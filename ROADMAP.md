@@ -32,6 +32,16 @@ MCP server exposing the toolkit; LLM reasoning module for layout decisions
 end-to-end by agents, published in a gallery at klayout-tools.org — the
 kicad-tools.org pattern, one layer down.
 
+## How progress is driven: canary repos
+
+The forcing function is real IP, not synthetic examples. We open canary
+repositories named `<pdk>-<block>` (e.g. `sky130-mipi-phy`,
+`gf180-1g-eth-phy`) where agents use klayout-tools to push an actual block
+design forward. Every place the tools bind, chafe, or fall short becomes a
+friction issue filed here. The block advances the gallery; the friction
+advances the toolkit. kicad-tools grew its router and DRC surface exactly
+this way, board by board.
+
 ## Non-goals (for now)
 
 Full P&R, timing closure, and anything requiring a proprietary PDK. Open
