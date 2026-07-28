@@ -35,10 +35,11 @@ kicad-tools.org pattern, one layer down.
 ## How progress is driven
 
 The forcing function is real IP, not synthetic examples. We use
-klayout-tools daily to push actual block designs forward, and every place
-the tools bind, chafe, or fall short becomes a friction issue filed here.
-kicad-tools grew its router and DRC surface exactly this way, board by
-board.
+klayout-tools daily to push actual block designs forward — PHY-class blocks
+on open PDKs, starting on sky130 — and every place the tools bind, chafe,
+or fall short becomes a friction issue filed here. The block designs
+themselves live in private repos; the friction is public. kicad-tools grew
+its router and DRC surface exactly this way, board by board.
 
 ## Non-goals (for now)
 
