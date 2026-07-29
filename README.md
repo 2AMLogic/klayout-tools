@@ -15,6 +15,13 @@ machine-readable JSON everywhere. Built on [KLayout](https://www.klayout.de)'s
 Python API the way kicad-tools builds on KiCad's file formats: the heavy
 lifting stays in the proven engine; the agent-native surface is ours.
 
+The target capability: **an agent can take a spec → schematic/generator →
+sized circuit → layout → DRC/LVS clean → extracted netlist →
+simulation-verified, on an open PDK, unaided — with every step headless
+and JSON-contracted.** [ROADMAP.md](ROADMAP.md) holds the build order,
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) how the pieces fit; the
+work itself is tracked in GitHub issues.
+
 Built in the open by [2AM Logic](https://2amlogic.com).
 
 ## Why agent-focused?

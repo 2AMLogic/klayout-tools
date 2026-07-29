@@ -3,6 +3,16 @@
 Tools for AI agents to work with IC layout (GDSII/OASIS via KLayout's
 Python API). Public repo, MIT, built in the open by 2AM Logic.
 
+- **The target is the closed loop.** An agent can take a spec →
+  schematic/generator → sized circuit → layout → DRC/LVS clean →
+  extracted netlist → simulation-verified, on an open PDK, unaided —
+  with every step headless and JSON-contracted. `docs/ARCHITECTURE.md`
+  defines the layers, the contract-first rule, and when engines get
+  wrapped vs. rewritten — read it before proposing new capabilities.
+- **Issues track work; docs track direction.** Day-to-day work lives in
+  GitHub issues (Loom labels). `ROADMAP.md` and `docs/ARCHITECTURE.md`
+  are alignment docs — update them when direction changes, not per task,
+  and keep the vision statement identical everywhere it appears.
 - **Mirror kicad-tools deliberately.** When adding a capability, check how
   `~/GitHub/kicad-tools` shaped the equivalent (CLI verb naming, `--format
   json` everywhere, MCP tool granularity, worked-example structure) and
