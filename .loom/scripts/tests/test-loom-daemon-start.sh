@@ -87,6 +87,47 @@ assert_eq "FAKE_DAEMON WF=[] HG=[]" "$out" "--from-config leaves both env vars u
 out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --no-work-finder --foreground 2>/dev/null ) | grep '^FAKE_DAEMON' )
 assert_eq "FAKE_DAEMON WF=[0] HG=[0]" "$out" "--no-work-finder forces finder off"
 
+# ---------- --from-config composition (#4353) ----------
+# --from-config used to be a strict either/or: it never looked at
+# --work-finder/--health-gate at all, so pairing it with an explicit flag
+# silently dropped the flag. It must now COMPOSE: the named loop is forced,
+# the other loop is left unset for config to drive.
+
+# 7a. --from-config --work-finder forces the finder ON, leaves the gate unset
+#     for config to drive.
+out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --from-config --work-finder --foreground 2>/dev/null ) | grep '^FAKE_DAEMON' )
+assert_eq "FAKE_DAEMON WF=[1] HG=[]" "$out" "--from-config --work-finder forces finder ON, gate stays config-driven (#4353)"
+
+# 7b. --from-config --no-work-finder forces the finder OFF, gate stays unset.
+out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --from-config --no-work-finder --foreground 2>/dev/null ) | grep '^FAKE_DAEMON' )
+assert_eq "FAKE_DAEMON WF=[0] HG=[]" "$out" "--from-config --no-work-finder forces finder OFF, gate stays config-driven (#4353)"
+
+# 7c. --from-config --health-gate forces the gate ON, finder stays unset.
+out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --from-config --health-gate --foreground 2>/dev/null ) | grep '^FAKE_DAEMON' )
+assert_eq "FAKE_DAEMON WF=[] HG=[1]" "$out" "--from-config --health-gate forces gate ON, finder stays config-driven (#4353)"
+
+# 7d. --from-config --no-health-gate forces the gate OFF, finder stays unset.
+out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --from-config --no-health-gate --foreground 2>/dev/null ) | grep '^FAKE_DAEMON' )
+assert_eq "FAKE_DAEMON WF=[] HG=[0]" "$out" "--from-config --no-health-gate forces gate OFF, finder stays config-driven (#4353)"
+
+# 7e. A pre-exported env var still wins over the forced flag under
+#     --from-config (env > CLI flag, same precedence as the non-config path).
+out=$( ( cd "$WORKDIR" && env -u LOOM_MAIN_HEALTH_GATE LOOM_WORK_FINDER=1 LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --from-config --no-work-finder --foreground 2>/dev/null ) | grep '^FAKE_DAEMON' )
+assert_eq "FAKE_DAEMON WF=[1] HG=[]" "$out" "pre-exported LOOM_WORK_FINDER=1 wins over --from-config --no-work-finder (#4353)"
+
+# 7f. The startup banner names the forced loop and never prints the
+#     "env not forced" wording when something WAS forced.
+banner_out=$( ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --from-config --work-finder --foreground 2>&1 ) )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$banner_out" | grep -q 'forced: work_finder=1' && ! echo "$banner_out" | grep -q 'env not forced'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} startup banner names the forced loop, never prints 'env not forced' when something was forced (#4353)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} startup banner names the forced loop, never prints 'env not forced' when something was forced (#4353)"
+    echo "  output: $banner_out"
+fi
+
 # 8. --help mentions the FLAGS-OFF default and the opt-in flags.
 help_out=$(bash "$START_SCRIPT" --help 2>/dev/null)
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -327,8 +368,134 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} systemd path: prints the loginctl enable-linger reboot-survival reminder"
 fi
+# S2 uses $WORKDIR as REPO_ROOT, which has no loom-daemon-watchdog.sh fixture
+# (a scratch tmpdir, not a real checkout) -- so the watchdog provisioning
+# tier degrades to its missing-script skip. Confirm that degrade is a WARNING,
+# never a failed start (parity with the launchd branch, #4260 sub-issue D AC).
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$sd_out" | grep -qi 'watchdog.*loom-daemon-watchdog.sh not found'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} systemd path: missing watchdog script degrades to a warning (start already asserted exit 0 above)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} systemd path: missing watchdog script degrades to a warning"
+    echo "  output: $sd_out"
+fi
 kill "$SD_MAIN_SLEEP_PID" 2>/dev/null || true
 rm -rf "$SD_HOME"
+
+# ---------- systemd --user watchdog timer (#4260 sub-issue D) ----------
+# A repo-like scratch checkout with the REAL loom-daemon-watchdog.sh installed
+# (S2's $WORKDIR deliberately has none) so provision_watchdog_job_systemd's
+# happy path is actually exercised, not just its missing-script skip above.
+WD_REPO="$(mktemp -d)"
+mkdir -p "$WD_REPO/.loom/scripts/cli" "$WD_REPO/.loom/logs"
+cp "$SCRIPT_DIR/../cli/loom-daemon-watchdog.sh" "$WD_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh"
+
+make_sd_stub_wd() {
+    local log="$1" mainpid="$2" fail_wd="$3"
+    cat > "$SD_BIN/systemctl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$log"
+if [[ "\${1:-}" == "--user" ]]; then shift; fi
+case "\${1:-}" in
+  show) echo "${mainpid}" ;;
+  enable)
+    if [[ "$fail_wd" == "1" && "\$*" == *"-watchdog.timer"* ]]; then exit 1; fi
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+    chmod +x "$SD_BIN/systemctl"
+}
+
+# WD1. Happy path: timer + service rendered with the correct fields, the timer
+#      (not the service) is enable --now'd, and LOOM_WATCHDOG_INTERVAL_SECS
+#      drives BOTH OnUnitActiveSec and OnBootSec.
+sleep 30 & WD_MAIN_SLEEP_PID=$!
+WD_LOG="$WORKDIR/sd-watchdog.log"; : > "$WD_LOG"
+make_sd_stub_wd "$WD_LOG" "$WD_MAIN_SLEEP_PID" "0"
+WD_HOME="$(mktemp -d)"; mkdir -p "$WD_HOME/.loom/logs"
+WD_UNIT="loom-daemon-wd-test-$$.service"
+wd_out=$( cd "$WD_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$WD_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$WD_UNIT" LOOM_WATCHDOG_INTERVAL_SECS=42 \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WD_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WD_HOME/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd 2>&1 )
+wd_rc=$?
+assert_eq "0" "$wd_rc" "systemd watchdog: start exits 0 with a real watchdog script present"
+[[ "$wd_rc" == "0" ]] || echo "  output: $wd_out"
+WD_TIMER_UNIT="loom-daemon-wd-test-$$-watchdog.timer"
+WD_SVC_UNIT="loom-daemon-wd-test-$$-watchdog.service"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "--user enable --now $WD_TIMER_UNIT" "$WD_LOG" \
+    && ! grep -q -- "--user enable --now $WD_SVC_UNIT" "$WD_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} systemd watchdog: enable --now targets the TIMER unit, not the service"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} systemd watchdog: enable --now targets the TIMER unit, not the service"
+    echo "  systemctl calls: $(cat "$WD_LOG")"
+fi
+WD_TIMER_PATH="$WD_HOME/.config/systemd/user/$WD_TIMER_UNIT"
+WD_SVC_PATH="$WD_HOME/.config/systemd/user/$WD_SVC_UNIT"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -f "$WD_TIMER_PATH" ]] \
+    && grep -qx 'OnUnitActiveSec=42' "$WD_TIMER_PATH" \
+    && grep -qx 'OnBootSec=42' "$WD_TIMER_PATH" \
+    && grep -qx "Unit=$WD_SVC_UNIT" "$WD_TIMER_PATH" \
+    && grep -qx 'Persistent=false' "$WD_TIMER_PATH"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} systemd watchdog: timer renders OnUnitActiveSec/OnBootSec from LOOM_WATCHDOG_INTERVAL_SECS, Unit=<service>, Persistent=false"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} systemd watchdog: timer renders the expected fields"
+    cat "$WD_TIMER_PATH" 2>/dev/null | sed 's/^/    /'
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -f "$WD_SVC_PATH" ]] \
+    && grep -qx 'Type=oneshot' "$WD_SVC_PATH" \
+    && grep -q "^ExecStart=/bin/bash $WD_REPO/.loom/scripts/cli/loom-daemon-watchdog.sh$" "$WD_SVC_PATH"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} systemd watchdog: service renders Type=oneshot and ExecStart=<watchdog script path>"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} systemd watchdog: service renders Type=oneshot and ExecStart=<watchdog script path>"
+    cat "$WD_SVC_PATH" 2>/dev/null | sed 's/^/    /'
+fi
+kill "$WD_MAIN_SLEEP_PID" 2>/dev/null || true
+rm -rf "$WD_HOME"
+
+# WD2. Provisioning failure (stub enable --now on the timer exits 1) is a
+#      WARNING, never a failed daemon start.
+sleep 30 & WD2_MAIN_SLEEP_PID=$!
+WD2_LOG="$WORKDIR/sd-watchdog-fail.log"; : > "$WD2_LOG"
+make_sd_stub_wd "$WD2_LOG" "$WD2_MAIN_SLEEP_PID" "1"
+WD2_HOME="$(mktemp -d)"; mkdir -p "$WD2_HOME/.loom/logs"
+WD2_UNIT="loom-daemon-wd2-test-$$.service"
+wd2_out=$( cd "$WD_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    PATH="$SD_BIN:$PATH" HOME="$WD2_HOME" \
+    LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$WD2_UNIT" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" \
+    LOOM_SOCKET_PATH="$WD2_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$WD2_HOME/.loom/autonomy-desired" \
+    bash "$START_SCRIPT" --no-launchd 2>&1 )
+wd2_rc=$?
+assert_eq "0" "$wd2_rc" "systemd watchdog: a failed 'enable --now' on the timer does not fail the daemon start"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$wd2_out" | grep -qi 'watchdog.*enable --now failed'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} systemd watchdog: install failure is reported as a warning"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} systemd watchdog: install failure is reported as a warning"
+    echo "  output: $wd2_out"
+fi
+kill "$WD2_MAIN_SLEEP_PID" 2>/dev/null || true
+rm -rf "$WD2_HOME"
+rm -rf "$WD_REPO"
 
 # S3. Escape hatch: --no-systemd falls back to the nohup path byte-compatibly —
 #     the stub systemctl is on PATH and detection is FORCED, yet no systemctl
@@ -436,6 +603,113 @@ assert_eq "user/${UID_NOW}" "$out" "LOOM_LAUNCHD_DOMAIN override is honored verb
 out=$( LOOM_LAUNCHD_DOMAIN="gui/${UID_NOW}" PATH="$DOMAIN_STUB_DIR/nogui:$PATH" \
     bash -c "source '$LAUNCHD_DOMAIN_LIB'; resolve_launchd_domain" )
 assert_eq "gui/${UID_NOW}" "$out" "override to a non-resolving domain is honored verbatim (no silent fallback)"
+
+# ---------- safehouse fleet-comms status surfacing (#4345) ----------
+# One-line static visibility check at start time: `loom-daemon-start.sh` can
+# only tell "configured" from "not configured" (a live connection needs the
+# daemon's own socket -- `loom-daemon status` covers that, see
+# .loom/docs/safehouse.md "New-host onboarding"). Uses the nohup fallback path
+# (--no-launchd --no-systemd) so this never touches real launchd/systemd, and a
+# background daemon fake bin that stays alive long enough for the "started"
+# banner (which the safehouse line is printed alongside) to run.
+SH_BG_FAKE_BIN="$WORKDIR/fake-loom-daemon-safehouse-bg"
+cat > "$SH_BG_FAKE_BIN" <<'EOF'
+#!/usr/bin/env bash
+sleep 5
+EOF
+chmod +x "$SH_BG_FAKE_BIN"
+
+# SH1. No `safehouse` block at all -> "not configured".
+SH1_HOME="$(mktemp -d)"
+mkdir -p "$SH1_HOME/.loom"
+sh1_out=$( ( cd "$SH1_HOME" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    -u LOOM_SAFEHOUSE_ENABLED -u LOOM_SAFEHOUSE_SOCKET -u SAFEHOUSED_SOCKET \
+    LOOM_DAEMON_BIN="$SH_BG_FAKE_BIN" \
+    LOOM_SOCKET_PATH="$SH1_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$SH1_HOME/.loom/autonomy-desired" \
+    LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-$$-sh1-watchdog" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 ) )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$sh1_out" | grep -q '^Safehouse:.*not configured'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} safehouse: no config block -> 'not configured' (#4345)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} safehouse: no config block -> 'not configured' (#4345)"
+    echo "  output: $sh1_out"
+fi
+if [[ -f "$SH1_HOME/.loom/.daemon.pid" ]]; then
+    kill "$(cat "$SH1_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -rf "$SH1_HOME"
+
+# SH2. safehouse.enabled=true + socket configured but the path does not exist
+#      -> "configured, unreachable" (stderr warn -- captured via 2>&1).
+SH2_HOME="$(mktemp -d)"
+mkdir -p "$SH2_HOME/.loom"
+cat > "$SH2_HOME/.loom/config.json" <<EOF
+{"safehouse": {"enabled": true, "socket": "$SH2_HOME/.loom/does-not-exist.sock"}}
+EOF
+sh2_out=$( ( cd "$SH2_HOME" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    -u LOOM_SAFEHOUSE_ENABLED -u LOOM_SAFEHOUSE_SOCKET -u SAFEHOUSED_SOCKET \
+    LOOM_DAEMON_BIN="$SH_BG_FAKE_BIN" \
+    LOOM_SOCKET_PATH="$SH2_HOME/.loom/loom-daemon.sock" \
+    LOOM_AUTONOMY_MARKER="$SH2_HOME/.loom/autonomy-desired" \
+    LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-$$-sh2-watchdog" \
+    bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 ) )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$sh2_out" | grep -q '^Safehouse:.*configured, unreachable' \
+    && echo "$sh2_out" | grep -q 'does-not-exist.sock'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} safehouse: enabled + missing socket -> 'configured, unreachable' with the resolved path (#4345)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} safehouse: enabled + missing socket -> 'configured, unreachable' with the resolved path (#4345)"
+    echo "  output: $sh2_out"
+fi
+if [[ -f "$SH2_HOME/.loom/.daemon.pid" ]]; then
+    kill "$(cat "$SH2_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+rm -rf "$SH2_HOME"
+
+# SH3. safehouse.enabled=true + socket path IS a real bound AF_UNIX socket file
+#      -> "configured (socket present ...)". Only `bind()`s (no accept loop
+#      needed -- the start wrapper only stat()s the path, it never connects).
+SH3_HOME="$(mktemp -d)"
+mkdir -p "$SH3_HOME/.loom"
+SH3_SOCK="$SH3_HOME/.loom/safehoused.sock"
+if command -v python3 >/dev/null 2>&1 \
+    && python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind('$SH3_SOCK')
+" 2>/dev/null; then
+    cat > "$SH3_HOME/.loom/config.json" <<EOF
+{"safehouse": {"enabled": true, "socket": "$SH3_SOCK"}}
+EOF
+    sh3_out=$( ( cd "$SH3_HOME" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+        -u LOOM_SAFEHOUSE_ENABLED -u LOOM_SAFEHOUSE_SOCKET -u SAFEHOUSED_SOCKET \
+        LOOM_DAEMON_BIN="$SH_BG_FAKE_BIN" \
+        LOOM_SOCKET_PATH="$SH3_HOME/.loom/loom-daemon.sock" \
+        LOOM_AUTONOMY_MARKER="$SH3_HOME/.loom/autonomy-desired" \
+        LOOM_WATCHDOG_LABEL="com.example.loom-sandbox-$$-sh3-watchdog" \
+        bash "$START_SCRIPT" --no-launchd --no-systemd 2>&1 ) )
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if echo "$sh3_out" | grep -q '^Safehouse:.*configured (socket present'; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "${GREEN}✓${NC} safehouse: enabled + socket file present -> 'configured (socket present ...)' (#4345)"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}✗${NC} safehouse: enabled + socket file present -> 'configured (socket present ...)' (#4345)"
+        echo "  output: $sh3_out"
+    fi
+    if [[ -f "$SH3_HOME/.loom/.daemon.pid" ]]; then
+        kill "$(cat "$SH3_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+    fi
+else
+    echo "  (skipping SH3: python3 AF_UNIX bind unavailable on this host)"
+fi
+rm -rf "$SH3_HOME"
 
 # ---------- summary ----------
 echo

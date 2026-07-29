@@ -5,6 +5,9 @@ dist/
 site/node_modules/
 site/dist/
 .pytest_cache/
+
+# Repo Skills machine-local install metadata (absolute source path + timestamp)
+.claude/skills/repo/.install-local.json
 # >>> loom-managed (do not edit) >>>
 # Loom runtime state (don't commit these)
 .loom-in-use
@@ -50,6 +53,3 @@ site/dist/
 .loom/*.sock
 .loom/logs/
 # <<< loom-managed <<<
-
-# Repo Skills machine-local install metadata (absolute source path + timestamp)
-.claude/skills/repo/.install-local.json

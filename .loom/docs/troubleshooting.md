@@ -129,7 +129,7 @@ Run the sync script — or create the one label directly — to reconcile:
 ```bash
 gh label list --search operator                      # empty => not provisioned
 gh label create "loom:operator-only" --color F97316 \
-  --description "Requires human action outside automation (credentials, infra, hardware); sweep/shepherd skip"
+  --description "Requires human action or ruling outside automation (creds, infra, hardware); sweep/shepherd skip"
 ```
 
 **GitHub caps label descriptions at 100 characters.** A `labels.yml` entry with a
@@ -143,8 +143,10 @@ These two status labels look similar but mean different things to the automation
 - **`loom:blocked`** — work is *automatable* but currently waiting on a dependency
   (another issue, an unmerged PR, missing context). The intent is "unblock it, then
   a Builder can proceed."
-- **`loom:operator-only`** — work requires a *human to act outside automation
-  entirely* (rotating credentials, infra changes, hardware access, manual deploys).
+- **`loom:operator-only`** — work requires a *human to act or rule outside
+  automation entirely* (rotating credentials, infra changes, hardware access,
+  manual deploys — or an owner-gated decision: an issue the code owner filed as a
+  TODO on owner-tracked code, where the design direction is the owner's call).
   Sweep/shepherd skip these in pre-flight rather than attempting them; a human must
   do the work off-automation before the issue can proceed.
 
@@ -315,21 +317,25 @@ is invisible to Linux CI by construction — see
 
 ## Stuck Agent Detection
 
-`loom-stuck-detection` checks for stuck sweep children by reading the per-task heartbeats in `.loom/spawn-loop-state.json::running[].last_heartbeat`.
-
-> **Note (post-v0.11.0):** `spawn-loop.sh` — the only writer of `.loom/spawn-loop-state.json` — was deleted, so this file no longer has a writer. `loom-stuck-detection` therefore currently reports nothing (a safe no-op: it only reports, it never tears down work). Repointing it to the `loom-daemon` sweep registry (`mcp__loom__list_sweeps`) and `.loom/sweep-checkpoint/issue-<N>.json` timestamps is tracked as a follow-up (see `docs/migration/daemon-state-consumers.md`).
+> **Note (post-#4274):** the Python `loom-stuck-detection` CLI was removed in
+> epic #4081 phase 3. It read `.loom/spawn-loop-state.json::running[].last_heartbeat`,
+> a file whose only writer (`spawn-loop.sh`) was deleted in v0.11.0 — so it had
+> already been a safe no-op (report-only, never tears down work). Live sweep
+> liveness is now owned by the Rust `loom-daemon` sweep registry.
 
 ### Check for stuck agents
 
+The native surfaces replace the former CLI:
+
 ```bash
-# Run stuck detection check
-loom-stuck-detection check
+# Daemon + registry health summary (sweeps, PIDs, quarantine state)
+loom health                # execs `loom-daemon status`
+loom-daemon status --json  # machine-readable
 
-# Check with JSON output
-loom-stuck-detection check --json
-
-# Check a specific issue
-loom-stuck-detection check-issue 123
+# Per-sweep liveness (MCP): list sweeps and their last activity
+#   mcp__loom__list_sweeps / mcp__loom__get_sweep_status
+# plus the per-issue checkpoint timestamps under
+#   .loom/sweep-checkpoint/issue-<N>.json
 ```
 
 ### Stuck indicators (post-v0.10.0)

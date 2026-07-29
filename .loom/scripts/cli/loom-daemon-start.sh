@@ -26,6 +26,11 @@
 #     disable-on-stop, LOOM_DAEMON_SUPERVISOR=systemd) — see --no-systemd for the
 #     escape hatch; on a non-systemd Linux host (or with --no-systemd) it stays a
 #     plain nohup background job,
+#   - arms the autonomy-loss watchdog (#4011): on Darwin a SECOND launchd
+#     StartInterval job, on a systemd Linux host a `<unit>-watchdog.timer` +
+#     `.service` pair (#4260 sub-issue D) — both drive the SAME
+#     loom-daemon-watchdog.sh payload on a recurring interval, independent of
+#     the daemon job/unit, so a wedged or dead daemon still gets checked,
 #   - backgrounds the daemon and writes a PID file (.loom/.daemon.pid),
 #   - persists the resolved invocation flags to .loom/.daemon.flags so
 #     `loom-daemon-update.sh` (#3968) can restart with EXACTLY the same
@@ -63,6 +68,8 @@
 #   ./.loom/scripts/cli/loom-daemon-start.sh --from-config   Enable per .loom/config.json only
 #   ./.loom/scripts/cli/loom-daemon-start.sh --no-work-finder    Force work finder OFF (explicit)
 #   ./.loom/scripts/cli/loom-daemon-start.sh --no-health-gate    Force health gate OFF (explicit)
+#   ./.loom/scripts/cli/loom-daemon-start.sh --from-config --work-finder   Config-driven, but FORCE the work finder on (#4353)
+#   ./.loom/scripts/cli/loom-daemon-start.sh --from-config --no-health-gate   Config-driven, but FORCE the health gate off (#4353)
 #   ./.loom/scripts/cli/loom-daemon-start.sh --foreground    Run in the foreground (no PID file)
 #   ./.loom/scripts/cli/loom-daemon-start.sh --no-launchd    macOS only: use legacy nohup instead of a LaunchAgent
 #   ./.loom/scripts/cli/loom-daemon-start.sh --no-systemd    Linux only: use legacy nohup instead of a systemd --user service
@@ -74,9 +81,15 @@
 #   LOOM_DAEMON_BIN     Path to the loom-daemon binary (else auto-detected)
 #   LOOM_SOCKET_PATH    Override the daemon socket (default ~/.loom/loom-daemon.sock)
 #   LOOM_WORK_FINDER / LOOM_MAIN_HEALTH_GATE  Respected when already exported
+#                        (always wins, even under --from-config -- #4353)
 #   LOOM_DAEMON_LAUNCHD  macOS only: 0/false/no forces the legacy nohup path (same as --no-launchd)
 #   LOOM_DAEMON_SYSTEMD  Linux only: 0/false/no forces the legacy nohup path (same as --no-systemd)
 #   LOOM_SYSTEMD_UNIT    Linux only: override the systemd --user unit name (default loom-daemon.service)
+#   LOOM_WATCHDOG_LABEL  Override the watchdog job identifier (macOS: LaunchAgent
+#                        label, default <daemon label>-watchdog; systemd Linux:
+#                        service/timer unit basename, default <daemon unit>-watchdog)
+#   LOOM_WATCHDOG_INTERVAL_SECS  Watchdog check cadence in seconds (default 300) —
+#                        macOS StartInterval / systemd OnUnitActiveSec+OnBootSec
 #   LOOM_LAUNCHD_LABEL   macOS only: override the LaunchAgent label (default com.rjwalters.loom-daemon)
 #   LOOM_LAUNCHD_DOMAIN  macOS only: pin the launchd domain (e.g. gui/$(id -u) or
 #                        user/$(id -u)); honored verbatim, else auto-resolved
@@ -444,14 +457,56 @@ EOF
     )
 }
 
-# ---------- watchdog LaunchAgent (#4011) ----------
-# The watchdog is the payload of a SECOND launchd job that runs on a
-# StartInterval cadence, SEPARATE from the daemon job, and reports when intent
-# (the marker above) diverges from reality (daemon not loaded/alive, or heartbeat
-# stale). It uses StartInterval and NOT KeepAlive: a KeepAlive'd short-lived job
-# would busy-loop, whereas StartInterval already re-runs it every interval
-# regardless of how the last run exited — which is exactly what makes an interval
-# job unable to "crash and stay dead" (the who-watches-the-watchdog resolution).
+# ---------- safehouse fleet-comms status (#4345) ----------
+# Reuses the same env>config>default resolvers `mcp-config.sh` already defines
+# for the safehouse-mcp worker injection (phase 2, #3999) — this is a purely
+# static, PRE-CONNECT check: "would the daemon even try?" It can only report
+# "not configured" vs "configured", never "connected" (proving a live
+# connection needs the daemon's own socket, surfaced instead by
+# `loom-daemon status` --- see .loom/docs/safehouse.md "New-host onboarding").
+_LOOM_MCP_CONFIG_LIB="$_LOOM_LAUNCHD_LIB_DIR/mcp-config.sh"
+if [[ -r "$_LOOM_MCP_CONFIG_LIB" ]]; then
+    # shellcheck source=../lib/mcp-config.sh
+    source "$_LOOM_MCP_CONFIG_LIB"
+fi
+print_safehouse_status() {
+    if ! command -v loom_mcp_safehouse_enabled >/dev/null 2>&1; then
+        return 0 # mcp-config.sh missing (stale/partial install) — skip silently
+    fi
+    local enabled socket
+    enabled=$(loom_mcp_safehouse_enabled "$REPO_ROOT")
+    if [[ "$enabled" != "true" ]]; then
+        echo "Safehouse:     not configured (safehouse.enabled is false/absent)"
+        return 0
+    fi
+    socket=$(loom_mcp_safehouse_socket "$REPO_ROOT")
+    if [[ -z "$socket" ]]; then
+        warn "Safehouse:     configured, unreachable (enabled but no socket path resolved -- set" \
+             "safehouse.socket, \$LOOM_SAFEHOUSE_SOCKET, or \$SAFEHOUSED_SOCKET)"
+        return 0
+    fi
+    if [[ -S "$socket" ]]; then
+        ok "Safehouse:     configured (socket present at $socket) -- see 'loom-daemon status' for live connection state"
+    else
+        warn "Safehouse:     configured, unreachable (socket $socket does not exist -- is safehoused running?)"
+    fi
+}
+
+# ---------- watchdog LaunchAgent / systemd timer (#4011, #4260 sub-issue D) ----------
+# The watchdog is the payload of a SECOND, SEPARATE scheduled job from the
+# daemon job/unit itself, and reports when intent (the marker above) diverges
+# from reality (daemon not loaded/alive, or heartbeat stale):
+#   - Darwin: a launchd job on a StartInterval cadence. StartInterval, NOT
+#     KeepAlive: a KeepAlive'd short-lived job would busy-loop, whereas
+#     StartInterval already re-runs it every interval regardless of how the
+#     last run exited.
+#   - systemd Linux: a `Type=oneshot` service driven by a `.timer` unit
+#     (`OnUnitActiveSec`). The systemd equivalent of StartInterval — a timer
+#     re-fires the oneshot service every interval independent of the last run's
+#     exit status.
+# Both mechanisms share the same property: the watchdog job owns NO long-lived
+# process, so it structurally cannot crash-and-stay-dead (the
+# who-watches-the-watchdog resolution).
 resolve_watchdog_label() {
     echo "${LOOM_WATCHDOG_LABEL:-$(resolve_launchd_label)-watchdog}"
 }
@@ -499,8 +554,7 @@ render_watchdog_plist() {
 # Provision + (re)load the watchdog LaunchAgent. Best-effort and NON-FATAL: a
 # watchdog that fails to install must never fail the daemon start (the daemon
 # running without a watchdog is strictly better than no daemon at all).
-provision_watchdog_job() {
-    [[ "$IS_DARWIN" == "true" ]] || { warn "watchdog: not Darwin — skipping (marker+heartbeat still active; no scheduled checker on this platform)."; return 0; }
+provision_watchdog_job_launchd() {
     command -v launchctl >/dev/null 2>&1 || { warn "watchdog: launchctl not found — skipping."; return 0; }
     local script; script="$(locate_watchdog_script)"
     if [[ -z "$script" ]]; then
@@ -532,6 +586,110 @@ provision_watchdog_job() {
     fi
 }
 
+# ---------- watchdog systemd --user timer (#4260 sub-issue D) ----------
+# resolve_systemd_watchdog_unit — the watchdog service/timer basename (no
+# `.service`/`.timer` suffix), mirroring resolve_watchdog_label's Darwin
+# `<daemon label>-watchdog` pattern: `<daemon unit>-watchdog`, with the same
+# LOOM_WATCHDOG_LABEL override.
+resolve_systemd_watchdog_unit() {
+    local daemon_unit; daemon_unit="$(resolve_systemd_unit)"
+    echo "${LOOM_WATCHDOG_LABEL:-${daemon_unit%.service}-watchdog}"
+}
+
+# render_systemd_watchdog_service <watchdog_script> <workdir> <log_path>
+# Type=oneshot: the unit owns no long-lived process (the ExecStart runs the
+# watchdog's single check-and-exit pass) -- the timer unit below re-fires it,
+# not a Restart= directive.
+render_systemd_watchdog_service() {
+    local script="$1" workdir="$2" log_path="$3"
+    printf '[Unit]\n'
+    printf 'Description=Loom daemon autonomy-loss watchdog (loom-daemon-watchdog)\n'
+    printf '\n'
+    printf '[Service]\n'
+    printf 'Type=oneshot\n'
+    printf 'WorkingDirectory=%s\n' "$workdir"
+    printf 'ExecStart=/bin/bash %s\n' "$script"
+    printf 'Environment=PATH=%s\n' "$PLIST_PATH_VALUE"
+    printf 'Environment=HOME=%s\n' "$HOME"
+    printf 'Environment=LOOM_AUTONOMY_MARKER=%s\n' "$INTENT_MARKER"
+    printf 'Environment=LOOM_SOCKET_PATH=%s\n' "$SOCKET_PATH"
+    printf 'Environment=LOOM_DAEMON_LAUNCHD=0\n'
+    printf 'StandardOutput=append:%s\n' "$log_path"
+    printf 'StandardError=append:%s\n' "$log_path"
+}
+
+# render_systemd_watchdog_timer <service_unit_name> <interval_secs>
+# OnUnitActiveSec is the systemd analog of launchd's StartInterval (re-fires
+# every <interval>s regardless of the last run's exit status). OnBootSec gives
+# the RunAtLoad-equivalent "run shortly after the user session starts" —
+# though `enable --now` on a timer already triggers an immediate first run, so
+# this only matters across reboots. Persistent=false: a watchdog tick missed
+# while the session was down should NOT fire a catch-up run the moment the
+# session resumes -- the next regular tick is soon enough.
+render_systemd_watchdog_timer() {
+    local service_unit="$1" interval="$2"
+    printf '[Unit]\n'
+    printf 'Description=Loom daemon autonomy-loss watchdog timer (loom-daemon-watchdog)\n'
+    printf '\n'
+    printf '[Timer]\n'
+    printf 'OnBootSec=%s\n' "$interval"
+    printf 'OnUnitActiveSec=%s\n' "$interval"
+    printf 'Unit=%s\n' "$service_unit"
+    printf 'Persistent=false\n'
+    printf '\n'
+    printf '[Install]\n'
+    printf 'WantedBy=timers.target\n'
+}
+
+# Provision + enable the watchdog service+timer pair under `systemd --user`.
+# Best-effort and NON-FATAL, same contract as the launchd path.
+provision_watchdog_job_systemd() {
+    command -v systemctl >/dev/null 2>&1 || { warn "watchdog: systemctl not found — skipping."; return 0; }
+    local script; script="$(locate_watchdog_script)"
+    if [[ -z "$script" ]]; then
+        warn "watchdog: loom-daemon-watchdog.sh not found — skipping (autonomy-loss detection disabled)."
+        return 0
+    fi
+    local wd_unit svc_unit timer_unit unit_dir svc_path timer_path wd_interval wd_log
+    wd_unit="$(resolve_systemd_watchdog_unit)"
+    svc_unit="${wd_unit}.service"
+    timer_unit="${wd_unit}.timer"
+    unit_dir="$(resolve_systemd_unit_dir)"
+    svc_path="${unit_dir}/${svc_unit}"
+    timer_path="${unit_dir}/${timer_unit}"
+    wd_interval="${LOOM_WATCHDOG_INTERVAL_SECS:-300}"
+    wd_log="$LOOM_DIR/logs/daemon-watchdog.log"
+    mkdir -p "$unit_dir" "$LOOM_DIR/logs" 2>/dev/null || true
+    if ! render_systemd_watchdog_service "$script" "$REPO_ROOT" "$wd_log" > "$svc_path" 2>/dev/null; then
+        warn "watchdog: could not write $svc_path — skipping."
+        return 0
+    fi
+    if ! render_systemd_watchdog_timer "$svc_unit" "$wd_interval" > "$timer_path" 2>/dev/null; then
+        warn "watchdog: could not write $timer_path — skipping."
+        return 0
+    fi
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    if systemctl --user enable --now "$timer_unit" >/dev/null 2>&1; then
+        echo "Watchdog:       $timer_unit (OnUnitActiveSec ${wd_interval}s) → $wd_log"
+    else
+        warn "watchdog: systemctl --user enable --now failed for $timer_unit — autonomy-loss detection not active (non-fatal)."
+    fi
+}
+
+# Called from the nohup fallback tier (non-systemd Linux host, or
+# --no-launchd/--no-systemd): no scheduled watchdog job/timer to provision.
+# Deliberately NOT re-derived from $IS_DARWIN/$IS_LINUX_SYSTEMD -- each of the
+# three call sites below already knows definitively which supervisor tier it
+# is in (that is what selected this code path), so it calls the matching
+# provision_watchdog_job_{launchd,systemd} directly instead of re-detecting.
+# Re-detecting here would be redundant AND actively wrong under the
+# LOOM_SYSTEMD_FORCE=1 test seam, where a Darwin test runner can have both
+# $IS_DARWIN and $IS_LINUX_SYSTEMD true simultaneously.
+provision_watchdog_job_none() {
+    warn "watchdog: no scheduled checker on this platform (nohup-fallback Linux / non-systemd host) — skipping (marker+heartbeat still active). Run loom-daemon-watchdog.sh by hand or wire it to cron."
+    return 0
+}
+
 # ---------- args ----------
 # Capture the raw invocation args before the parsing loop consumes "$@" — used
 # below to persist exactly what was passed (Issue #3968: `loom-daemon-update.sh`
@@ -544,8 +702,14 @@ ORIGINAL_ARGS=("$@")
 # --health-gate, or hand control to config with --from-config.
 FROM_CONFIG=false
 FOREGROUND=false
-WANT_WORK_FINDER=false
-WANT_HEALTH_GATE=false
+# Tri-state (#4353): "" = not passed on the CLI (unset), "on" = an explicit
+# --work-finder/--health-gate, "off" = an explicit --no-work-finder/
+# --no-health-gate. This lets --from-config tell "the operator asked to force
+# this loop" apart from "the operator said nothing, config drives it" --
+# a plain boolean collapsed both to the same false and silently dropped the
+# force.
+WANT_WORK_FINDER=""
+WANT_HEALTH_GATE=""
 NO_LAUNCHD=false
 NO_SYSTEMD=false
 PRINT_PLIST=false
@@ -555,10 +719,10 @@ while [[ $# -gt 0 ]]; do
         --help|-h) show_help; exit 0 ;;
         --from-config) FROM_CONFIG=true; shift ;;
         --foreground|--fg) FOREGROUND=true; shift ;;
-        --work-finder) WANT_WORK_FINDER=true; shift ;;
-        --health-gate) WANT_HEALTH_GATE=true; shift ;;
-        --no-work-finder) WANT_WORK_FINDER=false; shift ;;
-        --no-health-gate) WANT_HEALTH_GATE=false; shift ;;
+        --work-finder) WANT_WORK_FINDER="on"; shift ;;
+        --health-gate) WANT_HEALTH_GATE="on"; shift ;;
+        --no-work-finder) WANT_WORK_FINDER="off"; shift ;;
+        --no-health-gate) WANT_HEALTH_GATE="off"; shift ;;
         --no-launchd) NO_LAUNCHD=true; shift ;;
         --no-systemd) NO_SYSTEMD=true; shift ;;
         --print-plist) PRINT_PLIST=true; shift ;;
@@ -662,6 +826,15 @@ fi
 # (LOOM_WORK_FINDER unset => off, LOOM_MAIN_HEALTH_GATE unset => off). Opt in with
 # --work-finder / --health-gate (force the var to 1), or pass --from-config to
 # leave both unset so .loom/config.json -> autonomous drives.
+#
+# --from-config COMPOSES with --work-finder/--health-gate/--no-work-finder/
+# --no-health-gate rather than ignoring them (#4353): --from-config alone still
+# leaves both vars unset for config to drive (byte-for-byte the pre-#4353
+# behavior — test case 6 asserts this stays green); pairing it with an
+# explicit --work-finder / --no-work-finder additionally FORCES that one var
+# (same env-var-wins-if-already-exported rule), while the loop with no
+# explicit flag is still left to config. So `--from-config --work-finder`
+# forces LOOM_WORK_FINDER=1 and leaves LOOM_MAIN_HEALTH_GATE unset.
 export LOOM_WORKSPACE="${LOOM_WORKSPACE:-$REPO_ROOT}"
 
 # ---------- guard-hook autonomy defaults (#3898) ----------
@@ -683,17 +856,44 @@ export LOOM_GUARD_DECISION_LOG="${LOOM_GUARD_DECISION_LOG:-1}"
 export LOOM_FORCE_SCOPE="${LOOM_FORCE_SCOPE:-protected}"
 
 if [[ "$FROM_CONFIG" == "true" ]]; then
-    echo -e "${BOLD}Autonomous mode: driven by .loom/config.json -> autonomous (env not forced)${NC}"
+    # Compose (#4353): --from-config alone leaves BOTH vars unset for config to
+    # drive. An explicit --work-finder/--no-work-finder (or the health-gate
+    # equivalent) additionally FORCES that one var -- using the
+    # ${VAR:-default} form so an already-exported env var still wins over the
+    # CLI flag, exactly like the non-config branch below. The loop with no
+    # explicit flag is left untouched (stays unset, config drives it).
+    FORCED_DESC=()
+    if [[ "$WANT_WORK_FINDER" == "on" ]]; then
+        export LOOM_WORK_FINDER="${LOOM_WORK_FINDER:-1}"
+        FORCED_DESC+=("work_finder=${LOOM_WORK_FINDER}")
+    elif [[ "$WANT_WORK_FINDER" == "off" ]]; then
+        export LOOM_WORK_FINDER="${LOOM_WORK_FINDER:-0}"
+        FORCED_DESC+=("work_finder=${LOOM_WORK_FINDER}")
+    fi
+    if [[ "$WANT_HEALTH_GATE" == "on" ]]; then
+        export LOOM_MAIN_HEALTH_GATE="${LOOM_MAIN_HEALTH_GATE:-1}"
+        FORCED_DESC+=("main_health_gate=${LOOM_MAIN_HEALTH_GATE}")
+    elif [[ "$WANT_HEALTH_GATE" == "off" ]]; then
+        export LOOM_MAIN_HEALTH_GATE="${LOOM_MAIN_HEALTH_GATE:-0}"
+        FORCED_DESC+=("main_health_gate=${LOOM_MAIN_HEALTH_GATE}")
+    fi
+    if [[ "${#FORCED_DESC[@]}" -eq 0 ]]; then
+        echo -e "${BOLD}Autonomous mode: driven by .loom/config.json -> autonomous (env not forced)${NC}"
+    else
+        FORCED_JOINED="$(IFS=', '; echo "${FORCED_DESC[*]}")"
+        echo -e "${BOLD}Autonomous mode: config-driven; forced: ${FORCED_JOINED}${NC}"
+    fi
+    unset FORCED_DESC FORCED_JOINED
 else
     # An already-exported env var always wins. Otherwise --work-finder /
     # --health-gate force the loop ON (=1); the default (flags off) forces it
     # OFF (=0), so a plain start is a reliability daemon that never auto-dispatches.
-    if [[ "$WANT_WORK_FINDER" == "true" ]]; then
+    if [[ "$WANT_WORK_FINDER" == "on" ]]; then
         export LOOM_WORK_FINDER="${LOOM_WORK_FINDER:-1}"
     else
         export LOOM_WORK_FINDER="${LOOM_WORK_FINDER:-0}"
     fi
-    if [[ "$WANT_HEALTH_GATE" == "true" ]]; then
+    if [[ "$WANT_HEALTH_GATE" == "on" ]]; then
         export LOOM_MAIN_HEALTH_GATE="${LOOM_MAIN_HEALTH_GATE:-1}"
     else
         export LOOM_MAIN_HEALTH_GATE="${LOOM_MAIN_HEALTH_GATE:-0}"
@@ -906,10 +1106,11 @@ if [[ "$USE_LAUNCHD" == "true" ]]; then
     echo "$daemon_pid" > "$PID_FILE"
     # Record operator intent + arm the host-side autonomy-loss watchdog (#4011).
     write_intent_marker "true" "$LAUNCHD_LABEL"
-    provision_watchdog_job
+    provision_watchdog_job_launchd
     ok "loom-daemon started under launchd (pid $daemon_pid, label $LAUNCHD_LABEL)."
     echo "PID file: $PID_FILE"
     echo "Intent marker: $INTENT_MARKER"
+    print_safehouse_status
     if [[ "$MACHINE_MODE" == "true" ]]; then
         echo "Stop with: loom stop"
     else
@@ -976,14 +1177,14 @@ if [[ "$IS_LINUX_SYSTEMD" == "true" ]]; then
     fi
 
     echo "$daemon_pid" > "$PID_FILE"
-    # Record operator intent (#4011). The scheduled watchdog is a launchd job, so
-    # on Linux there is no host-side checker to provision -- the marker + heartbeat
-    # are still written (the systemd-side watchdog is sub-issue D of #4260).
+    # Record operator intent + arm the systemd-timer autonomy-loss watchdog
+    # (#4011, #4260 sub-issue D).
     write_intent_marker "false" ""
-    provision_watchdog_job
+    provision_watchdog_job_systemd
     ok "loom-daemon started under systemd (pid $daemon_pid, unit $SYSTEMD_UNIT)."
     echo "PID file: $PID_FILE"
     echo "Intent marker: $INTENT_MARKER"
+    print_safehouse_status
     warn "Reboot survival requires lingering: run 'loginctl enable-linger \"\$USER\"' once (SSH-only / headless hosts)."
     if [[ "$MACHINE_MODE" == "true" ]]; then
         echo "Stop with: loom stop"
@@ -1013,14 +1214,15 @@ if ! kill -0 "$daemon_pid" 2>/dev/null; then
 fi
 
 echo "$daemon_pid" > "$PID_FILE"
-# Record operator intent (#4011). The scheduled watchdog is a launchd job, so on
-# Linux / the nohup path there is no host-side checker to provision — the marker
-# + heartbeat are still written, and `loom-daemon-watchdog.sh` can be run by hand
-# or wired to a cron/systemd timer to consume them.
+# Record operator intent (#4011). This is the nohup fallback tier (non-systemd
+# Linux host, or --no-launchd/--no-systemd), so there is no scheduled checker to
+# provision here — the marker + heartbeat are still written, and
+# `loom-daemon-watchdog.sh` can be run by hand or wired to cron.
 write_intent_marker "false" ""
-provision_watchdog_job
+provision_watchdog_job_none
 ok "loom-daemon started (pid $daemon_pid). PID file: $PID_FILE"
 echo "Intent marker: $INTENT_MARKER"
+print_safehouse_status
 if [[ "$MACHINE_MODE" == "true" ]]; then
     echo "Stop with: loom stop"
 else
