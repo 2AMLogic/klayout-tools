@@ -1,0 +1,6 @@
+{
+  "version": "0.6.1",
+  "commit": "7fdfbdd",
+  "dev": false,
+  "commands": ["all","audit","branches","docs","followups","gitignore","handoff","help","links","orphans","readme","release","remote","reset","tidy","update-tools"]
+}
