@@ -33,3 +33,10 @@ def test_stats_subcommand_requires_file():
     # argparse exits 2 when the required positional is missing.
     with pytest.raises(SystemExit):
         main(["stats"])
+
+
+def test_cells_subcommand_requires_file():
+    # The `cells` subcommand exists and requires a file argument;
+    # argparse exits 2 when the required positional is missing.
+    with pytest.raises(SystemExit):
+        main(["cells"])
