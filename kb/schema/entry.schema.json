@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/kb/schema/entry.schema.json",
+  "title": "klayout-tools knowledge base entry",
+  "description": "One published circuit design (topology, sizing strategy, layout idioms) that the LLM reasoning module can draw on. See kb/README.md for the sourcing rules that every entry must satisfy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "topology", "spec_class", "source"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable slug; must match the entry's filename stem (kb/entries/<id>.json).",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable name of the design.",
+      "minLength": 1
+    },
+    "topology": {
+      "type": "string",
+      "description": "Circuit topology name/description.",
+      "minLength": 1
+    },
+    "spec_class": {
+      "type": "string",
+      "description": "What kind of spec this design serves (e.g. 'low-power PHY bias/reference').",
+      "minLength": 1
+    },
+    "pdk_portability": {
+      "description": "What changes / what's PDK-specific vs. portable about this design. Optional: omit or set null when not yet characterized.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["primary_pdk", "notes"],
+      "properties": {
+        "primary_pdk": {
+          "type": "string",
+          "description": "The PDK this entry was evaluated/designed against, e.g. 'sky130'.",
+          "minLength": 1
+        },
+        "notes": {
+          "type": "string",
+          "description": "What is PDK-specific vs. portable to other PDKs.",
+          "minLength": 1
+        }
+      }
+    },
+    "sizing_approach": {
+      "description": "How device sizes/bias points were derived. Optional: omit or set null when not applicable.",
+      "type": ["string", "null"]
+    },
+    "layout_idioms": {
+      "description": "Layout techniques used, e.g. common-centroid matching, guard rings. Optional: omit, null, or empty when none apply yet.",
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "source": {
+      "type": "object",
+      "description": "Citation for the design. Must satisfy the open-sources-only rule in kb/README.md.",
+      "additionalProperties": false,
+      "required": ["citation"],
+      "properties": {
+        "citation": {
+          "type": "string",
+          "description": "Full citation: authors, title, venue/year, or repo URL + license.",
+          "minLength": 1
+        },
+        "url": {
+          "description": "Link to the source, if available. Optional: omit or set null when none exists.",
+          "type": ["string", "null"]
+        },
+        "license_or_openness": {
+          "description": "Why this source clears the open-sources-only bar. Optional: omit or set null only when self-evident from the citation.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "notes": {
+      "description": "Free-form notes. Optional: omit or set null when there is nothing to add.",
+      "type": ["string", "null"]
+    }
+  }
+}

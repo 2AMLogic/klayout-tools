@@ -1,0 +1,23 @@
+{
+  "id": "sky130-spiral-inductor",
+  "title": "Octagonal top-metal spiral inductor with patterned ground shield (sky130 RF/PHY passive)",
+  "topology": "A planar octagonal (or square) spiral inductor wound in the thickest top routing metal (met5 in sky130), with a patterned ground shield (a slotted ground plane) placed on a lower metal layer beneath the spiral to reduce substrate eddy-current loss, and an underpass on a lower metal layer to bring the inner-turn terminal out without crossing the spiral itself.",
+  "spec_class": "PHY-class passive component — on-chip inductor for RF matching networks, LC-tank VCOs, and inductive peaking in wireline PHY front ends",
+  "pdk_portability": {
+    "primary_pdk": "sky130",
+    "notes": "sky130 (open-MPW variant) does not define a characterized inductor PDK primitive/PCell; the inductor is a custom-drawn structure using the standard metal stack (met5 for the spiral, a lower metal such as met1 for the patterned ground shield and underpass), so the physical model must be (re)derived per-technology from stack-up parameters (metal thickness, dielectric height, substrate resistivity) rather than reused from another node. The modeling approach (Yue & Wong) is fully portable since it is expressed in terms of generic metal/oxide/substrate geometry."
+  },
+  "sizing_approach": "Choose outer diameter, number of turns, and trace width/spacing on the top metal to hit the target inductance from the Yue & Wong physical (pi-model) equations relating series inductance, series resistance (skin-effect-limited at the target frequency), and substrate parasitic capacitance/conductance; iterate trace width against series resistance (wider traces lower R_s but raise self-capacitance and eddy-current loss) and validate peak self-resonant frequency and Q at the target operating frequency using an EM field solver, since compact analytical models are only a first-pass estimate for a slotted-ground-shield structure.",
+  "layout_idioms": [
+    "octagonal (or circular-approximating polygon) winding shape in preference to a square spiral to reduce series resistance and improve Q for a given inductance",
+    "patterned (slotted) ground shield on a lower metal layer, with slots oriented radially and broken to block circulating eddy currents while still providing an AC ground reference",
+    "symmetric center-tapped differential winding for differential LC-tank applications, halving the required area versus two single-ended inductors of the same total inductance",
+    "wide keep-out / exclusion ring around the inductor footprint on all layers to prevent eddy-current loss and coupling into adjacent sensitive analog circuitry"
+  ],
+  "source": {
+    "citation": "C. P. Yue and S. S. Wong, \"Physical modeling of spiral inductors on silicon,\" IEEE Transactions on Electron Devices, vol. 47, no. 3, pp. 560-568, March 2000.",
+    "url": "https://doi.org/10.1109/16.824729",
+    "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its physical inductor modeling methodology and patterned-ground-shield technique only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the foundational reference for the pi-model treatment of on-chip spiral inductors and the patterned ground shield used to raise substrate-limited Q, cited throughout subsequent RF-CMOS inductor literature."
+  },
+  "notes": "sky130 open-MPW shuttles commonly restrict full top-metal (met5) usage or require IP hand-off review for custom inductor structures, so check the specific shuttle's rules before committing area to one. Because there is no vendor-characterized inductor model, budget schedule for EM simulation (e.g. an open-source field solver) to validate the analytical sizing estimate before tapeout."
+}

@@ -1,0 +1,23 @@
+{
+  "id": "inverter-based-comparator",
+  "title": "Self-biased CMOS-inverter amplifier/comparator front end for low-voltage switched-capacitor circuits",
+  "topology": "A single CMOS inverter (or a cascade of two) operated in its high-gain transition region as a pseudo-differential transconductance amplifier: the inverter is self-biased to its switching threshold via a feedback switch during an auto-zero phase, then used open-loop as a high-gain comparator/amplifier stage during evaluation, exploiting both the NMOS and PMOS devices as a class-AB push-pull transconductor instead of a conventional differential pair with a tail current source.",
+  "spec_class": "low-power PHY bias/reference-adjacent building block — high-gain, rail-to-rail amplifier/comparator core for low-voltage switched-capacitor ADCs, delta-sigma modulators, and threshold-detection comparators operating from supplies as low as roughly 0.5-1.2V",
+  "pdk_portability": {
+    "primary_pdk": "sky130",
+    "notes": "The inverter-as-amplifier technique is device-model-agnostic (any PDK with matched NMOS/PMOS in a standard logic-compatible process works), but the achievable gain (g_m/g_ds of the stacked devices) and the self-bias trip point depend on sky130's specific Vt and length-dependent output-resistance characteristics, so W/L ratios sized for another process must be re-simulated against sky130 models rather than reused directly. Auto-zero switches should use sky130's standard-Vt or low-Vt devices depending on the required charge-injection budget."
+  },
+  "sizing_approach": "Size the PMOS-to-NMOS width ratio so the inverter's switching threshold sits at the desired common-mode/reference voltage (nominally VDD/2, or offset via asymmetric sizing for a threshold-detection comparator); choose channel length longer than minimum to raise intrinsic gain (g_m x r_o) at the cost of bandwidth; auto-zero (self-bias) the inverter through a unity-feedback switch during a reset phase so input-referred offset and threshold variation are sampled out, then open the loop for the high-gain evaluation phase; cascade a second inverter stage, sized for additional gain, when a single stage's g_m*r_o is insufficient for the required resolution.",
+  "layout_idioms": [
+    "NMOS/PMOS devices in each inverter stage placed with matched orientation and shared centroid to minimize threshold-voltage mismatch between the auto-zero and evaluation phases",
+    "auto-zero switch transistors sized minimum-length and placed adjacent to the inverter input node to minimize parasitic capacitance and charge-injection error",
+    "differential/pseudo-differential inverter pairs cross-coupled or interdigitated to cancel common-mode supply noise",
+    "guard rings around the analog inverter core to isolate it from digital switching activity elsewhere on the die"
+  ],
+  "source": {
+    "citation": "Y. Chae and G. Han, \"Low Voltage, Low Power, Inverter-Based Switched-Capacitor Delta-Sigma Modulator,\" IEEE Journal of Solid-State Circuits, vol. 44, no. 2, pp. 458-472, Feb. 2009.",
+    "url": "https://doi.org/10.1109/JSSC.2008.2010975",
+    "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its inverter-based amplifier topology and auto-zeroing/sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a widely-cited reference establishing the self-biased inverter as a practical replacement for a differential-pair OTA in low-voltage switched-capacitor design."
+  },
+  "notes": "Framed here as a reusable amplifier/comparator building block rather than the full delta-sigma modulator the source paper builds; the auto-zeroing/self-biasing technique generalizes directly to standalone dynamic comparators (sample the offset at the inverter's own trip point, then evaluate). Since it draws no static bias current outside switching transients, this idiom is attractive for area- and power-constrained PHY comparator applications on sky130."
+}
