@@ -65,6 +65,12 @@
     routed PCB to fabrication package, and a gallery of real boards proves it.
     Here, the same pattern meets silicon.
   </p>
+  <p>
+    An agent can take a spec → schematic/generator → sized circuit → layout
+    → DRC/LVS clean → extracted netlist → simulation-verified, on an open
+    PDK, unaided — with every step headless and JSON-contracted. That
+    closed loop is the target.
+  </p>
 
   <pre><span class="c"># the interface contract we are building toward</span>
 klt layers design.gds              <span class="c"># enumerate layers, JSON out</span>
@@ -74,8 +80,11 @@ klt stats design.gds --per-layer   <span class="c"># densities, bbox, counts</sp
 
   <p class="dim">
     Progress lands in the repo first; worked examples will appear here the
-    way boards appear in the kicad-tools gallery. The build order is in the
-    <a href="https://github.com/2AMLogic/klayout-tools/blob/main/ROADMAP.md">roadmap</a>.
+    way boards appear in the kicad-tools gallery. See the
+    <a href="https://github.com/2AMLogic/klayout-tools/blob/main/ROADMAP.md">roadmap</a>
+    for the build order and the
+    <a href="https://github.com/2AMLogic/klayout-tools/blob/main/docs/ARCHITECTURE.md">architecture</a>
+    doc for how the pieces fit.
   </p>
 </main>
 <footer>
