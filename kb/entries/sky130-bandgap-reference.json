@@ -1,0 +1,23 @@
+{
+  "id": "sky130-bandgap-reference",
+  "title": "Curvature-corrected CMOS bandgap reference (sub-1V, current-summing/Banba topology)",
+  "topology": "Banba-style CMOS bandgap reference: two forward-biased parasitic pnp diodes (or diode-connected BJTs) driven at a fixed current ratio, with the PTAT and CTAT currents summed in the current domain (through resistors at the input of a self-biased current-mirror op-amp) rather than in the voltage domain. Summing currents instead of voltages lets the output reference voltage be set independently of the ~1.2V silicon bandgap voltage, enabling sub-1V supply operation.",
+  "spec_class": "low-power PHY bias/reference — on-chip voltage/current reference for analog and mixed-signal PHY blocks (LDOs, ADC/DAC references, PLL charge pumps) where supply headroom is constrained below 1.8V core rails",
+  "pdk_portability": {
+    "primary_pdk": "sky130",
+    "notes": "sky130 exposes vertical parasitic PNP bipolar devices via the substrate (e.g. sky130_fd_pr__pnp_05v5) usable as the diode elements; absolute beta and saturation current vary by PDK and process corner, so PTAT/CTAT resistor ratios must be re-derived from PDK-specific device models rather than reused verbatim. The topology and current-summing method are portable to any PDK offering parasitic vertical BJTs or diode-connected devices."
+  },
+  "sizing_approach": "Set the diode area ratio (typically 1:8 to 1:24) to fix the PTAT delta-Vbe; size the CTAT/PTAT summing resistors so their current contributions cancel the first-order temperature dependence at the target output voltage (typically 0.5-0.6V, well below the ~1.2V bandgap voltage since summation happens in the current domain, not the voltage domain); iterate resistor ratios in simulation across process corners and -40C to 125C to trim the residual quadratic (curvature) term; add a curvature-correction branch (a resistor-diode network with a different temperature exponent) last and tune its weight to flatten the sub-1V output over temperature.",
+  "layout_idioms": [
+    "common-centroid / cross-quad placement of the matched bipolar devices to cancel linear gradients across the die",
+    "resistor arrays laid out as unit-resistor strings with dummy elements at both ends, matched in orientation to cancel process-gradient mismatch",
+    "guard ring around the bipolar devices tied to substrate/well potential to collect injected minority carriers and isolate from adjacent digital switching noise",
+    "op-amp differential pair placed on an axis of symmetry with the current-summing node kept short and symmetric to the two resistor branches"
+  ],
+  "source": {
+    "citation": "H. Banba, H. Shiga, A. Umezawa, T. Miyaba, T. Tanzawa, S. Atsumi, K. Sakui, \"A CMOS bandgap reference circuit with sub-1-V operation,\" IEEE Journal of Solid-State Circuits, vol. 34, no. 5, pp. 670-674, May 1999.",
+    "url": "https://doi.org/10.1109/4.760378",
+    "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its topology and sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the foundational published reference for current-domain-summing sub-1V bandgap references; essentially all subsequent literature on the technique cites it directly."
+  },
+  "notes": "Most modern sub-1V bandgap variants, including curvature-corrected ones, build on this current-summing base circuit rather than replacing it. sky130's parasitic PNP devices are lower-performance than a dedicated BiCMOS process, so expect larger die area and more careful trimming to approach the temperature coefficient reported in the original paper."
+}
