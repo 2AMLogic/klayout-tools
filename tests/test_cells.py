@@ -97,7 +97,12 @@ def test_cells_report_oasis(tmp_path):
     assert arr["instances"] == 0
     assert arr["children"] == []
     assert arr["parents"] == ["TOP"]
-    assert arr["bbox_um"] == {"left": 0.001, "bottom": 0.001, "right": 0.002, "top": 0.002}
+    assert arr["bbox_um"] == {
+        "left": 0.001,
+        "bottom": 0.001,
+        "right": 0.002,
+        "top": 0.002,
+    }
 
     lonely_top = by_name["LONELY_TOP"]
     assert lonely_top["is_top"] is True

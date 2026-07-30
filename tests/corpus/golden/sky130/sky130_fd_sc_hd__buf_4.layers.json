@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "file": "tests/corpus/sky130/sky130_fd_sc_hd__buf_4.gds",
   "dbu_um": 0.001,
   "layer_count": 22,

@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "file": "tests/corpus/gf180mcu/gf180mcu_fd_sc_mcu9t5v0__dffnq_1.gds",
   "dbu_um": 0.001,
   "layer_count": 13,

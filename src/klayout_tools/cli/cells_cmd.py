@@ -73,7 +73,9 @@ def _print_text(report: dict) -> None:
         # name/children/parents/bbox_um left-aligned.
         right_aligned = {0, 2, 3, 4}
         return "  ".join(
-            row[col].rjust(widths[col]) if col in right_aligned else row[col].ljust(widths[col])
+            row[col].rjust(widths[col])
+            if col in right_aligned
+            else row[col].ljust(widths[col])
             for col in range(len(headers))
         )
 
