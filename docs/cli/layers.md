@@ -18,10 +18,13 @@ The command runs fully headless via KLayout's batch database API
 **JSON is the API.** Human-readable text output is a courtesy; the JSON schema
 below is the stable contract. Per the project's rules, **breaking (renaming,
 removing, or retyping) a field is a breaking change**. New fields may be added
-without breaking the contract, so consumers should ignore unknown fields.
+without breaking the contract, so consumers should ignore unknown fields. See
+[`docs/json-contract.md`](../json-contract.md) for the envelope shared across
+all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
+  "schema_version": 1,
   "file": "design.gds",
   "dbu_um": 0.001,
   "layer_count": 3,
@@ -35,12 +38,13 @@ without breaking the contract, so consumers should ignore unknown fields.
 
 ### Top-level fields
 
-| Field         | Type            | Description                                                        |
-| ------------- | --------------- | ------------------------------------------------------------------ |
-| `file`        | string          | The input path exactly as provided on the command line.            |
-| `dbu_um`      | number (float)  | Database unit in micrometres (e.g. `0.001` = 1 nm).                |
-| `layer_count` | integer         | Number of entries in `layers` (i.e. `len(layers)`).                |
-| `layers`      | array\<object\> | One entry per layer in the stream's layer table (see below).       |
+| Field            | Type            | Description                                                        |
+| ---------------- | --------------- | ------------------------------------------------------------------ |
+| `schema_version` | integer         | Version of this command's JSON shape (starts at `1`; per-command). |
+| `file`           | string          | The input path exactly as provided on the command line.            |
+| `dbu_um`         | number (float)  | Database unit in micrometres (e.g. `0.001` = 1 nm).                |
+| `layer_count`    | integer         | Number of entries in `layers` (i.e. `len(layers)`).                |
+| `layers`         | array\<object\> | One entry per layer in the stream's layer table (see below).       |
 
 ### `layers[]` entries
 
@@ -95,5 +99,13 @@ Unnamed layers render as `-` in the table (and as `null` in JSON).
 | `1`       | The file is missing, unreadable, or not a recognisable layout.      |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse.|
 
-On error, a concise message is written to **stderr** (prefixed `klt layers:`)
-and nothing is written to stdout. No Python traceback is printed.
+On error, a concise message is written to **stderr** and nothing is written to
+stdout. No Python traceback is printed.
+
+- `--format text` (default): a plain-text line prefixed `klt layers:`.
+- `--format json`: the documented JSON error envelope (see
+  [`docs/json-contract.md`](../json-contract.md)):
+
+  ```json
+  { "schema_version": 1, "error": { "command": "layers", "message": "file not found: missing.gds" } }
+  ```

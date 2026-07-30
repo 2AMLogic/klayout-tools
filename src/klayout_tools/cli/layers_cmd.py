@@ -1,24 +1,18 @@
 """``klt layers`` command: serialise the layers report as text or JSON."""
 
 import argparse
-import json
-import sys
 
 from ..layers import LayersError, layers_report
+from .output import emit_error, emit_success
 
 
 def run(args: argparse.Namespace) -> int:
     try:
         report = layers_report(args.file)
     except LayersError as exc:
-        print(f"klt layers: {exc}", file=sys.stderr)
-        return 1
+        return emit_error("layers", str(exc), args.format)
 
-    if args.format == "json":
-        json.dump(report, sys.stdout, indent=2)
-        print()
-    else:
-        _print_text(report)
+    emit_success(report, args.format, _print_text)
     return 0
 
 

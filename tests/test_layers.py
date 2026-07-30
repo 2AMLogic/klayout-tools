@@ -94,7 +94,14 @@ def test_json_contract(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
 
     # Exact top-level field set.
-    assert set(data.keys()) == {"file", "dbu_um", "layer_count", "layers"}
+    assert set(data.keys()) == {
+        "schema_version",
+        "file",
+        "dbu_um",
+        "layer_count",
+        "layers",
+    }
+    assert data["schema_version"] == 1
     assert isinstance(data["file"], str)
     assert isinstance(data["dbu_um"], float)
     assert isinstance(data["layer_count"], int)
@@ -152,3 +159,18 @@ def test_non_layout_file(tmp_path, capsys):
 def test_layers_report_raises_on_missing():
     with pytest.raises(LayersError):
         layers_report("/no/such/path/design.gds")
+
+
+def test_missing_file_json_format(tmp_path, capsys):
+    """`--format json` errors emit the documented JSON error envelope on
+    stderr, leave stdout empty, and exit 1."""
+    missing = tmp_path / "nope.gds"
+
+    assert main(["layers", str(missing), "--format", "json"]) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "layers"
+    assert "not found" in error["error"]["message"]
