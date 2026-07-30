@@ -46,6 +46,11 @@
       "documentation"
     ]
   },
+  "buildGate": {
+    "enabled": true,
+    "command": "npm run check:ci",
+    "timeoutSeconds": 900
+  },
   "terminals": [
     {
       "id": "terminal-1",

@@ -1,5 +1,6 @@
 # klayout-tools
 
+[![CI](https://github.com/2AMLogic/klayout-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/2AMLogic/klayout-tools/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: scaffold](https://img.shields.io/badge/status-scaffold-orange.svg)](ROADMAP.md)
 
@@ -67,6 +68,24 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
 ```
+
+## Development
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/); the `klayout`
+pip wheel provides the headless Python API (no GUI, no source build needed).
+
+```bash
+uv sync --locked --extra dev    # create/refresh .venv from uv.lock
+
+uv run --extra dev ruff check .     # lint
+uv run --extra dev pytest           # tests
+
+npm run check:ci                    # lint + tests — the same gate CI runs
+```
+
+`.github/workflows/ci.yml` runs `ruff check` plus `pytest` on Python
+3.10–3.13 for every pull request and every push to `main`, so a red check is
+the signal that a PR is not mergeable.
 
 ## Guides
 
