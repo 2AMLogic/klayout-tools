@@ -1,20 +1,22 @@
 """``klt drc`` command: serialise the DRC report as text or JSON.
 
+Output goes through the shared envelope helpers in :mod:`.output`, as with
+every other ``klt`` subcommand — see ``docs/json-contract.md``.
+
 Exit codes (see ``docs/cli/drc.md`` for the full table):
     0 - ran clean, no violations
-    1 - failed to run (bad file, unknown deck, engine error)
+    1 - failed to run (bad file, unknown deck, engine error) — returned by
+        ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - ran successfully, violations found
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 """
 
 import argparse
-import json
-import sys
 
 from ..drc import DrcError, run_drc
+from .output import emit_error, emit_success
 
 EXIT_CLEAN = 0
-EXIT_FAILED = 1
 EXIT_VIOLATIONS = 3
 
 
@@ -22,14 +24,9 @@ def run(args: argparse.Namespace) -> int:
     try:
         report = run_drc(args.file, args.deck)
     except DrcError as exc:
-        print(f"klt drc: {exc}", file=sys.stderr)
-        return EXIT_FAILED
+        return emit_error("drc", str(exc), args.format)
 
-    if args.format == "json":
-        json.dump(report, sys.stdout, indent=2)
-        print()
-    else:
-        _print_text(report)
+    emit_success(report, args.format, _print_text)
 
     return EXIT_VIOLATIONS if report["status"] == "violations" else EXIT_CLEAN
 

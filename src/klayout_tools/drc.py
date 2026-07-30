@@ -47,6 +47,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     ``docs/cli/drc.md``)::
 
         {
+            "schema_version": 1,
             "file": <path as provided>,
             "deck": <deck name>,
             "dbu_um": <database unit in micrometres, float>,
@@ -63,6 +64,10 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 ...
             ],
         }
+
+    ``schema_version`` is versioned independently per command (see
+    ``docs/json-contract.md``); it starts at ``1`` and only increments when
+    this command's JSON shape changes in a way that isn't purely additive.
 
     ``violations`` is sorted by ``(rule, cell, bbox.left, bbox.bottom)`` for
     deterministic, diff-clean output across repeated runs on the same input.
@@ -150,6 +155,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     )
 
     return {
+        "schema_version": 1,
         "file": path,
         "deck": deck_name,
         "dbu_um": layout.dbu,

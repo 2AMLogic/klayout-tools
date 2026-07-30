@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "file": "examples/drc/example.gds",
   "deck": "sky130",
   "dbu_um": 0.001,

@@ -71,6 +71,13 @@ rendering, not the contract, so this shape is not versioned.
 | `1`       | Application-level error (e.g. missing/unreadable file). Documented error shape on stderr.     |
 | `2`       | Usage error (missing required argument, invalid `--format` choice, etc.) — raised by argparse before a command's handler runs. |
 
+Codes `0`/`1`/`2` mean the same thing for every verb. A command may define
+**additional** codes above `2` for outcomes that are neither success nor
+tool failure, documented in its own `docs/cli/<verb>.md` — e.g. `klt drc`
+exits `3` when the deck ran successfully but found violations (a successful
+run, so the documented success payload is still on stdout). Extensions never
+redefine `0`/`1`/`2`.
+
 **Carve-out:** exit code `2` and its accompanying stderr output are argparse's
 own behavior, produced before any subcommand's `run()` executes. They are
 deliberately out of scope for the shared `output.py` helper — argparse always

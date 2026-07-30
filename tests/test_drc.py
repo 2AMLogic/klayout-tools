@@ -51,6 +51,7 @@ def test_run_drc_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
+    assert report["schema_version"] == 1
     assert report["file"] == str(path)
     assert report["deck"] == "sky130"
     assert report["dbu_um"] == 0.001
@@ -110,6 +111,7 @@ def test_json_contract(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
 
     assert set(data.keys()) == {
+        "schema_version",
         "file",
         "deck",
         "dbu_um",
@@ -118,6 +120,7 @@ def test_json_contract(tmp_path, capsys):
         "rule_counts",
         "violations",
     }
+    assert data["schema_version"] == 1
     assert isinstance(data["file"], str)
     assert data["deck"] == "sky130"
     assert isinstance(data["dbu_um"], float)
@@ -221,3 +224,35 @@ def test_unknown_deck(tmp_path, capsys):
     assert captured.out == ""
     assert "klt drc" in captured.err
     assert "unknown deck" in captured.err
+
+
+def test_missing_file_json_format(tmp_path, capsys):
+    """`--format json` errors emit the documented JSON error envelope on
+    stderr, leave stdout empty, and exit 1."""
+    missing = tmp_path / "nope.gds"
+
+    assert main(["drc", str(missing), "--deck", "sky130", "--format", "json"]) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "drc"
+    assert "not found" in error["error"]["message"]
+
+
+def test_unknown_deck_json_format(tmp_path, capsys):
+    """An unknown deck is an application error, so it uses the same envelope."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+
+    assert (
+        main(["drc", str(path), "--deck", "not-a-real-deck", "--format", "json"]) == 1
+    )
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "drc"
+    assert "unknown deck" in error["error"]["message"]

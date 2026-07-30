@@ -70,10 +70,13 @@ schema below is the stable contract. Per the project's rules, **breaking
 (renaming, removing, or retyping) a field is a breaking change**, and rule
 `id` values are part of that contract — a rule id is never renumbered or
 repurposed once shipped. New fields may be added without breaking the
-contract, so consumers should ignore unknown fields.
+contract, so consumers should ignore unknown fields. See
+[`docs/json-contract.md`](../json-contract.md) for the envelope shared across
+all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
+  "schema_version": 1,
   "file": "design.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -88,6 +91,7 @@ On a run with findings:
 
 ```json
 {
+  "schema_version": 1,
   "file": "design.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -112,6 +116,7 @@ On a run with findings:
 
 | Field             | Type                     | Description                                                             |
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
+| `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`; per-command).       |
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
 | `deck`            | string                   | The deck name used (`"sky130"`).                                         |
 | `dbu_um`          | number (float)           | Database unit in micrometres, same semantics as `klt layers`.            |
@@ -151,9 +156,21 @@ depending on `klt drc`'s exit code must be able to tell "you typed something
 wrong" apart from "the deck ran and found problems" apart from "the tool
 itself failed."
 
-On error (exit 1), a concise message is written to **stderr** (prefixed
-`klt drc:`) and nothing is written to stdout. No Python traceback is
-printed — including for an unknown `--deck` name.
+On error (exit 1), a concise message is written to **stderr** and nothing is
+written to stdout. No Python traceback is printed — including for an unknown
+`--deck` name.
+
+- `--format text` (default): a plain-text line prefixed `klt drc:`.
+- `--format json`: the documented JSON error envelope (see
+  [`docs/json-contract.md`](../json-contract.md)):
+
+  ```json
+  { "schema_version": 1, "error": { "command": "drc", "message": "unknown deck 'nope' (available: sky130)" } }
+  ```
+
+Note that exit code `3` is a per-command extension of the shared exit-code
+table: unlike `0`/`1`/`2`, it is specific to `klt drc` and means the deck ran
+successfully and the documented success payload *is* on stdout.
 
 ## Worked example
 
