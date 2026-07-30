@@ -33,6 +33,7 @@ def cells_report(path: str, top: bool = False) -> dict[str, Any]:
     ``docs/cli/cells.md``)::
 
         {
+            "schema_version": 1,
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "cell_count": <total cells in the whole layout, int>,
@@ -138,6 +139,7 @@ def cells_report(path: str, top: bool = False) -> dict[str, Any]:
         cells = [entry for entry in cells if entry["is_top"]]
 
     return {
+        "schema_version": 1,
         "file": path,
         "dbu_um": layout.dbu,
         "cell_count": cell_count,
