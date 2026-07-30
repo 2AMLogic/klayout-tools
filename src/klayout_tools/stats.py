@@ -101,6 +101,7 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
     ``docs/cli/stats.md``)::
 
         {
+            "schema_version": 1,
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "top_cell": <top cell name, or None if the layout has no cells>,
@@ -191,6 +192,7 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
         per_layer_entries.sort(key=lambda entry: (entry["layer"], entry["datatype"]))
 
     return {
+        "schema_version": 1,
         "file": path,
         "dbu_um": dbu,
         "top_cell": top_cell.name if top_cell is not None else None,

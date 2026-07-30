@@ -34,10 +34,13 @@ fixtures, so **the same input always produces the same output**:
 **JSON is the API.** Human-readable text output is a courtesy; the JSON schema
 below is the stable contract. Per the project's rules, **breaking (renaming,
 removing, or retyping) a field is a breaking change**. New fields may be added
-without breaking the contract, so consumers should ignore unknown fields.
+without breaking the contract, so consumers should ignore unknown fields. See
+[`docs/json-contract.md`](../json-contract.md) for the envelope shared across
+all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
+  "schema_version": 1,
   "file": "design.gds",
   "dbu_um": 0.001,
   "top_cell": "TOP",
@@ -86,14 +89,15 @@ With `--per-layer`, `layers` is a list instead of `null`:
 
 ### Top-level fields
 
-| Field      | Type              | Description                                                              |
-| ---------- | ----------------- | -------------------------------------------------------------------------- |
-| `file`     | string            | The input path exactly as provided on the command line.                  |
-| `dbu_um`   | number (float)    | Database unit in micrometres (e.g. `0.001` = 1 nm).                      |
-| `top_cell` | string \| null    | Name of the layout's single top cell, or `null` if the layout has no cells. |
-| `bbox_um`  | object             | The top cell's bounding box (hierarchy-inclusive), in micrometres. See below. |
-| `total`    | object             | Aggregate area/density/polygon/vertex figures across all layers. See below. |
-| `layers`   | array\<object\> \| null | Per-layer breakdown; `null` unless `--per-layer` was given.        |
+| Field            | Type                    | Description                                                                  |
+| ---------------- | ----------------------- | ----------------------------------------------------------------------------- |
+| `schema_version` | integer                 | Version of this command's JSON shape (starts at `1`; per-command).          |
+| `file`           | string                  | The input path exactly as provided on the command line.                     |
+| `dbu_um`         | number (float)          | Database unit in micrometres (e.g. `0.001` = 1 nm).                         |
+| `top_cell`       | string \| null          | Name of the layout's single top cell, or `null` if the layout has no cells. |
+| `bbox_um`        | object                  | The top cell's bounding box (hierarchy-inclusive), in micrometres. See below. |
+| `total`          | object                  | Aggregate area/density/polygon/vertex figures across all layers. See below. |
+| `layers`         | array\<object\> \| null | Per-layer breakdown; `null` unless `--per-layer` was given.                 |
 
 ### `bbox_um`
 
@@ -175,5 +179,13 @@ layer  datatype  name  area_um2  density              polygons  vertices
 | `1`       | The file is missing, unreadable, not a recognisable layout, or the layout has more than one top cell. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse.|
 
-On error, a concise message is written to **stderr** (prefixed `klt stats:`)
-and nothing is written to stdout. No Python traceback is printed.
+On error, a concise message is written to **stderr** and nothing is written to
+stdout. No Python traceback is printed.
+
+- `--format text` (default): a plain-text line prefixed `klt stats:`.
+- `--format json`: the documented JSON error envelope (see
+  [`docs/json-contract.md`](../json-contract.md)):
+
+  ```json
+  { "schema_version": 1, "error": { "command": "stats", "message": "file not found: missing.gds" } }
+  ```

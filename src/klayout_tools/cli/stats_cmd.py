@@ -1,24 +1,22 @@
-"""``klt stats`` command: serialise the stats report as text or JSON."""
+"""``klt stats`` command: serialise the stats report as text or JSON.
+
+Output goes through the shared envelope helpers in :mod:`.output`, as with
+every other ``klt`` subcommand — see ``docs/json-contract.md``.
+"""
 
 import argparse
-import json
-import sys
 
 from ..stats import StatsError, stats_report
+from .output import emit_error, emit_success
 
 
 def run(args: argparse.Namespace) -> int:
     try:
         report = stats_report(args.file, per_layer=args.per_layer)
     except StatsError as exc:
-        print(f"klt stats: {exc}", file=sys.stderr)
-        return 1
+        return emit_error("stats", str(exc), args.format)
 
-    if args.format == "json":
-        json.dump(report, sys.stdout, indent=2)
-        print()
-    else:
-        _print_text(report)
+    emit_success(report, args.format, _print_text)
     return 0
 
 
