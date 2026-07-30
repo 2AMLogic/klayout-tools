@@ -1,0 +1,85 @@
+{
+  "file": "tests/corpus/gf180mcu/gf180mcu_fd_sc_mcu9t5v0__dffnq_1.gds",
+  "dbu_um": 0.001,
+  "layer_count": 13,
+  "layers": [
+    {
+      "layer": 0,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 21,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 22,
+      "datatype": 0,
+      "name": null,
+      "shapes": 6
+    },
+    {
+      "layer": 30,
+      "datatype": 0,
+      "name": null,
+      "shapes": 11
+    },
+    {
+      "layer": 31,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 32,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 33,
+      "datatype": 0,
+      "name": null,
+      "shapes": 49
+    },
+    {
+      "layer": 34,
+      "datatype": 0,
+      "name": null,
+      "shapes": 14
+    },
+    {
+      "layer": 34,
+      "datatype": 10,
+      "name": null,
+      "shapes": 5
+    },
+    {
+      "layer": 55,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 63,
+      "datatype": 63,
+      "name": null,
+      "shapes": 4
+    },
+    {
+      "layer": 112,
+      "datatype": 1,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 204,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    }
+  ]
+}

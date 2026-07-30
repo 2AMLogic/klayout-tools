@@ -1,0 +1,139 @@
+{
+  "file": "tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds",
+  "dbu_um": 0.001,
+  "layer_count": 22,
+  "layers": [
+    {
+      "layer": 64,
+      "datatype": 5,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 64,
+      "datatype": 16,
+      "name": null,
+      "shapes": 2
+    },
+    {
+      "layer": 64,
+      "datatype": 20,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 64,
+      "datatype": 59,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 65,
+      "datatype": 20,
+      "name": null,
+      "shapes": 2
+    },
+    {
+      "layer": 66,
+      "datatype": 20,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 66,
+      "datatype": 44,
+      "name": null,
+      "shapes": 11
+    },
+    {
+      "layer": 67,
+      "datatype": 5,
+      "name": null,
+      "shapes": 3
+    },
+    {
+      "layer": 67,
+      "datatype": 16,
+      "name": null,
+      "shapes": 3
+    },
+    {
+      "layer": 67,
+      "datatype": 20,
+      "name": null,
+      "shapes": 6
+    },
+    {
+      "layer": 67,
+      "datatype": 44,
+      "name": null,
+      "shapes": 6
+    },
+    {
+      "layer": 68,
+      "datatype": 5,
+      "name": null,
+      "shapes": 2
+    },
+    {
+      "layer": 68,
+      "datatype": 16,
+      "name": null,
+      "shapes": 4
+    },
+    {
+      "layer": 68,
+      "datatype": 20,
+      "name": null,
+      "shapes": 2
+    },
+    {
+      "layer": 78,
+      "datatype": 44,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 81,
+      "datatype": 4,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 83,
+      "datatype": 44,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 93,
+      "datatype": 44,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 94,
+      "datatype": 20,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 95,
+      "datatype": 20,
+      "name": null,
+      "shapes": 1
+    },
+    {
+      "layer": 122,
+      "datatype": 16,
+      "name": null,
+      "shapes": 2
+    },
+    {
+      "layer": 236,
+      "datatype": 0,
+      "name": null,
+      "shapes": 1
+    }
+  ]
+}
