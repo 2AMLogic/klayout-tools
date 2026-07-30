@@ -155,12 +155,14 @@ def test_json_contract(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
 
     assert set(data.keys()) == {
+        "schema_version",
         "file",
         "dbu_um",
         "cell_count",
         "top_cell_count",
         "cells",
     }
+    assert data["schema_version"] == 1
     assert isinstance(data["file"], str)
     assert isinstance(data["dbu_um"], float)
     assert isinstance(data["cell_count"], int)
@@ -201,6 +203,7 @@ def test_json_contract_with_top_flag(tmp_path, capsys):
     assert main(["cells", str(path), "--top", "--format", "json"]) == 0
     data = json.loads(capsys.readouterr().out)
 
+    assert data["schema_version"] == 1
     assert data["cell_count"] == 4
     assert data["top_cell_count"] == 2
     assert {entry["name"] for entry in data["cells"]} == {"TOP", "LONELY_TOP"}
@@ -237,6 +240,21 @@ def test_non_layout_file(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "klt cells" in captured.err
+
+
+def test_missing_file_json_format(tmp_path, capsys):
+    """`--format json` errors emit the documented JSON error envelope on
+    stderr, leave stdout empty, and exit 1."""
+    missing = tmp_path / "nope.gds"
+
+    assert main(["cells", str(missing), "--format", "json"]) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "cells"
+    assert "not found" in error["error"]["message"]
 
 
 def test_cells_report_raises_on_missing():

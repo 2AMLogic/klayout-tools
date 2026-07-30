@@ -1,24 +1,22 @@
-"""``klt cells`` command: serialise the cells report as text or JSON."""
+"""``klt cells`` command: serialise the cells report as text or JSON.
+
+Output goes through the shared envelope helpers in :mod:`.output`, as with
+every other ``klt`` subcommand — see ``docs/json-contract.md``.
+"""
 
 import argparse
-import json
-import sys
 
 from ..cells import CellsError, cells_report
+from .output import emit_error, emit_success
 
 
 def run(args: argparse.Namespace) -> int:
     try:
         report = cells_report(args.file, top=args.top)
     except CellsError as exc:
-        print(f"klt cells: {exc}", file=sys.stderr)
-        return 1
+        return emit_error("cells", str(exc), args.format)
 
-    if args.format == "json":
-        json.dump(report, sys.stdout, indent=2)
-        print()
-    else:
-        _print_text(report)
+    emit_success(report, args.format, _print_text)
     return 0
 
 
