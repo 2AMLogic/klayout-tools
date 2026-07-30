@@ -10,6 +10,28 @@ That closed loop is the target capability. Everything below is in service
 of it. This is a multiyear effort; complex and difficult work is in scope
 when it serves the loop.
 
+## Scope
+
+The name means "tools an agent uses to do IC design with KLayout in the
+loop," not "wrappers around KLayout." KLayout anchors the repo the same
+way KiCad anchors kicad-tools: it is the file-format substrate
+(GDSII/OASIS) and the visualization surface a human reaches for, and it
+happens to also be the first geometry/DRC/LVS engine behind the
+contracts. The repo's capabilities are not bounded by what KLayout
+itself does — kicad-tools ships a router, a placement optimizer, and an
+LLM reasoning module that KiCad has no equivalent of, and the same
+pattern applies here.
+
+Concretely in scope, in one repo, when the loop demands them: open-PDK
+data management, extracted device/parasitic lookup tables, SPICE and
+E&M simulation, circuit generators, optimization, and the knowledge
+base. What keeps this from sprawling is not the repo boundary but the
+gates below: every capability arrives contract-first, engines are
+wrapped rather than absorbed, and new engine classes enter through a
+spiked epic. The headless rule is unchanged — the KLayout GUI is a
+viewer humans (and agents, via screenshots) benefit from, never a
+dependency any command requires.
+
 ## Layers
 
 ```

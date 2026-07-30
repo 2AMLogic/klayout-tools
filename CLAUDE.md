@@ -7,8 +7,9 @@ Python API). Public repo, MIT, built in the open by 2AM Logic.
   schematic/generator → sized circuit → layout → DRC/LVS clean →
   extracted netlist → simulation-verified, on an open PDK, unaided —
   with every step headless and JSON-contracted. `docs/ARCHITECTURE.md`
-  defines the layers, the contract-first rule, and when engines get
-  wrapped vs. rewritten — read it before proposing new capabilities.
+  defines the scope, the layers, the contract-first rule, and when
+  engines get wrapped vs. rewritten — read it before proposing new
+  capabilities.
 - **Issues track work; docs track direction.** Day-to-day work lives in
   GitHub issues (Loom labels). `ROADMAP.md` and `docs/ARCHITECTURE.md`
   are alignment docs — update them when direction changes, not per task,
