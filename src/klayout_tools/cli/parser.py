@@ -100,10 +100,10 @@ def create_parser() -> argparse.ArgumentParser:
         "--deck",
         required=True,
         help=(
-            "DRC deck to run (currently: sky130). Not validated by argparse "
-            "-- an unknown deck name exits 1 with a clean error, per "
-            "docs/cli/drc.md's exit-code contract, rather than argparse's "
-            "usage-error exit 2."
+            "DRC deck to run (currently: sky130, gf180mcu). Not validated by "
+            "argparse -- an unknown deck name exits 1 with a clean error, "
+            "per docs/cli/drc.md's exit-code contract, rather than "
+            "argparse's usage-error exit 2."
         ),
     )
     drc_parser.add_argument(

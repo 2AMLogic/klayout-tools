@@ -1,10 +1,15 @@
 """Tests for `klt drc` and the `run_drc` library function.
 
-Fixtures are generated programmatically with `klayout.db` inside the tests —
-no dependency on an external corpus, mirroring `tests/test_layers.py`.
+Most fixtures are generated programmatically with `klayout.db` inside the
+tests — no dependency on an external corpus, mirroring `tests/test_layers.py`.
+The gf180mcu section additionally exercises the real corpus layouts checked
+in under `tests/corpus/gf180mcu/` (see `tests/corpus/README.md`).
 """
 
+from __future__ import annotations
+
 import json
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
@@ -14,6 +19,13 @@ from klayout_tools.drc import DrcError, run_drc
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
+
+# poly2.width.1 (gf180mcu deck): minimum poly2 interconnect width is 180 dbu
+# (0.18 um).
+_GF180MCU_POLY2_WIDTH_THRESHOLD_DBU = 180
+
+CORPUS_DIR = Path(__file__).parent / "corpus"
+GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
 
 
 def _make_violation_layout() -> kdb.Layout:
@@ -256,3 +268,154 @@ def test_unknown_deck_json_format(tmp_path, capsys):
     assert error["schema_version"] == 1
     assert error["error"]["command"] == "drc"
     assert "unknown deck" in error["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# gf180mcu deck
+# ---------------------------------------------------------------------------
+
+
+def _make_gf180mcu_violation_layout() -> kdb.Layout:
+    """A layout with one clear, seeded `poly2.width.1` violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    poly2 = layout.layer(30, 0)
+    layout.set_info(poly2, kdb.LayerInfo(30, 0, "Poly2"))
+    # width 60 dbu < 180 dbu threshold, long enough that only the width
+    # (not the end caps) triggers a violation.
+    top.shapes(poly2).insert(kdb.Box(0, 0, 60, 2000))
+    return layout
+
+
+def _make_gf180mcu_clean_layout() -> kdb.Layout:
+    """A layout with a poly2 shape wide enough to pass every deck rule."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    poly2 = layout.layer(30, 0)
+    layout.set_info(poly2, kdb.LayerInfo(30, 0, "Poly2"))
+    # width 300 dbu >= 240 dbu (poly2.space.1's shape-to-shape spacing isn't
+    # exercised by a single shape) and >= 180 dbu threshold.
+    top.shapes(poly2).insert(kdb.Box(0, 0, 300, 2000))
+    return layout
+
+
+def test_run_drc_gf180mcu_reports_seeded_violation(tmp_path):
+    path = tmp_path / "violation.gds"
+    _make_gf180mcu_violation_layout().write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["schema_version"] == 1
+    assert report["deck"] == "gf180mcu"
+    assert report["dbu_um"] == 0.001
+    assert report["status"] == "violations"
+    assert report["violation_count"] == 1
+    assert report["rule_counts"] == {"poly2.width.1": 1}
+
+    (violation,) = report["violations"]
+    assert violation["rule"] == "poly2.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "Poly2"
+    assert violation["cell"] == "TOP"
+    assert violation["bbox"] == {"left": 0, "bottom": 0, "right": 60, "top": 2000}
+
+
+def test_run_drc_gf180mcu_clean(tmp_path):
+    path = tmp_path / "clean.gds"
+    _make_gf180mcu_clean_layout().write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    assert report["rule_counts"] == {}
+    assert report["violations"] == []
+
+
+def test_run_drc_gf180mcu_missing_layer_does_not_crash(tmp_path):
+    """A layout that doesn't have every layer the gf180mcu deck references
+    (e.g. no Contact, no Metal1) still runs cleanly -- rules whose layer is
+    absent from the stream are simply skipped, mirroring how the sky130
+    deck already handles this (see `run_drc`'s `find_layer` guard)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    poly2 = layout.layer(30, 0)
+    layout.set_info(poly2, kdb.LayerInfo(30, 0, "Poly2"))
+    top.shapes(poly2).insert(kdb.Box(0, 0, 300, 2000))
+    path = tmp_path / "partial.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["schema_version"] == 1
+    assert report["deck"] == "gf180mcu"
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_json_contract(tmp_path, capsys):
+    path = tmp_path / "violation.gds"
+    _make_gf180mcu_violation_layout().write(str(path))
+
+    assert main(["drc", str(path), "--deck", "gf180mcu", "--format", "json"]) == 3
+    data = json.loads(capsys.readouterr().out)
+
+    assert data["schema_version"] == 1
+    assert data["deck"] == "gf180mcu"
+    assert data["status"] == "violations"
+    assert sum(data["rule_counts"].values()) == data["violation_count"]
+    assert len(data["violations"]) == data["violation_count"]
+
+
+@pytest.mark.skipif(
+    not GF180MCU_CORPUS_FILES, reason="no gf180mcu corpus files checked in"
+)
+def test_gf180mcu_corpus_is_non_empty():
+    """Guard against a silently-empty corpus (e.g. a broken glob)."""
+    assert len(GF180MCU_CORPUS_FILES) >= 1
+
+
+@pytest.mark.parametrize(
+    "layout_path", GF180MCU_CORPUS_FILES, ids=[p.name for p in GF180MCU_CORPUS_FILES]
+)
+def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
+    """`klt drc --deck gf180mcu` against a real gf180mcu standard-cell
+    layout (from `tests/corpus/gf180mcu/`, see #4/#20) produces a
+    well-formed report -- exercising the deck against real GDSII, not just
+    synthetic seeded fixtures."""
+    report = run_drc(str(layout_path), "gf180mcu")
+
+    assert report["schema_version"] == 1
+    assert report["file"] == str(layout_path)
+    assert report["deck"] == "gf180mcu"
+    assert report["dbu_um"] == 0.001
+    assert report["status"] in {"clean", "violations"}
+    assert isinstance(report["violation_count"], int)
+    assert report["violation_count"] == sum(report["rule_counts"].values())
+    assert len(report["violations"]) == report["violation_count"]
+
+    for entry in report["violations"]:
+        assert set(entry.keys()) == {
+            "rule",
+            "description",
+            "check",
+            "layer",
+            "cell",
+            "bbox",
+            "polygon",
+        }
+
+
+def test_gf180mcu_corpus_cli_json_matches_run_drc(capsys):
+    """`klt drc <file> --deck gf180mcu --format json` (the CLI path) agrees
+    with the `run_drc` library call for at least one real corpus file."""
+    layout_path = GF180MCU_CORPUS_FILES[0]
+
+    expected = run_drc(str(layout_path), "gf180mcu")
+    exit_code = main(
+        ["drc", str(layout_path), "--deck", "gf180mcu", "--format", "json"]
+    )
+    actual = json.loads(capsys.readouterr().out)
+
+    assert exit_code == (0 if expected["status"] == "clean" else 3)
+    assert actual == expected
