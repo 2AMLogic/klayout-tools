@@ -166,6 +166,7 @@ def test_json_contract(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
 
     assert set(data.keys()) == {
+        "schema_version",
         "file",
         "dbu_um",
         "top_cell",
@@ -173,6 +174,7 @@ def test_json_contract(tmp_path, capsys):
         "total",
         "layers",
     }
+    assert data["schema_version"] == 1
     assert isinstance(data["file"], str)
     assert isinstance(data["dbu_um"], float)
     assert isinstance(data["top_cell"], str)
@@ -237,6 +239,21 @@ def test_missing_file(tmp_path, capsys):
     assert captured.out == ""
     assert "klt stats" in captured.err
     assert "not found" in captured.err
+
+
+def test_missing_file_json_format(tmp_path, capsys):
+    """`--format json` errors emit the documented JSON error envelope on
+    stderr, leave stdout empty, and exit 1."""
+    missing = tmp_path / "nope.gds"
+
+    assert main(["stats", str(missing), "--format", "json"]) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "stats"
+    assert "not found" in error["error"]["message"]
 
 
 def test_non_layout_file(tmp_path, capsys):
