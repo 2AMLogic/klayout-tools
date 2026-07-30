@@ -6,9 +6,10 @@ defaulting to ``text``. New subcommands register themselves here and point their
 """
 
 import argparse
+import sys
 
 from .. import __version__
-from . import cells_cmd, drc_cmd, layers_cmd, stats_cmd
+from . import cells_cmd, drc_cmd, layers_cmd, pdk_cmd, stats_cmd
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -114,4 +115,108 @@ def create_parser() -> argparse.ArgumentParser:
     )
     drc_parser.set_defaults(func=drc_cmd.run)
 
+    _add_pdk_parser(subparsers)
+
     return parser
+
+
+def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``pdk`` verb with nested ``find``/``list``/``env`` subcommands.
+
+    The other verbs are flat; ``pdk`` groups discovery operations under one
+    verb (kicad-tools convention for multi-operation capabilities), so it uses
+    argparse sub-subparsers. Each ``--format`` stays a per-subcommand option,
+    matching the flat verbs.
+    """
+    pdk_parser = subparsers.add_parser(
+        "pdk",
+        help="discover and resolve an installed PDK",
+        description=(
+            "Locate an installed open_pdks-layout PDK (open_pdks, volare, or "
+            "ciel) and report its root, variant, version stamp, and per-tool "
+            "asset directories as structured data. This is the one shared "
+            "PDK_ROOT resolver every downstream tool imports instead of "
+            "re-implementing the lookup. Fully headless; safe in CI."
+        ),
+    )
+    pdk_sub = pdk_parser.add_subparsers(dest="pdk_command", metavar="<subcommand>")
+
+    def _no_subcommand(_args: argparse.Namespace) -> int:
+        pdk_parser.print_help(sys.stderr)
+        return 2
+
+    pdk_parser.set_defaults(func=_no_subcommand)
+
+    find_parser = pdk_sub.add_parser(
+        "find",
+        help="resolve one PDK install/variant and report its paths",
+        description=(
+            "Resolve a single PDK install and variant via the documented "
+            "resolution order and emit its root, variant, version, how it was "
+            "resolved, and its per-tool asset directories."
+        ),
+    )
+    find_parser.add_argument(
+        "--pdk",
+        help="variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    find_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    find_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    find_parser.set_defaults(func=pdk_cmd.run_find)
+
+    list_parser = pdk_sub.add_parser(
+        "list",
+        help="enumerate every PDK install and variant discovered",
+        description=(
+            "Enumerate every install and variant found across the full search "
+            "order. An empty result is success (exit 0), not an error."
+        ),
+    )
+    list_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        help="restrict the scan to this install root",
+    )
+    list_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    list_parser.set_defaults(func=pdk_cmd.run_list)
+
+    env_parser = pdk_sub.add_parser(
+        "env",
+        help="emit the resolved paths as eval-able shell exports",
+        description=(
+            "Emit the resolved install as shell `export` lines "
+            '(`eval "$(klt pdk env)"`) so an interactive simulator or '
+            "schematic-editor session uses the same install the automated "
+            "tooling picked. --format json emits the same payload as `find`."
+        ),
+    )
+    env_parser.add_argument(
+        "--pdk",
+        help="variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    env_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    env_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text; text emits shell exports)",
+    )
+    env_parser.set_defaults(func=pdk_cmd.run_env)
