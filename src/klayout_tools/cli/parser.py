@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 
 from .. import __version__
-from . import layers_cmd, stats_cmd
+from . import cells_cmd, layers_cmd, stats_cmd
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -67,5 +67,30 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     stats_parser.set_defaults(func=stats_cmd.run)
+
+    cells_parser = subparsers.add_parser(
+        "cells",
+        help="report the cell hierarchy of a GDSII/OASIS stream",
+        description=(
+            "Report the cell hierarchy of a GDSII or OASIS layout file: "
+            "top-cell status, per-cell shape/instance counts, direct "
+            "children/parents, and bounding box."
+        ),
+    )
+    cells_parser.add_argument(
+        "file", help="path to a GDSII or OASIS layout file"
+    )
+    cells_parser.add_argument(
+        "--top",
+        action="store_true",
+        help="only report top cells (cells with no parent instances)",
+    )
+    cells_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    cells_parser.set_defaults(func=cells_cmd.run)
 
     return parser
