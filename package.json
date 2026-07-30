@@ -7,6 +7,7 @@
     "check:ci": "npm run lint && npm run test",
     "check:all": "npm run check:ci",
     "test": "uv run --extra dev pytest",
-    "lint": "uv run --extra dev ruff check ."
+    "lint": "uv run --extra dev ruff format --check . && uv run --extra dev ruff check .",
+    "format": "uv run --extra dev ruff format ."
   }
 }
