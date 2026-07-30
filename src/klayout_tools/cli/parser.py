@@ -48,9 +48,7 @@ def create_parser() -> argparse.ArgumentParser:
             "per layer."
         ),
     )
-    stats_parser.add_argument(
-        "file", help="path to a GDSII or OASIS layout file"
-    )
+    stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     stats_parser.add_argument(
         "--per-layer",
         action="store_true",
@@ -73,9 +71,7 @@ def create_parser() -> argparse.ArgumentParser:
             "children/parents, and bounding box."
         ),
     )
-    cells_parser.add_argument(
-        "file", help="path to a GDSII or OASIS layout file"
-    )
+    cells_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     cells_parser.add_argument(
         "--top",
         action="store_true",
