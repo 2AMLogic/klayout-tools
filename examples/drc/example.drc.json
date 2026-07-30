@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "file": "examples/drc/example.gds",
+  "deck": "sky130",
+  "dbu_um": 0.001,
+  "status": "violations",
+  "violation_count": 5,
+  "rule_counts": {
+    "diff.enclosing.licon.1": 4,
+    "poly.width.1": 1
+  },
+  "violations": [
+    {
+      "rule": "diff.enclosing.licon.1",
+      "description": "minimum diff enclosure of licon1",
+      "check": "enclosing",
+      "layer": "diff.drawing",
+      "cell": "TOP",
+      "bbox": {
+        "left": 3000,
+        "bottom": 0,
+        "right": 3200,
+        "top": 10
+      },
+      "polygon": [
+        [
+          3000,
+          0
+        ],
+        [
+          3190,
+          10
+        ],
+        [
+          3010,
+          10
+        ],
+        [
+          3200,
+          0
+        ]
+      ]
+    },
+    {
+      "rule": "diff.enclosing.licon.1",
+      "description": "minimum diff enclosure of licon1",
+      "check": "enclosing",
+      "layer": "diff.drawing",
+      "cell": "TOP",
+      "bbox": {
+        "left": 3000,
+        "bottom": 0,
+        "right": 3010,
+        "top": 200
+      },
+      "polygon": [
+        [
+          3000,
+          0
+        ],
+        [
+          3000,
+          200
+        ],
+        [
+          3010,
+          10
+        ],
+        [
+          3010,
+          190
+        ]
+      ]
+    },
+    {
+      "rule": "diff.enclosing.licon.1",
+      "description": "minimum diff enclosure of licon1",
+      "check": "enclosing",
+      "layer": "diff.drawing",
+      "cell": "TOP",
+      "bbox": {
+        "left": 3000,
+        "bottom": 190,
+        "right": 3200,
+        "top": 200
+      },
+      "polygon": [
+        [
+          3010,
+          190
+        ],
+        [
+          3190,
+          190
+        ],
+        [
+          3000,
+          200
+        ],
+        [
+          3200,
+          200
+        ]
+      ]
+    },
+    {
+      "rule": "diff.enclosing.licon.1",
+      "description": "minimum diff enclosure of licon1",
+      "check": "enclosing",
+      "layer": "diff.drawing",
+      "cell": "TOP",
+      "bbox": {
+        "left": 3190,
+        "bottom": 0,
+        "right": 3200,
+        "top": 200
+      },
+      "polygon": [
+        [
+          3200,
+          0
+        ],
+        [
+          3190,
+          190
+        ],
+        [
+          3190,
+          10
+        ],
+        [
+          3200,
+          200
+        ]
+      ]
+    },
+    {
+      "rule": "poly.width.1",
+      "description": "minimum poly width",
+      "check": "width",
+      "layer": "poly.drawing",
+      "cell": "TOP",
+      "bbox": {
+        "left": 0,
+        "bottom": 0,
+        "right": 100,
+        "top": 2000
+      },
+      "polygon": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          2000
+        ],
+        [
+          100,
+          2000
+        ],
+        [
+          100,
+          0
+        ]
+      ]
+    }
+  ]
+}
