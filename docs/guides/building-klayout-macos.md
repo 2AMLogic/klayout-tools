@@ -201,7 +201,120 @@ DYLD_FALLBACK_LIBRARY_PATH="$APP/Contents/Frameworks" \
 
 For regular standalone-Python use, prefer the PyPI wheels
 (`pip install klayout`) or build wheels from this source tree with the
-`-P/--buildPymod` option.
+`-P/--buildPymod` option (evaluated below).
+
+## 6. Building a standalone wheel with `-P/--buildPymod`
+
+`build4mac.py` can package the same build as an installable `*.whl`
+instead of (or in addition to) the app bundle. Add `-P` to the compile
+invocation from §3 — no separate deploy step is needed, and it does not
+require `-y`/`-Y`:
+
+```bash
+./build4mac.py -q Qt6Brew -r HB34 -p HB313 -m '--jobs=24' -P
+```
+
+The wheel step runs immediately after the normal compile in the same
+process (`python setup.py build` → `bdist_wheel` → `delocate-wheel` →
+`clean`), so it adds only a small amount of time to the compile in §3
+rather than repeating it. The output lands in a `dist-<flavor>/`
+directory named after the module combination — for our Homebrew
+Ruby+Python combo, `dist-HB3-Qt6Brew/`:
+
+```
+dist-HB3-Qt6Brew/klayout-0.30.10-cp313-cp313-macosx_26_0_arm64.whl
+```
+
+### It works: no DYLD workaround needed
+
+Unlike the app's bundled pymod (§5), this wheel is post-processed with
+[`delocate-wheel`](https://pypi.org/project/delocate/), which copies its
+external runtime dependencies (e.g. `libpng16`) into a `klayout/.dylibs/`
+directory inside the wheel and rewrites the extension modules' own
+inter-module references to `@loader_path`-relative paths. The result
+installs and imports cleanly in a **clean venv**, with no
+`DYLD_FALLBACK_LIBRARY_PATH`, no Homebrew Qt/Ruby on `PATH`, and no
+inherited environment at all:
+
+```bash
+python3.13 -m venv /tmp/klt-venv
+/tmp/klt-venv/bin/pip install dist-HB3-Qt6Brew/klayout-0.30.10-cp313-cp313-macosx_26_0_arm64.whl
+
+env -i HOME="$HOME" PATH="/usr/bin:/bin" /tmp/klt-venv/bin/python3 -c "
+import klayout.db as db
+print(db.__version__)
+ly = db.Layout()
+top = ly.create_cell('TOP')
+top.shapes(ly.layer(1, 0)).insert(db.Box(0, 0, 1000, 2000))
+for ext in ('gds', 'oas', 'cif'):
+    ly.write(f'/tmp/smoke.{ext}')
+    ly2 = db.Layout(); ly2.read(f'/tmp/smoke.{ext}')
+    print(ext, 'roundtrip ok:', ly2.top_cell().bbox())
+"
+# 0.30.10
+# gds roundtrip ok: (0,0;1000,2000)
+# oas roundtrip ok: (0,0;1000,2000)
+# cif roundtrip ok: (0,0;1000,2000)
+```
+
+`otool -L` on the installed `dbcore*.so`/`laycore*.so` confirms no
+remaining Homebrew or Qt paths — only `@loader_path/...` siblings and
+`/usr/lib/lib{c++,System}.*.dylib`. `klayout.lay` (the Qt-backed layout
+view module) also imports without Qt installed on the machine, since the
+GUI-facing Qt frameworks aren't linked at import time. GDS, OASIS, and
+CIF read/write all round-trip correctly through the wheel's bundled
+format plugins (`klayout/db_plugins/*.dylib`).
+
+### Known cosmetic wart: `delocate.libsana` errors during the build
+
+The build log shows non-fatal `ERROR:delocate.libsana:@rpath/lib_tl...not
+found` noise for four optional streamer plugins (`net_tracer`, `magic`,
+`lefdef`, `cif`'s `db_plugins/lib_*_dbpi.dylib`). These plugins carry an
+`LC_RPATH` of `@loader_path/` (their own directory,
+`klayout/db_plugins/`) but need siblings one level up in `klayout/`,
+which `delocate-wheel`'s static dependency scan doesn't resolve — hence
+the warnings. **This did not affect functionality in testing**: CIF
+(among the flagged formats) round-tripped correctly at runtime, because
+those symbols are already resolved via the core `_tl`/`_db`/`_gsi`
+modules loaded earlier in the same process. Worth a closer look before
+relying on this wheel in a context that dlopens plugins standalone
+(outside a normal `klayout` import), but it did not block the wheel from
+building or from working for every format and submodule tested here.
+
+### Does this unlock newer Python versions? No — same ceiling as `-p`
+
+The issue that prompted this evaluation was building for a Python version
+newer than the PyPI wheels cover (e.g. Homebrew `python@3.14`). **`-P`
+does not help with that.** `Build_pymod_wheel()` in `build4mac.py` gates
+on the exact same `ModulePython` set the general `-p` flag already
+supports — `Python{313,312,311}{MacPorts,Brew}` and Anaconda3 — with no
+`HB314`/`MP314` option, even on a machine with `python@3.14` installed
+via Homebrew:
+
+```python
+elif not ModulePython in [ 'Python313MacPorts', 'Python312MacPorts', 'Python311MacPorts', \
+                           'Python313Brew',     'Python312Brew',     'Python311Brew', \
+                           'PythonAnaconda3V5', 'PythonAnaconda3V6' ]:
+    return 0
+```
+
+So `-P/--buildPymod` solves a **different** problem than the one that
+motivated this investigation: it produces a standalone, redistributable
+wheel that doesn't need `DYLD_FALLBACK_LIBRARY_PATH` (useful on its own
+merits), but targeting a newer Homebrew Python than 3.13 would require
+patching `build4mac.py`/`macbuild/build4mac_env.py` to add the new
+version to both the general Python-selection table and this
+`Build_pymod_wheel()` allowlist — out of scope here, and not attempted.
+
+### Caveat: wheel platform tag is version-pinned
+
+The produced filename embeds the exact macOS major version
+(`macosx_26_0_arm64` here, built on Tahoe). `pip` enforces that tag, so
+the wheel as built is only directly installable on that same major macOS
+version, even though nothing in it is actually Tahoe-specific — the same
+tag-portability caveat `build4mac.py` already works around for the
+Anaconda3 wheel target (see the `whlTarget == "ana3"` renaming logic).
+Not investigated further here.
 
 ## Gotchas recap
 
@@ -218,3 +331,8 @@ For regular standalone-Python use, prefer the PyPI wheels
 5. **Batch scripts must be real files**; process-substitution paths fail.
 6. **The bundled pymod needs `DYLD_FALLBACK_LIBRARY_PATH`** when
    imported from an external interpreter (see §5).
+7. **`-P/--buildPymod` gives you a truly standalone wheel** (no DYLD
+   workaround, verified in a clean venv), but it does **not** raise the
+   Homebrew Python ceiling — it's gated on the same `{3.11,3.12,3.13}`
+   set as `-p` (see §6). Non-fatal `delocate.libsana` warnings for four
+   optional streamer plugins are cosmetic in testing.
