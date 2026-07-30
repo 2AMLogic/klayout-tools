@@ -43,11 +43,25 @@ Scaffold. The pattern is proven (see the kicad-tools
 this repo is where it meets silicon. See [ROADMAP.md](ROADMAP.md) for the
 build order and [CLAUDE.md](CLAUDE.md) if you are an agent working here.
 
+## Install
+
+```bash
+uv tool install git+https://github.com/2AMLogic/klayout-tools
+```
+
+Or with `pip`:
+
+```bash
+pip install git+https://github.com/2AMLogic/klayout-tools
+```
+
+`klt` is now on `PATH`. (A published PyPI release is planned — see
+[RELEASING.md](RELEASING.md) — `pip install klayout-tools` will work once
+that lands.)
+
 ## Quick start (aspirational — the interface contract)
 
 ```bash
-pip install klayout-tools     # not yet published
-
 klt layers design.gds                    # enumerate layers, JSON out
 klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
