@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 
 from .. import __version__
-from . import cells_cmd, layers_cmd, stats_cmd
+from . import cells_cmd, drc_cmd, layers_cmd, stats_cmd
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -16,9 +16,7 @@ def create_parser() -> argparse.ArgumentParser:
         prog="klt",
         description="Tools for AI agents to work with IC layout.",
     )
-    parser.add_argument(
-        "--version", action="version", version=f"klt {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"klt {__version__}")
     # No default handler: absence of a subcommand is handled by main().
     parser.set_defaults(func=None)
 
@@ -32,9 +30,7 @@ def create_parser() -> argparse.ArgumentParser:
             "shape counts of a GDSII or OASIS layout file."
         ),
     )
-    layers_parser.add_argument(
-        "file", help="path to a GDSII or OASIS layout file"
-    )
+    layers_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     layers_parser.add_argument(
         "--format",
         choices=["text", "json"],
@@ -92,5 +88,34 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     cells_parser.set_defaults(func=cells_cmd.run)
+
+    drc_parser = subparsers.add_parser(
+        "drc",
+        help="run a headless DRC deck against a GDSII/OASIS stream",
+        description=(
+            "Run a DRC rule deck against a GDSII or OASIS layout file and "
+            "report violations as structured data. Runs fully headless via "
+            "KLayout's native Region check primitives — no GUI, no Qt, no "
+            "standalone klayout binary."
+        ),
+    )
+    drc_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    drc_parser.add_argument(
+        "--deck",
+        required=True,
+        help=(
+            "DRC deck to run (currently: sky130). Not validated by argparse "
+            "-- an unknown deck name exits 1 with a clean error, per "
+            "docs/cli/drc.md's exit-code contract, rather than argparse's "
+            "usage-error exit 2."
+        ),
+    )
+    drc_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    drc_parser.set_defaults(func=drc_cmd.run)
 
     return parser
