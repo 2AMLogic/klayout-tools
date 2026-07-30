@@ -68,6 +68,13 @@ spiking a design epic — candidate-engine survey, proposed JSON contract,
 wrap/build decision — when the friction log demands it (see
 docs/ARCHITECTURE.md, "How capabilities arrive").
 
+The SPICE side has been spiked:
+[docs/design/spice-corner-runner-spike.md](docs/design/spice-corner-runner-spike.md)
+surveys ngspice against Xyce, proposes the JSON contract for running a
+netlist across a PVT corner matrix, and recommends wrapping the engine
+while building the corner orchestration ourselves. It is a proposal, not a
+commitment — no phase is scheduled by it.
+
 Running alongside the tooling: a knowledge base of circuit designs from
 published work — topologies, sizing strategies, layout idioms — for the
 LLM reasoning module to draw on. Open sources only.
