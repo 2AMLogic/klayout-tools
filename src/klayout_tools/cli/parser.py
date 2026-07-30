@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 
 from .. import __version__
-from . import layers_cmd
+from . import layers_cmd, stats_cmd
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -42,5 +42,30 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     layers_parser.set_defaults(func=layers_cmd.run)
+
+    stats_parser = subparsers.add_parser(
+        "stats",
+        help="report area, density, and polygon/vertex counts of a GDSII/OASIS stream",
+        description=(
+            "Report bounding box, drawn area, density, and polygon/vertex "
+            "counts of a GDSII or OASIS layout file, in total and optionally "
+            "per layer."
+        ),
+    )
+    stats_parser.add_argument(
+        "file", help="path to a GDSII or OASIS layout file"
+    )
+    stats_parser.add_argument(
+        "--per-layer",
+        action="store_true",
+        help="also report the same statistics broken down per layer",
+    )
+    stats_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    stats_parser.set_defaults(func=stats_cmd.run)
 
     return parser
