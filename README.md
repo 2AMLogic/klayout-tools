@@ -54,6 +54,12 @@ klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
 ```
 
+## Guides
+
+- [Building KLayout from source on macOS](docs/guides/building-klayout-macos.md)
+  — full walkthrough (Homebrew Qt6/Python/Ruby, `build4mac.py`, deploy,
+  headless verification), tested on Apple Silicon with KLayout v0.30.10.
+
 ## License
 
 MIT. © 2026 Two AM Logic, Inc.
