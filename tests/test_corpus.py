@@ -43,9 +43,9 @@ def test_corpus_is_non_empty():
     """Guard against a silently-empty corpus (e.g. a broken glob)."""
     assert len(CASES) >= 4, "expected at least a handful of corpus files"
     for pdk in PDKS:
-        assert any(
-            layout.parent.name == pdk for layout, _ in CASES
-        ), f"no corpus files found for {pdk}"
+        assert any(layout.parent.name == pdk for layout, _ in CASES), (
+            f"no corpus files found for {pdk}"
+        )
 
 
 @pytest.mark.parametrize("layout_path,golden_path", CASES, ids=CASE_IDS)

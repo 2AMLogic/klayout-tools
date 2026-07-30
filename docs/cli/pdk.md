@@ -178,7 +178,7 @@ these instead of re-implementing the lookup in Python:
 ```python
 from klayout_tools.pdk import find_pdk, list_pdks, PdkNotFoundError
 
-info = find_pdk(variant="sky130A")   # same dict `klt pdk find` emits
+info = find_pdk(variant="sky130A")  # same dict `klt pdk find` emits
 models = info["assets"]["ngspice"]
 
 try:
@@ -186,7 +186,7 @@ try:
 except PdkNotFoundError as exc:
     ...  # exc carries the actionable, search-order-naming message
 
-everything = list_pdks()             # same dict `klt pdk list` emits
+everything = list_pdks()  # same dict `klt pdk list` emits
 ```
 
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact

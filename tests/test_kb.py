@@ -96,7 +96,7 @@ def _valid_reference_entry() -> dict:
         "title": "Example entry",
         "topology": "Example topology",
         "spec_class": "example spec class",
-        "source": {"citation": "Example, A., \"An example paper,\" 2020."},
+        "source": {"citation": 'Example, A., "An example paper," 2020.'},
     }
 
 
