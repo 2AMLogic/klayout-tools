@@ -20,7 +20,9 @@ Python API). Public repo, MIT, built in the open by 2AM Logic.
 - **Headless always.** Nothing may require the KLayout GUI; `pya` in batch
   mode only. Every command must be runnable in CI.
 - **JSON is the contract.** Human-readable output is a courtesy; the JSON
-  schema is the API. Breaking a JSON field is a breaking change.
+  schema is the API. Breaking a JSON field is a breaking change. Every `klt`
+  verb emits through the shared envelope defined in
+  `docs/json-contract.md` (`schema_version`, error shape, exit codes).
 - **Open PDKs only** (sky130 first). Never vendor proprietary PDK data or
   reference NDA'd design rules.
 - Python 3.10+, `pyproject.toml`/uv, pytest. CLI entry point is `klt`.

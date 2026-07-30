@@ -33,6 +33,7 @@ def layers_report(path: str) -> dict[str, Any]:
     ``docs/cli/layers.md``)::
 
         {
+            "schema_version": 1,
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "layer_count": <number of layers, int>,
@@ -41,6 +42,10 @@ def layers_report(path: str) -> dict[str, Any]:
                 ...
             ],
         }
+
+    ``schema_version`` is versioned independently per command (see
+    ``docs/json-contract.md``); it starts at ``1`` and only increments when
+    this command's JSON shape changes in a way that isn't purely additive.
 
     ``layers`` is sorted by ``(layer, datatype)`` ascending for deterministic
     output. Unnamed layers report ``name: None``. ``shapes`` is the count summed
@@ -85,6 +90,7 @@ def layers_report(path: str) -> dict[str, Any]:
     layers.sort(key=lambda entry: (entry["layer"], entry["datatype"]))
 
     return {
+        "schema_version": 1,
         "file": path,
         "dbu_um": layout.dbu,
         "layer_count": len(layers),
