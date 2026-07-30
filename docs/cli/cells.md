@@ -21,10 +21,13 @@ The command runs fully headless via KLayout's batch database API
 **JSON is the API.** Human-readable text output is a courtesy; the JSON schema
 below is the stable contract. Per the project's rules, **breaking (renaming,
 removing, or retyping) a field is a breaking change**. New fields may be added
-without breaking the contract, so consumers should ignore unknown fields.
+without breaking the contract, so consumers should ignore unknown fields. See
+[`docs/json-contract.md`](../json-contract.md) for the envelope shared across
+all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
+  "schema_version": 1,
   "file": "design.gds",
   "dbu_um": 0.001,
   "cell_count": 2,
@@ -58,6 +61,7 @@ without breaking the contract, so consumers should ignore unknown fields.
 
 | Field            | Type            | Description                                                                          |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------- |
+| `schema_version` | integer         | Version of this command's JSON shape (starts at `1`; per-command).                    |
 | `file`           | string          | The input path exactly as provided on the command line.                               |
 | `dbu_um`         | number (float)  | Database unit in micrometres (e.g. `0.001` = 1 nm).                                   |
 | `cell_count`     | integer         | Total cells in the **whole layout**, regardless of `--top` filtering.                  |
@@ -124,5 +128,13 @@ index  name  is_top  shapes  instances  children  parents  bbox_um
 | `1`       | The file is missing, unreadable, or not a recognisable layout.        |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse. |
 
-On error, a concise message is written to **stderr** (prefixed `klt cells:`)
-and nothing is written to stdout. No Python traceback is printed.
+On error, a concise message is written to **stderr** and nothing is written
+to stdout. No Python traceback is printed.
+
+- `--format text` (default): a plain-text line prefixed `klt cells:`.
+- `--format json`: the documented JSON error envelope (see
+  [`docs/json-contract.md`](../json-contract.md)):
+
+  ```json
+  { "schema_version": 1, "error": { "command": "cells", "message": "file not found: missing.gds" } }
+  ```
