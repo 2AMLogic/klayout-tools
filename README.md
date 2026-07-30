@@ -94,6 +94,17 @@ the signal that a PR is not mergeable.
   — full walkthrough (Homebrew Qt6/Python/Ruby, `build4mac.py`, deploy,
   headless verification), tested on Apple Silicon with KLayout v0.30.10.
 
+## Design notes
+
+Spikes and engine surveys — proposals and findings, not commitments.
+
+- [SPICE PVT corner runner](docs/design/spice-corner-runner-spike.md) —
+  ngspice vs. Xyce, a proposed JSON contract for sweeping a netlist across a
+  corner matrix, and the wrap/build call.
+- [sc-leflib evaluation](docs/design/sc-leflib-evaluation.md) — whether
+  siliconcompiler's LEF parser fills a gap that KLayout's own LEF/DEF reader
+  leaves. Verdict: use `pya`, no new dependency.
+
 ## License
 
 MIT. © 2026 Two AM Logic, Inc.
