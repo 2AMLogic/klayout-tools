@@ -18,9 +18,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # No subcommand: preserve the scaffold status blurb (and exit 0).
     if getattr(args, "func", None) is None:
-        print(
-            f"klt {__version__} — scaffold; run `klt --help` for available commands"
-        )
+        print(f"klt {__version__} — scaffold; run `klt --help` for available commands")
         return 0
 
     return args.func(args)

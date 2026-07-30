@@ -19,6 +19,12 @@ concurrency:
 jobs:
   lint:
     name: Lint (ruff)
+    # Both ruff steps below GATE — if either is red, run
+    # `uv run --extra dev ruff format .` / `uv run --extra dev ruff check . --fix`
+    # locally and commit the result. Do NOT add continue-on-error to either
+    # step: it makes this job always green regardless of ruff's exit code,
+    # which is exactly how a repo accumulates hundreds of unformatted files
+    # behind a false-green check.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -31,6 +37,11 @@ jobs:
       - name: Install dependencies
         # --locked fails the job if uv.lock is stale relative to pyproject.toml.
         run: uv sync --locked --extra dev
+
+      - name: ruff format --check
+        # Scoped to first-party code by [tool.ruff.format] exclude in
+        # pyproject.toml — vendored .loom/ and .claude/ trees are not governed.
+        run: uv run --frozen --extra dev ruff format --check .
 
       - name: ruff check
         run: uv run --frozen --extra dev ruff check .

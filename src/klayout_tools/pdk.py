@@ -238,9 +238,7 @@ def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
     return assets
 
 
-def _not_found_message(
-    candidates: list[tuple[str, str]], variant: str | None
-) -> str:
+def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -> str:
     """Build the actionable ``PdkNotFoundError`` message."""
     tried = ", ".join(f"{via} ({path})" for path, via in candidates)
     subject = (

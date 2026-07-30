@@ -296,8 +296,9 @@ def test_cli_find_json_on_stdout(tmp_path, capsys):
 
 
 def test_cli_find_no_install_error_envelope(tmp_path, capsys):
-    exit_code = main(["pdk", "find", "--pdk-root", str(tmp_path / "nope"),
-                      "--format", "json"])
+    exit_code = main(
+        ["pdk", "find", "--pdk-root", str(tmp_path / "nope"), "--format", "json"]
+    )
 
     assert exit_code == 1
     captured = capsys.readouterr()
@@ -347,8 +348,9 @@ def test_cli_env_matches_find(tmp_path, capsys, monkeypatch):
 
 
 def test_cli_env_no_install_error_envelope(tmp_path, capsys):
-    exit_code = main(["pdk", "env", "--pdk-root", str(tmp_path / "nope"),
-                      "--format", "json"])
+    exit_code = main(
+        ["pdk", "env", "--pdk-root", str(tmp_path / "nope"), "--format", "json"]
+    )
 
     assert exit_code == 1
     captured = capsys.readouterr()
