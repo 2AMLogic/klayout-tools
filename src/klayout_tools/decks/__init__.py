@@ -8,9 +8,8 @@ scripts, invoked directly instead of through the script runner. This keeps
 ``klt drc`` headless with zero new runtime dependency (see
 ``docs/cli/drc.md`` for the engine-choice rationale).
 
-Deck data lives in per-PDK sibling modules (``sky130.py``, and — tracked in
-issue #15 — a future ``gf180mcu.py``); this module only aggregates them into
-a name -> deck registry.
+Deck data lives in per-PDK sibling modules (``sky130.py``, ``gf180mcu.py``);
+this module only aggregates them into a name -> deck registry.
 """
 
 from __future__ import annotations
@@ -47,15 +46,15 @@ class UnknownDeckError(Exception):
 
 
 def _registry() -> dict[str, list[DrcRule]]:
-    from . import sky130
+    from . import gf180mcu, sky130
 
-    return {"sky130": sky130.DECK}
+    return {"sky130": sky130.DECK, "gf180mcu": gf180mcu.DECK}
 
 
 def _layer_name_registry() -> dict[str, dict[tuple[int, int], str]]:
-    from . import sky130
+    from . import gf180mcu, sky130
 
-    return {"sky130": sky130.LAYER_NAMES}
+    return {"sky130": sky130.LAYER_NAMES, "gf180mcu": gf180mcu.LAYER_NAMES}
 
 
 def get_deck(name: str) -> list[DrcRule]:

@@ -4,12 +4,12 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130 [--format text|json]
+klt drc <file> --deck sky130|gf180mcu [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
-- `--deck` — required. The DRC deck to run. Currently: `sky130`.
+- `--deck` — required. The DRC deck to run. Currently: `sky130`, `gf180mcu`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -50,10 +50,30 @@ script runner does. This is called out explicitly in each such rule's
 docstring; the threshold *values* used are always the real, unmodified
 source values.
 
-Coverage is expected to grow incrementally in follow-on issues. A
-`gf180mcu` deck is tracked separately (issue #15) and will register as a
-sibling `DrcRule` list in `src/klayout_tools/decks/gf180mcu.py`, without
-requiring changes to this adapter interface.
+The `gf180mcu` deck is likewise a **curated starter subset**: 10 rules —
+width, spacing, and enclosure checks across the `Poly2`, `Comp`
+(diffusion/active), `Contact`, and `Metal1` layers — transcribed from the
+published GlobalFoundries 180nm MCU **Design Rule Manual**
+([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
+`docs/physical_verification/design_manual/`; Apache License 2.0). Unlike
+sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), the
+companion KLayout DRC-deck repo
+([`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`](https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv))
+does not yet open-source the core FEOL/BEOL width/space/enclosure checks as
+executable rule-deck code, so `src/klayout_tools/decks/gf180mcu.py` instead
+cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
+`"Mn.1"`) and numeric values directly.
+
+Four of the ten gf180mcu rules approximate an official DRM rule in some
+way — either a compound-layer context our single/two-layer check
+primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`),
+or a bound our primitives don't support (`contact.width.1`'s fixed-size
+square, approximated as a minimum only). Each is called out explicitly in
+its rule's docstring in `gf180mcu.py`; the threshold values used are always
+the real, unmodified DRM values.
+
+Coverage is expected to grow incrementally in follow-on issues, for both
+decks.
 
 ## Limitation: whole-layout, flattened
 
@@ -118,7 +138,7 @@ On a run with findings:
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
 | `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`; per-command).       |
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
-| `deck`            | string                   | The deck name used (`"sky130"`).                                         |
+| `deck`            | string                   | The deck name used (`"sky130"` or `"gf180mcu"`).                         |
 | `dbu_um`          | number (float)           | Database unit in micrometres, same semantics as `klt layers`.            |
 | `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
@@ -132,7 +152,7 @@ On a run with findings:
 | `rule`        | string               | Stable rule id (e.g. `"poly.width.1"`) — never renumbered once shipped.       |
 | `description` | string               | Human-readable rule description.                                              |
 | `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.).                   |
-| `layer`       | string               | `"name.purpose"` (e.g. `"poly.drawing"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
+| `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under.                          |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
 | `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. |
@@ -165,7 +185,7 @@ written to stdout. No Python traceback is printed — including for an unknown
   [`docs/json-contract.md`](../json-contract.md)):
 
   ```json
-  { "schema_version": 1, "error": { "command": "drc", "message": "unknown deck 'nope' (available: sky130)" } }
+  { "schema_version": 1, "error": { "command": "drc", "message": "unknown deck 'nope' (available: gf180mcu, sky130)" } }
   ```
 
 Note that exit code `3` is a per-command extension of the shared exit-code
