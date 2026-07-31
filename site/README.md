@@ -98,10 +98,17 @@ site/
   tsconfig.json       # extends astro/tsconfigs/strict
   dist/                # build output (git-ignored, deploy target as of #65)
   src/
+    components/
+      Header.astro      # site header — GitHub repo link (#66)
+      Footer.astro      # site footer — build SHA, copyright, scope link (#66)
     data/
       types.ts         # Layout type (schema v1, mirrors klt layout-metrics / #61)
       loadLayouts.ts    # build-time layout data loader
       loadLayouts.test.ts
+      buildInfo.ts      # build-time git SHA lookup for the footer (#66)
+      buildInfo.test.ts
+    layouts/
+      Layout.astro      # shared page shell (head + Header/Footer chrome, #66)
     pages/
       index.astro       # landing page (folds in #11) + placeholder block list
 ```

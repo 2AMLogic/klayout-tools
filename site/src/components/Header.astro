@@ -1,0 +1,55 @@
+---
+/**
+ * Header — shared site chrome for the klayout-tools.org gallery (issue #66).
+ *
+ * Rendered at the top of every page via `Layout.astro` (index today; the
+ * per-block detail route from #64 tomorrow). Carries a "View on GitHub" link
+ * back to the project repo. Styling reuses the CSS custom properties
+ * declared on `:root` by `Layout.astro`'s global style block, so it
+ * inherits the dark theme automatically.
+ */
+const REPO_URL = "https://github.com/2AMLogic/klayout-tools";
+---
+
+<header class="site-header">
+  <a class="site-title" href="/">klayout-tools</a>
+  <a class="repo-link" href={REPO_URL} target="_blank" rel="noopener noreferrer">
+    View on GitHub
+  </a>
+</header>
+
+<style>
+  .site-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .site-title {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fog);
+    font-weight: 600;
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+    text-decoration: none;
+  }
+
+  .repo-link {
+    color: var(--cyan);
+    font-size: 0.85rem;
+    text-decoration: none;
+  }
+
+  .site-title:hover,
+  .site-title:focus-visible,
+  .repo-link:hover,
+  .repo-link:focus-visible {
+    text-decoration: underline;
+    outline: none;
+  }
+</style>
