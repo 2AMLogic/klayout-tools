@@ -106,6 +106,10 @@ the signal that a PR is not mergeable.
 
 Spikes and engine surveys — proposals and findings, not commitments.
 
+- [Staged agent design pipeline](docs/design/design-pipeline.md) — the
+  spec-to-simulation-verified stage graph, per-stage input/output contracts,
+  a vendor-neutral model-class matrix, and a gap map against today's `klt`
+  verbs.
 - [SPICE PVT corner runner](docs/design/spice-corner-runner-spike.md) —
   ngspice vs. Xyce, a proposed JSON contract for sweeping a netlist across a
   corner matrix, and the wrap/build call.

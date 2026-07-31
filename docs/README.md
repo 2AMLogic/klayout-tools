@@ -24,6 +24,7 @@ docs/
     render.md
     stats.md
   design/                # design notes, spikes, and upstream surveys
+    design-pipeline.md
     lambdalib-survey.md
     sc-leflib-evaluation.md
     scgallery-zerosoc-survey.md
