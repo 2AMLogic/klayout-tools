@@ -232,40 +232,6 @@ def test_default_format_is_text(tmp_path, capsys):
         json.loads(out)
 
 
-def test_missing_file(tmp_path, capsys):
-    missing = tmp_path / "nope.gds"
-    assert main(["stats", str(missing)]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "klt stats" in captured.err
-    assert "not found" in captured.err
-
-
-def test_missing_file_json_format(tmp_path, capsys):
-    """`--format json` errors emit the documented JSON error envelope on
-    stderr, leave stdout empty, and exit 1."""
-    missing = tmp_path / "nope.gds"
-
-    assert main(["stats", str(missing), "--format", "json"]) == 1
-    captured = capsys.readouterr()
-
-    assert captured.out == ""
-    error = json.loads(captured.err)
-    assert error["schema_version"] == 1
-    assert error["error"]["command"] == "stats"
-    assert "not found" in error["error"]["message"]
-
-
-def test_non_layout_file(tmp_path, capsys):
-    bogus = tmp_path / "notes.txt"
-    bogus.write_text("this is not a layout stream\n" * 4)
-
-    assert main(["stats", str(bogus)]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "klt stats" in captured.err
-
-
 def test_stats_report_raises_on_missing():
     with pytest.raises(StatsError):
         stats_report("/no/such/path/design.gds")

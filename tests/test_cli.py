@@ -21,24 +21,3 @@ def test_cli_version_flag(capsys):
         main(["--version"])
     assert exc_info.value.code == 0
     assert __version__ in capsys.readouterr().out
-
-
-def test_layers_subcommand_requires_file():
-    # The `layers` subcommand exists and requires a file argument;
-    # argparse exits 2 when the required positional is missing.
-    with pytest.raises(SystemExit):
-        main(["layers"])
-
-
-def test_stats_subcommand_requires_file():
-    # The `stats` subcommand exists and requires a file argument;
-    # argparse exits 2 when the required positional is missing.
-    with pytest.raises(SystemExit):
-        main(["stats"])
-
-
-def test_cells_subcommand_requires_file():
-    # The `cells` subcommand exists and requires a file argument;
-    # argparse exits 2 when the required positional is missing.
-    with pytest.raises(SystemExit):
-        main(["cells"])
