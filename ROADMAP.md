@@ -74,6 +74,14 @@ netlist across a PVT corner matrix, and recommends wrapping the engine
 while building the corner orchestration ourselves. It is a proposal, not a
 commitment — no phase is scheduled by it.
 
+The E&M side has also been spiked:
+[docs/design/em-field-sim-spike.md](docs/design/em-field-sim-spike.md)
+surveys geode-fem, strata-fdtd, and openEMS, proposes a `klt em` JSON
+contract, and recommends wrapping geode-fem as the default full-wave engine
+— validated against openEMS and analytic oracles — once it clears an
+accuracy bar on geometry produced from a real sky130 layout. Also a
+proposal, not a commitment.
+
 Running alongside the tooling: a knowledge base of circuit designs from
 published work — topologies, sizing strategies, layout idioms — for the
 LLM reasoning module to draw on. Open sources only.
