@@ -19,5 +19,9 @@
     "url": "https://doi.org/10.1109/16.824729",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its physical inductor modeling methodology and patterned-ground-shield technique only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the foundational reference for the pi-model treatment of on-chip spiral inductors and the patterned ground shield used to raise substrate-limited Q, cited throughout subsequent RF-CMOS inductor literature."
   },
-  "notes": "sky130 open-MPW shuttles commonly restrict full top-metal (met5) usage or require IP hand-off review for custom inductor structures, so check the specific shuttle's rules before committing area to one. Because there is no vendor-characterized inductor model, budget schedule for EM simulation (e.g. an open-source field solver) to validate the analytical sizing estimate before tapeout."
+  "notes": "sky130 open-MPW shuttles commonly restrict full top-metal (met5) usage or require IP hand-off review for custom inductor structures, so check the specific shuttle's rules before committing area to one. Because there is no vendor-characterized inductor model, budget schedule for EM simulation (e.g. an open-source field solver) to validate the analytical sizing estimate before tapeout.",
+  "artifacts": {
+    "layout": "examples/kb/sky130-spiral-inductor/spiral.gds",
+    "notes": "Octagonal met5 winding with a met4 underpass and a met1 patterned ground shield, drawn at sky130 layer/datatype pairs. Check it headlessly with `klt drc examples/kb/sky130-spiral-inductor/spiral.gds --deck sky130` -- it is clean against every met1 rule in that deck. Regenerate with `python3 examples/kb/sky130-spiral-inductor/generate.py`; that script's module docstring documents where the drawn orthogonal comb shield simplifies the radial slotting described in layout_idioms, and why (acute notches where radial fingers meet an octagonal ring trip the width/space checks). The GDS is a geometry-only structure with no vendor inductor model behind it, so it exercises the DRC path, not the sizing estimate."
+  }
 }

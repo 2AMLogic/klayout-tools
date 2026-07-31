@@ -1,0 +1,54 @@
+{
+  "netlist": "oscillator.spice",
+  "engine": "ngspice",
+  "models": {
+    "lib": "corners.lib"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "2n 15u"
+  },
+  "measurements": [
+    {
+      "name": "t_edge3",
+      "spice": ".meas tran t_edge3 WHEN v(vo)=0.9 RISE=3",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge4",
+      "spice": ".meas tran t_edge4 WHEN v(vo)=0.9 RISE=4",
+      "unit": "s"
+    },
+    {
+      "name": "period",
+      "spice": ".meas tran period PARAM=(t_edge4-t_edge3)",
+      "unit": "s",
+      "limits": {
+        "min": 1.4e-6,
+        "max": 2.2e-6
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 60,
+    "keep_artifacts": false
+  }
+}

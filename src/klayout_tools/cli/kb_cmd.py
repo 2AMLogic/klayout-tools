@@ -116,6 +116,8 @@ def _print_show_text(report: dict) -> None:
             print(f"artifacts.netlist: {artifacts['netlist']}")
         if artifacts.get("layout"):
             print(f"artifacts.layout: {artifacts['layout']}")
+        if artifacts.get("notes"):
+            print(f"artifacts.notes: {artifacts['notes']}")
 
 
 def _print_validate_text(report: dict) -> None:

@@ -1,0 +1,23 @@
+* Process corners for examples/kb/rc-relaxation-oscillator/oscillator.spice.
+*
+* Self-contained, PDK-free stand-in for a real .lib: the two process knobs
+* that actually set this oscillator's period are the timing capacitor value
+* and the reference-derived charge current, so each section scales those
+* rather than device models. Replace this file with a real PDK model
+* library (e.g. sky130's sky130.lib.spice) once the oscillator is built out
+* of real devices.
+
+.lib tt
+.param corner_cap=1.00
+.param corner_iref=1.00
+.endl tt
+
+.lib ss
+.param corner_cap=1.10
+.param corner_iref=0.95
+.endl ss
+
+.lib ff
+.param corner_cap=0.90
+.param corner_iref=1.05
+.endl ff
