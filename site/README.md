@@ -57,21 +57,21 @@ The loader is resilient to missing data:
 Blocks are discovered as immediate subdirectories of `blocks/`, skipping
 hidden / `_`-prefixed entries.
 
-### Provisional bootstrap data (until #61 lands)
+### Bootstrap data
 
-The `layout.json` schema is defined by issue #61 ("Gallery: per-layout
-metrics extractor"), which had not landed when this loader was built. Per
-#59's acceptance criteria, `blocks/` is bootstrapped against the [#4 test
-corpus](../tests/corpus/README.md) instead:
+The `layout.json` schema is the contract emitted by `klt layout-metrics`
+(issue #61, "Gallery: per-layout metrics extractor") — see
+[`../docs/cli/layout-metrics.md`](../docs/cli/layout-metrics.md) and
+`src/klayout_tools/layout_metrics.py` for the authoritative shape (the
+always-present fields are `schema_version`, `generated_at`, `slug`, `name`,
+`status`). The checked-in `blocks/` tree is bootstrapped against the [#4
+test corpus](../tests/corpus/README.md):
 [`../scripts/bootstrap-gallery-blocks.py`](../scripts/bootstrap-gallery-blocks.py)
-runs `klt cells` / `klt stats` / `klt layers` against each corpus GDS file
-and writes `blocks/<slug>/output/layout.json`. See
+runs `klt layers` / `klt cells` against each corpus GDS file and writes
+`blocks/<slug>/output/layout.json` in that same shape. See
 [`../blocks/README.md`](../blocks/README.md) for what is checked in and why
 one block is intentionally left without a `layout.json` (to demonstrate the
 `no_artifacts` path on the real placeholder page below).
-
-Once #61 lands with the real `klt` metrics extractor, regenerate `blocks/`
-with that command instead and remove the bootstrap script.
 
 ### Layout
 
@@ -84,7 +84,7 @@ site/
   tsconfig.json       # extends astro/tsconfigs/strict
   src/
     data/
-      types.ts         # Layout type (schema v1, provisional pending #61)
+      types.ts         # Layout type (schema v1, mirrors klt layout-metrics / #61)
       loadLayouts.ts    # build-time layout data loader
       loadLayouts.test.ts
     pages/

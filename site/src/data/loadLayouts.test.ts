@@ -29,10 +29,10 @@ function writeLayoutJson(slug: string, data: unknown): void {
 }
 
 const validLayout = (slug: string, overrides: Record<string, unknown> = {}) => ({
-  $schema: "https://klayout-tools.org/schemas/layout/v1.json",
   schema_version: 1,
   generated_at: "2026-07-31T00:00:00+00:00",
   slug,
+  name: slug,
   status: "ok",
   ...overrides,
 });
@@ -83,18 +83,21 @@ describe("loadLayout", () => {
       "sky130_fd_sc_hd__dfxtp_2",
       validLayout("sky130_fd_sc_hd__dfxtp_2", {
         name: "sky130_fd_sc_hd__dfxtp_2",
-        pdk: "sky130",
+        layout_file: "layout.gds",
         layer_count: 22,
         cell_count: 1,
         instance_count: 0,
+        drc: { deck: "sky130", status: "clean", violation_count: 0 },
         renders: { top: "renders/top.png" },
       }),
     );
     const layout = loadLayout(join(root, "sky130_fd_sc_hd__dfxtp_2"));
     expect(layout.status).toBe("ok");
     expect(layout.name).toBe("sky130_fd_sc_hd__dfxtp_2");
-    expect(layout.pdk).toBe("sky130");
+    expect(layout.layout_file).toBe("layout.gds");
     expect(layout.layer_count).toBe(22);
+    expect(layout.drc?.deck).toBe("sky130");
+    expect(layout.drc?.violation_count).toBe(0);
     expect(layout.renders?.top).toBe("renders/top.png");
   });
 
@@ -119,10 +122,10 @@ describe("loadLayout", () => {
   it("falls back to a stub when a required field is missing", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     writeLayoutJson("missing-status", {
-      $schema: "https://klayout-tools.org/schemas/layout/v1.json",
       schema_version: 1,
       generated_at: "2026-07-31T00:00:00+00:00",
       slug: "missing-status",
+      name: "missing-status",
       // status omitted
     });
     const layout = loadLayout(join(root, "missing-status"));

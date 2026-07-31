@@ -3,9 +3,9 @@
  *
  * Discovers every block directory under the repo's `blocks/` tree, reads
  * each block's `blocks/<slug>/output/layout.json` (the schema-v1 contract
- * bootstrapped in `scripts/bootstrap-gallery-blocks.py`, to be superseded by
- * `klt`'s own metrics extractor once issue #61 lands), and returns a typed,
- * slug-sorted `Layout[]`.
+ * emitted by `klt layout-metrics`, issue #61 — see
+ * `src/klayout_tools/layout_metrics.py` and `docs/cli/layout-metrics.md`),
+ * and returns a typed, slug-sorted `Layout[]`.
  *
  * Design notes (see `blocks/README.md` and issue #59):
  *   - Runs at build time only (Node `fs`). Not bundled into client output.
@@ -84,13 +84,26 @@ export function discoverBlockDirs(root: string): string[] {
   return dirs;
 }
 
+/**
+ * Title-cased fallback name derived from a slug (e.g. `a-b` -> `A B`).
+ *
+ * Mirrors `_default_name` in `klt layout-metrics`
+ * (`src/klayout_tools/layout_metrics.py`) so a loader-synthesized stub uses
+ * the same `name` the real extractor would emit for the same block.
+ */
+function titleCaseSlug(slug: string): string {
+  return slug
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 /** Construct a `no_artifacts` stub for a block with no parsable `layout.json`. */
 function makeStub(slug: string): Layout {
   return {
-    $schema: "https://klayout-tools.org/schemas/layout/v1.json",
     schema_version: SCHEMA_VERSION,
     generated_at: new Date(0).toISOString(),
     slug,
+    name: titleCaseSlug(slug),
     status: "no_artifacts",
   };
 }
@@ -119,7 +132,7 @@ function validateLayout(data: unknown, slug: string): Layout | null {
     return null;
   }
 
-  const required = ["$schema", "generated_at", "slug", "status"] as const;
+  const required = ["generated_at", "slug", "name", "status"] as const;
   for (const key of required) {
     if (!(key in obj)) {
       console.warn(`[loadLayouts] ${slug}: layout.json missing required field "${key}"; using stub`);

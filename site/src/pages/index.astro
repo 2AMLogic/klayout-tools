@@ -77,7 +77,6 @@ klt stats design.gds --per-layer   <span class="c"># densities, bbox, counts</sp
           layouts.map((layout) => (
             <li>
               <strong>{layout.slug}</strong> — {layout.status}
-              {layout.pdk ? ` · ${layout.pdk}` : ""}
               {layout.layer_count != null ? ` · ${layout.layer_count} layers` : ""}
               {layout.cell_count != null ? ` · ${layout.cell_count} cells` : ""}
             </li>

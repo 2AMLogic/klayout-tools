@@ -1,12 +1,10 @@
 {
-  "$schema": "https://klayout-tools.org/schemas/layout/v1.json",
   "schema_version": 1,
   "generated_at": "2026-07-31T16:46:33.650506+00:00",
   "slug": "gf180mcu_fd_sc_mcu9t5v0__and2_1",
-  "status": "ok",
   "name": "gf180mcu_fd_sc_mcu9t5v0__and2_1",
+  "status": "ok",
   "description": "gf180mcu standard-cell layout `gf180mcu_fd_sc_mcu9t5v0__and2_1` from the #4 test corpus.",
-  "pdk": "gf180mcu",
   "layer_count": 13,
   "cell_count": 1,
   "instance_count": 0

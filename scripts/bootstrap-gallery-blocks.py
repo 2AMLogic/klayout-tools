@@ -68,15 +68,19 @@ def bootstrap_block(gds_path: Path, pdk: str) -> None:
     cells = run_klt("cells", str(rel))
     instance_count = sum(c.get("instances", 0) for c in cells.get("cells", []))
 
+    # Field shape mirrors `klt layout-metrics` (issue #61) exactly — see
+    # src/klayout_tools/layout_metrics.py and docs/cli/layout-metrics.md. In
+    # particular: no `$schema` (the envelope key is `schema_version`), no
+    # `pdk` field, and `name` is always present. `layout_file`/`drc` are
+    # omitted here because this bootstrap reads the corpus GDS in place
+    # rather than materializing a layout file inside the block dir.
     layout = {
-        "$schema": "https://klayout-tools.org/schemas/layout/v1.json",
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "slug": slug,
-        "status": "ok",
         "name": slug,
+        "status": "ok",
         "description": f"{pdk} standard-cell layout `{slug}` from the #4 test corpus.",
-        "pdk": pdk,
         "layer_count": layers["layer_count"],
         "cell_count": cells["cell_count"],
         "instance_count": instance_count,

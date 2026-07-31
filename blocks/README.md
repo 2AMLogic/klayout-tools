@@ -5,23 +5,29 @@ subdirectory is a "block" (a layout the gallery shows); the site's data
 loader (`site/src/data/loadLayouts.ts`) discovers blocks here and reads each
 one's `<slug>/output/layout.json`.
 
-## Provisional bootstrap (until #61 lands)
+## Bootstrap data
 
-`layout.json`'s schema is defined by issue #61 ("Gallery: per-layout metrics
-extractor"), which had not landed when the loader in #59 was built. Per
-#59's acceptance criteria, this directory is bootstrapped instead from the
-[#4 test corpus](../tests/corpus/README.md) —
+`layout.json`'s schema is the contract emitted by `klt layout-metrics`
+(issue #61, "Gallery: per-layout metrics extractor") — see
+[`../docs/cli/layout-metrics.md`](../docs/cli/layout-metrics.md) and
+`src/klayout_tools/layout_metrics.py` for the authoritative shape (the
+always-present fields are `schema_version`, `generated_at`, `slug`, `name`,
+`status`). This directory is bootstrapped from the [#4 test
+corpus](../tests/corpus/README.md) —
 [`../scripts/bootstrap-gallery-blocks.py`](../scripts/bootstrap-gallery-blocks.py)
 runs `klt layers` / `klt cells` against each corpus GDS file and writes
-`<slug>/output/layout.json`.
+`<slug>/output/layout.json` in that same shape (it omits the optional
+`layout_file`/`drc` fields, which require running the full extractor against
+a materialized block directory).
 
-Once #61 lands with the real `klt` metrics extractor:
+Follow-ups for a future pass (owned by #61's extractor):
 
-1. Regenerate this directory with that command instead.
-2. Delete `scripts/bootstrap-gallery-blocks.py`.
+1. Regenerate this directory with `klt layout-metrics` directly (which also
+   populates `layout_file` and, with `--deck`, `drc`).
+2. Retire `scripts/bootstrap-gallery-blocks.py` once that regeneration path
+   is wired up.
 3. Revisit whether `layout.json` should stay checked in (as it does today)
-   or move to a gitignored, locally-generated artifact — #61 owns that
-   decision.
+   or move to a gitignored, locally-generated artifact.
 
 ## Contents
 
