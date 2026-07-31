@@ -11,8 +11,9 @@ Headless invariant: uses the pip ``klayout`` package's batch database API
 
 from __future__ import annotations
 
-import os
 from typing import Any
+
+from ._layout import load_layout
 
 
 class CellsError(Exception):
@@ -75,20 +76,7 @@ def cells_report(path: str, top: bool = False) -> dict[str, Any]:
     Raises :class:`CellsError` if the file is missing, unreadable, or not a
     recognisable layout stream.
     """
-    if not os.path.exists(path):
-        raise CellsError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise CellsError(f"not a file: {path}")
-
-    # Imported lazily so that `klt --version` and argument parsing do not pay
-    # the cost of loading the KLayout database module.
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    try:
-        layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise CellsError(f"could not read layout '{path}': {exc}") from exc
+    layout = load_layout(path, CellsError)
 
     top_cell_indices = {cell.cell_index() for cell in layout.top_cells()}
 

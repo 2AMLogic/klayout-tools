@@ -56,6 +56,46 @@ def emit_success(
         text_renderer(payload)
 
 
+def render_table(
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    left_aligned: set[int],
+) -> None:
+    """Print an aligned, ``--`` text-table rendering of ``rows`` under ``headers``.
+
+    Column widths are computed from the header and every row's cell in that
+    column (so the table is always at least as wide as its header). Columns
+    whose index is in ``left_aligned`` are left-justified (e.g. names, free
+    text); every other column is right-justified (numeric-ish data). Prints
+    nothing if ``rows`` is empty -- callers decide whether an empty table is
+    worth a header-only print.
+
+    This is a courtesy rendering for ``--format text``, not part of the JSON
+    contract -- see this module's docstring.
+    """
+    if not rows:
+        return
+
+    widths = [
+        max(len(headers[col]), max(len(row[col]) for row in rows))
+        for col in range(len(headers))
+    ]
+
+    def fmt(row: tuple[str, ...]) -> str:
+        return "  ".join(
+            row[col].ljust(widths[col])
+            if col in left_aligned
+            else row[col].rjust(widths[col])
+            for col in range(len(headers))
+        )
+
+    print()
+    print(fmt(headers))
+    print("  ".join("-" * widths[col] for col in range(len(headers))))
+    for row in rows:
+        print(fmt(row))
+
+
 def emit_error(command: str, message: str, format: str) -> int:
     """Emit an application-level error and return the exit code to use.
 

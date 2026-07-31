@@ -7,7 +7,7 @@ every other ``klt`` subcommand — see ``docs/json-contract.md``.
 import argparse
 
 from ..stats import StatsError, stats_report
-from .output import emit_error, emit_success
+from .output import emit_error, emit_success, render_table
 
 
 def run(args: argparse.Namespace) -> int:
@@ -63,20 +63,5 @@ def _print_text(report: dict) -> None:
         "polygons",
         "vertices",
     )
-    widths = [
-        max(len(headers[col]), max(len(row[col]) for row in rows))
-        for col in range(len(headers))
-    ]
-
-    def fmt(row: tuple[str, ...]) -> str:
-        # name (col 2) left-aligned; everything else numeric, right-aligned.
-        return "  ".join(
-            row[col].rjust(widths[col]) if col != 2 else row[col].ljust(widths[col])
-            for col in range(len(headers))
-        )
-
-    print()
-    print(fmt(headers))
-    print("  ".join("-" * widths[col] for col in range(len(headers))))
-    for row in rows:
-        print(fmt(row))
+    # name (col 2) left-aligned; everything else numeric, right-aligned.
+    render_table(headers, rows, left_aligned={2})

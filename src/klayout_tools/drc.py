@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._layout import load_layout
 from .decks import DrcRule, UnknownDeckError, get_deck, get_layer_names
 
 # Check kinds that operate on a single region (no other_layer).
@@ -76,6 +77,9 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     name is unknown, or a rule is malformed (e.g. a two-layer check missing
     ``other_layer``).
     """
+    # Checked here (ahead of deck lookup) so a missing/bad path is reported
+    # before an unknown deck name, matching this command's historical error
+    # precedence; load_layout() repeats this cheap check before the read.
     if not os.path.exists(path):
         raise DrcError(f"file not found: {path}")
     if os.path.isdir(path):
@@ -87,15 +91,11 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         raise DrcError(str(exc)) from exc
     layer_names = get_layer_names(deck_name)
 
-    # Imported lazily so that `klt --version` and argument parsing do not pay
-    # the cost of loading the KLayout database module.
-    import klayout.db as kdb
+    layout = load_layout(path, DrcError)
 
-    layout = kdb.Layout()
-    try:
-        layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise DrcError(f"could not read layout '{path}': {exc}") from exc
+    # Imported lazily (after load_layout, which already paid this cost) for
+    # kdb.Region() below.
+    import klayout.db as kdb
 
     top_cells = list(layout.top_cells())
 

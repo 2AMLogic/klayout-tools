@@ -3,7 +3,7 @@
 import argparse
 
 from ..layers import LayersError, layers_report
-from .output import emit_error, emit_success
+from .output import emit_error, emit_success, render_table
 
 
 def run(args: argparse.Namespace) -> int:
@@ -35,20 +35,5 @@ def _print_text(report: dict) -> None:
         for entry in layers
     ]
     headers = ("layer", "datatype", "name", "shapes")
-    widths = [
-        max(len(headers[col]), max(len(row[col]) for row in rows))
-        for col in range(len(headers))
-    ]
-
-    def fmt(row: tuple[str, ...]) -> str:
-        # layer/datatype/shapes right-aligned (numeric), name left-aligned.
-        return "  ".join(
-            row[col].rjust(widths[col]) if col != 2 else row[col].ljust(widths[col])
-            for col in range(len(headers))
-        )
-
-    print()
-    print(fmt(headers))
-    print("  ".join("-" * widths[col] for col in range(len(headers))))
-    for row in rows:
-        print(fmt(row))
+    # layer/datatype/shapes right-aligned (numeric), name (col 2) left-aligned.
+    render_table(headers, rows, left_aligned={2})
