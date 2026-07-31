@@ -17,7 +17,7 @@
   ],
   "source": {
     "citation": "G. A. Rincon-Mora and P. E. Allen, \"A low-voltage, low quiescent current, low drop-out regulator,\" IEEE Journal of Solid-State Circuits, vol. 33, no. 1, pp. 36-44, Jan. 1998.",
-    "url": "https://doi.org/10.1109/4.658619",
+    "url": "https://doi.org/10.1109/4.654935",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its pass-device/error-amp topology and ESR-zero compensation methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the foundational, most widely cited published analysis of PMOS-pass-device LDO stability via output-capacitor ESR, and essentially all subsequent LDO literature (including capless variants) frames its compensation strategy against this paper's pole/zero analysis."
   },
   "notes": "Framed here as the baseline external-capacitor PMOS-pass LDO; capless (on-chip-only output capacitor) variants replace the ESR-zero reliance with an internal buffer stage and Miller compensation, trading quiescent current and design complexity for the ability to drop the external component, and are a natural follow-up KB entry if a capless design becomes relevant to a spec_class target. The dropout voltage floor for this topology is set by the PMOS pass device's Vds(sat)/on-resistance at the maximum load current, not by any bandgap-related Vbe drop, which is what makes it compatible with sub-1.8V rails when paired with a sub-1V reference such as the current-summing bandgap in kb/entries/sky130-bandgap-reference.json."

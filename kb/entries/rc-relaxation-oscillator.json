@@ -15,7 +15,7 @@
     "guard ring and physical separation between the oscillator core and digital switching logic (including any downstream clock buffers/dividers) to keep substrate and supply noise from perturbing the comparator threshold-crossing instants (a major jitter source in relaxation oscillators, unlike the resonant-element-dominated jitter of a crystal oscillator)"
   ],
   "source": {
-    "citation": "T. Sundaresan, P. E. Allen, and F. Ayazi, \"Process and temperature compensation in a 7-MHz CMOS clock oscillator,\" IEEE Journal of Solid-State Circuits, vol. 41, no. 2, pp. 433-442, Feb. 2006.",
+    "citation": "K. Sundaresan, P. E. Allen, and F. Ayazi, \"Process and temperature compensation in a 7-MHz CMOS clock oscillator,\" IEEE Journal of Solid-State Circuits, vol. 41, no. 2, pp. 433-442, Feb. 2006.",
     "url": "https://doi.org/10.1109/JSSC.2005.863149",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its comparator-based RC relaxation-oscillator topology and process/temperature-compensation methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a widely cited reference for deriving both the oscillator's timing current and its comparator thresholds from a single compensated reference to cancel first-order supply/temperature sensitivity in the resulting C*delta-V/I period."
   },
