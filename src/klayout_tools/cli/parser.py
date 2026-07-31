@@ -9,7 +9,16 @@ import argparse
 import sys
 
 from .. import __version__
-from . import cells_cmd, drc_cmd, layers_cmd, layout_metrics_cmd, pdk_cmd, stats_cmd
+from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
+from . import (
+    cells_cmd,
+    drc_cmd,
+    layers_cmd,
+    layout_metrics_cmd,
+    pdk_cmd,
+    render_cmd,
+    stats_cmd,
+)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -155,6 +164,47 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     layout_metrics_parser.set_defaults(func=layout_metrics_cmd.run)
+
+    render_parser = subparsers.add_parser(
+        "render",
+        help="render per-layer PNG images from a GDSII/OASIS stream",
+        description=(
+            "Render one PNG per non-empty layer of a GDSII or OASIS layout "
+            "file, built on the same layer enumeration as `klt layers`. "
+            "Runs fully headless via KLayout's offscreen LayoutView -- no "
+            "GUI, no Qt, no X server."
+        ),
+    )
+    render_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    render_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "output directory for the rendered PNGs "
+            "(default: a `renders/` subdirectory next to <file>, e.g. "
+            "`<block>/output/renders/` for a file at `<block>/output/<name>.gds`)"
+        ),
+    )
+    render_parser.add_argument(
+        "--width",
+        type=int,
+        default=DEFAULT_WIDTH,
+        help=f"image width in pixels (default: {DEFAULT_WIDTH})",
+    )
+    render_parser.add_argument(
+        "--height",
+        type=int,
+        default=DEFAULT_HEIGHT,
+        help=f"image height in pixels (default: {DEFAULT_HEIGHT})",
+    )
+    render_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    render_parser.set_defaults(func=render_cmd.run)
 
     _add_pdk_parser(subparsers)
 

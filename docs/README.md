@@ -21,6 +21,7 @@ docs/
     layers.md
     layout-metrics.md
     pdk.md
+    render.md
     stats.md
   design/                # design notes, spikes, and upstream surveys
     lambdalib-survey.md

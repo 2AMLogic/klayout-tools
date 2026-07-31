@@ -10,6 +10,9 @@ site/dist/
 pdks/*
 !pdks/README.md
 
+# klt render output (build artifact, not checked in — see docs/cli/render.md)
+renders/
+
 # Repo Skills machine-local install metadata (absolute source path + timestamp)
 .claude/skills/repo/.install-local.json
 .claude/skills/repo/logs/

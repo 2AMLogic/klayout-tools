@@ -74,6 +74,7 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
+klt render design.gds                    # per-layer PNGs, headless
 ```
 
 ## Development
