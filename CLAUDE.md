@@ -31,7 +31,7 @@ Python API). Public repo, MIT, built in the open by 2AM Logic.
   `scripts/deploy-site.sh`.
 
 <!-- BEGIN REPO-SKILLS -->
-This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.6.1 installed —
+This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.7.0 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run
 `/repo:help` for the command list, or see `.claude/skills/repo/SKILL.md` for the full
 guide. Hygiene commands apply safe, reversible fixes by default and report each
