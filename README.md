@@ -47,18 +47,21 @@ build order and [CLAUDE.md](CLAUDE.md) if you are an agent working here.
 ## Install
 
 ```bash
-uv tool install git+https://github.com/2AMLogic/klayout-tools
+uv tool install klayout-tools
 ```
 
 Or with `pip`:
 
 ```bash
-pip install git+https://github.com/2AMLogic/klayout-tools
+pip install klayout-tools
 ```
 
-`klt` is now on `PATH`. (A published PyPI release is planned — see
-[RELEASING.md](RELEASING.md) — `pip install klayout-tools` will work once
-that lands.)
+`klt` is now on `PATH`. For the latest development version, install from
+source instead:
+
+```bash
+uv tool install git+https://github.com/2AMLogic/klayout-tools
+```
 
 ## Quick start
 
