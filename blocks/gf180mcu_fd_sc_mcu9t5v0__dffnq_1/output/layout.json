@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-31T16:46:34.109770+00:00",
+  "slug": "gf180mcu_fd_sc_mcu9t5v0__dffnq_1",
+  "name": "gf180mcu_fd_sc_mcu9t5v0__dffnq_1",
+  "status": "ok",
+  "description": "gf180mcu standard-cell layout `gf180mcu_fd_sc_mcu9t5v0__dffnq_1` from the #4 test corpus.",
+  "layer_count": 13,
+  "cell_count": 1,
+  "instance_count": 0
+}
