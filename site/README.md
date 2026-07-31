@@ -50,8 +50,34 @@ npm test         # runs the loader unit tests (vitest)
 ```
 
 `npm run build` succeeds even on a fresh checkout with **zero**
-`layout.json` files present — every block without data is listed as
-`status: no_artifacts`.
+`layout.json` files present — every block without data renders as a
+`status: no_artifacts` card with a placeholder thumbnail.
+
+### Gallery index
+
+The landing page (`src/pages/index.astro`) renders one `LayoutCard`
+(`src/components/LayoutCard.astro`) per block returned by `loadLayouts()`,
+in a responsive card grid. Each card shows:
+
+- A thumbnail — the first entry in the block's `renders` map (per-layer
+  PNGs from `klt render`, #60), or `public/placeholder-layout.svg` when
+  `renders` is absent.
+- The block's `name` and `description` (when present).
+- Metric badges for `layer_count`, `cell_count`, `instance_count`, and
+  `drc.status`/`drc.violation_count` — each omitted when its backing field
+  is absent, never rendered as `null`.
+- A status chip reflecting `status` (`ok` / `partial` / `no_artifacts`).
+
+Cards link to `/<slug>` (the per-block detail route, #64); until that page
+lands the link 404s, which is expected.
+
+`renders` values in `layout.json` are paths relative to the block's
+`output/` directory (e.g. `"renders/1_0.png"`). Because Astro's static
+build can only serve assets under `site/public/`, a `predev`/`prebuild`
+step (`npm run copy-renders`, `scripts/copy-renders.mjs`) stages
+`blocks/<slug>/output/renders/*.png` into `site/public/blocks/<slug>/renders/`
+before every `dev`/`build` run. The staged tree is git-ignored and
+regenerated each run; a fresh checkout with no renders is a no-op.
 
 ### Layout data
 
@@ -114,10 +140,13 @@ site/
   dist/                # build output (git-ignored, deploy target as of #65)
   scripts/
     copy-renders.mjs  # prebuild: stages blocks/*/output/... into public/blocks/
+  public/
+    placeholder-layout.svg  # thumbnail fallback for no_artifacts/no-renders blocks
   src/
     components/
       Header.astro      # site header — GitHub repo link (#66)
       Footer.astro      # site footer — build SHA, copyright, scope link (#66)
+      LayoutCard.astro  # one gallery card per block (#63)
     data/
       types.ts         # Layout type (schema v1, mirrors klt layout-metrics / #61)
       loadLayouts.ts    # build-time layout data loader
@@ -127,7 +156,7 @@ site/
     layouts/
       Layout.astro      # shared page shell (head + Header/Footer chrome, #66)
     pages/
-      index.astro       # landing page (folds in #11) + placeholder block list
+      index.astro       # landing page (folds in #11) + gallery card grid (#63)
       [slug].astro       # per-block detail page (#64)
 ```
 
@@ -135,8 +164,9 @@ site/
 
 Issue #59 shipped the scaffold, the layout data loader, and a landing page
 that folds in #11's closed-loop vision statement plus a placeholder block
-list proving the loader end-to-end. The polished gallery index (cards,
-renders, metrics) is #63; the per-block detail page (#64) is done — renders,
-metrics, name/description, and a downloads section gated on #62. The deploy
-pipeline itself (`scripts/deploy-site.sh` building this project and
-publishing `site/dist/`) is #65, also done.
+list proving the loader end-to-end. This gallery index (#63) replaces that
+placeholder list with the polished card grid described above. The per-block
+detail page (#64) is done — renders, full metrics, name/description, and a
+downloads section gated on #62. The deploy pipeline itself
+(`scripts/deploy-site.sh` building this project and publishing `site/dist/`)
+is #65, also done.

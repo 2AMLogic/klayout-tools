@@ -1,19 +1,22 @@
 ---
 // klayout-tools.org landing page.
 //
-// Scope (issue #59): fold in the closed-loop vision statement + roadmap /
-// architecture links from issue #11 (verbatim, mirroring site/index.html),
-// and prove the build-time layout data loader end-to-end with a placeholder
-// block list. The polished gallery index (cards, renders, metrics) is #63;
-// the per-block detail page is #64.
+// Scope: fold in the closed-loop vision statement + roadmap / architecture
+// links from issue #11 (verbatim, mirroring site/index.html — landed in
+// #59), and render the gallery index — one card per block discovered by the
+// build-time layout data loader (issue #63, mirroring kicad-tools#3680/
+// #3683). Each card links to its `/<slug>` detail page (#64).
 //
-// Site chrome (issue #66): the `<html>`/`<head>` boilerplate plus the
-// header/footer are now provided by the shared `Layout.astro`, which this
-// page renders through rather than owning its own document shell.
+// Site chrome (issue #66): the `<html>`/`<head>` boilerplate plus the shared
+// header/footer come from `Layout.astro`, which this page renders through
+// rather than owning its own document shell. Only the page-specific `<main>`
+// content and its scoped styles live here.
 import Layout from "../layouts/Layout.astro";
 import { loadLayouts } from "../data/loadLayouts.ts";
+import LayoutCard from "../components/LayoutCard.astro";
 
 const layouts = loadLayouts();
+const withData = layouts.filter((l) => l.status !== "no_artifacts").length;
 ---
 
 <Layout
@@ -59,23 +62,29 @@ klt stats design.gds --per-layer   <span class="c"># densities, bbox, counts</sp
       doc for how the pieces fit.
     </p>
 
-    <h2>Gallery (in progress)</h2>
+    <h2>Gallery</h2>
     <p class="dim">
-      Placeholder index — lists blocks discovered by the build-time layout
-      data loader (<code>src/data/loadLayouts.ts</code>). This proves the
-      data pipeline end-to-end; the polished gallery cards land in a
-      follow-up issue.
+      Blocks discovered by the build-time layout data loader
+      (<code>src/data/loadLayouts.ts</code>), each rendered from its
+      <code>klt layout-metrics</code> output.
     </p>
-    <p>
-      {layouts.length} block{layouts.length === 1 ? "" : "s"} found.
+    <p class="count">
+      {layouts.length} block{layouts.length === 1 ? "" : "s"}
+      {withData > 0 && ` · ${withData} with generated artifacts`}
     </p>
-    <ul>
+
+    {layouts.length === 0 && (
+      <p class="dim">
+        No blocks discovered. Add blocks under <code>blocks/</code> and run
+        <code>klt layout-metrics</code> to populate data.
+      </p>
+    )}
+
+    <ul class="grid" role="list">
       {
         layouts.map((layout) => (
           <li>
-            <strong>{layout.slug}</strong> — {layout.status}
-            {layout.layer_count != null ? ` · ${layout.layer_count} layers` : ""}
-            {layout.cell_count != null ? ` · ${layout.cell_count} cells` : ""}
+            <LayoutCard layout={layout} />
           </li>
         ))
       }
@@ -84,11 +93,22 @@ klt stats design.gds --per-layer   <span class="c"># densities, bbox, counts</sp
 </Layout>
 
 <style>
+  /*
+   * Page-scoped styles only. The dark-theme CSS variables (`--night`,
+   * `--orange`, …), the `body` reset/flex column, and the base `a` styling
+   * are declared once in `Layout.astro`'s global style block; the header and
+   * footer own their own chrome. The gallery grid widens `main` past the
+   * 44rem prose column while the prose/pre blocks stay capped for readability.
+   */
   main {
-    max-width: 44rem;
+    max-width: 72rem;
     margin: 0 auto;
     padding: 3rem 1.5rem;
     flex: 1;
+  }
+  main > p,
+  main > pre {
+    max-width: 44rem;
   }
   h1 {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -145,13 +165,27 @@ klt stats design.gds --per-layer   <span class="c"># densities, bbox, counts</sp
     color: var(--orange);
     font-size: 0.8rem;
   }
-  ul {
-    margin: 1rem 0;
-    padding-left: 1.4rem;
-  }
-  li {
-    margin: 0.4rem 0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  .count {
+    color: var(--fog-dim);
     font-size: 0.85rem;
+  }
+  .grid {
+    list-style: none;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 1.25rem;
+  }
+  .grid > li {
+    display: flex;
+  }
+  .grid > li > :global(.card) {
+    width: 100%;
+  }
+  @media (max-width: 480px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
