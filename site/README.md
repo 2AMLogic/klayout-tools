@@ -70,6 +70,21 @@ The loader is resilient to missing data:
 Blocks are discovered as immediate subdirectories of `blocks/`, skipping
 hidden / `_`-prefixed entries.
 
+### Block detail pages
+
+`src/pages/[slug].astro` generates a static `/<slug>` route for every block
+`loadLayouts()` discovers (issue #64), showing its renders, metrics,
+name/description, and (once #62's public-repo gate sets `downloadable:
+true`) a download link — `no_artifacts` blocks render a clear "not built"
+state instead of a broken page.
+
+Render images (and, once downloadable, the source layout file) live outside
+`site/` under `blocks/<slug>/output/...`; Astro's static build cannot
+reference files outside its project root, so the `predev`/`prebuild` npm
+hooks run `scripts/copy-renders.mjs` first, which stages them into
+`site/public/blocks/<slug>/...` (git-ignored, regenerated every run) so they
+are served from `/blocks/<slug>/...`.
+
 ### Bootstrap data
 
 The `layout.json` schema is the contract emitted by `klt layout-metrics`
@@ -97,6 +112,8 @@ site/
   astro.config.mjs    # Astro configuration (static output)
   tsconfig.json       # extends astro/tsconfigs/strict
   dist/                # build output (git-ignored, deploy target as of #65)
+  scripts/
+    copy-renders.mjs  # prebuild: stages blocks/*/output/... into public/blocks/
   src/
     components/
       Header.astro      # site header — GitHub repo link (#66)
@@ -111,13 +128,15 @@ site/
       Layout.astro      # shared page shell (head + Header/Footer chrome, #66)
     pages/
       index.astro       # landing page (folds in #11) + placeholder block list
+      [slug].astro       # per-block detail page (#64)
 ```
 
 ### Scope
 
-This issue (#59) ships the scaffold, the layout data loader, and a landing
-page that folds in #11's closed-loop vision statement plus a placeholder
-block list proving the loader end-to-end. The polished gallery index (cards,
-renders, metrics) is #63, and the per-block detail page is #64. The deploy
+Issue #59 shipped the scaffold, the layout data loader, and a landing page
+that folds in #11's closed-loop vision statement plus a placeholder block
+list proving the loader end-to-end. The polished gallery index (cards,
+renders, metrics) is #63; the per-block detail page (#64) is done — renders,
+metrics, name/description, and a downloads section gated on #62. The deploy
 pipeline itself (`scripts/deploy-site.sh` building this project and
-publishing `site/dist/`) is #65.
+publishing `site/dist/`) is #65, also done.

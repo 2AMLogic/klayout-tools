@@ -70,4 +70,14 @@ export interface Layout {
   drc?: LayoutDrc;
   /** Map of render id -> path relative to the layout.json location (#60). */
   renders?: Record<string, string>;
+  /**
+   * Whether `layout_file` may be linked as a download on the block detail
+   * page (#64). NOT part of the `klt layout-metrics` contract above — this
+   * is a presence-check flag reserved for the content pipeline / public-repo
+   * gate (#62), which is not yet wired up. Until #62 sets it, this field is
+   * always absent, so every detail page omits its download section; once
+   * #62 starts emitting `downloadable: true` for blocks sourced from public
+   * repos, the download link appears with no changes to this page.
+   */
+  downloadable?: boolean;
 }

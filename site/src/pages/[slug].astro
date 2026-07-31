@@ -1,0 +1,348 @@
+---
+/**
+ * Per-block detail page (issue #64, Epic #13 gallery).
+ *
+ * One static route `/<slug>` per block discovered by `loadLayouts()`
+ * (including `no_artifacts` stubs, so a future gallery index — #63 — never
+ * links to a 404). Each page shows:
+ *   - the block's available per-layer renders (the `renders` map), staged by
+ *     the `copy-renders` prebuild step (`site/scripts/copy-renders.mjs`)
+ *     into `public/blocks/<slug>/...` and served from `/blocks/<slug>/...`,
+ *   - name + description,
+ *   - a metrics table covering every present optional field (omit-absent
+ *     rule — a missing field is never rendered as "null"/"undefined"),
+ *   - a downloads section gated behind `layout.downloadable` (always absent
+ *     today: the public-repo content-pipeline gate is #62, not yet wired —
+ *     when it lands and starts setting the flag, the link appears here with
+ *     no further changes to this page),
+ *   - a back-link to the gallery index (`/`).
+ */
+import { loadLayouts } from "../data/loadLayouts.ts";
+import type { Layout } from "../data/types.ts";
+
+export function getStaticPaths() {
+  return loadLayouts().map((layout) => ({
+    params: { slug: layout.slug },
+    props: { layout },
+  }));
+}
+
+interface Props {
+  layout: Layout;
+}
+
+const { layout } = Astro.props;
+
+const displayName = layout.name;
+const isBuilt = layout.status !== "no_artifacts";
+
+/**
+ * Served URL for a path relative to the block's `output/` directory (the
+ * convention `renders`/`layout_file` values use — see `types.ts`), staged by
+ * `copy-renders.mjs` into `public/blocks/<slug>/...`.
+ */
+function blockAssetUrl(relPath: string): string {
+  return `/blocks/${layout.slug}/${relPath.replace(/^\.?\//, "")}`;
+}
+
+const renderEntries = Object.entries(layout.renders ?? {}).sort(([a], [b]) => a.localeCompare(b));
+
+/** Metrics rows, in display order — pushed only when the backing field is present. */
+type Row = { label: string; value: string };
+const rows: Row[] = [];
+if (layout.layer_count !== undefined) {
+  rows.push({ label: "Layers", value: `${layout.layer_count}` });
+}
+if (layout.cell_count !== undefined) {
+  rows.push({ label: "Cells", value: `${layout.cell_count}` });
+}
+if (layout.instance_count !== undefined) {
+  rows.push({ label: "Instances", value: `${layout.instance_count}` });
+}
+if (layout.drc?.deck !== undefined) {
+  rows.push({ label: "DRC Deck", value: layout.drc.deck });
+}
+if (layout.drc?.status !== undefined) {
+  rows.push({ label: "DRC Status", value: layout.drc.status });
+}
+if (layout.drc?.violation_count !== undefined) {
+  rows.push({ label: "DRC Violations", value: `${layout.drc.violation_count}` });
+}
+
+const canDownload = layout.downloadable === true && layout.layout_file !== undefined;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{displayName} — klayout-tools</title>
+    {layout.description && <meta name="description" content={layout.description} />}
+  </head>
+  <body>
+    <main>
+      <p class="back"><a href="/">&larr; Back to gallery</a></p>
+
+      <header class="detail-header">
+        <h1>{displayName}</h1>
+        <span class:list={["status", `status-${layout.status}`]}>{layout.status}</span>
+        {layout.description && <p class="desc">{layout.description}</p>}
+        {layout.slug !== displayName && <p class="slug-line">{layout.slug}</p>}
+      </header>
+
+      {
+        !isBuilt && (
+          <p class="not-built">
+            This block has not been built yet — no renders, metrics, or downloads are
+            available.
+          </p>
+        )
+      }
+
+      <section aria-label="Renders">
+        <h2>Renders</h2>
+        {
+          renderEntries.length > 0 ? (
+            <div class="renders-grid">
+              {renderEntries.map(([id, relPath]) => (
+                <figure>
+                  <img
+                    src={blockAssetUrl(relPath)}
+                    alt={`Render "${id}" of ${displayName}`}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <figcaption>{id}</figcaption>
+                </figure>
+              ))}
+            </div>
+          ) : (
+            <p class="dim">No renders yet.</p>
+          )
+        }
+      </section>
+
+      <section aria-label="Metrics">
+        <h2>Metrics</h2>
+        {
+          rows.length > 0 ? (
+            <table>
+              <tbody>
+                {rows.map((row) => (
+                  <tr>
+                    <th scope="row">{row.label}</th>
+                    <td>{row.value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p class="dim">No metrics available.</p>
+          )
+        }
+      </section>
+
+      <section aria-label="Downloads">
+        <h2>Downloads</h2>
+        {
+          canDownload ? (
+            <ul class="download-list">
+              <li>
+                <a href={blockAssetUrl(layout.layout_file as string)} download>
+                  Layout ({layout.layout_file})
+                </a>
+              </li>
+            </ul>
+          ) : (
+            <p class="dim">No download available.</p>
+          )
+        }
+      </section>
+
+      <footer class="back back-bottom">
+        <a href="/">&larr; Back to gallery</a>
+      </footer>
+    </main>
+    <style>
+      :root {
+        --night: #0b0e13;
+        --panel: #161b24;
+        --border: #232a36;
+        --fog: #c6cdd6;
+        --fog-dim: #8d97a5;
+        --orange: #ffa028;
+        --cyan: #3ee0e8;
+        --red: #ff6a5c;
+      }
+      :global(*) {
+        margin: 0;
+        box-sizing: border-box;
+      }
+      :global(body) {
+        background: var(--night);
+        color: var(--fog);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        min-height: 100vh;
+      }
+      main {
+        max-width: 44rem;
+        margin: 0 auto;
+        padding: 3rem 1.5rem 4rem;
+      }
+      a {
+        color: var(--cyan);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      .back {
+        font-size: 0.9rem;
+      }
+      .back-bottom {
+        margin-top: 3rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+      }
+      .detail-header {
+        margin-top: 1.5rem;
+      }
+      .detail-header h1 {
+        display: inline;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 1.8rem;
+        color: var(--orange);
+        word-break: break-word;
+      }
+      .desc {
+        margin-top: 0.75rem;
+        line-height: 1.6;
+        color: var(--fog);
+      }
+      .slug-line {
+        margin-top: 0.4rem;
+        color: var(--fog-dim);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8rem;
+      }
+      .status {
+        display: inline-block;
+        margin-left: 0.6rem;
+        vertical-align: middle;
+        padding: 0.15rem 0.7rem;
+        border: 1px solid var(--fog-dim);
+        border-radius: 999px;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .status-ok {
+        border-color: var(--cyan);
+        color: var(--cyan);
+      }
+      .status-partial {
+        border-color: var(--orange);
+        color: var(--orange);
+      }
+      .status-no_artifacts {
+        border-color: var(--fog-dim);
+        color: var(--fog-dim);
+      }
+      .not-built {
+        margin-top: 1.5rem;
+        padding: 0.9rem 1.1rem;
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--fog-dim);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--fog-dim);
+      }
+      section {
+        margin-top: 2.25rem;
+      }
+      section h2 {
+        margin-bottom: 1rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 1.1rem;
+        color: var(--cyan);
+      }
+      .dim {
+        color: var(--fog-dim);
+      }
+      .renders-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+        gap: 1rem;
+      }
+      .renders-grid figure {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--panel);
+      }
+      .renders-grid img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: contain;
+        background: var(--night);
+      }
+      .renders-grid figcaption {
+        padding: 0.35rem 0.6rem;
+        border-top: 1px solid var(--border);
+        text-align: center;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.75rem;
+        color: var(--fog-dim);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.55rem 0.9rem;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.9rem;
+      }
+      tr:last-child th,
+      tr:last-child td {
+        border-bottom: none;
+      }
+      th {
+        width: 40%;
+        color: var(--fog-dim);
+        font-weight: 500;
+        background: var(--panel);
+      }
+      td {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .download-list {
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+      }
+      .download-list a {
+        display: inline-block;
+        padding: 0.55rem 0.9rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--fog);
+        text-decoration: none;
+        font-size: 0.9rem;
+      }
+      .download-list a:hover,
+      .download-list a:focus-visible {
+        border-color: var(--cyan);
+      }
+    </style>
+  </body>
+</html>

@@ -2,6 +2,12 @@
 dist/
 node_modules/
 
+# Block renders / downloads staged into public/ by the copy-renders prebuild
+# step (site/scripts/copy-renders.mjs). Copied from blocks/<slug>/output/ at
+# build time and must never be committed (the sources are themselves
+# generated artifacts).
+public/blocks/
+
 # Astro generated types / cache
 .astro/
 
