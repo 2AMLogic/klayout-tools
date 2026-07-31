@@ -81,7 +81,7 @@ of the fields:
 | `source.url` | optional | Link to the source, if available. |
 | `source.license_or_openness` | optional | Why the source clears the sourcing bar below. |
 | `notes` | optional | Free-form notes. |
-| `artifacts` | optional | `{ netlist, layout }` — repo-root-relative paths linking this entry to a runnable netlist/testbench under `examples/` (`klt sim`) and/or a GDS layout (`klt drc`). At least one of `netlist`/`layout` is required when `artifacts` is given; `klt kb validate` fails if a referenced path doesn't exist. |
+| `artifacts` | optional | `{ netlist, layout, notes }` — repo-root-relative paths linking this entry to a runnable netlist/testbench under `examples/` (`klt sim`) and/or a GDS layout (`klt drc`), plus optional prose `notes` about them (never treated as a path). At least one of `netlist`/`layout` is required when `artifacts` is given — `notes` alone does not satisfy it. `klt kb validate` fails if a referenced path doesn't exist, is absolute, or escapes the repo via `..`. |
 
 Every seed entry under `kb/entries/` populates all fields (including the
 optional ones) to prove the schema against real content — new entries may

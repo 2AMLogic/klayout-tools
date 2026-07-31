@@ -141,6 +141,7 @@ def search_entries(query: str, root: Path | None = None) -> dict[str, Any]:
 
 
 #: `artifacts` keys checked for on-disk existence by :func:`_artifact_errors`.
+#: Deliberately excludes ``artifacts.notes``, which is prose, not a path.
 _ARTIFACT_PATH_FIELDS: tuple[str, ...] = ("netlist", "layout")
 
 
@@ -152,6 +153,11 @@ def _artifact_errors(entry: dict[str, Any], repo_root: Path) -> list[str]:
     Absent/null ``artifacts`` (or an absent individual key) is not an error;
     the schema already enforces that at least one key is present when the
     object itself is given.
+
+    A path that is absolute, or that escapes the repository root via ``..``,
+    is reported as an error rather than resolved: ``repo_root / "/etc/passwd"``
+    is ``/etc/passwd``, so an unguarded join would let an entry "verify"
+    against a file outside the repo that no other checkout can see.
     """
     artifacts = entry.get("artifacts")
     if not artifacts:
@@ -162,7 +168,13 @@ def _artifact_errors(entry: dict[str, Any], repo_root: Path) -> list[str]:
         rel_path = artifacts.get(field)
         if not rel_path:
             continue
-        if not (repo_root / rel_path).is_file():
+        candidate = Path(rel_path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            errors.append(
+                f"artifacts/{field}: must be a repository-relative path "
+                f"without '..' segments: {rel_path}"
+            )
+        elif not (repo_root / candidate).is_file():
             errors.append(
                 f"artifacts/{field}: referenced path does not exist: {rel_path}"
             )
@@ -191,11 +203,19 @@ def _entry_errors(
     return entry, errors
 
 
-def validate_entries(root: Path | None = None) -> dict[str, Any]:
+def validate_entries(
+    root: Path | None = None, repo_root: Path | None = None
+) -> dict[str, Any]:
     """Validate every entry: well-formed JSON, conforms to
     ``kb/schema/entry.schema.json``, ``id`` matches its filename stem, and
     any ``artifacts.{netlist,layout}`` path it references exists on disk
-    (resolved relative to the repository root, i.e. ``root``'s parent).
+    (resolved relative to the repository root).
+
+    ``repo_root`` is the base those artifact paths resolve against; it
+    defaults to ``root``'s parent, which is the real layout of this repo
+    (``kb/`` sits at the top level). Pass it explicitly when the KB root is
+    not a direct child of the tree the artifacts live in — e.g. a test that
+    builds a throwaway ``kb/`` beside a throwaway ``examples/``.
 
     Never raises for entry-level problems (they show up as structured
     per-entry errors in the returned payload, per the issue's spec); still
@@ -209,7 +229,7 @@ def validate_entries(root: Path | None = None) -> dict[str, Any]:
     validator_cls.check_schema(schema)
     validator = validator_cls(schema)
 
-    repo_root = root.parent
+    repo_root = repo_root if repo_root is not None else root.parent
     results = []
     for path in _entry_paths(root):
         _entry, errors = _entry_errors(path, validator, repo_root)

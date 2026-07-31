@@ -358,6 +358,135 @@ def test_validate_entries_tolerates_absent_artifacts_field(tmp_path):
     assert report["valid"] is True
 
 
+def test_validate_entries_passes_when_layout_artifact_exists(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a", artifacts={"layout": "examples/entry-a/layout.gds"}
+            )
+        },
+    )
+    layout_path = tmp_path / "examples" / "entry-a" / "layout.gds"
+    layout_path.parent.mkdir(parents=True)
+    layout_path.write_bytes(b"\x00\x06\x00\x02\x00\x07")  # not parsed, only stat-ed
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+    (result,) = report["entries"]
+    assert result["errors"] == []
+
+
+def test_validate_entries_rejects_absolute_artifact_path(tmp_path):
+    """An absolute path silently wins the `repo_root / rel_path` join, so an
+    entry could otherwise "verify" against a file outside the repository that
+    no other checkout can see."""
+    outside = tmp_path / "outside.spice"
+    outside.write_text("* fixture netlist\n")
+    root = _make_kb(
+        tmp_path,
+        {"entry-a": _valid_entry("entry-a", artifacts={"netlist": str(outside)})},
+    )
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any(
+        "artifacts/netlist" in error and "repository-relative" in error
+        for error in result["errors"]
+    ), result["errors"]
+
+
+def test_validate_entries_rejects_parent_traversal_artifact_path(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.gds"
+    outside.write_bytes(b"\x00")
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a", artifacts={"layout": f"../{outside.name}"}
+            )
+        },
+    )
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert any(
+        "artifacts/layout" in error and "'..'" in error for error in result["errors"]
+    ), result["errors"]
+    outside.unlink()
+
+
+def test_validate_entries_never_treats_artifact_notes_as_a_path(tmp_path):
+    """`artifacts.notes` is prose. It must not be stat-ed, even when it reads
+    like a path -- otherwise every note mentioning a filename would fail."""
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a",
+                artifacts={
+                    "netlist": "examples/entry-a/testbench.spice",
+                    "notes": "examples/entry-a/no-such-file.spice is NOT a path",
+                },
+            )
+        },
+    )
+    netlist_path = tmp_path / "examples" / "entry-a" / "testbench.spice"
+    netlist_path.parent.mkdir(parents=True)
+    netlist_path.write_text("* fixture netlist\n")
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+    (result,) = report["entries"]
+    assert result["errors"] == []
+
+
+def test_validate_entries_rejects_artifacts_naming_only_notes(tmp_path):
+    """`notes` alone is not a verification link -- the schema's `anyOf`
+    requires at least one of `netlist`/`layout` when `artifacts` is given."""
+    root = _make_kb(
+        tmp_path,
+        {"entry-a": _valid_entry("entry-a", artifacts={"notes": "see the paper"})},
+    )
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert result["errors"], result
+
+
+def test_validate_entries_resolves_artifacts_against_explicit_repo_root(tmp_path):
+    """`repo_root=` overrides the `root.parent` default, so a KB root that
+    is not a direct child of the tree holding the artifacts still validates."""
+    root = _make_kb(
+        tmp_path / "nested" / "deeper",
+        {
+            "entry-a": _valid_entry(
+                "entry-a", artifacts={"netlist": "examples/entry-a/testbench.spice"}
+            )
+        },
+    )
+    netlist_path = tmp_path / "examples" / "entry-a" / "testbench.spice"
+    netlist_path.parent.mkdir(parents=True)
+    netlist_path.write_text("* fixture netlist\n")
+
+    # Default resolution (root.parent == tmp_path/nested/deeper) cannot see it.
+    assert kb.validate_entries(root=root)["valid"] is False
+
+    report = kb.validate_entries(root=root, repo_root=tmp_path)
+
+    assert report["valid"] is True
+    (result,) = report["entries"]
+    assert result["errors"] == []
+
+
 # --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #

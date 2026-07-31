@@ -94,6 +94,10 @@
           "type": "string",
           "description": "Path, relative to the repository root, to a GDS/OASIS layout runnable via `klt drc`.",
           "minLength": 1
+        },
+        "notes": {
+          "description": "Free-form prose about the linked artifacts — e.g. how the drawn structure simplifies the entry's described idioms, or what the testbench does and does not cover. Prose only: never treated as a path by `klt kb validate`. Optional: omit or set null when there is nothing to add.",
+          "type": ["string", "null"]
         }
       }
     }

@@ -22,7 +22,8 @@ klt kb validate                 [--format text|json]
   `kb/schema/entry.schema.json`, has `id` matching its filename stem, and —
   when the entry sets `artifacts` — that any `artifacts.netlist`/
   `artifacts.layout` path it references actually exists on disk (resolved
-  relative to the repository root). This is the single implementation
+  relative to the repository root; `artifacts.notes` is prose and is never
+  treated as a path). This is the single implementation
   behind both the CI gate and `tests/test_kb.py`'s schema-conformance
   coverage.
 
@@ -62,7 +63,11 @@ An empty `kb/entries/` is success (exit `0`), not an error.
     "layout_idioms": ["...", "..."],
     "source": { "citation": "...", "url": "...", "license_or_openness": "..." },
     "notes": "...",
-    "artifacts": { "netlist": "examples/...", "layout": "path/to.gds" }
+    "artifacts": {
+      "netlist": "examples/...",
+      "layout": "path/to.gds",
+      "notes": "..."
+    }
   }
 }
 ```
@@ -115,7 +120,11 @@ skipped, never a match. No result is success (exit `0`), not an error.
   `artifacts/<netlist|layout>: referenced path does not exist: <path>` when
   the entry sets `artifacts` but the referenced file is missing (paths are
   resolved relative to the repository root, e.g. `artifacts.netlist:
-  "examples/kb/<id>/testbench.spice"`). Empty when `valid` is `true`.
+  "examples/kb/<id>/testbench.spice"`), or `artifacts/<netlist|layout>: must
+  be a repository-relative path without '..' segments: <path>` for an
+  absolute path or one escaping the repository — a link only the author's
+  machine can follow is not a verification link. Empty when `valid` is
+  `true`.
 
 A malformed `kb/entries/*.json` file or a schema mismatch produces a
 per-entry `valid: false` with a populated `errors` array — it does **not**

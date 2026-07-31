@@ -1,0 +1,61 @@
+* Runnable artifact for kb/entries/rc-relaxation-oscillator.json.
+*
+* Comparator-based RC relaxation oscillator, written with behavioral
+* elements only (no PDK device models) so it runs anywhere ngspice runs.
+* The timing capacitor is charged and discharged by a fixed reference
+* current between two reference-derived comparator thresholds, so the
+* period is C * dV / I -- exactly the relation the KB entry's
+* sizing_approach describes, and the reason both dV and I are derived from
+* the *same* reference here rather than from the supply.
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md, "Netlist convention: a circuit body, not a full
+* deck"). corner_cap / corner_iref come from corners.lib.
+
+.param vdd=1.8
+.param vref_nom=0.9
+* Finite line regulation of the reference (0.2 %/V) -- this is what makes
+* the supply corner axis move the measured period at all.
+.param line_reg=0.002
+.param iref=10u
+.param cosc=10p
+
+Vdd vdd 0 DC {vdd}
+
+* Reference: stand-in for the bandgap-derived voltage/current reference the
+* KB entry pairs this oscillator with (kb/entries/sky130-bandgap-reference.json).
+Bref vref 0 V = {vref_nom} * (1 + {line_reg} * (v(vdd) - 1.8))
+
+* Timing capacitor. tc1 gives it a first-order temperature coefficient
+* (60 ppm/C), so the temperature corner axis moves the period too.
+Cosc cap 0 {cosc*corner_cap} tc1=60u
+
+* DC path for the capacitor node so the operating point is not singular.
+* 1 Gohm at ~1 V is ~1 nA against a 10 uA charge current.
+Rleak cap 0 1G
+
+* Charge/discharge current source: +iref while the comparator input is
+* above the capacitor, -iref otherwise. tanh() is a smooth sign() -- much
+* friendlier to the solver than a hard ternary.
+Biosc 0 cap I = {iref * corner_iref} * tanh(1000 * (v(vp) - v(cap)))
+
+* Comparator core: high gain, output swinging 0 .. 2*vref off a
+* reference-derived rail (not vdd), so the threshold spacing tracks the
+* same reference as the charge current.
+Bcmp vc 0 V = v(vref) * (1 + tanh(1000 * (v(vp) - v(cap))))
+* Rcmp/Ccmp set the comparator propagation delay (~1 ns). Per the KB
+* entry, that delay adds directly to each half-period and is the dominant
+* error term once the C*dV/I ratio is compensated.
+Rcmp vc vo 1k
+Ccmp vo 0 1p
+
+* Positive-feedback divider sets the two thresholds either side of vref:
+*   vo = 2*vref -> vp = 1.5*vref   (upper threshold)
+*   vo = 0      -> vp = 0.5*vref   (lower threshold)
+* so dV = vref and the nominal period is 2 * Cosc * vref / iref = 1.8 us.
+R3 vo vp 100k
+R4 vp vref 100k
+
+* Startup kick: an astable has a metastable DC operating point, and SPICE
+* has no noise to leave it. A 50 ns, 10 uA pulse breaks it deterministically.
+Istart 0 cap PWL(0 0 1n 10u 50n 10u 51n 0)

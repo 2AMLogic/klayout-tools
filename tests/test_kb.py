@@ -229,3 +229,20 @@ def test_at_least_two_seed_entries_have_a_real_artifacts_link():
         if json.loads(path.read_text()).get("artifacts")
     ]
     assert len(entries_with_artifacts) >= 2, entries_with_artifacts
+
+
+def test_both_artifact_kinds_are_exercised_by_the_corpus():
+    """Both `artifacts` path kinds -- a `klt sim`-runnable netlist and a
+    `klt drc`-checkable layout -- are wired to a real file somewhere in the
+    corpus, so neither branch of the validator is only ever exercised by
+    fixtures. Existence of each path is enforced corpus-wide by
+    `test_entries_validate_against_schema_and_id_matches_filename`."""
+    wired = {"netlist": [], "layout": []}
+    for path in _entry_paths():
+        artifacts = json.loads(path.read_text()).get("artifacts") or {}
+        for kind in wired:
+            if artifacts.get(kind):
+                wired[kind].append(path.stem)
+
+    assert wired["netlist"], "no entry links a netlist artifact"
+    assert wired["layout"], "no entry links a layout artifact"
