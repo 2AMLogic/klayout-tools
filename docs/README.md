@@ -19,6 +19,7 @@ docs/
     cells.md
     drc.md
     layers.md
+    layout-metrics.md
     pdk.md
     stats.md
   design/                # design notes, spikes, and upstream surveys
