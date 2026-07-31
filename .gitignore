@@ -59,5 +59,6 @@ renders/
 .loom/CANARY
 .loom/*.log
 .loom/*.sock
+.loom/*.tmp
 .loom/logs/
 # <<< loom-managed <<<
