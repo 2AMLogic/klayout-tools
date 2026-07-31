@@ -1,0 +1,23 @@
+{
+  "id": "cmos-ring-vco-current-starved",
+  "title": "Current-starved CMOS ring voltage-controlled oscillator (PLL clock generator)",
+  "topology": "An odd number of CMOS inverter delay stages connected in a ring, with each stage's pull-up and pull-down current limited (\"starved\") by a series PMOS/NMOS current-source transistor whose gate is driven by the control voltage; restricting the charge/discharge current into each stage's output capacitance sets the per-stage delay and therefore the oscillation frequency. A differential (pseudo-differential delay-cell) variant replaces the single-ended inverter stages with cross-coupled differential pairs plus a symmetric load, trading area and power for better common-mode/supply noise rejection and lower even-order harmonic content.",
+  "spec_class": "PHY-class clock generator — voltage-controlled oscillator for on-chip PLL/DLL clock synthesis where wide tuning range and small area matter more than the best achievable phase noise (e.g. microprocessor/peripheral clock generation, non-RF PHY clocking)",
+  "pdk_portability": {
+    "primary_pdk": "sky130",
+    "notes": "The current-starved delay-stage topology is fully portable: it only needs standard-Vt (or optionally low-Vt for wider tuning range) core NMOS/PMOS devices, present in essentially every digital CMOS PDK including sky130's sky130_fd_pr__nfet_01v8 / pfet_01v8 devices. What is not portable is the specific W/L sizing and control-voltage-to-current mapping, since the starved-current-to-delay relationship depends on sky130's threshold voltage, mobility, and channel-length-modulation characteristics and must be re-simulated against sky130 corners rather than reused from another node."
+  },
+  "sizing_approach": "Pick the number of stages N (odd, typically 3-9) to trade area/power against phase-noise-per-stage (more stages lower the required per-stage gain but add parasitic capacitance); size the inverter's NMOS/PMOS for a target per-stage intrinsic delay at the nominal control voltage, then size the series current-starving transistors to allow that delay to be modulated over the required frequency range as the control voltage sweeps from its minimum to maximum; verify the tuning curve (frequency vs. control voltage) stays monotonic and reasonably linear across process/voltage/temperature corners, and check that the minimum current-starved condition still guarantees startup (loop gain > 1 at the lowest supported frequency) since current starving can stop oscillation entirely if pushed too far.",
+  "layout_idioms": [
+    "identical, matched delay-stage layout repeated N times around the ring with consistent orientation, so each stage contributes equal delay and any single-stage layout mismatch does not dominate duty-cycle/phase error",
+    "symmetric routing of the shared control-voltage bias node to every stage to avoid IR-drop-induced delay skew between stages",
+    "guard ring around the ring-oscillator core, isolating it from digital switching activity that would otherwise inject supply/substrate noise and modulate the oscillation frequency (supply pushing)",
+    "differential delay-cell layout (when used) with cross-coupled load devices placed on an axis of symmetry to preserve differential balance and suppress common-mode-to-differential conversion"
+  ],
+  "source": {
+    "citation": "I. A. Young, J. K. Greason, and K. L. Wong, \"A PLL clock generator with 5 to 110 MHz of lock range for microprocessors,\" IEEE Journal of Solid-State Circuits, vol. 27, no. 11, pp. 1599-1607, Nov. 1992.",
+    "url": "https://doi.org/10.1109/4.165341",
+    "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its current-starved delay-stage VCO topology and sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the widely-cited original description of the current-starved CMOS ring VCO used in on-chip PLL clock generators, and the technique it introduced remains the standard reference topology for wide-tuning-range digital-PLL VCOs."
+  },
+  "notes": "Current-starved ring VCOs trade phase noise (worse than an LC-tank VCO at the same power, due to the ring's lower effective Q) for much smaller area, no inductor, and a very wide tuning range spanning multiple octaves -- useful when the PLL must lock across a broad frequency range or area is at a premium. See the sky130-lc-vco-cross-coupled entry for the complementary LC-tank approach when phase-noise performance dominates the spec instead."
+}
