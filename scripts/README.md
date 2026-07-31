@@ -7,9 +7,12 @@ CI), not part of the `klt` CLI.
 
 ```
 scripts/
-  README.md          # this file
-  deploy-site.sh     # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
-  fetch-pdks.sh      # pinned fetch of lambdapdk open PDK data into pdks/
+  README.md                    # this file
+  deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
+  fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
+  fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
+  bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
+  gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
 ```
 
 ## `deploy-site.sh`
@@ -47,4 +50,38 @@ what lands where.
 
 ```
 scripts/fetch-pdks.sh
+```
+
+## `fetch-cell-netlists.sh`
+
+Fetches real, transistor-level SPICE netlists and primitive device models
+for the 7 gallery standard cells — pinned to an exact upstream commit SHA
+per file and checksum-verified (fails closed on mismatch), into
+`pdks/cell-netlists/` (gitignored, same as `pdks/lambdapdk/`). Unlike
+`fetch-pdks.sh`'s whole-release-tarball pin, this pins individual files:
+the full upstream primitive-model repos are 100+ MB of corners/devices the
+7 cells never instantiate. See `scripts/gallery_signals.py`'s module
+docstring for what these files are used for and the one documented device
+substitution (gf180mcu only).
+
+```
+scripts/fetch-cell-netlists.sh
+```
+
+## `gallery_signals.py` / `bootstrap-gallery-blocks.py`
+
+`bootstrap-gallery-blocks.py` regenerates `blocks/*/output/layout.json`
+from the [#4 test corpus](../tests/corpus/README.md); `gallery_signals.py`
+(imported by it, not run standalone) runs a `klt sim` PVT sweep per block
+against the netlists `fetch-cell-netlists.sh` vendors and attaches the
+result as `layout.json`'s `signals` field (15 PVT corners per cell), plus
+each block's 3 nominal-corner waveform artifacts under
+`blocks/<slug>/output/signals/` for the site's waveform viewer. Requires
+`fetch-cell-netlists.sh` to have been run first — otherwise the signals
+step is skipped with a warning (base layer/cell metrics still regenerate
+normally). See both modules' own docstrings for the full pipeline.
+
+```
+scripts/fetch-cell-netlists.sh
+python scripts/bootstrap-gallery-blocks.py
 ```

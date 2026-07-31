@@ -47,6 +47,17 @@ source data is absent or unavailable.
       "instance_count": 120,
       "drc": {"deck": "sky130", "status": "clean", "violation_count": 0},
       "renders": {"metal1": "renders/metal1.png"},
+      "signals": {
+        "schema_version": 1,
+        "engine": "ngspice",
+        "status": "pass",
+        "corner_count": 12,
+        "passed": 12,
+        "failed": 0,
+        "errored": 0,
+        "measurements": [],
+        "corners": []
+      },
       "status": "ok"
     }
 
@@ -61,7 +72,12 @@ source data is absent or unavailable.
 ``drc`` is populated only when a ``--deck`` is supplied *and* the DRC run
 succeeds; it never affects ``status`` (DRC is opt-in per invocation, not a
 required artifact). ``renders`` is populated only when at least one PNG is
-found under ``output/renders/``.
+found under ``output/renders/``. ``signals`` is populated only when
+``output/sim/signals.json`` exists (written by whatever build step ran
+``klt sim`` for this block -- see :func:`_attach_signals`) and is attached
+verbatim -- it is a ``klt sim``-response-shaped dict (``docs/cli/sim.md``),
+not a shape this module defines or validates itself. Additive, like
+``renders``/``drc``: introducing it required no ``schema_version`` bump.
 
 Schema versioning policy: this schema is the data contract the Astro gallery
 site's loader (#59) and detail/index pages (#63/#64) consume. Field additions
@@ -180,6 +196,29 @@ def _attach_renders(metrics: dict[str, Any], output_dir: Path) -> None:
         metrics["renders"] = renders
 
 
+def _attach_signals(metrics: dict[str, Any], output_dir: Path) -> None:
+    """Attach ``signals`` when ``output/sim/signals.json`` exists.
+
+    That file is written by whatever build-time step ran ``klt sim`` for
+    this block (for the gallery's 7 standard cells: ``scripts/
+    gallery_signals.py``, invoked from ``scripts/bootstrap-gallery-blocks.
+    py`` -- see issue #99) — its content is attached **verbatim** as
+    ``signals`` (already a ``klt sim``-shaped dict, see ``docs/cli/sim.md``
+    and ``docs/cli/layout-metrics.md``'s ``signals`` field docs). Missing
+    file, unreadable file, or malformed JSON are all treated as "no
+    signals" rather than raised, same as ``_load_meta``.
+    """
+    signals_path = output_dir / "sim" / "signals.json"
+    if not signals_path.is_file():
+        return
+    try:
+        data = json.loads(signals_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(data, dict):
+        metrics["signals"] = data
+
+
 def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, Any]:
     """Read existing block artifacts and return a ``layout.json`` dict.
 
@@ -220,6 +259,7 @@ def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, 
     if layout_file is None:
         metrics["status"] = "no_artifacts"
         _attach_renders(metrics, output_dir)
+        _attach_signals(metrics, output_dir)
         return metrics
 
     metrics["layout_file"] = layout_file.relative_to(path).as_posix()
@@ -252,6 +292,7 @@ def layout_metrics_report(block_dir: str, deck: str | None = None) -> dict[str, 
             pass
 
     _attach_renders(metrics, output_dir)
+    _attach_signals(metrics, output_dir)
 
     metrics["status"] = "ok" if parsed_ok else "partial"
     return metrics

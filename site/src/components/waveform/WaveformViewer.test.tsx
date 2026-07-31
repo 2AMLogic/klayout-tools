@@ -40,9 +40,28 @@ const ssWaveform: WaveformData = {
   ],
 };
 
+// Shaped like a real `blocks/<slug>/output/layout.json` `signals` section —
+// i.e. `klt sim`'s own response fields (issue #99's pipeline) plus the
+// viewer-facing `default_corner_id` / per-corner `waveform` path.
 const signals: LayoutSignals = {
   schema_version: 1,
+  engine: "ngspice",
+  engine_version: "46",
+  status: "pass",
+  corner_count: 2,
   default_corner_id: "tt/1.800V/27C",
+  passed: 2,
+  failed: 0,
+  errored: 0,
+  measurements: [
+    {
+      name: "tphl",
+      unit: "s",
+      limits: null,
+      status: "pass",
+      worst_case: { corner_id: "ss/1.620V/125C", value: 1.9e-10, margin: null },
+    },
+  ],
   corners: [
     {
       corner_id: "tt/1.800V/27C",
@@ -50,7 +69,9 @@ const signals: LayoutSignals = {
       supply_v: { vdd: 1.8 },
       temperature_c: 27,
       status: "pass",
+      runtime_s: 2.6,
       measurements: [{ name: "tphl", value: 8.2e-11, unit: "s", status: "pass", margin: 1e-10 }],
+      diagnostics: [],
       waveform: "signals/tt_1.800V_27C.json",
     },
     {
@@ -59,7 +80,9 @@ const signals: LayoutSignals = {
       supply_v: { vdd: 1.62 },
       temperature_c: 125,
       status: "pass",
+      runtime_s: 2.7,
       measurements: [{ name: "tphl", value: 1.9e-10, unit: "s", status: "pass", margin: 1e-11 }],
+      diagnostics: [],
       waveform: "signals/ss_1.620V_125C.json",
     },
   ],
@@ -171,7 +194,7 @@ describe("WaveformViewer", () => {
     render(
       <WaveformViewer
         slug="sky130_fd_sc_hd__inv_1"
-        signals={{ schema_version: 1, corners: [] }}
+        signals={{ ...signals, corner_count: 0, passed: 0, corners: [] }}
       />,
     );
     expect(screen.getByText("No signals data.")).toBeInTheDocument();

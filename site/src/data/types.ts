@@ -43,6 +43,133 @@ export interface LayoutDrc {
   violation_count: number;
 }
 
+/** Aggregate outcome of a `klt sim` PVT sweep -- see `docs/cli/sim.md`.
+ *  `error` outranks `fail`, which outranks `pass`. */
+export type SignalsStatus = "pass" | "fail" | "error";
+
+/** One `.meas`-declared measurement, rolled up across every corner (the
+ *  sweep-level `signals.measurements[]` entries — for the per-corner
+ *  results the waveform viewer renders, see `SignalsCornerMeasurement`). */
+export interface SignalsMeasurement {
+  name: string;
+  unit?: string;
+  /** Always present (per `klt sim`'s own JSON shape) -- `null` when the
+   *  request declared no `limits` for this measurement. */
+  limits: { min?: number; max?: number } | null;
+  /** `"pass"` when no `limits` were declared -- reported, never failed. */
+  status: SignalsStatus;
+  worst_case: {
+    corner_id: string;
+    /** `null` when the measurement was unextractable at its worst corner. */
+    value: number | null;
+    margin: number | null;
+  } | null;
+}
+
+/** `{ severity: "error", code: "...", message: "..." }` -- see
+ *  `docs/cli/sim.md`'s failure-classification table. */
+export interface SignalsDiagnostic {
+  severity: string;
+  code: string;
+  message: string;
+}
+
+/** A single PVT-corner measurement result (mirrors `klt sim`'s per-corner
+ *  `measurements[]` entries — see `docs/cli/sim.md`). */
+export interface SignalsCornerMeasurement {
+  name: string;
+  /** `null` when the measurement was unextractable (an `"error"` corner). */
+  value: number | null;
+  /** `null` when the request declared no unit for this measurement. */
+  unit: string | null;
+  status: SignalsStatus;
+  /** Signed distance to the nearest limit (positive = headroom). `null` when
+   *  `value` is `null` or no `limits` were declared. */
+  margin: number | null;
+}
+
+/** One expanded PVT corner's result (a trimmed mirror of `klt sim`'s
+ *  `corners[]` entry -- the response's `artifacts` object is replaced by
+ *  the site-relative `waveform` path below, since the response's absolute
+ *  work-directory paths are meaningless once committed). */
+export interface SignalsCorner {
+  /** `<process>/<supply>V/<temp>C`, e.g. `"tt/1.800V/27C"` — see `klt sim`'s
+   *  `corner_id` convention. Stable identifier used for corner selection. */
+  corner_id: string;
+  process: string | null;
+  /** Supply values for this corner, keyed by source/`.param` name. */
+  supply_v: Record<string, number>;
+  temperature_c: number;
+  status: SignalsStatus;
+  runtime_s: number;
+  measurements: SignalsCornerMeasurement[];
+  diagnostics: SignalsDiagnostic[];
+  /**
+   * Path to this corner's waveform JSON artifact, relative to the block's
+   * `output/` directory (the same convention `renders` values use) — staged
+   * by `copy-renders.mjs` into `public/blocks/<slug>/...` and fetched
+   * client-side by the waveform viewer (issue #100). Present only for the
+   * corners `scripts/gallery_signals.py` stages (the nominal-supply /
+   * nominal-temperature point of each process corner); omitted for the PVT
+   * extremes, whose full artifacts are not committed.
+   *
+   * The referenced file's shape matches `klt sim`'s `artifacts.waveform`
+   * artifact (see `docs/cli/sim.md` and
+   * `site/src/components/waveform/types.ts`'s `WaveformData`):
+   * `{ plotname, variables: [{index, name, type}], points: number[][] }` —
+   * projected down to the testbench's own pins, see that script's
+   * "Waveform artifacts" docstring section.
+   */
+  waveform?: string;
+}
+
+/**
+ * The `signals` sub-object (issue #99, epic #90 phase 2) -- present only
+ * when the build-time pipeline (`scripts/gallery_signals.py`, invoked from
+ * `scripts/bootstrap-gallery-blocks.py`) ran `klt sim` for this block
+ * against a real, checksum-verified vendored transistor-level netlist
+ * (`scripts/fetch-cell-netlists.sh`). Shape mirrors `klt sim`'s own JSON
+ * response (`docs/cli/sim.md`), with each corner's `artifacts` object
+ * replaced by the site-relative `waveform` path issue #100's viewer
+ * consumes. Absent entirely for blocks without a signals run (e.g. no
+ * vendored netlist available for that cell) -- never emitted as `null`,
+ * same convention as every other optional `Layout` field.
+ *
+ * This is a strict superset of the provisional shape issue #100 shipped
+ * ahead of this pipeline: `default_corner_id` and per-corner `waveform`
+ * are preserved and now carry real simulator output rather than the
+ * hand-built `inv_1` fixture they were introduced with.
+ */
+export interface LayoutSignals {
+  schema_version: number;
+  engine: string;
+  /** `null` if the engine's own version banner couldn't be parsed from any
+   *  corner's log. */
+  engine_version: string | null;
+  status: SignalsStatus;
+  corner_count: number;
+  /** `corner_id` of the corner the viewer should select by default (the
+   *  nominal-process nominal-PVT point). Falls back to `corners[0]` when
+   *  omitted or unmatched. */
+  default_corner_id?: string;
+  passed: number;
+  failed: number;
+  errored: number;
+  measurements: SignalsMeasurement[];
+  corners: SignalsCorner[];
+  /**
+   * Present only for the 3 gf180mcu gallery cells -- the vendored
+   * standard-cell netlists instantiate `nfet_05v0`/`pfet_05v0` devices with
+   * no matching bin in the currently published open primitive-model repo;
+   * this records the documented `nfet_05v0`/`pfet_05v0` ->
+   * `nmos_6p0`/`pmos_6p0` substitution applied to the generated testbench
+   * (never to the vendored cell netlist itself) -- see
+   * `scripts/gallery_signals.py`'s module docstring for the full
+   * rationale and prior art.
+   */
+  device_substitution?: Record<string, string>;
+}
+
 /**
  * A fully-parsed layout record matching `layout.json` schema v1.
  *
@@ -81,78 +208,11 @@ export interface Layout {
    */
   downloadable?: boolean;
   /**
-   * PVT corner simulation results (Epic #90 Phase 2, issue #100), produced
-   * by the signals pipeline (issue #99 — "Gallery: signals pipeline —
-   * per-block ngspice runs via `klt sim`, extend layout.json"). Omitted
-   * entirely for every block until that pipeline lands; the detail page's
-   * Signals section is gated on this field the same way `renders` /
-   * `downloadable` / `drc` are gated (presence, not truthiness).
-   *
-   * SCHEMA STATUS: at the time issue #100 shipped this type, #99 (which
-   * owns the authoritative shape) had not yet merged. This shape is a
-   * best-effort design mirroring `klt sim`'s own JSON contract
-   * (`docs/cli/sim.md`) as closely as possible — same `corner_id`/
-   * `process`/`supply_v`/`temperature_c`/`status`/`measurements` fields per
-   * corner, and the same "never inline waveform samples" convention (a
-   * `waveform` field is a *path*, relative to the block's `output/`
-   * directory, staged by `copy-renders.mjs` exactly like `renders` values,
-   * not inline sample data) — so reconciling with #99's landed schema
-   * should be a small, mostly-additive diff. Treat this as provisional
-   * until #99 merges.
+   * Real-cell `klt sim` PVT sweep results (issue #99), consumed by the
+   * detail page's Signals section / waveform viewer (issue #100). The
+   * section is gated on this field the same way `renders` / `downloadable`
+   * / `drc` are gated (presence, not truthiness). See `LayoutSignals`
+   * above.
    */
   signals?: LayoutSignals;
-}
-
-/** A single PVT-corner measurement result (mirrors `klt sim`'s per-corner
- *  `measurements[]` entries — see `docs/cli/sim.md`). */
-export interface SignalsMeasurement {
-  name: string;
-  /** `null` when the measurement was unextractable (an `"error"` corner). */
-  value: number | null;
-  unit?: string;
-  status: "pass" | "fail" | "error";
-  /** Signed distance to the nearest limit (positive = headroom). `null` when
-   *  `value` is `null` or no `limits` were declared. */
-  margin?: number | null;
-}
-
-/**
- * One expanded PVT corner's simulation result, mirroring `klt sim`'s
- * `corners[]` response entries (`docs/cli/sim.md`).
- */
-export interface SignalsCorner {
-  /** `<process>/<supply>V/<temp>C`, e.g. `"tt/1.800V/27C"` — see `klt sim`'s
-   *  `corner_id` convention. Stable identifier used for corner selection. */
-  corner_id: string;
-  process?: string | null;
-  /** Supply values for this corner, keyed by source/`.param` name. */
-  supply_v: Record<string, number>;
-  temperature_c: number;
-  status: "pass" | "fail" | "error";
-  measurements?: SignalsMeasurement[];
-  /**
-   * Path to this corner's waveform JSON artifact, relative to the block's
-   * `output/` directory (the same convention `renders` values use) — staged
-   * by `copy-renders.mjs` into `public/blocks/<slug>/...` and fetched
-   * client-side by the waveform viewer. Omitted when no waveform was
-   * captured for this corner (e.g. `options.waveforms` was false).
-   *
-   * The referenced file's shape matches `klt sim`'s `artifacts.waveform`
-   * artifact exactly (see `docs/cli/sim.md` and
-   * `site/src/components/waveform/types.ts`'s `WaveformData`):
-   * `{ plotname, variables: [{index, name, type}], points: number[][] }`.
-   */
-  waveform?: string;
-}
-
-/** The `signals` section of `layout.json` (schema v1, provisional pending
- *  #99 — see the field doc on `Layout.signals` above). */
-export interface LayoutSignals {
-  /** Versioned independently of the top-level `layout.json` schema_version,
-   *  since this sub-section's shape is still provisional pending #99. */
-  schema_version: number;
-  /** `corner_id` of the corner the viewer should select by default. Falls
-   *  back to `corners[0]` when omitted or unmatched. */
-  default_corner_id?: string;
-  corners: SignalsCorner[];
 }

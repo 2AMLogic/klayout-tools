@@ -434,7 +434,7 @@ export function WaveformViewer({ slug, signals }: WaveformViewerProps) {
                     <Badge variant={m.status === "pass" ? "default" : "warn"} className="gap-1.5">
                       <span className="text-[0.64rem] tracking-wide text-fog-dim uppercase">{m.name}</span>
                       <span className="font-semibold text-fog">
-                        {m.value === null ? "—" : formatEngineering(m.value, m.unit)}
+                        {m.value === null ? "—" : formatEngineering(m.value, m.unit ?? undefined)}
                       </span>
                     </Badge>
                   </li>

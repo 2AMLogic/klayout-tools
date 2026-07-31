@@ -46,22 +46,39 @@ Seven blocks, one per GDS file in the #4 test corpus:
 `gf180mcu_fd_sc_mcu9t5v0__clkinv_1` is **intentionally** left without an
 `output/layout.json` (the directory exists, the file does not) — it
 demonstrates the loader's `no_artifacts` handling on a real, non-synthetic
-block directory rather than only in unit tests.
+block directory rather than only in unit tests. This predates and is
+unrelated to the `signals` field below — `clkinv_1` still gets a real,
+checksum-verified vendored netlist and a real `klt sim` sweep (its
+`output/sim/signals.json` exists on disk and is exercised by
+`tests/test_gallery_signals.py`), it is just never attached to a
+`layout.json` that doesn't exist.
 
-## Signals fixture (provisional, pending #99)
+## Signals (issue #99)
 
-`sky130_fd_sc_hd__inv_1/output/layout.json`'s `signals` section and its
-`output/signals/*.json` waveform artifacts are a **hand-built fixture**
-added by issue #100 (Epic #90 Phase 2, the waveform viewer) to exercise the
-end-to-end detail-page/staging path against real gallery data, since #99
-("Gallery: signals pipeline") had not landed real `klt sim` output at the
-time. The shape mirrors `klt sim`'s own JSON contract (`docs/cli/sim.md`)
-as closely as possible — see the field docs on `Layout.signals` in
-`site/src/data/types.ts` — but the actual sample values are synthetic (a
-plausible RC-edge inverter transient, not simulator output). Re-running
-`scripts/bootstrap-gallery-blocks.py` will drop this fixture (it doesn't
-know about `signals`); once #99 lands, regenerate this block for real and
-this fixture note can be deleted.
+All 6 blocks with a `layout.json` (every block above except
+`clkinv_1`) carry a `signals` field — real, transistor-level `klt sim` PVT
+sweep results against vendored standard-cell netlists (checksum-verified,
+[`../scripts/fetch-cell-netlists.sh`](../scripts/fetch-cell-netlists.sh)),
+not a synthetic placeholder. See
+[`../docs/cli/layout-metrics.md`](../docs/cli/layout-metrics.md#signals-object)
+for the field's schema and
+[`../scripts/gallery_signals.py`](../scripts/gallery_signals.py)'s module
+docstring for the full pipeline, including the one documented device
+substitution the 3 gf180mcu cells require (their vendored `nfet_05v0`/
+`pfet_05v0` device references have no matching bin in the currently
+published open gf180mcu primitive-model repo).
+
+Each block's `output/signals/<corner_id>.json` files are the waveform
+artifacts issue #100's detail-page viewer fetches — real ngspice transient
+output for that block's 3 nominal corners (nominal supply, 27 °C, one per
+process corner), referenced from `layout.json` as
+`signals.corners[].waveform` (a path relative to `output/`, staged into the
+built site by `site/scripts/copy-renders.mjs`). They supersede the
+hand-built `sky130_fd_sc_hd__inv_1` fixture #100 shipped as a placeholder
+while this pipeline was in flight; every value in them is now simulator
+output. Only the nominal corners are staged — the remaining 12 PVT corners
+keep their measurements in `layout.json` but their multi-megabyte rawfiles
+are not committed.
 
 ## License note
 
