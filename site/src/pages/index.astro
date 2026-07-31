@@ -1,0 +1,212 @@
+---
+// klayout-tools.org landing page.
+//
+// Scope (issue #59): fold in the closed-loop vision statement + roadmap /
+// architecture links from issue #11 (verbatim, mirroring site/index.html),
+// and prove the build-time layout data loader end-to-end with a placeholder
+// block list. The polished gallery index (cards, renders, metrics) is #63;
+// the per-block detail page is #64.
+import { loadLayouts } from "../data/loadLayouts.ts";
+
+const layouts = loadLayouts();
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>klayout-tools — IC layout for AI agents</title>
+    <meta
+      name="description"
+      content="Standalone tools that let AI agents parse, check, and edit chip layouts. The kicad-tools playbook, one layer down the stack. In progress, in the open."
+    />
+  </head>
+  <body>
+    <main>
+      <h1>klayout-tools</h1>
+      <p class="tag">IC layout for AI agents</p>
+      <span class="status">scaffold — in progress, in the open</span>
+
+      <p style="margin-top:2rem">
+        Standalone tools that let AI agents parse, check, and edit chip layouts:
+        GDSII and OASIS streams, DRC decks, headless everything, machine-readable
+        JSON everywhere. Built on <a href="https://www.klayout.de">KLayout</a>'s
+        Python API.
+      </p>
+      <p>
+        It is the <a href="https://kicad-tools.org">kicad-tools</a> playbook one
+        layer down the stack. Over there, agents take a design from schematic to
+        routed PCB to fabrication package, and a gallery of real boards proves it.
+        Here, the same pattern meets silicon.
+      </p>
+      <p>
+        An agent can take a spec → schematic/generator → sized circuit → layout
+        → DRC/LVS clean → extracted netlist → simulation-verified, on an open
+        PDK, unaided — with every step headless and JSON-contracted. That
+        closed loop is the target.
+      </p>
+
+      <pre><span class="c"># the interface contract we are building toward</span>
+klt layers design.gds              <span class="c"># enumerate layers, JSON out</span>
+klt cells design.gds --top         <span class="c"># cell hierarchy</span>
+klt drc design.gds --deck sky130   <span class="c"># DRC, structured violations</span>
+klt stats design.gds --per-layer   <span class="c"># densities, bbox, counts</span></pre>
+
+      <p class="dim">
+        Progress lands in the repo first; worked examples appear here the
+        way boards appear in the kicad-tools gallery. See the
+        <a href="https://github.com/2AMLogic/klayout-tools/blob/main/ROADMAP.md">roadmap</a>
+        for the build order and the
+        <a href="https://github.com/2AMLogic/klayout-tools/blob/main/docs/ARCHITECTURE.md">architecture</a>
+        doc for how the pieces fit.
+      </p>
+
+      <h2>Gallery (in progress)</h2>
+      <p class="dim">
+        Placeholder index — lists blocks discovered by the build-time layout
+        data loader (<code>src/data/loadLayouts.ts</code>). This proves the
+        data pipeline end-to-end; the polished gallery cards land in a
+        follow-up issue.
+      </p>
+      <p>
+        {layouts.length} block{layouts.length === 1 ? "" : "s"} found.
+      </p>
+      <ul>
+        {
+          layouts.map((layout) => (
+            <li>
+              <strong>{layout.slug}</strong> — {layout.status}
+              {layout.pdk ? ` · ${layout.pdk}` : ""}
+              {layout.layer_count != null ? ` · ${layout.layer_count} layers` : ""}
+              {layout.cell_count != null ? ` · ${layout.cell_count} cells` : ""}
+            </li>
+          ))
+        }
+      </ul>
+    </main>
+    <footer>
+      <a href="https://github.com/2AMLogic/klayout-tools">GitHub</a>
+      <a href="https://2amlogic.com">2AM Logic</a>
+      <a href="https://kicad-tools.org">kicad-tools</a>
+      <span style="margin-left:auto">MIT · © 2026 Two AM Logic, Inc</span>
+    </footer>
+    <style>
+      :root {
+        --night: #0b0e13;
+        --panel: #161b24;
+        --border: #232a36;
+        --fog: #c6cdd6;
+        --fog-dim: #8d97a5;
+        --orange: #ffa028;
+        --cyan: #3ee0e8;
+      }
+      :global(*) {
+        margin: 0;
+        box-sizing: border-box;
+      }
+      :global(body) {
+        background: var(--night);
+        color: var(--fog);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      main {
+        max-width: 44rem;
+        margin: 0 auto;
+        padding: 6rem 1.5rem 3rem;
+        flex: 1;
+      }
+      h1 {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 2.2rem;
+        color: var(--orange);
+        text-shadow:
+          0 0 6px rgb(255 160 40 / 0.9),
+          0 0 24px rgb(255 160 40 / 0.4);
+      }
+      h2 {
+        margin-top: 2.5rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 1.3rem;
+        color: var(--cyan);
+      }
+      .tag {
+        margin-top: 0.5rem;
+        color: var(--cyan);
+        letter-spacing: 0.25em;
+        text-transform: uppercase;
+        font-size: 0.85rem;
+        text-shadow:
+          0 0 6px rgb(62 224 232 / 0.8),
+          0 0 20px rgb(62 224 232 / 0.3);
+      }
+      p {
+        margin: 1.1rem 0;
+        line-height: 1.7;
+      }
+      .dim {
+        color: var(--fog-dim);
+      }
+      a {
+        color: var(--cyan);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      pre {
+        margin: 1.5rem 0;
+        padding: 1rem 1.25rem;
+        overflow-x: auto;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85rem;
+        line-height: 1.7;
+        color: var(--fog);
+      }
+      pre .c {
+        color: var(--fog-dim);
+      }
+      .status {
+        display: inline-block;
+        margin-top: 1.2rem;
+        padding: 0.15rem 0.7rem;
+        border: 1px solid var(--orange);
+        border-radius: 999px;
+        color: var(--orange);
+        font-size: 0.8rem;
+      }
+      ul {
+        margin: 1rem 0;
+        padding-left: 1.4rem;
+      }
+      li {
+        margin: 0.4rem 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85rem;
+      }
+      footer {
+        max-width: 44rem;
+        margin: 0 auto;
+        padding: 2rem 1.5rem;
+        width: 100%;
+        color: var(--fog-dim);
+        font-size: 0.85rem;
+        display: flex;
+        gap: 1.5rem;
+        flex-wrap: wrap;
+      }
+      footer a {
+        color: var(--fog-dim);
+      }
+      footer a:hover {
+        color: var(--cyan);
+      }
+    </style>
+  </body>
+</html>
