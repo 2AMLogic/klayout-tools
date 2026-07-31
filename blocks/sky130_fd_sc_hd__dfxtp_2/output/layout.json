@@ -1,11 +1,340 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-31T16:46:35.189927+00:00",
+  "generated_at": "2026-07-31T21:56:40.607985+00:00",
   "slug": "sky130_fd_sc_hd__dfxtp_2",
   "name": "sky130_fd_sc_hd__dfxtp_2",
   "status": "ok",
   "description": "sky130 standard-cell layout `sky130_fd_sc_hd__dfxtp_2` from the #4 test corpus.",
   "layer_count": 22,
   "cell_count": 1,
-  "instance_count": 0
+  "instance_count": 0,
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "pass",
+    "corner_count": 15,
+    "default_corner_id": "tt/1.800V/27C",
+    "passed": 15,
+    "failed": 0,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "tcq",
+        "unit": "s",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "tt/1.620V/-40C",
+          "value": 2.60798e-10,
+          "margin": null
+        }
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "tt/1.620V/-40C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 4.052,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 2.60798e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tt/1.620V/125C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 3.684,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 2.46128e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tt/1.800V/27C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.8
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 4.479,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 2.06519e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/tt_1.800V_27C.json"
+      },
+      {
+        "corner_id": "tt/1.980V/-40C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 3.541,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.74304e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tt/1.980V/125C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 3.988,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.84917e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.620V/-40C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 4.018,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 4.26477e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.620V/125C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 3.932,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.92491e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.800V/27C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.8
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 3.603,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.1515e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/ss_1.800V_27C.json"
+      },
+      {
+        "corner_id": "ss/1.980V/-40C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 3.439,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 2.50905e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.980V/125C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 3.93,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 2.72678e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.620V/-40C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 5.794,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.81199e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.620V/125C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 7.345,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.69132e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.800V/27C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.8
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 4.782,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.49254e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/ff_1.800V_27C.json"
+      },
+      {
+        "corner_id": "ff/1.980V/-40C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 6.095,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.30221e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.980V/125C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 4.503,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 1.34689e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  }
 }

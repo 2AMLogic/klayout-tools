@@ -71,6 +71,32 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "instance_count": 120,
   "drc": { "deck": "sky130", "status": "clean", "violation_count": 0 },
   "renders": { "metal1": "renders/metal1.png" },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "pass",
+    "corner_count": 15,
+    "default_corner_id": "tt/1.800V/27C",
+    "passed": 15,
+    "failed": 0,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "tphl",
+        "unit": "s",
+        "status": "pass",
+        "worst_case": { "corner_id": "ss/1.620V/125C", "value": 6.1e-11, "margin": null }
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "tt/1.800V/27C",
+        "waveform": "signals/tt_1.800V_27C.json",
+        "...": "..."
+      }
+    ]
+  },
   "status": "ok"
 }
 ```
@@ -90,6 +116,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `instance_count`   | integer         | **Optional.** Sum of every cell's `instances` from `klt cells` (total placement records).           |
 | `drc`              | object          | **Optional.** Present only when `--deck` was supplied and the run succeeded. See below.             |
 | `renders`          | object          | **Optional.** Present only when at least one PNG exists under `output/renders/`. Filename stem -> path relative to `output/`. |
+| `signals`          | object          | **Optional.** Present only when `output/sim/signals.json` exists. See below.                        |
 | `status`           | string          | One of `"ok"`, `"partial"`, `"no_artifacts"` — see below.                                           |
 
 ### `drc` object
@@ -99,6 +126,40 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `deck`              | string  | The deck name passed via `--deck`.              |
 | `status`            | string  | `"clean"` or `"violations"`, from `klt drc`.    |
 | `violation_count`   | integer | Total violation count, from `klt drc`.          |
+
+### `signals` object
+
+Introduced by issue #99 (epic #90 phase 2, "Gallery signals pipeline") --
+`.meas`-backed transistor-level measurements from a `klt sim` PVT sweep
+(`docs/cli/sim.md`), attached verbatim from `output/sim/signals.json` when
+that file exists. This command does not run `klt sim` itself or validate
+the file's shape beyond "is it a JSON object" — whatever build-time step
+wrote it (for the klayout-tools.org gallery's 7 standard cells,
+`scripts/gallery_signals.py`, invoked by
+`scripts/bootstrap-gallery-blocks.py`) owns the content's correctness.
+Adding this field required no `schema_version` bump — same additive,
+omit-absent convention as `drc`/`renders`.
+
+| Field                        | Type    | Description                                                                                     |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------------------------- |
+| `schema_version`              | integer | The embedded `klt sim` response's own schema version (currently `1`) -- independent of this document's top-level `schema_version`. |
+| `engine` / `engine_version`   | string  | The SPICE engine used (`"ngspice"`) and its reported version.                                     |
+| `status`                      | string  | Aggregate `"pass"` / `"fail"` / `"error"` across every corner -- see `docs/cli/sim.md`.            |
+| `corner_count`/`passed`/`failed`/`errored` | integer | Corner counts by outcome.                                                            |
+| `default_corner_id`           | string  | **Optional.** The `corner_id` a viewer should select by default (the gallery pipeline emits its nominal-process nominal-PVT corner). Consumed by the site's waveform viewer (issue #100); falls back to `corners[0]` when absent. |
+| `measurements`                | array   | Per-measurement rollup (name, unit, limits if any, worst-case corner+value) -- see `docs/cli/sim.md`'s `measurements[]`. |
+| `corners`                     | array   | One entry per expanded PVT corner -- see `docs/cli/sim.md`'s `corners[]`, with each entry's `artifacts` object replaced by an optional `waveform` (see below). |
+| `device_substitution`         | object  | **Optional.** Present only when the source netlist required a documented device-model substitution (see `scripts/gallery_signals.py`'s module docstring) -- maps the substituted device names. |
+
+A corner's optional `waveform` is a **path relative to the block's
+`output/` directory** (e.g. `"signals/tt_1.800V_27C.json"`), the same
+convention `renders` values use, pointing at that corner's waveform JSON
+artifact in `klt sim`'s documented shape (`docs/cli/sim.md`). `klt sim`'s
+own per-corner `artifacts` object is deliberately *not* carried into
+`layout.json` — those are absolute paths into the run's work directory,
+meaningless once committed. The gallery pipeline stages only its nominal
+corners' waveforms; see `scripts/gallery_signals.py`'s "Waveform
+artifacts" docstring section.
 
 ### `status` values
 

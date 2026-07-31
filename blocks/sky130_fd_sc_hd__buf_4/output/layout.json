@@ -1,11 +1,456 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-31T16:46:34.637498+00:00",
+  "generated_at": "2026-07-31T21:55:49.205121+00:00",
   "slug": "sky130_fd_sc_hd__buf_4",
   "name": "sky130_fd_sc_hd__buf_4",
   "status": "ok",
   "description": "sky130 standard-cell layout `sky130_fd_sc_hd__buf_4` from the #4 test corpus.",
   "layer_count": 22,
   "cell_count": 1,
-  "instance_count": 0
+  "instance_count": 0,
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "pass",
+    "corner_count": 15,
+    "default_corner_id": "tt/1.800V/27C",
+    "passed": 15,
+    "failed": 0,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "tphl",
+        "unit": "s",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "tt/1.620V/-40C",
+          "value": 1.59299e-10,
+          "margin": null
+        }
+      },
+      {
+        "name": "tplh",
+        "unit": "s",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "tt/1.620V/-40C",
+          "value": 8.66485e-11,
+          "margin": null
+        }
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "tt/1.620V/-40C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 2.389,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.59299e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 8.66485e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tt/1.620V/125C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 2.37,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.30679e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 8.80555e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tt/1.800V/27C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.8
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 2.459,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.18379e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 8.18088e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/tt_1.800V_27C.json"
+      },
+      {
+        "corner_id": "tt/1.980V/-40C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 2.629,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.04604e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 7.69989e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tt/1.980V/125C",
+        "process": "tt",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 2.327,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 9.53336e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 8.264e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.620V/-40C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 2.256,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 2.4411e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 1.1967e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.620V/125C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 2.624,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.9265e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 1.23101e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.800V/27C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.8
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 2.471,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.70725e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 1.10616e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/ss_1.800V_27C.json"
+      },
+      {
+        "corner_id": "ss/1.980V/-40C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 2.771,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.46973e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 1.0016e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/1.980V/125C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 2.636,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.33623e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 1.12845e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.620V/-40C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 2.974,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 1.15025e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 6.65961e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.620V/125C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.62
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 2.533,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 9.55847e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 6.6869e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.800V/27C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.8
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 4.03,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 8.85496e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 6.3234e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/ff_1.800V_27C.json"
+      },
+      {
+        "corner_id": "ff/1.980V/-40C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 4.133,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 8.01874e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 6.05408e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/1.980V/125C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 1.98
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 4.404,
+        "measurements": [
+          {
+            "name": "tphl",
+            "value": 7.31806e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tplh",
+            "value": 6.46313e-11,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  }
 }

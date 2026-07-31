@@ -17,6 +17,7 @@ upstream release so every checkout gets identical data.
 | Path | What it is |
 | ---- | ---------- |
 | `lambdapdk/` | [siliconcompiler/lambdapdk](https://github.com/siliconcompiler/lambdapdk) (Apache-2.0) at the version pinned in `scripts/fetch-pdks.sh` |
+| `cell-netlists/` | Real, transistor-level SPICE netlists + primitive device models for the 7 klayout-tools.org gallery standard cells, pinned per-file (not a whole-release tarball) and checksum-verified by `scripts/fetch-cell-netlists.sh` — see that script and `scripts/gallery_signals.py`'s module docstring |
 
 lambdapdk bundles, per process: KLayout layer properties and tech
 files, DRC/PEX decks, and standard-cell library data (LEF/GDS/liberty)

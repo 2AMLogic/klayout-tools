@@ -1,11 +1,344 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-31T16:46:34.109770+00:00",
+  "generated_at": "2026-07-31T21:55:32.220318+00:00",
   "slug": "gf180mcu_fd_sc_mcu9t5v0__dffnq_1",
   "name": "gf180mcu_fd_sc_mcu9t5v0__dffnq_1",
   "status": "ok",
   "description": "gf180mcu standard-cell layout `gf180mcu_fd_sc_mcu9t5v0__dffnq_1` from the #4 test corpus.",
   "layer_count": 13,
   "cell_count": 1,
-  "instance_count": 0
+  "instance_count": 0,
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "pass",
+    "corner_count": 15,
+    "default_corner_id": "typical/5.000V/27C",
+    "passed": 15,
+    "failed": 0,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "tcq",
+        "unit": "s",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "typical/4.500V/-40C",
+          "value": 3.84796e-10,
+          "margin": null
+        }
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "typical/4.500V/-40C",
+        "process": "typical",
+        "supply_v": {
+          "vdd": 4.5
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 0.677,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.84796e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "typical/4.500V/125C",
+        "process": "typical",
+        "supply_v": {
+          "vdd": 4.5
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 0.817,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 5.29163e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "typical/5.000V/27C",
+        "process": "typical",
+        "supply_v": {
+          "vdd": 5.0
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0.824,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 4.02136e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/typical_5.000V_27C.json"
+      },
+      {
+        "corner_id": "typical/5.500V/-40C",
+        "process": "typical",
+        "supply_v": {
+          "vdd": 5.5
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 0.848,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.21121e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "typical/5.500V/125C",
+        "process": "typical",
+        "supply_v": {
+          "vdd": 5.5
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 0.829,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 4.37161e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/4.500V/-40C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 4.5
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 0.864,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 4.98162e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/4.500V/125C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 4.5
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 0.785,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 6.92476e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/5.000V/27C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 5.0
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0.851,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 5.18556e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/ss_5.000V_27C.json"
+      },
+      {
+        "corner_id": "ss/5.500V/-40C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 5.5
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 0.853,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 4.09147e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ss/5.500V/125C",
+        "process": "ss",
+        "supply_v": {
+          "vdd": 5.5
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 0.928,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 5.6175e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/4.500V/-40C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 4.5
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 1.175,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.17062e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/4.500V/125C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 4.5
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 0.635,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 4.284e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/5.000V/27C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 5.0
+        },
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0.881,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.3084e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": [],
+        "waveform": "signals/ff_5.000V_27C.json"
+      },
+      {
+        "corner_id": "ff/5.500V/-40C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 5.5
+        },
+        "temperature_c": -40,
+        "status": "pass",
+        "runtime_s": 0.606,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 2.68018e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ff/5.500V/125C",
+        "process": "ff",
+        "supply_v": {
+          "vdd": 5.5
+        },
+        "temperature_c": 125,
+        "status": "pass",
+        "runtime_s": 0.805,
+        "measurements": [
+          {
+            "name": "tcq",
+            "value": 3.59125e-10,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ],
+    "device_substitution": {
+      "nfet_05v0": "nmos_6p0",
+      "pfet_05v0": "pmos_6p0"
+    }
+  }
 }

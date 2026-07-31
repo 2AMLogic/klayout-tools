@@ -84,6 +84,14 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
+      - name: Fetch real gallery-cell SPICE netlists
+        # Pinned, checksum-verified per-file fetch (see the script's header
+        # comment) -- small (~9 MB), unlike fetch-pdks.sh's lambdapdk. Backs
+        # tests/test_gallery_signals.py's real-ngspice-against-a-real-cell
+        # integration tests (issue #99); those tests skip gracefully (never
+        # silently pass) if this step is ever unavailable, but CI always has it.
+        run: scripts/fetch-cell-netlists.sh
+
       - name: pytest
         run: uv run --frozen --extra dev pytest
 

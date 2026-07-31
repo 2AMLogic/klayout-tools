@@ -73,11 +73,15 @@ _MEAS_FAILED_RE = re.compile(
 )
 
 #: A completed ``.meas`` scalar line, e.g. ``vout_final          =  1.500e+00``
-#: (optionally followed by ``from=... to=...`` trailer text for AVG/etc,
-#: which is not captured). ``print`` output has been seen to use the same
-#: ``name = value`` shape, so this pattern is shared with the print fallback.
+#: (optionally followed by arbitrary trailing ``word=value`` pairs -- e.g.
+#: ``from=... to=...`` for AVG/etc, or ``targ=... trig=...`` for a
+#: TRIG/TARG delay measurement like
+#: ``tphl                =  4.02e-11 targ=  1.09e-09 trig=  1.05e-09`` --
+#: which are not captured; only the measurement's own value is). ``print``
+#: output has been seen to use the same ``name = value`` shape, so this
+#: pattern is shared with the print fallback.
 _MEAS_VALUE_RE = re.compile(
-    r"^([A-Za-z_][\w.]*)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*(?:from=.*)?$"
+    r"^([A-Za-z_][\w.]*)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*(?:\S+=.*)?$"
 )
 
 #: Ordered diagnostic classifiers: (code, compiled pattern). Order matters --
