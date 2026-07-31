@@ -1,0 +1,41 @@
+* 5T OTA (NMOS input pair, PMOS current-mirror load, NMOS current-mirror tail bias)
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention).
+*
+* Open-loop gain is characterized with a DC feedback network (Lfb/Cfb) that
+* holds the output at the common-mode operating point (out = vcm) at DC while
+* opening the loop at AC -- the standard way to measure open-loop gain without
+* the output floating to a fragile, corner-dependent balance point (which the
+* first Loop-A pass showed collapses gain at skewed corners). At AC, Lfb is
+* open and Cfb ties inn to the AC ground, so vid = v(inp) - vcm = the AC drive
+* and v(out)/vac is the open-loop transfer.
+.param vdd=1.8
+.param vcm=0.9
+.param ibias=20u
+.param cl=1p
+
+* --- supplies and stimulus ---
+Vdd  vdd 0 DC {vdd}
+Vcm  cm  0 DC {vcm}
+* single-ended AC drive on inp (magnitude 1 so v(out) magnitude == open-loop gain)
+Vin  inp cm DC 0 AC 1
+* ideal bias reference current injected into the tail mirror diode
+Iref vdd nbias DC {ibias}
+* output load
+CL   out 0 {cl}
+
+* --- DC feedback: closes at DC to bias out=vcm, opens at AC ---
+Lfb  out inn 1e9
+Cfb  inn cm  1e3
+
+* --- tail current mirror (NMOS) ---
+XM5b nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1   W=10 nf=1 mult=1
+XM5  tail  nbias 0 0 sky130_fd_pr__nfet_01v8 L=1   W=10 nf=1 mult=1
+
+* --- input differential pair (NMOS) ---
+XM1  n1  inp tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8  nf=1 mult=1
+XM2  out inn tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8  nf=1 mult=1
+
+* --- PMOS current-mirror load ---
+XM3  n1  n1  vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1
+XM4  out n1  vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=6 nf=1 mult=1

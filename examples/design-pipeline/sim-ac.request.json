@@ -1,0 +1,18 @@
+{
+  "netlist": "ota_5t.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt", "ss", "ff", "sf", "fs"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 125]
+  },
+  "analysis": { "kind": "ac", "args": "dec 20 1 1g" },
+  "measurements": [
+    { "name": "gain_db", "spice": ".meas ac gain_db find vdb(out) when frequency=10", "unit": "dB", "limits": { "min": 30 } },
+    { "name": "ugf", "spice": ".meas ac ugf when vdb(out)=0 cross=1", "unit": "Hz", "limits": { "min": 5e6 } },
+    { "name": "ph_ugf_rad", "spice": ".meas ac ph_ugf_rad find vp(out) when vdb(out)=0 cross=1", "unit": "rad" },
+    { "name": "pm_deg", "spice": ".meas ac pm_deg param='180 + ph_ugf_rad * 57.29578'", "unit": "deg", "limits": { "min": 60 } }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

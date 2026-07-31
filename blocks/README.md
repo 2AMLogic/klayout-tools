@@ -80,6 +80,20 @@ output. Only the nominal corners are staged — the remaining 12 PVT corners
 keep their measurements in `layout.json` but their multi-megabyte rawfiles
 are not committed.
 
+## Design-pipeline worked example (Epic #105 Phase 3)
+
+`sky130-ota-5t` is an eighth block, added by issue #130: a sky130 5T OTA
+driven through the staged agent design pipeline
+([`docs/design/design-pipeline.md`](../docs/design/design-pipeline.md)) from
+proposal through schematic-level simulation. It is outside the #4 test
+corpus (it has no source GDS at all — layout generation, S7, has no `klt`
+verb yet, #104), so like `clkinv_1` above it deliberately has no
+`output/layout.json`, explained in its own
+[`sky130-ota-5t/NOTE.md`](sky130-ota-5t/NOTE.md). The full run — every
+pipeline artifact, the stage-by-stage status, and a provisional pre-layout
+signoff comparison — lives at
+[`../examples/design-pipeline/README.md`](../examples/design-pipeline/README.md).
+
 ## License note
 
 `layout.json` metrics here are derived from the #4 corpus GDS files, which

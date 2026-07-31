@@ -1,0 +1,17 @@
+{
+  "netlist": "ota_5t.spice",
+  "engine": "ngspice",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corners": {
+    "process": ["tt", "ss", "ff", "sf", "fs"],
+    "supply_v": { "vdd": [1.62, 1.98] },
+    "temperature_c": [-40, 125]
+  },
+  "analysis": { "kind": "tran", "args": "10n 5u" },
+  "measurements": [
+    { "name": "idd", "spice": ".meas tran idd find i(vdd) at=5u", "unit": "A" },
+    { "name": "isup_ua", "spice": ".meas tran isup_ua param='-idd*1e6'", "unit": "uA", "limits": { "max": 60 } },
+    { "name": "vout_dc", "spice": ".meas tran vout_dc find v(out) at=5u", "unit": "V", "limits": { "min": 0.3, "max": 1.5 } }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

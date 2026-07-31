@@ -1,0 +1,48 @@
+{
+  "schema": "klt.pipeline.sizing/1",
+  "stage": "S5",
+  "note": "Proposed (not-shipped) contract shape per docs/design/design-pipeline.md §2 S5 and the design-sizing skill. Device W/L are in microns (sky130_fd_pr subckt convention). last_sim_result references the S10 corner-sweep artifacts this sizing was converged against.",
+  "input_ref": "04-topology.json",
+  "block": "ota_buffer",
+  "topology_ref": "kb:five-transistor-ota",
+  "devices": {
+    "M1": { "role": "input pair (-)", "model": "sky130_fd_pr__nfet_01v8", "w_um": 8, "l_um": 0.5, "nf": 1, "m": 1 },
+    "M2": { "role": "input pair (+)", "model": "sky130_fd_pr__nfet_01v8", "w_um": 8, "l_um": 0.5, "nf": 1, "m": 1 },
+    "M3": { "role": "PMOS mirror diode", "model": "sky130_fd_pr__pfet_01v8", "w_um": 6, "l_um": 1, "nf": 1, "m": 1 },
+    "M4": { "role": "PMOS mirror output", "model": "sky130_fd_pr__pfet_01v8", "w_um": 6, "l_um": 1, "nf": 1, "m": 1 },
+    "M5": { "role": "NMOS tail", "model": "sky130_fd_pr__nfet_01v8", "w_um": 10, "l_um": 1, "nf": 1, "m": 1 },
+    "M5b": { "role": "NMOS tail-mirror diode (on-block bias replica)", "model": "sky130_fd_pr__nfet_01v8", "w_um": 10, "l_um": 1, "nf": 1, "m": 1 }
+  },
+  "bias": { "ibias_ua": 20, "tail_current_ua": 20, "mirror_ratio": "1:1 (M5b:M5)" },
+  "load_cap_pf": 1.0,
+  "sizing_rationale": {
+    "tail_current": "20 uA nominal, split 10 uA per input-pair device; sets GBW = gm1/(2*pi*CL) with headroom over the 5 MHz target.",
+    "input_pair": "W/L = 8/0.5 um for gm ~30 uS at ID=10 uA (moderate inversion); L=0.5 um (well above minimum) for adequate ro per the KB entry's sky130 low-intrinsic-gain caveat.",
+    "pmos_load": "W/L = 6/1 um; L=1 um raises the mirror's ro to lift single-ended output gain gm_in*(ro_n||ro_p).",
+    "tail_device": "W/L = 10/1 um; L=1 um for high tail output impedance (CMRR floor per the KB sizing_approach)."
+  },
+  "loop_a_history": [
+    {
+      "pass": 1,
+      "sim_ref": "sim-ac.result.json (pass 1, superseded)",
+      "outcome": "gain_db failed at 3 skewed corners (worst 19.3 dB @ sf/1.620V/-40C vs 30 dB target).",
+      "diagnosis": "Not a device-sizing deficiency: the naive open-loop testbench let the output float to a corner-dependent balance point that drifted near a rail at skewed corners, pushing a load device toward triode and collapsing measured gain. In the actual unity-gain buffer application the output is held at the common-mode point by feedback, so this was a characterization artifact.",
+      "action": "Corrected the S6 netlist's characterization methodology: added a DC feedback network (Lfb/Cfb) that holds out = vcm at DC while opening the loop at AC. No device sizes changed."
+    },
+    {
+      "pass": 2,
+      "sim_ref": "sim-ac.result.json + sim-op.result.json (committed)",
+      "outcome": "All declared measurements pass across the full 5x2x2 corner matrix. See last_sim_result."
+    }
+  ],
+  "last_sim_result": {
+    "ac": { "request": "sim-ac.request.json", "response": "sim-ac.result.json" },
+    "op": { "request": "sim-op.request.json", "response": "sim-op.result.json" }
+  },
+  "convergence": {
+    "criterion": "Loop A (design doc §1): every declared measurement status == pass across the full declared corner matrix for a stable candidate.",
+    "provenance_caveat": "This is a SCHEMATIC-LEVEL (pre-layout) convergence via Loop A's fast S5->S6->S10 path. Per the design doc's S10 row, it does NOT satisfy the vision sentence's 'simulation-verified': that requires a post-extraction (S9->S10) pass, which is blocked on #54 (no extraction verb). See writeup."
+  },
+  "model_class": "mid-tier (design doc §3).",
+  "next_stage": "S6 schematic/netlist (ota_5t.spice) -> S10 simulation (Loop A)"
+}
