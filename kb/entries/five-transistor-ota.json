@@ -1,0 +1,23 @@
+{
+  "id": "five-transistor-ota",
+  "title": "Five-transistor OTA (differential pair with current-mirror load)",
+  "topology": "A single-stage operational transconductance amplifier built from five transistors: a source-coupled NMOS (or PMOS) differential input pair biased by a single tail current source, loaded by a PMOS (or NMOS) current mirror. The mirror's diode-connected device sets the mirror ratio (nominally 1:1) and folds one side's drain current onto the other side's output node, converting the pair's differential drain currents into a single-ended output current at one node rather than needing two separate output branches. DC gain is approximately the input pair's transconductance times the parallel combination of the NMOS and PMOS output resistances at that single node.",
+  "spec_class": "general-purpose single-stage transconductance amplifier — the baseline building block for feedback amplifiers, integrators, and comparator pre-amps in low-to-moderate gain, area- and power-constrained analog/mixed-signal PHY blocks",
+  "pdk_portability": {
+    "primary_pdk": "sky130",
+    "notes": "The 5T OTA topology, the gm/ID sizing methodology, and the current-mirror-ratio scaling are fully portable to any bulk CMOS PDK; only the absolute W/L values, tail-current headroom, and achievable intrinsic gain (gm*ro) are sky130-specific, since they depend on sky130's threshold voltages, mobility, and length-dependent output-resistance characteristics. sky130's minimum-length devices have comparatively low intrinsic gain, so getting useful DC gain out of a bare 5T OTA on sky130 typically requires longer-than-minimum channel lengths on all five devices rather than the minimum-length devices a finer node could get away with."
+  },
+  "sizing_approach": "Choose the tail current from the target output slew rate and GBW within the available power budget; size the input differential pair for the target transconductance using a gm/ID design point (trading transconductance efficiency against input-pair overdrive voltage and speed) rather than picking an arbitrary overdrive voltage; size the current-mirror load transistors to accommodate the input pair's output swing needs, using channel lengths well above minimum to raise the mirror's own output resistance and hence the single-ended output gain gm_in*(ro_n||ro_p); size the tail current source device's length for high output impedance, since the tail node's finite output resistance directly sets the stage's common-mode rejection ratio floor.",
+  "layout_idioms": [
+    "differential input pair laid out as a common-centroid (cross-quad, ABBA) structure to cancel linear process gradients and minimize input-referred offset",
+    "current-mirror load transistors matched in orientation and interdigitated with each other for mirror-ratio accuracy",
+    "dummy devices placed at both ends of the differential-pair and mirror arrays to equalize edge effects from adjacent-device etch and implant loading on the matched devices",
+    "tail current source transistor placed on the amplifier's axis of symmetry with short, symmetric routing to both pair sources to avoid introducing a systematic (layout-induced) offset"
+  ],
+  "source": {
+    "citation": "D. A. Johns, K. Martin, and A. Chan Carusone, \"Analog Integrated Circuit Design,\" 2nd ed., Wiley, 2012, Ch. 4 \"Basic Current Mirrors and Single-Stage Amplifiers.\"",
+    "url": "https://search.worldcat.org/search?q=Analog+Integrated+Circuit+Design+Johns+Martin",
+    "license_or_openness": "Standard graduate-level analog IC design textbook cited here for its topology, terminology, and sizing methodology only (no figures or text reproduced), per the KB's open-sources-only rule (case 4, textbook-level common knowledge, in kb/SOURCING.md). This is the textbook whose terminology ('five-transistor OTA') this entry's id/title follow."
+  },
+  "notes": "Also called a 'single-stage OTA' or 'differential-pair-with-current-mirror-load OTA'. It is the simplest practical OTA topology and the usual starting point before adding cascoding (for higher gain at the same power) or a second gain stage (for still higher gain, at the cost of stability/compensation). Single-ended-output DC gain is limited to roughly one stage's gm*ro (tens of dB in a bulk CMOS process at practical lengths), so it is normally used inside a closed feedback loop, or cascaded with additional gain stages, rather than deployed as a stand-alone high-gain amplifier."
+}
