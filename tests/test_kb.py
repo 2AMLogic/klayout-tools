@@ -154,3 +154,78 @@ def test_entry_with_null_optional_fields_still_validates():
     entry["source"]["url"] = None
     entry["source"]["license_or_openness"] = None
     jsonschema.validate(instance=entry, schema=schema)
+
+
+# --------------------------------------------------------------------------- #
+# artifacts field (schema shape only -- path-existence checks are
+# validate_entries()'s job, covered in tests/test_kb_cmd.py)
+# --------------------------------------------------------------------------- #
+
+
+def test_entry_without_artifacts_still_validates():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    assert "artifacts" not in entry
+    jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_with_null_artifacts_still_validates():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    entry["artifacts"] = None
+    jsonschema.validate(instance=entry, schema=schema)
+
+
+@pytest.mark.parametrize(
+    "artifacts",
+    [
+        {"netlist": "examples/kb/some-entry/testbench.spice"},
+        {"layout": "examples/kb/some-entry/layout.gds"},
+        {
+            "netlist": "examples/kb/some-entry/testbench.spice",
+            "layout": "examples/kb/some-entry/layout.gds",
+        },
+    ],
+    ids=["netlist-only", "layout-only", "both"],
+)
+def test_entry_with_artifacts_link_validates(artifacts):
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    entry["artifacts"] = artifacts
+    jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_with_empty_artifacts_object_fails_validation():
+    """The schema requires at least one of netlist/layout when `artifacts`
+    is given as an object at all -- an entirely empty object is a mistake,
+    not a "no artifact yet" signal (that's what omitting/null is for)."""
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    entry["artifacts"] = {}
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_entry_with_unknown_artifacts_key_fails_validation():
+    schema = _load_schema()
+    entry = _valid_reference_entry()
+    entry["artifacts"] = {"netlist": "examples/foo.spice", "bogus": "x"}
+
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=entry, schema=schema)
+
+
+def test_at_least_two_seed_entries_have_a_real_artifacts_link():
+    """Issue #126's end-to-end proof bar: at least two entries in the
+    checked-in corpus link to a real artifact, not just a theoretical schema
+    addition. Path existence itself is covered by
+    `test_entries_validate_against_schema_and_id_matches_filename` above,
+    which runs the full `validate_entries()` (the same function `klt kb
+    validate` calls) against this corpus."""
+    entries_with_artifacts = [
+        path.stem
+        for path in _entry_paths()
+        if json.loads(path.read_text()).get("artifacts")
+    ]
+    assert len(entries_with_artifacts) >= 2, entries_with_artifacts

@@ -1,0 +1,24 @@
+* kb artifact for kb/entries/sky130-bandgap-reference.json: a current-domain
+* PTAT/CTAT summing testbench for the Banba-style bandgap topology described
+* in that entry. Ideal current sources force a fixed 1:8 current-density
+* ratio through two diode-connected devices (standing in for the entry's
+* parasitic PNP diodes); the PTAT delta-Vbe and one diode's own CTAT Vbe are
+* summed in the current domain onto the output resistor, matching the
+* entry's "current-summing, not voltage-summing" sizing_approach.
+* (no .control/.end -- klt sim generates those, see docs/cli/sim.md)
+.param vdd_val=1.8
+.param ibias=10u
+.model kb_bg_diode D(IS=1e-15 N=1.0)
+
+Vdd vdd 0 DC {vdd_val}
+
+* Two forward-biased diodes at a fixed 1:8 area ratio.
+D1 vbe1 0 kb_bg_diode area=1
+D2 vbe2 0 kb_bg_diode area=8
+Ibias1 vdd vbe1 DC {ibias}
+Ibias2 vdd vbe2 DC {ibias}
+
+* Current-domain summing: PTAT current from the diodes' delta-Vbe, CTAT
+* current from D1's own Vbe, summed directly onto the output resistor.
+Bsum 0 out I = ((v(vbe1) - v(vbe2)) / 20k) + (v(vbe1) / 400k)
+Rout out 0 50k

@@ -19,5 +19,8 @@
     "url": "https://doi.org/10.1109/4.760378",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its topology and sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the foundational published reference for current-domain-summing sub-1V bandgap references; essentially all subsequent literature on the technique cites it directly."
   },
-  "notes": "Most modern sub-1V bandgap variants, including curvature-corrected ones, build on this current-summing base circuit rather than replacing it. sky130's parasitic PNP devices are lower-performance than a dedicated BiCMOS process, so expect larger die area and more careful trimming to approach the temperature coefficient reported in the original paper."
+  "notes": "Most modern sub-1V bandgap variants, including curvature-corrected ones, build on this current-summing base circuit rather than replacing it. sky130's parasitic PNP devices are lower-performance than a dedicated BiCMOS process, so expect larger die area and more careful trimming to approach the temperature coefficient reported in the original paper.",
+  "artifacts": {
+    "netlist": "examples/kb/sky130-bandgap-reference/testbench.spice"
+  }
 }

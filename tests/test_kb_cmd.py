@@ -272,6 +272,93 @@ def test_validate_missing_schema_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# library: validate_entries -- artifacts path-existence check (#126)
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_entries_passes_when_artifact_path_exists(tmp_path):
+    """Artifact paths are resolved relative to the repository root -- `kb/`'s
+    parent directory, i.e. `root.parent` -- matching how every other
+    `examples/...`-shaped path in this repo is written."""
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a", artifacts={"netlist": "examples/entry-a/testbench.spice"}
+            )
+        },
+    )
+    netlist_path = tmp_path / "examples" / "entry-a" / "testbench.spice"
+    netlist_path.parent.mkdir(parents=True)
+    netlist_path.write_text("* fixture netlist\n")
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+    (result,) = report["entries"]
+    assert result["valid"] is True
+    assert result["errors"] == []
+
+
+def test_validate_entries_fails_when_artifact_path_missing(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a",
+                artifacts={"netlist": "examples/entry-a/does-not-exist.spice"},
+            )
+        },
+    )
+    # Deliberately do not create examples/entry-a/does-not-exist.spice.
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert result["id"] == "entry-a"
+    assert result["valid"] is False
+    assert any(
+        "artifacts/netlist" in error and "does-not-exist.spice" in error
+        for error in result["errors"]
+    ), result["errors"]
+
+
+def test_validate_entries_checks_both_artifact_fields_independently(tmp_path):
+    root = _make_kb(
+        tmp_path,
+        {
+            "entry-a": _valid_entry(
+                "entry-a",
+                artifacts={
+                    "netlist": "examples/entry-a/testbench.spice",
+                    "layout": "examples/entry-a/layout.gds",
+                },
+            )
+        },
+    )
+    netlist_path = tmp_path / "examples" / "entry-a" / "testbench.spice"
+    netlist_path.parent.mkdir(parents=True)
+    netlist_path.write_text("* fixture netlist\n")
+    # layout.gds deliberately absent.
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is False
+    (result,) = report["entries"]
+    assert len(result["errors"]) == 1
+    assert "artifacts/layout" in result["errors"][0]
+
+
+def test_validate_entries_tolerates_absent_artifacts_field(tmp_path):
+    root = _make_kb(tmp_path, {"entry-a": _valid_entry("entry-a")})
+
+    report = kb.validate_entries(root=root)
+
+    assert report["valid"] is True
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 
@@ -319,6 +406,22 @@ def test_cli_show_json(_cli_kb, capsys):
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["entry"]["id"] == "entry-a"
+
+
+def test_cli_show_text_includes_artifacts(_cli_kb, capsys):
+    _cli_kb(
+        {
+            "entry-a": _valid_entry(
+                "entry-a", artifacts={"netlist": "examples/entry-a/testbench.spice"}
+            )
+        }
+    )
+
+    exit_code = main(["kb", "show", "entry-a"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "artifacts.netlist: examples/entry-a/testbench.spice" in out
 
 
 def test_cli_show_missing_error_envelope(_cli_kb, capsys):
@@ -405,3 +508,23 @@ def test_cli_kb_missing_dir_error_envelope(tmp_path, monkeypatch, capsys):
     assert exit_code == 1
     error = json.loads(capsys.readouterr().err)
     assert error["error"]["command"] == "kb list"
+
+
+def test_cli_validate_fails_with_missing_artifact_path(_cli_kb, tmp_path, capsys):
+    _cli_kb(
+        {
+            "entry-a": _valid_entry(
+                "entry-a",
+                artifacts={"netlist": "examples/entry-a/does-not-exist.spice"},
+            )
+        }
+    )
+
+    exit_code = main(["kb", "validate", "--format", "json"])
+
+    assert exit_code != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    (result,) = payload["entries"]
+    assert result["id"] == "entry-a"
+    assert any("artifacts/netlist" in error for error in result["errors"])

@@ -78,6 +78,24 @@
     "notes": {
       "description": "Free-form notes. Optional: omit or set null when there is nothing to add.",
       "type": ["string", "null"]
+    },
+    "artifacts": {
+      "description": "Links this entry to a runnable artifact: a netlist/testbench under examples/ runnable via `klt sim`, and/or a GDS/OASIS layout runnable via `klt drc`. `klt kb validate` checks that these paths exist on disk. Optional: omit or set null when no runnable artifact exists yet for this entry.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "anyOf": [{ "required": ["netlist"] }, { "required": ["layout"] }],
+      "properties": {
+        "netlist": {
+          "type": "string",
+          "description": "Path, relative to the repository root, to a SPICE netlist/testbench (e.g. under examples/) runnable via `klt sim`.",
+          "minLength": 1
+        },
+        "layout": {
+          "type": "string",
+          "description": "Path, relative to the repository root, to a GDS/OASIS layout runnable via `klt drc`.",
+          "minLength": 1
+        }
+      }
     }
   }
 }

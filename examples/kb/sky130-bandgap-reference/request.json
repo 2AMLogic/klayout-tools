@@ -1,0 +1,29 @@
+{
+  "netlist": "testbench.spice",
+  "engine": "ngspice",
+  "corners": {
+    "supply_v": {
+      "vdd_val": [1.62, 1.98]
+    },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "1n 1u"
+  },
+  "measurements": [
+    {
+      "name": "vout",
+      "spice": ".meas tran vout FIND v(out) AT=1u",
+      "unit": "V",
+      "limits": {
+        "min": 0.15,
+        "max": 0.3
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 30,
+    "keep_artifacts": false
+  }
+}

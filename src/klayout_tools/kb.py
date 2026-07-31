@@ -140,8 +140,37 @@ def search_entries(query: str, root: Path | None = None) -> dict[str, Any]:
     }
 
 
+#: `artifacts` keys checked for on-disk existence by :func:`_artifact_errors`.
+_ARTIFACT_PATH_FIELDS: tuple[str, ...] = ("netlist", "layout")
+
+
+def _artifact_errors(entry: dict[str, Any], repo_root: Path) -> list[str]:
+    """Check that any ``artifacts.{netlist,layout}`` path referenced by
+    ``entry`` exists on disk, relative to the repository root (``kb/``'s
+    parent directory) -- e.g. ``artifacts.netlist: "examples/..."``.
+
+    Absent/null ``artifacts`` (or an absent individual key) is not an error;
+    the schema already enforces that at least one key is present when the
+    object itself is given.
+    """
+    artifacts = entry.get("artifacts")
+    if not artifacts:
+        return []
+
+    errors = []
+    for field in _ARTIFACT_PATH_FIELDS:
+        rel_path = artifacts.get(field)
+        if not rel_path:
+            continue
+        if not (repo_root / rel_path).is_file():
+            errors.append(
+                f"artifacts/{field}: referenced path does not exist: {rel_path}"
+            )
+    return errors
+
+
 def _entry_errors(
-    path: Path, validator: jsonschema.protocols.Validator
+    path: Path, validator: jsonschema.protocols.Validator, repo_root: Path
 ) -> tuple[dict[str, Any] | None, list[str]]:
     try:
         entry = _load_entry(path)
@@ -157,12 +186,16 @@ def _entry_errors(
     if entry_id != path.stem:
         errors.append(f"id {entry_id!r} does not match filename stem {path.stem!r}")
 
+    errors.extend(_artifact_errors(entry, repo_root))
+
     return entry, errors
 
 
 def validate_entries(root: Path | None = None) -> dict[str, Any]:
     """Validate every entry: well-formed JSON, conforms to
-    ``kb/schema/entry.schema.json``, and ``id`` matches its filename stem.
+    ``kb/schema/entry.schema.json``, ``id`` matches its filename stem, and
+    any ``artifacts.{netlist,layout}`` path it references exists on disk
+    (resolved relative to the repository root, i.e. ``root``'s parent).
 
     Never raises for entry-level problems (they show up as structured
     per-entry errors in the returned payload, per the issue's spec); still
@@ -176,9 +209,10 @@ def validate_entries(root: Path | None = None) -> dict[str, Any]:
     validator_cls.check_schema(schema)
     validator = validator_cls(schema)
 
+    repo_root = root.parent
     results = []
     for path in _entry_paths(root):
-        _entry, errors = _entry_errors(path, validator)
+        _entry, errors = _entry_errors(path, validator, repo_root)
         results.append({"id": path.stem, "valid": not errors, "errors": errors})
 
     return {
