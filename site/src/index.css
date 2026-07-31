@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+/*
+ * Dark theme parity with the pre-migration Astro site (issue #92): same
+ * custom-property names/values as the old `Layout.astro` global style block
+ * and `[slug].astro`'s inline `:root`, now exposed to Tailwind's `@theme`
+ * so utilities like `bg-night`, `text-cyan`, `border-border` resolve to the
+ * exact same colors. Do not change these values as part of a platform
+ * migration — this is a like-for-like replatform, not a redesign.
+ */
+@theme {
+  --color-night: #0b0e13;
+  --color-panel: #161b24;
+  --color-border: #232a36;
+  --color-fog: #c6cdd6;
+  --color-fog-dim: #8d97a5;
+  --color-orange: #ffa028;
+  --color-cyan: #3ee0e8;
+  --color-red: #ff6a5c;
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  * {
+    margin: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    background: var(--color-night);
+    color: var(--color-fog);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  a {
+    color: var(--color-cyan);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  #root {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    width: 100%;
+  }
+}

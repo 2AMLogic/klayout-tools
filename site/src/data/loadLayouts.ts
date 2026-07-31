@@ -39,7 +39,7 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
  *
  * Resolution order:
  *   1. `KLT_BLOCKS_DIR` env override (used by tests and CI).
- *   2. `<cwd>/../blocks` — `astro build`/`dev` run with cwd = `site/`, so
+ *   2. `<cwd>/../blocks` — `npm run build`/`dev` run with cwd = `site/`, so
  *      the repo root is one level up. This path is stable even after Vite
  *      bundles this module (bundling rewrites `import.meta.url`, so we
  *      cannot rely on the module's own location during a build).

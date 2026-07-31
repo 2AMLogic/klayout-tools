@@ -1,5 +1,6 @@
-# Astro build output + dependencies (never committed)
+# Vite build output + dependencies (never committed)
 dist/
+dist-ssr/
 node_modules/
 
 # Block renders / downloads staged into public/ by the copy-renders prebuild
@@ -8,8 +9,9 @@ node_modules/
 # generated artifacts).
 public/blocks/
 
-# Astro generated types / cache
-.astro/
+# Vite build cache (tsc's incremental build info lives under node_modules/,
+# already covered above)
+.vite/
 
 # Logs and local env
 *.log

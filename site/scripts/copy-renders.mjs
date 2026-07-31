@@ -1,18 +1,19 @@
 /**
  * Prebuild step: stage per-block render PNGs (and, when downloadable, the
  * source layout file) from the repo's `blocks/` tree into `site/public/` so
- * the static Astro build can serve them.
+ * the static Vite build can serve them.
  *
  * Why this exists
  * ----------------
- * Astro is configured with `output: "static"` and block artifacts live
- * **outside** `site/` (under the repo's `blocks/<slug>/output/`). Astro
- * cannot import or bundle assets from outside its project root, so we copy
- * the files into `site/public/blocks/<slug>/...` at build time. Anything
- * under `public/` is served verbatim at the site root, so a copied file at
- * `site/public/blocks/<slug>/renders/1_0.png` is reachable at the URL
- * `/blocks/<slug>/renders/1_0.png` — exactly what `[slug].astro` (the block
- * detail page, #64) references.
+ * Vite serves anything under `public/` verbatim at the site root, but block
+ * artifacts live **outside** `site/` (under the repo's `blocks/<slug>/output/`)
+ * and Vite cannot reference files outside its project root. So we copy the
+ * files into `site/public/blocks/<slug>/...` at build time; a copied file at
+ * `site/public/blocks/<slug>/renders/1_0.png` is then reachable at the URL
+ * `/blocks/<slug>/renders/1_0.png` — exactly what `DetailPage.tsx` (the block
+ * detail page, originally #64) references. (Ported unchanged from the
+ * pre-Astro-migration script in #92 — the staging contract with the block
+ * pipeline, #62, did not change.)
  *
  * What gets staged
  * -----------------

@@ -1,11 +1,13 @@
 /**
  * Build-time provenance info for the site footer (issue #66).
  *
- * `getBuildSha` runs in Node during `astro build`/`astro dev` frontmatter —
- * never in the browser. Astro sites can be built from a context with no
- * `.git` directory (a tarball export, a shallow CI checkout, a Docker build
- * context that excludes VCS metadata), so the lookup must never throw and
- * must never fail the build. Fallback chain:
+ * `getBuildSha` runs in Node — at `npm run build` time (`scripts/prerender.mjs`)
+ * or `npm run dev` time (the SSR dev middleware in `vite.config.ts`) — never
+ * in the browser (see `src/components/Footer.tsx`'s doc comment for why it
+ * must not be imported into client-bundled code). The site can be built
+ * from a context with no `.git` directory (a tarball export, a shallow CI
+ * checkout, a Docker build context that excludes VCS metadata), so the
+ * lookup must never throw and must never fail the build. Fallback chain:
  *
  *   1. `git rev-parse --short HEAD` — local builds + deploys from a full
  *      checkout.
