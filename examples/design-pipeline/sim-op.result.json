@@ -1,0 +1,838 @@
+{
+  "schema_version": 1,
+  "netlist": "ota_5t.spice",
+  "status": "pass",
+  "corner_count": 20,
+  "passed": 20,
+  "failed": 0,
+  "errored": 0,
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "46",
+    "models_lib": "/Users/rwalters/.volare/sky130A/libs.tech/ngspice/sky130.lib.spice",
+    "models_lib_sha256": "5efa041a988893c1a3580d0ecd57870ea3146b27741c7d42b56baaa336b9549e",
+    "netlist_sha256": "b3dda1de18154f351f6f0d9aabd404eae468d070ff6a155242d925315da5c96a"
+  },
+  "measurements": [
+    {
+      "name": "idd",
+      "unit": "A",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "tt/1.620V/-40C",
+        "value": -3.83818e-05,
+        "margin": null
+      }
+    },
+    {
+      "name": "isup_ua",
+      "unit": "uA",
+      "limits": {
+        "max": 60
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "sf/1.980V/125C",
+        "value": 39.2196,
+        "margin": 20.7804
+      }
+    },
+    {
+      "name": "vout_dc",
+      "unit": "V",
+      "limits": {
+        "min": 0.3,
+        "max": 1.5
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "sf/1.620V/-40C",
+        "value": 0.888445,
+        "margin": 0.5884450000000001
+      }
+    }
+  ],
+  "corners": [
+    {
+      "corner_id": "tt/1.620V/-40C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 22.981,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.83818e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.3818,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.6182
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.891918,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5919179999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "tt/1.620V/125C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 31.295,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.89841e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.9841,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.015900000000002
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.894662,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.594662
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "tt/1.980V/-40C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 33.493,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.84235e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.4235,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.576500000000003
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.897875,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5978749999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "tt/1.980V/125C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 26.801,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.90089e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 39.0089,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 20.991100000000003
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.899995,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5999950000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.620V/-40C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 30.812,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.81088e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.1088,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.891199999999998
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.891796,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.591796
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.620V/125C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 19.408,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.87783e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.7783,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.2217
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.89418,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5941799999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.980V/-40C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 16.587,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.8172e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.172,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.828000000000003
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.897398,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5973980000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.980V/125C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 17.285,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.88123e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.8123,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.1877
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.899447,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5994470000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.620V/-40C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 17.283,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.8582e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.582,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.418
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.892632,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.592632
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.620V/125C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.465,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.91465e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 39.1465,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 20.853499999999997
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.895146,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.595146
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.980V/-40C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.473,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.86129e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.6129,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.387099999999997
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.898145,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5981449999999999
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.980V/125C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.431,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.91662e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 39.1662,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 20.833799999999997
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.900461,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.599539
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.620V/-40C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 17.948,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.86373e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.6373,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.362699999999997
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.888445,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5884450000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.620V/125C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.242,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.91964e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 39.1964,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 20.803600000000003
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.892673,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.592673
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.980V/-40C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.339,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.86837e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.6837,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.3163
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.897204,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.5972040000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.980V/125C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.554,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.92196e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 39.2196,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 20.7804
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.899267,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.599267
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.620V/-40C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.368,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.79908e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 37.9908,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 22.0092
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.893955,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.593955
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.620V/125C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.541,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.86972e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.6972,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.302799999999998
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.896033,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.596033
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.980V/-40C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.283,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.8047e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.047,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.953000000000003
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.898471,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.598471
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.980V/125C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.672,
+      "measurements": [
+        {
+          "name": "idd",
+          "value": -3.87291e-05,
+          "unit": "A",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "isup_ua",
+          "value": 38.7291,
+          "unit": "uA",
+          "status": "pass",
+          "margin": 21.270899999999997
+        },
+        {
+          "name": "vout_dc",
+          "value": 0.900592,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.599408
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    }
+  ]
+}

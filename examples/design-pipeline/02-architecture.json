@@ -1,0 +1,44 @@
+{
+  "schema": "klt.pipeline.architecture/1",
+  "stage": "S2",
+  "note": "Proposed (not-shipped) contract shape per docs/design/design-pipeline.md §2 S2 and the design-architecture-partition skill. No klt verb emits this. Strategy (how to trade power/area) is out of scope for the skill; only the closed partition is recorded here.",
+  "input_ref": "01-proposal.json",
+  "system_specs": {
+    "supply_v_range": [1.62, 1.98],
+    "temperature_c_range": [-40, 125],
+    "power_budget_uw": 150
+  },
+  "blocks": [
+    {
+      "name": "bias_gen",
+      "function": "Generate the OTA tail bias current (nominal 20 uA reference) from the supply.",
+      "interfaces": ["vdd", "vss", "ibias_out"],
+      "budget": {
+        "supply_current_ua": { "max": 25, "resolves": "OQ1" },
+        "power_uw_at_1p98v": { "max": 49.5 }
+      },
+      "note": "A beta-multiplier / current-mirror bias cell (see kb entry beta-multiplier-bias-cell) would fill this role; NOT driven through the pipeline in this worked example (scope: one block)."
+    },
+    {
+      "name": "ota_buffer",
+      "function": "Single-stage OTA used in unity-gain feedback to buffer the reference node onto the 1 pF SC load.",
+      "interfaces": ["vdd", "vss", "inp", "inn", "out", "ibias_in"],
+      "budget": {
+        "supply_current_ua": { "max": 60, "resolves": "OQ2", "note": "includes the tail branch plus the on-block bias-mirror replica branch fed by ibias_in" },
+        "power_uw_at_1p98v": { "max": 118.8 },
+        "load_cap_pf": 1.0,
+        "dc_open_loop_gain_db": { "min": 30 },
+        "unity_gain_bandwidth_hz": { "min": 5000000 },
+        "phase_margin_deg": { "min": 60 }
+      }
+    }
+  ],
+  "partition_closure": {
+    "sum_supply_current_ua_max": 85,
+    "system_supply_current_budget_ua": 83.3,
+    "closes": false,
+    "closure_note": "First-pass allocation (25 + 60 = 85 uA) slightly overshoots the 150 uW / 83.3 uA-at-1.8V system budget. It closes at the nominal 1.8 V worst-case-current interpretation only if the two blocks do not simultaneously hit their individual ceilings; the OTA measured worst case (S10) lands well under its 60 uA ceiling, so the realized partition closes. Recorded honestly rather than back-fitting the ceilings to force closure -- this is the S2 'partition that doesn't close' failure mode the skill names, surfaced and resolved by the S10 measurement rather than hidden."
+  },
+  "selected_block_for_pipeline": "ota_buffer",
+  "model_class": "frontier-reasoning (design doc §3)."
+}

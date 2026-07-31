@@ -1,0 +1,990 @@
+{
+  "schema_version": 1,
+  "netlist": "ota_5t.spice",
+  "status": "pass",
+  "corner_count": 20,
+  "passed": 20,
+  "failed": 0,
+  "errored": 0,
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "46",
+    "models_lib": "/Users/rwalters/.volare/sky130A/libs.tech/ngspice/sky130.lib.spice",
+    "models_lib_sha256": "5efa041a988893c1a3580d0ecd57870ea3146b27741c7d42b56baaa336b9549e",
+    "netlist_sha256": "b3dda1de18154f351f6f0d9aabd404eae468d070ff6a155242d925315da5c96a"
+  },
+  "measurements": [
+    {
+      "name": "gain_db",
+      "unit": "dB",
+      "limits": {
+        "min": 30
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "sf/1.620V/125C",
+        "value": 37.4998,
+        "margin": 7.4998000000000005
+      }
+    },
+    {
+      "name": "ugf",
+      "unit": "Hz",
+      "limits": {
+        "min": 5000000.0
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "ss/1.620V/125C",
+        "value": 21830000.0,
+        "margin": 16830000.0
+      }
+    },
+    {
+      "name": "ph_ugf_rad",
+      "unit": "rad",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "tt/1.620V/-40C",
+        "value": -1.63751,
+        "margin": null
+      }
+    },
+    {
+      "name": "pm_deg",
+      "unit": "deg",
+      "limits": {
+        "min": 60
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "ss/1.980V/-40C",
+        "value": 85.7444,
+        "margin": 25.7444
+      }
+    }
+  ],
+  "corners": [
+    {
+      "corner_id": "tt/1.620V/-40C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.435,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.6352,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.635199999999998
+        },
+        {
+          "name": "ugf",
+          "value": 30618900.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 25618900.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63751,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.1776,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.177599999999998
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "tt/1.620V/125C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.025,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 37.9588,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 7.9587999999999965
+        },
+        {
+          "name": "ugf",
+          "value": 22644900.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 17644900.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.62981,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.6186,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.6186
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "tt/1.980V/-40C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.432,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 40.2687,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 10.268700000000003
+        },
+        {
+          "name": "ugf",
+          "value": 31878100.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 26878100.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.64155,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 85.9463,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 25.946299999999994
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "tt/1.980V/125C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.627,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 38.7205,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 8.720500000000001
+        },
+        {
+          "name": "ugf",
+          "value": 23219600.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 18219600.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63324,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.4221,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.4221
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.620V/-40C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.327,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.9655,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.965499999999999
+        },
+        {
+          "name": "ugf",
+          "value": 29208400.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 24208400.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.64016,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.0255,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.025499999999994
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.620V/125C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.36,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 38.3019,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 8.301900000000003
+        },
+        {
+          "name": "ugf",
+          "value": 21830000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 16830000.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63154,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.5194,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.519400000000005
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.980V/-40C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.15,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 40.6807,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 10.680700000000002
+        },
+        {
+          "name": "ugf",
+          "value": 30793300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 25793300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.64507,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 85.7444,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 25.7444
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ss/1.980V/125C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 19.64,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.1185,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.118499999999997
+        },
+        {
+          "name": "ugf",
+          "value": 22413300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 17413300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63504,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.3192,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.319199999999995
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.620V/-40C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 17.218,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.2204,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.220399999999998
+        },
+        {
+          "name": "ugf",
+          "value": 31760300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 26760300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63575,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.2786,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.278599999999997
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.620V/125C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.876,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 37.5562,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 7.556199999999997
+        },
+        {
+          "name": "ugf",
+          "value": 23423300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 18423300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.62855,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.6909,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.6909
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.980V/-40C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.422,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.793,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.793
+        },
+        {
+          "name": "ugf",
+          "value": 32917000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 27917000.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63952,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.0622,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.062200000000004
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "ff/1.980V/125C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.13,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 38.2629,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 8.262900000000002
+        },
+        {
+          "name": "ugf",
+          "value": 23946200.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 18946200.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.6318,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.5046,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.504599999999996
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.620V/-40C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 17.963,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 38.6388,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 8.638800000000003
+        },
+        {
+          "name": "ugf",
+          "value": 27739300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 22739300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.62626,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.8219,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.8219
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.620V/125C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.676,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 37.4998,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 7.4998000000000005
+        },
+        {
+          "name": "ugf",
+          "value": 22867300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 17867300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63044,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.5827,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.582700000000003
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.980V/-40C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.535,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.9028,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.9028
+        },
+        {
+          "name": "ugf",
+          "value": 32972000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 27972000.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.64465,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 85.7683,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 25.768299999999996
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "sf/1.980V/125C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 17.842,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 38.3332,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 8.333199999999998
+        },
+        {
+          "name": "ugf",
+          "value": 23981300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 18981300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63622,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.2514,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.251400000000004
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.620V/-40C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 17.412,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 40.2218,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 10.221800000000002
+        },
+        {
+          "name": "ugf",
+          "value": 29917900.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 24917900.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63783,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.1593,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.1593
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.620V/125C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 18.438,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 38.4813,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 8.481299999999997
+        },
+        {
+          "name": "ugf",
+          "value": 21955900.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 16955900.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.62878,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.6779,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.677899999999994
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.980V/-40C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 18.378,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 40.8064,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 10.806399999999996
+        },
+        {
+          "name": "ugf",
+          "value": 30611600.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 25611600.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.64027,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.0196,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.019599999999997
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "fs/1.980V/125C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 16.411,
+      "measurements": [
+        {
+          "name": "gain_db",
+          "value": 39.2597,
+          "unit": "dB",
+          "status": "pass",
+          "margin": 9.259700000000002
+        },
+        {
+          "name": "ugf",
+          "value": 22321300.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 17321300.0
+        },
+        {
+          "name": "ph_ugf_rad",
+          "value": -1.63125,
+          "unit": "rad",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "pm_deg",
+          "value": 86.5361,
+          "unit": "deg",
+          "status": "pass",
+          "margin": 26.536100000000005
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    }
+  ]
+}

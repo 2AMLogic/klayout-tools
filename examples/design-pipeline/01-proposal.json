@@ -1,0 +1,30 @@
+{
+  "schema": "klt.pipeline.proposal/1",
+  "stage": "S1",
+  "note": "Proposed (not-shipped) contract shape per docs/design/design-pipeline.md §2 S1 and the design-proposal-intake skill. No klt verb emits this; it is authored by the S1 agent.",
+  "target_function": "A general-purpose unity-gain analog voltage buffer for a sky130 mixed-signal PHY: isolate a high-impedance on-chip reference node from a switched-capacitor sampling load without degrading the reference's DC value.",
+  "application": "Reference-buffer subsystem feeding a switched-capacitor stage (nominal 1 pF sampling load).",
+  "target_specs": {
+    "supply_v": { "nominal": 1.8, "tolerance_pct": 10, "range": [1.62, 1.98] },
+    "temperature_c": { "range": [-40, 125] },
+    "process_corners": ["tt", "ss", "ff", "sf", "fs"],
+    "load_cap_pf": 1.0,
+    "closed_loop_config": "unity-gain follower",
+    "dc_open_loop_gain_db": { "min": 30, "rationale": "buffer static gain error < ~3% needs open-loop gain comfortably above the 26 dB (20x) floor; 30 dB target." },
+    "unity_gain_bandwidth_hz": { "min": 5000000, "rationale": "settle a 1 pF sampling load within a modest SC clock period." },
+    "phase_margin_deg": { "min": 60, "rationale": "well-damped unity-gain step response." },
+    "system_power_budget_uw": { "max": 150, "note": "whole reference-buffer subsystem (bias generation + OTA core), to be partitioned in S2." }
+  },
+  "constraints": [
+    "sky130A open PDK only (CLAUDE.md: open PDKs only).",
+    "headless, JSON-contracted flow end to end.",
+    "single small block; not a full-chip or full-system design (ROADMAP.md non-goal)."
+  ],
+  "open_questions": [
+    { "id": "OQ1", "question": "How is the tail bias current generated, and what is its power/area cost?", "resolve_in": "S2" },
+    { "id": "OQ2", "question": "Per-block power/area allocation between bias generation and the OTA core.", "resolve_in": "S2" },
+    { "id": "OQ3", "question": "Input common-mode operating point for the buffer.", "resolve_in": "S3" }
+  ],
+  "exit_check": "Every top-level spec field is a concrete number/range or explicitly marked to-be-resolved in S2/S3 (OQ1-OQ3). No silent gaps.",
+  "model_class": "frontier-reasoning (design doc §3)."
+}

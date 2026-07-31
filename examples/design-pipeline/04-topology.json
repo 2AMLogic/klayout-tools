@@ -1,0 +1,29 @@
+{
+  "schema": "klt.pipeline.topology/1",
+  "stage": "S4",
+  "note": "Proposed (not-shipped) contract shape per docs/design/design-pipeline.md §2 S4 and the design-topology-selection skill. Selection was KB-assisted via the shipped `klt kb` verb (docs/cli/kb.md).",
+  "input_ref": "03-blockspec.json",
+  "block": "ota_buffer",
+  "kb_queries": [
+    { "cmd": "klt kb search \"single-stage transconductance amplifier\" --format json", "result_ids": ["five-transistor-ota"] },
+    { "cmd": "klt kb search \"current-mirror load\" --format json", "result_ids": ["five-transistor-ota"] },
+    { "cmd": "klt kb show five-transistor-ota --format json", "result": "matched entry read in full (topology, sizing_approach, layout_idioms, pdk_portability)" }
+  ],
+  "topology": {
+    "kb_id": "five-transistor-ota",
+    "description": null
+  },
+  "rationale": "The block spec (single-stage, unity-gain buffer, 30 dB / 5 MHz / 60 deg PM at ~40-60 uA on sky130, 1 pF load) matches the KB entry's spec_class verbatim ('general-purpose single-stage transconductance amplifier ... the baseline building block for feedback amplifiers ... in low-to-moderate gain, area- and power-constrained analog/mixed-signal PHY blocks'). The 5T OTA is the simplest topology that meets a low-to-moderate-gain buffer spec at minimum device count and power; folded-cascode (higher gain, more headroom cost) and two-stage Miller (higher gain, compensation complexity) both exceed what a 30 dB buffer needs. Chosen for spec fit, not familiarity.",
+  "matched_spec_fields": [
+    "dc_open_loop_gain_db.min = 30 (KB: 'low-to-moderate gain', tens of dB at practical sky130 lengths)",
+    "closed_loop_config = unity-gain follower (KB: 'baseline building block for feedback amplifiers')",
+    "process_environment.pdk = sky130A (KB pdk_portability.primary_pdk = sky130)",
+    "supply_current_ua.max = 60, power-constrained (KB: 'area- and power-constrained')"
+  ],
+  "known_limitations": [
+    "Single-ended DC gain is limited to ~one stage's gm*ro (tens of dB); the KB entry notes sky130 minimum-length devices have low intrinsic gain, so channel lengths well above minimum are required (reflected in S5 sizing: L=0.5-1 um on all devices). Recorded, not silently absorbed.",
+    "The KB corpus is shallow (design doc §4); a single matching entry is a strong fit here but the search space is not exhaustive. This match is corpus-confirmed, not merely model-knowledge."
+  ],
+  "model_class": "mid-tier (design doc §3).",
+  "next_stage": "S5 sizing"
+}
