@@ -16,7 +16,7 @@
   ],
   "source": {
     "citation": "C.-K. K. Yang, R. Farjad-Rad, and M. A. Horowitz, \"A 0.5-um CMOS 4.0-Gbit/s serial link transceiver with data recovery using oversampling,\" IEEE Journal of Solid-State Circuits, vol. 33, no. 5, pp. 713-722, May 1998.",
-    "url": "https://doi.org/10.1109/4.668989",
+    "url": "https://doi.org/10.1109/4.668986",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its receiver front-end termination and input-buffering approach only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a widely-cited early CMOS serial-link transceiver paper whose receive front end (on-chip termination feeding a differential input buffer ahead of oversampled data recovery) established the front-end architecture that later serdes receiver designs continue to build on."
   },
   "notes": "This entry covers only the analog front end (termination plus buffering); it hands off a full-swing differential signal to whatever clock-data-recovery/sampler architecture the rest of the PHY uses, which is out of scope here. See cml-tx-line-driver for the transmit-side counterpart whose matched output impedance this entry's termination is designed to receive into -- together they form a matched-impedance point-to-point link's two ends."

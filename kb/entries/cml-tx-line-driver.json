@@ -16,7 +16,7 @@
   ],
   "source": {
     "citation": "M. Mizuno, M. Yamashina, K. Furuta, H. Igura, H. Abiko, K. Okabe, A. Ono, and H. Yamada, \"A GHz MOS adaptive pipeline technique using MOS current-mode logic,\" IEEE Journal of Solid-State Circuits, vol. 31, no. 6, pp. 784-791, June 1996.",
-    "url": "https://doi.org/10.1109/4.508228",
+    "url": "https://doi.org/10.1109/4.509864",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its MOS current-mode logic (MCML) differential-pair-plus-load topology and sizing tradeoffs only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is a foundational reference establishing MOS current-mode logic as a practical CMOS circuit family; the resistively-terminated differential-pair driver used here for line driving is the same current-steering core circuit generalized to a transmit-driver application."
   },
   "notes": "Framed here specifically as a line driver (resistors sized to the channel impedance for source-series termination) rather than MCML's original use as an internal high-speed logic family, since PHY transmit drivers are the most common place this circuit reappears; the sizing methodology (tail-current-to-termination-resistance swing relationship) carries over directly. See rx-front-end-termination-buffer for the receive-side counterpart that this driver's matched line impedance is designed to terminate into."

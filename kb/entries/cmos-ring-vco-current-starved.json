@@ -16,7 +16,7 @@
   ],
   "source": {
     "citation": "I. A. Young, J. K. Greason, and K. L. Wong, \"A PLL clock generator with 5 to 110 MHz of lock range for microprocessors,\" IEEE Journal of Solid-State Circuits, vol. 27, no. 11, pp. 1599-1607, Nov. 1992.",
-    "url": "https://doi.org/10.1109/4.165320",
+    "url": "https://doi.org/10.1109/4.165341",
     "license_or_openness": "Peer-reviewed IEEE journal paper cited here for its current-starved delay-stage VCO topology and sizing methodology only (no figures or text reproduced), per the KB's open-sources sourcing rule. This is the widely-cited original description of the current-starved CMOS ring VCO used in on-chip PLL clock generators, and the technique it introduced remains the standard reference topology for wide-tuning-range digital-PLL VCOs."
   },
   "notes": "Current-starved ring VCOs trade phase noise (worse than an LC-tank VCO at the same power, due to the ring's lower effective Q) for much smaller area, no inductor, and a very wide tuning range spanning multiple octaves -- useful when the PLL must lock across a broad frequency range or area is at a premium. See the sky130-lc-vco-cross-coupled entry for the complementary LC-tank approach when phase-noise performance dominates the spec instead."
