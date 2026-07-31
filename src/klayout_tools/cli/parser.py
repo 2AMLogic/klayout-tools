@@ -199,6 +199,11 @@ def create_parser() -> argparse.ArgumentParser:
         help=f"image height in pixels (default: {DEFAULT_HEIGHT})",
     )
     render_parser.add_argument(
+        "--background",
+        default="#ffffff",
+        help="canvas color as #rrggbb/#rgb hex (default: #ffffff)",
+    )
+    render_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

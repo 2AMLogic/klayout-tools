@@ -1,11 +1,28 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-31T16:46:33.650506+00:00",
+  "generated_at": "2026-07-31T18:56:15.360753+00:00",
   "slug": "gf180mcu_fd_sc_mcu9t5v0__and2_1",
   "name": "gf180mcu_fd_sc_mcu9t5v0__and2_1",
-  "status": "ok",
   "description": "gf180mcu standard-cell layout `gf180mcu_fd_sc_mcu9t5v0__and2_1` from the #4 test corpus.",
+  "layout_file": "gf180mcu_fd_sc_mcu9t5v0__and2_1.gds",
   "layer_count": 13,
   "cell_count": 1,
-  "instance_count": 0
+  "instance_count": 0,
+  "renders": {
+    "0_0": "renders/0_0.png",
+    "112_1": "renders/112_1.png",
+    "204_0": "renders/204_0.png",
+    "21_0": "renders/21_0.png",
+    "22_0": "renders/22_0.png",
+    "30_0": "renders/30_0.png",
+    "31_0": "renders/31_0.png",
+    "32_0": "renders/32_0.png",
+    "33_0": "renders/33_0.png",
+    "34_0": "renders/34_0.png",
+    "34_10": "renders/34_10.png",
+    "55_0": "renders/55_0.png",
+    "63_63": "renders/63_63.png",
+    "overview": "renders/overview.png"
+  },
+  "status": "ok"
 }

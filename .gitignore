@@ -11,7 +11,10 @@ pdks/*
 !pdks/README.md
 
 # klt render output (build artifact, not checked in — see docs/cli/render.md)
+# — EXCEPT the gallery blocks' renders, which are site content the deploy
+# script publishes as-checked-in (blocks/README.md).
 renders/
+!blocks/*/output/renders/
 
 # Repo Skills machine-local install metadata (absolute source path + timestamp)
 .claude/skills/repo/.install-local.json

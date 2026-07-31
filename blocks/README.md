@@ -5,29 +5,26 @@ subdirectory is a "block" (a layout the gallery shows); the site's data
 loader (`site/src/data/loadLayouts.ts`) discovers blocks here and reads each
 one's `<slug>/output/layout.json`.
 
-## Bootstrap data
+## Regenerating
 
 `layout.json`'s schema is the contract emitted by `klt layout-metrics`
 (issue #61, "Gallery: per-layout metrics extractor") — see
 [`../docs/cli/layout-metrics.md`](../docs/cli/layout-metrics.md) and
 `src/klayout_tools/layout_metrics.py` for the authoritative shape (the
 always-present fields are `schema_version`, `generated_at`, `slug`, `name`,
-`status`). This directory is bootstrapped from the [#4 test
-corpus](../tests/corpus/README.md) —
-[`../scripts/bootstrap-gallery-blocks.py`](../scripts/bootstrap-gallery-blocks.py)
-runs `klt layers` / `klt cells` against each corpus GDS file and writes
-`<slug>/output/layout.json` in that same shape (it omits the optional
-`layout_file`/`drc` fields, which require running the full extractor against
-a materialized block directory).
+`status`). This directory is generated from the [#4 test
+corpus](../tests/corpus/README.md) by
+[`../scripts/regen-gallery-blocks.py`](../scripts/regen-gallery-blocks.py),
+which materializes each corpus GDS into its block directory, renders
+per-layer PNGs with `klt render` into `<slug>/output/renders/`, and emits
+`<slug>/output/layout.json` with `klt layout-metrics` — the same path a
+real (non-corpus) block will use. Each block's `meta.json` (curated by
+hand, read by the extractor, never overwritten by the regen script)
+carries the display `name`/`description` overrides.
 
-Follow-ups for a future pass (owned by #61's extractor):
-
-1. Regenerate this directory with `klt layout-metrics` directly (which also
-   populates `layout_file` and, with `--deck`, `drc`).
-2. Retire `scripts/bootstrap-gallery-blocks.py` once that regeneration path
-   is wired up.
-3. Revisit whether `layout.json` should stay checked in (as it does today)
-   or move to a gitignored, locally-generated artifact.
+Remaining follow-up: revisit whether `layout.json`, the renders, and the
+materialized GDS should stay checked in (as they do today) or move to
+gitignored, locally-generated artifacts.
 
 ## Contents
 
@@ -43,10 +40,10 @@ Seven blocks, one per GDS file in the #4 test corpus:
 | `gf180mcu_fd_sc_mcu9t5v0__dffnq_1` | gf180mcu | `tests/corpus/gf180mcu/gf180mcu_fd_sc_mcu9t5v0__dffnq_1.gds` |
 | `gf180mcu_fd_sc_mcu9t5v0__clkinv_1` | gf180mcu | `tests/corpus/gf180mcu/gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds` |
 
-`gf180mcu_fd_sc_mcu9t5v0__clkinv_1` is **intentionally** left without an
-`output/layout.json` (the directory exists, the file does not) — it
-demonstrates the loader's `no_artifacts` handling on a real, non-synthetic
-block directory rather than only in unit tests.
+(The earlier bootstrap left `gf180mcu_fd_sc_mcu9t5v0__clkinv_1` without
+artifacts as a live demo of the loader's `no_artifacts` path; now that the
+gallery is public-facing, all blocks ship full artifacts and that path is
+exercised in unit tests only.)
 
 ## License note
 

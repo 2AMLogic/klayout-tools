@@ -21,9 +21,13 @@ interface Props {
 
 const { layout } = Astro.props;
 
-const STATUS_LABEL: Record<LayoutStatus, string> = {
-  ok: "Ready",
-  partial: "Partial",
+/**
+ * `status: "ok"` means "metrics parsed cleanly" — a data-quality statement,
+ * not a claim about the block itself, so a healthy card gets no chip at
+ * all. Only degraded states are called out.
+ */
+const STATUS_LABEL: Partial<Record<LayoutStatus, string>> = {
+  partial: "Partial artifacts",
   no_artifacts: "No artifacts",
 };
 
@@ -36,9 +40,11 @@ const STATUS_LABEL: Record<LayoutStatus, string> = {
  */
 function thumbnailFor(l: Layout): { src: string; isPlaceholder: boolean } {
   const renders = l.renders;
-  const firstEntry = renders ? Object.values(renders)[0] : undefined;
-  if (firstEntry) {
-    const rel = firstEntry.replace(/^\.?\//, "");
+  // Prefer the all-layers composite (`klt render`'s overview.png) — a
+  // single-layer render makes a poor "what is this block" thumbnail.
+  const entry = renders ? (renders["overview"] ?? Object.values(renders)[0]) : undefined;
+  if (entry) {
+    const rel = entry.replace(/^\.?\//, "");
     return { src: `/blocks/${l.slug}/${rel}`, isPlaceholder: false };
   }
   return { src: "/placeholder-layout.svg", isPlaceholder: true };
@@ -61,7 +67,7 @@ const statusLabel = STATUS_LABEL[layout.status];
       decoding="async"
       class:list={["thumb-img", { "is-placeholder": thumb.isPlaceholder }]}
     />
-    <span class:list={["chip", `chip-${layout.status}`]}>{statusLabel}</span>
+    {statusLabel && <span class:list={["chip", `chip-${layout.status}`]}>{statusLabel}</span>}
   </div>
 
   <div class="body">
@@ -161,11 +167,6 @@ const statusLabel = STATUS_LABEL[layout.status];
     font-weight: 600;
     letter-spacing: 0.02em;
     backdrop-filter: blur(4px);
-  }
-
-  .chip-ok {
-    background: rgb(63 224 130 / 0.9);
-    color: #04150d;
   }
 
   .chip-partial {

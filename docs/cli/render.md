@@ -4,7 +4,7 @@ Render one PNG image per non-empty layer of a GDSII or OASIS layout stream,
 built on the same layer enumeration as [`klt layers`](layers.md).
 
 ```
-klt render <file> [-o/--output DIR] [--width N] [--height N] [--format text|json]
+klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrggbb] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -13,6 +13,8 @@ klt render <file> [-o/--output DIR] [--width N] [--height N] [--format text|json
   `renders/` subdirectory next to `<file>` (see "Output path" below).
 - `--width`, `--height` — image dimensions in pixels (default `1024x768`).
   Both must be positive.
+- `--background` — canvas color as a `#rrggbb`/`#rgb` hex string (default
+  `#ffffff`).
 - `--format` — `text` (default, a human-readable table) or `json`.
 
 The command runs fully headless via KLayout's `klayout.lay.LayoutView`, which
@@ -29,10 +31,13 @@ is expected to write canary-block layouts to) renders to
 `<block>/output/renders/` with no block-specific logic required downstream.
 
 Each layer's PNG is named `<layer>_<datatype>.png` (e.g. `67_20.png`) —
-deterministic and parseable without consulting the JSON output. Re-rendering
-into the same directory removes any stale `<layer>_<datatype>.png` files this
-command previously wrote (e.g. from a layer that no longer appears in the
-design) without touching unrelated files in that directory.
+deterministic and parseable without consulting the JSON output. An
+all-layers composite is also written as `overview.png` — the "what does this
+block look like" image (gallery thumbnails, agent quick-looks). Re-rendering
+into the same directory removes any stale `<layer>_<datatype>.png` /
+`overview.png` files this command previously wrote (e.g. from a layer that
+no longer appears in the design) without touching unrelated files in that
+directory.
 
 ## Which layers get rendered
 
@@ -57,6 +62,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "output_dir": "design_dir/renders",
   "width": 1024,
   "height": 768,
+  "background": "#ffffff",
+  "overview": "design_dir/renders/overview.png",
   "layer_count": 3,
   "rendered_count": 2,
   "layers": [
@@ -96,6 +103,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `file`            | string          | The input path exactly as provided on the command line.            |
 | `output_dir`      | string          | The resolved output directory PNGs were written into.              |
 | `width`           | integer         | Image width in pixels, as requested (or the default).              |
+| `background`      | string          | Canvas color, as requested (or the default `#ffffff`).             |
+| `overview`        | string          | Path to the all-layers composite PNG (`overview.png`).             |
 | `height`          | integer         | Image height in pixels, as requested (or the default).             |
 | `layer_count`     | integer         | Number of entries in `layers` (matches `klt layers`' `layer_count`). |
 | `rendered_count`  | integer         | Number of `layers[]` entries with `rendered: true`.                |
@@ -138,7 +147,7 @@ layer  datatype  name    shapes  path
 | Exit code | Meaning                                                              |
 | --------- | --------------------------------------------------------------------- |
 | `0`       | Success — report written to stdout, PNGs written to `output_dir`.     |
-| `1`       | The file is missing, unreadable, not a recognisable layout, or `--width`/`--height` is not positive. |
+| `1`       | The file is missing, unreadable, not a recognisable layout, `--width`/`--height` is not positive, or `--background` is not a valid hex color. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 On error, a concise message is written to **stderr** and nothing is written to
