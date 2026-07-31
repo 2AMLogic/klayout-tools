@@ -7,9 +7,13 @@ import { Card, CardContent, CardTitle, CardDescription } from "@/components/ui/c
  * `LayoutCard.astro` in issue #92's Astro -> React migration; originally
  * issue #63, mirroring kicad-tools#3680/#3683's BoardCard).
  *
- * Renders a thumbnail (first `renders` entry, falling back to a static
- * placeholder), the block `name` + `description`, a status chip driven by
- * `Layout.status`, and a set of metric badges. Every optional field follows
+ * Renders a thumbnail (preferring the composite `overview` render, else the
+ * first `renders` entry, falling back to a static placeholder), the block
+ * `name` + `description`, a status chip driven by `Layout.status`, and a set
+ * of metric badges. The status chip is honest: it is omitted entirely for
+ * `"ok"` blocks (no chip oversells a plain, ready block) and rendered only
+ * for `"partial"` / `"no_artifacts"`, which carry actionable meaning. Every
+ * optional field follows
  * the data contract's omit-when-absent rule: a badge is rendered only when
  * its backing field is `!== undefined`, never as "null" or "—" (see
  * `src/data/types.ts`).
@@ -20,14 +24,17 @@ export interface LayoutCardProps {
   layout: Layout;
 }
 
-const STATUS_LABEL: Record<LayoutStatus, string> = {
-  ok: "Ready",
+/**
+ * Status-chip labels. `"ok"` deliberately has no entry: a ready block gets
+ * no chip at all (see `thumbnailFor` docblock and the render below), so only
+ * the two statuses that carry actionable meaning are mapped here.
+ */
+const STATUS_LABEL: Record<Exclude<LayoutStatus, "ok">, string> = {
   partial: "Partial",
   no_artifacts: "No artifacts",
 };
 
-const STATUS_BADGE_VARIANT: Record<LayoutStatus, "ok" | "partial" | "no-artifacts"> = {
-  ok: "ok",
+const STATUS_BADGE_VARIANT: Record<Exclude<LayoutStatus, "ok">, "partial" | "no-artifacts"> = {
   partial: "partial",
   no_artifacts: "no-artifacts",
 };
@@ -38,10 +45,16 @@ const STATUS_BADGE_VARIANT: Record<LayoutStatus, "ok" | "partial" | "no-artifact
  * per `docs/cli/layout-metrics.md`); the `copy-renders` prebuild step
  * stages that same tree at `site/public/blocks/<slug>/`, so the value can
  * be appended to `/blocks/<slug>/` verbatim.
+ *
+ * When the block ships a composite `"overview"` render (a single image
+ * showing every layer together, produced by `klt render`), prefer it — a
+ * per-layer render picked by object-insertion order is a poor,
+ * unrepresentative thumbnail. Fall back to the first `renders` entry, then
+ * to the static placeholder.
  */
 function thumbnailFor(l: Layout): { src: string; isPlaceholder: boolean } {
   const renders = l.renders;
-  const firstEntry = renders ? Object.values(renders)[0] : undefined;
+  const firstEntry = renders ? renders["overview"] ?? Object.values(renders)[0] : undefined;
   if (firstEntry) {
     const rel = firstEntry.replace(/^\.?\//, "");
     return { src: `/blocks/${l.slug}/${rel}`, isPlaceholder: false };
@@ -53,7 +66,11 @@ export function LayoutCard({ layout }: LayoutCardProps) {
   const thumb = thumbnailFor(layout);
   const displayName = layout.name || layout.slug;
   const href = `/${layout.slug}/`;
-  const statusLabel = STATUS_LABEL[layout.status];
+  // Honest status chip: `"ok"` blocks get no chip at all — only the two
+  // statuses that flag an incomplete block render a Badge. Narrowing `status`
+  // to a non-`"ok"` value here also keeps the `STATUS_*` record lookups
+  // below type-safe (those records intentionally omit the `"ok"` key).
+  const status = layout.status;
 
   return (
     <a
@@ -78,12 +95,14 @@ export function LayoutCard({ layout }: LayoutCardProps) {
                 : "block h-full w-full object-contain"
             }
           />
-          <Badge
-            variant={STATUS_BADGE_VARIANT[layout.status]}
-            className="absolute top-2.5 right-2.5 backdrop-blur-sm"
-          >
-            {statusLabel}
-          </Badge>
+          {status !== "ok" && (
+            <Badge
+              variant={STATUS_BADGE_VARIANT[status]}
+              className="absolute top-2.5 right-2.5 backdrop-blur-sm"
+            >
+              {STATUS_LABEL[status]}
+            </Badge>
+          )}
         </div>
 
         <CardContent>
