@@ -76,6 +76,7 @@ klt stats design.gds --per-layer         # densities, bbox, polygon counts
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
 klt render design.gds                    # per-layer PNGs, headless
 klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSON out
+klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
 ```
 
@@ -114,6 +115,19 @@ load on demand:
   repo's device characterization, block-class completeness and
   corner-binding checks, and a ratify / ratify-with-amendments / defer
   verdict. Worked example: [`examples/spec-review/`](examples/spec-review/).
+- **Staged design pipeline (S1–S6 + back-end)** — one skill per stage of
+  [the design pipeline](docs/design/design-pipeline.md), from
+  [proposal intake](.claude/skills/design-proposal-intake/SKILL.md) through
+  [architecture partition](.claude/skills/design-architecture-partition/SKILL.md),
+  [block spec](.claude/skills/design-block-spec/SKILL.md),
+  [topology selection](.claude/skills/design-topology-selection/SKILL.md),
+  [sizing](.claude/skills/design-sizing/SKILL.md), and
+  [netlist authoring](.claude/skills/design-netlist-authoring/SKILL.md), plus
+  the back-end stages ([DRC/LVS](.claude/skills/design-drc-lvs/SKILL.md),
+  [layout generation](.claude/skills/design-layout-generation/SKILL.md),
+  [extraction](.claude/skills/design-extraction/SKILL.md), and
+  [signoff](.claude/skills/design-signoff/SKILL.md) — the last three are
+  declared stubs, each naming the capability gap that blocks it).
 
 ## Design notes
 
