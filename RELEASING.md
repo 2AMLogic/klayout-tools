@@ -27,6 +27,18 @@ account must register a trusted publisher for this project:
    for this repository (matches the `environment: pypi` job in
    `publish.yml`). Optionally add required reviewers/protections on that
    environment for extra safety before a publish runs.
+   - **Deployment branch/tag policy**: the environment's protection rules
+     default to "Protected branches only", which will **reject** every
+     publish. `publish.yml` triggers on `push: tags: ["v*"]`, and the
+     `publish` job runs under `environment: pypi` — GitHub evaluates the
+     *triggering ref* (a tag) against the environment's policy, and a tag
+     is not a protected branch. Under the default policy the job fails
+     with "not allowed to deploy to pypi due to environment protection
+     rules", even though trusted-publisher registration and the
+     environment are otherwise correctly configured. Set a **custom**
+     deployment branch/tag policy instead: repo Settings → Environments →
+     `pypi` → "Deployment branches and tags" → "Selected branches and
+     tags" → add a tag rule `v*`.
 
 Until this is done, pushing a `v*` tag will trigger the workflow but the
 `uv publish` step will fail authentication — that is expected, not a bug in
