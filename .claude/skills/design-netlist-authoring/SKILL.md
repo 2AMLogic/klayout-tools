@@ -108,6 +108,29 @@ real corner-matrix run.
   `.include` and drive — also #55. Combined with the "circuit body, not a
   full deck" constraint above, this is the single most common way S6's
   output fails S10 downstream.
+- **Floating-output open-loop testbench (spurious corner-dependent gain
+  failure).** For a block whose closed-loop intent is declared upstream —
+  S1's `target_specs.closed_loop_config` (e.g. "unity-gain follower"),
+  corroborated by S4's `matched_spec_fields` — an open-loop AC testbench
+  that lets the output float has no DC feedback holding it at the intended
+  closed-loop operating point. The output's DC bias then settles at a
+  corner-dependent balance point; at skewed corners that point can drift
+  toward a rail and push a load device into triode, collapsing measured
+  gain. This looks like a sizing failure but is a testbench-construction
+  artifact, not a device-sizing deficiency. Fix: characterize open-loop
+  gain with a DC feedback network that holds the output at the intended
+  closed-loop DC operating point (e.g. the common-mode voltage) while
+  opening the loop at AC — a large inductor from the output to the
+  inverting input closes the loop at DC (and looks open at AC), and a
+  large capacitor from the inverting input to AC ground holds that node at
+  DC while passing the AC drive through unaffected. See the worked
+  `Lfb`/`Cfb` network in
+  [`examples/design-pipeline/ota_5t.spice`](../../../examples/design-pipeline/ota_5t.spice)
+  and the original failure record in
+  [`examples/design-pipeline/05-sizing.json`](../../../examples/design-pipeline/05-sizing.json)'s
+  `loop_a_history`. A `gain_db` collapse concentrated at skewed PVT corners
+  is a testbench-methodology smell worth checking here before it is
+  treated as a sizing failure back in S5 (see that skill's Failure modes).
 
 ## Next stage
 

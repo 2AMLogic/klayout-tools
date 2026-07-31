@@ -136,6 +136,22 @@ frontier-reasoning per the rule above rather than continuing to spend passes.
   corner coverage), surfacing here as an apparently-converged result that
   isn't actually robust. If you suspect this, flag it in the output rather
   than reporting a clean convergence.
+- **Corner-dependent `gain_db` collapse mistaken for a sizing failure.** If
+  `gain_db` fails only at a handful of skewed PVT corners while other
+  measurements pass broadly, suspect the S6 netlist's open-loop testbench
+  construction before spending another Loop A pass on sizing. A block whose
+  closed-loop intent is declared upstream (S1's
+  `target_specs.closed_loop_config`, corroborated by S4's
+  `matched_spec_fields`) needs its open-loop gain characterized with a DC
+  feedback network holding the output at the intended closed-loop operating
+  point at DC while opening the loop at AC — letting the output float
+  instead lets its DC bias drift to a corner-dependent balance point that
+  can push a load device into triode at skewed corners, collapsing measured
+  gain independent of the actual sizing. See
+  `.claude/skills/design-netlist-authoring/SKILL.md`'s Failure modes section
+  for the technique and the worked `Lfb`/`Cfb` example in
+  `examples/design-pipeline/ota_5t.spice`. Rule this out before treating a
+  skewed-corner-only `gain_db` failure as a sizing deficiency.
 
 ## Next stage
 
