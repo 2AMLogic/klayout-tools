@@ -162,9 +162,7 @@ def test_render_report_background(tmp_path):
     assert report["background"] == "#0b0e13"
 
     with pytest.raises(RenderError, match="invalid background color"):
-        render_report(
-            str(path), output_dir=str(tmp_path / "out2"), background="red"
-        )
+        render_report(str(path), output_dir=str(tmp_path / "out2"), background="red")
 
 
 def test_render_report_invalid_dimensions(tmp_path):
