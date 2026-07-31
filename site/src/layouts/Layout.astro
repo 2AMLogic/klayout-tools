@@ -1,0 +1,66 @@
+---
+/**
+ * Layout — shared page shell for the klayout-tools.org gallery (issue #66).
+ *
+ * Every page (index.astro today; the per-block detail route from #64
+ * tomorrow) renders through this layout so the `<head>` boilerplate, dark
+ * theme CSS variables, and site chrome (`Header` + `Footer`) are defined
+ * exactly once instead of duplicated per page. Page-specific content is
+ * passed via the default slot; `title`/`description` set the page's
+ * `<title>`/`<meta name="description">` tags.
+ */
+import Footer from "../components/Footer.astro";
+import Header from "../components/Header.astro";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+  </head>
+  <body>
+    <Header />
+    <slot />
+    <Footer />
+    <style is:global>
+      :root {
+        --night: #0b0e13;
+        --panel: #161b24;
+        --border: #232a36;
+        --fog: #c6cdd6;
+        --fog-dim: #8d97a5;
+        --orange: #ffa028;
+        --cyan: #3ee0e8;
+      }
+      * {
+        margin: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--night);
+        color: var(--fog);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      a {
+        color: var(--cyan);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+    </style>
+  </body>
+</html>
