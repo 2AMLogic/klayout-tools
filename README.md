@@ -76,6 +76,7 @@ klt stats design.gds --per-layer         # densities, bbox, polygon counts
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
 klt render design.gds                    # per-layer PNGs, headless
 klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSON out
+klt kb search bandgap                    # query the circuit-design knowledge base
 ```
 
 ## Development

@@ -86,3 +86,10 @@ jobs:
 
       - name: pytest
         run: uv run --frozen --extra dev pytest
+
+      - name: klt kb validate
+        # Belt-and-suspenders alongside tests/test_kb.py (which calls the same
+        # kb.validate_entries() implementation): runs the actual shipped
+        # `klt kb validate` entry point so a malformed kb/ entry breaks the
+        # build the same way a real user invocation would surface it.
+        run: uv run --frozen --extra dev klt kb validate --format json

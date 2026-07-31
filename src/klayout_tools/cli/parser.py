@@ -13,6 +13,7 @@ from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
     drc_cmd,
+    kb_cmd,
     layers_cmd,
     layout_metrics_cmd,
     pdk_cmd,
@@ -240,6 +241,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     sim_parser.set_defaults(func=sim_cmd.run)
 
+    _add_kb_parser(subparsers)
+
     return parser
 
 
@@ -343,3 +346,93 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text; text emits shell exports)",
     )
     env_parser.set_defaults(func=pdk_cmd.run_env)
+
+
+def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``kb`` verb with nested ``list``/``show``/``search``/
+    ``validate`` subcommands, mirroring ``pdk``'s grouped-verb pattern (see
+    ``_add_pdk_parser``): ``--format`` stays a per-subcommand option.
+    """
+    kb_parser = subparsers.add_parser(
+        "kb",
+        help="query the circuit-design knowledge base (kb/)",
+        description=(
+            "Query kb/, the flat-files corpus of published circuit designs "
+            "(topology, sizing strategy, layout idioms) the LLM reasoning "
+            "module draws on -- see kb/README.md for the schema and "
+            "sourcing rules. Runs entirely against the local repo checkout; "
+            "no network access."
+        ),
+    )
+    kb_sub = kb_parser.add_subparsers(dest="kb_command", metavar="<subcommand>")
+
+    def _no_subcommand(_args: argparse.Namespace) -> int:
+        kb_parser.print_help(sys.stderr)
+        return 2
+
+    kb_parser.set_defaults(func=_no_subcommand)
+
+    list_parser = kb_sub.add_parser(
+        "list",
+        help="list id, title, spec_class for every kb entry",
+        description="Enumerate every kb/entries/*.json entry, id-sorted.",
+    )
+    list_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    list_parser.set_defaults(func=kb_cmd.run_list)
+
+    show_parser = kb_sub.add_parser(
+        "show",
+        help="show the full kb entry for <id>",
+        description="Print the full kb/entries/<id>.json entry.",
+    )
+    show_parser.add_argument(
+        "id", help="entry id (kb/entries/<id>.json's filename stem)"
+    )
+    show_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    show_parser.set_defaults(func=kb_cmd.run_show)
+
+    search_parser = kb_sub.add_parser(
+        "search",
+        help="keyword search over kb entries",
+        description=(
+            "Case-insensitive keyword match over title, topology, "
+            "spec_class, layout_idioms, and notes. Plain substring search -- "
+            "no embeddings, no index (kb/README.md's flat-files design)."
+        ),
+    )
+    search_parser.add_argument("query", help="keyword to search for")
+    search_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    search_parser.set_defaults(func=kb_cmd.run_search)
+
+    validate_parser = kb_sub.add_parser(
+        "validate",
+        help="validate every kb entry against the schema",
+        description=(
+            "Validate that every kb/entries/*.json entry parses, conforms "
+            "to kb/schema/entry.schema.json, and has an id matching its "
+            "filename stem. Exits nonzero if any entry is invalid -- "
+            "suitable for a CI gate."
+        ),
+    )
+    validate_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    validate_parser.set_defaults(func=kb_cmd.run_validate)

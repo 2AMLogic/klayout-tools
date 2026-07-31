@@ -1,7 +1,13 @@
 """Validate the `kb/` knowledge base against its JSON Schema.
 
 See `kb/README.md` for the schema summary, sourcing rules, and how to add
-a new entry.
+a new entry. Schema-conformance and id/filename-match checks against the
+checked-in corpus are delegated to `klayout_tools.kb.validate_entries()` --
+the same function `klt kb validate` calls -- so that verb is this repo's
+single implementation of "is a kb entry valid" (see `tests/test_kb_cmd.py`
+for the CLI/library's own dedicated, fixture-driven test coverage, including
+an invalid-entry case). The tests below cover what that function does not:
+schema well-formedness and content/sourcing rules specific to this corpus.
 """
 
 import copy
@@ -10,6 +16,8 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+
+from klayout_tools import kb
 
 KB_ROOT = Path(__file__).resolve().parent.parent / "kb"
 SCHEMA_PATH = KB_ROOT / "schema" / "entry.schema.json"
@@ -47,18 +55,16 @@ def test_entry_is_valid_json(path: Path):
     assert isinstance(data, dict)
 
 
-@pytest.mark.parametrize("path", _entry_paths(), ids=lambda p: p.stem)
-def test_entry_validates_against_schema(path: Path):
-    schema = _load_schema()
-    entry = json.loads(path.read_text())
-    # Raises jsonschema.exceptions.ValidationError on failure.
-    jsonschema.validate(instance=entry, schema=schema)
+def test_entries_validate_against_schema_and_id_matches_filename():
+    """Schema conformance and id-matches-filename for every checked-in entry,
+    via `klt kb validate`'s own implementation (`kb.validate_entries()`) --
+    not a second, hand-rolled `jsonschema.validate()` loop -- so there is one
+    place that decides what makes a kb entry valid."""
+    report = kb.validate_entries(root=KB_ROOT)
 
-
-@pytest.mark.parametrize("path", _entry_paths(), ids=lambda p: p.stem)
-def test_entry_id_matches_filename(path: Path):
-    entry = json.loads(path.read_text())
-    assert entry["id"] == path.stem
+    assert report["entry_count"] == len(_entry_paths())
+    invalid = [entry for entry in report["entries"] if not entry["valid"]]
+    assert invalid == [], invalid
 
 
 @pytest.mark.parametrize("path", _entry_paths(), ids=lambda p: p.stem)
