@@ -4,9 +4,10 @@
 # Cloudflare Pages.
 #
 # Mirrors kicad-tools/scripts/deploy-site.sh in spirit (issue #65,
-# rjwalters/kicad-tools#3688): the site is now an Astro project
-# (site/package.json), so the deploy target is the built site/dist/ output
-# rather than the static site/index.html placeholder.
+# rjwalters/kicad-tools#3688): the site is a Vite + React project
+# (site/package.json; migrated from Astro in #92), so the deploy target is
+# the built site/dist/ output — a fully static prerendered tree, no server
+# runtime required.
 #
 # Pipeline:
 #   1. build  -- `npm --prefix site ci && npm --prefix site run build`,
@@ -63,12 +64,12 @@ done
 cd "${REPO_ROOT}"
 
 if ! command -v npm >/dev/null 2>&1; then
-  err "'npm' (Node.js) not found — required to build the Astro site. Install Node 22+."
+  err "'npm' (Node.js) not found — required to build the site. Install Node 22+."
   exit 1
 fi
 
-# --- Step 1: build the Astro site -------------------------------------------
-info "Step 1/2: building the Astro site (npm --prefix site ci && run build)"
+# --- Step 1: build the site --------------------------------------------------
+info "Step 1/2: building the site (npm --prefix site ci && run build)"
 npm --prefix site ci
 npm --prefix site run build
 info "Site built to site/dist/."

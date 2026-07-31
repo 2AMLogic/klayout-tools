@@ -8,14 +8,14 @@ CI), not part of the `klt` CLI.
 ```
 scripts/
   README.md          # this file
-  deploy-site.sh     # build site/ (Astro) and deploy site/dist/ to Cloudflare Pages
+  deploy-site.sh     # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh      # pinned fetch of lambdapdk open PDK data into pdks/
 ```
 
 ## `deploy-site.sh`
 
-Builds the Astro project in [`site/`](../site) (`npm --prefix site ci && npm
---prefix site run build`, producing `site/dist/`) and deploys `site/dist/` to
+Builds the Vite + React project in [`site/`](../site) (`npm --prefix site ci
+&& npm --prefix site run build`, producing `site/dist/`) and deploys `site/dist/` to
 Cloudflare Pages (project `klayout-tools`, custom domain klayout-tools.org).
 Run it after changing the site content. Auth uses a scoped API token rather
 than wrangler OAuth — source `~/.cloudflare/rjwalters/pages-rjwalters.env`

@@ -53,7 +53,7 @@ A "block" is a directory containing:
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
 schema below is the stable contract. Per the project's rules, **breaking
 (renaming, removing, or retyping) a field is a breaking change**. New fields
-may be added without breaking the contract, so consumers (the Astro gallery
+may be added without breaking the contract, so consumers (the site's gallery
 loader, #59) should ignore unknown fields. See
 [`../json-contract.md`](../json-contract.md) for the envelope shared across
 all `klt` commands (`schema_version`, error shape, exit codes).
