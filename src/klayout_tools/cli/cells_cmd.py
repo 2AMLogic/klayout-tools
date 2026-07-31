@@ -7,7 +7,7 @@ every other ``klt`` subcommand — see ``docs/json-contract.md``.
 import argparse
 
 from ..cells import CellsError, cells_report
-from .output import emit_error, emit_success
+from .output import emit_error, emit_success, render_table
 
 
 def run(args: argparse.Namespace) -> int:
@@ -61,24 +61,6 @@ def _print_text(report: dict) -> None:
         "parents",
         "bbox_um",
     )
-    widths = [
-        max(len(headers[col]), max(len(row[col]) for row in rows))
-        for col in range(len(headers))
-    ]
-
-    def fmt(row: tuple[str, ...]) -> str:
-        # Numeric-ish columns (index, is_top, shapes, instances) right-aligned;
-        # name/children/parents/bbox_um left-aligned.
-        right_aligned = {0, 2, 3, 4}
-        return "  ".join(
-            row[col].rjust(widths[col])
-            if col in right_aligned
-            else row[col].ljust(widths[col])
-            for col in range(len(headers))
-        )
-
-    print()
-    print(fmt(headers))
-    print("  ".join("-" * widths[col] for col in range(len(headers))))
-    for row in rows:
-        print(fmt(row))
+    # Numeric-ish columns (index, is_top, shapes, instances) right-aligned;
+    # name/children/parents/bbox_um (cols 1, 5, 6, 7) left-aligned.
+    render_table(headers, rows, left_aligned={1, 5, 6, 7})

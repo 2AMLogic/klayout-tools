@@ -17,8 +17,9 @@ output.
 
 from __future__ import annotations
 
-import os
 from typing import Any
+
+from ._layout import load_layout
 
 
 class StatsError(Exception):
@@ -134,20 +135,11 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
     recognisable layout stream, or has more than one top cell (ambiguous
     bounding-box reference).
     """
-    if not os.path.exists(path):
-        raise StatsError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise StatsError(f"not a file: {path}")
+    layout = load_layout(path, StatsError)
 
-    # Imported lazily so that `klt --version` and argument parsing do not pay
-    # the cost of loading the KLayout database module.
+    # Imported lazily (after load_layout, which already paid this cost) for
+    # kdb.Box() below.
     import klayout.db as kdb
-
-    layout = kdb.Layout()
-    try:
-        layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise StatsError(f"could not read layout '{path}': {exc}") from exc
 
     dbu = layout.dbu
 

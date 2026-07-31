@@ -11,8 +11,9 @@ Headless invariant: uses the pip ``klayout`` package's batch database API
 
 from __future__ import annotations
 
-import os
 from typing import Any
+
+from ._layout import load_layout
 
 
 class LayersError(Exception):
@@ -56,20 +57,7 @@ def layers_report(path: str) -> dict[str, Any]:
     Raises :class:`LayersError` if the file is missing, unreadable, or not a
     recognisable layout stream.
     """
-    if not os.path.exists(path):
-        raise LayersError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise LayersError(f"not a file: {path}")
-
-    # Imported lazily so that `klt --version` and argument parsing do not pay
-    # the cost of loading the KLayout database module.
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    try:
-        layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise LayersError(f"could not read layout '{path}': {exc}") from exc
+    layout = load_layout(path, LayersError)
 
     layers: list[dict[str, Any]] = []
     for layer_index in layout.layer_indexes():
