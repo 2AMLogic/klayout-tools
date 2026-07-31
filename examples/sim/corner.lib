@@ -1,0 +1,7 @@
+.lib tt
+.param corner_scale=1.0
+.endl tt
+
+.lib ss
+.param corner_scale=1.15
+.endl ss

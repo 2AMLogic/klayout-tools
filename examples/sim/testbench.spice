@@ -1,0 +1,7 @@
+* klt sim worked example: resistor-divider testbench body
+* (no .control/.end -- klt sim generates those, see docs/cli/sim.md)
+.param vdd=1.8
+Vdd vdd 0 DC {vdd}
+R1 vdd out {1k*corner_scale}
+R2 out 0 1k
+C1 out 0 1n
