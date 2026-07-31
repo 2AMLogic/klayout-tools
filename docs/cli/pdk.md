@@ -33,8 +33,10 @@ repo:
 
 A **variant** is an immediate subdirectory of an install **root** that contains
 a `libs.tech/` directory (`sky130A`, `sky130B`, `gf180mcuA`–`D`). Out of scope
-for v1: the repo-local lambdapdk store (a different tree layout — a follow-up
-adapter if needed) and siliconcompiler `PathSchema` integration.
+for v1: the repo-local lambdapdk store fetched by
+[`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` (a
+different tree layout — a follow-up adapter if needed, not resolved by
+`find`/`list`/`env`) and siliconcompiler `PathSchema` integration.
 
 ## Resolution order
 
