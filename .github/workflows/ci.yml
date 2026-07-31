@@ -66,12 +66,23 @@ jobs:
       - name: Install dependencies (includes the klayout wheel)
         run: uv sync --locked --extra dev
 
+      - name: Install ngspice
+        # klt sim (docs/cli/sim.md) invokes `ngspice -b` as a subprocess --
+        # not a Python dependency, so it's installed here rather than via uv.
+        # Package-manager install per the spike's "trivially CI-installable"
+        # finding; tests skip gracefully (with a clear reason) if this binary
+        # is ever absent, but CI always has it.
+        run: sudo apt-get update && sudo apt-get install -y ngspice
+
       - name: Verify KLayout imports headlessly
         run: |
           uv run --frozen --extra dev python -c "
           import klayout.db as kdb
           print('klayout', kdb.Layout().dbu)
           "
+
+      - name: Verify ngspice runs headlessly
+        run: ngspice -v
 
       - name: pytest
         run: uv run --frozen --extra dev pytest

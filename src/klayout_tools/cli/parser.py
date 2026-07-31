@@ -17,6 +17,7 @@ from . import (
     layout_metrics_cmd,
     pdk_cmd,
     render_cmd,
+    sim_cmd,
     stats_cmd,
 )
 
@@ -207,6 +208,37 @@ def create_parser() -> argparse.ArgumentParser:
     render_parser.set_defaults(func=render_cmd.run)
 
     _add_pdk_parser(subparsers)
+
+    sim_parser = subparsers.add_parser(
+        "sim",
+        help="run a headless SPICE PVT corner matrix (ngspice)",
+        description=(
+            "Run a SPICE process/voltage/temperature corner matrix declared "
+            "by a request JSON file and report per-corner measurement "
+            "pass/fail as structured data. Invokes `ngspice -b` as a "
+            "subprocess, one process per corner -- see "
+            "docs/design/spice-corner-runner-spike.md for the design and "
+            "docs/cli/sim.md for the request/response contract."
+        ),
+    )
+    sim_parser.add_argument("request", help="path to a klt sim request JSON file")
+    sim_parser.add_argument(
+        "-o",
+        "--outdir",
+        default=None,
+        help=(
+            "override where per-corner logs/rawfiles are written when the "
+            "request sets options.keep_artifacts "
+            "(default: a `.klt/sim/` directory next to the request file)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    sim_parser.set_defaults(func=sim_cmd.run)
 
     return parser
 
