@@ -36,7 +36,10 @@ track it separately if it hasn't happened yet.
 ## Version source of truth
 
 `pyproject.toml`'s `version = "…"` is authoritative. Regenerate `uv.lock`
-(`uv lock`) whenever you bump it so the lockfile stays in sync.
+(`uv lock`) whenever you bump it so the lockfile stays in sync. The runtime
+`klayout_tools.__version__` is derived from installed package metadata
+(`importlib.metadata.version("klayout-tools")`) — there is no second bump
+site to keep in sync.
 
 ## The release sequence
 

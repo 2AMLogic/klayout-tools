@@ -1,3 +1,5 @@
+from importlib.metadata import version
+
 import pytest
 
 from klayout_tools import __version__
@@ -5,7 +7,7 @@ from klayout_tools.cli import main
 
 
 def test_version_matches_package():
-    assert __version__
+    assert __version__ == version("klayout-tools")
 
 
 def test_cli_no_subcommand_prints_scaffold(capsys):
