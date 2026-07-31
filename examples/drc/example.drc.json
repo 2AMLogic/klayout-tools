@@ -19,37 +19,6 @@
       "bbox": {
         "left": 3000,
         "bottom": 0,
-        "right": 3200,
-        "top": 10
-      },
-      "polygon": [
-        [
-          3000,
-          0
-        ],
-        [
-          3190,
-          10
-        ],
-        [
-          3010,
-          10
-        ],
-        [
-          3200,
-          0
-        ]
-      ]
-    },
-    {
-      "rule": "diff.enclosing.licon.1",
-      "description": "minimum diff enclosure of licon1",
-      "check": "enclosing",
-      "layer": "diff.drawing",
-      "cell": "TOP",
-      "bbox": {
-        "left": 3000,
-        "bottom": 0,
         "right": 3010,
         "top": 200
       },
@@ -69,6 +38,37 @@
         [
           3010,
           190
+        ]
+      ]
+    },
+    {
+      "rule": "diff.enclosing.licon.1",
+      "description": "minimum diff enclosure of licon1",
+      "check": "enclosing",
+      "layer": "diff.drawing",
+      "cell": "TOP",
+      "bbox": {
+        "left": 3000,
+        "bottom": 0,
+        "right": 3200,
+        "top": 10
+      },
+      "polygon": [
+        [
+          3000,
+          0
+        ],
+        [
+          3190,
+          10
+        ],
+        [
+          3010,
+          10
+        ],
+        [
+          3200,
+          0
         ]
       ]
     },

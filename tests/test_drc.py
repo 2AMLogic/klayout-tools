@@ -27,6 +27,13 @@ _GF180MCU_POLY2_WIDTH_THRESHOLD_DBU = 180
 CORPUS_DIR = Path(__file__).parent / "corpus"
 GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
 
+REPO_ROOT = Path(__file__).parent.parent
+# The literal, relative path baked into examples/drc/example.drc.json's "file"
+# field. `run_drc` echoes exactly the path string it is given, so the test must
+# pass this same relative string (CI runs pytest from the repo root).
+EXAMPLE_GDS = "examples/drc/example.gds"
+EXAMPLE_DRC_JSON = REPO_ROOT / "examples" / "drc" / "example.drc.json"
+
 
 def _make_violation_layout() -> kdb.Layout:
     """A layout with one clear, seeded `poly.width.1` violation.
@@ -384,4 +391,21 @@ def test_gf180mcu_corpus_cli_json_matches_run_drc(capsys):
     actual = json.loads(capsys.readouterr().out)
 
     assert exit_code == (0 if expected["status"] == "clean" else 3)
+    assert actual == expected
+
+
+def test_example_gds_matches_committed_json():
+    """Drift guard: `run_drc` on the checked-in worked example (see
+    `docs/cli/drc.md`) still produces exactly the committed
+    `examples/drc/example.drc.json`.
+
+    `run_drc`'s output is fully deterministic -- `violations` is sorted and
+    there are no timestamp/environment-dependent fields -- so no
+    normalization is needed. If this fails, either the DRC output shape or
+    the sky130 deck rules changed; regenerate the fixture per the header of
+    `examples/drc/generate.py`.
+    """
+    expected = json.loads(EXAMPLE_DRC_JSON.read_text())
+    actual = run_drc(EXAMPLE_GDS, "sky130")
+
     assert actual == expected

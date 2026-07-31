@@ -157,8 +157,12 @@ On a run with findings:
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
 | `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. |
 
-`violations` is sorted by `(rule, cell, bbox.left, bbox.bottom)` so repeated
-runs against the same input produce identical, diff-clean output.
+`violations` is sorted by
+`(rule, cell, bbox.left, bbox.bottom, bbox.right, bbox.top)` so repeated runs
+against the same input produce identical, diff-clean output. The full bbox is
+part of the key (not just the lower-left corner) so violations sharing a corner
+are still totally ordered — output stays canonical across platforms and KLayout
+builds regardless of the engine's internal shape-enumeration order.
 
 ## Exit codes
 
