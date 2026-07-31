@@ -15,6 +15,7 @@ ongoing work — see the parent issue/`ROADMAP.md` ("Beyond the phases").
 ```
 kb/
   README.md                        # this file
+  SOURCING.md                      # sourcing playbook + per-entry ingestion checklist
   schema/
     entry.schema.json              # JSON Schema (draft 2020-12) for one entry
   entries/
@@ -63,16 +64,22 @@ yet.
 ## Sourcing rules
 
 Same bar as PDKs (`CLAUDE.md`: "Open PDKs only... Never vendor proprietary
-PDK data or reference NDA'd design rules") extended to KB content:
+PDK data or reference NDA'd design rules") extended to KB content. The full
+playbook — allowed sources, what may/may not be recorded, and the per-entry
+ingestion checklist to run before opening a PR — lives in
+[`SOURCING.md`](SOURCING.md). Read it before adding or editing an entry.
+Summary:
 
-- **Open sources only**: peer-reviewed papers, textbooks (cite the
-  topology/methodology; do not reproduce copyrighted figures or text
-  verbatim), and open-silicon projects (e.g. sky130 open MPW shuttle
-  submissions, which are typically Apache-2.0/CC-licensed on acceptance).
+- **Open sources only**: open-access papers/preprints (preferred),
+  peer-reviewed papers cited for restated facts/methodology only (never
+  reproduced figures or text), textbooks, and open-silicon projects (e.g.
+  sky130 open MPW shuttle submissions, which are typically
+  Apache-2.0/CC-licensed on acceptance).
 - **Every entry's `source.citation` must be a full citation** — authors,
   title, venue/year, or repo URL plus license. No bare "industry knowledge"
   or unsourced claims.
-- **No NDA'd or proprietary material** — identical bar to the PDK rule.
+- **No NDA'd, paywalled-only-proprietary, or proprietary-PDK-specific
+  material** — identical bar to the PDK rule.
 - **When in doubt, leave it out.** The sourcing bar errs conservative, same
   spirit as the PDK rule.
 
@@ -83,8 +90,10 @@ PDK data or reference NDA'd design rules") extended to KB content:
    `source.citation`) plus whichever optional fields apply — do real source
    research and record a real, verifiable citation. Do not fabricate a
    placeholder citation.
-3. Validate: `uv run pytest tests/test_kb.py -v`. The test suite loads
+3. Work through the [`SOURCING.md`](SOURCING.md) per-entry ingestion
+   checklist before opening a PR.
+4. Validate: `uv run pytest tests/test_kb.py -v`. The test suite loads
    `kb/schema/entry.schema.json` and validates every file under
    `kb/entries/*.json` against it.
-4. Send a PR. Cite the schema summary above (or link this README) in the PR
+5. Send a PR. Cite the checklist in [`SOURCING.md`](SOURCING.md) in the PR
    description so reviewers can check the sourcing rule was followed.
