@@ -118,14 +118,15 @@ The `layout.json` schema is the contract emitted by `klt layout-metrics`
 [`../docs/cli/layout-metrics.md`](../docs/cli/layout-metrics.md) and
 `src/klayout_tools/layout_metrics.py` for the authoritative shape (the
 always-present fields are `schema_version`, `generated_at`, `slug`, `name`,
-`status`). The checked-in `blocks/` tree is bootstrapped against the [#4
-test corpus](../tests/corpus/README.md):
-[`../scripts/bootstrap-gallery-blocks.py`](../scripts/bootstrap-gallery-blocks.py)
-runs `klt layers` / `klt cells` against each corpus GDS file and writes
-`blocks/<slug>/output/layout.json` in that same shape. See
-[`../blocks/README.md`](../blocks/README.md) for what is checked in and why
-one block is intentionally left without a `layout.json` (to demonstrate the
-`no_artifacts` path on the real placeholder page below).
+`status`). The checked-in `blocks/` tree is generated from the [#4 test
+corpus](../tests/corpus/README.md):
+[`../scripts/regen-gallery-blocks.py`](../scripts/regen-gallery-blocks.py)
+materializes each corpus GDS into its block directory, renders it with
+`klt render`, and runs `klt layout-metrics` to write
+`blocks/<slug>/output/layout.json`. See
+[`../blocks/README.md`](../blocks/README.md) for what is checked in; the
+loader's `no_artifacts` path is exercised in unit tests only now that every
+checked-in block ships full artifacts.
 
 ### Layout
 
