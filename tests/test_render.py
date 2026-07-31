@@ -212,30 +212,6 @@ def test_default_format_is_text(tmp_path, capsys):
         json.loads(out)
 
 
-def test_missing_file_cli(tmp_path, capsys):
-    missing = tmp_path / "nope.gds"
-    assert main(["render", str(missing)]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "klt render" in captured.err
-    assert "not found" in captured.err
-
-
-def test_missing_file_json_format(tmp_path, capsys):
-    """`--format json` errors emit the documented JSON error envelope on
-    stderr, leave stdout empty, and exit 1."""
-    missing = tmp_path / "nope.gds"
-
-    assert main(["render", str(missing), "--format", "json"]) == 1
-    captured = capsys.readouterr()
-
-    assert captured.out == ""
-    error = json.loads(captured.err)
-    assert error["schema_version"] == 1
-    assert error["error"]["command"] == "render"
-    assert "not found" in error["error"]["message"]
-
-
 def test_no_layers_produces_empty_report(tmp_path, capsys):
     """A layout with no layers at all renders nothing, but still succeeds."""
     layout = kdb.Layout()

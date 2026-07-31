@@ -23,6 +23,7 @@ VERBS = [
     ("cells", []),
     ("stats", []),
     ("drc", ["--deck", "sky130"]),
+    ("render", []),
 ]
 
 
