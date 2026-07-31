@@ -84,5 +84,24 @@ fi
 : "${CLOUDFLARE_API_TOKEN:?source ~/.cloudflare/rjwalters/pages-rjwalters.env first}"
 : "${CLOUDFLARE_ACCOUNT_ID:?source ~/.cloudflare/rjwalters/pages-rjwalters.env first}"
 
+# The guards above only verify the *shell* variables are set — they say
+# nothing about whether they are exported, so the child `npx wrangler`
+# process below may not inherit them and would silently fall back to
+# cached OAuth (wrong account). Export explicitly.
+export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
+
+# Identity guard (mirrors kicad-tools/scripts/deploy-site.sh's
+# assert_cloudflare_account, adapted for API-token auth): refuse to deploy
+# unless CLOUDFLARE_ACCOUNT_ID matches the expected personal account. This
+# is an account identifier, not a secret — the real secret is
+# CLOUDFLARE_API_TOKEN, which is never logged or hardcoded.
+EXPECTED_CLOUDFLARE_ACCOUNT_ID="${EXPECTED_CLOUDFLARE_ACCOUNT_ID:-251e6e8626d921603fdc3f0d75576bc6}"
+if [ "${CLOUDFLARE_ACCOUNT_ID}" != "${EXPECTED_CLOUDFLARE_ACCOUNT_ID}" ]; then
+  err "WRONG Cloudflare account! Refusing to deploy."
+  err "  CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}"
+  err "  expected:             ${EXPECTED_CLOUDFLARE_ACCOUNT_ID}"
+  exit 1
+fi
+
 info "Step 2/2: deploying site/dist/ to Cloudflare Pages (branch main)."
 exec npx wrangler pages deploy site/dist --project-name klayout-tools --branch main --commit-dirty=true
