@@ -37,6 +37,32 @@ for path in sorted(Path("kb/entries").glob("*.json")):
 JSON, not YAML, per `CLAUDE.md`'s "JSON is the contract" — and it avoids
 introducing a YAML parser dependency where none currently exists.
 
+## Querying: `klt kb`
+
+An agent (or a human) can also query the KB through `klt kb` instead of
+reading `kb/entries/*.json` directly — same JSON envelope as every other
+`klt` verb (`docs/json-contract.md`: `schema_version`, error shape, exit
+codes; see `docs/cli/kb.md` for the full JSON schema of each subcommand):
+
+```
+klt kb list                # id, title, spec_class for every entry
+klt kb show <id>            # the full entry
+klt kb search <query>       # case-insensitive keyword match over title,
+                             # topology, spec_class, layout_idioms, notes
+klt kb validate             # schema + id-matches-filename check; nonzero
+                             # exit with structured per-entry errors on
+                             # any failure (this is what CI runs)
+```
+
+`search` is deliberately stdlib-simple substring matching — no embeddings, no
+index — matching this directory's flat-files design. `klt kb validate` is the
+single implementation behind both the CI gate and `tests/test_kb.py`'s own
+schema-conformance coverage; run it locally the same way CI does:
+
+```
+klt kb validate --format json
+```
+
 ## Schema
 
 Full schema: [`schema/entry.schema.json`](schema/entry.schema.json). Summary
@@ -92,8 +118,8 @@ Summary:
    placeholder citation.
 3. Work through the [`SOURCING.md`](SOURCING.md) per-entry ingestion
    checklist before opening a PR.
-4. Validate: `uv run pytest tests/test_kb.py -v`. The test suite loads
-   `kb/schema/entry.schema.json` and validates every file under
-   `kb/entries/*.json` against it.
+4. Validate: `uv run klt kb validate --format json` (same command CI runs; see
+   "Querying: `klt kb`" above). `uv run pytest tests/test_kb.py -v` also
+   covers schema conformance plus this corpus's content/sourcing rules.
 5. Send a PR. Cite the checklist in [`SOURCING.md`](SOURCING.md) in the PR
    description so reviewers can check the sourcing rule was followed.

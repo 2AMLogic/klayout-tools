@@ -8,6 +8,9 @@ authors = [{ name = "2AM Logic", email = "robb@2amlogic.com" }]
 requires-python = ">=3.10"
 dependencies = [
     "klayout>=0.29",
+    # Backs `klt kb validate` (src/klayout_tools/kb.py), so it's a runtime
+    # dependency, not dev-only -- it was dev-only before that command existed.
+    "jsonschema>=4.0",
 ]
 
 [project.urls]
@@ -20,7 +23,6 @@ klt = "klayout_tools.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "jsonschema>=4.0",
     "ruff>=0.14",
 ]
 
