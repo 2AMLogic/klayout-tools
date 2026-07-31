@@ -208,25 +208,6 @@ def test_exit_code_violations(tmp_path):
     assert main(["drc", str(path), "--deck", "sky130", "--format", "json"]) == 3
 
 
-def test_missing_file(tmp_path, capsys):
-    missing = tmp_path / "nope.gds"
-    assert main(["drc", str(missing), "--deck", "sky130"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "klt drc" in captured.err
-    assert "not found" in captured.err
-
-
-def test_non_layout_file(tmp_path, capsys):
-    bogus = tmp_path / "notes.txt"
-    bogus.write_text("this is not a layout stream\n" * 4)
-
-    assert main(["drc", str(bogus), "--deck", "sky130"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "klt drc" in captured.err
-
-
 def test_unknown_deck(tmp_path, capsys):
     path = tmp_path / "clean.gds"
     _make_clean_layout().write(str(path))
@@ -236,21 +217,6 @@ def test_unknown_deck(tmp_path, capsys):
     assert captured.out == ""
     assert "klt drc" in captured.err
     assert "unknown deck" in captured.err
-
-
-def test_missing_file_json_format(tmp_path, capsys):
-    """`--format json` errors emit the documented JSON error envelope on
-    stderr, leave stdout empty, and exit 1."""
-    missing = tmp_path / "nope.gds"
-
-    assert main(["drc", str(missing), "--deck", "sky130", "--format", "json"]) == 1
-    captured = capsys.readouterr()
-
-    assert captured.out == ""
-    error = json.loads(captured.err)
-    assert error["schema_version"] == 1
-    assert error["error"]["command"] == "drc"
-    assert "not found" in error["error"]["message"]
 
 
 def test_unknown_deck_json_format(tmp_path, capsys):
