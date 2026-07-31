@@ -32,10 +32,10 @@ an agent needs instead:
 
 - **Structured data access** — layouts parsed into clean Python objects
 - **Machine-readable output** — every CLI command supports `--format json`
-- **Programmatic modification** — edit layouts without a GUI
-- **MCP server** — expose the toolkit directly to agent frameworks
-- **LLM reasoning interface** — purpose-built module for layout decisions,
-  with geometric execution handled by tools, not tokens
+- **Programmatic modification** (planned) — edit layouts without a GUI
+- **MCP server** (planned) — expose the toolkit directly to agent frameworks
+- **LLM reasoning interface** (planned) — purpose-built module for layout
+  decisions, with geometric execution handled by tools, not tokens
 
 ## Status
 
@@ -60,7 +60,7 @@ pip install git+https://github.com/2AMLogic/klayout-tools
 [RELEASING.md](RELEASING.md) — `pip install klayout-tools` will work once
 that lands.)
 
-## Quick start (aspirational — the interface contract)
+## Quick start
 
 ```bash
 klt layers design.gds                    # enumerate layers, JSON out
