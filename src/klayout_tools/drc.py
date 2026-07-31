@@ -70,8 +70,12 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     ``docs/json-contract.md``); it starts at ``1`` and only increments when
     this command's JSON shape changes in a way that isn't purely additive.
 
-    ``violations`` is sorted by ``(rule, cell, bbox.left, bbox.bottom)`` for
-    deterministic, diff-clean output across repeated runs on the same input.
+    ``violations`` is sorted by
+    ``(rule, cell, bbox.left, bbox.bottom, bbox.right, bbox.top)`` for
+    deterministic, diff-clean output. The full bbox is included in the key so
+    violations that share a corner are still totally ordered, keeping output
+    canonical across platforms/KLayout builds regardless of the engine's
+    internal shape-enumeration order.
 
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, or a rule is malformed (e.g. a two-layer check missing
@@ -151,7 +155,14 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
 
     violations.sort(
-        key=lambda v: (v["rule"], v["cell"], v["bbox"]["left"], v["bbox"]["bottom"])
+        key=lambda v: (
+            v["rule"],
+            v["cell"],
+            v["bbox"]["left"],
+            v["bbox"]["bottom"],
+            v["bbox"]["right"],
+            v["bbox"]["top"],
+        )
     )
 
     return {
