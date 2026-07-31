@@ -9,7 +9,7 @@ import argparse
 import sys
 
 from .. import __version__
-from . import cells_cmd, drc_cmd, layers_cmd, pdk_cmd, stats_cmd
+from . import cells_cmd, drc_cmd, layers_cmd, layout_metrics_cmd, pdk_cmd, stats_cmd
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -114,6 +114,47 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     drc_parser.set_defaults(func=drc_cmd.run)
+
+    layout_metrics_parser = subparsers.add_parser(
+        "layout-metrics",
+        help="emit a normalized layout.json per block from existing klt output",
+        description=(
+            "Aggregate klt layers/cells/drc output for a block directory into "
+            "a single normalized layout.json, the gallery site's data "
+            "contract (epic #13). Never recomputes metrics ad hoc -- it "
+            "calls the same library functions that back klt layers/klt "
+            "cells/klt drc."
+        ),
+    )
+    layout_metrics_parser.add_argument(
+        "block", help="path to a block directory (e.g. blocks/example-block)"
+    )
+    layout_metrics_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "DRC deck to run for the drc.violation_count field (currently: "
+            "sky130, gf180mcu). Omit to skip DRC entirely."
+        ),
+    )
+    layout_metrics_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="override the output path (default: <block>/output/layout.json)",
+    )
+    layout_metrics_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print layout.json without writing any file",
+    )
+    layout_metrics_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    layout_metrics_parser.set_defaults(func=layout_metrics_cmd.run)
 
     _add_pdk_parser(subparsers)
 
