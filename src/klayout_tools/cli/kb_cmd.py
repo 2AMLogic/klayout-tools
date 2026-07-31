@@ -110,6 +110,13 @@ def _print_show_text(report: dict) -> None:
     if notes:
         print(f"notes: {notes}")
 
+    artifacts = entry.get("artifacts")
+    if artifacts:
+        if artifacts.get("netlist"):
+            print(f"artifacts.netlist: {artifacts['netlist']}")
+        if artifacts.get("layout"):
+            print(f"artifacts.layout: {artifacts['layout']}")
+
 
 def _print_validate_text(report: dict) -> None:
     print(f"entry_count: {report['entry_count']}")

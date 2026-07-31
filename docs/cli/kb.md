@@ -19,9 +19,12 @@ klt kb validate                 [--format text|json]
 - `search <query>` — case-insensitive keyword match over `title`, `topology`,
   `spec_class`, `layout_idioms`, and `notes`.
 - `validate` — every entry parses as JSON, validates against
-  `kb/schema/entry.schema.json`, and has `id` matching its filename stem.
-  This is the single implementation behind both the CI gate and
-  `tests/test_kb.py`'s schema-conformance coverage.
+  `kb/schema/entry.schema.json`, has `id` matching its filename stem, and —
+  when the entry sets `artifacts` — that any `artifacts.netlist`/
+  `artifacts.layout` path it references actually exists on disk (resolved
+  relative to the repository root). This is the single implementation
+  behind both the CI gate and `tests/test_kb.py`'s schema-conformance
+  coverage.
 
 Every subcommand emits through the shared envelope
 ([`docs/json-contract.md`](../json-contract.md): `schema_version`, error
@@ -58,7 +61,8 @@ An empty `kb/entries/` is success (exit `0`), not an error.
     "sizing_approach": "...",
     "layout_idioms": ["...", "..."],
     "source": { "citation": "...", "url": "...", "license_or_openness": "..." },
-    "notes": "..."
+    "notes": "...",
+    "artifacts": { "netlist": "examples/...", "layout": "path/to.gds" }
   }
 }
 ```
@@ -107,8 +111,11 @@ skipped, never a match. No result is success (exit `0`), not an error.
 - `entries[].errors` — structured, human-readable messages for that entry:
   JSON-Schema validation errors (`<json-pointer path>: <message>`, or bare
   `<message>` when the error is at the document root), an `id` that doesn't
-  match the filename stem, or "invalid JSON" for a file that doesn't parse.
-  Empty when `valid` is `true`.
+  match the filename stem, "invalid JSON" for a file that doesn't parse, or
+  `artifacts/<netlist|layout>: referenced path does not exist: <path>` when
+  the entry sets `artifacts` but the referenced file is missing (paths are
+  resolved relative to the repository root, e.g. `artifacts.netlist:
+  "examples/kb/<id>/testbench.spice"`). Empty when `valid` is `true`.
 
 A malformed `kb/entries/*.json` file or a schema mismatch produces a
 per-entry `valid: false` with a populated `errors` array — it does **not**

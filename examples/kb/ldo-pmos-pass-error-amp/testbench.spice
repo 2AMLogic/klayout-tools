@@ -1,0 +1,35 @@
+* kb artifact for kb/entries/ldo-pmos-pass-error-amp.json: a PMOS-pass LDO
+* with a single-stage error-amp feedback loop, matching that entry's
+* topology. The error amp is modeled behaviorally (finite-gain block driving
+* the pass-gate from the feedback error) rather than at the transistor
+* level, the same "ideal element" fidelity used by examples/sim's own
+* worked example; the pass device is a generic (non-PDK) PMOS model. The
+* output node carries an explicit ESR in series with the output capacitor,
+* the compensation zero this topology's stability relies on (see the
+* entry's sizing_approach).
+* (no .control/.end -- klt sim generates those, see docs/cli/sim.md)
+.param vin_val=3.3
+.param vref_val=0.9
+.param gain=500
+.model kb_ldo_pmos PMOS(LEVEL=1 VTO=-0.7 KP=50u LAMBDA=0.02)
+
+Vin vin 0 DC {vin_val}
+Vref vref_node 0 DC {vref_val}
+
+* Single-stage error amplifier: a finite-gain block driving the pass-device
+* gate from (Vfb - Vref), clamped to the [0, Vin] rail the real gate node is
+* bounded by.
+Bea gate 0 V = min(v(vin), max(0, (v(vin) / 2) + {gain} * (v(fb) - v(vref_node))))
+
+* PMOS pass device: source tied to the unregulated input rail, gate driven
+* by the error amp, drain at the regulated output.
+Mpass out gate vin vin kb_ldo_pmos W=2000u L=1u
+
+* Feedback divider (Vfb = Vout/2, so the loop regulates Vout to 2*vref).
+Rfb1 out fb 100k
+Rfb2 fb 0 100k
+
+* Load plus an output capacitor with explicit ESR.
+Rload out 0 1.8k
+Resr out cout_node 1
+Cout cout_node 0 1u
