@@ -102,6 +102,18 @@ the signal that a PR is not mergeable.
   — full walkthrough (Homebrew Qt6/Python/Ruby, `build4mac.py`, deploy,
   headless verification), tested on Apple Silicon with KLayout v0.30.10.
 
+## Agent skills
+
+Curated procedures (with reference data) that agents working in this repo
+load on demand:
+
+- [spec-review](.claude/skills/spec-review/SKILL.md) — expert-EE opinion on
+  a block's draft target spec: per-line achievability against published
+  best practice (open literature, cited), evidence checks against the
+  repo's device characterization, block-class completeness and
+  corner-binding checks, and a ratify / ratify-with-amendments / defer
+  verdict. Worked example: [`examples/spec-review/`](examples/spec-review/).
+
 ## Design notes
 
 Spikes and engine surveys — proposals and findings, not commitments.
