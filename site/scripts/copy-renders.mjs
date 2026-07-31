@@ -25,6 +25,12 @@
  *     (the content-pipeline / public-repo gate, #62 — not yet wired up, so
  *     this never fires today), `layout_file` is staged the same way so the
  *     detail page's download link resolves.
+ *   - Signals waveform artifacts (issue #100, Epic #90 Phase 2): every
+ *     `signals.corners[].waveform` path (relative to `output/`, same
+ *     convention as `renders`) is staged the same way, so the block detail
+ *     page's `WaveformViewer` can `fetch()` it client-side at
+ *     `/blocks/<slug>/<waveform path>`. Absent for every block until the
+ *     signals pipeline (#99) lands.
  *
  * Discovery rules mirror `src/data/loadLayouts.ts`: immediate subdirectories
  * of `blocks/`, skipping hidden / `_`-prefixed entries. The block directory
@@ -133,6 +139,7 @@ function main() {
   let renderCount = 0;
   let blocksWithRenders = 0;
   let downloadCount = 0;
+  let signalsCount = 0;
 
   for (const { slug, dir } of discoverBlocks(root)) {
     const layout = readLayoutJson(dir);
@@ -154,11 +161,19 @@ function main() {
     if (layout.downloadable === true && typeof layout.layout_file === "string") {
       if (stageFile(dir, destRoot, slug, layout.layout_file)) downloadCount += 1;
     }
+
+    const corners = Array.isArray(layout.signals?.corners) ? layout.signals.corners : [];
+    for (const corner of corners) {
+      const relPath = corner && typeof corner === "object" ? corner.waveform : null;
+      if (typeof relPath !== "string") continue;
+      if (stageFile(dir, destRoot, slug, relPath)) signalsCount += 1;
+    }
   }
 
   console.log(
-    `[copy-renders] staged ${renderCount} render(s) from ${blocksWithRenders} block(s) ` +
-      `and ${downloadCount} downloadable layout file(s) into ${destRoot}`,
+    `[copy-renders] staged ${renderCount} render(s) from ${blocksWithRenders} block(s), ` +
+      `${downloadCount} downloadable layout file(s), and ${signalsCount} signals waveform(s) ` +
+      `into ${destRoot}`,
   );
 }
 
