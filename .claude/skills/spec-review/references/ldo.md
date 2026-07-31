@@ -1,9 +1,9 @@
 # Spec-review reference: LDO regulator
 
-**Reference date: 2026-07-31.** Ranges below are for a 130–180 nm-class open
-PDK, PMOS-pass LDOs in the 1–100 mA class (see KB entry
-`kb/entries/ldo-pmos-pass-error-amp.json`). Refresh from current literature
-when web access allows.
+**Reference date: 2026-07-31 (errata: 2026-07-31 — see Changelog).** Ranges
+below are for a 130–180 nm-class open PDK, PMOS-pass LDOs in the 1–100 mA
+class (see KB entry `kb/entries/ldo-pmos-pass-error-amp.json`). Refresh from
+current literature when web access allows.
 
 ## Canonical spec-line checklist
 
@@ -83,10 +83,39 @@ Anchors:
   the design must own it (bleeder current counted in Iq).
 - **No current-limit row.** An LDO spec without a current limit / short
   behavior line has not been through a failure-mode pass.
-- **Dropout at the wrong corner.** Dropout binds at **SS/cold** (worst
-  PMOS on-resistance at max load) and low VIN; Iq binds at **FF/hot**;
-  stability margin typically binds at light load, **FF/cold**. Every row
-  should name its corner.
+- **Dropout at the wrong corner — binding is regime-dependent.** Dropout is
+  set by the pass FET's on-resistance at max load, and *which* corner
+  maximizes that on-resistance depends on how much overdrive the error amp
+  has left to give the pass gate:
+  - **Overdrive-limited pass device** (low-headroom design — the error amp
+    is already driving the gate close to its rail, so overdrive at the
+    dropout operating point is small) → dropout binds at **SS/hot**:
+    mobility degradation at high temperature dominates on-resistance when
+    overdrive can't be increased to compensate.
+  - **Vth-limited pass device** (ample overdrive available at the dropout
+    operating point) → dropout binds at **SS/cold**, the classic case:
+    cold's higher Vth (and correspondingly lower overdrive) dominates
+    on-resistance despite cold's higher mobility.
+  Evidence-first: this is a measured correction, not a hypothesis — a
+  gf180-ldo review found dropout binding at ss/hot (measured worst case
+  121 mV at ss/125 °C) for an overdrive-limited pass device, where this
+  file's prior unconditional "dropout binds at SS/cold" heuristic would
+  have mislabeled a correct corner-binding finding as a spec error. A repo's own
+  PVT sweep always outranks this reference — request the pass device's
+  overdrive at the dropout operating point before asserting a corner, and
+  do not flag a measured ss/hot dropout bind as wrong without checking the
+  overdrive regime first. Iq binds at **FF/hot**; stability margin
+  typically binds at light load, **FF/cold**. Every row should name its
+  corner **and** the regime that determines it, for pass-device-bound rows.
 - **Accuracy row that silently excludes the reference.** State whether the
   bandgap's error is inside or outside the LDO's accuracy number —
   double-counting (or omitting) it corrupts the system error budget.
+
+## Changelog
+
+- 2026-07-31: Amended the dropout corner-binding pitfall to be
+  regime-conditioned (overdrive-limited pass device → SS/hot,
+  mobility-dominated; Vth-limited pass device → SS/cold, Vth-dominated).
+  The prior unconditional "SS/cold" heuristic mislabeled a gf180-ldo spec
+  review's measured ss/hot worst case as a finding against a correct spec.
+  Origin: #131.
