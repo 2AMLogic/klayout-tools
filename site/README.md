@@ -1,23 +1,36 @@
 # klayout-tools.org site
 
-This directory holds two things:
+This directory holds the Astro project that builds and deploys
+klayout-tools.org (Epic #13). It also still carries
+[`index.html`](index.html), the pre-gallery static landing page — retained
+for reference but no longer part of the deploy target as of #65; it is
+superseded by the Astro `src/pages/index.astro` page built into
+`site/dist/`.
 
-- [`index.html`](index.html) — the single static landing page currently
-  **deployed** to Cloudflare Pages (project `klayout-tools`, custom domain
-  klayout-tools.org) via [`../scripts/deploy-site.sh`](../scripts/deploy-site.sh).
-- An Astro project (this README's focus below) — the future gallery site
-  (Epic #13), not yet wired into the deploy pipeline (#65). It coexists with
-  `index.html` until the deploy pipeline switches over and `index.html` is
-  retired.
+## Build and deploy
 
-To publish a change to the *currently live* page, edit `index.html`, then run
-the deploy script (see [`scripts/README.md`](../scripts/README.md) for the
-auth flow):
+[`../scripts/deploy-site.sh`](../scripts/deploy-site.sh) builds this Astro
+project (`npm --prefix site ci && npm --prefix site run build`, producing
+`site/dist/`) and deploys `site/dist/` to Cloudflare Pages (project
+`klayout-tools`, custom domain klayout-tools.org). Auth uses a scoped API
+token, not wrangler OAuth — see [`scripts/README.md`](../scripts/README.md)
+for the auth flow.
 
 ```
 source ~/.cloudflare/rjwalters/pages-rjwalters.env
 scripts/deploy-site.sh
 ```
+
+Pass `--no-deploy` to run the build only (verify `site/dist/` locally
+without touching Cloudflare):
+
+```
+scripts/deploy-site.sh --no-deploy
+```
+
+`deploy-site.sh` builds and deploys whatever is already checked into
+`blocks/` and `site/` — regenerating `blocks/*/output/layout.json` or
+renders is the content pipeline (#62), out of scope for this script.
 
 ## Astro gallery project
 
@@ -78,10 +91,12 @@ one block is intentionally left without a `layout.json` (to demonstrate the
 ```
 site/
   README.md          # this file
-  index.html          # the currently-deployed static landing page
+  index.html          # pre-gallery static landing page (kept for reference,
+                       # no longer deployed as of #65)
   package.json        # Astro + TypeScript dependencies (isolated from repo root)
   astro.config.mjs    # Astro configuration (static output)
   tsconfig.json       # extends astro/tsconfigs/strict
+  dist/                # build output (git-ignored, deploy target as of #65)
   src/
     data/
       types.ts         # Layout type (schema v1, mirrors klt layout-metrics / #61)
@@ -96,4 +111,6 @@ site/
 This issue (#59) ships the scaffold, the layout data loader, and a landing
 page that folds in #11's closed-loop vision statement plus a placeholder
 block list proving the loader end-to-end. The polished gallery index (cards,
-renders, metrics) is #63, and the per-block detail page is #64.
+renders, metrics) is #63, and the per-block detail page is #64. The deploy
+pipeline itself (`scripts/deploy-site.sh` building this project and
+publishing `site/dist/`) is #65.
