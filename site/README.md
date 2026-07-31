@@ -139,6 +139,26 @@ files outside its project root, so the `predev`/`prebuild` npm hooks run
 `site/public/blocks/<slug>/...` (git-ignored, regenerated every run) so they
 are served from `/blocks/<slug>/...`.
 
+### Waveform viewer (Signals section)
+
+When a block's `layout.json` has a `signals` field (see `LayoutSignals` in
+`src/data/types.ts`), `DetailPage.tsx` renders a "Signals" section between
+Metrics and Downloads, using `src/components/waveform/WaveformViewer.tsx`.
+It supports zooming the time axis, placing a click cursor with a
+nearest-sample readout, toggling per-node visibility, and selecting/
+overlaying multiple PVT corners. Blocks with no `signals` field render
+exactly as before (the section is omitted, not shown empty).
+
+Per-corner waveform sample data is never inlined into `layout.json` — each
+`signals.corners[]` entry references a `waveform` JSON artifact path
+(relative to the block's `output/` directory, matching the same convention
+`renders` values use), staged by `copy-renders.mjs` alongside renders and
+fetched client-side by the viewer. This mirrors `klt sim`'s own
+`artifacts.waveform` contract (`docs/cli/sim.md`) — see the field docs on
+`Layout.signals` in `types.ts` for the full shape and its provisional
+status pending issue #99 (the signals pipeline that will produce this data
+for real).
+
 ### Bootstrap data
 
 The `layout.json` schema is the contract emitted by `klt layout-metrics`
@@ -197,6 +217,12 @@ site/
         badge.tsx           # shadcn/ui-style Badge primitive
         card.tsx             # shadcn/ui-style Card primitives
         table.tsx            # shadcn/ui-style Table primitives
+      waveform/
+        WaveformViewer.tsx    # interactive Signals-section viewer (#100)
+        WaveformViewer.test.tsx
+        waveformMath.ts        # pure zoom/cursor/format helpers
+        waveformMath.test.ts
+        types.ts                # WaveformData artifact shape (mirrors klt sim)
     data/
       types.ts             # Layout type (schema v1, mirrors klt layout-metrics)
       loadLayouts.ts        # build-time layout data loader
@@ -205,9 +231,11 @@ site/
       buildInfo.test.ts
     lib/
       utils.ts             # shadcn's `cn` class-merging helper
+      blockAssets.ts        # block-relative asset URL helper (renders/signals)
     pages/
       IndexPage.tsx         # landing page (closed-loop vision statement) + gallery card grid
       DetailPage.tsx         # per-block detail page
+    setupTests.ts           # vitest global setup (@testing-library/jest-dom matchers)
 ```
 
 ### Scope
@@ -222,4 +250,7 @@ downloads section gated on #62. The deploy pipeline itself
 is #65. Issue #92 (Epic #90 Phase 1) replatformed all of the above from
 Astro to Vite + React + Tailwind + shadcn/ui without changing URLs, content,
 the data contract, or the deploy story — laying the groundwork for Epic
-#90's interactive phases.
+#90's interactive phases. Issue #100 (Epic #90 Phase 2) added the Signals
+section and its waveform viewer, built against a hand-written fixture (see
+`blocks/README.md`'s "Signals fixture" note) since the signals pipeline
+issue (#99) that will produce this data for real had not yet merged.

@@ -7,5 +7,35 @@
   "description": "sky130 standard-cell layout `sky130_fd_sc_hd__inv_1` from the #4 test corpus.",
   "layer_count": 22,
   "cell_count": 1,
-  "instance_count": 0
+  "instance_count": 0,
+  "signals": {
+    "schema_version": 1,
+    "default_corner_id": "tt/1.800V/27C",
+    "corners": [
+      {
+        "corner_id": "tt/1.800V/27C",
+        "process": "tt",
+        "supply_v": { "vdd": 1.8 },
+        "temperature_c": 27,
+        "status": "pass",
+        "measurements": [
+          { "name": "tphl", "value": 8.2e-11, "unit": "s", "status": "pass", "margin": 1.18e-10 },
+          { "name": "tplh", "value": 8.2e-11, "unit": "s", "status": "pass", "margin": 1.18e-10 }
+        ],
+        "waveform": "signals/tt_1.800V_27C.json"
+      },
+      {
+        "corner_id": "ss/1.620V/125C",
+        "process": "ss",
+        "supply_v": { "vdd": 1.62 },
+        "temperature_c": 125,
+        "status": "pass",
+        "measurements": [
+          { "name": "tphl", "value": 1.9e-10, "unit": "s", "status": "pass", "margin": 1.0e-11 },
+          { "name": "tplh", "value": 1.9e-10, "unit": "s", "status": "pass", "margin": 1.0e-11 }
+        ],
+        "waveform": "signals/ss_1.620V_125C.json"
+      }
+    ]
+  }
 }

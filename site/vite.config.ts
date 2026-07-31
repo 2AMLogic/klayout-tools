@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { readFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig, type Plugin } from "vite";
@@ -78,5 +79,12 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+  },
+  test: {
+    // Default environment stays "node" — the pre-existing loader/build-info
+    // suites don't touch the DOM. Component tests that need one (e.g.
+    // `WaveformViewer.test.tsx`) opt in per-file via a
+    // `// @vitest-environment jsdom` pragma at the top of the file.
+    setupFiles: ["./src/setupTests.ts"],
   },
 });

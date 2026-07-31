@@ -48,6 +48,21 @@ Seven blocks, one per GDS file in the #4 test corpus:
 demonstrates the loader's `no_artifacts` handling on a real, non-synthetic
 block directory rather than only in unit tests.
 
+## Signals fixture (provisional, pending #99)
+
+`sky130_fd_sc_hd__inv_1/output/layout.json`'s `signals` section and its
+`output/signals/*.json` waveform artifacts are a **hand-built fixture**
+added by issue #100 (Epic #90 Phase 2, the waveform viewer) to exercise the
+end-to-end detail-page/staging path against real gallery data, since #99
+("Gallery: signals pipeline") had not landed real `klt sim` output at the
+time. The shape mirrors `klt sim`'s own JSON contract (`docs/cli/sim.md`)
+as closely as possible — see the field docs on `Layout.signals` in
+`site/src/data/types.ts` — but the actual sample values are synthetic (a
+plausible RC-edge inverter transient, not simulator output). Re-running
+`scripts/bootstrap-gallery-blocks.py` will drop this fixture (it doesn't
+know about `signals`); once #99 lands, regenerate this block for real and
+this fixture note can be deleted.
+
 ## License note
 
 `layout.json` metrics here are derived from the #4 corpus GDS files, which

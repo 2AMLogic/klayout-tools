@@ -1,5 +1,7 @@
 import type { Layout } from "@/data/types";
 import { Table, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { WaveformViewer } from "@/components/waveform";
+import { blockAssetUrl } from "@/lib/blockAssets";
 
 /**
  * Per-block detail page (ported from `[slug].astro` in issue #92's Astro ->
@@ -10,7 +12,9 @@ import { Table, TableBody, TableRow, TableHead, TableCell } from "@/components/u
  * 404). Shows the block's available per-layer renders (the `renders` map,
  * staged by `site/scripts/copy-renders.mjs`), name + description, a
  * metrics table covering every present optional field (omit-absent rule —
- * a missing field is never rendered as "null"/"undefined"), a downloads
+ * a missing field is never rendered as "null"/"undefined"), a Signals
+ * section (issue #100, Epic #90 Phase 2) gated behind `layout.signals` and
+ * rendered by `@/components/waveform`'s `WaveformViewer`, a downloads
  * section gated behind `layout.downloadable`, and a back-link to the
  * gallery index.
  *
@@ -21,15 +25,6 @@ import { Table, TableBody, TableRow, TableHead, TableCell } from "@/components/u
  */
 export interface DetailPageProps {
   layout: Layout;
-}
-
-/**
- * Served URL for a path relative to the block's `output/` directory (the
- * convention `renders`/`layout_file` values use — see `types.ts`), staged
- * by `copy-renders.mjs` into `public/blocks/<slug>/...`.
- */
-function blockAssetUrl(slug: string, relPath: string): string {
-  return `/blocks/${slug}/${relPath.replace(/^\.?\//, "")}`;
 }
 
 const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
@@ -134,6 +129,13 @@ export function DetailPage({ layout }: DetailPageProps) {
           <p className="text-fog-dim">No metrics available.</p>
         )}
       </section>
+
+      {layout.signals !== undefined && (
+        <section aria-label="Signals" className="mt-9">
+          <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Signals</h2>
+          <WaveformViewer slug={layout.slug} signals={layout.signals} />
+        </section>
+      )}
 
       <section aria-label="Downloads" className="mt-9">
         <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Downloads</h2>
