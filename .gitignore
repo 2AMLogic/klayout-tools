@@ -6,6 +6,10 @@ site/node_modules/
 site/dist/
 .pytest_cache/
 
+# Fetched open PDK data (scripts/fetch-pdks.sh) — tracked: pdks/README.md only
+pdks/*
+!pdks/README.md
+
 # Repo Skills machine-local install metadata (absolute source path + timestamp)
 .claude/skills/repo/.install-local.json
 .claude/skills/repo/logs/
