@@ -8,7 +8,7 @@ PyPI via trusted publishing.
 > `vX.Y.Z` on the merged commit → push the tag. Pushing the tag is what
 > triggers the publish workflow.
 
-## One-time prerequisite (human-only, do this before the first release)
+## One-time prerequisite (human-only — completed before v0.1.0; kept for reference)
 
 `publish.yml` publishes using [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)
 (OIDC) — there is no `PYPI_TOKEN` secret stored in this repo. Before the
@@ -81,14 +81,11 @@ Let `X.Y.Z` be the new version.
 - Once green, confirm the new version is live:
   `pip index versions klayout-tools` or check
   `https://pypi.org/project/klayout-tools/`.
-- `pip install klayout-tools` (and the README's "not yet published" caveat)
-  can be updated to drop the caveat once the first version has actually
-  published.
 
 ## Quick checklist
 
-- [ ] One-time PyPI trusted-publisher registration done (see above) —
-      only needed before the very first release.
+- [x] One-time PyPI trusted-publisher registration (see above) — completed
+      before v0.1.0.
 - [ ] Version bumped in `pyproject.toml`; `uv.lock` regenerated to match.
 - [ ] Bump commit merged to `main` via a PR.
 - [ ] Annotated tag `vX.Y.Z` created on the merged commit on `main`.

@@ -9,6 +9,7 @@ CI), not part of the `klt` CLI.
 scripts/
   README.md          # this file
   deploy-site.sh     # deploy site/ to Cloudflare Pages (klayout-tools.org)
+  fetch-pdks.sh      # pinned fetch of lambdapdk open PDK data into pdks/
 ```
 
 ## `deploy-site.sh`
@@ -22,4 +23,15 @@ comment for details.
 ```
 source ~/.cloudflare/rjwalters/pages-rjwalters.env
 scripts/deploy-site.sh
+```
+
+## `fetch-pdks.sh`
+
+Downloads a pinned release of [lambdapdk](https://github.com/siliconcompiler/lambdapdk)
+(Apache-2.0) into `pdks/` — gitignored except for `pdks/README.md`. Run it to
+populate local open PDK data; see [`pdks/README.md`](../pdks/README.md) for
+what lands where.
+
+```
+scripts/fetch-pdks.sh
 ```

@@ -103,8 +103,8 @@ follow-up issue is filed to vendor a design directly; see "Recommendation."
   the current corpus's "tens of KB total" budget noted in
   `tests/corpus/README.md`), and deciding then whether that fits "small,
   checked-in" or needs a fetch-on-demand path instead.
-- Note: this repo does not currently have a `scripts/fetch-pdks.sh`
-  fetch-on-demand script — PDK acquisition today goes through
+- Note: `scripts/fetch-pdks.sh` fetches pre-built lambdapdk PDK data, not
+  generated designs — open_pdks-layout PDK acquisition goes through
   `ciel`/`volare` installs discovered by the new `klt pdk` verb
   (`src/klayout_tools/pdk.py`, landed after this issue was filed). Any
   future "fetch a generated design" script would need its own pattern,

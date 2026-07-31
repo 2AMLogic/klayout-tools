@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/2AMLogic/klayout-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/2AMLogic/klayout-tools/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: scaffold](https://img.shields.io/badge/status-scaffold-orange.svg)](ROADMAP.md)
+[![PyPI](https://img.shields.io/pypi/v/klayout-tools)](https://pypi.org/project/klayout-tools/)
+[![Status: early alpha](https://img.shields.io/badge/status-early%20alpha-yellow.svg)](ROADMAP.md)
 
 **Tools for AI agents to work with IC layout.**
 
@@ -39,10 +40,12 @@ an agent needs instead:
 
 ## Status
 
-Scaffold. The pattern is proven (see the kicad-tools
-[gallery](https://kicad-tools.org) of boards designed end-to-end by agents);
-this repo is where it meets silicon. See [ROADMAP.md](ROADMAP.md) for the
-build order and [CLAUDE.md](CLAUDE.md) if you are an agent working here.
+Early alpha — [v0.1.0 is on PyPI](https://pypi.org/project/klayout-tools/)
+with the first five verbs (`layers`, `stats`, `cells`, `drc`, `pdk`). The
+pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
+boards designed end-to-end by agents); this repo is where it meets silicon.
+See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
+if you are an agent working here.
 
 ## Install
 

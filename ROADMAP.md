@@ -14,18 +14,17 @@ issue or epic contradicts them, one of the two gets updated.
 Mirroring the kicad-tools build order, adapted to IC layout. Each phase ends
 with something an agent can use unaided and a worked example in `examples/`.
 
-## Phase 0 — scaffold (now)
+## Phase 0 — scaffold (done)
 
-Repo, license, CI skeleton, project site. No functional code yet; the README
-states the interface contract we are building toward.
+Repo, license, CI skeleton, project site.
 
-## Phase 1 — read
+## Phase 1 — read (done — v0.1.0)
 
 Parse GDSII/OASIS via KLayout's `pya` into clean Python objects. CLI: `klt
 layers`, `klt cells`, `klt stats`, all with `--format json`. The test corpus
 starts with open PDK example layouts (sky130).
 
-## Phase 2 — check
+## Phase 2 — check (first cut in v0.1.0)
 
 `klt drc` running KLayout DRC decks headless with structured violation
 output; deck adapters for open PDKs first. This is the ERC/DRC moment from
