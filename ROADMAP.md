@@ -35,6 +35,15 @@ kicad-tools: the step that lets an agent know whether it is wrong.
 Programmatic layout modification: cell instantiation, geometry ops,
 parametric cells. Reusable blocks the way kicad-tools ships circuit blocks.
 
+This phase has been spiked:
+[docs/design/layout-generator-spike.md](docs/design/layout-generator-spike.md)
+surveys BAG-class layout-generator frameworks (BAG3/xbase, laygo2,
+gdsfactory, ALIGN, MAGICAL, KLayout PCells), proposes the JSON contract for
+a generator capability, and recommends a Python/pya reference
+implementation first, per the rewrite rule, with a `pyo3`-backed Rust core
+only later and only where measured to hold. It is a proposal, not a
+commitment — no implementation epic is scheduled by it alone.
+
 ## Phase 4 — extract & verify
 
 `klt lvs` and netlist/parasitic extraction, headless with structured
