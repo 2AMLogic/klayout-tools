@@ -28,13 +28,17 @@ Scope (phase 2, this module's current state):
   :func:`manhattan_backbone`) between the two named ports on the resolved
   ``routing.layer_role`` layer at ``routing.width_um`` width, built natively
   as a ``pya.Path``. ``nets[]`` reports ``routed`` and ``route_length_um``
-  per net; a net the router cannot connect (e.g. a required jog through an
-  inter-block channel narrower than ``routing.width_um``, or a >2-pin bundle
-  net -- bundle routing is out of scope this phase, spike section 5 item 2)
-  is reported in ``unrouted_nets[]`` rather than failing the whole request.
-  A non-empty ``unrouted_nets[]`` with every block placed is a *partial
-  success* (exit code 3; see ``cli/gen_compose_cmd.py`` and the spike's
-  "Proposed exit codes").
+  per net; a net the router cannot connect -- a required jog through an
+  inter-block channel narrower than ``routing.width_um``; a route that would
+  cross a guard/collector ring's own tap loop or plow through a block's
+  interior (e.g. a same-facing port pair reaching a pin on a block's far
+  side, or an unrelated third block in a longer row -- :func:`route_two_pin`,
+  #199); or a >2-pin bundle net (bundle routing is out of scope this phase,
+  spike section 5 item 2) -- is reported in ``unrouted_nets[]`` rather than
+  failing the whole request or silently drawing a short. A non-empty
+  ``unrouted_nets[]`` with every block placed is a *partial success* (exit
+  code 3; see ``cli/gen_compose_cmd.py`` and the spike's "Proposed exit
+  codes").
 * **``drc_hints``** (new this phase): ``matched_groups[]`` reports every
   distinct ``matched_group_id`` seen among the input blocks' own
   ``generator_report.drc_hints.matched_group_id`` (read-only echo,
@@ -519,6 +523,86 @@ def _block_gap_um(
     return hi["y0"] - lo["y1"]
 
 
+#: Port-name prefixes a ``klt gen`` generator uses for a guard/collector ring's
+#: own tap ports (``diff_pair``'s ``add_guard_ring``, ``bjt_array``'s
+#: ``add_collector_ring``, and the standalone ``guard_ring`` generator itself
+#: -- see ``gen.py``'s ``_diff_pair_describe``/``_bjt_array_describe``/
+#: ``_guard_ring_describe``). A block reporting any port with one of these
+#: prefixes has a ring drawn *around* its other ports -- any route touching a
+#: non-tap port on that block necessarily crosses the ring's own metal loop on
+#: its way in or out (#199 case 2).
+_RING_TAP_PORT_PREFIXES = ("TAP_", "COLL_")
+
+
+def _block_has_ring_taps(block: dict[str, Any]) -> bool:
+    """Whether ``block`` reports a guard/collector ring (any tap port)."""
+    return any(name.startswith(_RING_TAP_PORT_PREFIXES) for name in block["port_names"])
+
+
+def _port_edge_margin_um(
+    port_xy: tuple[float, float], direction_deg: int, bbox_um: dict[str, float]
+) -> float:
+    """Distance from a port to its own placed block's bbox edge it faces.
+
+    A ``klt gen`` port need not sit exactly on its own block's bbox boundary
+    (e.g. ``mos_array``/``diff_pair`` inset every port ~0.2um from the edge
+    regardless of ``add_guard_ring``) -- this is the amount of a route's
+    approach into that port that is *always* inside the block's own bbox,
+    regardless of where the route comes from, and therefore not evidence of
+    anything wrong. Used as the routability check's per-block allowance
+    (:func:`route_two_pin`) -- an approach that crosses *more* than this
+    margin through the block's interior is crossing something else inside it
+    (e.g. another device's pin, or -- when the extra margin matches a ring's
+    width -- the guard/collector ring, though that specific case is instead
+    caught directly by :func:`_block_has_ring_taps`, since the margin here is
+    identical whether or not a ring sits in that space).
+    """
+    x, y = port_xy
+    if direction_deg == 0:
+        return bbox_um["x1"] - x
+    if direction_deg == 180:
+        return x - bbox_um["x0"]
+    if direction_deg == 90:
+        return bbox_um["y1"] - y
+    if direction_deg == 270:
+        return y - bbox_um["y0"]
+    return 0.0  # unreachable -- direction_deg is validated before this is called
+
+
+def _segment_bbox_interior_overlap_um(
+    p0: tuple[float, float], p1: tuple[float, float], bbox_um: dict[str, float]
+) -> float:
+    """Length of axis-aligned segment ``p0``->``p1`` inside ``bbox_um``'s
+    *strict interior* (a segment that only touches the boundary, or lies
+    fully outside, returns ``0.0``).
+
+    Every :func:`manhattan_backbone` segment is horizontal or vertical by
+    construction, so only those two cases are handled; a (unreachable)
+    diagonal or zero-length segment reports no overlap rather than raising.
+    """
+    eps = 1e-9
+    bx0, by0 = bbox_um["x0"] + eps, bbox_um["y0"] + eps
+    bx1, by1 = bbox_um["x1"] - eps, bbox_um["y1"] - eps
+    if bx0 >= bx1 or by0 >= by1:
+        return 0.0  # degenerate (zero-area) bbox
+
+    x0, y0 = p0
+    x1, y1 = p1
+    horizontal = abs(y0 - y1) < 1e-9
+    vertical = abs(x0 - x1) < 1e-9
+    if horizontal and not vertical:
+        if not (by0 < y0 < by1):
+            return 0.0
+        lo, hi = sorted((x0, x1))
+        return max(0.0, min(hi, bx1) - max(lo, bx0))
+    if vertical and not horizontal:
+        if not (bx0 < x0 < bx1):
+            return 0.0
+        lo, hi = sorted((y0, y1))
+        return max(0.0, min(hi, by1) - max(lo, by0))
+    return 0.0
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -531,12 +615,34 @@ def route_two_pin(
 
     Resolves each pin's port position into the composed coordinate frame
     (port ``x_um``/``y_um`` translated by its block's ``offset_um``),
-    generates a Manhattan backbone (:func:`manhattan_backbone`), and applies a
-    first-cut routability check: when the backbone requires a jog *across* the
-    channel between the two pins' blocks and that channel is narrower than
-    ``width_um``, the wire cannot fit without overlapping a block, so the net
-    is reported unroutable (spike section 2, ``unrouted_nets[]``). This is a
-    diagnostic heuristic, not a DRC check -- ``klt drc`` remains authoritative.
+    generates a Manhattan backbone (:func:`manhattan_backbone`), and applies
+    three routability checks before reporting success -- all diagnostic
+    heuristics against the composition's own already-known geometry
+    (``bbox_um``/``ports[]``), not a DRC check (``klt drc`` remains
+    authoritative):
+
+    1. **Channel-width check** (original, phase 2): when the backbone
+       requires a jog *across* the channel between the two pins' blocks and
+       that channel is narrower than ``width_um``, the wire cannot fit
+       without overlapping a block.
+    2. **Guard/collector-ring check** (#199 case 2): a block reporting a
+       guard or collector ring (any ``TAP_*``/``COLL_*`` port -- see
+       :func:`_block_has_ring_taps`) has that ring drawn *around* its other
+       ports; a route touching one of those non-tap ports necessarily
+       crosses the ring's own metal loop on its way in or out, merging the
+       net with the ring's own tap net.
+    3. **Obstacle-overlap check** (#199 case 1): after each port's own
+       unavoidable "sit set back from my own block's edge" margin is
+       excluded (:func:`_port_edge_margin_um`), the drawn backbone must not
+       cross the *interior* of any block's bbox -- including the two pins'
+       own blocks (a same-facing port pair forces the backbone to plow
+       through the destination block's full width to reach a port on its far
+       side, e.g. crossing that block's own opposite-facing pin) and any
+       third block's bbox the straight-line/single-jog backbone happens to
+       cross in a longer row.
+
+    Any of the three reports the net unroutable (spike section 2,
+    ``unrouted_nets[]``) rather than silently drawing a short.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "reason": str | None}``.
@@ -580,6 +686,33 @@ def route_two_pin(
     vb = _DIRECTION_VECTORS[dir_b]
     stub_um = width_um
 
+    # Guard/collector-ring check (#199 case 2): a block with a ring drawn
+    # around it (any TAP_*/COLL_* port reported) cannot be reached at any
+    # *other* port without the route crossing the ring's own metal loop --
+    # on the way in for a destination pin, or on the way out for a source
+    # pin, since the ring fully encloses the block either way. Only meaningful
+    # for distinct blocks: a self-net's two ports already both sit inside the
+    # same ring, so it draws no *additional* ring crossing.
+    if pin_a["block"] != pin_b["block"]:
+        for pin, block in ((pin_a, block_a), (pin_b, block_b)):
+            if _block_has_ring_taps(block) and not pin["port"].startswith(
+                _RING_TAP_PORT_PREFIXES
+            ):
+                return {
+                    "routed": False,
+                    "route_length_um": None,
+                    "points_um": None,
+                    "reason": (
+                        f"block '{pin['block']}' has a guard/collector ring "
+                        f"(reports a TAP_*/COLL_* port) -- a route to its "
+                        f"non-tap port '{pin['port']}' would cross the ring's "
+                        "own metal loop and merge this net with the ring's tap "
+                        "net; route to the ring's own tap port instead, or "
+                        "regenerate the block with add_guard_ring/"
+                        "add_collector_ring: false"
+                    ),
+                }
+
     # Routability heuristic: a jog perpendicular to the ports' facing axis has
     # to squeeze through the channel between the two blocks. When both ports
     # face x and their y differs (a vertical jog is required), the channel is
@@ -614,6 +747,67 @@ def route_two_pin(
                 }
 
     points = manhattan_backbone(a, dir_a, b, dir_b, stub_um)
+
+    # Obstacle-overlap check (#199 case 1): sum how much of the drawn backbone
+    # lies inside each block's bbox *interior* (a boundary touch doesn't
+    # count -- see _segment_bbox_interior_overlap_um), then compare each
+    # block's total against how much crossing is unavoidable there. A pin's
+    # own block always gets an allowance equal to that port's own edge margin
+    # (_port_edge_margin_um) -- crossing exactly that much is just "the route
+    # reached the pin", not a fault. Crossing *more* than that (own blocks) or
+    # *any* amount (every other block) means the backbone plowed through a
+    # block it shouldn't have -- e.g. a same-facing port pair forcing the
+    # route through the destination's full width to reach a pin on its far
+    # side, crossing that block's own other pins on the way.
+    own_a, own_b = pin_a["block"], pin_b["block"]
+    same_block_self_net = own_a == own_b
+    allowances_um: dict[str, float] = {}
+    if not same_block_self_net:
+        allowances_um[own_a] = max(
+            0.0, _port_edge_margin_um(a, dir_a, placed_bboxes_um[own_a])
+        )
+        allowances_um[own_b] = max(
+            0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b])
+        )
+
+    overlap_by_block_um: dict[str, float] = {}
+    for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
+        for other_id, other_bbox in placed_bboxes_um.items():
+            if same_block_self_net and other_id == own_a:
+                continue  # a self-net is expected to cross its own block
+            length = _segment_bbox_interior_overlap_um(seg_p0, seg_p1, other_bbox)
+            if length > 0.0:
+                overlap_by_block_um[other_id] = (
+                    overlap_by_block_um.get(other_id, 0.0) + length
+                )
+
+    margin_eps_um = 1e-6
+    for other_id, crossed_um in overlap_by_block_um.items():
+        allowed_um = allowances_um.get(other_id, 0.0)
+        if crossed_um <= allowed_um + margin_eps_um:
+            continue
+        if other_id in (own_a, own_b):
+            reason = (
+                f"backbone crosses {crossed_um:.4g}um through its own pin's "
+                f"block '{other_id}' -- more than that pin's own "
+                f"{allowed_um:.4g}um edge margin, so the route plows through "
+                "the block's interior (e.g. a same-facing port pair reaching "
+                "a pin on the block's far side, crossing another pin on the "
+                "way) rather than approaching the pin cleanly"
+            )
+        else:
+            reason = (
+                f"backbone crosses {crossed_um:.4g}um through unrelated "
+                f"block '{other_id}''s bbox -- the route is not "
+                "point-to-point between only the two connected blocks"
+            )
+        return {
+            "routed": False,
+            "route_length_um": None,
+            "points_um": None,
+            "reason": reason,
+        }
+
     return {
         "routed": True,
         "route_length_um": _polyline_length_um(points),

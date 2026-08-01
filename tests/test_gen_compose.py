@@ -628,15 +628,21 @@ def test_compose_reports_matched_groups_from_input_blocks(tmp_path, pdk_root):
 def test_compose_integration_three_real_blocks_with_connectivity(tmp_path, pdk_root):
     # The #164 5T OTA shape: a differential pair + a current-mirror-labelled
     # load + a tail device, placed in a row and wired with two 2-pin nets.
-    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp")
-    mir = _gen_block(tmp_path, pdk_root, "diff_pair", "mir", mirror=True)
+    # add_guard_ring=False and an *opposite*-facing port pair (diffpair's east
+    # -facing _D to mirror's west-facing _S) are both required for a clean
+    # route at this phase -- see #199 (a same-facing pair, or an inbound route
+    # into a guard-ringed block, produces a spurious device-level short and is
+    # now correctly reported unroutable instead; exercised directly by
+    # test_compose_route_two_pin_rejects_same_facing_port_pair and
+    # test_compose_route_two_pin_rejects_route_into_guard_ringed_block below).
+    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp", add_guard_ring=False)
+    mir = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "mir", mirror=True, add_guard_ring=False
+    )
     tail = _gen_block(tmp_path, pdk_root, "mos_array", "tail", rows=1, cols=1)
 
-    # Pick real port names off each generator's own reported ports[].
-    dp_ports = {p["name"] for p in dp["ports"]}
-    mir_ports = {p["name"] for p in mir["ports"]}
-    dp_port = sorted(dp_ports)[0]
-    mir_port = sorted(mir_ports)[0]
+    dp_port = "Q1_1_D"  # faces east -- toward `mirror`, placed to diffpair's east
+    mir_port = "M1_1_S"  # faces west -- toward `diffpair`
 
     output = tmp_path / "ota.gds"
     report = compose(
@@ -678,6 +684,263 @@ def test_compose_integration_three_real_blocks_with_connectivity(tmp_path, pdk_r
     layout = kdb.Layout()
     layout.read(str(output))
     assert layout.cell("ota_top_0") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Obstacle-aware routing (#199): same-facing port pairs and guard-ringed
+# blocks must no longer report `routed: true` when the backbone would
+# actually short a device -- both must show up as `unrouted_nets[]` with an
+# explanatory `drc_hints.notes[]` entry instead.
+# --------------------------------------------------------------------------- #
+
+
+def _diffpair_request(dp, mir, *, dp_port, mir_port, pdk_root, spacing_um=1.0):
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": "diffpair", "generator_report": dp},
+            {"id": "mirror", "generator_report": mir},
+        ],
+        "placement": {
+            "strategy": "row",
+            "order": ["diffpair", "mirror"],
+            "spacing_um": spacing_um,
+        },
+        "connectivity": [
+            {
+                "net": "N1",
+                "pins": [
+                    {"block": "diffpair", "port": dp_port},
+                    {"block": "mirror", "port": mir_port},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+    }
+
+
+def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
+    # #199 case 1's minimal repro: two _D ports (both direction_deg: 0) on
+    # adjacent blocks. The backbone would have to cross the *destination*
+    # block's full width to reach its far-side _D pin, plowing straight
+    # through that device's own _S pin on the way -- a device-level short
+    # `klt extract` would otherwise catch only after the fact.
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp4",
+        mirror=False,
+        splits=1,
+        add_guard_ring=False,
+    )
+    mir = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "mir4",
+        mirror=True,
+        splits=1,
+        add_guard_ring=False,
+    )
+    output = tmp_path / "test4.gds"
+    request = _diffpair_request(
+        dp, mir, dp_port="Q1_1_D", mir_port="M1_1_D", pdk_root=pdk_root
+    )
+    request["options"] = {"cell_name": "test4", "output": str(output)}
+    report = compose(request)
+
+    # Partial success -- blocks still placed, but the net is not routed.
+    assert output.is_file()
+    assert report["unrouted_nets"] == ["N1"]
+    assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["route_length_um"] is None
+    assert any(
+        "N1" in note and "mirror" in note for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_rejects_same_facing_port_pair_across_a_third_block(tmp_path, pdk_root):
+    # The same same-facing short, but with the two same-facing blocks not
+    # adjacent -- the backbone also has to cross clean through the
+    # in-between block's bbox, exercising the third-party-block branch of
+    # the obstacle-overlap check (not just "the two connected blocks'"
+    # own-block branch).
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp5",
+        mirror=False,
+        splits=1,
+        add_guard_ring=False,
+    )
+    mid = _gen_block(tmp_path, pdk_root, "mos_array", "mid5", rows=1, cols=1)
+    mir = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "mir5",
+        mirror=True,
+        splits=1,
+        add_guard_ring=False,
+    )
+    output = tmp_path / "test5.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "diffpair", "generator_report": dp},
+                {"id": "mid", "generator_report": mid},
+                {"id": "mirror", "generator_report": mir},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["diffpair", "mid", "mirror"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "diffpair", "port": "Q1_1_D"},
+                        {"block": "mirror", "port": "M1_1_D"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "test5", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["unrouted_nets"] == ["N1"]
+    assert report["nets"][0]["routed"] is False
+
+
+def test_compose_rejects_route_into_guard_ringed_block(tmp_path, pdk_root):
+    # #199 case 2's minimal repro: `add_guard_ring: true` (diff_pair's
+    # default) draws a local-metal ring around the block; any inbound route
+    # to a non-tap pin crosses that ring, merging the routed net with the
+    # ring's own tap net.
+    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp_ring1", splits=1)
+    mir = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "mir_ring1", mirror=True, splits=1
+    )
+    output = tmp_path / "ring1.gds"
+    request = _diffpair_request(
+        dp, mir, dp_port="Q1_1_D", mir_port="M1_1_S", pdk_root=pdk_root
+    )
+    request["options"] = {"cell_name": "ring1", "output": str(output)}
+    report = compose(request)
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == ["N1"]
+    assert report["nets"][0]["routed"] is False
+    assert any("ring" in note.lower() for note in report["drc_hints"]["notes"])
+
+
+def test_compose_rejects_route_out_of_guard_ringed_source_block(tmp_path, pdk_root):
+    # The ring check must be symmetric: a guard ring fully encloses its
+    # block, so a route is just as unsafe leaving a ring-having *source*
+    # block's non-tap pin as it is entering a ring-having *destination*
+    # block's non-tap pin (Test Plan's "source block" edge case).
+    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp_ring2", splits=1)  # ring on
+    mir = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "mir_ring2",
+        mirror=True,
+        splits=1,
+        add_guard_ring=False,
+    )
+    output = tmp_path / "ring2.gds"
+    request = _diffpair_request(
+        dp, mir, dp_port="Q1_1_D", mir_port="M1_1_S", pdk_root=pdk_root
+    )
+    request["options"] = {"cell_name": "ring2", "output": str(output)}
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["N1"]
+    assert report["nets"][0]["routed"] is False
+
+
+def test_compose_allows_connecting_directly_to_a_guard_ring_tap_port(
+    tmp_path, pdk_root
+):
+    # A route *to* a ring's own tap port (rather than one of the block's
+    # regular device pins) is exactly what the ring's tap ports are for --
+    # not a short, so it must still route cleanly.
+    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp_ring3", splits=1)
+    ring = _gen_block(
+        tmp_path,
+        pdk_root,
+        "guard_ring",
+        "ring3",
+        inner_width_um=2.0,
+        inner_height_um=2.0,
+    )
+    output = tmp_path / "ring3.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "diffpair", "generator_report": dp},
+                {"id": "ring", "generator_report": ring},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["diffpair", "ring"],
+                "spacing_um": 1.0,
+            },
+            "connectivity": [
+                {
+                    "net": "TAPNET",
+                    "pins": [
+                        {"block": "diffpair", "port": "TAP_E"},
+                        {"block": "ring", "port": "TAP_W"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "ring3", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+
+def test_compose_allows_opposite_facing_ports_without_guard_ring(tmp_path, pdk_root):
+    # No regression: the already-working pattern from #196's bring-up
+    # (opposite-facing ports, add_guard_ring: false) must still route.
+    dp = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "dp_ok",
+        mirror=False,
+        splits=1,
+        add_guard_ring=False,
+    )
+    mir = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "mir_ok",
+        mirror=True,
+        splits=1,
+        add_guard_ring=False,
+    )
+    output = tmp_path / "ok.gds"
+    request = _diffpair_request(
+        dp, mir, dp_port="Q1_1_D", mir_port="M1_1_S", pdk_root=pdk_root
+    )
+    request["options"] = {"cell_name": "ok", "output": str(output)}
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
 
 
 # --------------------------------------------------------------------------- #
