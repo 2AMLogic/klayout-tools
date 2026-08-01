@@ -478,8 +478,8 @@ _PHASE2_GENERATOR_X_DECK = [
 
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
-    issue scopes, alongside phase 1's `resistor_strip` (acceptance
-    criterion #1)."""
+    issue scopes, alongside phase 1's `resistor_strip` and phase 4's
+    `bjt_array` (acceptance criterion #1)."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -488,6 +488,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "res_array",
         "guard_ring",
         "diff_pair",
+        "bjt_array",
     }
 
 
@@ -958,6 +959,226 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
         generate(
             {
                 "generator": generator_name,
+                "pdk": {"variant": "someOtherPdkX", "root": str(root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4: bjt_array -- matched vertical-bipolar (PNP/BJT) array (Epic #152
+# phase 4, #176). Drawn from base layers per docs/design/gen-bjt-array-spike.md.
+# --------------------------------------------------------------------------- #
+
+#: gf180mcu's DRC_BJT device-mark layer (the `bjt.separation.comp.1` rule keys
+#: off it); sky130's curated deck has no bipolar mark layer.
+_DRC_BJT_LAYER = (127, 5)
+
+
+def test_list_generators_bjt_array_params_schema():
+    """`bjt_array`'s documented, request-facing `params` schema -- no hidden
+    layer/presence fields leak (acceptance criterion #2)."""
+    report = list_generators()
+    generator = next(g for g in report["generators"] if g["name"] == "bjt_array")
+    params = {p["name"]: p for p in generator["params"]}
+    assert set(params) == {
+        "emitter_um",
+        "rows",
+        "cols",
+        "topology",
+        "dummy",
+        "ratio",
+        "add_collector_ring",
+    }
+    # Hidden layer/presence params are never request-facing.
+    assert not set(params) & {
+        "active_layer",
+        "contact_layer",
+        "metal_layer",
+        "well_layer",
+        "well_present",
+        "bjt_mark_layer",
+        "bjt_mark_present",
+    }
+    assert params["topology"]["default"] == "common_centroid"
+    assert params["rows"]["type"] == "int"
+    assert params["add_collector_ring"]["type"] == "bool"
+
+
+@pytest.mark.parametrize("deck", _PHASE2_DECKS)
+def test_bjt_array_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
+    """`bjt_array`'s documented defaults must pass `klt drc --deck <pdk>`
+    clean on *both* curated decks -- gf180mcu's includes the bipolar-specific
+    `bjt.separation.comp.1` mark-layer rule (acceptance criteria #3, #4)."""
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"bjt_array_{deck}.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert output.is_file()
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    bbox = report["bbox_um"]
+    assert bbox["x1"] > bbox["x0"]
+    assert bbox["y1"] > bbox["y0"]
+    assert report["device_count"] == 9  # 3x3 default
+    assert report["ports"]
+    for port in report["ports"]:
+        assert set(port) == {
+            "name",
+            "net",
+            "layer",
+            "x_um",
+            "y_um",
+            "width_um",
+            "direction_deg",
+        }
+    # Every unit device exposes an emitter and a base port; the collector ring
+    # exposes four.
+    names = {p["name"] for p in report["ports"]}
+    assert {f"Q{i}_E" for i in range(9)} <= names
+    assert {f"Q{i}_B" for i in range(9)} <= names
+    assert {"COLL_N", "COLL_S", "COLL_E", "COLL_W"} <= names
+
+
+def test_bjt_array_matched_group_id_encodes_shape_topology_ratio(tmp_path, pdk_root):
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 2, "cols": 4, "ratio": 8},
+            "options": {"output": str(tmp_path / "out.gds")},
+        }
+    )
+    assert (
+        report["drc_hints"]["matched_group_id"]
+        == "bjt_array:2x4:common_centroid:ratio8"
+    )
+    assert report["device_count"] == 8
+
+
+def test_bjt_array_gf180_draws_drc_bjt_mark_layer(tmp_path, both_pdk_root):
+    """On gf180mcu the array draws the DRC_BJT device-mark layer (and a shared
+    Nwell base); the mark encloses every unit's COMP, so
+    `bjt.separation.comp.1` reports no separation violation."""
+    import klayout.db as kdb
+
+    output = tmp_path / "bjt_gf180.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _DRC_BJT_LAYER in present  # DRC_BJT mark drawn
+    assert (21, 0) in present  # shared Nwell base
+    # gf180mcu has both the mark and well rules, so no missing-layer note.
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_bjt_array_sky130_omits_mark_and_well_with_note(tmp_path, both_pdk_root):
+    """sky130's curated deck checks neither a bipolar mark nor a well, so the
+    generator draws neither and surfaces that in-band via `drc_hints.notes`
+    (the fidelity caveat from the design note)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "bjt_sky130.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _DRC_BJT_LAYER not in present  # no bipolar mark on sky130
+    notes = report["drc_hints"]["notes"]
+    assert any("device-mark" in n for n in notes)
+    assert any("well" in n for n in notes)
+
+
+def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):
+    """Edge case: a 1x1 array with no dummies (no matching to do) still
+    produces a DRC-clean cell on gf180mcu."""
+    output = tmp_path / "bjt_one.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"rows": 1, "cols": 1, "dummy": 0, "topology": "array"},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_bjt_array_without_collector_ring_notes_it(tmp_path, both_pdk_root):
+    output = tmp_path / "bjt_noring.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"add_collector_ring": False},
+            "options": {"output": str(output)},
+        }
+    )
+    assert any("collector guard ring" in n for n in report["drc_hints"]["notes"])
+    names = {p["name"] for p in report["ports"]}
+    assert not {"COLL_N", "COLL_S", "COLL_E", "COLL_W"} & names
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"emitter_um": 0.1},
+        {"rows": 0},
+        {"cols": 0},
+        {"dummy": -1},
+        {"ratio": 0},
+        {"topology": "nope"},
+    ],
+)
+def test_bjt_array_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "bjt_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_bjt_array_rejects_unsupported_pdk_family(tmp_path):
+    root = tmp_path / "pdk_install"
+    _make_install(root, "someOtherPdkX")
+    with pytest.raises(GenError, match="not supported"):
+        generate(
+            {
+                "generator": "bjt_array",
                 "pdk": {"variant": "someOtherPdkX", "root": str(root)},
                 "options": {"output": str(tmp_path / "out.gds")},
             }

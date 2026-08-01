@@ -5,12 +5,15 @@ reference, producing a GDS/OASIS stream plus a structured report. Phase 1 of
 Epic #152 landed the request/response contract and a thin
 [KLayout PCell](https://www.klayout.de/doc/programming/pcell.html) harness,
 proven end-to-end with one reference generator (`resistor_strip`). Phase 2
-(this document's current state) adds the four analog primitive generators
-the accepted spike scopes: `mos_array`, `res_array`, `guard_ring`, and
-`diff_pair`. See
+adds the four analog primitive generators the accepted spike scopes:
+`mos_array`, `res_array`, `guard_ring`, and `diff_pair`. Phase 4 (Epic #152,
+this document's current state) adds `bjt_array`, a matched vertical-bipolar
+(PNP/BJT) array. See
 [`docs/design/layout-generator-spike.md`](../design/layout-generator-spike.md)
 section 2 for the contract this command implements, and section 4 for the
-four families' scope.
+four phase-2 families' scope; see
+[`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md) for
+the phase-4 mechanism-choice decision behind `bjt_array`.
 
 ```
 klt gen --list [--format text|json]
@@ -174,6 +177,43 @@ is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 
+### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
+
+A `rows` × `cols` common-centroid (or plain-`array`) grid of identical unit
+vertical-bipolar devices, with `dummy` flanking columns each side. Each unit
+device is an emitter diffusion pad beside a base-tie diffusion pad (each with
+a contact and a covering local-metal pad); all units share **one** base well,
+are surrounded by a single collector guard ring, and — on PDK families whose
+curated deck checks a bipolar device-mark layer — are covered by that mark
+layer (gf180mcu's `DRC_BJT`, which its `bjt.separation.comp.1` / `BJT.3` rule
+keys off; sky130's curated deck has no bipolar rule, so no mark or well is
+drawn there and a `drc_hints.notes` entry says so).
+
+Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
+`COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when
+`add_collector_ring` is `true`. `device_count` is `rows * cols` (dummies
+excluded). `drc_hints.matched_group_id` is
+`"bjt_array:<rows>x<cols>:<topology>:ratio<ratio>"`.
+
+**This generator draws from base layers, not from a vendor library cell.** The
+result is a DRC-clean, matching-faithful *floorplan* of the device (layer
+stack + common-centroid/dummy arrangement), **not** a SPICE-model-exact
+replacement for the PDK's characterized vertical PNP — the curated decks check
+no implant layer, so emitter/base/collector all draw on the one diffusion
+role. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
+for why draw-from-scratch was chosen over vendor-cell instantiation, and the
+fidelity limits that choice carries.
+
+| `params` field       | Type   | Default            | Description |
+| -------------------- | ------ | ------------------ | ----------- |
+| `emitter_um`         | double | `0.6`              | Emitter diffusion side length (µm). Must be `>= 0.42`. |
+| `rows`               | int    | `3`                | Array rows. Must be `>= 1`. |
+| `cols`               | int    | `3`                | Array columns. Must be `>= 1`. |
+| `topology`           | string | `common_centroid`  | `array` (row-major) or `common_centroid` (centroid-symmetric pairing, same order convention as `mos_array`). |
+| `dummy`              | int    | `1`                | Dummy unit-device columns added on each side of the array. Must be `>= 0`. |
+| `ratio`              | int    | `8`                | Intended emitter matching ratio (e.g. `8` for a bandgap's 8:1 group) — recorded in `matched_group_id`; a `drc_hints.notes` entry warns if the array is too small to realise it. Must be `>= 1`. |
+| `add_collector_ring` | bool   | `true`             | Surround the array with a collector/substrate guard ring. |
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -278,7 +318,7 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, etc). |
+| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, etc). |
 | `net` | string \| null | Caller-supplied net label; always `null` — no request field feeds it yet. |
 | `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
@@ -290,7 +330,7 @@ family/variant split the resolver doesn't have. The response's
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (or its own safe-margin constant, for a generator with no single caller-supplied spacing param — see each generator's section above). |
-| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`); always `null` for `resistor_strip` and `guard_ring`, neither of which has a matching concept. |
+| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip` and `guard_ring`, neither of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 
@@ -400,4 +440,9 @@ $ klt drc output/mos_array_gf180.gds --deck gf180mcu
 # A guard-ringed differential pair, current-mirror-labelled:
 $ klt gen diff_pair --params '{"mirror": true, "splits": 2}' \
     --pdk sky130A -o output/current_mirror.gds --format json
+
+# A matched vertical-PNP array on gf180mcu (draws the DRC_BJT device mark),
+# then verify it's DRC-clean including the bipolar mark-layer rule:
+$ klt gen bjt_array --pdk gf180mcuD -o output/bjt_array.gds --format json
+$ klt drc output/bjt_array.gds --deck gf180mcu
 ```
