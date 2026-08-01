@@ -1,0 +1,5 @@
+{
+  "schema": "klt.lvs.request/1",
+  "layout": { "file": "06-layout.gds", "deck": "sky130", "top": "ota_5t_layout_0" },
+  "reference": { "netlist": "07-reference.spice", "top": "ota_5t_layout_0" }
+}

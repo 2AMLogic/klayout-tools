@@ -1,0 +1,30 @@
+{
+  "netlist": "09-sim.testbench.spice",
+  "engine": "ngspice",
+  "corners": {
+    "supply_v": { "vn1": [0.9, 1.1] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "tran", "args": "1n 1n" },
+  "measurements": [
+    {
+      "name": "n1_meas",
+      "spice": ".meas tran n1_meas find v(n1_node) at=1n",
+      "unit": "V",
+      "limits": { "min": 0.85, "max": 1.15 }
+    },
+    {
+      "name": "tail_meas",
+      "spice": ".meas tran tail_meas find v(tail_node) at=1n",
+      "unit": "V",
+      "limits": { "min": 0.45, "max": 0.55 }
+    },
+    {
+      "name": "vout_meas",
+      "spice": ".meas tran vout_meas find v(vout_node) at=1n",
+      "unit": "V",
+      "limits": { "min": 0.95, "max": 1.05 }
+    }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

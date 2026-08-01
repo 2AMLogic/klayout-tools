@@ -1,0 +1,24 @@
+* Hand-written reference netlist for LVS against 07-extract.spice.
+*
+* Topology mirrors docs/cli/gen-compose.md's worked example (5T OTA composed
+* from a tail mos_array block + two diff_pair blocks -- an input pair and a
+* "mirror"-labelled load), sized with this pipeline's own 05-sizing.json
+* values (M1/M2 input pair W/L=8/0.5, M3/M4 mirror load W/L=6/1, M5 tail
+* W/L=10/1). MOSFETs are symmetric devices (source/drain interchangeable),
+* so only the connectivity graph -- not the s/d terminal labels -- needs to
+* match klt extract's output for klt lvs's NetlistComparer to report a
+* match. All five composed devices draw as nfet-shaped geometry regardless
+* of electrical role (diff_pair's "mirror" naming is a labelling convention
+* only -- see docs/cli/gen.md), matching what klt gen-compose/klt extract
+* actually produced. Gate terminals and each device's unconnected
+* source/drain terminal are klt gen's own per-generator ports, never wired
+* through connectivity[] in 06-layout.request.json, so they are each their
+* own isolated (floating) node here too -- matching the extracted netlist's
+* $N floating nets.
+.subckt ota_5t_layout_0 N1 TAIL_NODE VOUT vsubs
+M1 N1        g1 flt1 vsubs nfet L=1U   W=6U
+M2 TAIL_NODE g2 N1    vsubs nfet L=0.5U W=8U
+M3 flt3      g3 TAIL_NODE vsubs nfet L=1U   W=10U
+M4 flt4      g4 VOUT  vsubs nfet L=1U   W=6U
+M5 TAIL_NODE g5 VOUT  vsubs nfet L=0.5U W=8U
+.ends

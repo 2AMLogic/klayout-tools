@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "file": "06-layout.gds",
+  "deck": "sky130",
+  "top": "ota_5t_layout_0",
+  "dbu_um": 0.001,
+  "netlist_path": "07-extract.spice",
+  "netlist_sha256": "6520e5f3791831ac53006c652cba66b5e3e90822bd1d30deb151ccc603fa2e05",
+  "status": "extracted",
+  "device_count": 5,
+  "net_count": 12,
+  "pin_count": 4,
+  "device_counts": {
+    "nfet": 5
+  },
+  "devices": [
+    {
+      "name": "$1",
+      "class": "nfet",
+      "nets": {
+        "s": "N1",
+        "g": "$7",
+        "d": "$2",
+        "b": "vsubs"
+      },
+      "params": {
+        "l_um": 1.0,
+        "w_um": 6.0
+      }
+    },
+    {
+      "name": "$2",
+      "class": "nfet",
+      "nets": {
+        "s": "TAIL_A,TAIL_B",
+        "g": "$8",
+        "d": "N1",
+        "b": "vsubs"
+      },
+      "params": {
+        "l_um": 0.5,
+        "w_um": 8.0
+      }
+    },
+    {
+      "name": "$3",
+      "class": "nfet",
+      "nets": {
+        "s": "$3",
+        "g": "$9",
+        "d": "TAIL_A,TAIL_B",
+        "b": "vsubs"
+      },
+      "params": {
+        "l_um": 1.0,
+        "w_um": 10.0
+      }
+    },
+    {
+      "name": "$4",
+      "class": "nfet",
+      "nets": {
+        "s": "VOUT",
+        "g": "$10",
+        "d": "$6",
+        "b": "vsubs"
+      },
+      "params": {
+        "l_um": 1.0,
+        "w_um": 6.0
+      }
+    },
+    {
+      "name": "$5",
+      "class": "nfet",
+      "nets": {
+        "s": "TAIL_A,TAIL_B",
+        "g": "$11",
+        "d": "VOUT",
+        "b": "vsubs"
+      },
+      "params": {
+        "l_um": 0.5,
+        "w_um": 8.0
+      }
+    }
+  ],
+  "nets": [
+    {
+      "name": "$10",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$11",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$2",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$3",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$6",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$7",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$8",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "$9",
+      "pin": false,
+      "device_count": 1
+    },
+    {
+      "name": "N1",
+      "pin": true,
+      "device_count": 2
+    },
+    {
+      "name": "TAIL_A,TAIL_B",
+      "pin": true,
+      "device_count": 3
+    },
+    {
+      "name": "VOUT",
+      "pin": true,
+      "device_count": 2
+    },
+    {
+      "name": "vsubs",
+      "pin": true,
+      "device_count": 5
+    }
+  ],
+  "warnings": [],
+  "pdk": null
+}
