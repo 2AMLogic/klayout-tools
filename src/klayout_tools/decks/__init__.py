@@ -26,8 +26,17 @@ class DrcRule:
     ``"width"`` / ``"space"`` / ``"notch"`` are single-layer checks;
     ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"`` are
     two-layer checks and require ``other_layer``. ``threshold_dbu`` is the
-    rule's distance threshold in database units (matching the layout's own
-    ``dbu`` — sky130 streams use ``dbu_um = 0.001``, i.e. 1 nm per unit).
+    rule's distance threshold expressed in database units of the deck's own
+    *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM`` constant — e.g.
+    sky130 and gf180mcu are both authored against ``dbu_um = 0.001``, i.e.
+    1 nm per unit).
+
+    ``threshold_dbu`` is **not** used directly against a layout's shapes:
+    ``run_drc()`` scales it by the ratio of the deck's ``NOMINAL_DBU_UM`` to
+    the layout's actual ``dbu`` before passing it to the ``Region.*_check()``
+    primitives, so a deck's rules give identical results regardless of the
+    database unit the input stream happens to be written at (see
+    ``docs/cli/drc.md``).
 
     Rule ``id`` values are a stable, public contract once shipped — never
     renumber or repurpose one (see ``docs/cli/drc.md``).
@@ -82,3 +91,29 @@ def get_layer_names(name: str) -> dict[tuple[int, int], str]:
     via :func:`get_deck` before reaching this point).
     """
     return _layer_name_registry().get(name, {})
+
+
+def _nominal_dbu_registry() -> dict[str, float]:
+    from . import gf180mcu, sky130
+
+    return {"sky130": sky130.NOMINAL_DBU_UM, "gf180mcu": gf180mcu.NOMINAL_DBU_UM}
+
+
+def get_nominal_dbu(name: str) -> float:
+    """Return the database unit (in micrometres) that ``name``'s rule
+    thresholds were authored against.
+
+    Every ``DrcRule.threshold_dbu`` value in a deck is transcribed assuming
+    this dbu; ``run_drc()`` uses it to rescale thresholds to the actual
+    layout's ``dbu`` before running any ``Region.*_check()`` (see
+    :class:`DrcRule`). Raises :class:`UnknownDeckError` for an unregistered
+    deck name, mirroring :func:`get_deck`.
+    """
+    registry = _nominal_dbu_registry()
+    try:
+        return registry[name]
+    except KeyError:
+        available = ", ".join(sorted(registry))
+        raise UnknownDeckError(
+            f"unknown deck '{name}' (available: {available})"
+        ) from None

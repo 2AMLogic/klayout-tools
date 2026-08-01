@@ -96,6 +96,26 @@ the check to a single cell in this version. If a layout has multiple top
 cells, each is checked independently and violations report the top cell
 they were found under.
 
+## Database units (dbu)
+
+Each deck's `DrcRule` thresholds are authored in database units against a
+fixed **nominal dbu** (currently `0.001` µm — 1 nm per unit — for both
+`sky130` and `gf180mcu`; see each deck's `NOMINAL_DBU_UM` constant in
+`src/klayout_tools/decks/`). A GDSII/OASIS stream's own `Layout.dbu` is not
+required to match that nominal value — foundry PCell libraries, GDS written
+by other tools, and older flows commonly use a different dbu (5 nm, 10 nm,
+etc.), and that is an ordinary input, not an edge case.
+
+`klt drc` handles this automatically: before running any check, every
+threshold is rescaled by `nominal_dbu_um / <the input file's own dbu>`, so
+the same physical geometry produces the identical `status` /
+`violation_count` / `violations[]` regardless of the input stream's database
+unit. You do not need to pre-convert or normalize a layout's dbu before
+running `klt drc` against it. The `dbu_um` field in the JSON output (below)
+simply echoes the input layout's own database unit for reference — bounding
+boxes and polygon coordinates in `violations[]` are reported in that same
+(input) database unit, not the deck's nominal one.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -152,7 +172,7 @@ On a run with findings:
 | `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`; per-command).       |
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
 | `deck`            | string                   | The deck name used (`"sky130"` or `"gf180mcu"`).                         |
-| `dbu_um`          | number (float)           | Database unit in micrometres, same semantics as `klt layers`.            |
+| `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
 | `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
