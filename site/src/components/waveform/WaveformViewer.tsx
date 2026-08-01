@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import type { LayoutSignals, SignalsCorner } from "@/data/types";
-import type { WaveformData } from "./types";
+import type { LiveWaveform, WaveformData } from "./types";
 import { blockAssetUrl } from "@/lib/blockAssets";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -31,10 +31,18 @@ import {
  *     name across the loaded corners)
  *   - PVT corner overlay/selection (checkboxes, one per corner; multiple
  *     selected corners overlay on the same axes)
+ *
+ * Also accepts an optional `liveWaveform` (Epic #90 phase C, issue #151):
+ * a client-computed re-run result overlaid as one more selectable, always-
+ * pre-selected "corner" entry, so the stimulus-editing playground can feed
+ * a re-run's result into the exact same plot the static `signals` data
+ * populates. Omitted/`null` preserves this component's pre-#151 behavior
+ * exactly (every existing prop shape still renders identically).
  */
 export interface WaveformViewerProps {
   slug: string;
   signals: LayoutSignals;
+  liveWaveform?: LiveWaveform | null;
 }
 
 const CORNER_COLORS = ["#3ee0e8", "#ffa028", "#ff6a5c", "#9d7cf2", "#6adf7f", "#f2c94c"];
@@ -58,13 +66,33 @@ function statusColor(status: SignalsCorner["status"]): string {
   return "text-red";
 }
 
-export function WaveformViewer({ slug, signals }: WaveformViewerProps) {
+export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerProps) {
   const corners = signals.corners;
+
+  // The live overlay entry (if any) rendered as one more "corner" everywhere
+  // below — same checkbox/legend/plot/cursor-readout code path as a real PVT
+  // corner, just without a `waveform` fetch path (its data is already
+  // resolved, seeded directly into `waveforms` state below).
+  const displayCorners = useMemo(() => {
+    if (!liveWaveform) return corners;
+    const synthetic: SignalsCorner = {
+      corner_id: liveWaveform.id,
+      process: null,
+      supply_v: {},
+      temperature_c: Number.NaN,
+      status: "pass",
+      runtime_s: 0,
+      measurements: [],
+      diagnostics: [],
+    };
+    return [...corners, synthetic];
+  }, [corners, liveWaveform]);
+
   const cornerIndex = useMemo(() => {
     const m = new Map<string, number>();
-    corners.forEach((c, i) => m.set(c.corner_id, i));
+    displayCorners.forEach((c, i) => m.set(c.corner_id, i));
     return m;
-  }, [corners]);
+  }, [displayCorners]);
 
   const defaultCornerId =
     signals.default_corner_id && cornerIndex.has(signals.default_corner_id)
@@ -83,11 +111,33 @@ export function WaveformViewer({ slug, signals }: WaveformViewerProps) {
   const [cursorX, setCursorX] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
+  // Seed the live overlay entry directly (no fetch — its data is already
+  // resolved) and auto-select it, so a re-run's result shows up in the plot
+  // immediately without the user re-toggling a checkbox. Its own node names
+  // are auto-shown too — a re-run's testbench (e.g. the generic inverter
+  // template) won't necessarily reuse the exact node names the static
+  // `signals` waveform used, so node visibility already having been
+  // initialized from the static data must not hide the live trace.
+  useEffect(() => {
+    if (!liveWaveform) return;
+    setWaveforms((prev) => ({ ...prev, [liveWaveform.id]: liveWaveform.data }));
+    setSelectedCorners((prev) => {
+      if (prev.has(liveWaveform.id)) return prev;
+      return new Set(prev).add(liveWaveform.id);
+    });
+    setSelectedNodes((prev) => {
+      const base = prev ?? new Set(allNodes);
+      const missing = nodeNames(liveWaveform.data).filter((n) => !base.has(n));
+      return missing.length === 0 ? prev : new Set([...base, ...missing]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveWaveform]);
+
   // Fetch any selected corner's waveform artifact that isn't cached yet.
   useEffect(() => {
     let cancelled = false;
     for (const cornerId of selectedCorners) {
-      const corner = corners[cornerIndex.get(cornerId) ?? -1];
+      const corner = displayCorners[cornerIndex.get(cornerId) ?? -1];
       if (!corner?.waveform || waveforms[cornerId] !== undefined) continue;
       setWaveforms((prev) => ({ ...prev, [cornerId]: "loading" }));
       const url = blockAssetUrl(slug, corner.waveform);
@@ -251,28 +301,42 @@ export function WaveformViewer({ slug, signals }: WaveformViewerProps) {
 
   const cursorSweepUnit = loadedWaveforms[0] ? sweepName(loadedWaveforms[0]) : "x";
 
+  /** Display label for a corner id — the live overlay's own `label` in place
+   *  of its (not user-facing) synthetic id. */
+  function cornerLabel(cornerId: string): string {
+    return liveWaveform && cornerId === liveWaveform.id ? liveWaveform.label : cornerId;
+  }
+
   return (
     <div className="flex flex-col gap-4" data-testid="waveform-viewer">
       <fieldset className="flex flex-wrap gap-2 border-0 p-0" aria-label="PVT corner selection">
-        {corners.map((corner, i) => (
-          <label
-            key={corner.corner_id}
-            className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-panel px-2.5 py-1 text-[0.78rem]"
-          >
-            <input
-              type="checkbox"
-              checked={selectedCorners.has(corner.corner_id)}
-              onChange={() => toggleCorner(corner.corner_id)}
-              aria-label={`Toggle corner ${corner.corner_id}`}
-            />
-            <span
-              className="inline-block h-2.5 w-2.5 rounded-full"
-              style={{ background: CORNER_COLORS[i % CORNER_COLORS.length] }}
-            />
-            <span className="font-mono text-fog">{corner.corner_id}</span>
-            <span className={statusColor(corner.status)}>{corner.status}</span>
-          </label>
-        ))}
+        {displayCorners.map((corner, i) => {
+          const isLive = liveWaveform !== undefined && liveWaveform !== null && corner.corner_id === liveWaveform.id;
+          const displayLabel = isLive && liveWaveform ? liveWaveform.label : corner.corner_id;
+          return (
+            <label
+              key={corner.corner_id}
+              className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-panel px-2.5 py-1 text-[0.78rem]"
+            >
+              <input
+                type="checkbox"
+                checked={selectedCorners.has(corner.corner_id)}
+                onChange={() => toggleCorner(corner.corner_id)}
+                aria-label={`Toggle corner ${displayLabel}`}
+              />
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{ background: CORNER_COLORS[i % CORNER_COLORS.length] }}
+              />
+              <span className="font-mono text-fog">{displayLabel}</span>
+              {isLive ? (
+                <span className="text-cyan">live</span>
+              ) : (
+                <span className={statusColor(corner.status)}>{corner.status}</span>
+              )}
+            </label>
+          );
+        })}
       </fieldset>
 
       {allNodes.length > 0 && (
@@ -408,7 +472,7 @@ export function WaveformViewer({ slug, signals }: WaveformViewerProps) {
                   return (
                     <tr key={`${cornerId}:${variable.name}`} className="border-b border-border last:border-b-0">
                       <th scope="row" className="w-2/5 bg-panel px-3.5 py-2 text-left font-medium text-fog-dim">
-                        {cornerId} · {variable.name}
+                        {cornerLabel(cornerId)} · {variable.name}
                       </th>
                       <td className="px-3.5 py-2 text-left font-mono text-fog">
                         {value === undefined ? "—" : formatEngineering(value, variable.type === "voltage" ? "V" : "")}
