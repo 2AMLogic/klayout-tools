@@ -182,7 +182,7 @@ get_polygons(117, 10)``):
 
 from __future__ import annotations
 
-from . import DrcRule, ExtractionDeck
+from . import DrcRule, ExtractionDeck, ParasiticLayer, ParasiticTech
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001, same as sky130), so a threshold in micrometres
@@ -498,4 +498,57 @@ EXTRACTION_DECK = ExtractionDeck(
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
     metals=((34, 0),),  # Metal1
     metal_labels=((34, 10),),  # Metal1 pin/label purpose
+)
+
+# --------------------------------------------------------------------------- #
+# `klt extract --parasitics` coefficient table (issue #217)
+# --------------------------------------------------------------------------- #
+#
+# Sheet resistance and area/perimeter capacitance-to-substrate coefficients,
+# transcribed from gf180mcu's own **public** process data as published in the
+# magic technology file `gf180mcu/magic/gf180mcu.tech` in
+# https://github.com/fossi-foundation/open-pdks -- the open_pdks repository
+# (GPLv3) that installs gf180mcu's extraction rule set, and the same upstream
+# the sky130 sibling deck's coefficients come from. Nothing here is NDA'd:
+# the file's own headers cite GlobalFoundries' public `PDS_035_03` document
+# for the capacitance values and `180MCU_YI-141-EP059-01_10.pdf` for the
+# resistances.
+#
+# Both blocks below are the file's **nominal** corner (`variants ()`); the
+# `(hrhc),(lrhc)` / `(hrlc),(lrlc)` corner sections are deliberately not
+# modelled, per the "fixed, not tunable" decision in
+# `docs/design/lvs-extraction-spike.md` -> "Addendum (#216)".
+#
+# Sheet resistance -- gf180mcu.tech "# Resistances are in milliohms per
+# square", so each value below is the file's number / 1000:
+#
+#     resist (allpolynonres)/active    7300   ->  7.3  ohm/sq  (Poly2)
+#     resist (allm1)/metal1              90   ->  0.09 ohm/sq  (Metal1)
+#
+# Capacitance -- gf180mcu.tech "in units of aF/um^2 for area caps and aF/um
+# for perimeter and sidewall caps", `defaultareacap` = parallel-plate cap to
+# the plane below, `defaultperimeter` = fringe cap to the plane below:
+#
+#     defaultareacap *poly  active 110.67   defaultperimeter *poly  active 50.72
+#     defaultareacap allm1  metal1 29.304   defaultperimeter allm1  metal1 39.431
+#
+# As in the sky130 sibling table, the file's `defaultsidewall` /
+# `defaultoverlap` / `defaultsideoverlap` entries are **not** transcribed
+# (net-to-net coupling, out of scope for the first cut), and diffusion
+# (`Comp`) has no entry because the source file itself comments its
+# `allnactivenonfet`/`allpactivenonfet` cap entries out with "Rely on device
+# models to capture *ndiff area cap".
+PARASITICS = ParasiticTech(
+    poly=ParasiticLayer(  # Poly2 (30/0)
+        sheet_ohm_per_sq=7.3,
+        area_cap_af_per_um2=110.67,
+        perimeter_cap_af_per_um=50.72,
+    ),
+    metals=(
+        ParasiticLayer(  # Metal1 (34/0) -- EXTRACTION_DECK.metals[0]
+            sheet_ohm_per_sq=0.09,
+            area_cap_af_per_um2=29.304,
+            perimeter_cap_af_per_um=39.431,
+        ),
+    ),
 )

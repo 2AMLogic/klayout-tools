@@ -76,7 +76,7 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
 
 from __future__ import annotations
 
-from . import DrcRule, ExtractionDeck
+from . import DrcRule, ExtractionDeck, ParasiticLayer, ParasiticTech
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
@@ -259,4 +259,69 @@ EXTRACTION_DECK = ExtractionDeck(
     metals=((67, 20), (68, 20)),  # li1.drawing, met1.drawing
     metal_labels=((67, 5), (68, 5)),  # li1.pin, met1.pin
     vias=((67, 44),),  # mcon.drawing (li1 -> met1)
+)
+
+# --------------------------------------------------------------------------- #
+# `klt extract --parasitics` coefficient table (issue #217)
+# --------------------------------------------------------------------------- #
+#
+# Sheet resistance and area/perimeter capacitance-to-substrate coefficients,
+# transcribed from sky130's own **public** process data as published in the
+# magic technology file `sky130/magic/sky130.tech` in
+# https://github.com/fossi-foundation/open-pdks -- the same canonical
+# open_pdks repository (GPLv3) the DRC deck at the top of this module is
+# transcribed from, and the file open_pdks itself installs as the sky130
+# extraction rule set. Nothing here comes from an NDA'd source; the file's own
+# header credits SkyWater's public `PEX/xRC/cap_models` document for the
+# capacitance numbers and `trtc.cor` (typical corner) for the resistances.
+#
+# Both blocks below are taken from the file's **nominal** corner section
+# (`variants (),(orig),(si)` -- the one open_pdks uses by default); the
+# `(hrhc),(hrlc)` and low-corner sections are deliberately not modelled, per
+# the "fixed, not tunable" decision in
+# `docs/design/lvs-extraction-spike.md` -> "Addendum (#216)".
+#
+# Sheet resistance -- sky130.tech "# Resistances are in milliohms per square",
+# so each value below is the file's number / 1000:
+#
+#     resist (allpolynonres)/active   48200   ->  48.2   ohm/sq  (poly)
+#     resist (allli)/locali           12800   ->  12.8   ohm/sq  (li1)
+#     resist (allm1)/metal1             125   ->   0.125 ohm/sq  (met1)
+#
+# Capacitance -- sky130.tech "# Units are aF/um^2 for area caps and aF/um for
+# perimeter and sidewall caps", `defaultareacap` = parallel-plate cap to the
+# plane below, `defaultperimeter` = fringe cap to the plane below:
+#
+#     defaultareacap   *poly   active 106.13   defaultperimeter *poly  active 55.27
+#     defaultareacap   allli   locali  36.99   defaultperimeter allli  locali 40.70
+#     defaultareacap   allm1   metal1  25.78   defaultperimeter allm1  metal1 40.57
+#
+# The file's `defaultsidewall` / `defaultoverlap` / `defaultsideoverlap`
+# entries (same-layer neighbour coupling and layer-to-layer overlap) are
+# deliberately **not** transcribed: they are net-to-net coupling terms, which
+# the first-cut lumped capacitance-to-ground model has nowhere to put and
+# which #217 explicitly defers.
+#
+# Diffusion (`active`/`tap`) has no entry, following the source file's own
+# instruction -- sky130.tech comments out its `allnactivenonfet` /
+# `allpactivenonfet` cap entries with "Rely on device models to capture
+# *ndiff area cap", and `klt extract`'s `M` cards already emit AS/AD/PS/PD.
+PARASITICS = ParasiticTech(
+    poly=ParasiticLayer(  # poly.drawing (66/20)
+        sheet_ohm_per_sq=48.2,
+        area_cap_af_per_um2=106.13,
+        perimeter_cap_af_per_um=55.27,
+    ),
+    metals=(
+        ParasiticLayer(  # li1.drawing (67/20) -- EXTRACTION_DECK.metals[0]
+            sheet_ohm_per_sq=12.8,
+            area_cap_af_per_um2=36.99,
+            perimeter_cap_af_per_um=40.70,
+        ),
+        ParasiticLayer(  # met1.drawing (68/20) -- EXTRACTION_DECK.metals[1]
+            sheet_ohm_per_sq=0.125,
+            area_cap_af_per_um2=25.78,
+            perimeter_cap_af_per_um=40.57,
+        ),
+    ),
 )

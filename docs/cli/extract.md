@@ -1,11 +1,12 @@
 # `klt extract`
 
-Extract a **schematic-equivalent** netlist (devices + connectivity, no
-parasitics) from a GDSII or OASIS layout stream, headless, and write it as a
-SPICE circuit body plus a structured summary.
+Extract a **schematic-equivalent** netlist (devices + connectivity) from a
+GDSII or OASIS layout stream, headless, and write it as a SPICE circuit body
+plus a structured summary. Opt in to first-order interconnect parasitics with
+`--parasitics`.
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -27,6 +28,8 @@ two disagree, this document (and the code) win.
   in that case; optional otherwise, and must name the sole top cell if
   given).
 - `--pdk` / `--pdk-root` — optional. See "PDK resolution" below.
+- `--parasitics` — optional, off by default. Also extract first-order lumped
+  interconnect parasitics. See "Parasitic extraction" below.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -170,11 +173,108 @@ future epic):
   table was verified against — this deck's device extractor never models
   multi-finger/multiplied devices either). Source/drain area+perimeter
   (`AS`/`AD`/`PS`/`PD`, present on the bare `M`-card form) are **not**
-  carried onto the `X` card — consistent with this command's documented
-  schematic-equivalent, no-parasitics scope (see "Out of scope" below).
+  carried onto the `X` card — the resolved subcircuit models the device's own
+  junction capacitance itself. Interconnect parasitics are a separate,
+  opt-in concern (see "Parasitic extraction" below), and `--parasitics`
+  composes with model binding.
 - **The JSON response is unaffected**: `device_counts`/`devices[].class`
   always report the deck's own class label (`nfet`/`pfet`), regardless of
   `--pdk`. Model binding is a SPICE-serialization concern only.
+
+## Parasitic extraction (`--parasitics`)
+
+Off by default. When given, `klt extract` additionally models the
+**interconnect** parasitics of every extracted net and folds them into the
+same netlist. Implemented per the interface decision in
+[`docs/design/lvs-extraction-spike.md`](../design/lvs-extraction-spike.md) →
+"Addendum (#216)"; the engine survey that decision deferred is written up in
+`src/klayout_tools/parasitics.py`'s module docstring (short version: KLayout's
+`db` module has no interconnect-PEX call to wrap, its newer `klayout.pex`
+module solves only the R half and only in *distributed* form, and the one
+credible external wrapper — `iic-jku/klayout-pex` — is GPL-3.0 and depends on
+non-pip external binaries, so the first-order reduction is built here over a
+curated coefficient table).
+
+### The model
+
+Per net, per conductor layer (poly and each metal level — diffusion is
+excluded because the device models already carry it, following both PDKs'
+own extraction rules):
+
+- **Capacitance to ground**: `area_um2 × area_cap + perimeter_um ×
+  perimeter_cap`, from the net's own merged shapes.
+- **Resistance**: `squares × sheet_rho`, where each merged polygon's square
+  count comes from its *equivalent rectangle* (the `L`/`W` with the polygon's
+  own area and perimeter, `squares = L/W`; a shape too compact for that
+  system to have a real solution counts as one square). Polygons on a layer
+  sum in series.
+
+Both are attached as **one lumped RC load per net** — a resistor from the net
+to a generated internal node, and a capacitor from that node to the deck's
+substrate net:
+
+```
+RY   Y      Y_par  106.146
+CY   Y_par  vsubs  2.39653e-16
+```
+
+Nothing existing is disturbed: no net is split and no device terminal is
+re-parented, so with `--parasitics` on, `devices[]`, `device_counts`,
+`net_count`, `pin_count`, every net name, and every pin are **identical** to
+the same run without it.
+
+One documented exception, reported as a `warnings[]` entry when it happens:
+every generated capacitor returns to the deck's substrate net, which must be
+tieable from a testbench. That net is normally already a pin (any layout with
+an NMOS has it), but a layout that never creates it — a PMOS-only cell, say —
+gets it promoted to a pin so the capacitance is not stranded on an
+unreachable internal node. That is the only case in which `--parasitics`
+changes the `.SUBCKT` interface, and it never happens silently.
+
+### What this does *not* model
+
+Stated plainly, so no caller mistakes this for sign-off-grade PEX:
+
+- **Net-to-net coupling capacitance** — not modelled at all (explicitly
+  deferred by #216 to a second increment). Only capacitance to substrate.
+- **IR drop / driver-to-receiver wire delay** — the series R is in series
+  with the net's own capacitance, not in the signal path between a driver and
+  its receivers. Placing it in the path requires partitioning a net's
+  terminals, which a single-R lumped model has no non-arbitrary basis for; a
+  distributed increment (KLayout's `klayout.pex` `RNetExtractor` is the
+  natural engine) is the honest way to get it.
+- **Contact/via resistance** — not modelled.
+- **Accuracy tuning** — one fixed operating point, no `fast`/`accurate`
+  selector (#216), and no calibration against silicon.
+
+### Coefficients
+
+Curated per PDK family in `src/klayout_tools/decks/sky130.py` /
+`decks/gf180mcu.py` as a `ParasiticTech` (`sheet_ohm_per_sq`,
+`area_cap_af_per_um2`, `perimeter_cap_af_per_um` per layer), positionally
+aligned with the same module's `ExtractionDeck` so the two cannot drift apart
+silently. Every value is transcribed from that PDK's **public** process data
+— the `resist` and `defaultareacap`/`defaultperimeter` entries of its magic
+technology file in
+[fossi-foundation/open-pdks](https://github.com/fossi-foundation/open-pdks)
+(`sky130/magic/sky130.tech`, `gf180mcu/magic/gf180mcu.tech`), nominal corner
+— with the exact file, section, and unit conversion cited inline, the same
+provenance discipline the DRC decks follow. No PDK install is required to use
+`--parasitics`: the coefficients ship with the deck, exactly like the DRC
+thresholds.
+
+`--parasitics` reuses `--deck`/`--pdk`/`--pdk-root` unchanged; there is no
+new PDK-selection mechanism. It composes with `--pdk` model binding (MOS
+devices still become `X` subcircuit calls; the parasitic elements are still
+plain `R`/`C` cards).
+
+### Parasitics and LVS
+
+Do **not** feed a `--parasitics` netlist to `klt lvs`. LVS is a
+schematic-equivalence compare, and a parasitic-annotated netlist is
+isomorphic to no schematic reference — it has extra R/C devices and extra
+nodes by construction. `klt lvs`'s own inline extraction never enables
+parasitics.
 
 ## Verified compatible with `klt sim`'s netlist convention
 
@@ -229,7 +329,34 @@ exit codes).
   ],
   "nets": [{ "name": "A", "pin": true, "device_count": 2 }],
   "warnings": [],
-  "pdk": null
+  "pdk": null,
+  "parasitics": null
+}
+```
+
+With `--parasitics`, `parasitics` is a block and each `nets[]` entry gains
+two fields (everything else is unchanged):
+
+```json
+{
+  "nets": [
+    {
+      "name": "Y",
+      "pin": true,
+      "device_count": 2,
+      "resistance_ohm": 106.146295,
+      "capacitance_ff": 0.239653
+    }
+  ],
+  "parasitics": {
+    "model": "lumped_rc_load",
+    "ground_net": "vsubs",
+    "net_count": 4,
+    "resistor_count": 4,
+    "capacitor_count": 4,
+    "total_resistance_ohm": 717.979281,
+    "total_capacitance_ff": 1.269301
+  }
 }
 ```
 
@@ -253,6 +380,19 @@ exit codes).
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
+| `parasitics`       | object \| `null`           | The lumped RC model's rollup when `--parasitics` was given; `null` otherwise. See below.                |
+
+### `parasitics` block (only with `--parasitics`)
+
+| Field                  | Type    | Description                                                                                             |
+| ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `model`                | string  | Identifier of the reduction that produced these numbers — `"lumped_rc_load"` (see "Parasitic extraction"). |
+| `ground_net`           | string  | The net every generated capacitor returns to (the deck's substrate net, e.g. `"vsubs"`).                 |
+| `net_count`            | integer | Number of nets that got parasitic elements (a net with no geometry on any curated layer gets none).      |
+| `resistor_count`       | integer | Number of generated `R` elements (one per modelled net).                                                 |
+| `capacitor_count`      | integer | Number of generated `C` elements (one per modelled net).                                                 |
+| `total_resistance_ohm` | number  | Sum of every net's modelled series resistance, in ohms.                                                  |
+| `total_capacitance_ff` | number  | Sum of every net's modelled capacitance to ground, in femtofarads.                                       |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want
 structure without re-parsing SPICE; the **netlist file at `netlist_path` is
@@ -276,9 +416,14 @@ consume.
 | -------------- | ------- | ------------------------------------------------------------------------------ |
 | `name`         | string  | The net's name in the written netlist (a labelled name, or an anonymous `$N`). |
 | `pin`          | boolean | Whether this net is promoted to a top-cell pin (a named net at the top level). |
-| `device_count` | integer | Number of device terminals connected to this net.                             |
+| `device_count` | integer | Number of device terminals connected to this net (never counts generated parasitic elements). |
+| `resistance_ohm` | number | **Only with `--parasitics`.** The net's modelled lumped series resistance, in ohms (`0.0` for a net with no geometry on any curated parasitic layer). |
+| `capacitance_ff` | number | **Only with `--parasitics`.** The net's modelled lumped capacitance to `parasitics.ground_net`, in femtofarads (`0.0`, as above). |
 
-`nets` is sorted by `name` for deterministic, diff-clean output.
+`nets` is sorted by `name` for deterministic, diff-clean output. The internal
+RC nodes `--parasitics` generates are **not** reported as nets — they are an
+implementation detail of the written netlist, and `nets[]` keeps its
+documented meaning with or without the flag.
 
 ## Exit codes
 
@@ -305,18 +450,16 @@ written to stdout. No Python traceback is printed.
 
 ## Out of scope
 
-Parasitic (RC) extraction is not implemented — this command extracts
-devices and connectivity only, never interconnect resistance/capacitance.
-This gap has a concrete tracking issue,
-[#216](https://github.com/2AMLogic/klayout-tools/issues/216), with a
-recorded interface decision in
-[`docs/design/lvs-extraction-spike.md`](../design/lvs-extraction-spike.md)
-→ "Addendum (#216): parasitic (RC) extraction interface decision": if/when
-built, it stays inside this command behind an explicit `--parasitics` flag
-(no new verb), additive to the JSON/SPICE contract documented above, for
-sky130 and gf180mcu. #216 is the design step only — the implementation
-itself is unscheduled and tracked separately by
-[#217](https://github.com/2AMLogic/klayout-tools/issues/217).
+**Net-to-net coupling capacitance** is not modelled — `--parasitics` extracts
+capacitance to substrate only, and resistance only along a net's own
+conductors. This is a deliberate first-increment boundary set by
+[#216](https://github.com/2AMLogic/klayout-tools/issues/216) (recorded in
+[`docs/design/lvs-extraction-spike.md`](../design/lvs-extraction-spike.md) →
+"Addendum (#216)") and delivered as scoped by
+[#217](https://github.com/2AMLogic/klayout-tools/issues/217); coupling
+requires spacing-aware neighbour geometry a lumped-to-ground model cannot
+carry. The full not-modelled list is in "Parasitic extraction" above.
+Accuracy calibration against silicon is likewise out of scope.
 
 Netlist comparison (`klt lvs`) is a separate command; this command only
 produces the layout-side netlist half of that comparison.

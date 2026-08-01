@@ -277,6 +277,19 @@ def create_parser() -> argparse.ArgumentParser:
         help="explicit PDK install root; overrides $PDK_ROOT and the search order",
     )
     extract_parser.add_argument(
+        "--parasitics",
+        action="store_true",
+        help=(
+            "also extract first-order lumped interconnect parasitics: one "
+            "series R plus one capacitance-to-ground per net, from curated "
+            "per-PDK sheet-resistance / area-perimeter-capacitance "
+            "coefficients. Additive -- adds R/C primitives to the same "
+            "netlist and a `parasitics` block to the report, and changes "
+            "nothing when omitted. Net-to-net coupling is not modelled; see "
+            "docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

@@ -128,6 +128,64 @@ class UnknownExtractionDeckError(Exception):
     """Raised by :func:`get_extraction_deck` for an unknown deck name."""
 
 
+@dataclass(frozen=True)
+class ParasiticLayer:
+    """Per-layer process coefficients for ``klt extract --parasitics``'s
+    first-order lumped RC model (see :mod:`klayout_tools.parasitics` for the
+    model itself and ``docs/cli/extract.md`` for the shipped contract).
+
+    Three numbers per conductor layer, all curated by hand from each PDK's
+    **public** process data exactly the way :class:`DrcRule`'s thresholds and
+    ``klayout_tools.pdk_models``' device-model names are (each family deck's
+    module docstring cites the exact source file and line it was transcribed
+    from, so every value can be re-verified against a fresh checkout):
+
+    - ``sheet_ohm_per_sq`` -- sheet resistance in ohms per square.
+    - ``area_cap_af_per_um2`` -- parallel-plate capacitance to substrate, in
+      attofarads per square micrometre.
+    - ``perimeter_cap_af_per_um`` -- fringe capacitance to substrate, in
+      attofarads per micrometre of edge.
+
+    Deliberately **not** carried: sidewall/coupling capacitance to a
+    *neighbouring net* on the same layer, and layer-to-layer overlap
+    capacitance. Both are net-to-net coupling terms, explicitly out of scope
+    for the first cut (``docs/design/lvs-extraction-spike.md`` -> "Addendum
+    (#216)"), and a lumped capacitance-to-ground model has nowhere to put
+    them.
+    """
+
+    sheet_ohm_per_sq: float
+    area_cap_af_per_um2: float
+    perimeter_cap_af_per_um: float
+
+
+@dataclass(frozen=True)
+class ParasiticTech:
+    """The per-PDK-family coefficient table behind ``klt extract
+    --parasitics`` -- the parasitics analogue of :class:`ExtractionDeck`.
+
+    ``poly`` carries the coefficients for the matching
+    :class:`ExtractionDeck`'s ``poly`` layer; ``metals`` is positionally
+    aligned with that deck's ``metals`` tuple (``metals[i]`` describes
+    ``ExtractionDeck.metals[i]``), so the two tables cannot drift apart
+    silently -- :func:`klayout_tools.parasitics.build_parasitic_layers`
+    asserts the lengths match. An entry may be ``None`` where a layer has no
+    curated coefficients, in which case that layer contributes nothing to the
+    model.
+
+    No entry exists for ``active``/``tap`` (diffusion), by design and with a
+    citation: both PDKs' own extraction decks exclude diffusion from
+    *parasitic* capacitance because the device models already carry it (see
+    each family deck's docstring), and ``klt extract``'s ``M`` cards already
+    emit ``AS``/``AD``/``PS``/``PD``. No entry exists for ``contact``/``vias``
+    either: per-cut via resistance is not modelled in the first cut (also
+    documented in ``docs/cli/extract.md``).
+    """
+
+    poly: ParasiticLayer | None
+    metals: tuple[ParasiticLayer | None, ...]
+
+
 def _registry() -> dict[str, list[DrcRule]]:
     from . import gf180mcu, sky130
 
@@ -218,6 +276,35 @@ def get_extraction_deck(name: str) -> ExtractionDeck:
         return decks[name]
     except KeyError:
         available = ", ".join(sorted(decks))
+        raise UnknownExtractionDeckError(
+            f"unknown deck '{name}' (available: {available})"
+        ) from None
+
+
+def _parasitics_registry() -> dict[str, ParasiticTech]:
+    from . import gf180mcu, sky130
+
+    return {
+        "sky130": sky130.PARASITICS,
+        "gf180mcu": gf180mcu.PARASITICS,
+    }
+
+
+def get_parasitics_tech(name: str) -> ParasiticTech:
+    """Return the registered :class:`ParasiticTech` for ``name``.
+
+    Raises :class:`UnknownExtractionDeckError` for an unknown deck name --
+    the same error type :func:`get_extraction_deck` raises, because the
+    parasitics table is keyed by the *extraction* deck name (``klt extract
+    --parasitics`` never selects a parasitics table independently of
+    ``--deck``, per ``docs/design/lvs-extraction-spike.md`` -> "Addendum
+    (#216)" -> "PDK coverage").
+    """
+    techs = _parasitics_registry()
+    try:
+        return techs[name]
+    except KeyError:
+        available = ", ".join(sorted(techs))
         raise UnknownExtractionDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None

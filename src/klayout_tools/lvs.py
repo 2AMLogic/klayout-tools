@@ -328,7 +328,16 @@ def _resolve_layout(
             raise LvsError("request.layout.deck is required when layout.file is given")
 
         try:
-            netlist, top_cell_name, _dbu_um, _warnings = extract_netlist_from_layout(
+            # No parasitics, deliberately: LVS is a *schematic-equivalence*
+            # compare, and a parasitic-annotated netlist is isomorphic to no
+            # schematic reference (docs/cli/extract.md -> "Parasitics and LVS").
+            (
+                netlist,
+                top_cell_name,
+                _dbu_um,
+                _warnings,
+                _parasitics,
+            ) = extract_netlist_from_layout(
                 layout_file, deck_name, top=layout_spec.get("top")
             )
         except ExtractError as exc:
