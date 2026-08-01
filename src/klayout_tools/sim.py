@@ -39,7 +39,13 @@ and runs the declared analysis. A netlist that already carries its own
 Failure classification is from the ngspice log text, never the process exit
 code -- ngspice reliably exits ``0`` even when a ``.meas`` fails or the
 matrix is singular (see the spike's "Failure signalling" survey row, verified
-empirically against ngspice 46 while building this module).
+empirically against ngspice 46 while building this module). A
+``singular_matrix``/``nonconvergence`` classification is only fatal when the
+corner's own requested measurements did not actually come back (see
+``_recovered_from_stepping``, issue #205) -- ngspice's internal gmin/source
+stepping recovery narrates its own intermediate attempts failing even on a
+run that ultimately succeeds, and that narration alone is not evidence of a
+real failure.
 """
 
 from __future__ import annotations
@@ -84,10 +90,22 @@ _MEAS_VALUE_RE = re.compile(
     r"^([A-Za-z_][\w.]*)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*(?:\S+=.*)?$"
 )
 
+#: A `.meas` card's declared analysis type (the token right after
+#: ``.meas``/``.measure``), e.g. ``tran`` in ``.meas tran vout find v(out)``.
+_MEAS_CARD_TYPE_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)", re.IGNORECASE)
+
+#: ngspice's own ``.MEASURE`` statement only implements these analysis types
+#: (verified empirically against ngspice 46 -- see issue #205). Notably,
+#: there is no ``.MEASURE OP``: an operating-point analysis has no sweep
+#: variable for a measurement to search over, unlike DC/AC/TRAN/SP.
+_SUPPORTED_MEAS_TYPES = frozenset({"dc", "ac", "tran", "sp"})
+
 #: Ordered diagnostic classifiers: (code, compiled pattern). Order matters --
 #: singular-matrix and nonconvergence text can co-occur in one log (ngspice
 #: tries gmin/source stepping as a nonconvergence *recovery* strategy after a
-#: singular matrix), and the more specific classification wins.
+#: singular matrix) even when the corner's requested measurements ultimately
+#: come back correctly -- see ``_run_corner``'s post-hoc recovery check,
+#: which downgrades both codes' severity together in that case (issue #205).
 _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "singular_matrix",
@@ -160,6 +178,41 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
+def _validate_meas_card(name: str, spice: str) -> None:
+    """Reject a ``.meas`` card declaring an analysis type ngspice's own
+    ``.MEASURE`` statement does not implement.
+
+    Most notably ``"op"``: it is a legitimate ``analysis.kind`` (ngspice's
+    operating-point analysis runs fine as a plain ``op`` control-block
+    command), but there is no such thing as ``.MEASURE OP`` -- an operating
+    point has no sweep variable for a measurement to search over the way
+    DC/AC/TRAN/SP do. Pairing ``analysis.kind: "op"`` with a ``.meas op``
+    card fails with ngspice's own
+    ``Error: unrecognized analysis type 'op' for the following .meas
+    statement`` (verified against ngspice 46, see issue #205) -- this
+    catches it before the request ever reaches ngspice, with an actionable
+    message instead of a raw parser error. Applies to every ``.meas`` card
+    regardless of the request's own ``analysis.kind``: a ``.meas`` type
+    ngspice does not implement is invalid on its own terms, not just when
+    paired with a mismatched analysis.
+
+    A card this function does not recognise as a ``.meas``/``.measure``
+    line (unexpected shape) is left alone -- validating hand-written SPICE
+    syntax in general is out of scope here.
+    """
+    match = _MEAS_CARD_TYPE_RE.match(spice)
+    if match is None:
+        return
+    meas_type = match.group(1).lower()
+    if meas_type not in _SUPPORTED_MEAS_TYPES:
+        raise SimError(
+            f"measurement '{name}' declares an unsupported .meas analysis "
+            f"type '{meas_type}': ngspice has no `.MEASURE {meas_type.upper()}` "
+            'analysis type; use analysis.kind: "tran" with a short '
+            "single-step transient and `.meas tran ... at=<t>` instead"
+        )
+
+
 def run_sim(request_path: str, *, artifacts_dir: str | None = None) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -207,6 +260,7 @@ def run_sim(request_path: str, *, artifacts_dir: str | None = None) -> dict[str,
             raise SimError(
                 "each request.measurements[] entry requires 'name' and 'spice'"
             )
+        _validate_meas_card(spec["name"], spec["spice"])
 
     options = request.get("options") or {}
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
@@ -569,11 +623,25 @@ def _run_corner(
                 }
             )
 
+    # A recovered `singular_matrix`/`nonconvergence` classification (ngspice's
+    # own gmin/source-stepping recovery narration -- routine noise on the way
+    # to a *successful* analysis, not evidence the run failed) does not count
+    # as fatal on its own: downgrade its severity in place before computing
+    # the corner's aggregate status. See `_recovered_from_stepping` and issue
+    # #205; `timeout`/`netlist`/`measurement`/`unknown` are never downgraded.
+    if _recovered_from_stepping(measurements_spec, measurement_results, log_text):
+        for diagnostic in diagnostics:
+            if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+                diagnostic["severity"] = "warning"
+
     # error > fail > pass, mirroring the response's own aggregate precedence:
-    # any engine-level diagnostic (timeout, singular matrix, nonconvergence,
-    # netlist, unresolvable measurement, unknown) means no trustworthy result
-    # exists for this corner, which always outranks a clean limit violation.
-    if diagnostics or any(m["status"] == "error" for m in measurement_results):
+    # any engine-level diagnostic still at severity "error" (timeout, an
+    # unrecovered singular matrix/nonconvergence, netlist, unresolvable
+    # measurement, unknown) means no trustworthy result exists for this
+    # corner, which always outranks a clean limit violation.
+    if any(d["severity"] == "error" for d in diagnostics) or any(
+        m["status"] == "error" for m in measurement_results
+    ):
         status = "error"
     elif any(m["status"] == "fail" for m in measurement_results):
         status = "fail"
@@ -679,6 +747,50 @@ def _line_containing(text: str, offset: int) -> str:
     if end == -1:
         end = len(text)
     return text[start:end].strip()
+
+
+#: ngspice's own terminal trailer when an analysis never actually completed
+#: (e.g. ``tran simulation(s) aborted``) -- verified against ngspice 46's
+#: output for a genuinely unrecoverable singular matrix/nonconvergence (see
+#: issue #205). Its presence always means "no trustworthy result", regardless
+#: of what measurement values happen to be parseable.
+_SIMULATION_ABORTED_RE = re.compile(r"simulation\(s\)\s+aborted", re.IGNORECASE)
+
+
+def _recovered_from_stepping(
+    measurements_spec: list[dict[str, Any]],
+    measurement_results: list[dict[str, Any]],
+    log_text: str,
+) -> bool:
+    """True when a ``singular_matrix``/``nonconvergence`` classification for
+    this corner should be treated as recovered (non-fatal) rather than fatal.
+
+    ngspice tries dynamic gmin stepping, true gmin stepping, and source
+    stepping in turn to recover from a singular DC operating-point matrix
+    before falling back to the requested analysis directly -- each stepping
+    attempt logs its own ``Warning: singular matrix`` and (when that stepping
+    attempt itself doesn't fully converge) ``... stepping failed`` text, even
+    on a run that ultimately succeeds (verified against ngspice 46 running
+    the sky130 5T OTA composed by ``klt gen-compose``, see issue #205). That
+    narration is expected noise on the path to a correct result, not evidence
+    the analysis failed -- so it is only treated as fatal when there is no
+    other way to tell the run actually succeeded.
+
+    Conservative by construction: recovery requires *every* requested
+    measurement to have actually come back with a value (a corner with no
+    ``measurements[]`` at all has no independent signal to check against, so
+    it is never considered recovered), and ngspice's own
+    ``simulation(s) aborted`` trailer must be absent -- either one failing
+    means the analysis never produced a trustworthy result and the
+    classification stays fatal.
+    """
+    if not measurements_spec:
+        return False
+    if any(m["status"] == "error" for m in measurement_results):
+        return False
+    if _SIMULATION_ABORTED_RE.search(log_text):
+        return False
+    return True
 
 
 def _parse_measurements(log_text: str) -> dict[str, float]:

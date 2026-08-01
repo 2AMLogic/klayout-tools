@@ -536,21 +536,25 @@ EOF
 # Two notes on the testbench shape above, neither of them #200's concern:
 # - `analysis.kind: "tran"` (a single-timestep transient), not `"op"`:
 #   ngspice's `.MEASURE` statement does not recognise `"op"` as an analysis
-#   type at all (`Error: unrecognized analysis type 'op'`) -- a pre-existing
-#   `klt sim`/ngspice-integration quirk, unrelated to #200, that a prior
-#   revision of this example never actually exercised (it always failed
-#   earlier, at the singular-matrix stage below, masking it).
+#   type at all (`Error: unrecognized analysis type 'op'`) -- unrelated to
+#   #200, and now a validated, rejected combination rather than a silent
+#   ngspice parse failure (`klt sim` raises a clear error for a `.meas op`
+#   card, see #205), that a prior revision of this example never actually
+#   exercised (it always failed earlier, at the singular-matrix stage
+#   below, masking it).
 # - `.options rshunt=1e12` (a standard SPICE convergence aid -- a very
 #   large global shunt resistor from every node to ground): this circuit's
 #   five gate terminals are `klt gen`'s own per-generator `ports[]`, never
 #   wired through `connectivity[]` in this request, so they stay genuinely
-#   floating (out of scope for #200, see "Known limitations"); without
+#   floating (out of scope for #200, see "Known limitations"). Without
 #   `rshunt`, ngspice's DC solver logs a `singular matrix` warning while
-#   still recovering a value via internal gmin stepping, which `klt sim`
-#   conservatively classifies as `status: "error"` (exit `4`) even though
-#   the reported measurements are correct. `rshunt` gives every node a
-#   real (if enormous) DC path, so the solver converges cleanly with no
-#   diagnostics -- no hand-editing of `ota_top_0.spice`, and no need to
+#   still recovering a value via internal gmin/source stepping; `klt sim`
+#   no longer misclassifies that recovery as fatal (#205 fixed the
+#   `status: "error"` false positive this used to produce), but `rshunt`
+#   remains worth keeping here anyway -- it gives every node a real (if
+#   enormous) DC path, so the solver converges cleanly with zero
+#   diagnostics instead of a recorded (non-fatal) `singular_matrix`
+#   warning -- no hand-editing of `ota_top_0.spice`, and no need to
 #   address any node by its anonymous `$N` name.
 $ klt sim sim_request.json --format json
 ```

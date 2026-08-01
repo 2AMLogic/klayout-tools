@@ -179,6 +179,66 @@ def test_run_sim_measurement_missing_fields_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# `.meas op` rejection -- ngspice has no `.MEASURE OP` analysis type (#205)
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_meas_card_rejects_op():
+    with pytest.raises(sim.SimError, match=r"\.MEASURE OP"):
+        sim._validate_meas_card("vout_meas", ".meas op vout_meas find v(out)")
+
+
+def test_validate_meas_card_accepts_supported_types():
+    # Every ngspice-implemented `.meas` type is accepted -- no SimError.
+    for card in (
+        ".meas dc vout find v(out) at=1.0",
+        ".meas ac vout find v(out) at=1k",
+        ".meas tran vout find v(out) at=1n",
+        ".meas sp vout find v(out) at=1k",
+        ".measure tran vout find v(out) at=1n",  # long-form spelling
+    ):
+        sim._validate_meas_card("vout", card)  # must not raise
+
+
+def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path):
+    # The exact pairing this issue reports: `analysis.kind: "op"` paired with
+    # a `.meas op` card must fail with a clear, actionable SimError *before*
+    # ngspice ever runs -- never a raw
+    # "Error: unrecognized analysis type 'op'" ngspice parse failure.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [
+                {"name": "vout_meas", "spice": ".meas op vout_meas find v(out)"}
+            ],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"\.MEASURE OP"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
+    # A `.meas op` card is invalid on ngspice's own terms regardless of the
+    # request's `analysis.kind` -- not just when the two literally match.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1n"},
+            "measurements": [
+                {"name": "vout_meas", "spice": ".meas op vout_meas find v(out)"}
+            ],
+        },
+    )
+    with pytest.raises(sim.SimError, match="unsupported .meas analysis type"):
+        sim.run_sim(str(request))
+
+
+# --------------------------------------------------------------------------- #
 # Model-library resolution (klt pdk integration, #45)
 # --------------------------------------------------------------------------- #
 
@@ -391,6 +451,54 @@ def test_classify_diagnostics_does_not_false_positive_on_title_text():
         "Note: Transient op finished successfully\n"
     )
     assert sim._classify_diagnostics(log) == []
+
+
+# --------------------------------------------------------------------------- #
+# Recovered singular_matrix/nonconvergence classification (#205)
+# --------------------------------------------------------------------------- #
+
+
+def test_recovered_from_stepping_true_when_measurements_all_resolved():
+    log = (
+        "Warning: singular matrix:  check node b\n"
+        "Note: Transient op finished successfully\n"
+    )
+    measurements_spec = [{"name": "vout", "spice": ".meas tran vout find v(out) at=1n"}]
+    measurement_results = [{"name": "vout", "value": 1.0, "status": "pass"}]
+    assert sim._recovered_from_stepping(measurements_spec, measurement_results, log)
+
+
+def test_recovered_from_stepping_false_with_no_measurements_declared():
+    # No measurements[] at all -- nothing independently confirms the run
+    # actually succeeded, so a singular-matrix classification stays fatal.
+    log = "Warning: singular matrix:  check node b\n"
+    assert sim._recovered_from_stepping([], [], log) is False
+
+
+def test_recovered_from_stepping_false_when_a_measurement_errored():
+    log = "Warning: singular matrix:  check node b\n"
+    measurements_spec = [{"name": "vout", "spice": ".meas tran vout find v(out) at=1n"}]
+    measurement_results = [{"name": "vout", "value": None, "status": "error"}]
+    assert (
+        sim._recovered_from_stepping(measurements_spec, measurement_results, log)
+        is False
+    )
+
+
+def test_recovered_from_stepping_false_on_simulation_aborted_trailer():
+    log = (
+        "Warning: singular matrix:  check node b\n"
+        "doAnalyses: TRAN:  Timestep too small\n"
+        "tran simulation(s) aborted\n"
+    )
+    measurements_spec = [{"name": "vout", "spice": ".meas tran vout find v(out) at=1n"}]
+    # Even if a stale measurement value somehow parsed, the abort trailer
+    # alone is decisive.
+    measurement_results = [{"name": "vout", "value": 1.0, "status": "pass"}]
+    assert (
+        sim._recovered_from_stepping(measurements_spec, measurement_results, log)
+        is False
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -700,6 +808,110 @@ def test_run_sim_stubbed_missing_measurement_is_error(tmp_path, monkeypatch):
     assert corner["measurements"][0]["value"] is None
     assert corner["measurements"][0]["status"] == "error"
     assert any(d["code"] == "measurement" for d in corner["diagnostics"])
+
+
+#: A real ngspice-46 log (captured against the sky130 5T OTA composed by
+#: `klt gen-compose`, per this issue's own repro) where gmin/source stepping
+#: recovers from a singular DC operating-point matrix and the transient
+#: still completes, producing correct measurement values -- yet also logs
+#: "gmin stepping failed"/"source stepping failed" text along the way,
+#: which is exactly why the fix cannot look at `singular_matrix` alone (see
+#: `_recovered_from_stepping`'s docstring).
+_RECOVERED_SINGULAR_MATRIX_LOG = (
+    "Doing analysis at TEMP = 27.000000 and TNOM = 27.000000\n\n"
+    "Using SPARSE 1.3 as Direct Linear Solver\n"
+    "Warning: singular matrix:  check node xota.g1\n\n"
+    "Note: Starting dynamic gmin stepping\n"
+    "Warning: singular matrix:  check node xota.g1\n\n"
+    "Warning: Dynamic gmin stepping failed\n"
+    "Note: Starting true gmin stepping\n"
+    "Warning: singular matrix:  check node xota.g1\n\n"
+    "Warning: True gmin stepping failed\n"
+    "Note: Starting source stepping\n"
+    "Warning: source stepping failed\n"
+    "Note: Transient op started\n"
+    "Note: Transient op finished successfully\n\n"
+    "  Measurements for Transient Analysis\n\n"
+    "vout_meas           =  1.00000e+00\n"
+    "tail_meas           =  5.00000e-01\n"
+)
+
+
+def test_run_sim_stubbed_recovered_singular_matrix_reports_pass(tmp_path, monkeypatch):
+    # The exact false positive this issue reports: a `singular matrix`
+    # warning that ngspice's own gmin/source stepping recovers from, still
+    # producing correct measurement values, must report `status: "pass"`,
+    # not `"error"`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1n"},
+            "measurements": [
+                {
+                    "name": "vout_meas",
+                    "spice": ".meas tran vout_meas find v(vout_node) at=1n",
+                    "limits": {"min": 0.9, "max": 1.1},
+                },
+                {
+                    "name": "tail_meas",
+                    "spice": ".meas tran tail_meas find v(tail_node) at=1n",
+                    "limits": {"min": 0.4, "max": 0.6},
+                },
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert corner["measurements"][0]["value"] == 1.0
+    assert corner["measurements"][1]["value"] == 0.5
+    # Recorded for visibility, but downgraded -- not fatal.
+    codes = {d["code"]: d["severity"] for d in corner["diagnostics"]}
+    assert codes["singular_matrix"] == "warning"
+    assert codes.get("nonconvergence") == "warning"
+
+
+def test_run_sim_stubbed_unrecovered_singular_matrix_still_errors(
+    tmp_path, monkeypatch
+):
+    # A genuinely unrecovered singular matrix (ngspice's own abort trailer
+    # present, no measurement values produced) must still classify as
+    # `status: "error"` -- this fix narrows the false positive, it does not
+    # remove the diagnostic.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1n"},
+            "measurements": [
+                {"name": "vout_meas", "spice": ".meas tran vout_meas find v(out) at=1n"}
+            ],
+        },
+    )
+    log = (
+        "Warning: singular matrix:  check node b\n"
+        "Warning: True gmin stepping failed\n"
+        "Warning: source stepping failed\n"
+        "Error: Transient op failed, timestep too small\n"
+        "doAnalyses: TRAN:  Timestep too small; initial timepoint: cause unrecorded.\n"
+        "tran simulation(s) aborted\n"
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "error"
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    codes = {d["code"]: d["severity"] for d in corner["diagnostics"]}
+    assert codes["singular_matrix"] == "error"
 
 
 def test_run_sim_keep_artifacts_writes_log(tmp_path, monkeypatch):

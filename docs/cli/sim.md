@@ -122,11 +122,35 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 
-**Any diagnostic present makes that corner `status: "error"`**, which always
-outranks a clean limit violation (`"fail"`) — `error` means no trustworthy
-number exists; `fail` means the simulator produced a trustworthy number and
-the design missed a limit. Conflating the two is the specific defect this
-command exists to avoid (see the spike's "Semantics and guarantees").
+**A `diagnostics` entry at `severity: "error"` makes that corner
+`status: "error"`**, which always outranks a clean limit violation
+(`"fail"`) — `error` means no trustworthy number exists; `fail` means the
+simulator produced a trustworthy number and the design missed a limit.
+Conflating the two is the specific defect this command exists to avoid (see
+the spike's "Semantics and guarantees").
+
+`singular_matrix`/`nonconvergence` are a documented exception, downgraded to
+`severity: "warning"` (recorded, but non-fatal) rather than `"error"` when
+the run recovered: ngspice's own gmin/source-stepping recovery narrates its
+*intermediate* stepping attempts failing (`Warning: singular matrix`,
+`... stepping failed`) even on a corner that goes on to complete
+successfully — that narration alone is not evidence the analysis failed
+(issue #205). The downgrade only applies when every one of the request's
+`measurements[]` actually came back with a value for this corner *and*
+ngspice's own `simulation(s) aborted` trailer is absent from the log; a
+corner with no `measurements[]` declared, a measurement that produced no
+value, or that trailer keeps `singular_matrix`/`nonconvergence` at
+`severity: "error"` and the corner at `status: "error"`, exactly as before.
+`netlist`/`timeout`/`measurement`/`unknown` are never downgraded.
+
+`.meas` cards are also validated against ngspice's own supported analysis
+types (`dc`/`ac`/`tran`/`sp`) before a request ever reaches ngspice: ngspice
+has no `.MEASURE OP` — an operating point has no sweep variable for a
+measurement to search over the way DC/AC/TRAN/SP do — so a `.meas op` card
+(regardless of the request's own `analysis.kind`) is rejected up front with
+an actionable `SimError` instead of failing deep inside an ngspice parse
+error. Use `analysis.kind: "tran"` with a short single-step transient and
+`.meas tran ... at=<t>` to read back an operating-point-like value instead.
 
 ## Waveform artifact (optional, first-class)
 
@@ -196,8 +220,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `corners.supply_v`       | object            | Supply axis, keyed by source/`.param` name; arrays sweep together by index.                                                                                            |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `exclude`                | array\<object\>   | Partial corner specs dropped from the expansion.                                                                                                                       |
-| `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request.                                        |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit` and `limits` (`min`/`max`, either optional). No `limits` -> reported, never fails. |
+| `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit` and `limits` (`min`/`max`, either optional). No `limits` -> reported, never fails. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
@@ -271,7 +295,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `status`         | string           | `"pass"`, `"fail"`, or `"error"`.                                                                                              |
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`), `margin`.               |
-| `diagnostics`    | array\<object\>  | `{ "severity": "error", "code": "...", "message": "..." }` — see the classification table above. Empty for a clean run.       |
+| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` only occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`); every other code is always `"error"`. Empty for a clean run.       |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. Raw log text is **never** inlined into the JSON. |
 
 ### Semantics and guarantees
