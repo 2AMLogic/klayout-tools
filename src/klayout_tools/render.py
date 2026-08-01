@@ -26,7 +26,13 @@ DEFAULT_HEIGHT = 768
 #: Filename pattern this module owns inside an output directory -- used to
 #: clear stale renders (e.g. from a layer set that shrank on re-render)
 #: without touching files this command didn't write.
-_OWNED_FILENAME_RE = re.compile(r"^-?\d+_-?\d+\.png$")
+_OWNED_FILENAME_RE = re.compile(r"^(-?\d+_-?\d+|overview)\.png$")
+
+#: Filename of the all-layers composite image.
+OVERVIEW_FILENAME = "overview.png"
+
+#: Hex ``#rrggbb`` (or ``#rgb``) color accepted by ``--background``.
+_BACKGROUND_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
 class RenderError(Exception):
@@ -47,6 +53,7 @@ def render_report(
     output_dir: str | None = None,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
+    background: str = "#ffffff",
 ) -> dict[str, Any]:
     """Render one PNG per non-empty layer of a GDSII or OASIS stream.
 
@@ -62,6 +69,11 @@ def render_report(
             to ``<block>/output/renders/`` with no block-specific logic.
         width: image width in pixels (must be positive).
         height: image height in pixels (must be positive).
+        background: canvas color as a ``#rrggbb``/``#rgb`` hex string.
+
+    Besides the per-layer PNGs, an all-layers composite is written as
+    ``overview.png`` -- the "what does this block look like" image (gallery
+    thumbnails, agent quick-looks).
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/render.md``)::
@@ -72,8 +84,10 @@ def render_report(
             "output_dir": <resolved output directory, absolute or as derived>,
             "width": <int>,
             "height": <int>,
+            "background": <hex color, str>,
+            "overview": <path to the all-layers composite PNG>,
             "layer_count": <number of layers in the stream, int>,
-            "rendered_count": <number of PNGs written, int>,
+            "rendered_count": <number of per-layer PNGs written, int>,
             "layers": [
                 {
                     "layer": int,
@@ -100,6 +114,10 @@ def render_report(
     """
     if width <= 0 or height <= 0:
         raise RenderError(f"invalid image size: {width}x{height}")
+    if not _BACKGROUND_RE.match(background):
+        raise RenderError(
+            f"invalid background color '{background}' (expected #rrggbb or #rgb)"
+        )
 
     try:
         report = layers_report(path)
@@ -118,7 +136,7 @@ def render_report(
 
     view = lay.LayoutView()
     try:
-        view.set_config("background-color", "#ffffff")
+        view.set_config("background-color", background)
         view.load_layout(path, 0)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         view.destroy()
@@ -129,6 +147,14 @@ def render_report(
         view.max_hier()
         view.resize(width, height)
         view.zoom_fit()
+
+        # All layers are still visible here: capture the composite overview
+        # before switching to per-layer isolation.
+        overview_path = os.path.join(resolved_output_dir, OVERVIEW_FILENAME)
+        try:
+            view.save_image(overview_path, width, height)
+        except Exception as exc:
+            raise RenderError(f"could not render overview: {exc}") from exc
 
         nodes = []
         it = view.begin_layers()
@@ -176,6 +202,8 @@ def render_report(
         "output_dir": resolved_output_dir,
         "width": width,
         "height": height,
+        "background": background,
+        "overview": overview_path,
         "layer_count": report["layer_count"],
         "rendered_count": sum(1 for entry in rendered if entry["rendered"]),
         "layers": rendered,
