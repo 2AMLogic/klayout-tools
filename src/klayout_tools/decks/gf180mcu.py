@@ -14,7 +14,16 @@ the canonical source repository for this issue:
   - ``drm_07_06.rst`` / ``tables_clear/14_COMP33_1.csv`` — 7.5 Comp (``DF.*``)
   - ``drm_07_08.rst`` / ``tables_clear/16_Poly2_42.csv`` — 7.7 Poly2 (``PL.*``)
   - ``drm_07_13.rst`` / ``tables_clear/21_Contact_56.csv`` — 7.12 Contact (``CO.*``)
-  - ``drm_07_14.rst`` / ``tables_clear/22_Metaln_58.csv`` — 7.13 Metaln (``Mn.*``)
+  - ``drm_07_14.rst`` / ``tables_clear/22_Metaln_58.csv`` — 7.13 Metaln (``Mn.*``,
+    ``n = 1 to 5``, i.e. ``Metal1``-``Metal5``)
+  - ``drm_07_16.rst`` / ``tables_clear/24_MetalTop_61.csv`` — 7.15 MetalTop
+    (``MT.*``) — **not** part of the 7.13 Metaln table above: ``MetalTop`` is
+    a separate drawn layer with its own DRM section and its own rule ids/
+    values (``MT.1``/``MT.2a``), not an ``n = 6`` row of ``Mn.*``.
+  - ``drm_10_4_2.rst`` / ``tables_clear/35_MIM2_88.csv`` — 10.4.2 MIM
+    (Metal-insulator-Metal) Capacitor, Option B (``MIMTM.*``), from the
+    "10.4 MIM Capacitor" section (itself under the "10.0 Analog Device
+    Related Rules" chapter)
   - ``drm_10_07.rst`` / ``tables_clear/38_DRC_BJT_103.csv`` — 10.7 DRC_BJT Mark
     Layer (``BJT.*``), from the "10.0 Analog Device Related Rules" chapter —
     the DRM's vertical NPN/PNP bipolar rule category.
@@ -44,15 +53,17 @@ DRM's own rule ids (which the ``.lydrc`` deck would use for its own
 This is *not* a full transcription of the official rule manual (hundreds of
 rules across dozens of layers, plus 5V/6V variants, DFM guidelines, etc.) —
 mirrors the "curated starter subset" scope guard sky130 documents:
-width/space/enclosure checks across poly2/comp/contact/metal1, plus a first
-increment of well/substrate-tap coverage (Nwell) and one bipolar
+width/space/enclosure checks across poly2/comp/contact/metal1 (extended, per
+#188, to metal2/metal3/metal5/metaltop and the MiM capacitor stack), plus a
+first increment of well/substrate-tap coverage (Nwell) and one bipolar
 (BJT)-specific device rule, wide enough to prove the deck-adapter shape
 (:class:`~klayout_tools.decks.DrcRule`) for a second PDK. Coverage is
 expected to grow incrementally in follow-on issues (e.g. Pplus/Nplus
 implant-specific rules, LVPWELL/DNWELL, the remaining BJT rules that key off
-DNWELL/LVPWELL, 5V/6V variants, DFM guidelines).
+DNWELL/LVPWELL, 5V/6V variants, DFM guidelines, and ``MIMTM.2``'s
+sized/derived-layer need — see its own note below).
 
-Seven rules below approximate the official DRM rule in some way (each is
+Eight rules below approximate the official DRM rule in some way (each is
 called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
 
@@ -94,13 +105,61 @@ are always the real, unmodified DRM values:
   connectivity information, only geometry, so it is approximated as a
   separation check against every ``comp`` shape on the layout, which may
   over-flag COMP that is legitimately part of the same BJT structure.
+- ``mim.space.1``: the official ``MIMTM.1`` scopes to the MiM capacitor's
+  "virtual bottom plate" (per the DRM's own note: ``FuseTop`` sized/oversized
+  by 1.06um, intersected with ``Metal4``) versus nearby bottom-plate-or-
+  routing ``Metal4``; approximated as a general ``Metal4``-to-``Metal4``
+  spacing check across the whole drawn layer, since isolating the virtual
+  bottom plate needs a sized/derived-layer primitive our engine does not
+  have (see the ``MIMTM.2`` note below). This means ordinary ``Metal4``
+  routing traces spaced between the deck's generic metal-spacing range and
+  1.2um apart -- nothing to do with a MiM capacitor -- will be flagged even
+  though they violate no real DRM rule. Threshold value unmodified.
+
+``MIMTM.2`` ("min. MiM bottom-plate overlap of ``Via4``", 0.4um) is
+**deliberately not transcribed** in this deck. Like ``MIMTM.1`` above, it is
+keyed off the same "virtual bottom plate" derived layer (``FuseTop`` sized
+by 1.06um AND ``Metal4`` intersecting ``FuseTop``) -- but here an *unscoped*
+approximation would be actively wrong, not merely conservative: ordinary
+``Metal4``-to-``Metal5`` routing vias use a much smaller enclosure than a
+MiM cap's virtual bottom plate requires, so a blanket "``Metal4`` must
+enclose every ``Via4`` by 0.4um" check would flag legitimate routing vias
+throughout *any* layout using ``Metal4``/``Via4``/``Metal5`` at all, not
+just genuine MiM structures -- unlike ``mim.space.1``'s over-flagging
+(spurious, but at least confined to the already-narrow ``Metal4`` layer),
+this one would make ordinary interconnect unusable. Implementing it
+correctly needs a sized/derived-layer check primitive
+:class:`~klayout_tools.decks.DrcRule` (``klayout_tools/decks/__init__.py``)
+does not support today (only ``width``/``space``/``notch``/``separation``/
+``enclosing``/``enclosed``/``overlap``, all single- or two-layer, none
+derived/sized) -- tracked as a follow-on issue naming that missing
+primitive as the blocker, per #188's own acceptance criteria.
+
+The DRM's "10.4 MIM Capacitor" section defines two mutually-exclusive
+process options (a PDK is wired for one or the other, never both): Option A
+(``MIM.*``, bottom plate on ``Metal2``, for a 3-metal-layer process variant)
+and Option B (``MIMTM.*`` above, bottom plate on ``Metal(n-1)`` of an
+n-metal stack, for a 4-or-more-metal-layer process variant). This deck's
+``Metal1``-``Metal5`` (``Mn.*``) coverage models the 5-metal-layer gf180mcu
+variant -- confirmed by ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
+``main.drc``, whose connectivity (``topmin1_metal = metal4`` /
+``top_via = via4`` when ``top_metal = metal5``) matches Option B's bottom
+plate landing on ``Metal4`` for that stack, the same stack the issue's own
+reproducer layout uses (``Metal4``/``FuseTop``/``Via4``/``Metal5``) -- so
+only Option B (``MIMTM.*``) is transcribed above; Option A's ``MIM.*`` rule
+set targets a different (3-metal-layer) process variant this deck does not
+model and is not duplicated here.
 
 Layer numbers (verified against ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``klayout/drc/rule_decks/main.drc`` layer derivations, e.g. ``comp =
 get_polygons(22, 0)``, cross-checked against this repo's own gf180mcu
-corpus fixtures in ``tests/corpus/golden/gf180mcu/*.layers.json``, and (for
-``DRC_BJT``, which doesn't appear in that corpus) against the DRM's own
-``tables_clear/06_Drawn_layer10.csv`` drawn-layer/GDS-number table):
+corpus fixtures in ``tests/corpus/golden/gf180mcu/*.layers.json`` where
+present, and (for layers absent from both -- ``DRC_BJT``, and the
+metal2-metal5/metaltop/MiM-stack layers added by #188) against the DRM's own
+``tables_clear/06_Drawn_layer10.csv`` drawn-layer/GDS-number table; the
+#188 additions are *also* independently confirmed present in ``main.drc``
+itself, e.g. ``metaltop_drawn = get_polygons(53, 0)`` and ``mim_l_mk =
+get_polygons(117, 10)``):
 
     Nwell     21/0
     Comp      22/0
@@ -109,8 +168,16 @@ corpus fixtures in ``tests/corpus/golden/gf180mcu/*.layers.json``, and (for
     Poly2     30/0
     Contact   33/0
     Metal1    34/0
+    Metal2    36/0
+    Metal3    42/0
+    Metal4    46/0
+    Via4      41/0
+    Metal5    81/0
+    MetalTop  53/0
+    FuseTop   75/0
     Dualgate  55/0
     DRC_BJT   127/5
+    MIM_L_MK  117/10
 """
 
 from __future__ import annotations
@@ -227,6 +294,101 @@ DECK: list[DrcRule] = [
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.23 (n = 1)
     ),
     DrcRule(
+        id="metal2.width.1",
+        description="minimum metal2 width",
+        layer=(36, 0),  # Metal2
+        check="width",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+    ),
+    DrcRule(
+        id="metal2.space.1",
+        description="minimum metal2 spacing",
+        layer=(36, 0),  # Metal2
+        check="space",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+    ),
+    DrcRule(
+        id="metal3.width.1",
+        description="minimum metal3 width",
+        layer=(42, 0),  # Metal3
+        check="width",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+    ),
+    DrcRule(
+        id="metal3.space.1",
+        description="minimum metal3 spacing",
+        layer=(42, 0),  # Metal3
+        check="space",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+    ),
+    DrcRule(
+        id="metal5.width.1",
+        description="minimum metal5 width",
+        layer=(81, 0),  # Metal5
+        check="width",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+    ),
+    DrcRule(
+        id="metal5.space.1",
+        description="minimum metal5 spacing",
+        layer=(81, 0),  # Metal5
+        check="space",
+        threshold_dbu=280,  # 0.28 um
+        # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+    ),
+    DrcRule(
+        id="metaltop.width.1",
+        description="minimum metaltop width (standard 6K angstrom thickness)",
+        layer=(53, 0),  # MetalTop
+        check="width",
+        threshold_dbu=360,  # 0.36 um
+        # DRM 7.15 MetalTop, rule "MT.1": "Width" -> 0.36 (standard/unstarred
+        # value; the DRM's "0.36/0.44*" lists a second value for the 9K/11K
+        # angstrom MetalTop thickness option, which -- like the 5V/6V variant
+        # elsewhere in this deck -- is not modeled here).
+    ),
+    DrcRule(
+        id="metaltop.space.1",
+        description="minimum metaltop spacing (standard 6K angstrom thickness)",
+        layer=(53, 0),  # MetalTop
+        check="space",
+        threshold_dbu=380,  # 0.38 um
+        # DRM 7.15 MetalTop, rule "MT.2a": "Space" -> 0.38 (standard/
+        # unstarred value; see metaltop.width.1's note on the thickness
+        # option not modeled here).
+    ),
+    DrcRule(
+        id="mim.space.1",
+        description=(
+            "minimum MiM bottom-plate (metal4) spacing to bottom-plate "
+            "metal (approximated as general metal4-to-metal4 spacing)"
+        ),
+        layer=(46, 0),  # Metal4
+        check="space",
+        threshold_dbu=1200,  # 1.2 um
+        # DRM 10.4.2 MIM Option B, rule "MIMTM.1": "Minimum MiM bottom plate
+        # spacing to the bottom plate metal (whether adjacent MiM or routing
+        # metal)" -> 1.2um. Approximation: see the module docstring's
+        # `mim.space.1` note above (virtual-bottom-plate context our engine
+        # can't isolate; over-flags ordinary Metal4 routing). Threshold value
+        # unmodified.
+    ),
+    DrcRule(
+        id="mim.enclosing.fusetop.1",
+        description="minimum MiM bottom plate (metal4) overlap of top plate (fusetop)",
+        layer=(46, 0),  # Metal4
+        other_layer=(75, 0),  # FuseTop
+        check="enclosing",
+        threshold_dbu=600,  # 0.6 um
+        # DRM 10.4.2 MIM Option B, rule "MIMTM.3": "Minimum MiM bottom plate
+        # overlap of Top plate" -> 0.6um.
+    ),
+    DrcRule(
         id="nwell.space.1",
         description="minimum Nwell spacing (equipotential, 3.3V)",
         layer=(21, 0),  # Nwell
@@ -285,6 +447,12 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (32, 0): "Nplus",
     (33, 0): "Contact",
     (34, 0): "Metal1",
+    (36, 0): "Metal2",
+    (42, 0): "Metal3",
+    (46, 0): "Metal4",
+    (81, 0): "Metal5",
+    (53, 0): "MetalTop",
+    (75, 0): "FuseTop",
     (55, 0): "Dualgate",
     (127, 5): "DRC_BJT",
 }
