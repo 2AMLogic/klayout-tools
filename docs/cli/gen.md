@@ -1,12 +1,16 @@
 # `klt gen`
 
 Run a named layout generator against a JSON `params` object and a PDK
-reference, producing a GDS/OASIS stream plus a structured report. This is
-phase 1 of Epic #152 — the request/response contract and a thin
+reference, producing a GDS/OASIS stream plus a structured report. Phase 1 of
+Epic #152 landed the request/response contract and a thin
 [KLayout PCell](https://www.klayout.de/doc/programming/pcell.html) harness,
-proven end-to-end with one reference generator (`resistor_strip`). See
+proven end-to-end with one reference generator (`resistor_strip`). Phase 2
+(this document's current state) adds the four analog primitive generators
+the accepted spike scopes: `mos_array`, `res_array`, `guard_ring`, and
+`diff_pair`. See
 [`docs/design/layout-generator-spike.md`](../design/layout-generator-spike.md)
-section 2 for the contract this command implements.
+section 2 for the contract this command implements, and section 4 for the
+four families' scope.
 
 ```
 klt gen --list [--format text|json]
@@ -38,17 +42,23 @@ class, the same substrate KLayout's own GUI PCell panel uses, invoked here
 through `Layout.add_pcell_variant()` with no GUI, no Qt, and no PCell library
 GUI panel involved — safe to run in CI.
 
-## The reference generator: `resistor_strip`
+## Generators
 
-The one generator implemented at phase 1: a row of parametrized rectangles
-standing in for a unit-resistor string
+`klt gen --list` reports every generator's `params` schema as structured
+data (see below) — the tables in this section are never hand-maintained
+separately from the PCell declarations that back them
+(`src/klayout_tools/gen.py`).
+
+### `resistor_strip` (phase 1 reference generator)
+
+A row of parametrized rectangles standing in for a unit-resistor string
 ([spike section 4.2](../design/layout-generator-spike.md#4-scope-proposal-first-generators)'s
 family). It exists to prove the request → PCell → response loop end to end —
 it has **no** well/tap/contact logic and is **not** claimed to be DRC-clean on
-any PDK. Phase 2 (tracked under Epic #152) replaces it with a real
-resistor-array generator, alongside the other three analog primitive
-families the spike scopes (matched MOS arrays, cap arrays, guard rings,
-diff pair/current mirror).
+any PDK; it is also the only generator that is PDK-agnostic (its drawing
+layer is a fixed placeholder, not resolved against a PDK family — see the
+PDK-family note below). `res_array` (below) is its phase-2, DRC-clean
+successor.
 
 | `params` field | Type   | Default | Description                          |
 | --------------- | ------ | ------- | ------------------------------------- |
@@ -57,9 +67,112 @@ diff pair/current mirror).
 | `spacing_um`     | double | `0.42`  | Spacing between unit resistors (µm). Must be `>= 0`. |
 | `num`            | int    | `4`     | Number of unit resistors. Must be `>= 1`. |
 
-`klt gen --list` reports this same table as structured data (see below) for
-every registered generator — the request-facing parameter schema is never
-hand-maintained in two places.
+### PDK-family support (phase 2 generators)
+
+`mos_array`, `res_array`, `guard_ring`, and `diff_pair` draw on their
+resolved PDK's own curated-DRC-deck layers (the same layer/datatype pairs
+`klt drc --deck sky130`/`--deck gf180mcu` check — see
+[`klt drc`](drc.md)), so they only support the `sky130`/`gf180mcu` PDK
+families (matched by the resolved `pdk.variant`'s prefix, e.g. `sky130A` or
+`gf180mcuC`). Any other resolved PDK family is an application error (exit
+code `1`). Every generator's **documented default `params`** are chosen to
+pass `klt drc --deck sky130` and `klt drc --deck gf180mcu` clean; a
+non-default `params` set is not guaranteed to (see each generator's
+"advisory, not authoritative" `drc_hints.notes` behaviour below).
+
+### `mos_array` (family 1: matched transistor array)
+
+A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
+strip + poly gate(s) + contact + local-metal source/drain pads), with
+`dummy` extra unit-device columns flanking each side for etch/gradient
+matching. Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
+(local-metal) and `U<i>_G` (poly), where `<i>` is the device's position in
+the `topology`-selected numbering order — `"array"` numbers row-major;
+`"common_centroid"` (the default) numbers nearest-center-first, pairing each
+instance immediately with its point-reflection through the array center, so
+a downstream matching/LVS consumer can pair index `2k`/`2k+1` as
+centroid-symmetric partners. (Physical placement is the same uniform grid
+either way — `topology` changes the *numbering*, not the layout; see
+`diff_pair` below for a generator that physically interleaves two distinct
+devices.) `device_count` is `rows * cols` (dummies excluded).
+`drc_hints.matched_group_id` is `"mos_array:<rows>x<cols>:<topology>"`.
+
+| `params` field | Type   | Default            | Description |
+| -------------- | ------ | ------------------ | ----------- |
+| `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact). |
+| `l_um`         | double | `0.28`             | Gate length (µm). Must be `> 0`; below `0.28`um risks violating a target PDK's poly-width or S/D metal-spacing rule (flagged via `drc_hints.notes`, not rejected). |
+| `fingers`      | int    | `1`                | Gate fingers per unit device. Must be `>= 1`. |
+| `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
+| `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
+| `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
+
+### `res_array` (family 2: resistor/capacitor array)
+
+A row of `num` matched unit elements (poly body + contact + local-metal pads
+at both ends) with `dummy` dummy elements at each end — the
+`kb/entries/sky130-bandgap-reference.json` KB entry's resistor-array layout
+idiom ("unit-resistor strings ... with dummy elements at both ends, matched
+in orientation"), generalized here to also stand in for a unit MoM/MiM
+capacitor cell footprint (neither curated DRC deck defines cap-specific
+layers, so the footprint — not the layer stack — is what's shared). Each
+real (non-dummy) unit gets two ports, `R<i>_A`/`R<i>_B`. `device_count` is
+`num` (dummies excluded). `drc_hints.matched_group_id` is `"res_array:<num>"`.
+
+| `params` field | Type   | Default | Description |
+| -------------- | ------ | ------- | ----------- |
+| `length_um`    | double | `2.0`   | Unit resistor body length (µm). Must be `> 0`. |
+| `width_um`     | double | `0.42`  | Unit resistor width (µm). Must be `>= 0.42`. |
+| `spacing_um`   | double | `0.5`   | Spacing between unit resistors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). |
+| `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
+| `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
+
+### `guard_ring` (family 3: substrate/well tap ring)
+
+A tap ring (drawn as a single unbroken outer-box-minus-inner-box polygon, so
+there is no same-layer spacing violation between "segments") with
+`contacts_per_side` contacts evenly spaced along each side and a
+local-metal ring on top, optionally enclosed by a well tie (`add_well`) on
+PDK families whose curated deck checks a well layer (gf180mcu's `Nwell`;
+sky130's curated deck has no well-layer rule, so `add_well=true` there is a
+documented no-op, reported via `drc_hints.notes`). Four ports —
+`TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` — sit at the midpoint of each ring side.
+`device_count` is `contacts_per_side * 4`.
+**`drc_hints.matched_group_id` is always `null`** — a guard ring has no
+matching concept (it is excluded from the matched-device generators: 1, 2,
+and 4).
+
+| `params` field      | Type   | Default | Description |
+| -------------------- | ------ | ------- | ----------- |
+| `inner_width_um`     | double | `3.0`   | Width of the protected inner area (µm). Must be `> 0`. |
+| `inner_height_um`    | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
+| `ring_width_um`      | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
+| `contacts_per_side`  | int    | `4`     | Tap contacts evenly spaced along each ring side. Must be `>= 1`, and must fit without overlapping (a `contacts_per_side` too large for `inner_width_um`/`inner_height_um` is rejected outright — a structural error, not a DRC-adjacent one). |
+| `add_well`           | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
+
+### `diff_pair` (family 4: differential pair / current mirror cell)
+
+Composes `mos_array`'s unit-device drawing and `guard_ring`'s ring drawing:
+two matched devices, each split into `splits` sub-instances, interleaved in
+a true common-centroid cross-quad checkerboard over a 2-row x
+`splits`-column grid (`label(row, col) = "A"` if `row + col` is even, else
+`"B"` — for `splits=2` this is exactly the classic "A B / B A"
+differential-pair layout), optionally enclosed by an automatically-sized
+guard ring (`add_guard_ring`, fixed internal sizing — use the standalone
+`guard_ring` generator directly for a fully-parametrized ring). Ports are
+named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
+`params.mirror` is `true`, for a current-mirror naming convention — geometry
+is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
+`add_guard_ring` is `true`. `device_count` is `2 * splits`.
+`drc_hints.matched_group_id` is `"diff_pair:pair:<splits>"` (or
+`"diff_pair:mirror:<splits>"` with `params.mirror`).
+
+| `params` field    | Type   | Default | Description |
+| ------------------ | ------ | ------- | ----------- |
+| `w_um`             | double | `0.42`  | Unit device width (µm). Must be `>= 0.42`. |
+| `l_um`             | double | `0.28`  | Gate length (µm). Must be `> 0`. |
+| `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. |
+| `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
+| `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 
 ## JSON schema (the contract)
 
@@ -165,9 +278,9 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Stable port/pin name (`P1`/`P2` for `resistor_strip` — the two ends of the strip). |
-| `net` | string \| null | Caller-supplied net label; always `null` at phase 1 (no request field feeds it yet). |
-| `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports. `name` is `null` at phase 1 (no per-PDK layer-name lookup is wired up yet; see the module docstring in `src/klayout_tools/gen.py`). |
+| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, etc). |
+| `net` | string \| null | Caller-supplied net label; always `null` — no request field feeds it yet. |
+| `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
@@ -176,10 +289,10 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (`resistor_strip`'s `spacing_um`). |
-| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Always `null` at phase 1 — `resistor_strip` has no matching concept; a future array generator (phase 2) is expected to set it. |
+| `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (or its own safe-margin constant, for a generator with no single caller-supplied spacing param — see each generator's section above). |
+| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`); always `null` for `resistor_strip` and `guard_ring`, neither of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
-| `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes. Always present, empty when there is nothing to report. |
+| `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 
 ### Semantics and guarantees
 
@@ -194,8 +307,7 @@ field requires one.
 ## `klt gen --list`
 
 Enumerates every registered generator and its `params` schema — the same data
-[the per-generator table above](#the-reference-generator-resistor_strip)
-documents by hand for `resistor_strip`:
+[the per-generator tables above](#generators) document by hand:
 
 ```json
 {
@@ -274,4 +386,18 @@ $ klt gen --list
 # Generate a 3-unit resistor strip against an installed sky130A PDK:
 $ klt gen resistor_strip --params '{"num": 3, "length_um": 1.5}' \
     --pdk sky130A -o output/res_strip.gds --format json
+
+# A 2x2 common-centroid matched MOS array on sky130A, then verify it's
+# DRC-clean:
+$ klt gen mos_array --pdk sky130A -o output/mos_array.gds --format json
+$ klt drc output/mos_array.gds --deck sky130
+
+# The same defaults on gf180mcu -- every phase-2 generator's documented
+# defaults pass klt drc clean on both curated decks:
+$ klt gen mos_array --pdk gf180mcuC -o output/mos_array_gf180.gds
+$ klt drc output/mos_array_gf180.gds --deck gf180mcu
+
+# A guard-ringed differential pair, current-mirror-labelled:
+$ klt gen diff_pair --params '{"mirror": true, "splits": 2}' \
+    --pdk sky130A -o output/current_mirror.gds --format json
 ```

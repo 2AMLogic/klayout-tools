@@ -14,6 +14,7 @@ import pytest
 
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
+from klayout_tools.drc import run_drc
 from klayout_tools.gen import GenError, generate, list_generators, load_params_arg
 
 
@@ -37,6 +38,17 @@ def _isolate(monkeypatch, tmp_path):
 def pdk_root(tmp_path):
     root = tmp_path / "pdk_install"
     _make_install(root, "sky130A")
+    return root
+
+
+@pytest.fixture()
+def both_pdk_root(tmp_path):
+    """Both PDK families the phase-2 generators support (see
+    `klayout_tools.gen._PDK_ROLE_LAYERS`), under one install root -- used by
+    the DRC-clean-on-both-decks tests below."""
+    root = tmp_path / "pdk_install"
+    _make_install(root, "sky130A")
+    _make_install(root, "gf180mcuD")
     return root
 
 
@@ -449,3 +461,504 @@ def test_generate_uses_shared_pdk_resolver(tmp_path, pdk_root, monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][1] == {"variant": "sky130A", "root": str(pdk_root)}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: the four analog primitive generators (Epic #152's phase 2, #159)
+# --------------------------------------------------------------------------- #
+
+#: Every phase-2 generator, and the deck name (== PDK family, see
+#: `klayout_tools.gen._PDK_ROLE_LAYERS`) it must pass `klt drc --deck` on.
+_PHASE2_GENERATORS = ("mos_array", "res_array", "guard_ring", "diff_pair")
+_PHASE2_DECKS = ("sky130", "gf180mcu")
+_PHASE2_GENERATOR_X_DECK = [
+    (name, deck) for name in _PHASE2_GENERATORS for deck in _PHASE2_DECKS
+]
+
+
+def test_list_generators_includes_all_four_phase2_families():
+    """`klt gen --list` must show all four analog primitive families the
+    issue scopes, alongside phase 1's `resistor_strip` (acceptance
+    criterion #1)."""
+    report = list_generators()
+    names = {g["name"] for g in report["generators"]}
+    assert names == {
+        "resistor_strip",
+        "mos_array",
+        "res_array",
+        "guard_ring",
+        "diff_pair",
+    }
+
+
+@pytest.mark.parametrize("name", _PHASE2_GENERATORS)
+def test_list_generators_phase2_params_have_no_hidden_layer_fields(name):
+    report = list_generators()
+    generator = next(g for g in report["generators"] if g["name"] == name)
+    param_names = {p["name"] for p in generator["params"]}
+    assert not param_names & {
+        "active_layer",
+        "poly_layer",
+        "contact_layer",
+        "metal_layer",
+        "tap_layer",
+        "well_layer",
+        "well_present",
+    }
+
+
+@pytest.mark.parametrize(("generator_name", "deck"), _PHASE2_GENERATOR_X_DECK)
+def test_phase2_generator_default_params_are_drc_clean(
+    generator_name, deck, tmp_path, both_pdk_root
+):
+    """Each phase-2 generator's documented default `params` must pass `klt
+    drc --deck <pdk>` clean on *both* sky130 and gf180mcu (acceptance
+    criterion #2) -- this is the 4 families x 2 PDKs = 8-combination matrix
+    the issue's test plan calls out."""
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"{generator_name}_{deck}.gds"
+    report = generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert output.is_file()
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # bbox_um and ports[] are populated (acceptance criterion #3).
+    bbox = report["bbox_um"]
+    assert bbox["x1"] > bbox["x0"]
+    assert bbox["y1"] > bbox["y0"]
+    assert report["ports"]
+    for port in report["ports"]:
+        assert set(port) == {
+            "name",
+            "net",
+            "layer",
+            "x_um",
+            "y_um",
+            "width_um",
+            "direction_deg",
+        }
+
+
+@pytest.mark.parametrize("generator_name", ("mos_array", "res_array", "diff_pair"))
+def test_matched_group_id_populated_for_matched_device_generators(
+    generator_name, tmp_path, pdk_root
+):
+    """`drc_hints.matched_group_id` must be non-null for the array/matched-
+    device generators -- families 1, 2, 4 (acceptance criterion #4)."""
+    output = tmp_path / f"{generator_name}.gds"
+    report = generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["matched_group_id"] is not None
+
+
+def test_matched_group_id_is_null_for_guard_ring(tmp_path, pdk_root):
+    """`guard_ring` (family 3) has no matching concept -- it is explicitly
+    excluded from the `matched_group_id` requirement (see the issue's
+    acceptance criteria and `resistor_strip`'s phase-1 precedent)."""
+    output = tmp_path / "guard_ring.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["matched_group_id"] is None
+
+
+# --- mos_array -------------------------------------------------------------- #
+
+
+def test_mos_array_device_count_and_ports(tmp_path, pdk_root):
+    output = tmp_path / "mos_array.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 2, "cols": 2, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 4
+    # 3 ports (S/D/G) per real unit device, no ports for dummies.
+    assert len(report["ports"]) == 12
+    port_names = {p["name"] for p in report["ports"]}
+    assert {"U0_S", "U0_D", "U0_G"} <= port_names
+
+
+def test_mos_array_1x1_boundary(tmp_path, pdk_root):
+    output = tmp_path / "mos_array_1x1.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 1, "cols": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    assert len(report["ports"]) == 3
+
+
+def test_mos_array_topology_array_vs_common_centroid_reorders_ports(tmp_path, pdk_root):
+    """`topology` changes the port-numbering order (see
+    `klayout_tools.gen._centroid_order`) without changing device_count."""
+
+    def _run(topology):
+        output = tmp_path / f"mos_array_{topology}.gds"
+        return generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"rows": 2, "cols": 2, "dummy": 0, "topology": topology},
+                "options": {"output": str(output)},
+            }
+        )
+
+    array_report = _run("array")
+    cc_report = _run("common_centroid")
+    assert array_report["device_count"] == cc_report["device_count"] == 4
+
+    # Port *names* are always sequential (U0.._Un-1) regardless of topology --
+    # what `topology` changes is which physical (x_um, y_um) position each
+    # sequential index lands on (see `klayout_tools.gen._centroid_order`).
+    array_positions = [
+        (p["x_um"], p["y_um"])
+        for p in array_report["ports"]
+        if p["name"].endswith("_S")
+    ]
+    cc_positions = [
+        (p["x_um"], p["y_um"]) for p in cc_report["ports"] if p["name"].endswith("_S")
+    ]
+    assert array_positions != cc_positions
+    assert sorted(array_positions) == sorted(cc_positions)
+
+
+def test_mos_array_dummy_devices_not_counted_or_ported(tmp_path, pdk_root):
+    output_no_dummy = tmp_path / "no_dummy.gds"
+    output_dummy = tmp_path / "with_dummy.gds"
+    no_dummy = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 1, "cols": 2, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    with_dummy = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 1, "cols": 2, "dummy": 2},
+            "options": {"output": str(output_dummy)},
+        }
+    )
+    # Dummies widen the bbox but never change device_count/ports.
+    assert no_dummy["device_count"] == with_dummy["device_count"] == 2
+    assert len(no_dummy["ports"]) == len(with_dummy["ports"]) == 6
+    assert with_dummy["bbox_um"]["x1"] - with_dummy["bbox_um"]["x0"] > (
+        no_dummy["bbox_um"]["x1"] - no_dummy["bbox_um"]["x0"]
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"w_um": 0.1},
+        {"l_um": 0},
+        {"l_um": -1.0},
+        {"fingers": 0},
+        {"rows": 0},
+        {"cols": 0},
+        {"dummy": -1},
+        {"topology": "bogus"},
+    ],
+)
+def test_mos_array_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --- res_array --------------------------------------------------------------- #
+
+
+def test_res_array_device_count_and_ports(tmp_path, pdk_root):
+    output = tmp_path / "res_array.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3, "dummy": 1},
+            "options": {"output": str(output)},
+        }
+    )
+    # 3 matched resistors -> device_count 3, but dummies still widen the bbox.
+    assert report["device_count"] == 3
+    assert len(report["ports"]) == 6
+    assert report["drc_hints"]["matched_group_id"] == "res_array:3"
+
+
+def test_res_array_num_1_boundary_and_zero_dummy(tmp_path, pdk_root):
+    output = tmp_path / "res_array_1.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    assert len(report["ports"]) == 2
+
+
+def test_res_array_tight_spacing_is_advisory_not_rejected(tmp_path, pdk_root):
+    """A `spacing_um` below the safe margin is legal (not a structural
+    error) -- it is surfaced via `drc_hints.notes` instead of a hard
+    rejection, per the spike's "advisory, not authoritative" semantics
+    (issue's edge-case test plan)."""
+    output = tmp_path / "res_array_tight.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"spacing_um": 0.05},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["notes"]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"length_um": 0},
+        {"width_um": 0.1},
+        {"spacing_um": -0.1},
+        {"num": 0},
+        {"dummy": -1},
+    ],
+)
+def test_res_array_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --- guard_ring --------------------------------------------------------------- #
+
+
+def test_guard_ring_ports_and_device_count(tmp_path, pdk_root):
+    output = tmp_path / "guard_ring.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"contacts_per_side": 2},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 8  # 2 contacts/side * 4 sides
+    port_names = {p["name"] for p in report["ports"]}
+    assert port_names == {"TAP_N", "TAP_S", "TAP_E", "TAP_W"}
+
+
+def test_guard_ring_add_well_false_on_gf180mcu_draws_no_well_note(
+    tmp_path, both_pdk_root
+):
+    output = tmp_path / "guard_ring_no_well.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"add_well": False},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_guard_ring_add_well_true_on_sky130_notes_unsupported(tmp_path, pdk_root):
+    """sky130's curated deck has no well-layer rule (see
+    `klayout_tools.gen._PDK_ROLE_LAYERS`) -- `add_well=True` (the default)
+    is honoured as "no-op, with a note" rather than an error."""
+    output = tmp_path / "guard_ring_well.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert any("well" in note for note in report["drc_hints"]["notes"])
+
+
+def test_guard_ring_contacts_per_side_1_boundary(tmp_path, pdk_root):
+    output = tmp_path / "guard_ring_1.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"contacts_per_side": 1},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 4
+
+
+def test_guard_ring_overlapping_contacts_rejected(tmp_path, pdk_root):
+    """A `contacts_per_side` too large for the ring's own dimensions would
+    produce literally overlapping contacts -- a structural error, rejected
+    outright (not just noted), per the issue's edge-case test plan."""
+    with pytest.raises(GenError, match="does not fit"):
+        generate(
+            {
+                "generator": "guard_ring",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"contacts_per_side": 50, "inner_width_um": 0.5},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"inner_width_um": 0},
+        {"inner_height_um": -1.0},
+        {"ring_width_um": 0.1},
+        {"contacts_per_side": 0},
+    ],
+)
+def test_guard_ring_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "guard_ring",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --- diff_pair ---------------------------------------------------------------- #
+
+
+def test_diff_pair_composes_mos_array_unit_and_guard_ring(tmp_path, pdk_root):
+    """`diff_pair` composes families 1 and 3 -- a common-centroid pair of
+    unit devices (Q1/Q2) plus an automatically-sized guard ring."""
+    output = tmp_path / "diff_pair.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 4  # splits=2 -> 2 sub-instances per device
+    port_names = {p["name"] for p in report["ports"]}
+    assert {"Q1_1_S", "Q1_1_D", "Q1_1_G", "Q2_1_S"} <= port_names
+    assert {"TAP_N", "TAP_S", "TAP_E", "TAP_W"} <= port_names
+
+
+def test_diff_pair_mirror_naming(tmp_path, pdk_root):
+    output = tmp_path / "current_mirror.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"mirror": True},
+            "options": {"output": str(output)},
+        }
+    )
+    port_names = {p["name"] for p in report["ports"]}
+    assert any(name.startswith("M1_") for name in port_names)
+    assert any(name.startswith("M2_") for name in port_names)
+    assert report["drc_hints"]["matched_group_id"] == "diff_pair:mirror:2"
+
+
+def test_diff_pair_no_guard_ring_when_disabled(tmp_path, pdk_root):
+    output = tmp_path / "diff_pair_no_ring.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"add_guard_ring": False},
+            "options": {"output": str(output)},
+        }
+    )
+    port_names = {p["name"] for p in report["ports"]}
+    assert not port_names & {"TAP_N", "TAP_S", "TAP_E", "TAP_W"}
+    assert report["drc_hints"]["notes"]
+
+
+def test_diff_pair_splits_1_boundary(tmp_path, pdk_root):
+    output = tmp_path / "diff_pair_1.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"splits": 1},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"w_um": 0.1}, {"l_um": 0}, {"splits": 0}],
+)
+def test_diff_pair_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "diff_pair",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --- PDK-family support ------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("generator_name", _PHASE2_GENERATORS)
+def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_name):
+    root = tmp_path / "pdk_install"
+    _make_install(root, "someOtherPdkX")
+    with pytest.raises(GenError, match="not supported"):
+        generate(
+            {
+                "generator": generator_name,
+                "pdk": {"variant": "someOtherPdkX", "root": str(root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
