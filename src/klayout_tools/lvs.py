@@ -205,7 +205,7 @@ def run_lvs(request_path: str) -> dict[str, Any]:
     # would pass a second, redundant logger reference).
     compare_result = comparer.compare(layout_netlist, reference_netlist)
 
-    mismatches = _build_mismatches(logger)
+    mismatches = _build_mismatches(logger, layout_netlist, reference_netlist)
     if not compare_result and not mismatches:
         # Safety net for the correctness invariant this module's docstring
         # states: `compare()` is always authoritative. If the engine says
@@ -611,7 +611,24 @@ def _mismatch(
     }
 
 
-def _build_mismatches(logger: Any) -> list[dict[str, Any]]:
+def _count_devices_of_class(netlist: Any, device_class: Any) -> int:
+    """Count device instances of ``device_class`` anywhere in ``netlist``
+    (device classes are netlist-scoped, but instances live on individual
+    circuits -- see ``_build_mismatches``'s ``device_class_mismatches``
+    handling)."""
+    count = 0
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            if device.device_class() is device_class:
+                count += 1
+    return count
+
+
+def _build_mismatches(
+    logger: Any,
+    layout_netlist: Any | None = None,
+    reference_netlist: Any | None = None,
+) -> list[dict[str, Any]]:
     mismatches: list[dict[str, Any]] = []
 
     mismatches.extend(_classify_net_mismatches(logger.net_mismatches))
@@ -693,14 +710,43 @@ def _build_mismatches(logger: Any) -> list[dict[str, Any]]:
 
     for a, b in logger.device_class_mismatches:
         side = "layout" if b is None else ("reference" if a is None else "both")
-        mismatches.append(
-            _mismatch(
-                CATEGORY_TOPOLOGY,
-                "error",
-                "device class could not be mapped to a counterpart",
-                side,
-            )
+        # `a`/`b` is the device class present on the side that has it (the
+        # other side never registered a counterpart category at all -- see
+        # this module's docstring on `NetlistComparer`'s own event
+        # semantics). If that side's netlist genuinely has zero instances of
+        # the class (e.g. `extract.py` unconditionally registers both
+        # `nfet`/`pfet` device classes even when a layout only instantiates
+        # one polarity), this is not a real topology defect -- downgrade to
+        # `warning`, mirroring the `ambiguous_net_matches` precedent below.
+        # A class with actual instances that still has no counterpart is a
+        # genuine gap and stays `error`.
+        present_class = a if a is not None else b
+        present_netlist = layout_netlist if a is not None else reference_netlist
+        instance_count = (
+            _count_devices_of_class(present_netlist, present_class)
+            if present_netlist is not None
+            else None
         )
+        if instance_count == 0:
+            mismatches.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "warning",
+                    "device class has no counterpart on the other side, but "
+                    "no devices of this class were extracted either -- not "
+                    "a real topology mismatch",
+                    side,
+                )
+            )
+        else:
+            mismatches.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "error",
+                    "device class could not be mapped to a counterpart",
+                    side,
+                )
+            )
 
     for a, b in logger.ambiguous_net_matches:
         mismatches.append(

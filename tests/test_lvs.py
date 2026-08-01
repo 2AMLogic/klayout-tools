@@ -907,6 +907,70 @@ def test_corpus_deliberately_broken_reference_reports_mismatches(
 
 
 # --------------------------------------------------------------------------- #
+# Regression: #201 -- unused device-class registration is not a real mismatch
+# --------------------------------------------------------------------------- #
+
+
+def test_lvs_unused_device_class_mismatch_is_warning_not_error(tmp_path, monkeypatch):
+    """`klt extract` always registers both `nfet` and `pfet` device classes
+    (see `extract.py`'s ``_extract_netlist`` core), even when a layout only ever
+    instantiates one polarity -- the `diff_pair` generator's plain (non-
+    `mirror`) output is entirely `nfet` (the same shape as the #196
+    gen-compose bring-up's all-`nfet` composed circuit that discovered this).
+    A round-tripped SPICE reference netlist naturally never mentions the
+    unused `pfet` class (a `NetlistSpiceReader`-parsed netlist only registers
+    a device class actually referenced by a device line), so the comparer's
+    `device_class_mismatch` event fires for `pfet` on a otherwise-clean
+    self-compare. This must report `severity: "warning"`, not `"error"` --
+    the documented "`error` breaks equivalence" contract must hold in
+    practice, and `status` must still be `"match"`."""
+    from klayout_tools import pdk
+    from klayout_tools.extract import run_extract
+    from klayout_tools.gen import generate
+
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+    pdk_root = tmp_path / "pdk_install"
+    (pdk_root / "sky130A" / "libs.tech").mkdir(parents=True)
+
+    layout_path = tmp_path / "diff_pair.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(layout_path)},
+        }
+    )
+
+    reference_path = tmp_path / "ref.spice"
+    extracted = run_extract(str(layout_path), "sky130", output=str(reference_path))
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(layout_path), "deck": "sky130"},
+            "reference": {"netlist": str(reference_path), "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    device_class_entries = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_TOPOLOGY and "device class" in m["description"]
+    ]
+    assert device_class_entries, (
+        "expected a topology entry for the unused pfet device class"
+    )
+    assert all(m["severity"] == "warning" for m in device_class_entries)
+    assert not any(m["severity"] == "error" for m in report["mismatches"])
+
+
+# --------------------------------------------------------------------------- #
 # CLI: exit codes, --format text/json
 # --------------------------------------------------------------------------- #
 
