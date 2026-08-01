@@ -26,8 +26,14 @@ export const SCHEMA_VERSION = 1;
  *    (e.g. DRC not run yet).
  *  - "no_artifacts": no layout.json found for this block (or it failed to
  *    parse) — the loader synthesizes this stub rather than crashing.
+ *  - "in design — simulation evidence": a canary block repo ingested by
+ *    `scripts/ingest-canary.py` (issue #62) that has no layout yet — real
+ *    simulation evidence (`spec_summary`/`signals` below), no GDS-derived
+ *    metrics. The literal string (not a snake_case enum value like the
+ *    others) is the honest status chip text itself, emitted verbatim by the
+ *    ingest script — see `blocks/README.md`.
  */
-export type LayoutStatus = "ok" | "partial" | "no_artifacts";
+export type LayoutStatus = "ok" | "partial" | "no_artifacts" | "in design — simulation evidence";
 
 /** DRC run status, from `klt drc` — `"clean"` or `"violations"`. */
 export type DrcStatus = "clean" | "violations";
@@ -171,6 +177,56 @@ export interface LayoutSignals {
 }
 
 /**
+ * One row of a canary block's target-spec table (issue #62), parsed
+ * verbatim from the source repo's `README.md` "Target specification"
+ * section by `scripts/ingest-canary.py::parse_spec_summary`. Keys mirror
+ * that table's own (slugified) column headers -- `parameter`/`target` are
+ * present on every current canary; `stretch`/`corner_binding` are present
+ * only when the source table has those columns (both wave-1 canaries do,
+ * but a future one's table shape isn't hardcoded against). Values are the
+ * cell text verbatim (e.g. `"1.20 V ±2% untrimmed"`) -- this is prose for
+ * display, not a machine-comparable number.
+ */
+export interface LayoutSpecRow {
+  parameter: string;
+  target?: string;
+  stretch?: string;
+  corner_binding?: string;
+  [key: string]: string | undefined;
+}
+
+/**
+ * A canary block's target-spec summary (issue #62), present only for
+ * blocks ingested by `scripts/ingest-canary.py` from a source repo whose
+ * `README.md` has a "Target specification" section.
+ */
+export interface LayoutSpecSummary {
+  /** The heading's parenthetical, e.g. `"RATIFIED 2026-07-31, see issue #1
+   *  and #35"` or `"DRAFT — engineering to ratify, see issue #1"`. Omitted
+   *  when the source heading has no parenthetical. */
+  status_note?: string;
+  rows: LayoutSpecRow[];
+}
+
+/**
+ * Provenance for a block ingested from an external source repo (issue #62)
+ * -- always present for canary blocks, always absent for #4-corpus /
+ * design-pipeline blocks (which have no external source repo).
+ */
+export interface LayoutSource {
+  /** `"<org>/<name>"`, e.g. `"2AMLogic/gf180-bandgap"`. */
+  repo: string;
+  /** The exact pinned commit sha this ingest run used (`git rev-parse
+   *  HEAD` after checkout) -- always a full 40-char sha, never a branch
+   *  name, so it stays meaningful after the source repo moves on. */
+  ref: string;
+  /** Path within the source repo this block corresponds to, relative to
+   *  its root. Currently always `"."` -- every canary repo is one block --
+   *  reserved for a future monorepo-style source. */
+  path: string;
+}
+
+/**
  * A fully-parsed layout record matching `layout.json` schema v1.
  *
  * Required fields (always present): `schema_version`, `generated_at`,
@@ -200,11 +256,11 @@ export interface Layout {
   /**
    * Whether `layout_file` may be linked as a download on the block detail
    * page (#64). NOT part of the `klt layout-metrics` contract above — this
-   * is a presence-check flag reserved for the content pipeline / public-repo
-   * gate (#62), which is not yet wired up. Until #62 sets it, this field is
-   * always absent, so every detail page omits its download section; once
-   * #62 starts emitting `downloadable: true` for blocks sourced from public
-   * repos, the download link appears with no changes to this page.
+   * is a presence-check flag set by the content pipeline / public-repo gate
+   * (#62): `scripts/ingest-canary.py` sets it to `true` unconditionally for
+   * every block that passes the fail-closed public-repo check, regardless
+   * of whether `layout_file` itself is present yet (the download section
+   * still only renders once both are set — see `DetailPage.tsx`).
    */
   downloadable?: boolean;
   /**
@@ -213,6 +269,15 @@ export interface Layout {
    * section is gated on this field the same way `renders` / `downloadable`
    * / `drc` are gated (presence, not truthiness). See `LayoutSignals`
    * above.
+   *
+   * Also reused, with the same shape, by `scripts/ingest-canary.py` (#62)
+   * for canary blocks' *own* `sim/` evidence trail — a source repo's
+   * append-only simulation records, not a `klt sim` run this repo performs
+   * itself. See `blocks/README.md` and that script's module docstring.
    */
   signals?: LayoutSignals;
+  /** Canary block target-spec summary (issue #62). See `LayoutSpecSummary`. */
+  spec_summary?: LayoutSpecSummary;
+  /** Canary block source-repo provenance (issue #62). See `LayoutSource`. */
+  source?: LayoutSource;
 }

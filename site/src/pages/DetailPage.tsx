@@ -10,13 +10,15 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * One static route `/<slug>/` per block discovered by `loadLayouts()`
  * (including `no_artifacts` stubs, so the gallery index never links to a
  * 404). Shows the block's available per-layer renders (the `renders` map,
- * staged by `site/scripts/copy-renders.mjs`), name + description, a
- * metrics table covering every present optional field (omit-absent rule —
- * a missing field is never rendered as "null"/"undefined"), a Signals
- * section (issue #100, Epic #90 Phase 2) gated behind `layout.signals` and
- * rendered by `@/components/waveform`'s `WaveformViewer`, a downloads
- * section gated behind `layout.downloadable`, and a back-link to the
- * gallery index.
+ * staged by `site/scripts/copy-renders.mjs`), name + description, source
+ * provenance (`layout.source`, issue #62), a Specification section gated
+ * behind `layout.spec_summary` (issue #62, canary blocks' target-spec
+ * table), a metrics table covering every present optional field
+ * (omit-absent rule — a missing field is never rendered as
+ * "null"/"undefined"), a Signals section (issue #100, Epic #90 Phase 2)
+ * gated behind `layout.signals` and rendered by `@/components/waveform`'s
+ * `WaveformViewer`, a downloads section gated behind `layout.downloadable`,
+ * and a back-link to the gallery index.
  *
  * Matches the original Astro page's chrome exactly: no shared Header/Footer
  * — this page has always been a standalone document (see `[slug].astro`,
@@ -31,11 +33,13 @@ const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
   ok: "border-cyan text-cyan",
   partial: "border-orange text-orange",
   no_artifacts: "border-fog-dim text-fog-dim",
+  "in design — simulation evidence": "border-cyan text-cyan",
 };
 
 export function DetailPage({ layout }: DetailPageProps) {
   const displayName = layout.name;
-  const isBuilt = layout.status !== "no_artifacts";
+  const isPreLayout = layout.status === "in design — simulation evidence";
+  const isBuilt = layout.status !== "no_artifacts" && !isPreLayout;
 
   const renderEntries = Object.entries(layout.renders ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
@@ -79,13 +83,57 @@ export function DetailPage({ layout }: DetailPageProps) {
         {layout.slug !== displayName && (
           <p className="mt-1.5 font-mono text-[0.8rem] text-fog-dim">{layout.slug}</p>
         )}
+        {layout.source && (
+          <p className="mt-1.5 font-mono text-[0.8rem] text-fog-dim">
+            Source:{" "}
+            <a href={`https://github.com/${layout.source.repo}`}>{layout.source.repo}</a>
+            {" @ "}
+            {layout.source.ref.slice(0, 12)}
+          </p>
+        )}
       </header>
 
-      {!isBuilt && (
+      {isPreLayout && (
+        <p className="mt-6 rounded-lg border border-l-[3px] border-border border-l-cyan bg-panel px-[1.1rem] py-[0.9rem] text-fog-dim">
+          This block is still in design — no layout exists yet. The specification and
+          signals below are simulation evidence from the source repo, not
+          measured/extracted silicon.
+        </p>
+      )}
+      {!isBuilt && !isPreLayout && (
         <p className="mt-6 rounded-lg border border-l-[3px] border-border border-l-fog-dim bg-panel px-[1.1rem] py-[0.9rem] text-fog-dim">
           This block has not been built yet — no renders, metrics, or downloads are
           available.
         </p>
+      )}
+
+      {layout.spec_summary && (
+        <section aria-label="Specification" className="mt-9">
+          <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Specification</h2>
+          {layout.spec_summary.status_note && (
+            <p className="mb-3 text-[0.85rem] text-fog-dim">{layout.spec_summary.status_note}</p>
+          )}
+          <Table>
+            <TableBody>
+              {layout.spec_summary.rows.map((row) => (
+                <TableRow key={row.parameter}>
+                  <TableHead>{row.parameter}</TableHead>
+                  <TableCell>
+                    {row.target}
+                    {row.stretch && (
+                      <span className="text-fog-dim"> · stretch: {row.stretch}</span>
+                    )}
+                    {row.corner_binding && (
+                      <span className="block text-[0.8rem] text-fog-dim">
+                        {row.corner_binding}
+                      </span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </section>
       )}
 
       <section aria-label="Renders" className="mt-9">

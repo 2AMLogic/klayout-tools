@@ -101,6 +101,22 @@ describe("loadLayout", () => {
     expect(layout.renders?.top).toBe("renders/top.png");
   });
 
+  it('accepts the "in design — simulation evidence" status (issue #62 canary blocks)', () => {
+    writeLayoutJson(
+      "gf180-bandgap",
+      validLayout("gf180-bandgap", {
+        status: "in design — simulation evidence",
+        spec_summary: { rows: [{ parameter: "Output reference", target: "1.20 V" }] },
+        source: { repo: "2AMLogic/gf180-bandgap", ref: "a".repeat(40), path: "." },
+        downloadable: true,
+      }),
+    );
+    const layout = loadLayout(join(root, "gf180-bandgap"));
+    expect(layout.status).toBe("in design — simulation evidence");
+    expect(layout.spec_summary?.rows[0]?.parameter).toBe("Output reference");
+    expect(layout.source?.repo).toBe("2AMLogic/gf180-bandgap");
+  });
+
   it("skips an unknown schema_version and returns a stub, with a warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     writeLayoutJson("future-block", validLayout("future-block", { schema_version: 2 }));

@@ -13,6 +13,7 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
   gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
+  ingest-canary.py               # ingest a public canary block repo (issue #62) into blocks/<slug>/output/layout.json
 ```
 
 ## `deploy-site.sh`
@@ -38,8 +39,9 @@ scripts/deploy-site.sh --no-deploy
 ```
 
 Out of scope: regenerating `blocks/*/output/layout.json` or renders — that's
-the content pipeline (#62); `deploy-site.sh` only builds and deploys whatever
-is already checked into `blocks/` and `site/`.
+the content pipeline (`bootstrap-gallery-blocks.py` for the #4 corpus,
+`ingest-canary.py` for canary blocks, #62); `deploy-site.sh` only builds and
+deploys whatever is already checked into `blocks/` and `site/`.
 
 ## `fetch-pdks.sh`
 
@@ -84,4 +86,22 @@ normally). See both modules' own docstrings for the full pipeline.
 ```
 scripts/fetch-cell-netlists.sh
 python scripts/bootstrap-gallery-blocks.py
+```
+
+## `ingest-canary.py`
+
+Ingests a **public** canary block repo (issue #62 — a real 2AM Logic block
+designed end-to-end by AI agents, e.g. `2AMLogic/gf180-bandgap`) into
+`blocks/<slug>/output/layout.json`, alongside (not instead of) the #4-corpus
+blocks the two scripts above bootstrap. Gated fail-closed on the target
+repo's GitHub visibility (`gh api repos/<repo> --jq .visibility`) — a
+private/inaccessible repo, or `gh` itself being unavailable, refuses and
+writes nothing. Pre-layout blocks (no GDS yet) get a `status: "in design —
+simulation evidence"` sim-evidence card instead of `"ok"`/`"partial"`/
+`"no_artifacts"` — see [`../blocks/README.md`](../blocks/README.md#canary-blocks-issue-62)
+for the full field-level documentation.
+
+```
+python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap
+python scripts/ingest-canary.py --repo 2AMLogic/sky130-bandgap
 ```

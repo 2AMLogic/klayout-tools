@@ -50,6 +50,13 @@ describe("LayoutCard status chip", () => {
     render(<LayoutCard layout={makeLayout({ status: "no_artifacts" })} />);
     expect(screen.getByText("No artifacts")).toBeInTheDocument();
   });
+
+  it('renders the "In design" badge for a canary sim-evidence card (issue #62)', () => {
+    render(
+      <LayoutCard layout={makeLayout({ status: "in design — simulation evidence" })} />,
+    );
+    expect(screen.getByText("In design")).toBeInTheDocument();
+  });
 });
 
 describe("LayoutCard thumbnail selection", () => {

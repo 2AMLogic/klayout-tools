@@ -32,11 +32,16 @@ export interface LayoutCardProps {
 const STATUS_LABEL: Record<Exclude<LayoutStatus, "ok">, string> = {
   partial: "Partial",
   no_artifacts: "No artifacts",
+  "in design — simulation evidence": "In design",
 };
 
-const STATUS_BADGE_VARIANT: Record<Exclude<LayoutStatus, "ok">, "partial" | "no-artifacts"> = {
+const STATUS_BADGE_VARIANT: Record<
+  Exclude<LayoutStatus, "ok">,
+  "partial" | "no-artifacts" | "in-design"
+> = {
   partial: "partial",
   no_artifacts: "no-artifacts",
+  "in design — simulation evidence": "in-design",
 };
 
 /**

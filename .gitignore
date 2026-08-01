@@ -10,6 +10,10 @@ site/dist/
 pdks/*
 !pdks/README.md
 
+# Cloned canary block repos (scripts/ingest-canary.py, issue #62) — not
+# tracked; only the emitted blocks/<slug>/output/layout.json is checked in.
+.cache/canary-repos/
+
 # klt render output (build artifact, not checked in — see docs/cli/render.md)
 renders/
 

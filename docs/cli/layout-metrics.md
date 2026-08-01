@@ -175,6 +175,13 @@ artifacts" docstring section.
 name, or a DRC engine error simply omits `drc` — it never changes `status`
 or blocks the rest of the report.
 
+A fourth status value, `"in design — simulation evidence"`, is emitted only
+by `scripts/ingest-canary.py` (issue #62), never by this command itself —
+it marks a pre-layout block ingested from an external canary repo (real
+simulation evidence, `spec_summary`/`signals`, no GDS-derived metrics yet).
+See [`../../blocks/README.md`](../../blocks/README.md#canary-blocks-issue-62)
+for that pipeline's full field-level documentation.
+
 ## Text format
 
 ```

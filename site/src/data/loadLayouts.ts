@@ -29,6 +29,7 @@ const VALID_STATUSES: ReadonlySet<string> = new Set<LayoutStatus>([
   "ok",
   "partial",
   "no_artifacts",
+  "in design — simulation evidence",
 ]);
 
 /** Directory of this module when executed unbundled (Node ESM, vitest). */
