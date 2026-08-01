@@ -5,26 +5,48 @@ JSON-serialisable primitives) and never prints, mirroring ``gen.py``.
 Serialisation and human-readable formatting live in the CLI command module
 (``cli/gen_compose_cmd.py``).
 
-This is phase 1 of Epic #191 (``klt gen compose``), the build carried by the
+This is phase 2 of Epic #191 (``klt gen compose``), the build carried by the
 accepted spike, ``docs/design/gen-composition-spike.md`` -- read that
 document first; its section 2 ("Proposed composition contract") settles the
-request/response JSON shape this module implements, and section 5's "Scope
-proposal for a first implementing epic" settles this phase's scope:
-``placement.strategy: "row"`` only, no routing.
+request/response JSON shape this module implements, section 3 (build vs wrap)
+settles that routing is built natively against ``pya.Path``/``pya.Region``
+(not a runtime dependency on gdsfactory), and section 5's "Scope proposal for
+a first implementing epic" settles this phase's scope: ``placement.strategy:
+"row"`` plus *two-pin, point-to-point* Manhattan routing.
 
-Scope (phase 1, this module's current state): resolve each ``blocks[]``
-entry's own ``generator_report`` (a ``klt gen`` response, given as a file
-path or inline object -- see :func:`load_generator_report_arg`), compute a
-single horizontal row placement from each block's own reported ``bbox_um``
-plus ``placement.spacing_um`` (see :func:`compute_row_offsets`), and write a
-composed GDS with each block's own top cell instantiated as a translated
-sub-cell instance under one new top cell -- no routing metal, no
-``connectivity[]``/``routing`` execution. ``connectivity[]`` entries are
-still validated (a reference to a nonexistent block ``id``/port name is an
-application error, exit code 1, per the acceptance criteria) even though
-nothing is routed yet; ``nets[]``/``unrouted_nets[]``/``drc_hints`` are
-reserved, empty/null-equivalent placeholders this phase so phase 2 (routing)
-doesn't have to change the top-level envelope.
+Scope (phase 2, this module's current state):
+
+* **Placement** (from phase 1, unchanged): resolve each ``blocks[]`` entry's
+  own ``generator_report`` (a ``klt gen`` response, given as a file path or
+  inline object -- see :func:`load_generator_report_arg`), compute a single
+  horizontal row placement from each block's own reported ``bbox_um`` plus
+  ``placement.spacing_um`` (see :func:`compute_row_offsets`), and write a
+  composed GDS with each block's own top cell instantiated as a translated
+  sub-cell instance under one new top cell.
+* **Routing** (new this phase): for every 2-pin ``connectivity[]`` net, draw
+  a Manhattan metal path (backbone -> corner bends -> straight fill; see
+  :func:`manhattan_backbone`) between the two named ports on the resolved
+  ``routing.layer_role`` layer at ``routing.width_um`` width, built natively
+  as a ``pya.Path``. ``nets[]`` reports ``routed`` and ``route_length_um``
+  per net; a net the router cannot connect (e.g. a required jog through an
+  inter-block channel narrower than ``routing.width_um``, or a >2-pin bundle
+  net -- bundle routing is out of scope this phase, spike section 5 item 2)
+  is reported in ``unrouted_nets[]`` rather than failing the whole request.
+  A non-empty ``unrouted_nets[]`` with every block placed is a *partial
+  success* (exit code 3; see ``cli/gen_compose_cmd.py`` and the spike's
+  "Proposed exit codes").
+* **``drc_hints``** (new this phase): ``matched_groups[]`` reports every
+  distinct ``matched_group_id`` seen among the input blocks' own
+  ``generator_report.drc_hints.matched_group_id`` (read-only echo,
+  ``placement_symmetric: null`` -- symmetry *verification* is out of scope,
+  spike section 5 item 3); ``min_spacing_um`` reports the tightest spacing
+  actually used across placement and routing.
+
+``connectivity[]`` entries are validated exactly as in phase 1 (a reference
+to a nonexistent block ``id``/port name is an application error, exit code
+1); geometry is *advisory* -- ``klt drc`` remains the rule-compliance
+authority on the composed output, so a routed net (``routed: true``) is not a
+DRC-clean guarantee.
 
 PDK resolution goes through the one resolver every other verb uses
 (:func:`klayout_tools.pdk.find_pdk`) -- this module never implements its own
@@ -41,6 +63,7 @@ import json
 import os
 from typing import Any
 
+from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 from .pdk import PdkNotFoundError, find_pdk
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -53,6 +76,16 @@ SCHEMA_VERSION = 1
 #: Placement strategies implemented at this phase. ``"grid"`` is spike-scoped
 #: for a later phase (see ``docs/design/gen-composition-spike.md`` section 5).
 SUPPORTED_PLACEMENT_STRATEGIES = {"row"}
+
+#: Unit outward vector (dx, dy) for each orthogonal ``direction_deg`` a
+#: ``klt gen`` port reports. Ports only ever face an axis (0/90/180/270 --
+#: see ``gen.py``'s generators), so the router never has to snap a diagonal.
+_DIRECTION_VECTORS: dict[int, tuple[int, int]] = {
+    0: (1, 0),
+    90: (0, 1),
+    180: (-1, 0),
+    270: (0, -1),
+}
 
 
 class GenComposeError(Exception):
@@ -217,11 +250,18 @@ def _parse_blocks(raw_blocks: Any) -> dict[str, dict[str, Any]]:
             where=f"blocks[{index}] (id '{block_id}').generator_report",
         )
         ports = report.get("ports") or []
-        port_names = {
-            p["name"]
+        ports_by_name: dict[str, dict[str, Any]] = {
+            p["name"]: p
             for p in ports
             if isinstance(p, dict) and isinstance(p.get("name"), str)
         }
+
+        drc_hints = report.get("drc_hints")
+        matched_group_id = None
+        if isinstance(drc_hints, dict):
+            candidate = drc_hints.get("matched_group_id")
+            if isinstance(candidate, str) and candidate:
+                matched_group_id = candidate
 
         blocks[block_id] = {
             "id": block_id,
@@ -229,7 +269,9 @@ def _parse_blocks(raw_blocks: Any) -> dict[str, dict[str, Any]]:
             "cell_name": cell_name,
             "gds_path": gds_path,
             "bbox_um": bbox_um,
-            "port_names": port_names,
+            "port_names": set(ports_by_name),
+            "ports": ports_by_name,
+            "matched_group_id": matched_group_id,
         }
 
     return blocks
@@ -333,6 +375,253 @@ def _parse_connectivity(
     return connectivity
 
 
+def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
+    """Resolve ``routing.layer_role`` to a ``(layer, datatype)`` pair.
+
+    Routing goes through the *same* per-PDK-family role-layer table every
+    ``klt gen`` generator already uses (:data:`klayout_tools.gen._PDK_ROLE_LAYERS`)
+    -- never a raw ``{layer, datatype}`` pair from the request, and never a
+    second, private layer map (spike section 2, ``routing.layer_role``).
+
+    Raises :class:`GenComposeError` when the variant is unsupported, the role
+    is not a known role, or the resolved family's curated deck has no layer
+    for the role (``None`` entry).
+    """
+    try:
+        family = _pdk_family(variant)
+    except GenError as exc:
+        raise GenComposeError(str(exc)) from exc
+
+    family_roles = _PDK_ROLE_LAYERS[family]
+    if layer_role not in family_roles:
+        available = ", ".join(sorted(family_roles))
+        raise GenComposeError(
+            f"routing.layer_role '{layer_role}' is not a known layer role for "
+            f"PDK family '{family}' -- available: {available}"
+        )
+    pair = family_roles[layer_role]
+    if pair is None:
+        raise GenComposeError(
+            f"routing.layer_role '{layer_role}' has no layer in PDK family "
+            f"'{family}''s curated deck -- cannot route on it"
+        )
+    return pair
+
+
+def _cleanup_points(
+    points: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Drop consecutive duplicate and collinear waypoints from a backbone.
+
+    A raw backbone can contain zero-length hops (a stub that lands on top of
+    the next waypoint) and three collinear points (a straight run split by a
+    degenerate jog); both are geometrically harmless but produce a
+    ``pya.Path`` with redundant vertices. Collapsing them keeps the drawn
+    path -- and its reported ``route_length_um`` -- minimal and stable.
+    """
+    deduped: list[tuple[float, float]] = []
+    for p in points:
+        if not deduped or (
+            abs(p[0] - deduped[-1][0]) > 1e-9 or abs(p[1] - deduped[-1][1]) > 1e-9
+        ):
+            deduped.append(p)
+
+    if len(deduped) <= 2:
+        return deduped
+
+    cleaned: list[tuple[float, float]] = [deduped[0]]
+    for i in range(1, len(deduped) - 1):
+        prev, cur, nxt = cleaned[-1], deduped[i], deduped[i + 1]
+        # Collinear (same x for both segments, or same y for both segments)?
+        same_x = abs(prev[0] - cur[0]) < 1e-9 and abs(cur[0] - nxt[0]) < 1e-9
+        same_y = abs(prev[1] - cur[1]) < 1e-9 and abs(cur[1] - nxt[1]) < 1e-9
+        if same_x or same_y:
+            continue  # cur adds nothing; skip it
+        cleaned.append(cur)
+    cleaned.append(deduped[-1])
+    return cleaned
+
+
+def _polyline_length_um(points: list[tuple[float, float]]) -> float:
+    """Total length of an orthogonal polyline (sum of ``|dx| + |dy|``)."""
+    total = 0.0
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
+        total += abs(x1 - x0) + abs(y1 - y0)
+    return total
+
+
+def manhattan_backbone(
+    a: tuple[float, float],
+    dir_a_deg: int,
+    b: tuple[float, float],
+    dir_b_deg: int,
+    stub_um: float,
+) -> list[tuple[float, float]]:
+    """Generate a two-pin Manhattan backbone from port ``a`` to port ``b``.
+
+    Reimplements gdsfactory's ``route_single`` *algorithm* (spike section 1)
+    natively: leave port ``a`` along its outward ``dir_a_deg`` for a short
+    ``stub_um`` stub, leave port ``b`` along ``dir_b_deg`` likewise, then
+    connect the two stub ends with right-angle-only segments:
+
+    * both ports facing along **x** (the common row-placement case): a single
+      vertical jog at the midpoint x between the stub ends (degenerates to a
+      straight line when the ports share a y);
+    * both facing along **y**: a single horizontal jog at the midpoint y;
+    * mixed (one x, one y): a single corner (an "L").
+
+    Returns the cleaned ordered ``(x, y)`` waypoint list (um). ``pya.Path``
+    renders each interior corner as a square miter that fully fills the bend,
+    so no separate bend-insertion pass is needed -- the corner *is* the bend.
+    """
+    ax, ay = a
+    bx, by = b
+    va = _DIRECTION_VECTORS[dir_a_deg]
+    vb = _DIRECTION_VECTORS[dir_b_deg]
+    sa = (ax + va[0] * stub_um, ay + va[1] * stub_um)
+    sb = (bx + vb[0] * stub_um, by + vb[1] * stub_um)
+
+    a_horizontal = va[1] == 0  # port a faces +/-x
+    b_horizontal = vb[1] == 0  # port b faces +/-x
+
+    mid: list[tuple[float, float]] = []
+    if a_horizontal and b_horizontal:
+        mx = (sa[0] + sb[0]) / 2.0
+        mid = [(mx, sa[1]), (mx, sb[1])]
+    elif not a_horizontal and not b_horizontal:
+        my = (sa[1] + sb[1]) / 2.0
+        mid = [(sa[0], my), (sb[0], my)]
+    else:
+        # One port faces x, the other y -> a single corner joins the stubs.
+        if a_horizontal:
+            mid = [(sb[0], sa[1])]
+        else:
+            mid = [(sa[0], sb[1])]
+
+    return _cleanup_points([a, sa, *mid, sb, b])
+
+
+def _block_gap_um(
+    bbox_a: dict[str, float], bbox_b: dict[str, float], axis: str
+) -> float:
+    """Signed gap between two placed bboxes along ``axis`` (``"x"``/``"y"``).
+
+    Positive when the boxes are disjoint along that axis (the value is the
+    channel width available between them); ``<= 0`` when they touch or overlap
+    (a route jog has room regardless). ``axis`` is the axis the channel spans,
+    i.e. for a *vertical* jog the relevant channel is the horizontal (``"x"``)
+    gap between the two blocks.
+    """
+    if axis == "x":
+        lo, hi = sorted((bbox_a, bbox_b), key=lambda bb: bb["x0"])
+        return hi["x0"] - lo["x1"]
+    lo, hi = sorted((bbox_a, bbox_b), key=lambda bb: bb["y0"])
+    return hi["y0"] - lo["y1"]
+
+
+def route_two_pin(
+    pin_a: dict[str, Any],
+    pin_b: dict[str, Any],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+    width_um: float,
+) -> dict[str, Any]:
+    """Route one two-pin net and report the result.
+
+    Resolves each pin's port position into the composed coordinate frame
+    (port ``x_um``/``y_um`` translated by its block's ``offset_um``),
+    generates a Manhattan backbone (:func:`manhattan_backbone`), and applies a
+    first-cut routability check: when the backbone requires a jog *across* the
+    channel between the two pins' blocks and that channel is narrower than
+    ``width_um``, the wire cannot fit without overlapping a block, so the net
+    is reported unroutable (spike section 2, ``unrouted_nets[]``). This is a
+    diagnostic heuristic, not a DRC check -- ``klt drc`` remains authoritative.
+
+    Returns ``{"routed": bool, "route_length_um": float | None,
+    "points_um": list | None, "reason": str | None}``.
+    """
+    block_a = blocks[pin_a["block"]]
+    block_b = blocks[pin_b["block"]]
+    port_a = block_a["ports"].get(pin_a["port"])
+    port_b = block_b["ports"].get(pin_b["port"])
+
+    # A block with no reported ports[] (a hand-crafted generator_report) can't
+    # supply a routable position -- treat as unroutable rather than crashing.
+    if not isinstance(port_a, dict) or not isinstance(port_b, dict):
+        return {
+            "routed": False,
+            "route_length_um": None,
+            "points_um": None,
+            "reason": "one or both ports report no position (empty ports[])",
+        }
+
+    off_a = offsets_um[pin_a["block"]]
+    off_b = offsets_um[pin_b["block"]]
+    a = (
+        float(port_a["x_um"]) + off_a["x"],
+        float(port_a["y_um"]) + off_a["y"],
+    )
+    b = (
+        float(port_b["x_um"]) + off_b["x"],
+        float(port_b["y_um"]) + off_b["y"],
+    )
+    dir_a = int(port_a.get("direction_deg", 0)) % 360
+    dir_b = int(port_b.get("direction_deg", 0)) % 360
+    if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:
+        return {
+            "routed": False,
+            "route_length_um": None,
+            "points_um": None,
+            "reason": "a port reports a non-orthogonal direction_deg",
+        }
+
+    va = _DIRECTION_VECTORS[dir_a]
+    vb = _DIRECTION_VECTORS[dir_b]
+    stub_um = width_um
+
+    # Routability heuristic: a jog perpendicular to the ports' facing axis has
+    # to squeeze through the channel between the two blocks. When both ports
+    # face x and their y differs (a vertical jog is required), the channel is
+    # the horizontal gap; symmetric for both-y. Only meaningful for distinct
+    # blocks (a self-net has no inter-block channel).
+    if pin_a["block"] != pin_b["block"]:
+        bbox_a = placed_bboxes_um[pin_a["block"]]
+        bbox_b = placed_bboxes_um[pin_b["block"]]
+        if va[1] == 0 and vb[1] == 0 and abs(a[1] - b[1]) > 1e-9:
+            gap = _block_gap_um(bbox_a, bbox_b, axis="x")
+            if 0.0 <= gap < width_um:
+                return {
+                    "routed": False,
+                    "route_length_um": None,
+                    "points_um": None,
+                    "reason": (
+                        f"vertical jog needs a channel >= width {width_um}um "
+                        f"but the gap between blocks is only {gap:.4g}um"
+                    ),
+                }
+        elif va[0] == 0 and vb[0] == 0 and abs(a[0] - b[0]) > 1e-9:
+            gap = _block_gap_um(bbox_a, bbox_b, axis="y")
+            if 0.0 <= gap < width_um:
+                return {
+                    "routed": False,
+                    "route_length_um": None,
+                    "points_um": None,
+                    "reason": (
+                        f"horizontal jog needs a channel >= width {width_um}um "
+                        f"but the gap between blocks is only {gap:.4g}um"
+                    ),
+                }
+
+    points = manhattan_backbone(a, dir_a, b, dir_b, stub_um)
+    return {
+        "routed": True,
+        "route_length_um": _polyline_length_um(points),
+        "points_um": points,
+        "reason": None,
+    }
+
+
 def compose(request: dict[str, Any]) -> dict[str, Any]:
     """Run one composition request end-to-end and return the response envelope.
 
@@ -404,26 +693,112 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
     bboxes_um = {block_id: block["bbox_um"] for block_id, block in blocks.items()}
     offsets_um = compute_row_offsets(order, bboxes_um, spacing_um)
 
-    placed_bboxes_um = [
-        _translate_bbox(bboxes_um[block_id], offsets_um[block_id]) for block_id in order
-    ]
-    composed_bbox_um = _union_bbox(placed_bboxes_um)
-
-    _write_composed_gds(blocks, order, offsets_um, cell_name, output_path)
+    placed_bboxes_um = {
+        block_id: _translate_bbox(bboxes_um[block_id], offsets_um[block_id])
+        for block_id in order
+    }
+    composed_bbox_um = _union_bbox([placed_bboxes_um[block_id] for block_id in order])
 
     warnings: list[str] = []
+    notes: list[str] = []
+
+    # --- Routing (phase 2) --------------------------------------------------
+    # A connectivity[] net is routed only when routing.layer_role/width_um are
+    # given; if the caller supplied nets to wire but no routing spec, that's an
+    # application error (there is nothing to draw the metal on).
+    route_layer: tuple[int, int] | None = None
+    width_um = 0.0
     if connectivity:
-        warnings.append(
-            "connectivity[] was validated but not routed -- routing is not "
-            "implemented until phase 2 (see docs/design/gen-composition-spike.md)"
+        layer_role = routing.get("layer_role")
+        if not isinstance(layer_role, str) or not layer_role:
+            raise GenComposeError(
+                "request.routing.layer_role is required (a layer role such as "
+                "'metal') when connectivity[] is non-empty"
+            )
+        raw_width = routing.get("width_um")
+        if (
+            isinstance(raw_width, bool)
+            or not isinstance(raw_width, (int, float))
+            or raw_width <= 0
+        ):
+            raise GenComposeError(
+                "request.routing.width_um is required and must be > 0 when "
+                "connectivity[] is non-empty"
+            )
+        width_um = float(raw_width)
+        route_layer = _resolve_route_layer(pdk_info["variant"], layer_role)
+
+    nets: list[dict[str, Any]] = []
+    unrouted_nets: list[str] = []
+    routed_geometry: list[dict[str, Any]] = []
+    for entry in connectivity:
+        net_label = entry["net"]
+        pins = entry["pins"]
+        if len(pins) != 2:
+            # Bundle (>2-pin) routing is out of scope this phase (spike section
+            # 5 item 2). Report as a partial-success unrouted net rather than
+            # rejecting the whole request or silently dropping the connection.
+            nets.append(
+                {
+                    "net": net_label,
+                    "pins": pins,
+                    "routed": False,
+                    "route_length_um": None,
+                }
+            )
+            unrouted_nets.append(net_label)
+            notes.append(
+                f"net '{net_label}' has {len(pins)} pins -- bundle (>2-pin) "
+                "routing is out of scope this phase, so it was left unrouted"
+            )
+            continue
+
+        result = route_two_pin(
+            pins[0], pins[1], blocks, offsets_um, placed_bboxes_um, width_um
         )
+        nets.append(
+            {
+                "net": net_label,
+                "pins": pins,
+                "routed": result["routed"],
+                "route_length_um": result["route_length_um"],
+            }
+        )
+        if result["routed"]:
+            routed_geometry.append(
+                {"points_um": result["points_um"], "width_um": width_um}
+            )
+        else:
+            unrouted_nets.append(net_label)
+            notes.append(f"net '{net_label}' could not be routed: {result['reason']}")
+
+    _write_composed_gds(
+        blocks,
+        order,
+        offsets_um,
+        cell_name,
+        output_path,
+        routed_geometry,
+        route_layer,
+    )
+
+    # --- drc_hints: matched-group echo + tightest spacing used --------------
+    matched_groups = _collect_matched_groups(blocks, order)
+
+    min_spacing_um: float | None = None
+    if connectivity:
+        # Placement always applies spacing_um between adjacent blocks; routing
+        # adds no spacing tighter than that at this phase (routes run through
+        # the placed channels), so the tightest spacing actually used is the
+        # placement gap. Left null when nothing was routed (phase-1 behaviour).
+        min_spacing_um = spacing_um
 
     response_blocks = [
         {
             "id": block_id,
             "generator": blocks[block_id]["generator"],
             "offset_um": offsets_um[block_id],
-            "bbox_um": _translate_bbox(bboxes_um[block_id], offsets_um[block_id]),
+            "bbox_um": placed_bboxes_um[block_id],
         }
         for block_id in order
     ]
@@ -439,11 +814,42 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         },
         "bbox_um": composed_bbox_um,
         "blocks": response_blocks,
-        "nets": [],
-        "unrouted_nets": [],
-        "drc_hints": {"min_spacing_um": None, "matched_groups": [], "notes": []},
+        "nets": nets,
+        "unrouted_nets": unrouted_nets,
+        "drc_hints": {
+            "min_spacing_um": min_spacing_um,
+            "matched_groups": matched_groups,
+            "notes": notes,
+        },
         "warnings": warnings,
     }
+
+
+def _collect_matched_groups(
+    blocks: dict[str, dict[str, Any]], order: list[str]
+) -> list[dict[str, Any]]:
+    """Echo every distinct ``matched_group_id`` seen among input blocks.
+
+    Read-only consumption of the ``drc_hints.matched_group_id`` hook every
+    array/matched-device ``klt gen`` generator populates (spike section 2).
+    One entry per distinct id, in first-seen order, listing which request-level
+    block ``id``s carry it. ``placement_symmetric`` is always ``null`` this
+    phase -- symmetry *verification* against a declared symmetry axis is out of
+    scope (spike section 5 item 3).
+    """
+    groups: dict[str, list[str]] = {}
+    for block_id in order:
+        gid = blocks[block_id].get("matched_group_id")
+        if gid:
+            groups.setdefault(gid, []).append(block_id)
+    return [
+        {
+            "matched_group_id": gid,
+            "blocks": block_ids,
+            "placement_symmetric": None,
+        }
+        for gid, block_ids in groups.items()
+    ]
 
 
 def _write_composed_gds(
@@ -452,9 +858,12 @@ def _write_composed_gds(
     offsets_um: dict[str, dict[str, float]],
     cell_name: str,
     output_path: str,
+    routed_geometry: list[dict[str, Any]] | None = None,
+    route_layer: tuple[int, int] | None = None,
 ) -> None:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
-    every block's own top cell as a translated sub-cell instance.
+    every block's own top cell as a translated sub-cell instance, plus any
+    routed metal.
 
     Each block's GDS is read into its own scratch :class:`kdb.Layout`, its
     reported top cell (``generator_report.cell_name``) is duplicated
@@ -463,6 +872,11 @@ def _write_composed_gds(
     block's computed ``offset_um`` -- geometry is copied exactly once (never
     re-derived), and hierarchy is preserved (each block stays its own cell,
     not flattened into the composed top cell).
+
+    Routed nets (``routed_geometry``: a list of ``{points_um, width_um}``) are
+    drawn as native :class:`kdb.Path` shapes directly on the composed top cell,
+    on ``route_layer`` (a ``(layer, datatype)`` pair) -- top-level metal, not
+    inside any block's sub-cell.
     """
     import klayout.db as kdb
 
@@ -506,6 +920,20 @@ def _write_composed_gds(
         ox = int(round(offset["x"] / dbu))
         oy = int(round(offset["y"] / dbu))
         top.insert(kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(ox, oy)))
+
+    if routed_geometry and route_layer is not None:
+        if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)
+            dbu = layout.dbu
+        layer_index = layout.layer(route_layer[0], route_layer[1])
+        for route in routed_geometry:
+            points = route["points_um"]
+            if not points or len(points) < 2:
+                continue
+            path_points = [
+                kdb.Point(int(round(x / dbu)), int(round(y / dbu))) for (x, y) in points
+            ]
+            width_dbu = int(round(route["width_um"] / dbu))
+            top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
 
     try:
         layout.write(output_path)
