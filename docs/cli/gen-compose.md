@@ -57,25 +57,42 @@ cleanly.
 ## Known limitations (found during phase 3 bring-up, #196)
 
 Running the real 5T OTA case (below) surfaced gaps phases 1–2 did not
-anticipate — none is fixed in this phase (bring-up/integration only, per
-#196's scope); each is filed as its own follow-up issue (#199, #200, #201).
+anticipate; #200/#201 remain unfixed (bring-up/integration only, per #196's
+scope). #199 (below) is fixed: the two device-level shorts #196's bring-up
+hit are now caught at `klt gen-compose` time (`unrouted_nets[]` plus a
+`drc_hints.notes[]` reason), not silently drawn as `routed: true` — but the
+router still cannot *route around* either case; both remain workarounds a
+caller must apply, exactly as the worked example below does.
 
-- **The router has no obstacle-awareness against already-placed geometry.**
-  A routed net's Manhattan backbone is a straight line/single-jog between two
-  ports' positions (see "Engine" below) with no check for what lies *between*
-  them. Two cases produced a spurious device-level short (verified via
-  `klt extract`) during bring-up: **(1)** connecting two ports that face the
-  *same* absolute direction (e.g. two `_D` ports, both `direction_deg: 0`,
-  which is how every phase-2 generator's drain-side port always faces,
-  regardless of a block's position in the row) routes straight through the
-  *destination* device's nearer same-row pin (its `_S` port, since `_S` sits
-  closer to the approach side than `_D`), shorting that device's own source
-  and drain together; **(2)** routing into a block with `add_guard_ring:
-  true` (the default for `diff_pair`) from outside crosses the guard ring's
-  own local-metal ring, merging the signal net with the ring's tap net. The
-  worked example below works around both (an `add_guard_ring: false` block
-  parameter, and connectivity wired between *opposite*-facing port pairs
-  only) — filed as #199.
+- **The router detects, but does not avoid, two obstacle cases —
+  same-facing port pairs and guard-ringed blocks (#199, fixed).** A routed
+  net's Manhattan backbone is a straight line/single-jog between two ports'
+  positions (see "Engine" below); before drawing it, `route_two_pin()` now
+  checks the backbone against every placed block's own reported `bbox_um`
+  and any `TAP_*`/`COLL_*` (guard/collector ring tap) port names, and
+  reports the net **unroutable** (`unrouted_nets[]`, `routed: false`, a
+  `drc_hints.notes[]` entry naming the crossed block or ring) instead of
+  drawing it, for either of the two cases #196's bring-up hit: **(1)**
+  connecting two ports that face the *same* absolute direction (e.g. two
+  `_D` ports, both `direction_deg: 0`) would route straight through the
+  *destination* device's nearer same-row pin (its `_S` port), shorting that
+  device's own source and drain together; **(2)** routing to/from a
+  non-tap port on a block with `add_guard_ring: true` (the default for
+  `diff_pair`) would cross the guard ring's own local-metal loop, merging
+  the signal net with the ring's tap net (checked symmetrically — a
+  guard-ringed *source* block is caught the same as a guard-ringed
+  *destination* block). Neither case is *routable* at this phase — the
+  router reports the obstruction rather than routing around it — so the
+  worked example below still applies the same workarounds as before (an
+  `add_guard_ring: false` block parameter, and connectivity wired between
+  *opposite*-facing port pairs only); the difference #199 makes is that
+  skipping a workaround now fails visibly (partial success, exit `3`)
+  instead of silently producing a shorted device. The underlying detection
+  is a bbox/margin heuristic against each block's own already-reported
+  geometry (not a general obstacle-avoiding router, e.g. `route_astar`,
+  and not aware of a block's *internal* geometry beyond its `bbox_um` and
+  `ports[]`) — full obstacle avoidance (needed once `"grid"` placement
+  lands, per the spike's own open questions) remains its own follow-up.
 - **The composed output carries no net labels**, so `klt extract`'s
   pin-promotion (`Netlist.make_top_level_pins()` + `purge()`) keeps only the
   one *globally*-connected net every deck ties every device body to (`vsubs`

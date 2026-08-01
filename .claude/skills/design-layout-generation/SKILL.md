@@ -34,7 +34,7 @@ cleanly through `klt gen-compose` -> `klt extract` -> `klt lvs`.
 
 **Use `klt gen-compose` for any circuit needing more than one generated
 block wired together.** Two caveats to know before composing, both found
-during #196's bring-up and filed as follow-up issues (not yet fixed):
+during #196's bring-up:
 
 - **Wire opposite-facing port pairs only, and disable
   `add_guard_ring`.** Every phase-2 generator's `_D` ports face east and
@@ -42,12 +42,14 @@ during #196's bring-up and filed as follow-up issues (not yet fixed):
   same-facing ports (e.g. `_D` to `_D` across adjacent blocks — the naive
   "tie both drains together" reading of a current-mirror load) or routing
   into a guard-ringed block from outside both draw a route straight through
-  intervening geometry, producing a spurious device-level short that `klt
-  gen-compose` does **not** warn about (#199). `docs/cli/gen-compose.md`'s
-  worked example shows the working pattern: place blocks so a connection
-  only ever needs to reach the *nearer* (outer) same-row pin of its target,
-  and pass `"add_guard_ring": false` to any block an external net reaches
-  into.
+  intervening geometry, which would produce a spurious device-level short.
+  `klt gen-compose` now **detects and rejects** both cases (`routed: false`
+  in `unrouted_nets[]` with a `drc_hints.notes[]` reason — #199, fixed) —
+  neither case is *routable* yet, only caught, so the workaround is still
+  required: `docs/cli/gen-compose.md`'s worked example shows the working
+  pattern: place blocks so a connection only ever needs to reach the
+  *nearer* (outer) same-row pin of its target, and pass
+  `"add_guard_ring": false` to any block an external net reaches into.
 - **A composed circuit's connectivity nets are not addressable from `klt
   sim`.** `klt gen-compose` draws no net labels, so `klt extract`'s
   pin-promotion keeps only the deck's one globally-connected net (the
@@ -66,7 +68,7 @@ during #196's bring-up and filed as follow-up issues (not yet fixed):
 | Entry criteria | Netlist elaborates cleanly (S6 exit criteria met). |
 | Exit criteria | Loop B's convergence criterion (design doc §1): zero DRC violations and clean LVS. |
 | `klt` verbs | `klt gen` (`docs/cli/gen.md`) for a single primitive generator call, and `klt gen-compose` (`docs/cli/gen-compose.md`) to place + wire multiple generator outputs into one circuit — both shipped and usable today (see caveats above). `klt render` (visual inspection of an existing layout) and `klt layout-metrics` (area/utilization aggregation) are also shipped and usable today against whatever layout exists, regardless of how it was produced. |
-| Failure modes | Loop B's stuck condition (design doc §1: violation count not monotonically decreasing, a "fixed" rule re-firing, or a DRC fix breaking LVS); a generator producing DRC-clean geometry whose connectivity doesn't match S6 — an LVS failure masquerading as a DRC pass; for a composed circuit, a same-facing-port or guard-ring routing short that `klt gen-compose` reports as `routed: true` with no warning (#199 — verify with `klt extract`, not just `klt gen-compose`'s own exit code). |
+| Failure modes | Loop B's stuck condition (design doc §1: violation count not monotonically decreasing, a "fixed" rule re-firing, or a DRC fix breaking LVS); a generator producing DRC-clean geometry whose connectivity doesn't match S6 — an LVS failure masquerading as a DRC pass; for a composed circuit, a same-facing-port pair or an inbound route to a guard-ringed block, both reported unroutable by `klt gen-compose` itself (`unrouted_nets[]`, exit `3` — #199, fixed) rather than needing a later `klt extract` pass to notice. |
 
 ## What an agent can do today
 
@@ -122,6 +124,11 @@ does not cover, not parameter tweaks.
   the provenance later stages (and signoff, S11) would want.
 - Treating `klt render`/`klt layout-metrics` output as evidence of
   generation success — they inspect a layout, they do not produce one.
-- Treating `klt gen-compose`'s `routed: true`/exit `0` as proof of correct
-  connectivity — verify with `klt extract` (device-level net names) before
-  trusting a composed circuit, per #199 above.
+- Treating `klt gen-compose`'s `routed: true`/exit `0` as a DRC-clean
+  guarantee — geometry is advisory; `klt drc`/`klt extract` remain the
+  rule-compliance and connectivity authorities. `klt gen-compose` itself
+  now catches the two known routing-collision shorts (same-facing port
+  pairs, guard-ring crossings — #199, fixed), but a residual gap (e.g.
+  `"grid"`-placement obstacle avoidance) could still slip through
+  undetected — verifying a composed circuit with `klt extract`/`klt drc`
+  before trusting it remains good practice.
