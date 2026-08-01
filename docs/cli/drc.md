@@ -157,9 +157,23 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "status": "clean",
   "violation_count": 0,
   "rule_counts": {},
-  "violations": []
+  "violations": [],
+  "coverage": {
+    "deck_layers": ["22/0", "30/0", "33/0", "34/0"],
+    "layers_checked": ["22/0", "30/0"],
+    "layers_in_stream_without_rules": ["46/0", "75/0"],
+    "rules_skipped": ["metal1.width.1", "metal1.space.1"]
+  }
 }
 ```
+
+A `"clean"` `status` with a non-empty `coverage.layers_in_stream_without_rules`
+means "clean, and here is exactly what was not looked at" — geometry drawn
+entirely on layers the selected deck has no rules for reports `"clean"` (the
+engine correctly found no violations among the rules it *could* run), but
+`coverage` is what lets a consumer distinguish that from a genuinely
+fully-checked pass. See "Coverage" above for why this is common, not an edge
+case: both shipped decks cover a deliberate layer subset of their PDK.
 
 On a run with findings:
 
@@ -182,7 +196,13 @@ On a run with findings:
       "bbox": { "left": 0, "bottom": 0, "right": 100, "top": 2000 },
       "polygon": [[0, 0], [0, 2000], [100, 2000], [100, 0]]
     }
-  ]
+  ],
+  "coverage": {
+    "deck_layers": ["65/20", "66/20", "66/44", "68/20"],
+    "layers_checked": ["65/20", "66/20", "66/44"],
+    "layers_in_stream_without_rules": [],
+    "rules_skipped": []
+  }
 }
 ```
 
@@ -198,6 +218,7 @@ On a run with findings:
 | `violation_count` | integer                  | `len(violations)`.                                                       |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
+| `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 
 ### `violations[]` entries
 
@@ -217,6 +238,30 @@ against the same input produce identical, diff-clean output. The full bbox is
 part of the key (not just the lower-left corner) so violations sharing a corner
 are still totally ordered — output stays canonical across platforms and KLayout
 builds regardless of the engine's internal shape-enumeration order.
+
+### `coverage`
+
+Additive field (see [`docs/json-contract.md`](../json-contract.md) — no
+`schema_version` bump): what the run actually checked, distinct from what it
+found. `status: "clean"` alone cannot tell a consumer apart "genuinely
+checked and passed" from "the deck had no rules for anything this layout
+draws" — `coverage` closes that gap. `status`'s own two-value contract
+(`"clean"` / `"violations"`) is unchanged; a non-empty
+`layers_in_stream_without_rules` does not change `status`.
+
+| Field                             | Type            | Description                                                                 |
+| ---------------------------------- | --------------- | ----------------------------------------------------------------------------- |
+| `deck_layers`                      | array\<string\> | Every `"<layer>/<datatype>"` the selected deck's rules reference — a static property of the deck, independent of the input stream. Sorted ascending by `(layer, datatype)`. |
+| `layers_checked`                   | array\<string\> | The subset of `deck_layers` actually present in this stream (i.e. found via `Layout.find_layer(...)`), matching what the per-rule check loop actually ran against. Sorted ascending by `(layer, datatype)`. |
+| `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
+| `rules_skipped`                    | array\<string\> | Rule ids silently skipped because their `layer`/`other_layer` was absent from this stream. Sorted alphabetically. |
+
+`layers_checked` and `layers_in_stream_without_rules` are computed from the
+input stream's own layer table (reusing the same per-layer enumeration
+`klt layers` uses — see [`klt layers`](layers.md)), not from shape counts: a
+layer present in the stream's layer table with zero shapes still counts as
+"in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
+semantics.
 
 ## Exit codes
 

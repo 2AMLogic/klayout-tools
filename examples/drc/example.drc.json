@@ -165,5 +165,28 @@
         ]
       ]
     }
-  ]
+  ],
+  "coverage": {
+    "deck_layers": [
+      "65/20",
+      "66/20",
+      "66/44",
+      "67/20",
+      "67/44",
+      "68/20"
+    ],
+    "layers_checked": [
+      "65/20",
+      "66/20",
+      "66/44",
+      "68/20"
+    ],
+    "layers_in_stream_without_rules": [],
+    "rules_skipped": [
+      "li1.space.1",
+      "li1.width.1",
+      "mcon.space.1",
+      "met1.enclosing.mcon.1"
+    ]
+  }
 }

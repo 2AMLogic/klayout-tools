@@ -15,6 +15,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
+from klayout_tools.decks import get_deck
 from klayout_tools.drc import DrcError, run_drc
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
@@ -122,6 +123,125 @@ def test_run_drc_raises_on_unknown_deck(tmp_path):
         run_drc(str(path), "not-a-real-deck")
 
 
+# ---------------------------------------------------------------------------
+# coverage block (#189)
+# ---------------------------------------------------------------------------
+
+
+def _sky130_deck_layer_tuples() -> set[tuple[int, int]]:
+    tuples: set[tuple[int, int]] = set()
+    for rule in get_deck("sky130"):
+        tuples.add(rule.layer)
+        if rule.other_layer is not None:
+            tuples.add(rule.other_layer)
+    return tuples
+
+
+def _fmt_layer(layer_tuple: tuple[int, int]) -> str:
+    return f"{layer_tuple[0]}/{layer_tuple[1]}"
+
+
+def test_run_drc_coverage_empty_for_layout_using_only_covered_layers(tmp_path):
+    """A layout drawn entirely on a layer the sky130 deck has rules for
+    reports an empty `layers_in_stream_without_rules` -- nothing was drawn
+    outside the deck's coverage."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))  # poly.drawing (66/20) only
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["coverage"]["layers_in_stream_without_rules"] == []
+    assert "66/20" in report["coverage"]["layers_checked"]
+
+
+def test_run_drc_coverage_reports_uncovered_stream_layers(tmp_path):
+    """A layout drawn entirely on a layer the sky130 deck has no rules for
+    at all reports it in `layers_in_stream_without_rules`, and every deck
+    rule is skipped -- the #189 reproducer: this used to report `"clean"`
+    with no indication anything was skipped."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    unused = layout.layer(99, 0)
+    layout.set_info(unused, kdb.LayerInfo(99, 0, "not.in.any.deck.rule"))
+    top.shapes(unused).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "uncovered.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["coverage"]["layers_in_stream_without_rules"] == ["99/0"]
+    assert report["coverage"]["layers_checked"] == []
+    assert report["coverage"]["rules_skipped"] == sorted(
+        rule.id for rule in get_deck("sky130")
+    )
+
+
+def test_run_drc_coverage_rules_skipped_matches_absent_layers(tmp_path):
+    """`coverage.rules_skipped` lists exactly the deck rules whose layer(s)
+    are absent from the stream -- here, only `poly.drawing` (66/20) is
+    present, so every rule that references any other layer is skipped."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))  # poly.drawing (66/20) only
+
+    report = run_drc(str(path), "sky130")
+
+    present = {(66, 20)}
+    expected_skipped = sorted(
+        rule.id
+        for rule in get_deck("sky130")
+        if rule.layer not in present
+        or (rule.other_layer is not None and rule.other_layer not in present)
+    )
+    assert report["coverage"]["rules_skipped"] == expected_skipped
+
+
+def test_run_drc_coverage_empty_stream(tmp_path):
+    """A layout with no layers registered at all (degenerate empty stream)
+    has empty `layers_checked` and `layers_in_stream_without_rules`, and
+    does not raise -- every deck rule is skipped."""
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    path = tmp_path / "empty.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["coverage"]["layers_checked"] == []
+    assert report["coverage"]["layers_in_stream_without_rules"] == []
+    assert set(report["coverage"]["deck_layers"]) == {
+        _fmt_layer(t) for t in _sky130_deck_layer_tuples()
+    }
+    assert report["coverage"]["rules_skipped"] == sorted(
+        rule.id for rule in get_deck("sky130")
+    )
+
+
+def test_run_drc_coverage_fully_covered_stream(tmp_path):
+    """A layout drawing a shape on every layer the sky130 deck's rules
+    reference reports `layers_checked` == `deck_layers`, an empty
+    `layers_in_stream_without_rules`, and no rules skipped."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    # A GDS write drops layers with no shapes (empty layers do not round-trip
+    # through the stream format), so every deck layer needs at least one
+    # shape to be findable via `Layout.find_layer(...)` after re-reading.
+    for layer_num, datatype in _sky130_deck_layer_tuples():
+        layer_index = layout.layer(layer_num, datatype)
+        top.shapes(layer_index).insert(kdb.Box(0, 0, 10, 10))
+    path = tmp_path / "fully_covered.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["coverage"]["layers_in_stream_without_rules"] == []
+    assert set(report["coverage"]["layers_checked"]) == set(
+        report["coverage"]["deck_layers"]
+    )
+    assert report["coverage"]["rules_skipped"] == []
+
+
 def test_json_contract(tmp_path, capsys):
     path = tmp_path / "violation.gds"
     _make_violation_layout().write(str(path))
@@ -138,6 +258,7 @@ def test_json_contract(tmp_path, capsys):
         "violation_count",
         "rule_counts",
         "violations",
+        "coverage",
     }
     assert data["schema_version"] == 1
     assert isinstance(data["file"], str)
@@ -176,6 +297,17 @@ def test_json_contract(tmp_path, capsys):
     ]
     assert keys == sorted(keys)
 
+    coverage = data["coverage"]
+    assert set(coverage.keys()) == {
+        "deck_layers",
+        "layers_checked",
+        "layers_in_stream_without_rules",
+        "rules_skipped",
+    }
+    for field in coverage.values():
+        assert isinstance(field, list)
+        assert all(isinstance(v, str) for v in field)
+
 
 def test_json_contract_clean(tmp_path, capsys):
     path = tmp_path / "clean.gds"
@@ -201,6 +333,37 @@ def test_default_format_is_text(tmp_path, capsys):
     # Not JSON.
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
+
+
+def test_text_format_reports_unchecked_layers_summary(tmp_path, capsys):
+    """`--format text` gains a one-line coverage summary when
+    `layers_in_stream_without_rules` is non-empty (#189)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    unused = layout.layer(99, 0)
+    layout.set_info(unused, kdb.LayerInfo(99, 0, "not.in.any.deck.rule"))
+    top.shapes(unused).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "uncovered.gds"
+    layout.write(str(path))
+
+    assert main(["drc", str(path), "--deck", "sky130"]) == 0
+    out = capsys.readouterr().out
+
+    assert "status: clean" in out
+    assert "unchecked layers in stream: 1" in out
+
+
+def test_text_format_no_coverage_summary_when_fully_checked(tmp_path, capsys):
+    """No coverage summary line when `layers_in_stream_without_rules` is
+    empty -- the summary is only a courtesy for the non-empty case, not
+    noise on every run."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))  # poly.drawing (66/20) only
+
+    assert main(["drc", str(path), "--deck", "sky130"]) == 0
+    out = capsys.readouterr().out
+
+    assert "unchecked layers in stream" not in out
 
 
 def test_exit_code_clean(tmp_path):
