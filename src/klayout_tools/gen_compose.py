@@ -67,6 +67,7 @@ import json
 import os
 from typing import Any
 
+from .decks import get_extraction_deck
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -410,6 +411,73 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
             f"'{family}''s curated deck -- cannot route on it"
         )
     return pair
+
+
+def _resolve_label_layer(
+    variant: str, route_layer: tuple[int, int]
+) -> tuple[int, int] | None:
+    """Resolve the PDK-family net-label layer/datatype that pairs with
+    ``route_layer``, for naming a routed ``connectivity[]`` net.
+
+    Mirrors `klt extract`'s own label-recognition convention exactly --
+    :class:`klayout_tools.decks.ExtractionDeck`'s ``metals[i]`` <->
+    ``metal_labels[i]`` correspondence (see ``_extract_netlist()`` in
+    ``extract.py``, which only promotes a net to a named ``.SUBCKT`` pin
+    when a ``kdb.Text`` on ``metal_labels[i]`` touches a shape on
+    ``metals[i]``). This is the *same* per-PDK-family
+    :class:`~klayout_tools.decks.ExtractionDeck` every `klt extract` call
+    already resolves via ``get_extraction_deck`` -- never a second, private
+    label-layer table.
+
+    Returns ``None`` when ``route_layer`` does not match any of the
+    resolved family's ``ExtractionDeck.metals`` entries, or that entry has
+    no corresponding label layer -- routing still proceeds (the metal is
+    still drawn), just without a net label for `klt extract` to promote
+    into a pin.
+    """
+    family = _pdk_family(variant)
+    deck = get_extraction_deck(family)
+    try:
+        index = deck.metals.index(route_layer)
+    except ValueError:
+        return None
+    if index >= len(deck.metal_labels):
+        return None
+    return deck.metal_labels[index]
+
+
+def _polyline_midpoint_um(
+    points: list[tuple[float, float]],
+) -> tuple[float, float]:
+    """A point strictly along ``points``' own drawn path, at half its total
+    arc length.
+
+    Used to place a routed net's label away from both endpoints (each
+    endpoint sits at, or just inside, a block's own port -- see
+    :func:`route_two_pin`'s obstacle-overlap check, which already guarantees
+    the backbone stays clear of every block's interior beyond a pin's own
+    small edge-approach margin). The arc-length midpoint is the point on the
+    backbone farthest, in the routing sense, from either endpoint, minimising
+    the chance the label lands over a neighbouring block's own metal on the
+    same layer (which would misattach the label to that block's net instead
+    of this one). Falls back to the first point for a degenerate
+    (zero-length) route.
+    """
+    total = _polyline_length_um(points)
+    if total <= 0.0:
+        return points[0]
+
+    target = total / 2.0
+    accumulated = 0.0
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
+        seg_len = abs(x1 - x0) + abs(y1 - y0)
+        if accumulated + seg_len >= target:
+            if seg_len <= 0.0:
+                return (x0, y0)
+            frac = (target - accumulated) / seg_len
+            return (x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac)
+        accumulated += seg_len
+    return points[-1]
 
 
 def _cleanup_points(
@@ -901,6 +969,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
     # given; if the caller supplied nets to wire but no routing spec, that's an
     # application error (there is nothing to draw the metal on).
     route_layer: tuple[int, int] | None = None
+    label_layer: tuple[int, int] | None = None
     width_um = 0.0
     if connectivity:
         layer_role = routing.get("layer_role")
@@ -921,6 +990,14 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
             )
         width_um = float(raw_width)
         route_layer = _resolve_route_layer(pdk_info["variant"], layer_role)
+        label_layer = _resolve_label_layer(pdk_info["variant"], route_layer)
+        if label_layer is None:
+            notes.append(
+                f"routing.layer_role '{layer_role}' has no PDK label-layer "
+                "convention `klt extract` recognises -- routed nets on this "
+                "layer will not carry a net label, so they will not survive "
+                "as named .SUBCKT pins after extraction"
+            )
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -960,7 +1037,11 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         )
         if result["routed"]:
             routed_geometry.append(
-                {"points_um": result["points_um"], "width_um": width_um}
+                {
+                    "net": net_label,
+                    "points_um": result["points_um"],
+                    "width_um": width_um,
+                }
             )
         else:
             unrouted_nets.append(net_label)
@@ -974,6 +1055,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         output_path,
         routed_geometry,
         route_layer,
+        label_layer,
     )
 
     # --- drc_hints: matched-group echo + tightest spacing used --------------
@@ -1054,6 +1136,7 @@ def _write_composed_gds(
     output_path: str,
     routed_geometry: list[dict[str, Any]] | None = None,
     route_layer: tuple[int, int] | None = None,
+    label_layer: tuple[int, int] | None = None,
 ) -> None:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -1067,10 +1150,17 @@ def _write_composed_gds(
     re-derived), and hierarchy is preserved (each block stays its own cell,
     not flattened into the composed top cell).
 
-    Routed nets (``routed_geometry``: a list of ``{points_um, width_um}``) are
-    drawn as native :class:`kdb.Path` shapes directly on the composed top cell,
-    on ``route_layer`` (a ``(layer, datatype)`` pair) -- top-level metal, not
-    inside any block's sub-cell.
+    Routed nets (``routed_geometry``: a list of ``{net, points_um,
+    width_um}``) are drawn as native :class:`kdb.Path` shapes directly on the
+    composed top cell, on ``route_layer`` (a ``(layer, datatype)`` pair) --
+    top-level metal, not inside any block's sub-cell. When ``label_layer`` is
+    given (resolved by :func:`_resolve_label_layer`), each routed net also
+    gets one :class:`kdb.Text` label -- named after its own ``net`` field --
+    on that layer, at the arc-length midpoint of its drawn path
+    (:func:`_polyline_midpoint_um`), so `klt extract`'s label-recognition
+    convention (``metals[i]``/``metal_labels[i]`` -- see
+    :class:`klayout_tools.decks.ExtractionDeck`) promotes the net to a named
+    ``.SUBCKT`` pin instead of an anonymous one (#200).
     """
     import klayout.db as kdb
 
@@ -1119,6 +1209,11 @@ def _write_composed_gds(
         if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)
             dbu = layout.dbu
         layer_index = layout.layer(route_layer[0], route_layer[1])
+        label_layer_index = (
+            layout.layer(label_layer[0], label_layer[1])
+            if label_layer is not None
+            else None
+        )
         for route in routed_geometry:
             points = route["points_um"]
             if not points or len(points) < 2:
@@ -1128,6 +1223,15 @@ def _write_composed_gds(
             ]
             width_dbu = int(round(route["width_um"] / dbu))
             top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
+
+            if label_layer_index is not None:
+                lx_um, ly_um = _polyline_midpoint_um(points)
+                label_point = kdb.Point(
+                    int(round(lx_um / dbu)), int(round(ly_um / dbu))
+                )
+                top.shapes(label_layer_index).insert(
+                    kdb.Text(route["net"], kdb.Trans(label_point))
+                )
 
     try:
         layout.write(output_path)

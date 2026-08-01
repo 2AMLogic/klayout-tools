@@ -45,6 +45,20 @@ cleanly.
   hard failure. **Bundle (>2-pin) routing is out of scope this phase** — a net
   with more than two pins is left unrouted (reported in `unrouted_nets[]` with
   an explanatory `drc_hints.notes[]` entry), not rejected.
+- **Net labels (#200, fixed)** — every routed 2-pin net also gets one
+  `kdb.Text` label, named after its own `connectivity[].net` field, on the
+  PDK-family label layer that pairs with the resolved routing layer (e.g.
+  sky130 `li1.pin` `67/5` for the `"metal"` role's `li1.drawing`; gf180mcu
+  `Metal1`'s pin/label purpose `34/10`) — the same label-recognition
+  convention [`klt extract`](extract.md) already uses for hand-authored
+  corpus cells (`ExtractionDeck.metals[]`/`metal_labels[]`). This is what lets
+  a `connectivity[]` net survive `klt extract`'s pin-promotion
+  (`Netlist.make_top_level_pins()`/`purge()`) as a **named** `.SUBCKT` pin
+  instead of being demoted to an anonymous `$N` net — see "Worked example"
+  below. A `routing.layer_role` with no PDK label-layer counterpart (e.g.
+  `"poly"`, which pairs with no `ExtractionDeck.metals[]` entry) still gets
+  its metal drawn, just without a label — a `drc_hints.notes[]` entry
+  explains why.
 - **`drc_hints`** — `matched_groups[]` reports every distinct
   `matched_group_id` seen among the input blocks (read-only echo of
   `generator_report.drc_hints.matched_group_id`, `placement_symmetric: null` —
@@ -57,12 +71,14 @@ cleanly.
 ## Known limitations (found during phase 3 bring-up, #196)
 
 Running the real 5T OTA case (below) surfaced gaps phases 1–2 did not
-anticipate; #200/#201 remain unfixed (bring-up/integration only, per #196's
-scope). #199 (below) is fixed: the two device-level shorts #196's bring-up
-hit are now caught at `klt gen-compose` time (`unrouted_nets[]` plus a
-`drc_hints.notes[]` reason), not silently drawn as `routed: true` — but the
-router still cannot *route around* either case; both remain workarounds a
-caller must apply, exactly as the worked example below does.
+anticipate; #199, #200, and #201 (below) are all now fixed: the two
+device-level shorts #196's bring-up hit are now caught at `klt gen-compose`
+time (`unrouted_nets[]` plus a `drc_hints.notes[]` reason) rather than
+silently drawn as `routed: true`, every routed `connectivity[]` net now
+survives extraction as a named pin, and `klt lvs` no longer logs a spurious
+`severity: "error"` mismatch for an unused device class — but the router
+still cannot *route around* the two obstacle cases below; both remain
+workarounds a caller must apply, exactly as the worked example below does.
 
 - **The router detects, but does not avoid, two obstacle cases —
   same-facing port pairs and guard-ringed blocks (#199, fixed).** A routed
@@ -93,26 +109,33 @@ caller must apply, exactly as the worked example below does.
   and not aware of a block's *internal* geometry beyond its `bbox_um` and
   `ports[]`) — full obstacle avoidance (needed once `"grid"` placement
   lands, per the spike's own open questions) remains its own follow-up.
-- **The composed output carries no net labels**, so `klt extract`'s
-  pin-promotion (`Netlist.make_top_level_pins()` + `purge()`) keeps only the
-  one *globally*-connected net every deck ties every device body to (`vsubs`
-  in the sky130/gf180mcu curated decks) — every other net, including every
-  `connectivity[]` net this command itself just wired, is extraction-visible
-  only under an unstable, anonymous `$N` name, and is not addressable from a
-  `klt sim` testbench (which can only source/probe a `.subckt`'s *declared*
-  pins). `klt extract`/`klt lvs` are unaffected (both work from the full
-  net/device graph, not net names), but this blocks true post-extraction
-  `klt sim` bias for anything `klt gen-compose` produces — see the worked
-  example's "Simulation" step. Filed as #200.
-- **`klt lvs` logs a spurious `severity: "error"` mismatch** for a device
-  class (e.g. `pfet`) that `klt extract` always registers even when a
-  layout has zero instances of it, if the paired reference netlist
-  naturally omits that unused class — `status` still correctly reports
-  `"match"` (it is `NetlistComparer.compare()`'s own verdict, not derived
-  from `severity`), but a caller filtering `mismatches[]` on
-  `severity: "error"` alone would see a false positive. Not specific to
-  composed circuits, but first observed while LVS-checking the worked
-  example below. Filed as #201.
+- **The composed output now carries net labels (#200, fixed).** Previously,
+  `klt gen-compose` drew routed metal with no `kdb.Text` label, so `klt
+  extract`'s pin-promotion (`Netlist.make_top_level_pins()` + `purge()`) kept
+  only the one *globally*-connected net every deck ties every device body to
+  (`vsubs` in the sky130/gf180mcu curated decks) — every other net, including
+  every `connectivity[]` net this command itself just wired, was
+  extraction-visible only under an unstable, anonymous `$N` name, and was not
+  addressable from a `klt sim` testbench (which can only source/probe a
+  `.subckt`'s *declared* pins). `_write_composed_gds` now draws one label per
+  routed net (see "Scope" above), so the 5T OTA's `.SUBCKT` below declares a
+  pin for every `connectivity[]` net (`N1`, `TAIL_A|TAIL_B`, `VOUT`), not just
+  `vsubs` — see the worked example's "Extraction and LVS" and "Simulation"
+  steps below. This only labels nets `klt gen-compose` itself routes; a
+  *single* `klt gen` generator's own `ports[]` (e.g. a lone `diff_pair`
+  block's gate/source/drain pins, never passed through `connectivity[]`) are
+  still unlabelled — that is a separate, `klt gen`-side follow-up, not part
+  of this fix.
+- **`klt lvs`'s unused-device-class mismatch is now `severity: "warning"`
+  (#201, fixed).** Previously, a device class (e.g. `pfet`) that `klt
+  extract` always registers even when a layout has zero instances of it, if
+  the paired reference netlist naturally omits that unused class, logged a
+  spurious `severity: "error"` mismatch. `status` always correctly reported
+  `"match"` regardless (it is `NetlistComparer.compare()`'s own verdict, not
+  derived from `severity`), but a caller filtering `mismatches[]` on
+  `severity: "error"` alone would have seen a false positive. Not specific
+  to composed circuits, but first observed while LVS-checking the worked
+  example below.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
@@ -365,13 +388,14 @@ printed.
 
 ## Worked example
 
-**Verified end to end (#196, phase 3 canary bring-up)**: the real sky130 5T
-OTA case #164 needs — a differential pair, a current-mirror load, and a
-single-device tail current source, composed and wired with
-`connectivity[]` — taken through `klt gen-compose` -> `klt extract` -> `klt
-lvs` cleanly, and `klt sim` far enough to hit the documented limitation
-above (#200), not a plumbing failure. The exact commands and results below
-are what #196 ran (sky130A; a gf180mcuA run of the same request produces
+**Verified end to end (#196, phase 3 canary bring-up; re-verified after
+#200)**: the real sky130 5T OTA case #164 needs — a differential pair, a
+current-mirror load, and a single-device tail current source, composed and
+wired with `connectivity[]` — taken through `klt gen-compose` -> `klt
+extract` -> `klt lvs` -> `klt sim`, all the way through to a passing
+simulation biasing the composed circuit's own declared net names. The exact
+commands and results below are what #196 originally ran (sky130A; a
+gf180mcuA run of the same request produces
 byte-identical topology — see "gf180mcu bonus" below).
 
 Placement order is **`tail` first**, not `diffpair`/`mirror`/`tail` as a
@@ -430,25 +454,34 @@ $ klt gen-compose compose_request.json --format json
 
 ### Extraction and LVS
 
+**Re-verified after #200** (previously, this step's `.SUBCKT` declared only
+`vsubs`; it now declares a pin for every routed `connectivity[]` net too):
+
 ```bash
 # Extract the composed GDS (5 devices: tail + 2 diff-pair + 2 mirror, all
 # nfet -- diff_pair's "mirror" naming is a labelling convention only, see
 # docs/cli/gen.md; it draws the same NMOS geometry either way):
 $ klt extract ota_top_0.gds --deck sky130 --top ota_top_0 \
     -o ota_top_0.spice --format json
-# device_count: 5, device_counts: {"nfet": 5}, exit 0.
+# device_count: 5, device_counts: {"nfet": 5}, pin_count: 4, exit 0.
+# ota_top_0.spice now declares:
+#   .SUBCKT ota_top_0 N1 TAIL_A|TAIL_B VOUT vsubs
+# (TAIL_A and TAIL_B are the same physical node -- both routed to tail's
+# single U0_D port -- so KLayout's netlist writer joins their two labels
+# into one alias, "TAIL_A|TAIL_B"; N1/VOUT are each single-labelled.)
 
 # Compare against a hand-written reference netlist with the same topology
-# (three-way tail node, two 2-terminal load nodes, five isolated gate nets,
-# three isolated floating terminals meant for VDD/VSS in a real bias -- see
-# "Known limitations" above for why those can't be reached from `klt sim`):
+# (a three-way tail node and two 2-terminal load nodes now match by name;
+# five gate nets and three drain/source terminals remain isolated/floating
+# -- those are `klt gen`'s own per-generator `ports[]`, never passed through
+# `connectivity[]`, and are out of scope for #200, see "Known limitations"):
 $ cat > ota_reference.spice <<'EOF'
-.subckt ota_top_0 vsubs
-M1 tail_node g1 flt1 vsubs nfet L=0.28U W=0.42U
-M2 tail_node g2 n1_node vsubs nfet L=0.28U W=0.42U
-M3 n1_node g3 flt3 vsubs nfet L=0.28U W=0.42U
-M4 tail_node g4 vout_node vsubs nfet L=0.28U W=0.42U
-M5 vout_node g5 flt5 vsubs nfet L=0.28U W=0.42U
+.subckt ota_top_0 N1 TAIL_NODE VOUT vsubs
+M1 TAIL_NODE g1 flt1 vsubs nfet L=0.28U W=0.42U
+M2 TAIL_NODE g2 N1 vsubs nfet L=0.28U W=0.42U
+M3 N1 g3 flt3 vsubs nfet L=0.28U W=0.42U
+M4 TAIL_NODE g4 VOUT vsubs nfet L=0.28U W=0.42U
+M5 VOUT g5 flt5 vsubs nfet L=0.28U W=0.42U
 .ends
 EOF
 $ cat > lvs_request.json <<'EOF'
@@ -458,37 +491,67 @@ $ cat > lvs_request.json <<'EOF'
   "reference": { "netlist": "ota_reference.spice", "top": "ota_top_0" }
 }
 EOF
-# status: "match", counts: nets 12/12/12, devices 5/5/5, pins 1/1/1, exit 0.
-# mismatch_count is 3 (two "ambiguous net pairing" warnings -- expected,
-# since S/D are symmetric MOS terminals and this circuit has no
-# hints.same_nets to pin them down -- plus one spurious device_class_mismatch
-# error, #201 above); none of the three changes `status`.
+# status: "match", counts: nets 12/12/12, devices 5/5/5, pins 4/4/4 (was
+# 1/1/1 before #200), exit 0. mismatch_count is 1 (the unused-device-class
+# "warning" from #201 above -- unrelated to #200); it doesn't change
+# `status`.
 $ klt lvs lvs_request.json --format json
 ```
 
 ### Simulation
 
+**Re-verified after #200** — the composed circuit's own `connectivity[]`
+net names (not just `vsubs`) are now addressable from a `klt sim`
+testbench, per `docs/cli/extract.md`'s documented pattern:
+
 ```bash
-# Per docs/cli/extract.md's documented pattern: a thin testbench `.include`s
-# the extracted file unmodified and instantiates the `.subckt`. This composed
-# circuit's *only* declared pin is `vsubs` (see "Known limitations" -- #200):
+# A thin testbench `.include`s the extracted file unmodified and
+# instantiates the `.subckt`, biasing it through its own declared pins
+# (N1/TAIL_A|TAIL_B/VOUT/vsubs -- the caller picks its own local node names
+# for the Xota instantiation; the .SUBCKT's own pin order, not the pin
+# *text*, positionally binds them):
 $ cat > testbench.spice <<'EOF'
 .include "ota_top_0.spice"
 .model nfet nmos level=1
+.options rshunt=1e12
 Vvsubs vsubs 0 DC 0
-Xota vsubs ota_top_0
+Vn1 n1_node 0 DC 1.0
+Vtail tail_node 0 DC 0.5
+Vvout vout_node 0 DC 1.0
+Xota n1_node tail_node vout_node vsubs ota_top_0
 EOF
 $ cat > sim_request.json <<'EOF'
 {
   "netlist": "testbench.spice",
-  "analysis": { "kind": "op", "args": "" },
-  "measurements": [{ "name": "vsubs", "spice": ".meas op vsubs find v(vsubs)" }]
+  "analysis": { "kind": "tran", "args": "1n 1n" },
+  "measurements": [
+    { "name": "vout_meas", "spice": ".meas tran vout_meas find v(vout_node) at=1n" },
+    { "name": "tail_meas", "spice": ".meas tran tail_meas find v(tail_node) at=1n" }
+  ]
 }
 EOF
-# exit 4: every device's gate (and every other non-pin node) is unreachable
-# from this testbench, so ngspice reports singular_matrix -- klt sim
-# classifies this correctly per its own documented contract (not a crash);
-# it is the direct, expected consequence of #200, not a `klt sim` bug.
+# status: "pass", exit 0 -- vout_meas/tail_meas read back the exact bias
+# (1.0V/0.5V) applied through the composed circuit's own declared pins.
+#
+# Two notes on the testbench shape above, neither of them #200's concern:
+# - `analysis.kind: "tran"` (a single-timestep transient), not `"op"`:
+#   ngspice's `.MEASURE` statement does not recognise `"op"` as an analysis
+#   type at all (`Error: unrecognized analysis type 'op'`) -- a pre-existing
+#   `klt sim`/ngspice-integration quirk, unrelated to #200, that a prior
+#   revision of this example never actually exercised (it always failed
+#   earlier, at the singular-matrix stage below, masking it).
+# - `.options rshunt=1e12` (a standard SPICE convergence aid -- a very
+#   large global shunt resistor from every node to ground): this circuit's
+#   five gate terminals are `klt gen`'s own per-generator `ports[]`, never
+#   wired through `connectivity[]` in this request, so they stay genuinely
+#   floating (out of scope for #200, see "Known limitations"); without
+#   `rshunt`, ngspice's DC solver logs a `singular matrix` warning while
+#   still recovering a value via internal gmin stepping, which `klt sim`
+#   conservatively classifies as `status: "error"` (exit `4`) even though
+#   the reported measurements are correct. `rshunt` gives every node a
+#   real (if enormous) DC path, so the solver converges cleanly with no
+#   diagnostics -- no hand-editing of `ota_top_0.spice`, and no need to
+#   address any node by its anonymous `$N` name.
 $ klt sim sim_request.json --format json
 ```
 
@@ -497,7 +560,8 @@ $ klt sim sim_request.json --format json
 The identical `compose_request.json`/`lvs_request.json` shape, with
 `sky130A` -> `gf180mcuA` and `--deck sky130` -> `--deck gf180mcu`, produces
 byte-identical device/net topology (`device_count: 5`,
-`device_counts: {"nfet": 5}`) and an identical `klt lvs` `"match"` verdict
-against the same reference netlist -- every phase-2 generator's layout
-shape is PDK-family-agnostic (`docs/cli/gen.md`), so this composition and
-its connectivity carry over unchanged.
+`device_counts: {"nfet": 5}`, `pin_count: 4`) and an identical `klt lvs`
+`"match"` verdict (`pins 4/4/4`) against the same reference netlist --
+every phase-2 generator's layout shape is PDK-family-agnostic
+(`docs/cli/gen.md`), so this composition and its connectivity carry over
+unchanged.
