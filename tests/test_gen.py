@@ -15,6 +15,7 @@ import pytest
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
+from klayout_tools.extract import run_extract
 from klayout_tools.gen import GenError, generate, list_generators, load_params_arg
 
 
@@ -685,6 +686,7 @@ def test_mos_array_dummy_devices_not_counted_or_ported(tmp_path, pdk_root):
         {"cols": 0},
         {"dummy": -1},
         {"topology": "bogus"},
+        {"flavor": "bogus"},
     ],
 )
 def test_mos_array_invalid_params_rejected(tmp_path, pdk_root, params):
@@ -697,6 +699,76 @@ def test_mos_array_invalid_params_rejected(tmp_path, pdk_root, params):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+def test_mos_array_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
+    """`flavor` defaults to `'nfet'`, which must draw *no* well shape --
+    byte-identical to a request that never even mentions `flavor` (issue
+    #208 acceptance criterion: the default case is not allowed to change)."""
+    import klayout.db as kdb
+
+    implicit = tmp_path / "implicit.gds"
+    explicit = tmp_path / "explicit.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(implicit)},
+        }
+    )
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet"},
+            "options": {"output": str(explicit)},
+        }
+    )
+    assert implicit.read_bytes() == explicit.read_bytes()
+
+    layout = kdb.Layout()
+    layout.read(str(implicit))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (64, 20) not in present  # no well drawn for the nfet default
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "well_pair"),
+    [
+        ("sky130A", "sky130", (64, 20)),
+        ("gf180mcuD", "gf180mcu", (21, 0)),
+    ],
+)
+def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, well_pair
+):
+    """`flavor='pfet'` encloses the unit devices in a well on both curated
+    PDK families, and stays DRC-clean there (issue #208)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"mos_array_pfet_{deck}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"flavor": "pfet"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert well_pair in present
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # --- res_array --------------------------------------------------------------- #
@@ -804,10 +876,14 @@ def test_guard_ring_add_well_false_on_gf180mcu_draws_no_well_note(
     assert report["drc_hints"]["notes"] == []
 
 
-def test_guard_ring_add_well_true_on_sky130_notes_unsupported(tmp_path, pdk_root):
-    """sky130's curated deck has no well-layer rule (see
-    `klayout_tools.gen._PDK_ROLE_LAYERS`) -- `add_well=True` (the default)
-    is honoured as "no-op, with a note" rather than an error."""
+def test_guard_ring_add_well_true_on_sky130_draws_well(tmp_path, pdk_root):
+    """sky130's curated *DRC* deck has no well-layer rule, but the layer
+    itself is real (`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell` =
+    `(64, 20)`, see `klayout_tools.gen._PDK_ROLE_LAYERS`) -- `add_well=True`
+    (the default) now draws it there too, silently (no advisory note),
+    mirroring gf180mcu's behaviour (issue #208's root-cause correction)."""
+    import klayout.db as kdb
+
     output = tmp_path / "guard_ring_well.gds"
     report = generate(
         {
@@ -816,7 +892,14 @@ def test_guard_ring_add_well_true_on_sky130_notes_unsupported(tmp_path, pdk_root
             "options": {"output": str(output)},
         }
     )
-    assert any("well" in note for note in report["drc_hints"]["notes"])
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (64, 20) in present  # sky130 nwell.drawing
+    assert report["drc_hints"]["notes"] == []
 
 
 def test_guard_ring_contacts_per_side_1_boundary(tmp_path, pdk_root):
@@ -934,7 +1017,7 @@ def test_diff_pair_splits_1_boundary(tmp_path, pdk_root):
 
 @pytest.mark.parametrize(
     "params",
-    [{"w_um": 0.1}, {"l_um": 0}, {"splits": 0}],
+    [{"w_um": 0.1}, {"l_um": 0}, {"splits": 0}, {"flavor": "bogus"}],
 )
 def test_diff_pair_invalid_params_rejected(tmp_path, pdk_root, params):
     with pytest.raises(GenError):
@@ -946,6 +1029,193 @@ def test_diff_pair_invalid_params_rejected(tmp_path, pdk_root, params):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+def test_diff_pair_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
+    """`flavor` defaults to `'nfet'` -- byte-identical whether a request
+    omits it or sets it explicitly (issue #208 acceptance criterion: this
+    issue's new device-flavor logic is not allowed to change the default
+    case)."""
+    implicit = tmp_path / "implicit.gds"
+    explicit = tmp_path / "explicit.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(implicit)},
+        }
+    )
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet"},
+            "options": {"output": str(explicit)},
+        }
+    )
+    assert implicit.read_bytes() == explicit.read_bytes()
+
+
+def test_diff_pair_flavor_nfet_without_guard_ring_draws_no_well(tmp_path, pdk_root):
+    """With no automatic guard ring (so the *ring's own* well-tie logic --
+    unrelated to `flavor`, and now also active on sky130 by default after
+    this issue's `_PDK_ROLE_LAYERS` fix -- never runs), `flavor='nfet'`
+    (the default) must draw no well shape at all. Isolates this issue's new
+    device-level well-drawing gate from that pre-existing ring behaviour."""
+    import klayout.db as kdb
+
+    output = tmp_path / "diff_pair_nfet_no_ring.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"add_guard_ring": False},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (64, 20) not in present  # no device well drawn for the nfet default
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "well_pair"),
+    [
+        ("sky130A", "sky130", (64, 20)),
+        ("gf180mcuD", "gf180mcu", (21, 0)),
+    ],
+)
+def test_diff_pair_flavor_pfet_draws_well_and_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, well_pair
+):
+    """`flavor='pfet'` (e.g. a PMOS current mirror, `mirror=true` +
+    `flavor='pfet'`) encloses the device pair in a well on both curated PDK
+    families, and stays DRC-clean there (issue #208)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"diff_pair_pfet_{deck}.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"flavor": "pfet", "mirror": True},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert well_pair in present
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_diff_pair_flavor_pfet_no_guard_ring_still_draws_device_well(
+    tmp_path, pdk_root
+):
+    """The device-array well is independent of `add_guard_ring` -- a PMOS
+    pair with no automatic ring still needs its own well (edge case from
+    the issue's test plan)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "diff_pair_pfet_no_ring.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "pfet", "add_guard_ring": False},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (64, 20) in present
+
+
+# --- flavor -> klt extract device_counts (issue #208) ------------------------ #
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck"),
+    [("sky130A", "sky130"), ("gf180mcuD", "gf180mcu")],
+)
+def test_mos_array_flavor_pfet_extracts_as_pfet(tmp_path, both_pdk_root, variant, deck):
+    """The end-to-end acceptance bar from the issue's friction report: a
+    `flavor='pfet'` `mos_array`, run through (unmodified) `klt extract`,
+    must report `device_counts.pfet > 0` -- not `nfet`, which was the whole
+    bug (issue #208)."""
+    gds_path = tmp_path / f"mos_array_pfet_{deck}.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"flavor": "pfet", "rows": 2, "cols": 2, "dummy": 0},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), deck)
+
+    assert report["device_counts"].get("pfet", 0) > 0
+    assert report["device_counts"].get("nfet", 0) == 0
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck"),
+    [("sky130A", "sky130"), ("gf180mcuD", "gf180mcu")],
+)
+def test_mos_array_flavor_nfet_still_extracts_as_nfet(
+    tmp_path, both_pdk_root, variant, deck
+):
+    """The default `flavor='nfet'` must keep extracting as `nfet`, not
+    regress into `pfet` now that both curated decks resolve a real well
+    layer role (issue #208)."""
+    gds_path = tmp_path / f"mos_array_nfet_{deck}.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"rows": 2, "cols": 2, "dummy": 0},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), deck)
+
+    assert report["device_counts"].get("nfet", 0) > 0
+    assert report["device_counts"].get("pfet", 0) == 0
+
+
+def test_diff_pair_flavor_pfet_extracts_as_pfet(tmp_path, pdk_root):
+    """Same acceptance bar as `mos_array` above, for `diff_pair` (a PMOS
+    current mirror: `flavor='pfet'` + `mirror=true`)."""
+    gds_path = tmp_path / "diff_pair_pfet.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "pfet", "mirror": True},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), "sky130")
+
+    assert report["device_counts"].get("pfet", 0) > 0
+    assert report["device_counts"].get("nfet", 0) == 0
 
 
 # --- PDK-family support ------------------------------------------------------- #
@@ -1089,10 +1359,12 @@ def test_bjt_array_gf180_draws_drc_bjt_mark_layer(tmp_path, both_pdk_root):
     assert report["drc_hints"]["notes"] == []
 
 
-def test_bjt_array_sky130_omits_mark_and_well_with_note(tmp_path, both_pdk_root):
-    """sky130's curated deck checks neither a bipolar mark nor a well, so the
-    generator draws neither and surfaces that in-band via `drc_hints.notes`
-    (the fidelity caveat from the design note)."""
+def test_bjt_array_sky130_omits_mark_but_draws_well(tmp_path, both_pdk_root):
+    """sky130's curated deck checks no bipolar mark layer, so the generator
+    omits it and surfaces that in-band via `drc_hints.notes` (the fidelity
+    caveat from the design note) -- but sky130's `well` layer role is real
+    (see issue #208's root-cause correction), so the shared base well *is*
+    now drawn there, same as gf180mcu."""
     import klayout.db as kdb
 
     output = tmp_path / "bjt_sky130.gds"
@@ -1110,9 +1382,10 @@ def test_bjt_array_sky130_omits_mark_and_well_with_note(tmp_path, both_pdk_root)
         for i in layout.layer_indexes()
     }
     assert _DRC_BJT_LAYER not in present  # no bipolar mark on sky130
+    assert (64, 20) in present  # shared base well IS drawn (sky130 nwell.drawing)
     notes = report["drc_hints"]["notes"]
     assert any("device-mark" in n for n in notes)
-    assert any("well" in n for n in notes)
+    assert not any("well" in n for n in notes)
 
 
 def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):
