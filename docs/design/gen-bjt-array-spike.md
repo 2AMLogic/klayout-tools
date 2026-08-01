@@ -150,6 +150,18 @@ device without a device-mark or well layer its curated deck does not check.
   rule is out of scope for this phase (the issue scopes out "new DRC rule
   coverage beyond what's needed to validate this generator's own output") and
   is filed as follow-on friction.
+
+  **Resolved, negative finding (issue #183):** research into sky130's
+  official DRC deck (`sky130.lydrc`) found no analogous rule. sky130 does
+  define a `pnp.drawing` device-mark layer (82/44) for the vertical-PNP
+  device, but the only DRC rule referencing it (`dnwell.4`, a
+  `dnwell`-vs-`pnp` overlap exclusion) checks an unrelated process-layer
+  incompatibility, not a separation/spacing rule like gf180mcu's `BJT.3` —
+  and its "must never overlap at all" semantics aren't representable by any
+  check kind this repo's DRC engine supports (see `DrcRule`'s docstring).
+  Documented as a negative finding in `src/klayout_tools/decks/sky130.py`'s
+  module docstring; `_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]` remains `None`,
+  and the `drc_hints.notes` fidelity caveat described above stays accurate.
 - Vendor-library-cell instantiation (Option A) remains the right long-term
   mechanism for a *model-exact* device and for fixed vendor primitives
   generally (MiM/MoM caps). It needs its own epic — a library-locate/instantiate

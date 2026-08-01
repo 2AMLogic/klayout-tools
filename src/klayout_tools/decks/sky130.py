@@ -22,6 +22,36 @@ poly/diff/li1/met1/licon1/mcon, wide enough to prove the deck-adapter shape
 (:class:`~klayout_tools.decks.DrcRule`) and produce a non-trivial worked
 example. Coverage is expected to grow incrementally in follow-on issues.
 
+Negative finding — bipolar (BJT) device-mark rule (issue #183): sky130's
+layer map (``sky130.lyt``) defines a ``pnp.drawing`` mark layer (82/44,
+alongside an unused ``npn.drawing`` at 82/20) that the vertical-PNP bipolar
+device library cells (e.g. ``sky130_fd_pr__pnp_05v5``) draw over themselves
+for device recognition — the sky130 counterpart of gf180mcu's ``DRC_BJT``
+mark layer (127/5, see ``gf180mcu.py``). But the *only* rule in
+``sky130.lydrc`` that references it is ``dnwell.4``::
+
+    dnwell.and(pnp).output("dnwell.4", "dnwell.4 : dnwell must not overlap pnp")
+
+— a compatibility exclusion between two unrelated process layers (``dnwell``,
+the deep-nwell triple-well isolation layer at 64/18, is a *different* layer
+from ``nwell.drawing`` at 64/20, and is not drawn by this curated deck or by
+``bjt_array``'s sky130 output, whose ``well`` role is ``None``). It is not a
+separation/spacing rule protecting
+the bipolar device from unrelated diffusion/tap the way gf180mcu's
+``BJT.3`` (``bjt.separation.comp.1`` below) is, and its "must never overlap
+at all" semantics have no representation among the check kinds this
+engine's ``Region.*_check()`` dispatch supports (``width``/``space``/
+``notch``/``separation``/``enclosing``/``enclosed``/``overlap`` — see
+``DrcRule``'s docstring): ``overlap_check`` enforces a *minimum required*
+overlap, the opposite of "forbid any overlap," so transcribing ``dnwell.4``
+under that check kind would silently pass every layout rather than flag
+anything. Conclusion: sky130's official DRC deck has no analogue to
+gf180mcu's ``BJT.3`` bipolar device-mark separation rule; sky130's vertical
+PNP device relies on ``pnp.drawing`` for LVS/device-recognition purposes
+only, not DRC-level mark/separation checking. No rule was added here, and
+``_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`` in ``klayout_tools.gen`` remains
+``None`` accordingly.
+
 Two rules below (``poly.width.1`` is not one of them) approximate an
 official rule defined on a *compound* layer expression (a union of two mask
 layers) as a check against a single drawn layer, because our engine (native
