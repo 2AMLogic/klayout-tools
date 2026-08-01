@@ -48,8 +48,13 @@ from __future__ import annotations
 
 from . import DrcRule
 
-# Database units are nanometres (sky130 streams use dbu_um = 0.001), so a
-# threshold in micrometres times 1000 gives threshold_dbu.
+# This deck's rule thresholds below are authored assuming database units are
+# nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
+# threshold_dbu. `run_drc()` rescales threshold_dbu by NOMINAL_DBU_UM /
+# layout.dbu at run time, so the deck still gives correct results against a
+# layout written at a different dbu (see DrcRule's docstring).
+NOMINAL_DBU_UM = 0.001
+
 DECK: list[DrcRule] = [
     DrcRule(
         id="poly.width.1",

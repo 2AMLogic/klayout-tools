@@ -24,7 +24,7 @@ import os
 from typing import Any
 
 from ._layout import load_layout
-from .decks import DrcRule, UnknownDeckError, get_deck, get_layer_names
+from .decks import DrcRule, UnknownDeckError, get_deck, get_layer_names, get_nominal_dbu
 
 # Check kinds that operate on a single region (no other_layer).
 _SINGLE_LAYER_CHECKS = {"width", "space", "notch"}
@@ -77,6 +77,13 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     canonical across platforms/KLayout builds regardless of the engine's
     internal shape-enumeration order.
 
+    Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
+    deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not
+    against whatever dbu ``path`` happens to use. Before any
+    ``Region.*_check()`` runs, thresholds are rescaled by
+    ``nominal_dbu_um / layout.dbu`` so the same physical geometry produces
+    identical violations regardless of the input stream's database unit.
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, or a rule is malformed (e.g. a two-layer check missing
     ``other_layer``).
@@ -91,11 +98,18 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
 
     try:
         deck = get_deck(deck_name)
+        nominal_dbu_um = get_nominal_dbu(deck_name)
     except UnknownDeckError as exc:
         raise DrcError(str(exc)) from exc
     layer_names = get_layer_names(deck_name)
 
     layout = load_layout(path, DrcError)
+
+    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
+    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
+    # rescale so the same physical distance is checked regardless of the
+    # stream's database unit.
+    dbu_scale = nominal_dbu_um / layout.dbu
 
     # Imported lazily (after load_layout, which already paid this cost) for
     # kdb.Region() below.
@@ -126,7 +140,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 else None
             )
 
-            edge_pairs = _run_check(region, other_region, rule)
+            edge_pairs = _run_check(region, other_region, rule, dbu_scale)
 
             for edge_pair in edge_pairs:
                 bbox = edge_pair.bbox()
@@ -177,13 +191,21 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     }
 
 
-def _run_check(region: Any, other_region: Any | None, rule: DrcRule) -> Any:
+def _run_check(
+    region: Any, other_region: Any | None, rule: DrcRule, dbu_scale: float
+) -> Any:
     """Dispatch to the matching ``klayout.db.Region.*_check`` primitive.
+
+    ``dbu_scale`` (``deck's nominal_dbu_um / layout.dbu``, see
+    :func:`run_drc`) rescales ``rule.threshold_dbu`` from the deck's
+    authored, nominal database unit to the layout's actual one, rounding to
+    the nearest whole dbu since ``Region.*_check()`` thresholds are integer
+    database units.
 
     Returns an ``EdgePairs`` collection, one entry per violation.
     """
     check = rule.check
-    d = rule.threshold_dbu
+    d = round(rule.threshold_dbu * dbu_scale)
 
     if check in _SINGLE_LAYER_CHECKS:
         return getattr(region, f"{check}_check")(d)

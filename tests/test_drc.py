@@ -595,3 +595,111 @@ def test_example_gds_matches_committed_json():
     actual = run_drc(EXAMPLE_GDS, "sky130")
 
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# dbu invariance (#172): the same physical geometry must produce the same
+# DRC verdict regardless of the stream's own database unit. Rule thresholds
+# are authored against each deck's nominal dbu (0.001 um for both sky130 and
+# gf180mcu, see decks/sky130.py and decks/gf180mcu.py) but `run_drc` must
+# rescale them to whatever dbu the layout under test actually uses.
+# ---------------------------------------------------------------------------
+
+# dbu_um values chosen (matching the issue's own repro table) so that the
+# physical widths/lengths below divide evenly -- no rounding ambiguity, so
+# bbox comparisons after conversion to physical units are exact.
+_DBU_INVARIANCE_DBU_VALUES = [0.001, 0.005, 0.0005]
+
+
+def _make_sky130_violation_layout_at_dbu(dbu_um: float) -> kdb.Layout:
+    """Same physical geometry as `_make_violation_layout` (a poly bar 0.05 um
+    wide, 2.0 um long -- narrower than `poly.width.1`'s 0.15 um threshold),
+    written at an arbitrary `dbu_um`."""
+    layout = kdb.Layout()
+    layout.dbu = dbu_um
+    top = layout.create_cell("TOP")
+    poly = layout.layer(66, 20)
+    layout.set_info(poly, kdb.LayerInfo(66, 20, "poly.drawing"))
+    width = round(0.05 / dbu_um)
+    length = round(2.0 / dbu_um)
+    top.shapes(poly).insert(kdb.Box(0, 0, width, length))
+    return layout
+
+
+def _make_gf180mcu_violation_layout_at_dbu(dbu_um: float) -> kdb.Layout:
+    """Same physical geometry as `_make_gf180mcu_violation_layout` (a Poly2
+    bar 0.06 um wide, 2.0 um long -- narrower than `poly2.width.1`'s 0.18 um
+    threshold), written at an arbitrary `dbu_um`."""
+    layout = kdb.Layout()
+    layout.dbu = dbu_um
+    top = layout.create_cell("TOP")
+    poly2 = layout.layer(30, 0)
+    layout.set_info(poly2, kdb.LayerInfo(30, 0, "Poly2"))
+    width = round(0.06 / dbu_um)
+    length = round(2.0 / dbu_um)
+    top.shapes(poly2).insert(kdb.Box(0, 0, width, length))
+    return layout
+
+
+def _assert_reports_match_modulo_dbu(
+    reference: dict, dbu_um: float, other: dict
+) -> None:
+    """Assert `other` (from a layout written at `dbu_um`) reports the exact
+    same violations as `reference` (from the deck's nominal-dbu layout),
+    once bounding boxes are converted from database units back to physical
+    micrometres."""
+    assert other["status"] == reference["status"]
+    assert other["violation_count"] == reference["violation_count"]
+    assert other["rule_counts"] == reference["rule_counts"]
+    assert len(other["violations"]) == len(reference["violations"])
+
+    for expected, actual in zip(
+        reference["violations"], other["violations"], strict=True
+    ):
+        assert actual["rule"] == expected["rule"]
+        assert actual["description"] == expected["description"]
+        assert actual["check"] == expected["check"]
+        assert actual["layer"] == expected["layer"]
+        assert actual["cell"] == expected["cell"]
+
+        expected_bbox_um = {k: v * 0.001 for k, v in expected["bbox"].items()}
+        actual_bbox_um = {k: v * dbu_um for k, v in actual["bbox"].items()}
+        assert actual_bbox_um == expected_bbox_um
+
+
+@pytest.mark.parametrize("dbu_um", _DBU_INVARIANCE_DBU_VALUES)
+def test_run_drc_sky130_dbu_invariant(tmp_path, dbu_um):
+    """`poly.width.1` (sky130) reports the identical violation for the same
+    physical geometry whether the stream's `dbu_um` is 0.001 (the deck's
+    nominal dbu), 0.005, or 0.0005 (#172's own repro table)."""
+    reference_path = tmp_path / "reference.gds"
+    _make_sky130_violation_layout_at_dbu(0.001).write(str(reference_path))
+    reference = run_drc(str(reference_path), "sky130")
+    assert reference["status"] == "violations"
+    assert reference["violation_count"] == 1
+
+    path = tmp_path / f"dbu_{dbu_um}.gds"
+    _make_sky130_violation_layout_at_dbu(dbu_um).write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    assert report["dbu_um"] == dbu_um
+    _assert_reports_match_modulo_dbu(reference, dbu_um, report)
+
+
+@pytest.mark.parametrize("dbu_um", _DBU_INVARIANCE_DBU_VALUES)
+def test_run_drc_gf180mcu_dbu_invariant(tmp_path, dbu_um):
+    """`poly2.width.1` (gf180mcu) reports the identical violation for the
+    same physical geometry whether the stream's `dbu_um` is 0.001 (the
+    deck's nominal dbu), 0.005, or 0.0005 (#172's own repro table)."""
+    reference_path = tmp_path / "reference.gds"
+    _make_gf180mcu_violation_layout_at_dbu(0.001).write(str(reference_path))
+    reference = run_drc(str(reference_path), "gf180mcu")
+    assert reference["status"] == "violations"
+    assert reference["violation_count"] == 1
+
+    path = tmp_path / f"dbu_{dbu_um}.gds"
+    _make_gf180mcu_violation_layout_at_dbu(dbu_um).write(str(path))
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["dbu_um"] == dbu_um
+    _assert_reports_match_modulo_dbu(reference, dbu_um, report)
