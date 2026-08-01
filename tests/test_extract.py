@@ -187,8 +187,9 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
     assert report["devices"] == []
     assert report["device_counts"] == {}
     # `device_classes` is what the deck *can* recognise, unaffected by this
-    # layout happening to contain zero devices (issue #221).
-    assert report["device_classes"] == ["nfet", "pfet"]
+    # layout happening to contain zero devices (issue #221) -- sky130 also
+    # declares a `pnp` bipolar entry (issue #223).
+    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
 
 
 # --------------------------------------------------------------------------- #
@@ -274,7 +275,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert len(report["netlist_sha256"]) == 64
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert report["device_classes"] == ["nfet", "pfet"]
+    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
     assert report["pdk"] is None
     assert report["warnings"] == []
 
@@ -327,6 +328,116 @@ def test_written_netlist_has_no_top_level_end_or_control(tmp_path):
         stripped = line.strip().upper()
         assert stripped != ".END"
         assert not stripped.startswith(".CONTROL")
+
+
+# --------------------------------------------------------------------------- #
+# Bipolar (BJT) device recognition (issue #223)
+# --------------------------------------------------------------------------- #
+
+
+def _make_sky130_bjt_layout() -> kdb.Layout:
+    """A minimal vertical-PNP layout on sky130's curated bipolar layers: an
+    nwell (base) marked with `pnp.drawing`, a p+ diffusion (emitter) inside
+    it, contacted up through li1 and labelled -- plus a base contact/label so
+    both the emitter and base terminals resolve to named nets, and no drawn
+    collector (collector = substrate, per `BipolarDevice`'s docstring)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(64, 20, kdb.Box(0, 0, 2000, 2000))  # nwell.drawing (base)
+    draw(82, 44, kdb.Box(0, 0, 2000, 2000))  # pnp.drawing (device-mark)
+
+    # Emitter: p+ diffusion inside the marked nwell, contacted + labelled.
+    draw(65, 20, kdb.Box(800, 800, 1200, 1200))  # diff.drawing (emitter)
+    draw(66, 44, kdb.Box(900, 900, 1100, 1100))  # licon1 over the emitter
+    draw(67, 20, kdb.Box(850, 850, 1150, 1150))  # li1 over the emitter
+    label(67, 5, "EMIT", 1000, 1000)
+
+    # Base: a well tap (tap.drawing) inside the same nwell, contacted +
+    # labelled -- mirrors the PMOS body-tie pattern `_make_inverter_layout`
+    # already exercises.
+    draw(65, 44, kdb.Box(100, 100, 300, 300))  # tap.drawing (base tie)
+    draw(66, 44, kdb.Box(150, 150, 250, 250))  # licon1 over the tap
+    draw(67, 20, kdb.Box(100, 100, 300, 300))  # li1 over the tap
+    label(64, 5, "BASE", 200, 200)
+
+    return layout
+
+
+def _make_gf180mcu_bjt_layout() -> kdb.Layout:
+    """A minimal vertical-bipolar layout on gf180mcu's curated bipolar
+    layers: an Nwell (base) marked with `DRC_BJT`, a Comp diffusion
+    (emitter) inside it, contacted up through Metal1 and labelled -- no
+    drawn collector (collector = substrate)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(21, 0, kdb.Box(0, 0, 2000, 2000))  # Nwell (base)
+    draw(127, 5, kdb.Box(0, 0, 2000, 2000))  # DRC_BJT (device-mark)
+
+    # Emitter: Comp diffusion inside the marked Nwell, contacted + labelled.
+    draw(22, 0, kdb.Box(800, 800, 1200, 1200))  # Comp (emitter)
+    draw(33, 0, kdb.Box(900, 900, 1100, 1100))  # Contact over the emitter
+    draw(34, 0, kdb.Box(850, 850, 1150, 1150))  # Metal1 over the emitter
+    label(34, 10, "EMIT", 1000, 1000)
+
+    return layout
+
+
+def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
+    """The synthetic vertical-PNP layout extracts exactly one `pnp` device
+    (no spurious `nfet`/`pfet` from the emitter's diff.drawing shape, which
+    doubles as this deck's MOS `active` layer -- there is no poly gate over
+    it, so the MOS extractor recognises nothing there), with the emitter and
+    base terminals resolved to their labelled nets and the collector tied to
+    the deck's substrate net."""
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "bjt.spice"))
+
+    assert report["device_counts"] == {"pnp": 1}
+    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
+
+    (device,) = report["devices"]
+    assert device["class"] == "pnp"
+    assert device["nets"] == {"c": "vsubs", "b": "BASE", "e": "EMIT"}
+
+
+def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
+    """The synthetic vertical-bipolar layout extracts exactly one `bjt`
+    device (no spurious `nfet`/`pfet` from the emitter's Comp shape, which
+    doubles as this deck's MOS `active` layer -- no poly gate over it), with
+    the emitter terminal resolved to its labelled net and the collector tied
+    to the deck's substrate net. The base has no drawn tap in this fixture
+    (gf180mcu's curated deck has no distinct well-tie layer, mirroring
+    `test_gf180mcu_clkinv_1_spot_check`'s PMOS-body note), so it is an
+    anonymous net."""
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bjt.spice"))
+
+    assert report["device_counts"] == {"bjt": 1}
+    assert report["device_classes"] == ["nfet", "pfet", "bjt"]
+
+    (device,) = report["devices"]
+    assert device["class"] == "bjt"
+    assert device["nets"]["c"] == "vsubs"
+    assert device["nets"]["e"] == "EMIT"
+    assert device["nets"]["b"].startswith("$")  # anonymous, no base tie drawn
 
 
 # --------------------------------------------------------------------------- #
@@ -559,13 +670,26 @@ def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
     assert exc_info.value.code == 2
 
 
-@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
-def test_extraction_deck_device_classes_is_nfet_pfet_only(deck_name):
-    """Every registered deck is MOS-only today (issue #221) -- the
-    `device_classes` coverage accessor reports exactly `nfet`/`pfet` for
-    both, independent of any particular layout."""
+@pytest.mark.parametrize(
+    "deck_name, expected",
+    [
+        # sky130 declares one bipolar entry, `pnp` (issue #223, its own
+        # `sky130_fd_pr__pnp_05v5` device cell).
+        ("sky130", ("nfet", "pfet", "pnp")),
+        # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
+        # the DRM's `DRC_BJT` mark layer covers both NPN and PNP polarities
+        # with no single named device cell to attribute one to; see
+        # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note).
+        ("gf180mcu", ("nfet", "pfet", "bjt")),
+    ],
+)
+def test_extraction_deck_device_classes_reports_mos_and_bipolar(deck_name, expected):
+    """`device_classes` reports exactly what each deck is structurally
+    capable of recognising -- two-terminal-well MOS plus each deck's
+    curated bipolar entry (issue #223) -- independent of any particular
+    layout."""
     deck = get_extraction_deck(deck_name)
-    assert deck.device_classes == ("nfet", "pfet")
+    assert deck.device_classes == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -627,7 +751,7 @@ def test_sky130_inv_1_spot_check(tmp_path):
     assert report["top"] == "sky130_fd_sc_hd__inv_1"
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert report["device_classes"] == ["nfet", "pfet"]
+    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
 
     devices = {d["class"]: d for d in report["devices"]}
     nfet, pfet = devices["nfet"], devices["pfet"]
@@ -651,7 +775,7 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     assert report["top"] == "gf180mcu_fd_sc_mcu9t5v0__clkinv_1"
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert report["device_classes"] == ["nfet", "pfet"]
+    assert report["device_classes"] == ["nfet", "pfet", "bjt"]
 
     devices = {d["class"]: d for d in report["devices"]}
     nfet, pfet = devices["nfet"], devices["pfet"]

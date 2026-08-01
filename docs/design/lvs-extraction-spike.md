@@ -798,3 +798,26 @@ filed as a separate tracking issue, #217, rather than done inline here, the
 same way Epic #153's phase-1 spike (#161) preceded its phase-2
 implementation issue (#162). See #216 (this decision) and #217
 (implementation) for status.
+
+## Addendum (#223): bipolar (BJT) device-class recognition, realized
+
+**Status:** implementation note, not a fresh design decision — this spike's
+own survey (§ "KLayout's own `LayoutToNetlist` + `NetlistComparer`" →
+"Extraction API" above) already verified `db.DeviceExtractorBJT3Transistor`
+present live alongside `DeviceExtractorMOS4Transistor`; #219 (device-class
+recognition friction) and its sub-issue #223 are what schedule wiring it in,
+not a new engine-choice question. `klt extract` now recognises one curated
+vertical-BJT device per deck (sky130's `pnp`, gf180mcu's generic `bjt`) via
+that same extractor, mirroring the MOS device-recognition pattern §2a
+already established: an optional `ExtractionDeck.bipolars` field (a tuple of
+`BipolarDevice` — base/emitter/marker/collector layer roles) feeds
+`DeviceExtractorBJT3Transistor`, with the PDK's dedicated device-mark layer
+(sky130's `pnp.drawing`, gf180mcu's `DRC_BJT`) scoping recognition to
+genuine device-cell instances rather than every drawn well region. See
+`docs/cli/extract.md` → "Bipolar (BJT) device recognition" for the shipped
+contract (the authoritative source once code and this survey disagree, per
+this document's own opening note) and
+`src/klayout_tools/decks/__init__.py`'s `BipolarDevice` docstring for the
+layer-role contract. Resistor and capacitor device classes (#219's
+remaining sibling sub-issues, e.g. #222 for resistors) are unaffected by
+this addendum and remain separately tracked.

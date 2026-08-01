@@ -182,7 +182,7 @@ get_polygons(117, 10)``):
 
 from __future__ import annotations
 
-from . import DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
+from . import BipolarDevice, DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001, same as sky130), so a threshold in micrometres
@@ -431,6 +431,12 @@ DECK: list[DrcRule] = [
         # checks against every comp shape, which may over-flag COMP that is
         # legitimately part of the same BJT structure. Threshold value
         # unmodified.
+        #
+        # Follow-up (issue #223): `DRC_BJT` is now *also* consumed for
+        # device-recognition purposes (not just this DRC mark/separation
+        # check) -- see `EXTRACTION_DECK.bipolars` below, which uses it as
+        # the `marker` layer of a `klt extract` bipolar device-recognition
+        # entry.
     ),
 ]
 
@@ -490,6 +496,23 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # NMOS body: as with sky130, no separate substrate layer is drawn in this
 # curated deck, so the NMOS body terminal is tied to the deck's
 # `substrate_net` global (`ExtractionDeck.substrate_net`, default `"vsubs"`).
+#
+# Bipolar (BJT) device recognition (issue #223): base = Nwell (the physical
+# n-type body a vertical bipolar's emitter diffusion sits in -- the same
+# layer this deck's `nwell` MOS-recognition role already uses), emitter =
+# Comp (the same diffusion mask an ordinary PMOS source/drain uses; this
+# curated deck does not model Nplus/Pplus implants, so Comp alone cannot
+# distinguish device polarity -- see `class_name` below), marker = DRC_BJT
+# (127/5, `bjt.separation.comp.1` above) -- `extract.py` intersects
+# base/emitter with the marker so only genuine BJT device-cell instances are
+# recognised, not every Nwell drawn for an ordinary PMOS. No drawn collector
+# layer -- the DRM's vertical bipolar's collector is the substrate, tied to
+# `substrate_net` like the NMOS body above (see `BipolarDevice`'s
+# docstring). `class_name="bjt"` (not `"npn"`/`"pnp"`): the DRM's own 10.7
+# section title ("vertical NPN/PNP bipolar rule category") names both
+# polarities under one mark layer, and unlike sky130's `pnp_05v5` this repo
+# has no positively-identified single device-cell name to attribute a
+# specific polarity to -- a generic class name is used rather than guessing.
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -498,6 +521,14 @@ EXTRACTION_DECK = ExtractionDeck(
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
     metals=((34, 0),),  # Metal1
     metal_labels=((34, 10),),  # Metal1 pin/label purpose
+    bipolars=(
+        BipolarDevice(
+            base=(21, 0),  # Nwell
+            emitter=(22, 0),  # Comp
+            marker=(127, 5),  # DRC_BJT
+            class_name="bjt",
+        ),
+    ),
 )
 
 # --------------------------------------------------------------------------- #

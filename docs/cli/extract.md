@@ -54,7 +54,10 @@ flattened `Region`/`Texts` collection over the selected top cell (via
 uses. Device recognition splits NMOS (`active - nwell`) from PMOS
 (`active & nwell`) and runs KLayout's native `DeviceExtractorMOS4Transistor`
 for each — one generic `nfet`/`pfet` device class per deck (no
-voltage-flavor distinction).
+voltage-flavor distinction). A deck may additionally declare one or more
+vertical-BJT device-recognition entries, run through KLayout's native
+`DeviceExtractorBJT3Transistor` — see "Bipolar (BJT) device recognition"
+below.
 
 ## Deviation from the spike
 
@@ -103,6 +106,39 @@ background region spanning the whole PMOS area, so a blanket rule like that
 shorts every transistor terminal inside the well together. See
 `ExtractionDeck`'s docstring in `src/klayout_tools/decks/__init__.py` for
 the full reasoning.
+
+### Bipolar (BJT) device recognition
+
+Both curated decks additionally declare one vertical-BJT device-recognition
+entry (`ExtractionDeck.bipolars`, a tuple of `BipolarDevice` — see its
+docstring in `src/klayout_tools/decks/__init__.py`), run through KLayout's
+native `DeviceExtractorBJT3Transistor`:
+
+- **sky130**: one `pnp` entry — base = `nwell.drawing` (64/20), emitter =
+  `diff.drawing` (65/20), marker = `pnp.drawing` (82/44, the layer
+  `sky130_fd_pr__pnp_05v5`-style device-cell instances draw over themselves
+  for recognition).
+- **gf180mcu**: one generic `bjt` entry (the DRM's `DRC_BJT` mark layer
+  covers both NPN and PNP polarities with no single named device cell to
+  attribute one to, unlike sky130's `pnp_05v5`) — base = `Nwell` (21/0),
+  emitter = `Comp` (22/0), marker = `DRC_BJT` (127/5).
+
+Both entries reuse the deck's own MOS-recognition `nwell`/`active` layers for
+`base`/`emitter` rather than introducing dedicated bipolar-only masks — the
+`marker` layer is what scopes recognition to genuine device-cell instances:
+`extract.py` intersects `base` with `marker` before extraction, so an
+ordinary PMOS-only `nwell` drawn elsewhere in the layout is never
+misrecognised as a bipolar base. Neither curated deck draws a distinct
+collector layer (the vertical bipolar's collector is the substrate itself),
+so the collector terminal is tied to the deck's global substrate net
+(`vsubs` by default), mirroring the NMOS-body wiring above.
+
+`devices[].nets` for a bipolar device uses `"c"`/`"b"`/`"e"` terminal keys
+(collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"`, and
+`devices[].params` is empty (KLayout's `DeviceClassBJT3Transistor` reports
+area/perimeter parameters named `AE`/`AB`/`AC`/`PE`/`PB`/`PC`/`NE`, none of
+which match the `W`/`L` parameter names `devices[].params` extracts — see
+"JSON response" below).
 
 ## PDK resolution
 
@@ -334,7 +370,7 @@ exit codes).
   "net_count": 6,
   "pin_count": 6,
   "device_counts": { "nfet": 1, "pfet": 1 },
-  "device_classes": ["nfet", "pfet"],
+  "device_classes": ["nfet", "pfet", "pnp"],
   "devices": [
     {
       "name": "$1",
@@ -365,8 +401,8 @@ exit codes).
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
-| `device_counts`    | object\<string, int\>      | Per-device-class counts (`"nfet"`/`"pfet"`), keys sorted for determinism. What was actually **found**.  |
-| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (currently always `["nfet", "pfet"]` — every registered deck is MOS-only), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
+| `device_counts`    | object\<string, int\>      | Per-device-class counts, keys sorted for determinism (`"nfet"`/`"pfet"` and, on decks that declare one, a bipolar class like `"pnp"`/`"bjt"`). What was actually **found**.  |
+| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `["nfet", "pfet", "pnp"]` or gf180mcu's `["nfet", "pfet", "bjt"]` — see "Bipolar (BJT) device recognition" above), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |
@@ -383,9 +419,9 @@ consume.
 | Field    | Type                        | Description                                                                                    |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
-| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`).                                              |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map: `"s"`, `"g"`, `"d"`, `"b"`. `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; `b` can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres.                             |
+| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, or a declared bipolar class like `"pnp"` / `"bjt"`). |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 

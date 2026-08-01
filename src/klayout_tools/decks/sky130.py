@@ -52,6 +52,21 @@ only, not DRC-level mark/separation checking. No rule was added here, and
 ``_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`` in ``klayout_tools.gen`` remains
 ``None`` accordingly.
 
+Follow-up (issue #223): ``pnp.drawing`` (82/44) is now consumed for exactly
+that LVS/device-recognition purpose -- ``EXTRACTION_DECK.bipolars`` below
+uses it as the ``marker`` layer of a :class:`~klayout_tools.decks.BipolarDevice`
+entry, scoping ``klt extract``'s ``DeviceExtractorBJT3Transistor`` wiring to
+genuine ``sky130_fd_pr__pnp_05v5``-style device-cell instances rather than
+every drawn ``nwell.drawing`` region. ``npn.drawing`` (82/20) is deliberately
+*not* wired into a second ``bipolars`` entry: this module's own finding above
+(no ``.lydrc`` rule references it beyond the unrelated ``dnwell.4``
+compatibility exclusion) is the only evidence available in this repo, and it
+does not on its own establish that some sky130 bipolar device cell draws it
+for recognition the way ``pnp.drawing`` is drawn by ``..._pnp_05v5`` -- absent
+that positive confirmation (this repo vendors no sky130 device-library GDS to
+check directly), this deck stays with the one PNP entry it can attribute to a
+concretely-named device cell.
+
 Two rules below (``poly.width.1`` is not one of them) approximate an
 official rule defined on a *compound* layer expression (a union of two mask
 layers) as a check against a single drawn layer, because our engine (native
@@ -76,7 +91,7 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
 
 from __future__ import annotations
 
-from . import DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
+from . import BipolarDevice, DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
@@ -199,6 +214,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (67, 44): "mcon.drawing",
     (68, 20): "met1.drawing",
     (68, 44): "via.drawing",
+    (82, 44): "pnp.drawing",
 }
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +275,23 @@ EXTRACTION_DECK = ExtractionDeck(
     metals=((67, 20), (68, 20)),  # li1.drawing, met1.drawing
     metal_labels=((67, 5), (68, 5)),  # li1.pin, met1.pin
     vias=((67, 44),),  # mcon.drawing (li1 -> met1)
+    # Vertical PNP (issue #223, see the module docstring's "Follow-up" note
+    # above): base = nwell.drawing (the physical n-type body the device's
+    # p+ emitter sits in), emitter = diff.drawing (the same p+ diffusion
+    # mask an ordinary PMOS source/drain uses), marker = pnp.drawing --
+    # `extract.py` intersects base/emitter with the marker so only genuine
+    # `sky130_fd_pr__pnp_05v5`-style device-cell instances are recognised,
+    # not every PMOS's nwell. No drawn collector layer -- the collector is
+    # the native P-substrate, tied to `substrate_net` like the NMOS body
+    # above (see `BipolarDevice`'s docstring).
+    bipolars=(
+        BipolarDevice(
+            base=(64, 20),  # nwell.drawing
+            emitter=(65, 20),  # diff.drawing
+            marker=(82, 44),  # pnp.drawing
+            class_name="pnp",
+        ),
+    ),
 )
 
 # --------------------------------------------------------------------------- #

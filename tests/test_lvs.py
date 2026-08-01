@@ -604,10 +604,15 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
     report = run_lvs(path)
 
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # sky130 also declares a `pnp` bipolar entry (issue #223); this cell
+    # draws none, so the comparer's one mismatch is the pre-existing
+    # "class declared but zero instances on both sides" warning (#204's own
+    # downgrade-to-warning precedent) -- not a real topology defect.
+    assert report["mismatch_count"] == 1
+    assert report["mismatches"][0]["severity"] == "warning"
     # `layout.file` + `layout.deck` (inline extraction) was given -- echoes
-    # the sky130 deck's device-class coverage (issue #221).
-    assert report["device_classes"] == ["nfet", "pfet"]
+    # the sky130 deck's device-class coverage (issue #221, extended by #223).
+    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
     assert (
         report["environment"]["extracted_netlist"] is None
     )  # keep_extracted defaults False
@@ -865,7 +870,13 @@ def test_corpus_known_good_cell_matches_cleanly(
     )
     report = run_lvs(path)
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Both decks also declare a bipolar entry (issue #223: sky130's `pnp`,
+    # gf180mcu's `bjt`) that these MOS-only corpus cells draw none of -- the
+    # comparer's one mismatch is the pre-existing "class declared but zero
+    # instances on both sides" warning (#204's downgrade-to-warning
+    # precedent), not a real topology defect.
+    assert report["mismatch_count"] == 1
+    assert report["mismatches"][0]["severity"] == "warning"
 
 
 @pytest.mark.parametrize(

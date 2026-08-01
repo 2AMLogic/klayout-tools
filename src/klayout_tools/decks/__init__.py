@@ -107,6 +107,13 @@ class ExtractionDeck:
     substrate-tap geometry exists to derive one from (KLayout
     ``connect_global``) -- see the family deck's docstring for why this is a
     documented approximation, not a real substrate-tap extraction.
+
+    ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
+    by default) declaring this deck's drawn vertical-BJT device-recognition
+    layers -- the resistor/bipolar/capacitor extension point #221's own
+    docstring anticipates (see :attr:`device_classes` below). Empty for a
+    deck with no curated bipolar recognition; non-empty decks may declare
+    more than one entry (e.g. distinct NPN and PNP device families).
     """
 
     active: tuple[int, int]
@@ -122,23 +129,81 @@ class ExtractionDeck:
     nfet_class: str = "nfet"
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
+    bipolars: tuple[BipolarDevice, ...] = ()
 
     @property
     def device_classes(self) -> tuple[str, ...]:
         """The device-class *roles* (not the ``devices[].class`` label
-        strings ``nfet_class``/``pfet_class`` provide) this deck is
-        structurally capable of recognising -- independent of whether a
-        given layout actually contains any devices of that class (see
-        ``device_counts`` in ``docs/cli/extract.md`` for the "what was
-        found" counterpart of this "what can be found" declaration).
+        strings ``nfet_class``/``pfet_class``/``BipolarDevice.class_name``
+        provide) this deck is structurally capable of recognising --
+        independent of whether a given layout actually contains any devices
+        of that class (see ``device_counts`` in ``docs/cli/extract.md`` for
+        the "what was found" counterpart of this "what can be found"
+        declaration).
 
-        Every registered deck extracts two-terminal-well MOS today (#221),
-        so this is always ``("nfet", "pfet")``. When a future deck grows a
-        resistor/bipolar/capacitor extractor (#219's sibling sub-issues),
-        that deck's set of declared ``*_class`` fields should extend the
-        tuple this property returns accordingly.
+        Every registered deck extracts two-terminal-well MOS (``"nfet"``,
+        ``"pfet"``); a deck that also declares one or more ``bipolars``
+        entries (#223) appends each entry's ``class_name`` (in declaration
+        order, deduplicated) after those two. Resistor/capacitor extractors
+        (#219's remaining sibling sub-issues) should extend this the same
+        way once added.
         """
-        return ("nfet", "pfet")
+        classes = ["nfet", "pfet"]
+        for bipolar in self.bipolars:
+            if bipolar.class_name not in classes:
+                classes.append(bipolar.class_name)
+        return tuple(classes)
+
+
+@dataclass(frozen=True)
+class BipolarDevice:
+    """One drawn vertical-BJT device-recognition entry for an
+    :class:`ExtractionDeck`'s optional ``bipolars`` field (issue #223),
+    consumed by ``extract.py``'s ``kdb.DeviceExtractorBJT3Transistor``
+    wiring -- the bipolar analogue of :class:`ExtractionDeck`'s own
+    ``active``/``poly``/``nwell`` MOS-recognition layers.
+
+    ``base``/``emitter`` reuse the *same* curated layers the deck already
+    declares for MOS recognition (typically ``nwell`` and ``active``
+    respectively -- a vertical PNP/NPN's base/emitter are drawn on the same
+    physical well/diffusion masks an ordinary MOS transistor uses, just in a
+    different geometric arrangement) rather than introducing dedicated
+    bipolar-only masks this curated deck does not otherwise model.
+
+    ``marker`` is the PDK's dedicated bipolar device-recognition mark layer
+    (drawn by the bipolar device library cell over itself; not consumed for
+    connectivity otherwise, e.g. sky130's ``pnp.drawing`` 82/44 or
+    gf180mcu's ``DRC_BJT`` 127/5). It disambiguates "this specific patch of
+    well/diffusion is a real bipolar device" from the many unrelated
+    nwell/diffusion regions a layout draws for ordinary PMOS/tap purposes --
+    ``extract.py`` intersects ``base`` with ``marker`` before extraction, so
+    only nwell area actually inside a marked device cell becomes a base
+    region, and only diffusion inside *that* scoped base region becomes an
+    emitter; an ordinary PMOS-only nwell drawn elsewhere in the layout is
+    never misrecognised as a bipolar base.
+
+    ``collector`` is ``None`` when the PDK's vertical bipolar has no drawn
+    collector layer of its own (collector formed by the substrate -- true
+    for both curated decks this issue populates). KLayout's
+    ``DeviceExtractorBJT3Transistor`` handles that case itself: an empty
+    ``C`` input makes it output the base region's own footprint onto the
+    collector terminal, which ``extract.py``'s wiring then ties to the
+    deck's ``substrate_net`` global -- the same ``connect_global`` pattern
+    :class:`ExtractionDeck`'s NMOS body/``substrate_net`` wiring already
+    uses. When a future deck's bipolar has a genuinely distinct drawn
+    collector layer (e.g. a lateral device), set this instead.
+
+    ``class_name`` names the extracted ``DeviceClassBJT3Transistor`` device
+    class (``devices[].class`` in the JSON response, and one of the values
+    :attr:`ExtractionDeck.device_classes` reports for a deck that declares
+    this entry).
+    """
+
+    base: tuple[int, int]
+    emitter: tuple[int, int]
+    marker: tuple[int, int]
+    collector: tuple[int, int] | None = None
+    class_name: str = "bjt"
 
 
 @dataclass(frozen=True)
