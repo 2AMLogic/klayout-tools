@@ -32,6 +32,39 @@ scripts/deploy-site.sh --no-deploy
 `blocks/` and `site/` — regenerating `blocks/*/output/layout.json` or
 renders is the content pipeline (#62), out of scope for this script.
 
+### Automated deploy (deploy trigger)
+
+The chosen deploy trigger is a **GitHub Actions workflow on push to `main`**
+([`../.github/workflows/deploy-site.yml`](../.github/workflows/deploy-site.yml),
+issue #166). It is path-filtered to `site/**` and `blocks/**` (plus the deploy
+script and the workflow itself), so a merge that changes the site or the
+gallery data runs `scripts/deploy-site.sh` automatically — a merge that touches
+neither skips it. This closes the gap where content merged to `main` but never
+reached the live site until someone ran the deploy by hand.
+
+Deploys are serialized by a `concurrency` group with `cancel-in-progress:
+false`: two merges in quick succession **queue** rather than clobber each other
+(the "last-writer-wins" failure mode), so the live site always ends on fresh
+`main`.
+
+**Operator setup required.** The workflow deploys with the same
+`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` credentials the script expects,
+read from repository secrets. Those secrets must be added by an operator (they
+live only on the operator's machine today, in
+`~/.cloudflare/rjwalters/pages-rjwalters.env`); until they exist, the workflow
+runs but its deploy step fails fast on the script's own
+`: "${CLOUDFLARE_API_TOKEN:?...}"` guard — it never deploys to the wrong account
+or silently no-ops. Add them with:
+
+```
+gh secret set CLOUDFLARE_API_TOKEN
+gh secret set CLOUDFLARE_ACCOUNT_ID
+```
+
+Until the workflow is live and green, `main` and the deployed site can drift;
+run one manual `scripts/deploy-site.sh` (with the env file sourced) to catch the
+live site up to `main`.
+
 ## Vite + React gallery project
 
 Self-contained npm project: it has its own `package.json` and does **not**

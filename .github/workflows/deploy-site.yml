@@ -1,0 +1,67 @@
+name: Deploy site
+
+# Deploy klayout-tools.org (site/) to Cloudflare Pages when gallery/site
+# content lands on main. Without this, `scripts/deploy-site.sh` only ever runs
+# by hand, so content that merges to `blocks/` or `site/` ships to the repo and
+# silently NOT to the live site (issue #166).
+#
+# Trigger: push to main, path-filtered to the two trees that change the built
+# site — `site/**` (the Vite + React project) and `blocks/**` (the gallery data
+# the build reads). A merge that touches neither skips the deploy.
+#
+# Headless: the job runs `scripts/deploy-site.sh`, which does
+# `npm --prefix site ci && npm --prefix site run build` then
+# `npx wrangler pages deploy site/dist` — no GUI, no server runtime.
+#
+# CREDENTIALS: this deploy CANNOT run until an operator adds two repository
+# secrets, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (the same env var
+# names `scripts/deploy-site.sh` already requires). Until then the deploy step
+# fails fast on the script's own `: "${CLOUDFLARE_API_TOKEN:?...}"` guard — it
+# does not deploy to the wrong account or silently no-op the site. See the
+# "Automated deploy" section of site/README.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "blocks/**"
+      # Redeploy if the deploy pipeline itself changes.
+      - "scripts/deploy-site.sh"
+      - ".github/workflows/deploy-site.yml"
+
+permissions:
+  contents: read
+
+# Serialize deploys so two merges in quick succession queue instead of racing.
+# Unlike ci.yml, this uses cancel-in-progress: false ON PURPOSE — cancelling an
+# in-flight deploy is the "last-writer-wins clobbering" failure mode issue #166
+# flags (2amlogic/marketing#35). A newer push waits for the current deploy to
+# finish, then deploys fresh main on top of it.
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy to Cloudflare Pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 22+ per scripts/deploy-site.sh / site @types/node.
+          node-version: "22"
+
+      - name: Build and deploy
+        # scripts/deploy-site.sh builds site/dist/ then runs
+        # `npx wrangler pages deploy`. It fails fast on its own
+        # `: "${CLOUDFLARE_API_TOKEN:?...}"` guard if the secrets below are
+        # unset, so a missing-credentials run is a loud red build, never a
+        # silent wrong-account deploy.
+        run: scripts/deploy-site.sh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
