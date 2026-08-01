@@ -1,0 +1,24 @@
+* extracted by klt extract --deck sky130
+
+* cell ota_5t_top
+* pin N1
+* pin TAIL_A,TAIL_B
+* pin VOUT
+* pin vsubs
+.SUBCKT ota_5t_top N1 TAIL_A|TAIL_B VOUT vsubs
+* device instance $1 r0 *1 8.34,3 nfet
+M$1 \$2 \$9 N1 vsubs nfet L=1U W=6U AS=2.52P AD=2.52P PS=12.84U PD=12.84U
+* device instance $2 r0 *1 5.75,4 nfet
+M$2 N1 \$10 TAIL_A|TAIL_B vsubs nfet L=0.5U W=8U AS=3.36P AD=3.36P PS=16.84U
++ PD=16.84U
+* device instance $3 r0 *1 0.92,5 nfet
+M$3 \$4 \$11 \$3 vsubs nfet L=1U W=10U AS=4.2P AD=4.2P PS=20.84U PD=20.84U
+* device instance $4 r0 *1 3.16,5 nfet
+M$4 TAIL_A|TAIL_B \$12 \$5 vsubs nfet L=1U W=10U AS=4.2P AD=4.2P PS=20.84U
++ PD=20.84U
+* device instance $5 r0 *1 8.34,9.4 nfet
+M$5 \$8 \$13 VOUT vsubs nfet L=1U W=6U AS=2.52P AD=2.52P PS=12.84U PD=12.84U
+* device instance $6 r0 *1 5.75,12.4 nfet
+M$6 VOUT \$14 TAIL_A|TAIL_B vsubs nfet L=0.5U W=8U AS=3.36P AD=3.36P PS=16.84U
++ PD=16.84U
+.ENDS ota_5t_top

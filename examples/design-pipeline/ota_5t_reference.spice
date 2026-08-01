@@ -1,0 +1,10 @@
+* LVS reference for the composed 5T OTA layout (S8).
+* Device W/L are 05-sizing.json's sized values; SPICE M-card order is D G S B.
+.subckt ota_5t_top N1 TAIL VOUT vsubs
+M3  m3d  m3g  N1   vsubs nfet L=1U   W=6U
+M1  N1   m1g  TAIL vsubs nfet L=0.5U W=8U
+M5b m5bd m5bg m5bs vsubs nfet L=1U   W=10U
+M5  TAIL m5g  m5s  vsubs nfet L=1U   W=10U
+M4  m4d  m4g  VOUT vsubs nfet L=1U   W=6U
+M2  VOUT m2g  TAIL vsubs nfet L=0.5U W=8U
+.ends

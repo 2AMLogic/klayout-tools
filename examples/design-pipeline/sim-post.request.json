@@ -1,0 +1,71 @@
+{
+  "netlist": "ota_5t_post.spice",
+  "engine": "ngspice",
+  "corners": {
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "1n 1n"
+  },
+  "measurements": [
+    {
+      "name": "vdd_meas",
+      "spice": ".meas tran vdd_meas find v(vdd) at=1n",
+      "unit": "V"
+    },
+    {
+      "name": "n1_v",
+      "spice": ".meas tran n1_v find v(n1_node) at=1n",
+      "unit": "V"
+    },
+    {
+      "name": "vout_v",
+      "spice": ".meas tran vout_v find v(vout_node) at=1n",
+      "unit": "V"
+    },
+    {
+      "name": "tail_v",
+      "spice": ".meas tran tail_v find v(tail_node) at=1n",
+      "unit": "V"
+    },
+    {
+      "name": "n1_ratio",
+      "spice": ".meas tran n1_ratio param='n1_v/vdd_meas'",
+      "limits": {
+        "min": 0.66,
+        "max": 0.674
+      }
+    },
+    {
+      "name": "vout_ratio",
+      "spice": ".meas tran vout_ratio param='vout_v/vdd_meas'",
+      "limits": {
+        "min": 0.495,
+        "max": 0.505
+      }
+    },
+    {
+      "name": "tail_ratio",
+      "spice": ".meas tran tail_ratio param='tail_v/vdd_meas'",
+      "limits": {
+        "min": 0.245,
+        "max": 0.255
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 60,
+    "keep_artifacts": false
+  }
+}

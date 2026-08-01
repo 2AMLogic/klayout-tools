@@ -1,0 +1,508 @@
+{
+  "schema_version": 1,
+  "netlist": "ota_5t_post.spice",
+  "status": "pass",
+  "corner_count": 6,
+  "passed": 6,
+  "failed": 0,
+  "errored": 0,
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "46",
+    "models_lib": null,
+    "models_lib_sha256": null,
+    "netlist_sha256": "7f459ddf0a6b9bed76f3ef56a4f5d62c3bcd5af746724421a02cb4dd95311232"
+  },
+  "measurements": [
+    {
+      "name": "vdd_meas",
+      "unit": "V",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.620V/-40C",
+        "value": 1.62,
+        "margin": null
+      }
+    },
+    {
+      "name": "n1_v",
+      "unit": "V",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.620V/-40C",
+        "value": 1.08,
+        "margin": null
+      }
+    },
+    {
+      "name": "vout_v",
+      "unit": "V",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.620V/-40C",
+        "value": 0.809999,
+        "margin": null
+      }
+    },
+    {
+      "name": "tail_v",
+      "unit": "V",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.620V/-40C",
+        "value": 0.404999,
+        "margin": null
+      }
+    },
+    {
+      "name": "n1_ratio",
+      "unit": null,
+      "limits": {
+        "min": 0.66,
+        "max": 0.674
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.980V/125C",
+        "value": 0.665732,
+        "margin": 0.005731999999999959
+      }
+    },
+    {
+      "name": "vout_ratio",
+      "unit": null,
+      "limits": {
+        "min": 0.495,
+        "max": 0.505
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.980V/125C",
+        "value": 0.499299,
+        "margin": 0.004298999999999997
+      }
+    },
+    {
+      "name": "tail_ratio",
+      "unit": null,
+      "limits": {
+        "min": 0.245,
+        "max": 0.255
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.620V/125C",
+        "value": 0.248277,
+        "margin": 0.003277000000000002
+      }
+    }
+  ],
+  "corners": [
+    {
+      "corner_id": "default/1.620V/-40C",
+      "process": null,
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 0.564,
+      "measurements": [
+        {
+          "name": "vdd_meas",
+          "value": 1.62,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_v",
+          "value": 1.08,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "vout_v",
+          "value": 0.809999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "tail_v",
+          "value": 0.404999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_ratio",
+          "value": 0.666665,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.006664999999999921
+        },
+        {
+          "name": "vout_ratio",
+          "value": 0.499999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.004999000000000031
+        },
+        {
+          "name": "tail_ratio",
+          "value": 0.249999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.0049990000000000034
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "default/1.620V/27C",
+      "process": null,
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 0.392,
+      "measurements": [
+        {
+          "name": "vdd_meas",
+          "value": 1.62,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_v",
+          "value": 1.08,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "vout_v",
+          "value": 0.809999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "tail_v",
+          "value": 0.404999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_ratio",
+          "value": 0.666665,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.006664999999999921
+        },
+        {
+          "name": "vout_ratio",
+          "value": 0.499999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.004999000000000031
+        },
+        {
+          "name": "tail_ratio",
+          "value": 0.249999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.0049990000000000034
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "default/1.620V/125C",
+      "process": null,
+      "supply_v": {
+        "vdd": 1.62
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 0.454,
+      "measurements": [
+        {
+          "name": "vdd_meas",
+          "value": 1.62,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_v",
+          "value": 1.07874,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "vout_v",
+          "value": 0.809054,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "tail_v",
+          "value": 0.402209,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_ratio",
+          "value": 0.665888,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.005888000000000004
+        },
+        {
+          "name": "vout_ratio",
+          "value": 0.499416,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.004416000000000031
+        },
+        {
+          "name": "tail_ratio",
+          "value": 0.248277,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.003277000000000002
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "default/1.980V/-40C",
+      "process": null,
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 0.556,
+      "measurements": [
+        {
+          "name": "vdd_meas",
+          "value": 1.98,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_v",
+          "value": 1.32,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "vout_v",
+          "value": 0.989999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "tail_v",
+          "value": 0.494999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_ratio",
+          "value": 0.666665,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.006664999999999921
+        },
+        {
+          "name": "vout_ratio",
+          "value": 0.499999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.004999000000000031
+        },
+        {
+          "name": "tail_ratio",
+          "value": 0.249999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.0049990000000000034
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "default/1.980V/27C",
+      "process": null,
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 0.334,
+      "measurements": [
+        {
+          "name": "vdd_meas",
+          "value": 1.98,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_v",
+          "value": 1.32,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "vout_v",
+          "value": 0.989999,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "tail_v",
+          "value": 0.494998,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_ratio",
+          "value": 0.666665,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.006664999999999921
+        },
+        {
+          "name": "vout_ratio",
+          "value": 0.499999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.004999000000000031
+        },
+        {
+          "name": "tail_ratio",
+          "value": 0.249999,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.0049990000000000034
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    },
+    {
+      "corner_id": "default/1.980V/125C",
+      "process": null,
+      "supply_v": {
+        "vdd": 1.98
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 0.52,
+      "measurements": [
+        {
+          "name": "vdd_meas",
+          "value": 1.98,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_v",
+          "value": 1.31815,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "vout_v",
+          "value": 0.988612,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "tail_v",
+          "value": 0.492209,
+          "unit": "V",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "n1_ratio",
+          "value": 0.665732,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.005731999999999959
+        },
+        {
+          "name": "vout_ratio",
+          "value": 0.499299,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.004298999999999997
+        },
+        {
+          "name": "tail_ratio",
+          "value": 0.24859,
+          "unit": null,
+          "status": "pass",
+          "margin": 0.00359000000000001
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null
+      }
+    }
+  ]
+}

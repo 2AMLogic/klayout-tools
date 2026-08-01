@@ -1,0 +1,24 @@
+* Post-extraction testbench for the composed 5T OTA layout (S9 -> S10).
+* Body only -- no .control/.end (klt sim wraps this).
+*
+* Includes `klt extract`'s output verbatim and biases the composed circuit
+* through the pins it promoted from gen-compose's net labels. `nfet` is a
+* generic level-1 model: `klt extract` emits the deck's device-class name, not
+* a PDK model/subckt name, so the PDK model library cannot be bound here --
+* see README.md "Friction".
+.include "ota_5t_extracted.spice"
+.model nfet nmos level=1
+.options rshunt=1e12
+
+Vdd    vdd   0 DC 1.8
+Vvsubs vsubs 0 DC 0
+
+* supply-referenced bias dividers: N1 = 2/3 vdd, VOUT = 1/2 vdd, TAIL = 1/4 vdd
+Rn1a vdd n1_node   1MEG
+Rn1b n1_node 0     2MEG
+Rvoa vdd vout_node 1MEG
+Rvob vout_node 0   1MEG
+Rtla vdd tail_node 3MEG
+Rtlb tail_node 0   1MEG
+
+Xota n1_node tail_node vout_node vsubs ota_5t_top

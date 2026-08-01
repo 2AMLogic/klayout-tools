@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "cell_name": "ota_5t_top",
+  "gds_path": "ota_5t_top.gds",
+  "pdk": {
+    "name": "sky130A",
+    "variant": "sky130A",
+    "version": "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+  },
+  "bbox_um": {
+    "x0": 0.0,
+    "y0": 0.0,
+    "x1": 9.26,
+    "y1": 16.4
+  },
+  "blocks": [
+    {
+      "id": "tail",
+      "generator": "mos_array",
+      "offset_um": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "bbox_um": {
+        "x0": 0.0,
+        "y0": 0.0,
+        "x1": 4.08,
+        "y1": 10.0
+      }
+    },
+    {
+      "id": "diffpair",
+      "generator": "diff_pair",
+      "offset_um": {
+        "x": 5.08,
+        "y": 0.0
+      },
+      "bbox_um": {
+        "x0": 5.08,
+        "y0": 0.0,
+        "x1": 6.42,
+        "y1": 16.4
+      }
+    },
+    {
+      "id": "mirror",
+      "generator": "diff_pair",
+      "offset_um": {
+        "x": 7.42,
+        "y": 0.0
+      },
+      "bbox_um": {
+        "x0": 7.42,
+        "y0": 0.0,
+        "x1": 9.26,
+        "y1": 12.4
+      }
+    }
+  ],
+  "nets": [
+    {
+      "net": "TAIL_A",
+      "pins": [
+        {
+          "block": "tail",
+          "port": "U1_D"
+        },
+        {
+          "block": "diffpair",
+          "port": "Q1_1_S"
+        }
+      ],
+      "routed": true,
+      "route_length_um": 2.4200000000000004
+    },
+    {
+      "net": "TAIL_B",
+      "pins": [
+        {
+          "block": "tail",
+          "port": "U1_D"
+        },
+        {
+          "block": "diffpair",
+          "port": "Q2_1_S"
+        }
+      ],
+      "routed": true,
+      "route_length_um": 8.82
+    },
+    {
+      "net": "N1",
+      "pins": [
+        {
+          "block": "diffpair",
+          "port": "Q1_1_D"
+        },
+        {
+          "block": "mirror",
+          "port": "M1_1_S"
+        }
+      ],
+      "routed": true,
+      "route_length_um": 2.42
+    },
+    {
+      "net": "VOUT",
+      "pins": [
+        {
+          "block": "diffpair",
+          "port": "Q2_1_D"
+        },
+        {
+          "block": "mirror",
+          "port": "M2_1_S"
+        }
+      ],
+      "routed": true,
+      "route_length_um": 4.42
+    }
+  ],
+  "unrouted_nets": [],
+  "drc_hints": {
+    "min_spacing_um": 1.0,
+    "matched_groups": [
+      {
+        "matched_group_id": "mos_array:1x2:array",
+        "blocks": [
+          "tail"
+        ],
+        "placement_symmetric": null
+      },
+      {
+        "matched_group_id": "diff_pair:pair:1",
+        "blocks": [
+          "diffpair"
+        ],
+        "placement_symmetric": null
+      },
+      {
+        "matched_group_id": "diff_pair:mirror:1",
+        "blocks": [
+          "mirror"
+        ],
+        "placement_symmetric": null
+      }
+    ],
+    "notes": []
+  },
+  "warnings": []
+}

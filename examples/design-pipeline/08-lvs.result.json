@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "engine": "klayout",
+  "layout": "ota_5t_top.gds",
+  "reference": "ota_5t_reference.spice",
+  "top": "ota_5t_top",
+  "status": "match",
+  "mismatch_count": 3,
+  "category_counts": {
+    "topology": 3
+  },
+  "counts": {
+    "nets": {
+      "layout": 15,
+      "reference": 15,
+      "matched": 15
+    },
+    "devices": {
+      "layout": 6,
+      "reference": 6,
+      "matched": 6
+    },
+    "pins": {
+      "layout": 4,
+      "reference": 4,
+      "matched": 4
+    }
+  },
+  "environment": {
+    "engine": "klayout",
+    "engine_version": "0.30.10",
+    "layout_sha256": "99d11f834e784f8cd4d18d0cd05570669466928e27381f549f8e075b077ef39d",
+    "reference_sha256": "dcea33fa0f4c9b1f556d840976a6d5d44b82fea563e6ce8364b8a21cc12b6993",
+    "extracted_netlist": null
+  },
+  "mismatches": [
+    {
+      "category": "topology",
+      "severity": "warning",
+      "description": "nets were paired ambiguously; the comparer resolved it structurally (consider a hints.same_nets entry to pin this down)",
+      "side": "both",
+      "net": {
+        "layout": "$3",
+        "reference": "M5BD"
+      },
+      "device": null,
+      "property": null
+    },
+    {
+      "category": "topology",
+      "severity": "warning",
+      "description": "nets were paired ambiguously; the comparer resolved it structurally (consider a hints.same_nets entry to pin this down)",
+      "side": "both",
+      "net": {
+        "layout": "$4",
+        "reference": "M5BS"
+      },
+      "device": null,
+      "property": null
+    },
+    {
+      "category": "topology",
+      "severity": "warning",
+      "description": "device class has no counterpart on the other side, but no devices of this class were extracted either -- not a real topology mismatch",
+      "side": "layout",
+      "net": null,
+      "device": null,
+      "property": null
+    }
+  ]
+}
