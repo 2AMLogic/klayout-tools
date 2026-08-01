@@ -38,6 +38,10 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"violations: {report['violation_count']}")
 
+    unchecked_layers = report["coverage"]["layers_in_stream_without_rules"]
+    if unchecked_layers:
+        print(f"unchecked layers in stream: {len(unchecked_layers)}")
+
     rule_counts = report["rule_counts"]
     if rule_counts:
         print()

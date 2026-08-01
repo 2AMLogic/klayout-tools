@@ -25,6 +25,7 @@ from typing import Any
 
 from ._layout import load_layout
 from .decks import DrcRule, UnknownDeckError, get_deck, get_layer_names, get_nominal_dbu
+from .layers import layers_report
 
 # Check kinds that operate on a single region (no other_layer).
 _SINGLE_LAYER_CHECKS = {"width", "space", "notch"}
@@ -64,6 +65,12 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 },
                 ...
             ],
+            "coverage": {
+                "deck_layers": ["<layer>/<datatype>", ...],
+                "layers_checked": ["<layer>/<datatype>", ...],
+                "layers_in_stream_without_rules": ["<layer>/<datatype>", ...],
+                "rules_skipped": [<rule id>, ...],
+            },
         }
 
     ``schema_version`` is versioned independently per command (see
@@ -76,6 +83,23 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     violations that share a corner are still totally ordered, keeping output
     canonical across platforms/KLayout builds regardless of the engine's
     internal shape-enumeration order.
+
+    ``coverage`` reports what was actually checked, purely additive to the
+    JSON contract (see ``docs/json-contract.md``; no ``schema_version``
+    bump). A rule whose ``layer``/``other_layer`` is absent from ``path``
+    is silently skipped by the engine (``layout.find_layer(...)`` returns
+    ``None``) -- correct behaviour, but by itself indistinguishable from a
+    genuinely-checked pass. ``coverage.layers_in_stream_without_rules`` is
+    the load-bearing field: ``(layer, datatype)`` pairs present in ``path``
+    that no active rule in ``deck_name`` references at all, formatted
+    ``"<layer>/<datatype>"``. ``coverage.deck_layers`` is every layer the
+    deck's rules reference (a static property of the deck, independent of
+    ``path``); ``coverage.layers_checked`` is the subset of those layers
+    actually present in this stream; ``coverage.rules_skipped`` lists the
+    rule ids skipped because their layer(s) were absent. A ``"clean"``
+    ``status`` with a non-empty ``layers_in_stream_without_rules`` means
+    "clean, and here is exactly what was not looked at" rather than a
+    fully-verified pass.
 
     Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
     deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not
@@ -117,17 +141,37 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
 
     top_cells = list(layout.top_cells())
 
+    # Deck-static: every (layer, datatype) any rule in this deck references,
+    # regardless of what's actually present in `path`.
+    deck_layer_tuples: set[tuple[int, int]] = set()
+    for rule in deck:
+        deck_layer_tuples.add(rule.layer)
+        if rule.other_layer is not None:
+            deck_layer_tuples.add(rule.other_layer)
+
+    # Reuse layers.py's existing per-layer enumeration (used today by
+    # `klt layers`) for stream-layer enumeration, rather than a second
+    # `kdb.Layout` layer walk -- see #189.
+    stream_layer_tuples = {
+        (entry["layer"], entry["datatype"]) for entry in layers_report(path)["layers"]
+    }
+
     violations: list[dict[str, Any]] = []
     rule_counts: dict[str, int] = {}
+    rules_skipped: list[str] = []
 
     for rule in deck:
         layer_index = layout.find_layer(*rule.layer)
         if layer_index is None:
-            continue  # rule's layer is absent from this stream -> no violations
+            # rule's layer is absent from this stream -> no violations, but
+            # record it so `coverage.rules_skipped` can surface the skip.
+            rules_skipped.append(rule.id)
+            continue
         other_index = None
         if rule.other_layer is not None:
             other_index = layout.find_layer(*rule.other_layer)
             if other_index is None:
+                rules_skipped.append(rule.id)
                 continue
 
         layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
@@ -179,6 +223,21 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         )
     )
 
+    def _fmt(layer_tuple: tuple[int, int]) -> str:
+        return f"{layer_tuple[0]}/{layer_tuple[1]}"
+
+    layers_checked = deck_layer_tuples & stream_layer_tuples
+    layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
+
+    coverage = {
+        "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
+        "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
+        "layers_in_stream_without_rules": [
+            _fmt(t) for t in sorted(layers_in_stream_without_rules)
+        ],
+        "rules_skipped": sorted(rules_skipped),
+    }
+
     return {
         "schema_version": 1,
         "file": path,
@@ -188,6 +247,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
+        "coverage": coverage,
     }
 
 
