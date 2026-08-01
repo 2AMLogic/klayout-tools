@@ -18,6 +18,7 @@ from . import (
     kb_cmd,
     layers_cmd,
     layout_metrics_cmd,
+    lvs_cmd,
     pdk_cmd,
     render_cmd,
     sim_cmd,
@@ -281,6 +282,30 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     extract_parser.set_defaults(func=extract_cmd.run)
+
+    lvs_parser = subparsers.add_parser(
+        "lvs",
+        help="compare an extracted/reference netlist pair and report mismatches",
+        description=(
+            "Compare a layout-derived netlist (extracted inline, or a "
+            "pre-extracted `klt extract` output) against a reference "
+            "(schematic/golden) SPICE netlist and report structured "
+            "mismatches -- see docs/design/lvs-extraction-spike.md section "
+            "2b for the request/response contract and docs/cli/lvs.md for "
+            "the CLI surface. Runs fully headless via KLayout's native "
+            "NetlistComparer/NetlistSpiceReader -- no GUI, no Qt. Takes a "
+            "request-document path (like `klt sim`/`klt gen`), not "
+            "positional netlist file args."
+        ),
+    )
+    lvs_parser.add_argument("request", help="path to a klt lvs request JSON file")
+    lvs_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    lvs_parser.set_defaults(func=lvs_cmd.run)
 
     gen_parser = subparsers.add_parser(
         "gen",

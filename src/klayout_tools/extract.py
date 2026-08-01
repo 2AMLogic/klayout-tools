@@ -142,16 +142,6 @@ def run_extract(
     name is unknown, the PDK (when given) does not resolve, the top cell is
     missing/ambiguous, or the output path's directory does not exist.
     """
-    if not os.path.exists(path):
-        raise ExtractError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise ExtractError(f"not a file: {path}")
-
-    try:
-        deck = get_extraction_deck(deck_name)
-    except UnknownExtractionDeckError as exc:
-        raise ExtractError(str(exc)) from exc
-
     pdk_info: dict[str, Any] | None = None
     if pdk_variant is not None or pdk_root is not None:
         try:
@@ -159,25 +149,16 @@ def run_extract(
         except PdkNotFoundError as exc:
             raise ExtractError(str(exc)) from exc
 
-    # Imported lazily (after the cheap checks above) so `klt --version` and
-    # argument parsing never pay the cost of loading the KLayout database
-    # module -- same discipline as `_layout.load_layout`.
+    netlist, top_cell_name, dbu_um, warnings = extract_netlist_from_layout(
+        path, deck_name, top=top
+    )
+
     import klayout.db as kdb
-
-    layout = kdb.Layout()
-    try:
-        layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise ExtractError(f"could not read layout '{path}': {exc}") from exc
-
-    top_cell = _resolve_top_cell(layout, top, path)
 
     netlist_path = output if output is not None else _default_output_path(path)
     out_dir = os.path.dirname(os.path.abspath(netlist_path))
     if not os.path.isdir(out_dir):
         raise ExtractError(f"output directory does not exist: {out_dir}")
-
-    netlist, warnings = _extract_netlist(layout, top_cell, deck)
 
     writer = kdb.NetlistSpiceWriter()
     writer.use_net_names = True
@@ -195,7 +176,7 @@ def run_extract(
     # extractable devices and no named nets. That is a legitimate "nothing
     # extracted" result, not an error: report zero devices/nets rather than
     # dereferencing a `None` circuit.
-    circuit = netlist.circuit_by_name(top_cell.name)
+    circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
         devices, device_counts = _describe_devices(circuit)
         nets = _describe_nets(circuit)
@@ -206,8 +187,8 @@ def run_extract(
         "schema_version": SCHEMA_VERSION,
         "file": path,
         "deck": deck_name,
-        "top": top_cell.name,
-        "dbu_um": layout.dbu,
+        "top": top_cell_name,
+        "dbu_um": dbu_um,
         "netlist_path": netlist_path,
         "netlist_sha256": netlist_sha256,
         "status": "extracted",
@@ -229,6 +210,50 @@ def run_extract(
         result["pdk"] = None
 
     return result
+
+
+def extract_netlist_from_layout(
+    path: str, deck_name: str, top: str | None = None
+) -> tuple[kdb.Netlist, str, float, list[str]]:
+    """Core extraction: read ``path``, resolve ``deck_name`` and the top
+    cell, and run flat device + connectivity extraction. Returns
+    ``(netlist, top_cell_name, dbu_um, warnings)``.
+
+    Shared by :func:`run_extract` (this module, which additionally writes the
+    netlist to disk and builds the ``devices``/``nets`` convenience view) and
+    ``klt lvs``'s inline-extraction path (``lvs.py``'s ``layout.file`` +
+    ``layout.deck`` request shape, per
+    ``docs/design/lvs-extraction-spike.md`` section 2b), which composes this
+    with ``NetlistComparer`` instead of ``NetlistSpiceWriter`` -- no need to
+    round-trip through a written SPICE file just to compare it.
+
+    Raises :class:`ExtractError` for a bad file, unknown deck, or missing/
+    ambiguous top cell -- identical error semantics to ``run_extract``.
+    """
+    if not os.path.exists(path):
+        raise ExtractError(f"file not found: {path}")
+    if os.path.isdir(path):
+        raise ExtractError(f"not a file: {path}")
+
+    try:
+        deck = get_extraction_deck(deck_name)
+    except UnknownExtractionDeckError as exc:
+        raise ExtractError(str(exc)) from exc
+
+    # Imported lazily (after the cheap checks above) so `klt --version` and
+    # argument parsing never pay the cost of loading the KLayout database
+    # module -- same discipline as `_layout.load_layout`.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    try:
+        layout.read(path)
+    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
+        raise ExtractError(f"could not read layout '{path}': {exc}") from exc
+
+    top_cell = _resolve_top_cell(layout, top, path)
+    netlist, warnings = _extract_netlist(layout, top_cell, deck)
+    return netlist, top_cell.name, layout.dbu, warnings
 
 
 def _resolve_top_cell(layout: kdb.Layout, top: str | None, path: str) -> kdb.Cell:
