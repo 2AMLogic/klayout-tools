@@ -1,6 +1,6 @@
 ---
 name: "Design Pipeline: Extraction (S9)"
-description: "Stub — extract a parasitic-aware netlist from a DRC/LVS-clean layout for post-layout simulation. No klt verb exists; blocked on #54, bundled with LVS."
+description: "klt extract ships a schematic-equivalent netlist (devices + connectivity); it has no RC parasitics yet — tracked by #216 (design decision, recorded) / #217 (implementation, unscheduled)."
 domain: design-pipeline
 type: skill
 user-invocable: false
@@ -13,45 +13,58 @@ per-stage contracts, and model-class matrix live in
 [`docs/design/design-pipeline.md`](../../../docs/design/design-pipeline.md)
 (§1 stage graph, §2 per-stage contracts, §3 model-class matrix, §4 gap map).
 Re-read that doc's S9 entries directly if anything here seems stale — this
-file only restates it for an agent entering the stage.
+file only restates it for an agent entering the stage; as of this writing
+that document still describes S9 as blocked on the now-closed #54 and has
+not been reconciled with `klt extract` shipping (out of scope for this
+skill file — see [`docs/cli/extract.md`](../../../docs/cli/extract.md) and
+[`docs/cli/lvs.md`](../../../docs/cli/lvs.md) for the authoritative, current
+CLI contracts).
 
-## Status: blocked — no extraction verb exists
+## Status: partially shipped — schematic-equivalent extraction exists; RC parasitics do not
 
-No `klt` command extracts a parasitic-aware netlist from a layout. Issue
-**#54** (open) tracks this gap, bundled with S8's LVS half — per its curator
-note, extraction and LVS are likely one friction issue and one engine
-(`pya.LayoutToNetlist` / `pya.NetlistComparer`). This is a **full stub**:
-there is no partial tool support to fall back on, unlike S7 (which at least
-has `klt render`/`klt layout-metrics` for inspection).
+`klt extract` ([`docs/cli/extract.md`](../../../docs/cli/extract.md)) is
+shipped and extracts a **schematic-equivalent** netlist (devices +
+connectivity, sky130/gf180mcu) from a layout stream — the #54 gap this file
+previously described is closed. What remains gapped is **RC parasitics**:
+`klt extract`'s output carries no interconnect resistance/capacitance, so a
+netlist produced today makes S9's output artifact only partially
+"post-layout" (LVS-accurate, still schematic-accuracy for simulation
+purposes). This specific gap is tracked by
+[#216](https://github.com/2AMLogic/klayout-tools/issues/216) (friction
+issue; design decision recorded in
+[`docs/design/lvs-extraction-spike.md`](../../../docs/design/lvs-extraction-spike.md)
+→ "Addendum (#216)") and
+[#217](https://github.com/2AMLogic/klayout-tools/issues/217)
+(implementation, unscheduled).
 
-## Contract (design doc §2, S9)
+## Contract (design doc §2, S9 — RC-parasitics gap only; see note above)
 
 | | |
 | --- | --- |
 | Input artifact | S8-clean layout stream — i.e. Loop B already converged (design doc §1). |
-| Output artifact | Extracted netlist with parasitics, format TBD by #54's eventual contract — the artifact that makes the S10 pass here "post-layout" rather than schematic-level. **Not implemented.** |
+| Output artifact | `klt extract`'s SPICE netlist today: devices + connectivity, no parasitics (shipped). Extracted netlist *with* RC parasitics: format decided by #216's design record (`--parasitics` flag, additive to the existing contract); **not implemented** (#217). |
 | Entry criteria | Loop B converged (S8 exit criteria met) — extracting a DRC/LVS-dirty layout produces a netlist nothing downstream should trust. |
-| Exit criteria | Extracted netlist elaborates cleanly and its device/net topology matches the S6 netlist it was extracted from (itself an LVS-shaped check). Per the design doc's own open question, `environment` should record which side of the loop — schematic vs. extracted — a given netlist represents, once a contract exists. |
-| `klt` verbs | None — blocked on #54. |
-| Failure modes | Parasitics that flip a measurement's pass/fail relative to the schematic-level S5 result — the entire reason S10 must re-run post-extraction rather than trusting the pre-layout sizing pass. |
+| Exit criteria | Extracted netlist elaborates cleanly and its device/net topology matches the S6 netlist it was extracted from (itself an LVS-shaped check, `klt lvs`). Per the design doc's own open question, `environment` should record which side of the loop — schematic vs. extracted — a given netlist represents, once a contract exists. |
+| `klt` verbs | `klt extract` (schematic-equivalent, shipped), `klt lvs` (shipped). RC-parasitic extraction: none yet — see #216/#217. |
+| Failure modes | Parasitics that flip a measurement's pass/fail relative to the schematic-level S5 result — the entire reason S10 must re-run post-extraction rather than trusting the pre-layout sizing pass. Today's `klt extract` output cannot surface this class of failure at all (no parasitics), so an S10 pass against it remains schematic-accurate, not truly post-layout. |
 
-## What an agent should do until #54 ships
+## What an agent should do until RC parasitics ship (#216/#217)
 
-Do not attempt to hand-derive parasitics or fabricate an "extracted" netlist
-without a real extraction engine backing the claim — a fabricated parasitic
-netlist is worse than an honestly-missing one, since it would silently
-downgrade S10's post-extraction pass into a false "simulation-verified"
-result (the exact failure mode S10's own contract warns against, design doc
-§2 S10). If a pipeline run reaches this stage:
+Do not attempt to hand-derive parasitics or fabricate a parasitic-aware
+"extracted" netlist without a real extraction engine backing the claim — a
+fabricated parasitic netlist is worse than an honestly-missing one, since it
+would silently downgrade S10's post-extraction pass into a false
+"simulation-verified" result (the exact failure mode S10's own contract
+warns against, design doc §2 S10). If a pipeline run reaches this stage:
 
-1. Report S9 as blocked on #54, not as skipped or complete.
-2. Do not proceed to a post-extraction S10 pass — a schematic-level S10 pass
-   (S6-sourced netlist) remains valid and should be reported as such, but
-   explicitly labeled pre-layout, not final.
+1. Run `klt extract` for the schematic-equivalent netlist and `klt lvs` to
+   confirm it matches the schematic (S9's topological half is not blocked).
+2. Report the S10 pass run against that netlist as schematic-accurate, not
+   as a post-layout/parasitic-verified pass — RC parasitics are not yet
+   part of the loop (#216/#217).
 3. If this gap causes concrete friction driving a real block through the
-   pipeline (Epic #105 Phase 3's worked example), that is exactly the signal
-   #54 already exists to capture — comment there rather than filing a
-   duplicate.
+   pipeline (Epic #105 Phase 3's worked example), comment on #216 or #217
+   rather than filing a duplicate.
 
 ## Model-class assignment (design doc §3)
 
