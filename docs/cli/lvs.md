@@ -159,6 +159,7 @@ Extraction and compare are separable steps that also compose in one call:
     "devices": { "layout": 5, "reference": 5, "matched": 5 },
     "pins": { "layout": 4, "reference": 4, "matched": 4 }
   },
+  "device_classes": ["nfet", "pfet"],
   "environment": {
     "engine": "klayout",
     "engine_version": "0.30.10",
@@ -183,6 +184,7 @@ Extraction and compare are separable steps that also compose in one call:
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `category_counts` | object\<string, int\> | Per-category mismatch counts, keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. |
+| `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Present (currently always `["nfet", "pfet"]`) when `layout.file` + `layout.deck` (inline extraction) was given; `null` when `layout.netlist` (pre-extracted, no deck involved) was given instead. |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
 

@@ -157,6 +157,7 @@ def run_extract(
             "net_count": <int>,
             "pin_count": <int>,
             "device_counts": {<device class>: <int>, ...},
+            "device_classes": [<device class role>, ...],
             "devices": [
                 {
                     "name": str, "class": str,
@@ -172,6 +173,14 @@ def run_extract(
 
     ``devices``/``nets`` are sorted by name for deterministic, diff-clean
     output (same discipline as ``drc.py``'s ``violations`` sort).
+
+    ``device_classes`` is what the *deck* is structurally capable of
+    recognising (:attr:`klayout_tools.decks.ExtractionDeck.device_classes`)
+    -- independent of what this particular layout happens to contain, unlike
+    ``device_counts`` (issue #221). A consumer that needs to know ahead of
+    time whether a deck can even produce a given device class (e.g. before
+    pairing it with a reference netlist for ``klt lvs``) reads this field
+    instead of inferring "not supported" from a zero count.
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
@@ -241,6 +250,13 @@ def run_extract(
     # elements never appear in `device_count`/`devices[]`, and the internal
     # parasitic nodes never appear in `net_count`/`nets[]` -- they live only
     # in the written SPICE and in the separate `parasitics` block below.
+    # Already validated by `extract_netlist_from_layout` above (it would have
+    # raised `ExtractError` on an unknown deck before reaching this point),
+    # so re-fetching it here to read its static device-class coverage
+    # (`device_classes`, issue #221) and its `substrate_net` cannot itself
+    # raise.
+    deck = get_extraction_deck(deck_name)
+
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
         devices, device_counts = _describe_devices(circuit)
@@ -251,7 +267,7 @@ def run_extract(
     parasitics_report: dict[str, Any] | None = None
     if parasitic_nets is not None:
         if circuit is not None and parasitic_nets:
-            ground_net = get_extraction_deck(deck_name).substrate_net
+            ground_net = deck.substrate_net
             parasitics_report = _inject_parasitics(
                 kdb, circuit, parasitic_nets, ground_net
             )
@@ -292,6 +308,7 @@ def run_extract(
         "net_count": len(nets),
         "pin_count": sum(1 for net in nets if net["pin"]),
         "device_counts": dict(sorted(device_counts.items())),
+        "device_classes": list(deck.device_classes),
         "devices": devices,
         "nets": nets,
         "warnings": warnings,

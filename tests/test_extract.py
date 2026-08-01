@@ -25,6 +25,7 @@ import pytest
 
 from klayout_tools import pdk
 from klayout_tools.cli import main
+from klayout_tools.decks import get_extraction_deck
 from klayout_tools.extract import ExtractError, _n_squares, run_extract
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -185,6 +186,9 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
     assert report["device_count"] == 0
     assert report["devices"] == []
     assert report["device_counts"] == {}
+    # `device_classes` is what the deck *can* recognise, unaffected by this
+    # layout happening to contain zero devices (issue #221).
+    assert report["device_classes"] == ["nfet", "pfet"]
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +274,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert len(report["netlist_sha256"]) == 64
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert report["device_classes"] == ["nfet", "pfet"]
     assert report["pdk"] is None
     assert report["warnings"] == []
 
@@ -554,6 +559,15 @@ def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
     assert exc_info.value.code == 2
 
 
+@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
+def test_extraction_deck_device_classes_is_nfet_pfet_only(deck_name):
+    """Every registered deck is MOS-only today (issue #221) -- the
+    `device_classes` coverage accessor reports exactly `nfet`/`pfet` for
+    both, independent of any particular layout."""
+    deck = get_extraction_deck(deck_name)
+    assert deck.device_classes == ("nfet", "pfet")
+
+
 # --------------------------------------------------------------------------- #
 # Corpus round-trip: real sky130 / gf180mcu standard cells
 # --------------------------------------------------------------------------- #
@@ -613,6 +627,7 @@ def test_sky130_inv_1_spot_check(tmp_path):
     assert report["top"] == "sky130_fd_sc_hd__inv_1"
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert report["device_classes"] == ["nfet", "pfet"]
 
     devices = {d["class"]: d for d in report["devices"]}
     nfet, pfet = devices["nfet"], devices["pfet"]
@@ -636,6 +651,7 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     assert report["top"] == "gf180mcu_fd_sc_mcu9t5v0__clkinv_1"
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert report["device_classes"] == ["nfet", "pfet"]
 
     devices = {d["class"]: d for d in report["devices"]}
     nfet, pfet = devices["nfet"], devices["pfet"]
