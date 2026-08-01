@@ -18,6 +18,7 @@ docs/
   cli/                   # per-verb CLI reference
     cells.md
     drc.md
+    extract.md
     layers.md
     layout-metrics.md
     pdk.md

@@ -115,7 +115,7 @@ corpus fixtures in ``tests/corpus/golden/gf180mcu/*.layers.json``, and (for
 
 from __future__ import annotations
 
-from . import DrcRule
+from . import BULK_LAYER, DerivedLayer, DeviceSpec, DrcRule, ExtractionDeck
 
 # Database units are nanometres (gf180mcu streams use dbu_um = 0.001, same as
 # sky130), so a threshold in micrometres times 1000 gives threshold_dbu.
@@ -282,3 +282,126 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (55, 0): "Dualgate",
     (127, 5): "DRC_BJT",
 }
+
+# --------------------------------------------------------------------------
+# Extraction (connectivity + device) deck
+# --------------------------------------------------------------------------
+#
+# Drives `klt extract` (klayout.db.LayoutToNetlist) — see
+# docs/design/lvs-extraction-spike.md for the engine choice and
+# docs/cli/extract.md for the contract.
+#
+# Layer/datatype pairs below are the same ones the DRC deck above uses
+# (confirmed by `main.drc`'s layer/connectivity setup in
+# google/globalfoundries-pdk-libs-gf180mcu_fd_pv, commit `999a6ff`), plus the
+# Via1/Metal2 pair and the Metal1/Metal2 label layers that extraction needs
+# and DRC did not:
+#
+#     Nwell    21/0
+#     Comp     22/0
+#     Poly2    30/0
+#     Pplus    31/0
+#     Nplus    32/0
+#     Contact  33/0
+#     Metal1   34/0     Metal1 label  34/10
+#     Via1     35/0
+#     Metal2   36/0     Metal2 label  36/10
+#
+# Scope guard (mirrors the DRC deck's, and sky130's extraction deck): a
+# *curated* recipe, not a transcription of a full PDK LVS setup. MOS devices
+# only — the DRM's bipolars, resistors, capacitors, and diodes are not
+# recognised — and the two extracted MOS classes are the 3.3 V core flavours;
+# the 5 V/6 V thick-oxide variants (which key off Dualgate, 55/0) are not
+# distinguished from them. The interconnect stack stops at Metal2 because
+# those are the layer numbers this repo has verified against the published
+# deck; Metal3-and-above are a follow-on increment, exactly as the DRC deck's
+# coverage grows incrementally.
+#
+# Substrate handling matches sky130's: gf180mcu's p-substrate has no drawn
+# layer here, so the nfet body terminal binds to the synthetic empty `bulk`
+# region (decks.BULK_LAYER), tied to the p-substrate taps and named "VSUBS"
+# globally. Keeping the same global name across both decks means a downstream
+# testbench or `klt lvs` hint does not have to special-case the PDK.
+
+EXTRACTION = ExtractionDeck(
+    name="gf180mcu",
+    layers={
+        "nwell": (21, 0),
+        "comp": (22, 0),
+        "poly2": (30, 0),
+        "pplus": (31, 0),
+        "nplus": (32, 0),
+        "contact": (33, 0),
+        "metal1": (34, 0),
+        "via1": (35, 0),
+        "metal2": (36, 0),
+    },
+    texts={
+        "metal1_label": (34, 10),
+        "metal2_label": (36, 10),
+    },
+    derived=(
+        # gf180mcu draws explicit Pplus/Nplus implants over Comp, so device
+        # vs. tap is decided by implant *and* well: p+ inside the n-well is a
+        # pfet source/drain, n+ inside it is the well tap; outside the well
+        # the roles swap.
+        DerivedLayer("pcomp", "and", "comp", "pplus"),
+        DerivedLayer("ncomp", "and", "comp", "nplus"),
+        DerivedLayer("pactive", "and", "pcomp", "nwell"),
+        DerivedLayer("ntap", "and", "ncomp", "nwell"),
+        DerivedLayer("nactive", "not", "ncomp", "nwell"),
+        DerivedLayer("ptap", "not", "pcomp", "nwell"),
+        # Channel = active under poly2; source/drain = the remainder.
+        DerivedLayer("pgate", "and", "pactive", "poly2"),
+        DerivedLayer("psd", "not", "pactive", "poly2"),
+        DerivedLayer("ngate", "and", "nactive", "poly2"),
+        DerivedLayer("nsd", "not", "nactive", "poly2"),
+    ),
+    devices=(
+        DeviceSpec(
+            name="nfet_03v3",
+            kind="mos4",
+            gate="ngate",
+            source_drain="nsd",
+            gate_conductor="poly2",
+            well=BULK_LAYER,
+        ),
+        DeviceSpec(
+            name="pfet_03v3",
+            kind="mos4",
+            gate="pgate",
+            source_drain="psd",
+            gate_conductor="poly2",
+            well="nwell",
+        ),
+    ),
+    intra_connect=(
+        "psd",
+        "nsd",
+        "ptap",
+        "ntap",
+        "nwell",
+        "poly2",
+        "contact",
+        "metal1",
+        "via1",
+        "metal2",
+    ),
+    inter_connect=(
+        ("contact", "psd"),
+        ("contact", "nsd"),
+        ("contact", "ptap"),
+        ("contact", "ntap"),
+        ("contact", "poly2"),
+        ("contact", "metal1"),
+        ("via1", "metal1"),
+        ("via1", "metal2"),
+        ("ntap", "nwell"),
+        (BULK_LAYER, "ptap"),
+    ),
+    global_connect=((BULK_LAYER, "VSUBS"),),
+    labels=(
+        ("metal1", "metal1_label"),
+        ("metal2", "metal2_label"),
+    ),
+)

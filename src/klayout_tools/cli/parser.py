@@ -13,6 +13,7 @@ from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
     drc_cmd,
+    extract_cmd,
     gen_cmd,
     kb_cmd,
     layers_cmd,
@@ -126,6 +127,70 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     drc_parser.set_defaults(func=drc_cmd.run)
+
+    extract_parser = subparsers.add_parser(
+        "extract",
+        help="extract a SPICE netlist from a GDSII/OASIS stream",
+        description=(
+            "Extract a schematic-equivalent SPICE netlist (devices and "
+            "connectivity, no parasitics) from a GDSII or OASIS layout file "
+            "and report it as structured data. The written netlist is a "
+            "circuit body -- one .SUBCKT per circuit, no top-level "
+            ".control/.end -- so it drops straight into `klt sim`'s netlist "
+            "field. Runs fully headless via KLayout's native "
+            "LayoutToNetlist/NetlistSpiceWriter -- no GUI, no Qt, no "
+            "standalone klayout binary. See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    extract_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "extraction deck: connectivity + device-extraction rule set "
+            "(currently: sky130, gf180mcu). Required unless --pdk/--pdk-root "
+            "resolve an install whose variant names one (e.g. sky130A). Not "
+            "validated by argparse -- an unknown deck name exits 1 with a "
+            "clean error, per docs/cli/extract.md's exit-code contract, "
+            "rather than argparse's usage-error exit 2."
+        ),
+    )
+    extract_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "path to write the extracted SPICE netlist "
+            "(default: <file> with its extension replaced by .spice)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to extract (required when the stream has several)",
+    )
+    extract_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK variant to resolve for provenance and to derive --deck "
+            "(e.g. sky130A); overrides $PDK. Optional -- the extraction deck "
+            "is self-contained, so no PDK install is needed."
+        ),
+    )
+    extract_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        default=None,
+        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
+    )
+    extract_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    extract_parser.set_defaults(func=extract_cmd.run)
 
     layout_metrics_parser = subparsers.add_parser(
         "layout-metrics",
