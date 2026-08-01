@@ -13,6 +13,7 @@ from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
     drc_cmd,
+    gen_cmd,
     kb_cmd,
     layers_cmd,
     layout_metrics_cmd,
@@ -214,6 +215,68 @@ def create_parser() -> argparse.ArgumentParser:
     render_parser.set_defaults(func=render_cmd.run)
 
     _add_pdk_parser(subparsers)
+
+    gen_parser = subparsers.add_parser(
+        "gen",
+        help="generate a parametrized layout cell (headless PCell harness)",
+        description=(
+            "Run a named layout generator against a JSON params object and "
+            "PDK reference, producing a GDS/OASIS stream plus a structured "
+            "report -- see docs/design/layout-generator-spike.md section 2 "
+            "for the request/response contract. Runs fully headless via "
+            "KLayout's native pya.PCellDeclarationHelper -- no GUI, no Qt. "
+            "PDK resolution reuses `klt pdk find`'s resolver."
+        ),
+    )
+    gen_parser.add_argument(
+        "generator",
+        nargs="?",
+        default=None,
+        help="generator to run (see --list for available generators)",
+    )
+    gen_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="list available generators and their params, then exit",
+    )
+    gen_parser.add_argument(
+        "--params",
+        default=None,
+        help=(
+            "generator params as a path to a JSON file, or an inline JSON "
+            "object (e.g. '{\"num\": 8}'); omit to use every param's default"
+        ),
+    )
+    gen_parser.add_argument(
+        "--pdk",
+        default=None,
+        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    gen_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        default=None,
+        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
+    )
+    gen_parser.add_argument(
+        "--cell-name",
+        dest="cell_name",
+        default=None,
+        help="name for the generated top cell (default: <generator>_0)",
+    )
+    gen_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="output GDS/OASIS path (default: <cell_name>.gds)",
+    )
+    gen_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    gen_parser.set_defaults(func=gen_cmd.run)
 
     sim_parser = subparsers.add_parser(
         "sim",
