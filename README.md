@@ -78,6 +78,7 @@ klt render design.gds                    # per-layer PNGs, headless
 klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSON out
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
+klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)
 ```
 
 ## Development
