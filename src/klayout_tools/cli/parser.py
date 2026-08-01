@@ -15,6 +15,7 @@ from . import (
     drc_cmd,
     extract_cmd,
     gen_cmd,
+    gen_compose_cmd,
     kb_cmd,
     layers_cmd,
     layout_metrics_cmd,
@@ -368,6 +369,35 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     gen_parser.set_defaults(func=gen_cmd.run)
+
+    gen_compose_parser = subparsers.add_parser(
+        "gen-compose",
+        help="place already-generated `klt gen` blocks into one composed cell",
+        description=(
+            "Place a set of already-generated `klt gen` blocks (each block's "
+            "own JSON response, read from a file path or embedded inline) into "
+            "one composed GDS/OASIS stream, per a request document's "
+            "blocks[]/placement/connectivity[]/routing/options shape -- see "
+            "docs/design/gen-composition-spike.md section 2 for the contract "
+            "and docs/cli/gen-compose.md for the CLI surface. Phase 1 "
+            'implements placement.strategy: "row" only; connectivity[] is '
+            "validated but not yet routed. A distinct top-level verb (not a "
+            "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
+            "'CLI shape' note for why. Runs fully headless via KLayout's "
+            "native pya -- no GUI, no Qt. Takes a request-document path (like "
+            "`klt sim`/`klt lvs`), not positional block file args."
+        ),
+    )
+    gen_compose_parser.add_argument(
+        "request", help="path to a klt gen-compose request JSON file"
+    )
+    gen_compose_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    gen_compose_parser.set_defaults(func=gen_compose_cmd.run)
 
     sim_parser = subparsers.add_parser(
         "sim",

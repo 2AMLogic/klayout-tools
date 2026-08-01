@@ -446,3 +446,10 @@ $ klt gen diff_pair --params '{"mirror": true, "splits": 2}' \
 $ klt gen bjt_array --pdk gf180mcuD -o output/bjt_array.gds --format json
 $ klt drc output/bjt_array.gds --deck gf180mcu
 ```
+
+## See also
+
+[`klt gen-compose`](gen-compose.md) places a set of already-generated `klt
+gen` blocks (each block's own JSON response, from this command's `--format
+json` output) into one composed cell — a single horizontal row at phase 1,
+per [`docs/design/gen-composition-spike.md`](../design/gen-composition-spike.md).
