@@ -34,6 +34,53 @@ def _make_install(root, variant, *, sources=None, assets=("ngspice",)):
     return variant_dir
 
 
+def _make_cell_library(
+    variant_dir,
+    name,
+    *,
+    devices=("nfet_01v8", "pfet_01v8_hvt"),
+    family="sky130",
+    corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    with_spice=True,
+    with_lib=True,
+):
+    """Fabricate a `libs.ref/<name>` entry with `spice/`/`lib/` views.
+
+    ``devices`` are nfet/pfet flavor suffixes embedded in one synthetic SPICE
+    instance line each (prefixed ``<family>_fd_pr__``, matching real
+    ``X<n> ... <model> w=... l=...`` instance lines). ``corners`` is an
+    iterable of ``(corner_name, nom_process, nom_temperature, nom_voltage)``
+    tuples, one `.lib` file per entry. ``with_spice``/``with_lib`` let a test
+    omit either view to exercise the missing-view fallback.
+    """
+    lib_dir = variant_dir / "libs.ref" / name
+    if with_spice:
+        spice_dir = lib_dir / "spice"
+        spice_dir.mkdir(parents=True)
+        lines = [
+            f"X{i} a b c d {family}_fd_pr__{device} w=1u l=1u"
+            for i, device in enumerate(devices)
+        ]
+        (spice_dir / f"{name}.spice").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    if with_lib:
+        lib_views_dir = lib_dir / "lib"
+        lib_views_dir.mkdir(parents=True)
+        for corner_name, process, temperature, voltage in corners:
+            content = (
+                f'    default_operating_conditions : "{corner_name}";\n'
+                f"    nom_process : {process};\n"
+                f"    nom_temperature : {temperature};\n"
+                f"    nom_voltage : {voltage};\n"
+            )
+            (lib_views_dir / f"{name}__{corner_name}.lib").write_text(
+                content, encoding="utf-8"
+            )
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    return lib_dir
+
+
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
     """Scrub PDK env vars, redirect HOME, and empty the host search space.
@@ -365,3 +412,241 @@ def test_cli_pdk_no_subcommand_prints_help(capsys):
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "find" in err and "list" in err and "env" in err
+
+
+# --------------------------------------------------------------------------- #
+# list_cell_libraries (`klt pdk cells`)
+# --------------------------------------------------------------------------- #
+
+
+def test_cells_reports_device_flavors_and_nominal_supply(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        devices=("nfet_01v8", "pfet_01v8_hvt"),
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    assert report["schema_version"] == 1
+    assert report["pdk"] == "sky130A"
+    assert len(report["libraries"]) == 1
+    library = report["libraries"][0]
+    assert library["name"] == "sky130_fd_sc_hd"
+    assert library["device_flavors"] == ["nfet_01v8", "pfet_01v8_hvt"]
+    assert library["nominal_supply_v"] == 1.8
+    assert library["nominal_corner"] == "tt_025C_1v80"
+    assert library["voltage_class"] == "core"
+
+
+def test_cells_high_voltage_library_classified_io(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hvl",
+        devices=("nfet_g5v0d10v5", "pfet_g5v0d10v5", "nfet_05v0_nvt"),
+        corners=(("tt_025C_2v64_lv1v80", 1.0, 25.0, 2.64),),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["nominal_supply_v"] == 2.64
+    assert library["voltage_class"] == "io"
+
+
+def test_cells_multi_corner_picks_lowest_nominal_voltage(tmp_path):
+    """A library characterised at more than one supply for the typical-process,
+    room-temperature corner (a split/multi-rail library, mirroring
+    sky130_fd_sc_hvl's real 2.64V/2.97V/3.3V `tt_025C` views) reports the
+    lowest voltage as its nominal supply -- not the alphabetically-first file,
+    not an arbitrary pick.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hvl",
+        corners=(
+            ("tt_025C_3v30", 1.0, 25.0, 3.30),
+            ("tt_025C_2v64_lv1v80", 1.0, 25.0, 2.64),
+            ("tt_025C_2v97_lv1v80", 1.0, 25.0, 2.97),
+            ("ff_100C_5v50", 1.0, 100.0, 5.50),  # not room temp -- excluded
+        ),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["nominal_supply_v"] == 2.64
+    assert library["nominal_corner"] == "tt_025C_2v64_lv1v80"
+
+
+def test_cells_excludes_non_std_cell_libraries(tmp_path):
+    """Only `_fd_sc_`-named entries are reported -- `_fd_io`/`_fd_pr`/macro
+    entries are a deliberate exclusion (issue #147 acceptance criteria), not
+    an accident of the glob used to walk `libs_ref`.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+    _make_cell_library(variant_dir, "sky130_fd_io", devices=("nfet_g5v0d10v5",))
+    _make_cell_library(variant_dir, "sky130_sram_macros", devices=("nfet_01v8",))
+    (variant_dir / "libs.ref" / "sky130_fd_pr").mkdir(parents=True)
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    assert [lib["name"] for lib in report["libraries"]] == ["sky130_fd_sc_hd"]
+
+
+def test_cells_no_libs_ref_is_empty_list(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    assert report["libraries"] == []
+
+
+def test_cells_missing_spice_view_yields_empty_device_flavors(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd", with_spice=False)
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["device_flavors"] == []
+    assert library["nominal_supply_v"] == 1.8  # lib/ view still present
+
+
+def test_cells_missing_lib_view_yields_null_supply(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd", with_lib=False)
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["device_flavors"] == ["nfet_01v8", "pfet_01v8_hvt"]
+    assert library["nominal_supply_v"] is None
+    assert library["nominal_corner"] is None
+    assert library["voltage_class"] is None
+
+
+def test_cells_supply_adds_compatibility_verdict(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir, "sky130_fd_sc_hd", corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),)
+    )
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hvl",
+        corners=(("tt_025C_2v64_lv1v80", 1.0, 25.0, 2.64),),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root), supply=1.8)
+
+    assert report["supply_v"] == 1.8
+    assert report["any_compatible"] is True
+    by_name = {lib["name"]: lib for lib in report["libraries"]}
+    assert by_name["sky130_fd_sc_hd"]["compatible"] is True
+    assert by_name["sky130_fd_sc_hvl"]["compatible"] is False
+
+
+def test_cells_supply_no_match_is_false(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir, "sky130_fd_sc_hd", corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),)
+    )
+
+    report = pdk.list_cell_libraries(root=str(root), supply=5.0)
+
+    assert report["any_compatible"] is False
+    assert report["libraries"][0]["compatible"] is False
+
+
+def test_cells_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.list_cell_libraries(root=str(tmp_path / "nope"))
+
+
+# --------------------------------------------------------------------------- #
+# CLI envelope conformance (via klt main()) -- `klt pdk cells`
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_cells_json_on_stdout(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    exit_code = main(["pdk", "cells", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["pdk"] == "sky130A"
+    assert payload["libraries"][0]["name"] == "sky130_fd_sc_hd"
+
+
+def test_cli_cells_text_table(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    exit_code = main(["pdk", "cells", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "sky130_fd_sc_hd" in out
+    assert "nfet_01v8/pfet_01v8_hvt" in out
+    assert "1.8V @ tt_025C_1v80" in out
+
+
+def test_cli_cells_supply_exit_zero_when_compatible(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    exit_code = main(["pdk", "cells", "--pdk-root", str(root), "--supply", "1.8"])
+
+    assert exit_code == 0
+
+
+def test_cli_cells_supply_exit_three_when_no_match(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    exit_code = main(["pdk", "cells", "--pdk-root", str(root), "--supply", "5.0"])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "NO MATCH" in out
+
+
+def test_cli_cells_no_install_error_envelope(tmp_path, capsys):
+    exit_code = main(
+        [
+            "pdk",
+            "cells",
+            "--pdk-root",
+            str(tmp_path / "nope"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["error"]["command"] == "pdk cells"

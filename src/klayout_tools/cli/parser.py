@@ -252,7 +252,8 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``pdk`` verb with nested ``find``/``list``/``env`` subcommands.
+    """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
+    ``cells`` subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
     verb (kicad-tools convention for multi-operation capabilities), so it uses
@@ -351,6 +352,44 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text; text emits shell exports)",
     )
     env_parser.set_defaults(func=pdk_cmd.run_env)
+
+    cells_parser = pdk_sub.add_parser(
+        "cells",
+        help="report standard-cell library device flavor(s) / nominal supply",
+        description=(
+            "Report, per standard-cell digital library (libs.ref entries "
+            "named `*_fd_sc_*`) under the resolved variant: the nfet/pfet "
+            "device flavor(s) its cells instantiate (spice/<lib>.spice), and "
+            "the nominal supply its .lib timing views are characterised at. "
+            "With --supply, adds a per-library compatibility verdict and "
+            "exits non-zero (3) when no library matches, so this can gate CI."
+        ),
+    )
+    cells_parser.add_argument(
+        "--pdk",
+        help="variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    cells_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    cells_parser.add_argument(
+        "--supply",
+        type=float,
+        default=None,
+        help=(
+            "caller-stated supply in volts; adds a compatibility verdict per "
+            "library and exits 3 when no library is compatible"
+        ),
+    )
+    cells_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    cells_parser.set_defaults(func=pdk_cmd.run_cells)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:

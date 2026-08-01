@@ -6,14 +6,17 @@ simulation, DRC, LVS, symbol lookup — imports (Python) or evaluates (shell/Tcl
 instead of re-implementing the lookup, usually twice, per repo.
 
 ```
-klt pdk find [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk list [--pdk-root <dir>] [--format text|json]
-klt pdk env  [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk find  [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk list  [--pdk-root <dir>] [--format text|json]
+klt pdk env   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk cells [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
 - `list` — enumerate **every** install/variant discovered across the search order.
 - `env` — the resolved paths as eval-able shell `export` lines.
+- `cells` — per standard-cell digital library, its device flavor(s) and the
+  nominal supply its `.lib` timing views are characterised at.
 
 The command is fully headless (pure filesystem probing — it does not load the
 KLayout database module) and safe to run in CI.
@@ -172,13 +175,147 @@ frozen exception** to the "text is unstable" rule. Specifically:
 Use `--format json` when you want the full asset map for scripting; use the
 default text form only for `eval`.
 
+## `klt pdk cells`
+
+An open PDK's standard-cell libraries encode a track height and voltage class
+in their *name* (`sky130_fd_sc_hd`, `sky130_fd_sc_hvl`) but not the underlying
+device model each library's cells are built from. `klt pdk cells` answers
+that directly — per standard-cell digital library, the device flavor(s) its
+cells instantiate and the nominal supply its `.lib` timing views are
+characterised at — instead of grepping the library's SPICE view by hand.
+
+```
+$ klt pdk cells --pdk sky130A
+pdk: sky130A
+
+library           devices                                                              lib corners
+----------------  -------------------------------------------------------------------  ---------------------------
+sky130_fd_sc_hd   nfet_01v8/pfet_01v8_hvt                                              1.8V @ tt_025C_1v80
+sky130_fd_sc_hvl  nfet_01v8/nfet_05v0_nvt/nfet_g5v0d10v5/pfet_01v8_hvt/pfet_g5v0d10v5  2.64V @ tt_025C_2v64_lv1v80
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "sky130A",
+  "root": "/usr/share/pdk",
+  "libraries": [
+    {
+      "name": "sky130_fd_sc_hd",
+      "device_flavors": ["nfet_01v8", "pfet_01v8_hvt"],
+      "nominal_supply_v": 1.8,
+      "nominal_corner": "tt_025C_1v80",
+      "voltage_class": "core"
+    },
+    {
+      "name": "sky130_fd_sc_hvl",
+      "device_flavors": [
+        "nfet_01v8", "nfet_05v0_nvt", "nfet_g5v0d10v5",
+        "pfet_01v8_hvt", "pfet_g5v0d10v5"
+      ],
+      "nominal_supply_v": 2.64,
+      "nominal_corner": "tt_025C_2v64_lv1v80",
+      "voltage_class": "io"
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `schema_version` | integer | Version of this command's JSON shape (starts at `1`). |
+| `pdk` | string | Resolved variant name (same resolution as `find`/`env`). |
+| `root` | string | Absolute install root. |
+| `libraries` | array | One entry per standard-cell digital library found (see "Which libraries are reported" below). |
+| `libraries[].name` | string | The `libs.ref` entry's directory name. |
+| `libraries[].device_flavors` | array of string | Sorted, deduplicated nfet/pfet device model *suffixes* (the `<family>_fd_pr__` prefix is stripped — it repeats the PDK family and adds no information) its cells instantiate, read from `spice/<lib>.spice`'s instance lines. `[]` when the library ships no `spice/` view, or no instance line matches. |
+| `libraries[].nominal_supply_v` | float \| null | The supply the library's nominal `.lib` timing view is characterised at (its `nom_voltage` Liberty attribute). `null` when the library ships no `lib/` directory or no parseable `.lib` file. |
+| `libraries[].nominal_corner` | string \| null | The nominal view's Liberty operating-condition name (its `default_operating_conditions`, e.g. `tt_025C_1v80`). `null` alongside `nominal_supply_v`. |
+| `libraries[].voltage_class` | `"core"` \| `"io"` \| null | `"core"` when `nominal_supply_v <= 2.5`, `"io"` above that. A documented heuristic threshold — not a field the PDK itself declares. `null` when `nominal_supply_v` is `null`. |
+| `libraries[].compatible` | boolean | **Present only when `--supply` is given.** See "Compatibility verdict (`--supply`)" below. |
+| `supply_v` | float | **Present only when `--supply` is given.** Echoes the caller-stated supply. |
+| `any_compatible` | boolean | **Present only when `--supply` is given.** `true` when at least one library is compatible; the CLI's exit code is derived from this. |
+
+### Which libraries are reported
+
+Only `libs_ref` entries whose name contains `_fd_sc_` — the open_pdks
+"foundry digital, standard cell" naming convention (`sky130_fd_sc_hd`/`_hvl`;
+`gf180mcu_fd_sc_mcu*`) — are reported. This is a **deliberate** filter, not an
+accident of the glob used to walk `libs_ref`:
+
+- **`sky130_fd_pr`** (primitive devices) is excluded — it ships no `.lib`
+  timing views, so it isn't a "standard-cell library" in the sense this
+  command answers for.
+- **`sky130_fd_io`** (I/O pad cells) is excluded — its `.lib` views are
+  per-pad-type, multi-supply-corner files (`sky130_ef_io__gpiov2_pad_*.lib`),
+  not the single-corner-per-`.lib`-file shape a digital standard-cell library
+  ships; it answers a different question ("what supply does this I/O pad
+  drive/tolerate") than "what voltage domain is this logic library built on".
+- **`sky130_sram_macros`** (SRAM macros) is excluded — it is a macro library,
+  not a standard-cell library, even though it ships both `spice/` and `lib/`.
+
+An empty `libraries` list (a variant with no `_fd_sc_`-named `libs_ref` entry)
+is a **successful result**, not an error.
+
+### Nominal supply selection
+
+A library may ship more than one `.lib` view at the typical-process,
+room-temperature (`tt`, 25°C) corner — a split/multi-rail library, e.g.
+`sky130_fd_sc_hvl`, ships `tt_025C` views at 2.64V, 2.97V, and 3.3V (with and
+without a low-voltage rail), because it supports more than one I/O-class
+supply configuration. `nominal_supply_v` reports the **lowest** of these: the
+library's baseline/minimum operating point, deterministically tie-broken by
+filename when voltages are equal. A library with only one `tt`/25°C view
+(e.g. `sky130_fd_sc_hd`) reports that view's `nom_voltage` directly.
+
+### Compatibility verdict (`--supply`)
+
+```
+$ klt pdk cells --pdk sky130A --supply 1.8
+...
+supply 1.8V: compatible library found
+$ echo $?
+0
+
+$ klt pdk cells --pdk sky130A --supply 5.0
+...
+supply 5V: NO MATCH
+$ echo $?
+3
+```
+
+`--supply <volts>` adds a `compatible` bool to every library entry
+(`nominal_supply_v` within 2%/0.01V of the stated supply — a tolerance so a
+caller-stated `1.8` matches a library characterised at `1.8000000000`) and an
+`any_compatible` bool at the top level. **Exit code `3`** when
+`any_compatible` is `false`, distinct from `1` (no PDK install resolved) and
+`2` (argparse usage error) — the same non-clean/non-error exit-code pattern
+`klt drc` uses for "ran fine, found violations" — so this can gate CI rather
+than being a manual check (`klt pdk cells --pdk sky130A --supply 1.8 || exit
+1` in a block repo's decision-record check).
+
+### Design choice: live-parsed, not a curated table
+
+Unlike `klt pdk device`/`klt pdk corner` (proposed in
+[`docs/design/pdk-device-corner-metadata-spike.md`](../design/pdk-device-corner-metadata-spike.md),
+which recommends owning a curated per-release table because primitive-device
+and process-corner metadata require synthesising knowledge no single shipped
+file states), `klt pdk cells` **live-parses** the shipped `spice/`/`lib/`
+files at call time. A standard-cell library's device flavor and nominal
+supply are each stated directly, verbatim, in exactly one file the PDK ships
+(`spice/<lib>.spice`'s instance lines; the nominal `.lib` view's
+`nom_voltage` attribute) — a curated table here would just be a stale copy of
+what the install already says, and would silently drift on a PDK upgrade
+instead of reflecting what is actually installed. Reflecting the real,
+installed state is the point of `--supply` being usable as a CI gate.
+
 ## Library API
 
 The importable half lives in `src/klayout_tools/pdk.py` — block repos import
 these instead of re-implementing the lookup in Python:
 
 ```python
-from klayout_tools.pdk import find_pdk, list_pdks, PdkNotFoundError
+from klayout_tools.pdk import find_pdk, list_pdks, list_cell_libraries, PdkNotFoundError
 
 info = find_pdk(variant="sky130A")  # same dict `klt pdk find` emits
 models = info["assets"]["ngspice"]
@@ -189,21 +326,30 @@ except PdkNotFoundError as exc:
     ...  # exc carries the actionable, search-order-naming message
 
 everything = list_pdks()  # same dict `klt pdk list` emits
+
+cells = list_cell_libraries(variant="sky130A")  # same dict `klt pdk cells` emits
+cells_checked = list_cell_libraries(
+    variant="sky130A", supply=1.8
+)  # + "compatible"/"any_compatible"
 ```
 
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
 payload dicts the CLI emits (the `layers_report()` pattern), and `find_pdk`
 raises `PdkNotFoundError` — carrying the actionable message — when nothing
 resolves. The `env` verb covers the shell/Tcl/rc-file side by exporting into the
-process environment.
+process environment. `list_cell_libraries(variant=None, root=None,
+supply=None)` follows the same shape and also raises `PdkNotFoundError` when
+no PDK install resolves; `supply` is optional and adds the compatibility
+verdict fields documented above.
 
 ## Exit codes and errors
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`. |
-| `1` | `find`/`env` resolved nothing. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `cells` with `--supply` matching at least one library is `0`. |
+| `1` | `find`/`env`/`cells` resolved no PDK install. Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
+| `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
@@ -239,4 +385,8 @@ $ klt pdk find --pdk sky130A --format json | jq -r '.assets.ngspice'
 $ eval "$(klt pdk env --pdk sky130A)"
 $ echo "$PDK_ROOT $PDK"
 /usr/share/pdk sky130A
+
+# Gate a block's decision record: does a 1.8V core-logic supply have a
+# matching standard-cell library on this PDK? (non-zero exit if not)
+$ klt pdk cells --pdk sky130A --supply 1.8 || echo "no compatible library"
 ```
