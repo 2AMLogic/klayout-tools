@@ -1,0 +1,60 @@
+SkyWater Open Source PDK — device model text
+============================================
+
+The `*.spice` model decks staged in this directory are assembled, unmodified
+except for having their `.include` directives resolved inline (see below),
+from the SkyWater Open Source PDK primitive-device SPICE models:
+
+    Copyright 2020 The SkyWater PDK Authors
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        https://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+Each staged deck also carries this Apache-2.0 header inline, verbatim from the
+upstream model files. This NOTICE is added because `eecircuit-engine` (the
+client-side SPICE engine these decks are intended for) does not roll the
+SkyWater model-data attributions up into its own LICENSE file — they live only
+in source comments — so this repository's staged copy carries the attribution
+explicitly.
+
+Source
+------
+
+Only the two primitive devices the four sky130 gallery standard cells
+instantiate are staged (`nfet_01v8`, `pfet_01v8_hvt`), for the `tt`/`ss`/`ff`
+process corners — not the full ~48 MB all-devices library.
+
+    Repository: https://github.com/google/skywater-pdk-libs-sky130_fd_pr
+    Pinned commit: f62031a1be9aefe902d6d54cddd6f59b57627436
+
+The pinned commit is kept in lockstep with `SKY130_FD_PR_SHA` in
+`scripts/fetch-cell-netlists.sh`, which fetches and checksum-verifies these
+files into `pdks/cell-netlists/` (gitignored). See that script for the exact
+per-file SHA-256 manifest.
+
+Assembly and inlining
+---------------------
+
+Staged by `site/scripts/stage-models.mjs`. Each `<corner>.spice` deck is the
+concatenation, for each of the two devices, of that device's
+`*__mismatch.corner.spice` and `*__<corner>.corner.spice` files — the same
+selection `scripts/gallery_signals.py`'s `_sky130_models_lib` assembles for
+build-time `klt sim` runs. The corner files' relative `.include` of their
+`*.pm3.spice` binned-model cards is resolved inline so each staged deck is a
+single self-contained, portable static asset (a browser SPICE engine cannot
+follow a build-machine filesystem `.include`).
+
+A `checksums.json` alongside these decks publishes, for every deck, the deck's
+own SHA-256 and the SHA-256 of each `pdks/cell-netlists/` source file that went
+into it — matching the reproducibility convention `docs/cli/sim.md`'s
+`environment` hashing uses — so any staged deck is verifiable against its
+sources.

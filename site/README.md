@@ -159,6 +159,25 @@ fetched client-side by the viewer. This mirrors `klt sim`'s own
 status pending issue #99 (the signals pipeline that will produce this data
 for real).
 
+### SPICE model decks (playground, phase A)
+
+For the in-browser SPICE playground (Epic #90, issue #149 / parent #148), the
+`predev`/`prebuild` hooks also run `scripts/stage-models.mjs` (after
+`copy-renders.mjs`), which stages self-contained sky130 primitive-device model
+decks — one per `tt`/`ss`/`ff` process corner — for the four sky130 gallery
+standard cells, at `/blocks/<slug>/models/<corner>.spice`. Each deck is the
+same device-corner text `scripts/gallery_signals.py`'s `_sky130_models_lib`
+assembles for build-time `klt sim` runs (`nfet_01v8` + `pfet_01v8_hvt`), with
+the corner files' relative `.include` of their `*.pm3.spice` binned models
+resolved inline so each deck is one portable file a browser SPICE engine can
+`fetch()` directly. A `models/checksums.json` publishes each deck's SHA-256
+plus the SHA-256 of every `pdks/cell-netlists/` source file it was built from
+(the `docs/cli/sim.md` `environment` hashing convention), and a `models/NOTICE`
+carries the Apache-2.0 attribution for the SkyWater PDK model text. Source
+lives in `pdks/cell-netlists/` (git-ignored, populated by
+`scripts/fetch-cell-netlists.sh`); a fresh checkout with no fetched netlists is
+a no-op. gf180mcu is out of scope for this phase — sky130 only.
+
 ### Bootstrap data
 
 The `layout.json` schema is the contract emitted by `klt layout-metrics`
@@ -200,6 +219,8 @@ site/
   dist/                  # build output (git-ignored, deploy target)
   scripts/
     copy-renders.mjs    # prebuild: stages blocks/*/output/... into public/blocks/
+    stage-models.mjs    # prebuild: stages checksummed sky130 SPICE model decks (issue #149)
+    sky130-models.NOTICE.txt  # Apache-2.0 attribution staged alongside model decks
     prerender.mjs        # build: client + SSR Vite builds -> static dist/<route>/index.html
     html-template.mjs    # shared HTML injection helper (prerender.mjs + vite.config.ts's dev SSR)
   public/

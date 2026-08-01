@@ -6,9 +6,10 @@
   "description": "Vite + React static site for the klayout-tools.org gallery (Epic #13, migrated from Astro to Vite/React/Tailwind/shadcn in #92).",
   "scripts": {
     "copy-renders": "node scripts/copy-renders.mjs",
-    "predev": "npm run copy-renders",
+    "stage-models": "node scripts/stage-models.mjs",
+    "predev": "npm run copy-renders && npm run stage-models",
     "dev": "vite",
-    "prebuild": "npm run copy-renders",
+    "prebuild": "npm run copy-renders && npm run stage-models",
     "build": "tsc -b && node scripts/prerender.mjs",
     "preview": "vite preview",
     "check": "tsc -b",
