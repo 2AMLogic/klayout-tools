@@ -124,6 +124,60 @@ class ExtractionDeck:
     substrate_net: str = "vsubs"
 
 
+@dataclass(frozen=True)
+class LayerRC:
+    """First-order lumped-RC parasitic coefficients for one conductor role.
+
+    A curated, per-PDK numeric table for ``klt extract --parasitics`` -- the
+    parasitics analogue of :class:`DrcRule`'s curated width/space table and
+    the SPICE model-binding table (``klayout_tools.pdk_models``), sourced
+    from each PDK's *public* process/DRM data (never NDA'd, matching this
+    repo's open-PDK-only rule). Three coefficients per conductor role:
+
+    - ``sheet_res_ohm_sq`` -- sheet resistance, ohms per square. Combined
+      with a per-net square count (estimated from the net's per-layer area
+      and perimeter, see ``klayout_tools.extract._n_squares``) to give one
+      lumped series resistance per net.
+    - ``cap_area_ff_um2`` -- parallel-plate capacitance to substrate,
+      femtofarads per square micrometre of the net's area on this layer.
+    - ``cap_perim_ff_um`` -- sidewall/fringe capacitance to substrate,
+      femtofarads per micrometre of the net's perimeter on this layer.
+
+    **These are representative, uncalibrated, order-of-magnitude starter
+    values**, exactly like the DRC decks' "curated starter subset" scope
+    (see ``docs/cli/drc.md`` -> "Coverage"). Parasitic-extraction accuracy
+    tuning/calibration against silicon is an explicit non-goal of the first
+    cut (issue #216's "Non-goals"); each family deck's ``PARASITICS``
+    docstring cites the public source its numbers are drawn from.
+    """
+
+    sheet_res_ohm_sq: float
+    cap_area_ff_um2: float
+    cap_perim_ff_um: float
+
+
+@dataclass(frozen=True)
+class ParasiticsDeck:
+    """Per-PDK-family first-order lumped-RC coefficient set for
+    ``klt extract --parasitics`` (see ``docs/cli/extract.md`` -> "Parasitic
+    (RC) extraction" and ``docs/design/lvs-extraction-spike.md`` -> "Addendum
+    (#216)").
+
+    One :class:`LayerRC` per conductor role the extraction pass tracks
+    geometry for. ``metals`` is index-aligned with the matching
+    :class:`ExtractionDeck`'s ``metals`` stack (so ``metals[0]``'s
+    coefficients apply to whatever layer that deck's ``metals[0]`` is -- e.g.
+    sky130's local-interconnect ``li1``, gf180mcu's ``Metal1``), which is why
+    the coefficients are per-deck and per-metal-index rather than keyed by a
+    universal role name. A ``None`` role (or a ``metals`` entry that is
+    ``None``) contributes no parasitics for that role.
+    """
+
+    diffusion: LayerRC | None = None
+    poly: LayerRC | None = None
+    metals: tuple[LayerRC | None, ...] = ()
+
+
 class UnknownExtractionDeckError(Exception):
     """Raised by :func:`get_extraction_deck` for an unknown deck name."""
 
@@ -214,6 +268,34 @@ def get_extraction_deck(name: str) -> ExtractionDeck:
     same object reused for two purposes.
     """
     decks = _extraction_registry()
+    try:
+        return decks[name]
+    except KeyError:
+        available = ", ".join(sorted(decks))
+        raise UnknownExtractionDeckError(
+            f"unknown deck '{name}' (available: {available})"
+        ) from None
+
+
+def _parasitics_registry() -> dict[str, ParasiticsDeck]:
+    from . import gf180mcu, sky130
+
+    return {
+        "sky130": sky130.PARASITICS,
+        "gf180mcu": gf180mcu.PARASITICS,
+    }
+
+
+def get_parasitics_deck(name: str) -> ParasiticsDeck:
+    """Return the registered :class:`ParasiticsDeck` for ``name``.
+
+    Raises :class:`UnknownExtractionDeckError` (which ``extract.py`` turns
+    into an :class:`~klayout_tools.extract.ExtractError`) if ``name`` is not a
+    registered deck -- same name lookup and error type as
+    :func:`get_extraction_deck`, since every extraction deck also carries a
+    parasitics table.
+    """
+    decks = _parasitics_registry()
     try:
         return decks[name]
     except KeyError:

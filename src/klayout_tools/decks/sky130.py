@@ -76,7 +76,7 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
 
 from __future__ import annotations
 
-from . import DrcRule, ExtractionDeck
+from . import DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
@@ -259,4 +259,37 @@ EXTRACTION_DECK = ExtractionDeck(
     metals=((67, 20), (68, 20)),  # li1.drawing, met1.drawing
     metal_labels=((67, 5), (68, 5)),  # li1.pin, met1.pin
     vias=((67, 44),),  # mcon.drawing (li1 -> met1)
+)
+
+# --------------------------------------------------------------------------- #
+# `klt extract --parasitics` first-order lumped-RC coefficients
+# --------------------------------------------------------------------------- #
+#
+# Representative, uncalibrated starter values drawn from the *public* sky130
+# process documentation (SkyWater sky130 open PDK, the same open-PDK source
+# family cited at the top of this module; sheet resistances from the PDK's
+# published per-layer R tables, area/fringe capacitances from its published
+# interconnect parasitic-capacitance tables). Order-of-magnitude only --
+# parasitic-extraction accuracy tuning/calibration against silicon is an
+# explicit non-goal of the first cut (issue #216 "Non-goals"); these exist to
+# give `--parasitics` a plausible, self-consistent RC magnitude per net, not a
+# sign-off-grade extraction. `metals` is index-aligned with EXTRACTION_DECK's
+# `metals` stack: index 0 is li1 (local interconnect -- relatively high sheet
+# R), index 1 is met1 (low sheet R). Values expressed as (sheet ohms/square,
+# area cap fF/um^2, fringe cap fF/um).
+PARASITICS = ParasiticsDeck(
+    # n+/p+ source-drain diffusion -- high sheet R; the area coefficient
+    # stands in for the (bias-dependent) junction capacitance to bulk, taken
+    # here as a fixed zero-bias-order approximation.
+    diffusion=LayerRC(
+        sheet_res_ohm_sq=120.0, cap_area_ff_um2=0.40, cap_perim_ff_um=0.30
+    ),
+    # poly gate/interconnect.
+    poly=LayerRC(sheet_res_ohm_sq=48.2, cap_area_ff_um2=0.107, cap_perim_ff_um=0.067),
+    metals=(
+        # li1 local interconnect.
+        LayerRC(sheet_res_ohm_sq=12.8, cap_area_ff_um2=0.037, cap_perim_ff_um=0.078),
+        # met1.
+        LayerRC(sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.036, cap_perim_ff_um=0.082),
+    ),
 )

@@ -328,8 +328,12 @@ def _resolve_layout(
             raise LvsError("request.layout.deck is required when layout.file is given")
 
         try:
-            netlist, top_cell_name, _dbu_um, _warnings = extract_netlist_from_layout(
-                layout_file, deck_name, top=layout_spec.get("top")
+            # LVS is topological -- no parasitics_deck, so the 5th return
+            # (parasitic_nets) is always None here and is ignored.
+            netlist, top_cell_name, _dbu_um, _warnings, _parasitics = (
+                extract_netlist_from_layout(
+                    layout_file, deck_name, top=layout_spec.get("top")
+                )
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc
