@@ -334,6 +334,7 @@ exit codes).
   "net_count": 6,
   "pin_count": 6,
   "device_counts": { "nfet": 1, "pfet": 1 },
+  "device_classes": ["nfet", "pfet"],
   "devices": [
     {
       "name": "$1",
@@ -364,7 +365,8 @@ exit codes).
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
-| `device_counts`    | object\<string, int\>      | Per-device-class counts (`"nfet"`/`"pfet"`), keys sorted for determinism.                              |
+| `device_counts`    | object\<string, int\>      | Per-device-class counts (`"nfet"`/`"pfet"`), keys sorted for determinism. What was actually **found**.  |
+| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (currently always `["nfet", "pfet"]` — every registered deck is MOS-only), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |

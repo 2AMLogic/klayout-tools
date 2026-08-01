@@ -310,6 +310,9 @@ def test_clean_self_compare_reports_match(tmp_path):
     assert report["counts"]["nets"] == {"layout": 4, "reference": 4, "matched": 4}
     assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
     assert report["counts"]["pins"] == {"layout": 4, "reference": 4, "matched": 4}
+    # `layout.netlist` (pre-extracted) was given -- no deck is involved, so
+    # there is no device-class coverage to report (issue #221).
+    assert report["device_classes"] is None
     assert report["environment"]["engine"] == "klayout"
     assert report["environment"]["engine_version"]
     assert len(report["environment"]["layout_sha256"]) == 64
@@ -602,6 +605,9 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
 
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
+    # `layout.file` + `layout.deck` (inline extraction) was given -- echoes
+    # the sky130 deck's device-class coverage (issue #221).
+    assert report["device_classes"] == ["nfet", "pfet"]
     assert (
         report["environment"]["extracted_netlist"] is None
     )  # keep_extracted defaults False

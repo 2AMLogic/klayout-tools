@@ -123,6 +123,23 @@ class ExtractionDeck:
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
 
+    @property
+    def device_classes(self) -> tuple[str, ...]:
+        """The device-class *roles* (not the ``devices[].class`` label
+        strings ``nfet_class``/``pfet_class`` provide) this deck is
+        structurally capable of recognising -- independent of whether a
+        given layout actually contains any devices of that class (see
+        ``device_counts`` in ``docs/cli/extract.md`` for the "what was
+        found" counterpart of this "what can be found" declaration).
+
+        Every registered deck extracts two-terminal-well MOS today (#221),
+        so this is always ``("nfet", "pfet")``. When a future deck grows a
+        resistor/bipolar/capacitor extractor (#219's sibling sub-issues),
+        that deck's set of declared ``*_class`` fields should extend the
+        tuple this property returns accordingly.
+        """
+        return ("nfet", "pfet")
+
 
 @dataclass(frozen=True)
 class LayerRC:

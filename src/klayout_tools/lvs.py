@@ -56,6 +56,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
+from .decks import get_extraction_deck
 from .extract import ExtractError, extract_netlist_from_layout
 
 if TYPE_CHECKING:
@@ -151,6 +152,13 @@ def run_lvs(request_path: str) -> dict[str, Any]:
     reference input, unknown deck, unsupported engine, engine error) --
     a documented ``status: "mismatch"`` is a successful run, not an error
     (see this module's docstring).
+
+    ``device_classes`` (issue #221) echoes the layout-side
+    :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` -- what that
+    deck can structurally recognise, not what this particular compare found
+    -- when ``layout.file`` + ``layout.deck`` (inline extraction) was given;
+    ``null`` when ``layout.netlist`` (pre-extracted, no deck involved) was
+    given instead.
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -236,6 +244,20 @@ def run_lvs(request_path: str) -> dict[str, Any]:
             category_counts.get(mismatch["category"], 0) + 1
         )
 
+    # What the layout-side deck can structurally recognise
+    # (`ExtractionDeck.device_classes`, issue #221) -- `null` when
+    # `layout.netlist` (pre-extracted) was given instead of `layout.file` +
+    # `layout.deck`, since no deck is involved in that shape. Already
+    # validated by `_resolve_layout` above (an unknown deck would have
+    # raised `LvsError` before reaching this point), so re-fetching it here
+    # cannot itself raise.
+    layout_deck_name = layout_spec.get("deck")
+    device_classes = (
+        list(get_extraction_deck(layout_deck_name).device_classes)
+        if layout_deck_name
+        else None
+    )
+
     counts = {
         "nets": {
             "layout": sum(1 for _ in layout_circuit.each_net()),
@@ -264,6 +286,7 @@ def run_lvs(request_path: str) -> dict[str, Any]:
         "mismatch_count": len(mismatches),
         "category_counts": dict(sorted(category_counts.items())),
         "counts": counts,
+        "device_classes": device_classes,
         "environment": {
             "engine": engine,
             "engine_version": _engine_version(),
