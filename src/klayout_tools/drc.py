@@ -24,7 +24,13 @@ import os
 from typing import Any
 
 from ._layout import load_layout
-from .decks import DrcRule, UnknownDeckError, get_deck, get_layer_names
+from .decks import (
+    DrcRule,
+    UnknownDeckError,
+    get_deck,
+    get_layer_names,
+    get_nominal_dbu_um,
+)
 
 # Check kinds that operate on a single region (no other_layer).
 _SINGLE_LAYER_CHECKS = {"width", "space", "notch"}
@@ -97,6 +103,14 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
 
     layout = load_layout(path, DrcError)
 
+    # `deck`'s threshold_dbu values are authored against the deck's nominal
+    # dbu (get_nominal_dbu_um()), not necessarily this layout's actual dbu.
+    # Scaling by nominal/actual converts each threshold to this layout's own
+    # database units before it reaches a Region.*_check() primitive, so the
+    # same physical geometry gets the same verdict regardless of the stream's
+    # dbu (see docs/cli/drc.md "Database units" and issue #172).
+    dbu_scale = get_nominal_dbu_um(deck_name) / layout.dbu
+
     # Imported lazily (after load_layout, which already paid this cost) for
     # kdb.Region() below.
     import klayout.db as kdb
@@ -126,7 +140,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 else None
             )
 
-            edge_pairs = _run_check(region, other_region, rule)
+            edge_pairs = _run_check(region, other_region, rule, dbu_scale)
 
             for edge_pair in edge_pairs:
                 bbox = edge_pair.bbox()
@@ -177,13 +191,21 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     }
 
 
-def _run_check(region: Any, other_region: Any | None, rule: DrcRule) -> Any:
+def _run_check(
+    region: Any, other_region: Any | None, rule: DrcRule, dbu_scale: float
+) -> Any:
     """Dispatch to the matching ``klayout.db.Region.*_check`` primitive.
+
+    ``dbu_scale`` (the deck's nominal dbu divided by the layout's actual
+    ``dbu``, computed once per :func:`run_drc` call) converts ``rule``'s
+    ``threshold_dbu`` — authored against the deck's nominal dbu — into the
+    layout's own database units, so the check primitive receives a threshold
+    that means the same physical distance regardless of the stream's dbu.
 
     Returns an ``EdgePairs`` collection, one entry per violation.
     """
     check = rule.check
-    d = rule.threshold_dbu
+    d = int(round(rule.threshold_dbu * dbu_scale))
 
     if check in _SINGLE_LAYER_CHECKS:
         return getattr(region, f"{check}_check")(d)

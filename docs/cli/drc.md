@@ -88,6 +88,34 @@ Coverage does **not** yet include: `Pplus`/`Nplus` implant-specific rules
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
 
+## Database units
+
+Each deck's rule thresholds (`DrcRule.threshold_dbu`) are authored against a
+**nominal** database unit — the dbu each deck's numeric values were
+transcribed from the source rule table at (both `sky130` and `gf180mcu`
+currently use `0.001` µm/dbu, i.e. a 1nm grid; see each deck module's
+`NOMINAL_DBU_UM` constant in `src/klayout_tools/decks/`).
+
+A layout stream's own database unit is whatever its author wrote it at, and
+is not guaranteed to match a deck's nominal dbu — foundry PCell libraries,
+GDS emitted by other tools, and older flows commonly use a coarser (e.g.
+5nm) or finer (e.g. 0.5nm) grid. `klt drc` reads the layout's actual `dbu`
+(the same value reported as `dbu_um` in the JSON output below) and scales
+every threshold by `NOMINAL_DBU_UM / dbu` *before* it reaches a
+`Region.*_check()` primitive, so a rule's physical meaning (e.g. "0.15um
+minimum poly width") stays correct regardless of the stream's dbu. This
+matters in both directions: an unconverted threshold interpreted against a
+coarser dbu reads as physically *larger* (over-flagging clean geometry as a
+violation), and against a finer dbu reads as physically *smaller* (silently
+missing real violations) — the same geometry must produce the same verdict
+regardless of `dbu_um`, and `klt drc` guarantees this by construction.
+
+`bbox` and `polygon` coordinates in `violations[]` remain in the checked
+layout's **own** database units (as documented below) — only the rule
+*thresholds* are converted internally; report consumers that need physical
+coordinates multiply by the report's own `dbu_um`, exactly as for any other
+`klt` command's dbu-denominated output.
+
 ## Limitation: whole-layout, flattened
 
 Each rule is checked against the **whole layout**, flattened per top cell

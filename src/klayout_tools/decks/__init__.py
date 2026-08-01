@@ -26,8 +26,15 @@ class DrcRule:
     ``"width"`` / ``"space"`` / ``"notch"`` are single-layer checks;
     ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"`` are
     two-layer checks and require ``other_layer``. ``threshold_dbu`` is the
-    rule's distance threshold in database units (matching the layout's own
-    ``dbu`` — sky130 streams use ``dbu_um = 0.001``, i.e. 1 nm per unit).
+    rule's distance threshold in the deck's *nominal* database unit — the
+    dbu each deck's threshold values were transcribed/authored against (see
+    each deck module's ``NOMINAL_DBU_UM`` constant), **not** necessarily the
+    dbu of the layout actually being checked. ``run_drc()`` converts
+    ``threshold_dbu`` to the layout's own ``dbu`` at run time by scaling with
+    the ratio ``NOMINAL_DBU_UM / layout.dbu`` before passing it to the
+    ``Region.*_check()`` primitives — see ``docs/cli/drc.md`` "Database
+    units" for the full rationale (a threshold interpreted at the wrong dbu
+    silently changes which geometry passes or fails).
 
     Rule ``id`` values are a stable, public contract once shipped — never
     renumber or repurpose one (see ``docs/cli/drc.md``).
@@ -57,6 +64,12 @@ def _layer_name_registry() -> dict[str, dict[tuple[int, int], str]]:
     return {"sky130": sky130.LAYER_NAMES, "gf180mcu": gf180mcu.LAYER_NAMES}
 
 
+def _nominal_dbu_registry() -> dict[str, float]:
+    from . import gf180mcu, sky130
+
+    return {"sky130": sky130.NOMINAL_DBU_UM, "gf180mcu": gf180mcu.NOMINAL_DBU_UM}
+
+
 def get_deck(name: str) -> list[DrcRule]:
     """Return the rule list for a registered deck name.
 
@@ -82,3 +95,17 @@ def get_layer_names(name: str) -> dict[tuple[int, int], str]:
     via :func:`get_deck` before reaching this point).
     """
     return _layer_name_registry().get(name, {})
+
+
+def get_nominal_dbu_um(name: str) -> float:
+    """Return the database unit (µm/dbu) that ``name``'s ``threshold_dbu``
+    values were authored against.
+
+    ``run_drc()`` uses this to convert each rule's ``threshold_dbu`` to the
+    layout's actual ``dbu`` before it is passed to a ``Region.*_check()``
+    primitive, so a deck's thresholds are portable across streams written at
+    any dbu (see ``docs/cli/drc.md`` "Database units"). Callers already
+    validated the deck name via :func:`get_deck` before reaching this point,
+    so an unknown name is a programming error, not a user-facing one.
+    """
+    return _nominal_dbu_registry()[name]

@@ -595,3 +595,139 @@ def test_example_gds_matches_committed_json():
     actual = run_drc(EXAMPLE_GDS, "sky130")
 
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# Database unit scaling (issue #172): the same *physical* geometry must
+# produce the same verdict regardless of the GDS stream's dbu_um. Each
+# fixture below is built by converting a fixed physical size (in um) to raw
+# database-unit integers at a given `dbu_um` -- exactly how the same design
+# would be represented if written out at a different (but still ordinary,
+# e.g. 5nm/0.5nm) database unit -- and asserts identical `violation_count`
+# and `rule_counts` across dbu_um values, plus violations[] that describe the
+# same physical location once bbox is converted back to micrometres.
+# ---------------------------------------------------------------------------
+
+# dbu_um values exercised below: the nominal 1nm grid both decks are
+# authored against, plus a coarser 5nm grid and a finer 0.5nm grid -- the
+# exact values from the issue's own repro table.
+_DBU_UM_VALUES = [0.001, 0.005, 0.0005]
+
+
+def _um_to_dbu(value_um: float, dbu_um: float) -> int:
+    return int(round(value_um / dbu_um))
+
+
+def _make_layout_at_dbu(
+    dbu_um: float,
+    layer: tuple[int, int],
+    layer_name: str,
+    width_um: float,
+    length_um: float,
+) -> kdb.Layout:
+    """A single rectangular shape of a fixed *physical* size (`width_um` x
+    `length_um`), written to a layout whose database unit is `dbu_um` --
+    i.e. the same physical geometry re-expressed in a different dbu's raw
+    integer coordinates, the way the same design looks coming out of a
+    5nm-grid tool vs. a 1nm-grid tool.
+    """
+    layout = kdb.Layout()
+    layout.dbu = dbu_um
+    top = layout.create_cell("TOP")
+    layer_index = layout.layer(*layer)
+    layout.set_info(layer_index, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    width_dbu = _um_to_dbu(width_um, dbu_um)
+    length_dbu = _um_to_dbu(length_um, dbu_um)
+    top.shapes(layer_index).insert(kdb.Box(0, 0, width_dbu, length_dbu))
+    return layout
+
+
+def test_run_drc_sky130_violation_count_independent_of_dbu(tmp_path):
+    """`poly.width.1` (0.15um threshold): a 0.05um-wide poly bar is a
+    violation at every dbu_um it's written at."""
+    reports = []
+    for dbu_um in _DBU_UM_VALUES:
+        path = tmp_path / f"violation-{dbu_um}.gds"
+        _make_layout_at_dbu(
+            dbu_um, (66, 20), "poly.drawing", width_um=0.05, length_um=2.0
+        ).write(str(path))
+        reports.append(run_drc(str(path), "sky130"))
+
+    for report, dbu_um in zip(reports, _DBU_UM_VALUES, strict=True):
+        assert report["dbu_um"] == pytest.approx(dbu_um)
+        assert report["status"] == "violations"
+        assert report["violation_count"] == 1
+        assert report["rule_counts"] == {"poly.width.1": 1}
+
+        (violation,) = report["violations"]
+        assert violation["rule"] == "poly.width.1"
+        assert violation["bbox"]["left"] * dbu_um == pytest.approx(0.0)
+        assert violation["bbox"]["right"] * dbu_um == pytest.approx(0.05)
+        assert violation["bbox"]["top"] * dbu_um == pytest.approx(2.0)
+
+    # violation_count and rule_counts must match exactly across every dbu_um.
+    assert len({report["violation_count"] for report in reports}) == 1
+    assert (
+        len({tuple(sorted(report["rule_counts"].items())) for report in reports}) == 1
+    )
+
+
+def test_run_drc_sky130_clean_independent_of_dbu(tmp_path):
+    """The same rule at a width comfortably above threshold stays clean at
+    every dbu_um -- the false-positive direction of the bug (issue #172's
+    dbu_um=0.005 repro row)."""
+    for dbu_um in _DBU_UM_VALUES:
+        path = tmp_path / f"clean-{dbu_um}.gds"
+        _make_layout_at_dbu(
+            dbu_um, (66, 20), "poly.drawing", width_um=0.2, length_um=2.0
+        ).write(str(path))
+
+        report = run_drc(str(path), "sky130")
+
+        assert report["dbu_um"] == pytest.approx(dbu_um)
+        assert report["status"] == "clean"
+        assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_violation_count_independent_of_dbu(tmp_path):
+    """`poly2.width.1` (0.18um threshold): a 0.06um-wide Poly2 bar is a
+    violation at every dbu_um it's written at."""
+    reports = []
+    for dbu_um in _DBU_UM_VALUES:
+        path = tmp_path / f"violation-{dbu_um}.gds"
+        _make_layout_at_dbu(
+            dbu_um, (30, 0), "Poly2", width_um=0.06, length_um=2.0
+        ).write(str(path))
+        reports.append(run_drc(str(path), "gf180mcu"))
+
+    for report, dbu_um in zip(reports, _DBU_UM_VALUES, strict=True):
+        assert report["dbu_um"] == pytest.approx(dbu_um)
+        assert report["status"] == "violations"
+        assert report["violation_count"] == 1
+        assert report["rule_counts"] == {"poly2.width.1": 1}
+
+        (violation,) = report["violations"]
+        assert violation["rule"] == "poly2.width.1"
+        assert violation["bbox"]["right"] * dbu_um == pytest.approx(0.06)
+        assert violation["bbox"]["top"] * dbu_um == pytest.approx(2.0)
+
+    assert len({report["violation_count"] for report in reports}) == 1
+    assert (
+        len({tuple(sorted(report["rule_counts"].items())) for report in reports}) == 1
+    )
+
+
+def test_run_drc_gf180mcu_clean_independent_of_dbu(tmp_path):
+    """The same rule at a width comfortably above threshold stays clean at
+    every dbu_um."""
+    for dbu_um in _DBU_UM_VALUES:
+        path = tmp_path / f"clean-{dbu_um}.gds"
+        _make_layout_at_dbu(
+            dbu_um, (30, 0), "Poly2", width_um=0.3, length_um=2.0
+        ).write(str(path))
+
+        report = run_drc(str(path), "gf180mcu")
+
+        assert report["dbu_um"] == pytest.approx(dbu_um)
+        assert report["status"] == "clean"
+        assert report["violation_count"] == 0

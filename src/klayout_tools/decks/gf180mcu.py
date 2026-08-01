@@ -117,8 +117,15 @@ from __future__ import annotations
 
 from . import DrcRule
 
-# Database units are nanometres (gf180mcu streams use dbu_um = 0.001, same as
-# sky130), so a threshold in micrometres times 1000 gives threshold_dbu.
+# The database unit (µm/dbu) the threshold_dbu values below are authored
+# against (same as sky130's) — a threshold in micrometres times 1000 gives
+# threshold_dbu at this nominal dbu. run_drc() reads this via
+# get_nominal_dbu_um() and scales threshold_dbu by
+# NOMINAL_DBU_UM / layout.dbu before checking, so these values remain
+# correct against a layout stream written at any dbu, not just 0.001 (see
+# docs/cli/drc.md "Database units").
+NOMINAL_DBU_UM = 0.001
+
 DECK: list[DrcRule] = [
     DrcRule(
         id="poly2.width.1",
