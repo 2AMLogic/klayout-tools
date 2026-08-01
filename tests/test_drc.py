@@ -379,6 +379,192 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
         }
 
 
+def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
+    """A layout drawn only on the four originally-covered layers
+    (Poly2/Comp/Contact/Metal1), sized to satisfy every one of those
+    layers' rules. Regression fixture (see #157): confirms the well/tap and
+    BJT rules added on top of the original 10 don't fire on layouts that
+    never draw Nwell or DRC_BJT geometry.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    poly2 = layout.layer(30, 0)
+    layout.set_info(poly2, kdb.LayerInfo(30, 0, "Poly2"))
+    top.shapes(poly2).insert(kdb.Box(0, 0, 300, 2000))
+
+    comp = layout.layer(22, 0)
+    layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
+    top.shapes(comp).insert(kdb.Box(1000, 0, 1300, 2000))
+
+    contact = layout.layer(33, 0)
+    layout.set_info(contact, kdb.LayerInfo(33, 0, "Contact"))
+    top.shapes(contact).insert(kdb.Box(2000, 0, 2300, 300))
+
+    metal1 = layout.layer(34, 0)
+    layout.set_info(metal1, kdb.LayerInfo(34, 0, "Metal1"))
+    top.shapes(metal1).insert(kdb.Box(3000, 0, 3300, 2000))
+
+    return layout
+
+
+def test_run_drc_gf180mcu_four_layer_layout_still_clean(tmp_path):
+    """Regression check (#157): a layout using only the current four layers
+    (Poly2/Comp/Contact/Metal1) still reports `"status": "clean"` now that
+    the deck also has well/tap (Nwell) and BJT (DRC_BJT) rules -- those
+    rules require their own layers (Nwell / DRC_BJT), which are absent from
+    this layout, so they must not introduce any new violations here."""
+    path = tmp_path / "four_layer_clean.gds"
+    _make_gf180mcu_four_layer_clean_layout().write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    assert report["rule_counts"] == {}
+    assert report["violations"] == []
+
+
+# --- nwell.space.1 -----------------------------------------------------
+
+
+def test_run_drc_gf180mcu_nwell_space_violation(tmp_path):
+    """Two Nwell shapes closer than the 600 dbu (0.6 um) `nwell.space.1`
+    threshold trip exactly one violation (elongated shapes so only the
+    spacing, not the end caps, triggers)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(21, 0)
+    layout.set_info(nwell, kdb.LayerInfo(21, 0, "Nwell"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(nwell).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 600
+    path = tmp_path / "nwell_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"nwell.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "nwell.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "Nwell"
+
+
+def test_run_drc_gf180mcu_nwell_space_clean(tmp_path):
+    """Two Nwell shapes spaced exactly at the 600 dbu threshold pass."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(21, 0)
+    layout.set_info(nwell, kdb.LayerInfo(21, 0, "Nwell"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(nwell).insert(kdb.Box(2600, 0, 4000, 4000))  # 600 dbu gap == threshold
+    path = tmp_path / "nwell_space_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+# --- nwell.enclosing.comp.1 ---------------------------------------------
+
+
+def test_run_drc_gf180mcu_nwell_enclosing_comp_violation(tmp_path):
+    """A COMP shape inside an Nwell shape, but with less than the 120 dbu
+    (0.12 um) `nwell.enclosing.comp.1` margin on one edge, trips exactly one
+    violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(21, 0)
+    layout.set_info(nwell, kdb.LayerInfo(21, 0, "Nwell"))
+    comp = layout.layer(22, 0)
+    layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
+    # 300 dbu margin on 3 sides, only 50 dbu (< 120) margin on the right.
+    top.shapes(comp).insert(kdb.Box(300, 300, 1950, 1700))
+    path = tmp_path / "nwell_enclosing_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"nwell.enclosing.comp.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "nwell.enclosing.comp.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Nwell"
+
+
+def test_run_drc_gf180mcu_nwell_enclosing_comp_clean(tmp_path):
+    """A COMP shape enclosed by Nwell with >= 120 dbu margin on every side
+    passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    nwell = layout.layer(21, 0)
+    layout.set_info(nwell, kdb.LayerInfo(21, 0, "Nwell"))
+    comp = layout.layer(22, 0)
+    layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
+    top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
+    top.shapes(comp).insert(kdb.Box(300, 300, 1700, 1700))  # 300 dbu margin >= 120
+    path = tmp_path / "nwell_enclosing_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+# --- bjt.separation.comp.1 ------------------------------------------------
+
+
+def test_run_drc_gf180mcu_bjt_separation_violation(tmp_path):
+    """A DRC_BJT shape closer than the 100 dbu (0.1 um)
+    `bjt.separation.comp.1` threshold to a COMP shape trips exactly one
+    violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    bjt = layout.layer(127, 5)
+    layout.set_info(bjt, kdb.LayerInfo(127, 5, "DRC_BJT"))
+    comp = layout.layer(22, 0)
+    layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
+    top.shapes(bjt).insert(kdb.Box(0, 0, 500, 500))
+    top.shapes(comp).insert(kdb.Box(550, 0, 1000, 500))  # 50 dbu gap < 100
+    path = tmp_path / "bjt_separation_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"bjt.separation.comp.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "bjt.separation.comp.1"
+    assert violation["check"] == "separation"
+    assert violation["layer"] == "DRC_BJT"
+
+
+def test_run_drc_gf180mcu_bjt_separation_clean(tmp_path):
+    """A DRC_BJT shape spaced exactly at the 100 dbu threshold from a COMP
+    shape passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    bjt = layout.layer(127, 5)
+    layout.set_info(bjt, kdb.LayerInfo(127, 5, "DRC_BJT"))
+    comp = layout.layer(22, 0)
+    layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
+    top.shapes(bjt).insert(kdb.Box(0, 0, 500, 500))
+    top.shapes(comp).insert(kdb.Box(600, 0, 1000, 500))  # 100 dbu gap == threshold
+    path = tmp_path / "bjt_separation_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
 def test_gf180mcu_corpus_cli_json_matches_run_drc(capsys):
     """`klt drc <file> --deck gf180mcu --format json` (the CLI path) agrees
     with the `run_drc` library call for at least one real corpus file."""

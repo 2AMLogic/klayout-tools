@@ -50,8 +50,8 @@ against:
   e.g. `"poly.width.1"`), `description`, `check` kind, `layer`, `cell`,
   `bbox`, `polygon`. Edit geometry to resolve each, then re-run.
 
-**Coverage caveat** (from `docs/cli/drc.md`): both the `sky130` and
-`gf180mcu` decks are curated starter subsets (10 rules each), not the full
+**Coverage caveat** (from `docs/cli/drc.md`): both the `sky130` (10 rules)
+and `gf180mcu` (13 rules) decks are curated starter subsets, not the full
 foundry rule manual. A "DRC-clean" verdict from `klt drc` is clean *against
 the curated subset*, not a full-deck signoff — do not conflate the two when
 reporting S8's exit criteria met, especially at S11 (signoff).

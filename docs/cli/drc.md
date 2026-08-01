@@ -50,27 +50,40 @@ script runner does. This is called out explicitly in each such rule's
 docstring; the threshold *values* used are always the real, unmodified
 source values.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 10 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 13 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
-(diffusion/active), `Contact`, and `Metal1` layers — transcribed from the
-published GlobalFoundries 180nm MCU **Design Rule Manual**
-([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
-`docs/physical_verification/design_manual/`; Apache License 2.0). Unlike
-sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), the
-companion KLayout DRC-deck repo
+(diffusion/active), `Contact`, and `Metal1` layers, plus a first increment
+of well/substrate-tap coverage (`Nwell` spacing and Nwell-tap enclosure) and
+one bipolar (BJT)-specific device rule (`DRC_BJT` mark-layer separation) —
+transcribed from the published GlobalFoundries 180nm MCU **Design Rule
+Manual** ([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
+`docs/physical_verification/design_manual/`; Apache License 2.0),
+specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
+(`PL.*`), "7.12 Contact" (`CO.*`), "7.13 Metaln" (`Mn.*`), and "10.7 DRC_BJT
+Mark Layer" (`BJT.*`) sections. Unlike sky130 (transcribed from a live,
+KLayout-runnable `.lydrc` script), the companion KLayout DRC-deck repo
 ([`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`](https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv))
 does not yet open-source the core FEOL/BEOL width/space/enclosure checks as
 executable rule-deck code, so `src/klayout_tools/decks/gf180mcu.py` instead
 cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
-`"Mn.1"`) and numeric values directly.
+`"Mn.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and numeric values directly.
 
-Four of the ten gf180mcu rules approximate an official DRM rule in some
-way — either a compound-layer context our single/two-layer check
-primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`),
-or a bound our primitives don't support (`contact.width.1`'s fixed-size
-square, approximated as a minimum only). Each is called out explicitly in
-its rule's docstring in `gf180mcu.py`; the threshold values used are always
-the real, unmodified DRM values.
+Seven of the thirteen gf180mcu rules approximate an official DRM rule in
+some way — either a compound-layer context our single/two-layer check
+primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
+`nwell.enclosing.comp.1`), a bound our primitives don't support
+(`contact.width.1`'s fixed-size square, approximated as a minimum only), or
+context our engine has no data for at all — net-potential (`nwell.space.1`)
+or device connectivity (`bjt.separation.comp.1`), both of which require
+netlist/connectivity information the geometry-only check primitives don't
+have. Each is called out explicitly in its rule's docstring in
+`gf180mcu.py`; the threshold values used are always the real, unmodified
+DRM values.
+
+Coverage does **not** yet include: `Pplus`/`Nplus` implant-specific rules
+(width/space/enclosure of the implant layers themselves), `LVPWELL` or
+`DNWELL`, the remaining `BJT.*` rules (`BJT.1`/`BJT.2`, which key off
+`DNWELL`), or 5V/6V high-voltage variants — left for follow-on issues.
 
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
