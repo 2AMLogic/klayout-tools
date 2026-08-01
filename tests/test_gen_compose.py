@@ -13,11 +13,13 @@ import json
 
 import pytest
 
-from klayout_tools import gen, gen_compose, pdk
+from klayout_tools import extract, gen, gen_compose, pdk
 from klayout_tools.cli import main
 from klayout_tools.gen_compose import (
     GenComposeError,
     _cleanup_points,
+    _polyline_midpoint_um,
+    _resolve_label_layer,
     compose,
     compute_row_offsets,
     load_generator_report_arg,
@@ -439,6 +441,46 @@ def test_cleanup_points_removes_duplicates_and_collinear():
 
 
 # --------------------------------------------------------------------------- #
+# _resolve_label_layer() / _polyline_midpoint_um() -- #200 net-labelling
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_label_layer_sky130_metal_role_is_li1_pin():
+    # "metal" resolves to li1.drawing (67/20), metals[0] in sky130's
+    # ExtractionDeck -- its paired label is li1.pin (67/5), metal_labels[0].
+    assert _resolve_label_layer("sky130A", (67, 20)) == (67, 5)
+
+
+def test_resolve_label_layer_gf180mcu_metal_role_is_metal1_pin():
+    # "metal" resolves to Metal1 (34/0), gf180mcu's sole metals[] entry --
+    # its paired label is Metal1's pin/label purpose (34/10).
+    assert _resolve_label_layer("gf180mcuA", (34, 0)) == (34, 10)
+
+
+def test_resolve_label_layer_returns_none_for_a_layer_with_no_label_convention():
+    # "poly" (66/20 on sky130) is a valid routable role, but it's not one of
+    # the ExtractionDeck's `metals[]` entries -- no label-layer convention
+    # pairs with it, so routing on it draws metal without a net label rather
+    # than raising or guessing a layer.
+    assert _resolve_label_layer("sky130A", (66, 20)) is None
+
+
+def test_polyline_midpoint_um_straight_line_is_geometric_midpoint():
+    assert _polyline_midpoint_um([(0.0, 0.0), (2.0, 0.0)]) == (1.0, 0.0)
+
+
+def test_polyline_midpoint_um_jogged_route_is_arc_length_midpoint():
+    # Total arc length is 1 + 4 = 5um; the midpoint (2.5um in) falls 1.5um
+    # into the second (vertical) segment.
+    points = [(0.0, 0.0), (1.0, 0.0), (1.0, 4.0)]
+    assert _polyline_midpoint_um(points) == (1.0, 1.5)
+
+
+def test_polyline_midpoint_um_degenerate_zero_length_falls_back_to_first_point():
+    assert _polyline_midpoint_um([(3.0, 4.0), (3.0, 4.0)]) == (3.0, 4.0)
+
+
+# --------------------------------------------------------------------------- #
 # compose() -- routing (phase 2)
 # --------------------------------------------------------------------------- #
 
@@ -490,6 +532,110 @@ def test_compose_routes_two_pin_net_between_adjacent_blocks(tmp_path, pdk_root):
     assert len(paths) == 1
     width_dbu = int(round(0.17 / layout.dbu))
     assert paths[0].path.width == width_dbu
+
+    # #200: the routed net also carries a kdb.Text label on li1.pin (67/5),
+    # named after connectivity[].net -- exactly one, not one per segment.
+    li1_pin = layout.layer(67, 5)
+    texts = list(top.shapes(li1_pin).each())
+    assert len(texts) == 1
+    assert texts[0].text.string == "N1"
+
+    # The label sits strictly in the inter-block channel -- not inside
+    # either block's own bbox (see route_two_pin's obstacle-overlap check
+    # and _polyline_midpoint_um's docstring for why this is guaranteed).
+    b1_bbox = report["blocks"][0]["bbox_um"]
+    b2_bbox = report["blocks"][1]["bbox_um"]
+    label_x_um = texts[0].text.x * layout.dbu
+    assert b1_bbox["x1"] < label_x_um < b2_bbox["x0"]
+
+
+def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_root):
+    # A mixed-orientation port pair (see test_manhattan_backbone_l_corner_for
+    # _mixed_orientation) produces a multi-segment backbone drawn as one
+    # kdb.Path -- confirm the label count stays at one per net regardless of
+    # how many straight segments make up the drawn path.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "m1", rows=1, cols=1)
+    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "m2", rows=1, cols=1)
+    output = tmp_path / "jogged.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 2.0},
+            "connectivity": [
+                {
+                    "net": "GNET",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "jogged_0", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("jogged_0")
+    li1_pin = layout.layer(67, 5)
+    texts = list(top.shapes(li1_pin).each())
+    assert len(texts) == 1
+    assert texts[0].text.string == "GNET"
+
+
+def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
+    tmp_path, pdk_root
+):
+    # "poly" is a valid routable role but has no ExtractionDeck metal_labels
+    # counterpart -- the metal is still drawn, but no label, and a note
+    # explains why.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    output = tmp_path / "unlabelled.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b2", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "poly", "width_um": 0.17},
+            "options": {"cell_name": "unlabelled_0", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+    assert any(
+        "no PDK label-layer convention" in note for note in report["drc_hints"]["notes"]
+    )
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("unlabelled_0")
+    poly = layout.layer(66, 20)
+    paths = [s for s in top.shapes(poly).each() if s.is_path()]
+    assert len(paths) == 1  # metal still drawn
+    li1_pin = layout.layer(67, 5)
+    assert list(top.shapes(li1_pin).each()) == []  # but no label anywhere
 
 
 def test_compose_reports_unroutable_net_as_partial_success(tmp_path, pdk_root):
@@ -684,6 +830,56 @@ def test_compose_integration_three_real_blocks_with_connectivity(tmp_path, pdk_r
     layout = kdb.Layout()
     layout.read(str(output))
     assert layout.cell("ota_top_0") is not None
+
+
+def test_compose_labeled_net_survives_extraction_as_named_pin(tmp_path, pdk_root):
+    # #200's own acceptance bar: run the composed output through `klt
+    # extract`'s real pin-promotion path and confirm the routed
+    # connectivity[] net (VOUT) comes back as a *named* .SUBCKT pin --
+    # not just the deck's always-present `vsubs` substrate tie, and not an
+    # anonymous `$N` net.
+    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp", add_guard_ring=False)
+    mir = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "mir", mirror=True, add_guard_ring=False
+    )
+    tail = _gen_block(tmp_path, pdk_root, "mos_array", "tail", rows=1, cols=1)
+
+    output = tmp_path / "ota_extract.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "diffpair", "generator_report": dp},
+                {"id": "mirror", "generator_report": mir},
+                {"id": "tail", "generator_report": tail},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["diffpair", "mirror", "tail"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "VOUT",
+                    "pins": [
+                        {"block": "diffpair", "port": "Q1_1_D"},
+                        {"block": "mirror", "port": "M1_1_S"},
+                    ],
+                },
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "ota_top_0", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+
+    result = extract.run_extract(str(output), "sky130", top="ota_top_0")
+    pin_names = {net["name"] for net in result["nets"] if net["pin"]}
+    # Before #200: pin_names == {"vsubs"} only (VOUT demoted to an anonymous
+    # $N during Netlist.purge()). After #200: VOUT survives as a real pin
+    # alongside vsubs.
+    assert "VOUT" in pin_names
+    assert "vsubs" in pin_names
 
 
 # --------------------------------------------------------------------------- #
