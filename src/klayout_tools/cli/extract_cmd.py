@@ -29,6 +29,7 @@ def run(args: argparse.Namespace) -> int:
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
+            parasitics=args.parasitics,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -55,6 +56,14 @@ def _print_text(report: dict) -> None:
     pdk = report["pdk"]
     if pdk is not None:
         print(f"pdk: {pdk['variant']} ({pdk['version'] or '-'})")
+
+    parasitics = report.get("parasitics")
+    if parasitics is not None:
+        print(
+            f"parasitics: R={parasitics['r_count']} C={parasitics['c_count']}  "
+            f"total_R={parasitics['total_resistance_ohm']} ohm  "
+            f"total_C={parasitics['total_capacitance_ff']} fF"
+        )
 
     device_counts = report["device_counts"]
     if device_counts:

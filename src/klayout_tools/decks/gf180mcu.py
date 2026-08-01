@@ -182,7 +182,7 @@ get_polygons(117, 10)``):
 
 from __future__ import annotations
 
-from . import DrcRule, ExtractionDeck
+from . import DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001, same as sky130), so a threshold in micrometres
@@ -498,4 +498,31 @@ EXTRACTION_DECK = ExtractionDeck(
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
     metals=((34, 0),),  # Metal1
     metal_labels=((34, 10),),  # Metal1 pin/label purpose
+)
+
+# --------------------------------------------------------------------------- #
+# `klt extract --parasitics` first-order lumped-RC coefficients
+# --------------------------------------------------------------------------- #
+#
+# Representative, uncalibrated starter values drawn from the *public*
+# gf180mcu process documentation (the GlobalFoundries 180nm MCU open PDK /
+# DRM, the same public source family cited at the top of this module; sheet
+# resistances and interconnect area/fringe capacitances from its published
+# per-layer tables). Order-of-magnitude only -- parasitic-extraction accuracy
+# tuning/calibration against silicon is an explicit non-goal of the first cut
+# (issue #216 "Non-goals"). `metals` is index-aligned with EXTRACTION_DECK's
+# `metals` stack: index 0 is Metal1. Values expressed as (sheet ohms/square,
+# area cap fF/um^2, fringe cap fF/um).
+PARASITICS = ParasiticsDeck(
+    # Comp (n+/p+ active) source-drain diffusion; area coefficient stands in
+    # for junction-to-bulk capacitance as a fixed approximation.
+    diffusion=LayerRC(
+        sheet_res_ohm_sq=70.0, cap_area_ff_um2=0.45, cap_perim_ff_um=0.25
+    ),
+    # Poly2 gate/interconnect.
+    poly=LayerRC(sheet_res_ohm_sq=12.0, cap_area_ff_um2=0.10, cap_perim_ff_um=0.05),
+    metals=(
+        # Metal1.
+        LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.05),
+    ),
 )

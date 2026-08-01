@@ -277,6 +277,18 @@ def create_parser() -> argparse.ArgumentParser:
         help="explicit PDK install root; overrides $PDK_ROOT and the search order",
     )
     extract_parser.add_argument(
+        "--parasitics",
+        action="store_true",
+        help=(
+            "additionally extract first-order lumped RC parasitics (one "
+            "series R + one ground C per net, from the deck's curated "
+            "sheet-resistance/capacitance table) as extra R/C cards in the "
+            "written netlist and a `parasitics` block in the JSON. Off by "
+            "default; when omitted, output is byte-identical to a "
+            "schematic-equivalent extraction. See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

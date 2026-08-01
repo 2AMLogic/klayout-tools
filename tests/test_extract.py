@@ -25,7 +25,7 @@ import pytest
 
 from klayout_tools import pdk
 from klayout_tools.cli import main
-from klayout_tools.extract import ExtractError, run_extract
+from klayout_tools.extract import ExtractError, _n_squares, run_extract
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
@@ -690,6 +690,229 @@ def test_extracted_netlist_feeds_klt_sim_unmodified(tmp_path):
                 "analysis": {"kind": "tran", "args": "1n 1n"},
                 "measurements": [
                     {"name": "vout", "spice": ".meas tran vout find v(Y) at=0"}
+                ],
+            }
+        )
+    )
+
+    sim_report = sim.run_sim(str(request))
+
+    assert sim_report["status"] == "pass"
+    assert sim_report["measurements"][0]["worst_case"]["value"] == pytest.approx(1.8)
+
+
+# --------------------------------------------------------------------------- #
+# `--parasitics`: first-order lumped RC extraction (issue #217)
+# --------------------------------------------------------------------------- #
+
+
+def test_n_squares_geometric_estimate():
+    """The area/perimeter -> square-count estimator: 1 square for a square,
+    exact L/W for a rectangle, clamped to >= 1, and 0 for empty geometry."""
+    # A 1x1 square: area 1, perimeter 4 -> 1 square.
+    assert _n_squares(1.0, 4.0) == pytest.approx(1.0)
+    # A 10x1 wire: area 10, perimeter 22 -> 10 squares.
+    assert _n_squares(10.0, 22.0) == pytest.approx(10.0, rel=1e-6)
+    # A 4x1 wire: area 4, perimeter 10 -> 4 squares.
+    assert _n_squares(4.0, 10.0) == pytest.approx(4.0, rel=1e-6)
+    # Empty geometry contributes nothing.
+    assert _n_squares(0.0, 0.0) == 0.0
+    # "Rounder than a rectangle" (negative discriminant) clamps to 1.
+    assert _n_squares(1.0, 3.0) == 1.0
+
+
+def test_parasitics_off_by_default_is_none(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["parasitics"] is None
+
+
+def test_parasitics_off_writes_byte_identical_netlist(tmp_path):
+    """The additive contract: omitting --parasitics leaves the written SPICE
+    byte-identical to a pre-feature schematic-equivalent extraction."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    # Default (no flag) explicitly false, same output path semantics.
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"), parasitics=False)
+    assert a["netlist_sha256"] == b["netlist_sha256"]
+
+
+def test_parasitics_adds_rc_without_changing_schematic_view(tmp_path):
+    """--parasitics is additive: device_count/net_count/devices[]/nets[] keep
+    their exact schematic-equivalent meaning; R/C live only in the SPICE and
+    the separate `parasitics` block."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+
+    assert para["device_count"] == plain["device_count"]
+    assert para["net_count"] == plain["net_count"]
+    assert para["pin_count"] == plain["pin_count"]
+    assert para["device_counts"] == plain["device_counts"]
+    assert para["devices"] == plain["devices"]
+    assert para["nets"] == plain["nets"]
+
+
+def test_parasitics_summary_block_shape(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+    assert para is not None
+    assert set(para) == {
+        "r_count",
+        "c_count",
+        "total_resistance_ohm",
+        "total_capacitance_ff",
+        "nets",
+    }
+    assert para["r_count"] == para["c_count"] == len(para["nets"])
+    assert para["r_count"] >= 1
+    assert para["total_capacitance_ff"] > 0.0
+
+    names = [n["net"] for n in para["nets"]]
+    assert names == sorted(names)  # deterministic, sorted by net name
+    for entry in para["nets"]:
+        assert set(entry) == {
+            "net",
+            "resistance_ohm",
+            "capacitance_ff",
+            "internal_node",
+        }
+        assert entry["capacitance_ff"] > 0.0
+        assert entry["resistance_ohm"] >= 0.0
+        assert entry["internal_node"].startswith(f"{entry['net']}__par")
+    # Internal parasitic node names are unique (collision-suffixed if needed).
+    internal_nodes = [n["internal_node"] for n in para["nets"]]
+    assert len(internal_nodes) == len(set(internal_nodes))
+    # Ground net never gets its own parasitic stub.
+    assert "vsubs" not in names
+
+
+def test_parasitics_writes_r_and_c_cards_preserving_subckt_interface(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+
+    plain_text = Path(plain["netlist_path"]).read_text()
+    para_text = Path(para["netlist_path"]).read_text()
+
+    # The .SUBCKT pin interface is untouched (parasitic nodes are internal).
+    plain_subckt = next(
+        ln for ln in plain_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    para_subckt = next(
+        ln for ln in para_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    assert plain_subckt == para_subckt
+
+    r_lines = [ln for ln in para_text.splitlines() if ln.startswith("R")]
+    c_lines = [ln for ln in para_text.splitlines() if ln.startswith("C")]
+    assert len(r_lines) == para["parasitics"]["r_count"]
+    assert len(c_lines) == para["parasitics"]["c_count"]
+    # Bare R/C cards: R<name> n1 n2 <value> -- no trailing model token.
+    for ln in r_lines + c_lines:
+        assert len(ln.split()) == 4
+
+    # Still a klt-sim-consumable circuit body: no top-level .end/.control.
+    for line in para_text.splitlines():
+        stripped = line.strip().upper()
+        assert stripped != ".END"
+        assert not stripped.startswith(".CONTROL")
+
+
+def test_parasitics_deterministic_across_runs(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"), parasitics=True)
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True)
+    assert a["netlist_sha256"] == b["netlist_sha256"]
+    assert a["parasitics"] == b["parasitics"]
+
+
+def test_cli_parasitics_flag_json(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    exit_code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics", "--format", "json"]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"] is not None
+    assert out["parasitics"]["r_count"] >= 1
+
+
+def test_cli_parasitics_text_reports_counts(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    exit_code = main(["extract", path, "--deck", "sky130", "--parasitics"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "parasitics:" in out
+
+
+@pytest.mark.parametrize(
+    "deck,layout_path",
+    [
+        ("sky130", CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"),
+        (
+            "gf180mcu",
+            CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds",
+        ),
+    ],
+)
+def test_corpus_parasitics_produce_positive_rc(deck, layout_path, tmp_path):
+    """Real sky130/gf180mcu inverters extract a non-trivial, positive lumped
+    RC on their signal/power nets."""
+    report = run_extract(
+        str(layout_path), deck, output=str(tmp_path / "cell.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+    assert para["r_count"] >= 3  # at least in/out/one supply
+    assert para["total_resistance_ohm"] > 0.0
+    assert para["total_capacitance_ff"] > 0.0
+    # Device connectivity view is unchanged by the parasitics pass.
+    assert report["device_count"] == 2
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
+    """Acceptance bar (issue #217): a `--parasitics` netlist stays a drop-in
+    `klt sim` `netlist` -- the same inverter testbench that consumes the
+    schematic-equivalent extraction consumes the parasitic-aware one verbatim
+    and ngspice still reports the correct inverted output."""
+    from klayout_tools import sim
+
+    layout_path = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    netlist_path = tmp_path / "inv_1.spice"
+    report = run_extract(
+        str(layout_path), "sky130", output=str(netlist_path), parasitics=True
+    )
+    assert report["parasitics"]["r_count"] >= 1
+
+    testbench = tmp_path / "testbench.spice"
+    testbench.write_text(
+        f'.include "{netlist_path}"\n'
+        ".model nfet nmos level=1\n"
+        ".model pfet pmos level=1\n"
+        ".param vdd=1.8\n"
+        "Vvpwr VPWR 0 DC {vdd}\n"
+        "Vvpb VPB 0 DC {vdd}\n"
+        "Vvgnd VGND 0 DC 0\n"
+        "Vvsubs vsubs 0 DC 0\n"
+        "Va A 0 DC 0\n"
+        "Xinv A VGND VPB VPWR Y vsubs sky130_fd_sc_hd__inv_1\n"
+    )
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": str(testbench),
+                "analysis": {"kind": "tran", "args": "1n 5n"},
+                "measurements": [
+                    {"name": "vout", "spice": ".meas tran vout find v(Y) at=5n"}
                 ],
             }
         )
