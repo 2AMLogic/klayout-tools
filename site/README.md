@@ -178,6 +178,50 @@ lives in `pdks/cell-netlists/` (git-ignored, populated by
 `scripts/fetch-cell-netlists.sh`); a fresh checkout with no fetched netlists is
 a no-op. gf180mcu is out of scope for this phase — sky130 only.
 
+### SPICE playground engine wrapper (phase B)
+
+`src/lib/playground/` is the client-side SPICE engine wrapper (Epic #90, issue
+#150 / parent #148) that phase C's playground UI (#151) builds on. It wraps
+[`eecircuit-engine`](https://www.npmjs.com/package/eecircuit-engine) — a
+MIT-licensed WASM build of ngspice (BSD-3 core) recommended by the spike
+(`docs/design/wasm-spice-playground-spike.md`) — with three concerns:
+
+- **`netlist.ts`** (pure, no engine): turns editable stimulus parameters
+  (`StimulusParams`: supply, pulse slew/timing, load cap, temperature, transient
+  window) plus a phase-A vendored model deck into one self-contained SPICE deck
+  via `{{name}}`-placeholder substitution (`assembleNetlist`). The default
+  testbench is a transistor-level inverter built from the two vendored sky130
+  primitives (`nfet_01v8` / `pfet_01v8_hvt`) — the same netlist the spike
+  benchmarked. The model text is **spliced in from the checksummed phase-A deck**
+  (`/blocks/<slug>/models/<corner>.spice`), never the engine's bundled model
+  blobs. Being engine-free, the parameter → netlist substitution is fully
+  unit-tested (`netlist.test.ts`).
+- **`engine.ts`**: lazy-loads the ~19 MB (5.75 MB gzip) engine only via a dynamic
+  `import("eecircuit-engine")` inside `loadSimulation()` — nothing imports it at
+  page load (`DetailPage` does not reference it), so a visitor who never triggers
+  the playground never fetches it. `loadSimulation()` memoizes the started
+  instance so `sim.start()` (the one-time ~600 ms WASM init) runs **once per page
+  visit**, reused across every re-run. `runPlayground()` orchestrates fetch →
+  assemble → `setNetList` → `runSim` and returns the result in the site's shared
+  `WaveformData` shape.
+
+**Engine version pinning** (spike open question): `eecircuit-engine` is pinned to
+an **exact** version in `package.json` (`1.7.0`); the ngspice version it embeds
+is recorded in `EMBEDDED_NGSPICE_VERSION` (`ngspice-45.2+`, build
+`Tue Mar 24 02:02:56 UTC 2026`) and confirmed at runtime from each result
+header by `extractNgspiceVersion()` — the same way `klt sim`'s
+`environment.engine_version` records the server-side engine.
+
+**Perf validation** (spike open question, "Real-browser perf validation"):
+`npm run playground-perf` reproduces the spike's Node methodology (one cold
+`start()`, then two `runSim()` calls on the same instance). Measured on this
+build: `start()` ~580–630 ms, re-runs well under the ~1 s budget — matching the
+spike's numbers. To validate in a **real browser tab** rather than Node, run the
+equivalent `perfProbe()` (exported from `engine.ts`) from the Vite dev server's
+DevTools console; the engine's Emscripten build targets `"web,worker"`, so a
+future phase may move it to a dedicated Web Worker (a phase-C UX call) without a
+rebuild.
+
 ### Bootstrap data
 
 The `layout.json` schema is the contract emitted by `klt layout-metrics`
@@ -221,6 +265,7 @@ site/
     copy-renders.mjs    # prebuild: stages blocks/*/output/... into public/blocks/
     stage-models.mjs    # prebuild: stages checksummed sky130 SPICE model decks (issue #149)
     sky130-models.NOTICE.txt  # Apache-2.0 attribution staged alongside model decks
+    playground-perf.mjs  # perf harness: reproduces the spike's engine timing (issue #150)
     prerender.mjs        # build: client + SSR Vite builds -> static dist/<route>/index.html
     html-template.mjs    # shared HTML injection helper (prerender.mjs + vite.config.ts's dev SSR)
   public/
@@ -253,6 +298,12 @@ site/
     lib/
       utils.ts             # shadcn's `cn` class-merging helper
       blockAssets.ts        # block-relative asset URL helper (renders/signals)
+      playground/           # client-side SPICE playground engine wrapper (#150)
+        netlist.ts          # pure stimulus-params -> netlist assembly
+        netlist.test.ts
+        engine.ts            # lazy-load / cache / run eecircuit-engine (WASM ngspice)
+        engine.test.ts
+        index.ts             # public re-exports
     pages/
       IndexPage.tsx         # landing page (closed-loop vision statement) + gallery card grid
       DetailPage.tsx         # per-block detail page
