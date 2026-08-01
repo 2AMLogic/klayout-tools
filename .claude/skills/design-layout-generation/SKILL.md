@@ -1,6 +1,6 @@
 ---
 name: "Design Pipeline: Layout Generation (S7)"
-description: "Blocked — klt gen ships single-cell primitive generators (mos_array, res_array, guard_ring, diff_pair, bjt_array) but cannot compose multiple generated blocks into one placed-and-routed circuit. klt render and klt layout-metrics are usable today for inspecting a hand-edited or externally produced layout."
+description: "klt gen ships single-cell primitive generators (mos_array, res_array, guard_ring, diff_pair, bjt_array); klt gen-compose places and wires multiple generated blocks into one circuit (row placement + two-pin routing), verified end to end against a real sky130 5T OTA. klt render and klt layout-metrics are usable today for inspecting a hand-edited or externally produced layout."
 domain: design-pipeline
 type: skill
 user-invocable: false
@@ -15,60 +15,78 @@ per-stage contracts, and model-class matrix live in
 Re-read that doc's S7 entries directly if anything here seems stale — this
 file only restates it for an agent entering the stage.
 
-## Status: blocked — generators exist but don't compose
+## Status: unblocked — single- and multi-block circuits both runnable
 
-**This is not "no generator verb at all" anymore** — that was the correct
-description before Epic #152 (`klt gen`, phases 1–4) shipped, but is now
-stale. `klt gen` exists and ships five single-cell primitive generators —
+**This used to be "blocked" for any circuit needing more than one generated
+block** — that was accurate before Epic #191 (`klt gen-compose`) shipped,
+but is now stale. `klt gen` ships five single-cell primitive generators —
 `resistor_strip`, `mos_array`, `res_array`, `guard_ring`, `diff_pair`,
 `bjt_array` (`docs/cli/gen.md`) — each producing a GDS/OASIS stream plus a
 structured report (`ports[]`, `bbox_um`, `drc_hints`) per the contract
-`docs/design/layout-generator-spike.md` (issue #104) settled.
+`docs/design/layout-generator-spike.md` (issue #104) settled. `klt
+gen-compose` (`docs/cli/gen-compose.md`) then places a set of already-
+generated blocks into one row and routes two-pin nets between their named
+ports, per `docs/design/gen-composition-spike.md` (issue #186)'s
+build-native-not-wrap decision. Phase 3 (#196) proved this against the real
+5T OTA case this stage's own design doc names as the motivating example (a
+differential pair, a current-mirror load, and a tail current source), taken
+cleanly through `klt gen-compose` -> `klt extract` -> `klt lvs`.
 
-**The current, accurate blocker is narrower: `klt gen` has no capability to
-compose multiple generated primitives into one placed-and-routed circuit.**
-A real block (e.g. a 5T OTA — a differential pair, a current-mirror load,
-and a tail device, wired together) needs several generator outputs placed
-relative to each other and connected by routed metal; nothing in `klt gen`
-does that. This was a deliberate, explicitly-stated scope boundary of Epic
-#152 at every phase, not an oversight — see
-`docs/design/gen-composition-spike.md` (issue #186) for the survey of
-placement/routing approaches and the build/wrap decision for closing this
-specific gap. Until that capability ships, this stage is not runnable by an
-agent unaided for any circuit needing more than one generator instance:
-layout must be produced by some other means (hand-edited, imported, or
-produced outside this pipeline) before S7's exit criteria can be evaluated
-for such a circuit. A circuit realizable as exactly **one** `klt gen` call
-(e.g. a single matched-device array with no further wiring to another
-generated block) is already unblocked today.
+**Use `klt gen-compose` for any circuit needing more than one generated
+block wired together.** Two caveats to know before composing, both found
+during #196's bring-up and filed as follow-up issues (not yet fixed):
+
+- **Wire opposite-facing port pairs only, and disable
+  `add_guard_ring`.** Every phase-2 generator's `_D` ports face east and
+  `_S` ports face west regardless of a block's row position; connecting two
+  same-facing ports (e.g. `_D` to `_D` across adjacent blocks — the naive
+  "tie both drains together" reading of a current-mirror load) or routing
+  into a guard-ringed block from outside both draw a route straight through
+  intervening geometry, producing a spurious device-level short that `klt
+  gen-compose` does **not** warn about (#199). `docs/cli/gen-compose.md`'s
+  worked example shows the working pattern: place blocks so a connection
+  only ever needs to reach the *nearer* (outer) same-row pin of its target,
+  and pass `"add_guard_ring": false` to any block an external net reaches
+  into.
+- **A composed circuit's connectivity nets are not addressable from `klt
+  sim`.** `klt gen-compose` draws no net labels, so `klt extract`'s
+  pin-promotion keeps only the deck's one globally-connected net (the
+  substrate tie) as a real `.SUBCKT` pin — every other net, including the
+  ones `klt gen-compose` just wired, is unreachable from a `klt sim`
+  testbench (#200). Loop B (DRC/LVS) is unaffected; **post-extraction `klt
+  sim` bias/measurement is still blocked** for a composed circuit's own
+  gates/bias/supply nodes until #200 closes.
 
 ## Contract (design doc §2, S7)
 
 | | |
 | --- | --- |
 | Input artifact | S6's netlist (elaborated, matches S4/S5's intent) + S5's sized device parameters — a generator needs both connectivity and sizes. |
-| Output artifact | GDSII/OASIS layout stream, plus a structured report (ports, bounding box, DRC-relevant metadata) — the shape `docs/cli/gen.md` documents for a single generator call. A multi-block, placed-and-routed circuit's equivalent output is proposed, not implemented, in `docs/design/gen-composition-spike.md` (#186). |
+| Output artifact | GDSII/OASIS layout stream, plus a structured report (ports, bounding box, DRC-relevant metadata) — the shape `docs/cli/gen.md` documents for a single generator call, or `docs/cli/gen-compose.md`'s composed-cell shape (per-block offsets, per-net routing result) for multiple blocks wired together. |
 | Entry criteria | Netlist elaborates cleanly (S6 exit criteria met). |
 | Exit criteria | Loop B's convergence criterion (design doc §1): zero DRC violations and clean LVS. |
-| `klt` verbs | `klt gen` (`docs/cli/gen.md`) for a single primitive generator call — shipped and usable today. No verb for composing multiple generator outputs into one circuit yet — blocked (see above). `klt render` (visual inspection of an existing layout) and `klt layout-metrics` (area/utilization aggregation) are also shipped and usable today against whatever layout exists, regardless of how it was produced. |
-| Failure modes | Loop B's stuck condition (design doc §1: violation count not monotonically decreasing, a "fixed" rule re-firing, or a DRC fix breaking LVS); a generator producing DRC-clean geometry whose connectivity doesn't match S6 — an LVS failure masquerading as a DRC pass. |
+| `klt` verbs | `klt gen` (`docs/cli/gen.md`) for a single primitive generator call, and `klt gen-compose` (`docs/cli/gen-compose.md`) to place + wire multiple generator outputs into one circuit — both shipped and usable today (see caveats above). `klt render` (visual inspection of an existing layout) and `klt layout-metrics` (area/utilization aggregation) are also shipped and usable today against whatever layout exists, regardless of how it was produced. |
+| Failure modes | Loop B's stuck condition (design doc §1: violation count not monotonically decreasing, a "fixed" rule re-firing, or a DRC fix breaking LVS); a generator producing DRC-clean geometry whose connectivity doesn't match S6 — an LVS failure masquerading as a DRC pass; for a composed circuit, a same-facing-port or guard-ring routing short that `klt gen-compose` reports as `routed: true` with no warning (#199 — verify with `klt extract`, not just `klt gen-compose`'s own exit code). |
 
 ## What an agent can do today
 
 1. **Run a single `klt gen` primitive generator.** `klt gen <generator>
    --pdk <variant> -o <path>` produces a DRC-clean single-cell block
    (`resistor_strip`, `mos_array`, `res_array`, `guard_ring`, `diff_pair`,
-   `bjt_array` — `docs/cli/gen.md`). This is sufficient for any circuit that
-   is exactly one matched-device group with no further wiring to another
-   generated block; it is **not** sufficient for a multi-block circuit
-   (composition is blocked — see above).
-2. **Inspect an existing layout.** `klt render <file>` produces one PNG per
+   `bjt_array` — `docs/cli/gen.md`).
+2. **Compose multiple generated blocks into one placed-and-routed
+   circuit.** `klt gen-compose <request.json>` places a row of already-
+   generated blocks and routes two-pin nets between their named ports
+   (`docs/cli/gen-compose.md`) — read that document's "Known limitations"
+   section and worked example before wiring a real circuit (the
+   opposite-facing-ports / no-guard-ring caveats above).
+3. **Inspect an existing layout.** `klt render <file>` produces one PNG per
    non-empty layer for visual review (`docs/cli/render.md`).
-3. **Aggregate block-level metrics.** `klt layout-metrics <block> [--deck
+4. **Aggregate block-level metrics.** `klt layout-metrics <block> [--deck
    sky130|gf180mcu]` normalizes `klt layers`/`klt cells`/`klt drc` output for
    a block directory into `layout.json`, including area/utilization-relevant
    counts and (with `--deck`) a DRC summary (`docs/cli/layout-metrics.md`).
-4. **Enter S8 (DRC/LVS) against whatever layout exists** once one has been
+5. **Enter S8 (DRC/LVS) against whatever layout exists** once one has been
    produced by some other means — S8's skill (`../design-drc-lvs/SKILL.md`)
    picks up from there.
 
@@ -81,19 +99,20 @@ generator-contract provenance for later stages to trust).
 ## Model-class assignment (design doc §3)
 
 **mid-tier.** Mapping sized devices onto generator parameters (grid,
-matching, guard rings) requires layout-idiom judgment even when the
-generator itself is mechanical — not a frontier-reasoning task once a
-generator exists, but not small-fast mechanical transformation either.
+matching, guard rings) — and, for a multi-block circuit, choosing a
+`placement.order` and `connectivity[]` that both realise the intended
+topology and avoid the routing gaps above — requires layout-idiom judgment
+even when the generator itself is mechanical — not a frontier-reasoning
+task once a generator exists, but not small-fast mechanical transformation
+either.
 
 **Escalation rule:** escalate to frontier-reasoning when no generator
 primitive fits the block's topology (a floorplan-level decision, not a
-parameter tweak). For a **single-generator** circuit this is now
-conditional on the topology (a `klt gen` primitive may or may not fit).
-For any circuit needing **more than one** generated block wired together,
-escalation remains **unconditional** until #186's composition gap closes —
-there is no way to place and route multiple generator outputs into one
-circuit yet, regardless of how well each individual block's topology fits
-an existing generator.
+parameter tweak), **or** when a multi-block circuit's needed connectivity
+cannot be expressed as `klt gen-compose`'s two-pin, opposite-facing-port
+routing (e.g. a genuine >2-pin bundle net, or a topology requiring
+`"grid"` placement) — both are floorplan-level gaps this phase's tooling
+does not cover, not parameter tweaks.
 
 ## Failure modes (recap)
 
@@ -103,3 +122,6 @@ an existing generator.
   the provenance later stages (and signoff, S11) would want.
 - Treating `klt render`/`klt layout-metrics` output as evidence of
   generation success — they inspect a layout, they do not produce one.
+- Treating `klt gen-compose`'s `routed: true`/exit `0` as proof of correct
+  connectivity — verify with `klt extract` (device-level net names) before
+  trusting a composed circuit, per #199 above.
