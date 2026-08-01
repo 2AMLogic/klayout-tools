@@ -190,6 +190,41 @@ describe("WaveformViewer", () => {
     await waitFor(() => expect(domainLabel()).toBe(fullRangeText));
   });
 
+  it("overlays a liveWaveform as an extra, auto-selected corner (issue #151 playground)", async () => {
+    const liveData: WaveformData = {
+      plotname: "Transient Analysis",
+      variables: [
+        { index: 0, name: "time", type: "time" },
+        { index: 1, name: "v(y)", type: "voltage" },
+      ],
+      points: [
+        [0, 1.8],
+        [1e-9, 0],
+      ],
+    };
+
+    const { rerender } = render(
+      <WaveformViewer slug="sky130_fd_sc_hd__inv_1" signals={signals} liveWaveform={null} />,
+    );
+    await waitFor(() => expect(screen.getByTestId("waveform-plot")).toBeInTheDocument());
+    const beforeCount = screen.getByTestId("waveform-plot").querySelectorAll("path").length;
+    expect(screen.queryByLabelText("Toggle corner live (tt)")).not.toBeInTheDocument();
+
+    rerender(
+      <WaveformViewer
+        slug="sky130_fd_sc_hd__inv_1"
+        signals={signals}
+        liveWaveform={{ id: "live:tt", label: "live (tt)", data: liveData }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Toggle corner live (tt)")).toBeChecked());
+    await waitFor(() => {
+      const afterCount = screen.getByTestId("waveform-plot").querySelectorAll("path").length;
+      expect(afterCount).toBeGreaterThan(beforeCount);
+    });
+  });
+
   it("renders a 'no signals data' message for an empty corners list", () => {
     render(
       <WaveformViewer

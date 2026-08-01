@@ -1,6 +1,7 @@
 import type { Layout } from "@/data/types";
 import { Table, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { WaveformViewer } from "@/components/waveform";
+import { StimulusPlayground, isPlaygroundEligible } from "@/components/playground";
 import { blockAssetUrl } from "@/lib/blockAssets";
 
 /**
@@ -17,8 +18,11 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * (omit-absent rule — a missing field is never rendered as
  * "null"/"undefined"), a Signals section (issue #100, Epic #90 Phase 2)
  * gated behind `layout.signals` and rendered by `@/components/waveform`'s
- * `WaveformViewer`, a downloads section gated behind `layout.downloadable`,
- * and a back-link to the gallery index.
+ * `WaveformViewer` — or, for a sky130 gallery cell with a staged playground
+ * model deck (Epic #90 phase C, issue #151), `@/components/playground`'s
+ * `StimulusPlayground`, which wraps the same viewer with editable stimulus
+ * controls and a client-side ngspice re-run — a downloads section gated
+ * behind `layout.downloadable`, and a back-link to the gallery index.
  *
  * Matches the original Astro page's chrome exactly: no shared Header/Footer
  * — this page has always been a standalone document (see `[slug].astro`,
@@ -181,7 +185,11 @@ export function DetailPage({ layout }: DetailPageProps) {
       {layout.signals !== undefined && (
         <section aria-label="Signals" className="mt-9">
           <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Signals</h2>
-          <WaveformViewer slug={layout.slug} signals={layout.signals} />
+          {isPlaygroundEligible(layout.slug) ? (
+            <StimulusPlayground slug={layout.slug} signals={layout.signals} />
+          ) : (
+            <WaveformViewer slug={layout.slug} signals={layout.signals} />
+          )}
         </section>
       )}
 
