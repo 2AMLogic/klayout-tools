@@ -305,8 +305,18 @@ written to stdout. No Python traceback is printed.
 
 ## Out of scope
 
-Parasitic (RC) extraction is explicitly deferred, per the phase 1 spike's
-"Out of scope" section — this command extracts devices and connectivity
-only, never interconnect resistance/capacitance. Netlist comparison
-(`klt lvs`) is a separate, later phase; this command only produces the
-layout-side netlist half of that comparison.
+Parasitic (RC) extraction is not implemented — this command extracts
+devices and connectivity only, never interconnect resistance/capacitance.
+This gap has a concrete tracking issue,
+[#216](https://github.com/2AMLogic/klayout-tools/issues/216), with a
+recorded interface decision in
+[`docs/design/lvs-extraction-spike.md`](../design/lvs-extraction-spike.md)
+→ "Addendum (#216): parasitic (RC) extraction interface decision": if/when
+built, it stays inside this command behind an explicit `--parasitics` flag
+(no new verb), additive to the JSON/SPICE contract documented above, for
+sky130 and gf180mcu. #216 is the design step only — the implementation
+itself is unscheduled and tracked separately by
+[#217](https://github.com/2AMLogic/klayout-tools/issues/217).
+
+Netlist comparison (`klt lvs`) is a separate command; this command only
+produces the layout-side netlist half of that comparison.

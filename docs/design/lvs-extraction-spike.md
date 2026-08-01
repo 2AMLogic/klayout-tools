@@ -654,3 +654,147 @@ dropped:
   reference, hints) hashes — the same caching opportunity the SPICE spike
   flagged for corners, so a re-run after a one-net fix need not re-extract the
   whole layout.
+
+## Addendum (#216): parasitic (RC) extraction interface decision
+
+**Status:** design decision only. Like the rest of this spike, nothing here
+authorises implementation — it resolves the interface/contract questions
+this document's own "Out of scope" section deferred ("committing to an
+RC-extraction contract... belongs to its own follow-on decision once
+schematic-equivalent extraction is real and a friction-log entry demands
+parasitics"). #216 is that friction-log entry. Schematic-equivalent `klt
+extract`/`klt lvs` are shipped (Epic #153, phases 2–4); this addendum is the
+follow-on decision the original text promised, scoped — per #216's own
+"Ask" and its curator enhancement — to the decision, not the build. No code
+in `src/klayout_tools/` changes as part of this addendum.
+
+### Interface shape: stays inside `klt extract`, behind `--parasitics`
+
+Parasitics extraction is **not** a distinct verb. It stays inside `klt
+extract` behind an explicit, opt-in `--parasitics` flag, for the same
+reasons `--pdk`/`--pdk-root` (#214) were added as flags rather than a
+sibling command:
+
+- A parasitics pass still needs the exact same flattened `LayoutToNetlist`
+  connectivity/device extraction `klt extract` already performs (§2a) — a
+  separate verb would duplicate `--deck`/`--top`/`--pdk` resolution and the
+  device-recognition pass for no benefit, and would risk the two outputs
+  (schematic-equivalent vs. parasitic-aware) silently diverging in what they
+  consider a "device" or a "net."
+- `--parasitics` is additive and off by default: the current fast,
+  parasitics-free path (`klt extract`'s existing contract, `docs/cli/
+  extract.md`) is completely unaffected when the flag is omitted — matching
+  this spike's original framing of a future parasitic mode as "an *additive*
+  extension... that does not break the schematic-equivalent contract."
+- This mirrors the project's general precedent for optional deeper analysis
+  behind a flag rather than a new verb (e.g. `klt drc`'s coverage reporting,
+  #193) — reserve a new verb for a capability with a genuinely different
+  input/output shape, which parasitics is not: it is still "layout in,
+  netlist out."
+
+### Coupling model and reduction strategy: what KLayout offers vs. what we'd build
+
+Verified live against this repo's actual runtime dependency (pip `klayout`
+0.30.10, the same package `klt extract`/`klt drc` already use — no second
+engine):
+
+- `db.LayoutToNetlist` itself carries **no interconnect-mesh parasitic
+  extraction call.** Its full method surface (audited directly via
+  `dir(LayoutToNetlist)`) has no `extract_rc`/`extract_parasitics`-shaped
+  API — only the connectivity/device extraction (`extract_netlist`,
+  `extract_devices`) this spike already scoped for schematic-equivalence.
+- KLayout **does** ship `db.DeviceExtractorResistor` /
+  `db.DeviceClassResistor` (and `...Capacitor`/`...CapacitorWithBulk`
+  counterparts). These recognize an **explicit, drawn resistor or capacitor
+  device** — e.g. a PDK's precision poly resistor or MiM cap structure, the
+  same device-recognition idiom `klt extract` already uses for
+  `DeviceExtractorMOS4Transistor` (`R = L/W * sheet_rho` from the shape
+  geometry). This is the "parasitic-adjacent capability" the original
+  "Out of scope" section gestured at — but it recognizes a *device the
+  designer intentionally drew as a resistor/capacitor*, not the parasitic
+  resistance/capacitance of ordinary interconnect wiring. It does not
+  generalize to "compute R/C for every net's routing."
+- There is therefore **no built-in call to wrap** for genuine interconnect
+  parasitics; a real implementation needs one of:
+  1. **Build a first-order, lumped reduction ourselves** on top of the
+     shapes `LayoutToNetlist` already tracks per net (`shapes_of_net`/
+     `polygons_of_net`): one equivalent series resistance per net segment
+     from a curated per-layer sheet resistance (`rho`), and one lumped
+     capacitance-to-ground per net from curated per-layer area/perimeter
+     capacitance coefficients — the same "curate what the PDK doesn't hand
+     us as a native KLayout deck" pattern already used for the DRC decks
+     (`src/klayout_tools/decks/`) and this spike's own connectivity decks.
+     Net-to-net coupling capacitance (as opposed to ground capacitance) is
+     explicitly **not** part of this first-order model — it requires
+     spacing-aware neighbor geometry the lumped-to-ground model does not
+     capture, and is a credible second increment once a friction log
+     demands it.
+  2. **Wrap an external, already-built open-source PEX layer on top of
+     KLayout**, if a suitably licensed (MIT/Apache/BSD, matching this
+     project's open-PDK-and-open-tooling posture) and headless-scriptable
+     one exists — evaluated the same way this spike evaluated `klayout`
+     vs. `magic`/`netgen` for LVS (§3), i.e. "wrap the proven engine" when
+     one credibly exists rather than building from scratch.
+  - **Recommendation:** this addendum does **not** pick between (1) and
+    (2) — that survey (candidate engines, license/headless fitness,
+    accuracy-vs-effort) is exactly the kind of judgment call #216's own
+    "Non-goals" section rules out doing here ("parasitic extraction
+    accuracy tuning/calibration... is out of scope"). It is scoped work
+    for the follow-on implementation issue, matching how this spike's §3
+    itself was the dedicated venue for the LVS engine survey rather than
+    folding it into the Overview.
+
+### Accuracy vs. runtime tradeoff: fixed, not tunable, in a first cut
+
+A single, fixed, first-order lumped model (§ above) — no `--parasitics
+fast|accurate` mode selector. Exposing an accuracy/runtime knob is only
+worth the added contract surface once real friction demands a tradeoff be
+made visible to a caller; until then a fixed, documented, conservative
+approximation is simpler to reason about and to test. This matches the
+project's demand-driven capability-arrival rule (`docs/ARCHITECTURE.md` →
+"How capabilities arrive").
+
+### Output format: additive, still one flat SPICE netlist
+
+Confirmed unchanged from this spike's original framing — the follow-on
+implementation must keep:
+
+- **One SPICE file**, still a `.SUBCKT ... .ENDS` circuit body with no
+  top-level `.control`/`.end` card, still directly consumable by `klt sim`'s
+  `netlist` field with no manual reformatting (`docs/cli/sim.md` →
+  "Netlist convention"). Parasitic elements are additional `R`/`C`
+  primitive instances alongside the existing `M`-card (or `X`-card, when
+  `--pdk` model-binding is active) device instances — never a second file
+  and never a different netlist shape.
+- **`devices[]`/`nets[]` JSON stays additive, not breaking.** The
+  currently-documented fields (`docs/cli/extract.md` → "JSON schema") keep
+  their exact meaning whether or not `--parasitics` is given. The follow-on
+  implementation issue should scope whatever new summary fields it needs
+  (e.g. a `parasitics` block with R/C element counts) as new,
+  independently-optional additions — never a retype/rename of an existing
+  field, per this project's JSON-contract rule
+  (`docs/json-contract.md`).
+
+### PDK coverage: sky130 and gf180mcu, same resolution path
+
+No new PDK-selection mechanism. `--parasitics` reuses `klt extract`'s
+existing `--deck sky130|gf180mcu` plus its existing optional `--pdk`/
+`--pdk-root` resolution (`docs/cli/extract.md` → "PDK resolution"). The
+per-layer sheet-resistance and area/perimeter capacitance coefficients the
+lumped model needs (see "Coupling model" above) are exactly the kind of
+per-PDK numeric table this repo already curates by hand for the DRC decks
+and the SPICE model-binding table (#214) — sourced from each PDK's own
+public device/process data, never from an NDA'd source, matching
+`docs/cli/extract.md` → "SPICE model binding" as the closest existing
+precedent for a curated, per-PDK-variant numeric table.
+
+### Follow-on
+
+This addendum recommends eventually building the first-order lumped model
+above (§ "Coupling model," option 1, unless the follow-on issue's own
+engine survey finds a wrap candidate under option 2 that is clearly
+preferable) — per #216's acceptance criteria, that implementation work is
+filed as a separate tracking issue, #217, rather than done inline here, the
+same way Epic #153's phase-1 spike (#161) preceded its phase-2
+implementation issue (#162). See #216 (this decision) and #217
+(implementation) for status.
