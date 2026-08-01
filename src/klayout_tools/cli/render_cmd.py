@@ -13,6 +13,7 @@ def run(args: argparse.Namespace) -> int:
             output_dir=args.output,
             width=args.width,
             height=args.height,
+            background=args.background,
         )
     except RenderError as exc:
         return emit_error("render", str(exc), args.format)
@@ -25,6 +26,8 @@ def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"output_dir: {report['output_dir']}")
     print(f"size: {report['width']}x{report['height']}")
+    print(f"background: {report['background']}")
+    print(f"overview: {report['overview']}")
     print(f"layers: {report['layer_count']}")
     print(f"rendered: {report['rendered_count']}")
 

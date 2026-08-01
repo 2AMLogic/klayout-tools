@@ -135,6 +135,36 @@ def test_render_report_clears_stale_owned_files(tmp_path):
     assert unrelated.is_file()
 
 
+def test_render_report_writes_overview(tmp_path):
+    """An all-layers composite `overview.png` is always written and reported,
+    and a stale one is cleared on re-render like the per-layer PNGs."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stale = out_dir / "overview.png"
+    stale.write_bytes(b"stale")
+
+    path = _write_design(tmp_path)
+    report = render_report(str(path), output_dir=str(out_dir))
+
+    overview = Path(report["overview"])
+    assert overview == out_dir / "overview.png"
+    assert overview.is_file()
+    assert overview.read_bytes() != b"stale"
+    assert overview.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_render_report_background(tmp_path):
+    """`background` is validated and echoed in the report."""
+    path = _write_design(tmp_path)
+    report = render_report(
+        str(path), output_dir=str(tmp_path / "out"), background="#0b0e13"
+    )
+    assert report["background"] == "#0b0e13"
+
+    with pytest.raises(RenderError, match="invalid background color"):
+        render_report(str(path), output_dir=str(tmp_path / "out2"), background="red")
+
+
 def test_render_report_invalid_dimensions(tmp_path):
     path = _write_design(tmp_path)
     with pytest.raises(RenderError, match="invalid image size"):
@@ -176,10 +206,14 @@ def test_json_contract(tmp_path, capsys):
         "output_dir",
         "width",
         "height",
+        "background",
+        "overview",
         "layer_count",
         "rendered_count",
         "layers",
     }
+    assert isinstance(data["background"], str)
+    assert isinstance(data["overview"], str)
     assert data["schema_version"] == 1
     assert isinstance(data["output_dir"], str)
     assert isinstance(data["width"], int)
