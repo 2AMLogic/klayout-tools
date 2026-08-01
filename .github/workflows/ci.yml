@@ -93,7 +93,16 @@ jobs:
         run: scripts/fetch-cell-netlists.sh
 
       - name: pytest
+        # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`
+        # integration tests (issue #62's public-repo gate + full canary
+        # ingest) -- the default automatic token, not a new secret. Its
+        # cross-repo/cross-org reach is exactly the reach the gate itself
+        # needs at ingest time: it can read public repos anywhere, but a
+        # private repo in a different org (e.g. 2AMLogic/gf180-trng) 404s,
+        # which is the fail-closed "refuse" behavior those tests assert.
         run: uv run --frozen --extra dev pytest
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: klt kb validate
         # Belt-and-suspenders alongside tests/test_kb.py (which calls the same

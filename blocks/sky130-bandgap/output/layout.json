@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-01T04:22:04.258860+00:00",
+  "slug": "sky130-bandgap",
+  "name": "Sky130 Bandgap",
+  "description": "Bandgap voltage reference on sky130 \u2014 2AM Logic canary block",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Output reference",
+        "target": "1.20 V \u00b11% untrimmed (3.3 V I/O devices)",
+        "stretch": "\u00b10.5% with trim; sub-1V Banba variant on 1.8 V core"
+      },
+      {
+        "parameter": "Temp coefficient (\u221240\u2026125 \u00b0C)",
+        "target": "< 50 ppm/\u00b0C",
+        "stretch": "< 20 ppm/\u00b0C"
+      },
+      {
+        "parameter": "PSRR @ DC",
+        "target": "> 60 dB",
+        "stretch": "> 70 dB"
+      },
+      {
+        "parameter": "Supply",
+        "target": "3.3 V \u00b110%",
+        "stretch": "1.8 V variant"
+      },
+      {
+        "parameter": "Iq",
+        "target": "< 50 \u00b5A",
+        "stretch": "< 20 \u00b5A"
+      },
+      {
+        "parameter": "Area",
+        "target": "< 0.05 mm\u00b2"
+      },
+      {
+        "parameter": "Startup",
+        "target": "self-starting, < 1 ms"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #1"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "pass",
+    "corner_count": 6,
+    "default_corner_id": "mos-matching-characterization/tt_27c_3.30v",
+    "passed": 6,
+    "failed": 0,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "Mos Matching Characterization",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Pdk Smoke",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Pnp Characterization",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Pnp Mismatch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Resistor Flavor Characterization",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Resistor Tc Single Length",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "mos-matching-characterization/tt_27c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "mna2u_id",
+            "value": 2e-06,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna2u_vth",
+            "value": 0.811889,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna2u_vov",
+            "value": 0.0506902,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna2u_gmid",
+            "value": 15.39491,
+            "unit": "/V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna5u_id",
+            "value": 5e-06,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna5u_vth",
+            "value": 0.811928,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna5u_vov",
+            "value": 0.118048,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "mna5u_gmid",
+            "value": 11.73011,
+            "unit": "/V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pdk-smoke/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vgs",
+            "value": 0.918849,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup",
+            "value": 2.05115e-06,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pnp-characterization/tt_27c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "veb_small_100n",
+            "value": 0.48467,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "veb_large_100n",
+            "value": 0.470275,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dvbe_100n",
+            "value": 0.0143955,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "veb_small_316n",
+            "value": 0.514702,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "veb_large_316n",
+            "value": 0.500072,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dvbe_316n",
+            "value": 0.01463,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "veb_small_1u",
+            "value": 0.545166,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "veb_large_1u",
+            "value": 0.529986,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pnp-mismatch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "resistor-flavor-characterization/tt_27c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "r_highl1",
+            "value": 704.532,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_highl20",
+            "value": 6876.25,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_xhighl1",
+            "value": 2152.97,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_xhighl20",
+            "value": 42407.2,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "resistor-tc-single-length/tt_27c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "r_xh_l50_5u",
+            "value": 105965.0,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_xh_l50_0p5u",
+            "value": 105966.0,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_xh_l5_5u",
+            "value": 10627.5,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_high_l50_5u",
+            "value": 16621.1,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tc_probe_lit",
+            "value": 997.071,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tc_probe_expr",
+            "value": 997.071,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tc_probe_beh",
+            "value": 1000.0,
+            "unit": "ohm",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-bandgap",
+    "ref": "7709135dce352b7044979103d90a02e2b3129a09",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

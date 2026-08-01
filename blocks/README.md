@@ -94,6 +94,74 @@ pipeline artifact, the stage-by-stage status, and a provisional pre-layout
 signoff comparison — lives at
 [`../examples/design-pipeline/README.md`](../examples/design-pipeline/README.md).
 
+## Canary blocks (issue #62)
+
+Two more blocks — `gf180-bandgap` and `sky130-bandgap` — are ingested from
+real, public canary block repos (2AM Logic's own bandgap voltage-reference
+designs, built end to end by AI agents against the open gf180mcu/sky130
+PDKs), not the #4 demo corpus and not the design-pipeline worked example
+above. Per operator decision 2026-07-31, these real blocks are first-class
+gallery content, not just purpose-built demos; simple demo blocks remain a
+welcome supplement, not the focus.
+
+[`../scripts/ingest-canary.py`](../scripts/ingest-canary.py) does the work:
+
+```
+python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap
+python scripts/ingest-canary.py --repo 2AMLogic/sky130-bandgap
+```
+
+It clones (or fetches+checks out, if already cached under the gitignored
+`.cache/canary-repos/`) the given repo at its default branch's current
+`HEAD`, resolves and pins the exact commit sha as `layout.json`'s
+`source.ref`, and writes `blocks/<slug>/output/layout.json`.
+
+**Public-repo gate (fail-closed).** Before touching the filesystem, the
+script calls `gh api repos/<repo> --jq .visibility` and refuses to proceed
+unless the answer is exactly `"public"` — a private repo, an inaccessible
+repo, an API error, or `gh` not being installed/authenticated are all
+treated identically (refuse, write nothing). There is no allowlist to keep
+in sync with the still-private canaries (`gf180-trng`, `gf180-sar-adc`,
+`gf180-pll`, `gf180-temp-por`, `gf180-ldo`) — the API call is the source of
+truth at ingest time, every run, so a repo that flips to public later just
+starts working the next time this script runs against it.
+
+**Sim-evidence cards for pre-layout blocks.** Both current canaries are at
+schematic/sim stage — no GDS exists yet, so there is nothing for `klt
+layers`/`klt cells` to derive `layer_count`/`cell_count`/`renders` from.
+Rather than a `no_artifacts` stub, their `layout.json` carries `status: "in
+design — simulation evidence"` (the honest status chip — see issue #140)
+plus two fields not part of `klt layout-metrics`'s own contract:
+
+- `spec_summary` — the source repo's `README.md` "Target specification"
+  table, parsed verbatim (`{status_note, rows: [{parameter, target,
+  stretch?, corner_binding?}, ...]}`). `gf180-bandgap`'s table is ratified;
+  `sky130-bandgap`'s is still draft — `status_note` carries that state
+  through to the detail page.
+- `signals` — reuses `layout.json`'s `signals` object shape (issue #99),
+  but populated from the *source repo's own* `sim/` evidence trail (its
+  append-only `records/*.md`, and `suite/summaries/*.md` when the repo has
+  full-loop testbenches for its ratified spec rows) rather than from a
+  fresh `klt sim` run this repo performs — these are the canary repo's own
+  simulation results. An experiment whose latest record has no extractable
+  `**Overall: PASS/FAIL/ERROR**` verdict (pure device-characterization
+  "recorded, not claimed" data) is excluded, since there is no honest
+  pass/fail/error value for it.
+
+Every canary block also carries `source: {repo, ref, path}` provenance and
+`downloadable: true` (the public-repo gate having just confirmed the repo
+is public) — see `site/src/data/types.ts`'s `LayoutSource`/
+`LayoutSpecSummary` for the field-level TypeScript contract, and
+`scripts/ingest-canary.py`'s module docstring for the full derivation
+(including the markdown-parsing helpers for the two different `sim/`
+evidence record shapes the two current canaries happen to use).
+
+When a canary's layout eventually lands, re-running the same command finds
+the GDS (under `layout/`, `gds/`, or the repo root) and upgrades the block
+to a normal `"ok"`/`"partial"` metrics record — same slug, same card. This
+upgrade path exists in the script today but is not exercised by either
+current canary (both pre-layout); see `tests/test_ingest_canary.py`.
+
 ## License note
 
 `layout.json` metrics here are derived from the #4 corpus GDS files, which
@@ -102,3 +170,8 @@ are redistributed under the upstream repositories' Apache License 2.0 terms
 provenance). The generated `layout.json` files themselves are original
 output of this repository's tooling and carry this repository's MIT
 license.
+
+The two canary blocks' `layout.json` content is derived from
+`2AMLogic/gf180-bandgap` and `2AMLogic/sky130-bandgap`, both Apache License
+2.0 (see each repo's own `LICENSE`) — the same public-repo gate that
+ingests them also confirms, at ingest time, that they are public.

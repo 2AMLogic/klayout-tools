@@ -18,6 +18,7 @@ const badgeVariants = cva(
         ok: "border-transparent bg-[#3fe082]/90 text-[#04150d]",
         partial: "border-transparent bg-orange/90 text-[#1a1300]",
         "no-artifacts": "border-transparent bg-fog-dim/85 text-[#0c1116]",
+        "in-design": "border-transparent bg-cyan/90 text-[#03181a]",
         warn: "border-orange/60 bg-orange/10 text-fog",
       },
     },

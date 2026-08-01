@@ -22,9 +22,13 @@
  *     copied to the matching relative path under
  *     `site/public/blocks/<slug>/...`, served at `/blocks/<slug>/...`.
  *   - Downloadable layout file: when `layout.json` sets `downloadable: true`
- *     (the content-pipeline / public-repo gate, #62 — not yet wired up, so
- *     this never fires today), `layout_file` is staged the same way so the
- *     detail page's download link resolves.
+ *     (the content-pipeline / public-repo gate, `scripts/ingest-canary.py`,
+ *     #62) AND `layout_file` is present, `layout_file` is staged the same
+ *     way so the detail page's download link resolves. Both current canary
+ *     blocks set `downloadable: true` but have no `layout_file` yet (they
+ *     are pre-layout sim-evidence cards — see `blocks/README.md`), so this
+ *     still never fires against real data today; it is exercised once a
+ *     canary's layout lands.
  *   - Signals waveform artifacts (issue #100, Epic #90 Phase 2): every
  *     `signals.corners[].waveform` path (relative to `output/`, same
  *     convention as `renders`) is staged the same way, so the block detail
