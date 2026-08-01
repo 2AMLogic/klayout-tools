@@ -50,29 +50,37 @@ script runner does. This is called out explicitly in each such rule's
 docstring; the threshold *values* used are always the real, unmodified
 source values.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 13 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 23 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
-(diffusion/active), `Contact`, and `Metal1` layers, plus a first increment
-of well/substrate-tap coverage (`Nwell` spacing and Nwell-tap enclosure) and
-one bipolar (BJT)-specific device rule (`DRC_BJT` mark-layer separation) —
-transcribed from the published GlobalFoundries 180nm MCU **Design Rule
-Manual** ([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
+(diffusion/active), `Contact`, `Metal1`-`Metal3`, `Metal5`, and `MetalTop`
+layers, plus a first increment of well/substrate-tap coverage (`Nwell`
+spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
+(`DRC_BJT` mark-layer separation), and the MiM capacitor stack
+(`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap) — transcribed
+from the published GlobalFoundries 180nm MCU **Design Rule Manual**
+([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
 `docs/physical_verification/design_manual/`; Apache License 2.0),
 specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
-(`PL.*`), "7.12 Contact" (`CO.*`), "7.13 Metaln" (`Mn.*`), and "10.7 DRC_BJT
-Mark Layer" (`BJT.*`) sections. Unlike sky130 (transcribed from a live,
-KLayout-runnable `.lydrc` script), the companion KLayout DRC-deck repo
+(`PL.*`), "7.12 Contact" (`CO.*`), "7.13 Metaln" (`Mn.*`, extended to
+`n = 2..5`), "7.15 MetalTop" (`MT.*`), "10.4.2 MIM Capacitor, Option B"
+(`MIMTM.*`), and "10.7 DRC_BJT Mark Layer" (`BJT.*`) sections. Unlike
+sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), the
+companion KLayout DRC-deck repo
 ([`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`](https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv))
 does not yet open-source the core FEOL/BEOL width/space/enclosure checks as
 executable rule-deck code, so `src/klayout_tools/decks/gf180mcu.py` instead
 cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
-`"Mn.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and numeric values directly.
+`"Mn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and
+numeric values directly.
 
-Seven of the thirteen gf180mcu rules approximate an official DRM rule in
+Eight of the twenty-three gf180mcu rules approximate an official DRM rule in
 some way — either a compound-layer context our single/two-layer check
 primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
 `nwell.enclosing.comp.1`), a bound our primitives don't support
-(`contact.width.1`'s fixed-size square, approximated as a minimum only), or
+(`contact.width.1`'s fixed-size square, approximated as a minimum only), a
+sized/derived-layer context our primitives can't isolate (`mim.space.1`,
+approximated as a general `Metal4`-to-`Metal4` spacing check that may
+over-flag ordinary `Metal4` routing unrelated to a MiM capacitor), or
 context our engine has no data for at all — net-potential (`nwell.space.1`)
 or device connectivity (`bjt.separation.comp.1`), both of which require
 netlist/connectivity information the geometry-only check primitives don't
@@ -80,10 +88,23 @@ have. Each is called out explicitly in its rule's docstring in
 `gf180mcu.py`; the threshold values used are always the real, unmodified
 DRM values.
 
+The DRM's MiM capacitor rule `MIMTM.2` (minimum bottom-plate overlap of
+`Via4`) is **not** transcribed: an unscoped approximation of it (unlike
+`mim.space.1`'s) would flag legitimate `Metal4`-`Via4`-`Metal5` routing
+throughout any layout using that metal stack, not just genuine MiM
+structures, because it requires the same sized/derived "virtual bottom
+plate" layer (`FuseTop` sized by 1.06um, intersected with `Metal4`) that
+neither `DrcRule` nor the `Region` check primitives it drives can express
+today. See `gf180mcu.py`'s module docstring for the full rationale and the
+missing-primitive blocker for a follow-on issue.
+
 Coverage does **not** yet include: `Pplus`/`Nplus` implant-specific rules
 (width/space/enclosure of the implant layers themselves), `LVPWELL` or
 `DNWELL`, the remaining `BJT.*` rules (`BJT.1`/`BJT.2`, which key off
-`DNWELL`), or 5V/6V high-voltage variants — left for follow-on issues.
+`DNWELL`), `MIMTM.2` (see above), the MIM Option-A (`MIM.*`) rule set (a
+different, 3-metal-layer process variant this deck doesn't model — see
+`gf180mcu.py`'s docstring), or 5V/6V high-voltage variants — left for
+follow-on issues.
 
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.

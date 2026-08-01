@@ -565,6 +565,384 @@ def test_run_drc_gf180mcu_bjt_separation_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- metal2.width.1 / metal2.space.1 (#188) -----------------------------
+
+
+def test_run_drc_gf180mcu_metal2_width_violation(tmp_path):
+    """A Metal2 bar narrower than the 280 dbu (0.28 um) `metal2.width.1`
+    threshold trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal2 = layout.layer(36, 0)
+    layout.set_info(metal2, kdb.LayerInfo(36, 0, "Metal2"))
+    top.shapes(metal2).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 280
+    path = tmp_path / "metal2_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal2.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal2.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "Metal2"
+
+
+def test_run_drc_gf180mcu_metal2_space_violation(tmp_path):
+    """Two Metal2 bars closer than the 280 dbu `metal2.space.1` threshold
+    trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal2 = layout.layer(36, 0)
+    layout.set_info(metal2, kdb.LayerInfo(36, 0, "Metal2"))
+    top.shapes(metal2).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(metal2).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 280
+    path = tmp_path / "metal2_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal2.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal2.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "Metal2"
+
+
+def test_run_drc_gf180mcu_metal2_clean(tmp_path):
+    """A Metal2 bar wide enough to satisfy `metal2.width.1` passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal2 = layout.layer(36, 0)
+    layout.set_info(metal2, kdb.LayerInfo(36, 0, "Metal2"))
+    top.shapes(metal2).insert(kdb.Box(0, 0, 300, 2000))  # 300 >= 280
+    path = tmp_path / "metal2_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+# --- metal3.width.1 / metal3.space.1 (#188) -----------------------------
+
+
+def test_run_drc_gf180mcu_metal3_width_violation(tmp_path):
+    """A Metal3 bar narrower than the 280 dbu `metal3.width.1` threshold
+    trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal3 = layout.layer(42, 0)
+    layout.set_info(metal3, kdb.LayerInfo(42, 0, "Metal3"))
+    top.shapes(metal3).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 280
+    path = tmp_path / "metal3_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal3.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal3.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "Metal3"
+
+
+def test_run_drc_gf180mcu_metal3_space_violation(tmp_path):
+    """Two Metal3 bars closer than the 280 dbu `metal3.space.1` threshold
+    trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal3 = layout.layer(42, 0)
+    layout.set_info(metal3, kdb.LayerInfo(42, 0, "Metal3"))
+    top.shapes(metal3).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(metal3).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 280
+    path = tmp_path / "metal3_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal3.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal3.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "Metal3"
+
+
+def test_run_drc_gf180mcu_metal3_clean(tmp_path):
+    """A Metal3 bar wide enough to satisfy `metal3.width.1` passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal3 = layout.layer(42, 0)
+    layout.set_info(metal3, kdb.LayerInfo(42, 0, "Metal3"))
+    top.shapes(metal3).insert(kdb.Box(0, 0, 300, 2000))  # 300 >= 280
+    path = tmp_path / "metal3_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+# --- metal5.width.1 / metal5.space.1 (#188) -----------------------------
+
+
+def test_run_drc_gf180mcu_metal5_width_violation(tmp_path):
+    """A Metal5 bar narrower than the 280 dbu `metal5.width.1` threshold
+    trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 280
+    path = tmp_path / "metal5_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal5.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal5.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "Metal5"
+
+
+def test_run_drc_gf180mcu_metal5_space_violation(tmp_path):
+    """Two Metal5 bars closer than the 280 dbu `metal5.space.1` threshold
+    trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(metal5).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 280
+    path = tmp_path / "metal5_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal5.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal5.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "Metal5"
+
+
+def test_run_drc_gf180mcu_metal5_clean(tmp_path):
+    """A Metal5 bar wide enough to satisfy `metal5.width.1` passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 300, 2000))  # 300 >= 280
+    path = tmp_path / "metal5_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+# --- metaltop.width.1 / metaltop.space.1 (#188) --------------------------
+
+
+def test_run_drc_gf180mcu_metaltop_width_violation(tmp_path):
+    """A MetalTop bar narrower than the 360 dbu (0.36 um) `metaltop.width.1`
+    threshold trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metaltop = layout.layer(53, 0)
+    layout.set_info(metaltop, kdb.LayerInfo(53, 0, "MetalTop"))
+    top.shapes(metaltop).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 360
+    path = tmp_path / "metaltop_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metaltop.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metaltop.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "MetalTop"
+
+
+def test_run_drc_gf180mcu_metaltop_space_violation(tmp_path):
+    """Two MetalTop bars closer than the 380 dbu (0.38 um) `metaltop.space.1`
+    threshold trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metaltop = layout.layer(53, 0)
+    layout.set_info(metaltop, kdb.LayerInfo(53, 0, "MetalTop"))
+    top.shapes(metaltop).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(metaltop).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 380
+    path = tmp_path / "metaltop_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metaltop.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metaltop.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "MetalTop"
+
+
+def test_run_drc_gf180mcu_metaltop_clean(tmp_path):
+    """A MetalTop bar wide enough to satisfy `metaltop.width.1` passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metaltop = layout.layer(53, 0)
+    layout.set_info(metaltop, kdb.LayerInfo(53, 0, "MetalTop"))
+    top.shapes(metaltop).insert(kdb.Box(0, 0, 400, 2000))  # 400 >= 360
+    path = tmp_path / "metaltop_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+# --- mim.space.1 (MIMTM.1) / mim.enclosing.fusetop.1 (MIMTM.3) (#188) ----
+
+
+def test_run_drc_gf180mcu_mim_space_violation(tmp_path):
+    """Two Metal4 bars closer than the 1200 dbu (1.2 um) `mim.space.1`
+    threshold trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(metal4).insert(kdb.Box(2300, 0, 4000, 4000))  # 300 dbu gap < 1200
+    path = tmp_path / "mim_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"mim.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "mim.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "Metal4"
+
+
+def test_run_drc_gf180mcu_mim_space_clean(tmp_path):
+    """Two Metal4 bars spaced exactly at the 1200 dbu threshold pass."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(metal4).insert(kdb.Box(3200, 0, 5000, 4000))  # 1200 dbu gap == threshold
+    path = tmp_path / "mim_space_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_mim_enclosing_fusetop_violation(tmp_path):
+    """A FuseTop shape hanging off the edge of its Metal4 bottom plate by
+    less than the 600 dbu (0.6 um) `mim.enclosing.fusetop.1` margin trips
+    exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 5000, 5000))
+    # 1000 dbu margin on 3 sides, only 100 dbu (< 600) margin on the right.
+    top.shapes(fusetop).insert(kdb.Box(1000, 1000, 4900, 4000))
+    path = tmp_path / "mim_enclosing_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"mim.enclosing.fusetop.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "mim.enclosing.fusetop.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Metal4"
+
+
+def test_run_drc_gf180mcu_mim_enclosing_fusetop_clean(tmp_path):
+    """A FuseTop shape enclosed by its Metal4 bottom plate with >= 600 dbu
+    margin on every side passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 5000, 5000))
+    top.shapes(fusetop).insert(kdb.Box(1000, 1000, 4000, 4000))  # 1000 margin >= 600
+    path = tmp_path / "mim_enclosing_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_reproducer_from_issue(tmp_path):
+    """The exact reproducer geometry from issue #188: illegal MiM-stack and
+    upper-metal geometry that used to report `"status": "clean"` (no rule
+    coverage at all on these layers) now reports the expected violations.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("PROBE")
+    m4 = layout.layer(46, 0)
+    layout.set_info(m4, kdb.LayerInfo(46, 0, "Metal4"))
+    ft = layout.layer(75, 0)
+    layout.set_info(ft, kdb.LayerInfo(75, 0, "FuseTop"))
+    v4 = layout.layer(41, 0)
+    layout.set_info(v4, kdb.LayerInfo(41, 0, "Via4"))
+    m5 = layout.layer(81, 0)
+    layout.set_info(m5, kdb.LayerInfo(81, 0, "Metal5"))
+    m2 = layout.layer(36, 0)
+    layout.set_info(m2, kdb.LayerInfo(36, 0, "Metal2"))
+    m3 = layout.layer(42, 0)
+    layout.set_info(m3, kdb.LayerInfo(42, 0, "Metal3"))
+
+    top.shapes(m4).insert(kdb.Box(0, 0, 5000, 5000))  # bottom plate
+    top.shapes(m4).insert(kdb.Box(5300, 0, 7300, 5000))  # 0.3 um away
+    top.shapes(ft).insert(kdb.Box(4800, 200, 6000, 4800))  # top plate hangs off
+    top.shapes(v4).insert(kdb.Box(-100, 500, 100, 700))  # via straddles edge
+    top.shapes(m5).insert(kdb.Box(4900, 2000, 7000, 3000))
+    top.shapes(m2).insert(kdb.Box(0, 6000, 4000, 6050))  # 0.05 um wide
+    top.shapes(m3).insert(kdb.Box(0, 6200, 4000, 6250))  # 0.05 um wide
+
+    path = tmp_path / "probe.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["violation_count"] > 0
+    assert "mim.space.1" in report["rule_counts"]
+    assert "mim.enclosing.fusetop.1" in report["rule_counts"]
+    assert "metal2.width.1" in report["rule_counts"]
+    assert "metal3.width.1" in report["rule_counts"]
+
+
 def test_gf180mcu_corpus_cli_json_matches_run_drc(capsys):
     """`klt drc <file> --deck gf180mcu --format json` (the CLI path) agrees
     with the `run_drc` library call for at least one real corpus file."""
