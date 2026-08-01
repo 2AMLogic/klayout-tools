@@ -31,6 +31,22 @@ resolution is skipped entirely and extraction runs from the curated deck
 alone, so CI needs no PDK install (matching ``klt drc``'s and ``klt gen``'s
 test posture -- see ``tests/test_extract.py``'s fabricated installs).
 
+When a PDK resolves, ``--pdk``/``--pdk-root`` also change what the *written
+SPICE file* looks like (not just the JSON response's provenance-only
+``pdk`` field, which is all they did before issue #209): each extracted MOS
+device is written as an ``X`` subcircuit call against the resolved PDK's own
+curated device library, e.g. ``sky130_fd_pr__nfet_01v8``, instead of the
+curated deck's bare ``nfet``/``pfet`` ``M``-card class label -- see
+``klayout_tools.pdk_models`` for the curated
+``(deck_name, pdk_variant_family)`` model-name table, the
+``kdb.NetlistSpiceWriterDelegate`` subclass that performs the rewrite, and
+the exact provenance of each bound subcircuit name. A resolved PDK whose
+family/deck pairing has no curated table entry is an :class:`ExtractError`
+naming what was tried -- never a silent fallback to the bare ``M``-card
+form. When ``--pdk``/``--pdk-root`` are omitted, the written SPICE is
+unchanged from before #209 (the bare ``M``-card form, byte-identical to the
+existing golden tests).
+
 Device recognition: each deck's ``active``/``poly``/``nwell`` layers extract
 NMOS (``active - nwell``) and PMOS (``active & nwell``) via KLayout's native
 ``DeviceExtractorMOS4Transistor`` -- one generic ``nfet``/``pfet`` device
@@ -57,6 +73,11 @@ from typing import TYPE_CHECKING, Any
 
 from .decks import ExtractionDeck, UnknownExtractionDeckError, get_extraction_deck
 from .pdk import PdkNotFoundError, find_pdk
+from .pdk_models import (
+    ModelBindingError,
+    create_model_binding_delegate,
+    resolve_mos_model_table,
+)
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -143,11 +164,30 @@ def run_extract(
     missing/ambiguous, or the output path's directory does not exist.
     """
     pdk_info: dict[str, Any] | None = None
+    # Populated only when a PDK resolves: `{<deck's device class name>:
+    # <resolved PDK subckt name>}` for the MOS classes this deck extracts,
+    # e.g. `{"nfet": "sky130_fd_pr__nfet_01v8", "pfet": ...}`. Drives the
+    # `X`-card model-binding writer below -- see the module docstring's
+    # "--pdk-triggered model binding" note and `klayout_tools.pdk_models`.
+    model_class_to_subckt: dict[str, str] | None = None
     if pdk_variant is not None or pdk_root is not None:
         try:
             pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
         except PdkNotFoundError as exc:
             raise ExtractError(str(exc)) from exc
+
+        try:
+            deck_for_models = get_extraction_deck(deck_name)
+        except UnknownExtractionDeckError as exc:
+            raise ExtractError(str(exc)) from exc
+        try:
+            subckt_names = resolve_mos_model_table(deck_name, pdk_info["variant"])
+        except ModelBindingError as exc:
+            raise ExtractError(str(exc)) from exc
+        model_class_to_subckt = {
+            deck_for_models.nfet_class: subckt_names["nfet"],
+            deck_for_models.pfet_class: subckt_names["pfet"],
+        }
 
     netlist, top_cell_name, dbu_um, warnings = extract_netlist_from_layout(
         path, deck_name, top=top
@@ -160,7 +200,11 @@ def run_extract(
     if not os.path.isdir(out_dir):
         raise ExtractError(f"output directory does not exist: {out_dir}")
 
-    writer = kdb.NetlistSpiceWriter()
+    writer = (
+        kdb.NetlistSpiceWriter(create_model_binding_delegate(model_class_to_subckt))
+        if model_class_to_subckt is not None
+        else kdb.NetlistSpiceWriter()
+    )
     writer.use_net_names = True
     try:
         netlist.write(

@@ -113,6 +113,69 @@ env` use ([`docs/cli/pdk.md`](pdk.md)):
   (exit 1), and the resolved `variant`/`root`/`version` are echoed in the
   response's `pdk` field for provenance.
 
+### SPICE model binding (`--pdk` given + resolvable)
+
+Before this behavior existed, `--pdk`/`--pdk-root` only affected the JSON
+response's `pdk` provenance field — the *written netlist* was identical
+either way, using the curated deck's bare device-class label
+(`nfet`/`pfet`) as an `M`-card model name:
+
+```
+M$1 Y A VGND vsubs nfet L=0.15U W=0.65U AS=0.234P AD=0.234P PS=1.6U PD=1.6U
+```
+
+`nfet` is the deck's own class label, not a model any real PDK ships —
+sky130 and gf180mcu both ship their primitive MOS device as a SPICE
+`.subckt` (taking `d g s b` terminals plus `l`/`w` geometry), never a
+built-in `nmos`/`pmos` model — so this `M` card cannot bind a real PDK model
+library at all.
+
+**When a PDK resolves now**, each extracted MOS device is written as an `X`
+subcircuit call against the resolved PDK's real device library instead:
+
+```
+X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U
+```
+
+The device is bound via a small curated
+`(deck_name, pdk_variant_family) -> {"nfet": <subckt>, "pfet": <subckt>}`
+table (`src/klayout_tools/pdk_models.py`; see that module's docstring for
+the exact provenance of each bound subcircuit name, verified against a real
+fetched PDK install rather than assumed) and a
+`kdb.NetlistSpiceWriterDelegate` subclass that overrides KLayout's default
+`M`-card device writer only for classes present in the resolved table.
+
+**Scope limits** (deliberately narrower than the general PDK-device-metadata
+resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
+future epic):
+
+- **MOS family only**, one voltage flavor per PDK family — the only flavor
+  the curated extraction decks distinguish (see this module's own docstring):
+  sky130's `01v8` core devices (`sky130_fd_pr__nfet_01v8` /
+  `sky130_fd_pr__pfet_01v8`) and gf180mcu's `03v3` core devices (`nfet_03v3`
+  / `pfet_03v3` — gf180mcu has no `gf180mcu_fd_pr__`-prefixed naming
+  convention the way sky130 does).
+- **Two curated decks only** (`sky130`, `gf180mcu`); a resolved PDK whose
+  family has no curated table entry for the requesting `--deck` (e.g. the
+  `sky130` deck against a resolved `gf180mcuA` install, or a variant name
+  matching no known PDK family at all) is an application error (exit 1)
+  naming what was tried — **never** a silent fallback to the bare `M`-card
+  form.
+- The written `X` card carries only `L`/`W` (both with an explicit
+  micrometre unit suffix, e.g. `L=0.15U` — the same convention `klt
+  extract`'s `M`-card form already uses, unambiguous regardless of any
+  `.option scale` a caller's testbench may or may not set) and relies on
+  the resolved subcircuit's own defaults for everything else (`nf`/`mult`/
+  `par`, all confirmed `1`-equivalent in the fetched real installs this
+  table was verified against — this deck's device extractor never models
+  multi-finger/multiplied devices either). Source/drain area+perimeter
+  (`AS`/`AD`/`PS`/`PD`, present on the bare `M`-card form) are **not**
+  carried onto the `X` card — consistent with this command's documented
+  schematic-equivalent, no-parasitics scope (see "Out of scope" below).
+- **The JSON response is unaffected**: `device_counts`/`devices[].class`
+  always report the deck's own class label (`nfet`/`pfet`), regardless of
+  `--pdk`. Model binding is a SPICE-serialization concern only.
+
 ## Verified compatible with `klt sim`'s netlist convention
 
 Hard acceptance bar (Epic #153: "`klt extract` output feeds `klt sim`
@@ -222,7 +285,7 @@ consume.
 | Code | Meaning                                                                                          |
 | ---- | --------------------------------------------------------------------------------------------------- |
 | `0`  | Extraction succeeded, netlist written.                                                              |
-| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), missing/ambiguous top cell, or an engine error. |
+| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.                               |
 
 There is no exit code `3` — unlike `klt drc`/`klt lvs`, there is no "ran but
