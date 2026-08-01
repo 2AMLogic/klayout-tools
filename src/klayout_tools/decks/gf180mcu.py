@@ -115,7 +115,7 @@ corpus fixtures in ``tests/corpus/golden/gf180mcu/*.layers.json``, and (for
 
 from __future__ import annotations
 
-from . import DrcRule
+from . import DrcRule, ExtractionDeck
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001, same as sky130), so a threshold in micrometres
@@ -288,3 +288,36 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (55, 0): "Dualgate",
     (127, 5): "DRC_BJT",
 }
+
+# --------------------------------------------------------------------------- #
+# `klt extract` connectivity + device-extraction deck
+# --------------------------------------------------------------------------- #
+#
+# Metal1's pin/label purpose (34/10) is not in LAYER_NAMES above (that table
+# only names *drawn* layers); verified against this repo's own gf180mcu
+# corpus fixtures (`tests/corpus/gf180mcu/gf180mcu_fd_sc_mcu9t5v0__*.gds`),
+# which label every signal and power pin directly on 34/10 (e.g. "I", "ZN",
+# "VDD", "VSS").
+#
+# Unlike sky130, gf180mcu's curated layer set has no distinct substrate/well
+# tie layer -- a well tap is drawn on the *same* `Comp` layer as transistor
+# active (`tap=None` below). This deck therefore does not attempt to derive
+# a well-tie net name: the PMOS body terminal picks up whatever net (if any)
+# a Comp/contact/metal shape *inside* the Nwell polygon happens to be tied
+# to via ordinary connectivity (see `ExtractionDeck`'s docstring on why
+# `nwell` is never connected to `contact` directly), and is otherwise a
+# floating, anonymous net in the extracted netlist -- a documented
+# approximation for this PDK's curated deck (no `well_label`/`tap` fields
+# are set), not a real substrate-tap extraction.
+#
+# NMOS body: as with sky130, no separate substrate layer is drawn in this
+# curated deck, so the NMOS body terminal is tied to the deck's
+# `substrate_net` global (`ExtractionDeck.substrate_net`, default `"vsubs"`).
+EXTRACTION_DECK = ExtractionDeck(
+    active=(22, 0),  # Comp
+    poly=(30, 0),  # Poly2
+    nwell=(21, 0),  # Nwell
+    contact=(33, 0),  # Contact
+    metals=((34, 0),),  # Metal1
+    metal_labels=((34, 10),),  # Metal1 pin/label purpose
+)

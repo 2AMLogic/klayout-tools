@@ -54,6 +54,69 @@ class UnknownDeckError(Exception):
     """Raised by :func:`get_deck` / :func:`get_layer_names` for an unknown deck name."""
 
 
+@dataclass(frozen=True)
+class ExtractionDeck:
+    """Connectivity + device-extraction rule set for ``klt extract`` (see
+    ``docs/design/lvs-extraction-spike.md`` and ``docs/cli/extract.md``).
+
+    A curated, per-PDK-family layer-role table for KLayout's
+    ``klayout.db.LayoutToNetlist`` -- the extraction analogue of
+    :class:`DrcRule`'s curated width/space/enclosure table, covering a
+    two-terminal-well CMOS stack (NMOS/PMOS via one drawn well layer,
+    contact/local-interconnect up through one or two metal levels) rather
+    than a full PDK's device zoo. All layer fields are ``(layer, datatype)``
+    pairs, matching the layout's own GDS numbering.
+
+    ``active``/``poly``/``nwell`` are the device-recognition layers: NMOS is
+    ``active - nwell``, PMOS is ``active & nwell`` (KLayout's standard
+    "well marks the flip side" MOS-splitting idiom). ``tap`` is an optional,
+    *distinct* substrate/well-tie diffusion layer (present when a PDK draws
+    taps on a separate layer from transistor active, e.g. sky130's
+    ``tap.drawing``; ``None`` when taps share the active layer, e.g.
+    gf180mcu's ``Comp`` -- see the family deck's own docstring for which
+    case applies and why a blanket "connect the well to every contact
+    inside it" rule is wrong (it shorts every transistor terminal in the
+    well together; only a genuinely distinct tap region is safe to tie to
+    the well directly).
+
+    ``contact`` connects ``active``/``poly``/``tap`` to the first metal
+    level. ``metals`` is the ordered metal-stack layer list (index 0 is the
+    one ``contact`` lands on); ``metal_labels`` is the matching list of
+    optional text/label layers used to name nets/pins (``None`` where a
+    level has no label layer in this curated deck); ``vias`` connects
+    ``metals[i]`` to ``metals[i + 1]`` and has ``len(metals) - 1`` entries.
+
+    ``well_label`` is an optional text/label layer read directly off
+    ``nwell`` (for a PDK that labels the well/body pin on the well layer
+    itself, e.g. sky130's ``VPB``) -- distinct from ``metal_labels``, which
+    label metal-level pins/power straps.
+
+    ``nfet_class``/``pfet_class`` name the extracted ``DeviceClassMOS4Transistor``
+    device classes (``devices[].class`` in the JSON response). ``substrate_net``
+    is the global net name the NMOS body terminal is tied to when no drawn
+    substrate-tap geometry exists to derive one from (KLayout
+    ``connect_global``) -- see the family deck's docstring for why this is a
+    documented approximation, not a real substrate-tap extraction.
+    """
+
+    active: tuple[int, int]
+    poly: tuple[int, int]
+    nwell: tuple[int, int]
+    contact: tuple[int, int]
+    metals: tuple[tuple[int, int], ...]
+    tap: tuple[int, int] | None = None
+    well_label: tuple[int, int] | None = None
+    metal_labels: tuple[tuple[int, int] | None, ...] = ()
+    vias: tuple[tuple[int, int], ...] = ()
+    nfet_class: str = "nfet"
+    pfet_class: str = "pfet"
+    substrate_net: str = "vsubs"
+
+
+class UnknownExtractionDeckError(Exception):
+    """Raised by :func:`get_extraction_deck` for an unknown deck name."""
+
+
 def _registry() -> dict[str, list[DrcRule]]:
     from . import gf180mcu, sky130
 
@@ -115,5 +178,35 @@ def get_nominal_dbu(name: str) -> float:
     except KeyError:
         available = ", ".join(sorted(registry))
         raise UnknownDeckError(
+            f"unknown deck '{name}' (available: {available})"
+        ) from None
+
+
+def _extraction_registry() -> dict[str, ExtractionDeck]:
+    from . import gf180mcu, sky130
+
+    return {
+        "sky130": sky130.EXTRACTION_DECK,
+        "gf180mcu": gf180mcu.EXTRACTION_DECK,
+    }
+
+
+def get_extraction_deck(name: str) -> ExtractionDeck:
+    """Return the registered :class:`ExtractionDeck` for ``name``.
+
+    Raises :class:`UnknownExtractionDeckError` (which ``extract.py`` turns
+    into an :class:`~klayout_tools.extract.ExtractError`) if ``name`` is not
+    a registered deck. Deliberately a *separate* registry/name lookup from
+    :func:`get_deck` (the DRC deck registry) even though the deck names
+    overlap (``"sky130"``/``"gf180mcu"``) -- DRC and extraction decks are
+    different rule tables that happen to share PDK-family names, not the
+    same object reused for two purposes.
+    """
+    decks = _extraction_registry()
+    try:
+        return decks[name]
+    except KeyError:
+        available = ", ".join(sorted(decks))
+        raise UnknownExtractionDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None

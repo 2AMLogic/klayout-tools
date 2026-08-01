@@ -46,7 +46,7 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
 
 from __future__ import annotations
 
-from . import DrcRule
+from . import DrcRule, ExtractionDeck
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
@@ -170,3 +170,48 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (68, 20): "met1.drawing",
     (68, 44): "via.drawing",
 }
+
+# --------------------------------------------------------------------------- #
+# `klt extract` connectivity + device-extraction deck
+# --------------------------------------------------------------------------- #
+#
+# Layer numbers not already covered above, from the same source cited at the
+# top of this module (sky130.lyt's layer-map / open_pdks):
+#
+#     nwell.drawing   64/20
+#     nwell.pin       64/5   (a text/label layer -- carries the body-tie pin
+#                             name, e.g. "VPB", directly on the well shape)
+#     li1.pin         67/5
+#     met1.pin        68/5
+#
+# Verified against this repo's own sky130 corpus fixtures
+# (`tests/corpus/sky130/sky130_fd_sc_hd__*.gds`): every cell's nwell body pin
+# is labelled directly on layer 64/5 (e.g. "VPB"); li1/met1 signal and power
+# pins are labelled on 67/5 / 68/5 respectively (e.g. "A", "Y", "VPWR",
+# "VGND"). `tap.drawing` (65/44) is a *distinct* drawn layer from
+# `diff.drawing` (65/20) -- sky130 never draws a substrate/well tie on the
+# transistor active layer -- so it is safe to connect `tap` to the well and
+# to `contact` directly (see `ExtractionDeck`'s docstring for why the
+# opposite (connecting the *well* to *every* contact inside it) is wrong).
+#
+# NMOS body: sky130 draws no separate substrate/pwell layer for a curated
+# subset like this one (the whole non-well area is one native P-substrate),
+# so there is no drawn tap geometry to derive a real net name from; the NMOS
+# body terminal is tied to the deck's `substrate_net` global instead
+# (`ExtractionDeck.substrate_net`, default `"vsubs"`) -- a documented
+# approximation, not a real substrate-tap extraction (this repo's real
+# sky130 corpus cells keep VPB (nwell) as a genuine standalone pin, but never
+# expose an equivalent pin for the native substrate at the single-cell
+# level -- see the well-tap connectivity open question in
+# `docs/design/lvs-extraction-spike.md`).
+EXTRACTION_DECK = ExtractionDeck(
+    active=(65, 20),  # diff.drawing
+    poly=(66, 20),  # poly.drawing
+    nwell=(64, 20),  # nwell.drawing
+    tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
+    well_label=(64, 5),  # nwell.pin
+    contact=(66, 44),  # licon1.drawing
+    metals=((67, 20), (68, 20)),  # li1.drawing, met1.drawing
+    metal_labels=((67, 5), (68, 5)),  # li1.pin, met1.pin
+    vias=((67, 44),),  # mcon.drawing (li1 -> met1)
+)
