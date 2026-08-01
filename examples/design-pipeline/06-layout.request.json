@@ -1,0 +1,17 @@
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [
+    { "id": "tail", "generator_report": "06-gen-tail.json" },
+    { "id": "diffpair", "generator_report": "06-gen-diffpair.json" },
+    { "id": "mirror", "generator_report": "06-gen-mirror.json" }
+  ],
+  "placement": { "strategy": "row", "order": ["tail", "diffpair", "mirror"], "spacing_um": 1.0 },
+  "connectivity": [
+    { "net": "TAIL_A", "pins": [{ "block": "tail", "port": "U0_D" }, { "block": "diffpair", "port": "Q1_1_S" }] },
+    { "net": "TAIL_B", "pins": [{ "block": "tail", "port": "U0_D" }, { "block": "diffpair", "port": "Q2_1_S" }] },
+    { "net": "N1", "pins": [{ "block": "diffpair", "port": "Q1_1_D" }, { "block": "mirror", "port": "M1_1_S" }] },
+    { "net": "VOUT", "pins": [{ "block": "diffpair", "port": "Q2_1_D" }, { "block": "mirror", "port": "M2_1_S" }] }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17 },
+  "options": { "cell_name": "ota_5t_layout_0", "output": "06-layout.gds" }
+}

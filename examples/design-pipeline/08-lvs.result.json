@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "engine": "klayout",
+  "layout": "06-layout.gds",
+  "reference": "07-reference.spice",
+  "top": "ota_5t_layout_0",
+  "status": "match",
+  "mismatch_count": 1,
+  "category_counts": {
+    "topology": 1
+  },
+  "counts": {
+    "nets": {
+      "layout": 12,
+      "reference": 12,
+      "matched": 12
+    },
+    "devices": {
+      "layout": 5,
+      "reference": 5,
+      "matched": 5
+    },
+    "pins": {
+      "layout": 4,
+      "reference": 4,
+      "matched": 4
+    }
+  },
+  "environment": {
+    "engine": "klayout",
+    "engine_version": "0.30.10",
+    "layout_sha256": "c7e9145fb8def74b60c69d65a17f3a37c251ec4abbcadde7fc9ad3a31041ebf6",
+    "reference_sha256": "2b6722829721637bc2254158a5eca75ee1ee96cff2776fd608a4a73856ed4f90",
+    "extracted_netlist": null
+  },
+  "mismatches": [
+    {
+      "category": "topology",
+      "severity": "warning",
+      "description": "device class has no counterpart on the other side, but no devices of this class were extracted either -- not a real topology mismatch",
+      "side": "layout",
+      "net": null,
+      "device": null,
+      "property": null
+    }
+  ]
+}

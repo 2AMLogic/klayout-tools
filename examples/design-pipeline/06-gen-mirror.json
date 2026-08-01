@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "generator": "diff_pair",
+  "cell_name": "diff_pair_0",
+  "gds_path": "06-gen-mirror.gds",
+  "pdk": {
+    "name": "sky130A",
+    "variant": "sky130A",
+    "version": "open_pdks bdc9412b3e468c102d01b7cf6337be06ec6e9c9a"
+  },
+  "bbox_um": {
+    "x0": 0.0,
+    "y0": 0.0,
+    "x1": 1.84,
+    "y1": 12.4
+  },
+  "device_count": 2,
+  "ports": [
+    {
+      "name": "M1_1_S",
+      "net": null,
+      "layer": {
+        "layer": 67,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 0.21000000000000002,
+      "y_um": 3.0,
+      "width_um": 6.0,
+      "direction_deg": 180
+    },
+    {
+      "name": "M1_1_D",
+      "net": null,
+      "layer": {
+        "layer": 67,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 1.63,
+      "y_um": 3.0,
+      "width_um": 6.0,
+      "direction_deg": 0
+    },
+    {
+      "name": "M1_1_G",
+      "net": null,
+      "layer": {
+        "layer": 66,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 0.9199999999999999,
+      "y_um": 6.0,
+      "width_um": 1.0,
+      "direction_deg": 90
+    },
+    {
+      "name": "M2_1_S",
+      "net": null,
+      "layer": {
+        "layer": 67,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 0.21000000000000002,
+      "y_um": 9.4,
+      "width_um": 6.0,
+      "direction_deg": 180
+    },
+    {
+      "name": "M2_1_D",
+      "net": null,
+      "layer": {
+        "layer": 67,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 1.63,
+      "y_um": 9.4,
+      "width_um": 6.0,
+      "direction_deg": 0
+    },
+    {
+      "name": "M2_1_G",
+      "net": null,
+      "layer": {
+        "layer": 66,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 0.9199999999999999,
+      "y_um": 12.4,
+      "width_um": 1.0,
+      "direction_deg": 90
+    }
+  ],
+  "drc_hints": {
+    "min_spacing_um": 0.4,
+    "matched_group_id": "diff_pair:mirror:1",
+    "snapped_to_grid": false,
+    "notes": [
+      "no guard ring drawn (params.add_guard_ring is false) -- isolation from adjacent structures is the caller's responsibility"
+    ]
+  },
+  "warnings": []
+}

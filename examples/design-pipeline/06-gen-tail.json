@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "generator": "mos_array",
+  "cell_name": "mos_array_0",
+  "gds_path": "06-gen-tail.gds",
+  "pdk": {
+    "name": "sky130A",
+    "variant": "sky130A",
+    "version": "open_pdks bdc9412b3e468c102d01b7cf6337be06ec6e9c9a"
+  },
+  "bbox_um": {
+    "x0": 0.0,
+    "y0": 0.0,
+    "x1": 1.84,
+    "y1": 10.0
+  },
+  "device_count": 1,
+  "ports": [
+    {
+      "name": "U0_S",
+      "net": null,
+      "layer": {
+        "layer": 67,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 0.21000000000000002,
+      "y_um": 5.0,
+      "width_um": 10.0,
+      "direction_deg": 180
+    },
+    {
+      "name": "U0_D",
+      "net": null,
+      "layer": {
+        "layer": 67,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 1.63,
+      "y_um": 5.0,
+      "width_um": 10.0,
+      "direction_deg": 0
+    },
+    {
+      "name": "U0_G",
+      "net": null,
+      "layer": {
+        "layer": 66,
+        "datatype": 20,
+        "name": null
+      },
+      "x_um": 0.9199999999999999,
+      "y_um": 10.0,
+      "width_um": 1.0,
+      "direction_deg": 90
+    }
+  ],
+  "drc_hints": {
+    "min_spacing_um": 0.4,
+    "matched_group_id": "mos_array:1x1:common_centroid",
+    "snapped_to_grid": false,
+    "notes": []
+  },
+  "warnings": []
+}
