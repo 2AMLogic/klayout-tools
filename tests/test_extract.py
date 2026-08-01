@@ -189,7 +189,13 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
     # `device_classes` is what the deck *can* recognise, unaffected by this
     # layout happening to contain zero devices (issue #221) -- sky130 also
     # declares a `pnp` bipolar entry (issue #223).
-    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "pnp",
+        "sky130_fd_pr__model__cap_mim",
+        "sky130_fd_pr__model__cap_mim_m4",
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -275,7 +281,13 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert len(report["netlist_sha256"]) == 64
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "pnp",
+        "sky130_fd_pr__model__cap_mim",
+        "sky130_fd_pr__model__cap_mim_m4",
+    ]
     assert report["pdk"] is None
     assert report["warnings"] == []
 
@@ -411,7 +423,13 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
     report = run_extract(path, "sky130", output=str(tmp_path / "bjt.spice"))
 
     assert report["device_counts"] == {"pnp": 1}
-    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "pnp",
+        "sky130_fd_pr__model__cap_mim",
+        "sky130_fd_pr__model__cap_mim_m4",
+    ]
 
     (device,) = report["devices"]
     assert device["class"] == "pnp"
@@ -431,13 +449,152 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "bjt.spice"))
 
     assert report["device_counts"] == {"bjt": 1}
-    assert report["device_classes"] == ["nfet", "pfet", "bjt"]
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "bjt",
+        "cap_mim_2f0_m4m5_noshield",
+    ]
 
     (device,) = report["devices"]
     assert device["class"] == "bjt"
     assert device["nets"]["c"] == "vsubs"
     assert device["nets"]["e"] == "EMIT"
     assert device["nets"]["b"].startswith("$")  # anonymous, no base tie drawn
+
+
+# --------------------------------------------------------------------------- #
+# MiM capacitor device recognition (issue #225)
+# --------------------------------------------------------------------------- #
+
+
+def _box_um(x0, y0, x1, y1, dbu=0.001):
+    """A `kdb.Box` from micrometre coordinates at the given database unit --
+    matches this deck's own `NOMINAL_DBU_UM`/corpus convention (1 nm/unit)."""
+    return kdb.Box(round(x0 / dbu), round(y0 / dbu), round(x1 / dbu), round(y1 / dbu))
+
+
+def _make_gf180mcu_mim_layout(*, marked: bool = True) -> kdb.Layout:
+    """A minimal gf180mcu MiM-cap layout on the curated deck's Option-B
+    stack: a 10x10um `FuseTop` top plate (marked with both `CAP_MK`/
+    `MIM_L_MK` when ``marked``) sitting over a much larger `Metal4` bottom
+    plate, so the "virtual bottom plate" derivation clips to the sized
+    `FuseTop` outline rather than the raw `Metal4` extent.
+
+    ``marked=False`` drops the ``CAP_MK``/``MIM_L_MK`` markers, leaving an
+    ordinary `FuseTop`-over-`Metal4` overlap indistinguishable in area/shape
+    from a real MiM cap except for the missing marker -- the edge case this
+    module's own docstring calls out (a marker-free overlap must not be
+    misclassified as a capacitor)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, _box_um(-20, -20, 20, 20))  # Metal4 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    if marked:
+        draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+        draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+
+    return layout
+
+
+def _make_sky130_mim_layout(*, met4: bool = False) -> kdb.Layout:
+    """A minimal sky130 MiM-cap layout: a 10x5um top-plate mark (`capm` on
+    met3, or `capm2` on met4 when ``met4``) over a larger bottom-plate
+    conductor -- sky130's derivation needs no "virtual bottom plate" sizing
+    step (see `sky130.py`'s provenance note), so the bottom conductor can be
+    exactly as large as convenient."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    if met4:
+        draw(71, 20, _box_um(-20, -20, 20, 20))  # met4.drawing
+        draw(97, 44, _box_um(0, 0, 10, 5))  # capm2.drawing
+    else:
+        draw(70, 20, _box_um(-20, -20, 20, 20))  # met3.drawing
+        draw(89, 44, _box_um(0, 0, 10, 5))  # capm.drawing
+
+    return layout
+
+
+def test_gf180mcu_synthetic_mim_extracts_one_capacitor_device(tmp_path):
+    """The synthetic marked FuseTop-over-Metal4 layout extracts exactly one
+    `cap_mim_2f0_m4m5_noshield` device: `C = A * area_cap` for the 10x10um
+    `FuseTop` top-plate area against the deck's cited 2.0fF/um^2 coefficient
+    (100um^2 * 2.0e-15 F/um^2 = 2.0e-13 F), independent of the much larger
+    `Metal4` bottom-plate conductor it sits over (clipped to the "virtual
+    bottom plate" by the 1.06um `FuseTop` oversize -- see `gf180mcu.py`)."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "mim.spice"))
+
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+
+    (device,) = report["devices"]
+    assert device["class"] == "cap_mim_2f0_m4m5_noshield"
+    assert device["params"]["c_f"] == pytest.approx(2.0e-13)
+    assert device["params"]["area_um2"] == pytest.approx(100.0)
+
+
+def test_gf180mcu_unmarked_metal4_fusetop_overlap_is_not_a_capacitor(tmp_path):
+    """An ordinary `FuseTop`-over-`Metal4` overlap with no `CAP_MK`/
+    `MIM_L_MK` marker is *not* misclassified as a capacitor -- it extracts as
+    plain, unrecognised connectivity (zero devices), the same "unmarked
+    conductor is never reclassified" guarantee `docs/cli/extract.md`
+    documents for drawn resistors."""
+    path = _write_gds(
+        _make_gf180mcu_mim_layout(marked=False), tmp_path / "unmarked.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "unmarked.spice"))
+
+    assert report["device_count"] == 0
+    assert report["device_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    "met4, expected_class",
+    [
+        (False, "sky130_fd_pr__model__cap_mim"),
+        (True, "sky130_fd_pr__model__cap_mim_m4"),
+    ],
+)
+def test_sky130_synthetic_mim_extracts_one_capacitor_device(
+    tmp_path, met4, expected_class
+):
+    """Both of sky130's curated MiM stacks (met3's `capm`, met4's `capm2`)
+    extract exactly one capacitor device each: `C = A * area_cap` for the
+    10x5um top-plate mark's own area against the deck's cited 2.0fF/um^2
+    coefficient (50um^2 * 2.0e-15 F/um^2 = 1.0e-13 F) -- no "virtual bottom
+    plate" derivation needed (see `sky130.py`'s provenance note), so the
+    extracted area is exactly the drawn mark's own area."""
+    path = _write_gds(_make_sky130_mim_layout(met4=met4), tmp_path / "mim.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim.spice"))
+
+    assert report["device_counts"] == {expected_class: 1}
+
+    (device,) = report["devices"]
+    assert device["class"] == expected_class
+    assert device["params"]["c_f"] == pytest.approx(1.0e-13)
+    assert device["params"]["area_um2"] == pytest.approx(50.0)
+
+
+def test_sky130_unmarked_metal_has_no_capacitor_device(tmp_path):
+    """A plain met3/met4 shape with no `capm`/`capm2` mark drawn anywhere is
+    not misclassified as a capacitor -- zero devices extracted."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(70, 20)).insert(_box_um(-20, -20, 20, 20))  # met3
+    path = _write_gds(layout, tmp_path / "unmarked.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "unmarked.spice"))
+
+    assert report["device_count"] == 0
+    assert report["device_counts"] == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -674,20 +831,38 @@ def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
     "deck_name, expected",
     [
         # sky130 declares one bipolar entry, `pnp` (issue #223, its own
-        # `sky130_fd_pr__pnp_05v5` device cell).
-        ("sky130", ("nfet", "pfet", "pnp")),
+        # `sky130_fd_pr__pnp_05v5` device cell), plus two MiM-capacitor
+        # entries (issue #225, one per metal level its official LVS deck
+        # draws a purpose-built top-plate mark layer on).
+        (
+            "sky130",
+            (
+                "nfet",
+                "pfet",
+                "pnp",
+                "sky130_fd_pr__model__cap_mim",
+                "sky130_fd_pr__model__cap_mim_m4",
+            ),
+        ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
         # the DRM's `DRC_BJT` mark layer covers both NPN and PNP polarities
         # with no single named device cell to attribute one to; see
-        # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note).
-        ("gf180mcu", ("nfet", "pfet", "bjt")),
+        # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note), plus one
+        # MiM-capacitor entry (issue #225, its own official LVS device name
+        # for the deck's Metal4/Metal5 MiM stack).
+        (
+            "gf180mcu",
+            ("nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield"),
+        ),
     ],
 )
-def test_extraction_deck_device_classes_reports_mos_and_bipolar(deck_name, expected):
+def test_extraction_deck_device_classes_reports_mos_bipolar_and_capacitor(
+    deck_name, expected
+):
     """`device_classes` reports exactly what each deck is structurally
     capable of recognising -- two-terminal-well MOS plus each deck's
-    curated bipolar entry (issue #223) -- independent of any particular
-    layout."""
+    curated bipolar (issue #223) and MiM-capacitor (issue #225) entries --
+    independent of any particular layout."""
     deck = get_extraction_deck(deck_name)
     assert deck.device_classes == expected
 
@@ -751,7 +926,13 @@ def test_sky130_inv_1_spot_check(tmp_path):
     assert report["top"] == "sky130_fd_sc_hd__inv_1"
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "pnp",
+        "sky130_fd_pr__model__cap_mim",
+        "sky130_fd_pr__model__cap_mim_m4",
+    ]
 
     devices = {d["class"]: d for d in report["devices"]}
     nfet, pfet = devices["nfet"], devices["pfet"]
@@ -775,7 +956,12 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     assert report["top"] == "gf180mcu_fd_sc_mcu9t5v0__clkinv_1"
     assert report["device_count"] == 2
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
-    assert report["device_classes"] == ["nfet", "pfet", "bjt"]
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "bjt",
+        "cap_mim_2f0_m4m5_noshield",
+    ]
 
     devices = {d["class"]: d for d in report["devices"]}
     nfet, pfet = devices["nfet"], devices["pfet"]

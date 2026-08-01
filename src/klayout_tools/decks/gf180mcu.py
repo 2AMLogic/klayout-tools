@@ -63,6 +63,33 @@ implant-specific rules, LVPWELL/DNWELL, the remaining BJT rules that key off
 DNWELL/LVPWELL, 5V/6V variants, DFM guidelines, and ``MIMTM.2``'s
 sized/derived-layer need — see its own note below).
 
+``klt extract``'s MiM-capacitor device recognition (``EXTRACTION_DECK.capacitors``
+below, issue #225) is transcribed from a *different*, LVS-specific source
+than the DRC rules above: the DRM's "10.4 MIM Capacitor" section publishes
+only the DRC-checkable geometry rules (``MIMTM.*``, above), not a
+device-recognition derivation or a capacitance-per-area coefficient. Both
+come from ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s companion **KLayout
+LVS** deck (a sibling of the DRC deck cited above, under ``klayout/lvs/``
+rather than ``klayout/drc/``) — unlike the DRC deck, this was not present in
+the ``999a6ff`` DRC-only snapshot cited above, so it is instead cited from a
+real fetched PDK install: ``volare enable gf180mcu
+c6d73a35f524070e85faff4a6a9eef49553ebc2b`` (the same commit ``open_pdks``
+itself; its ``gf180mcu/Makefile.in`` copies ``${GF180MCU_PV_PATH}/klayout/lvs/*``
+from that verification-library fetch), giving
+``libs.tech/klayout/lvs/rule_decks/mimcap_derivations.lvs`` (the "virtual
+bottom plate" geometry derivation), ``mimcap_extraction.lvs`` (the
+``extract_devices(capacitor(name, area_cap, class), {...})`` call and its
+``2.0e-15`` F/um² coefficient) and ``layers_definitions.lvs`` (the
+``topmin1_metal``/``CAP_MK``/``mim_l_mk`` layer roles). Cross-checked
+against two more independent sources in the same open_pdks build:
+``gf180mcu-pdk``'s own ``docs/analog/model_parameters/LV/tables_clear/08_MIM.csv``
+(a device-model table publishing the same three selectable MiM densities,
+"1.0fF/um2 MIM" / "1.5fF/um2 MIM" / "2.0fF/um2 MIM"), and ``open_pdks``'
+own ``gf180mcu/gf180mcu.json`` PDK-variant description string, which
+literally reads ``"Global Foundries 0.18um MCU CMOS, 2fF MiM + 1k high
+sheet rho poly"`` for this built variant (confirming ``2.0`` fF/um² -- not
+``1.0``/``1.5`` -- is the one this specific PDK build ships).
+
 Eight rules below approximate the official DRM rule in some way (each is
 called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
@@ -182,7 +209,14 @@ get_polygons(117, 10)``):
 
 from __future__ import annotations
 
-from . import BipolarDevice, DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
+from . import (
+    BipolarDevice,
+    CapacitorDevice,
+    DrcRule,
+    ExtractionDeck,
+    LayerRC,
+    ParasiticsDeck,
+)
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001, same as sky130), so a threshold in micrometres
@@ -461,6 +495,10 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (75, 0): "FuseTop",
     (55, 0): "Dualgate",
     (127, 5): "DRC_BJT",
+    (117, 5): "CAP_MK",
+    (117, 10): "MIM_L_MK",
+    (80, 5): "efuse_mk",
+    (125, 5): "plfuse",
 }
 
 # --------------------------------------------------------------------------- #
@@ -513,6 +551,42 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # polarities under one mark layer, and unlike sky130's `pnp_05v5` this repo
 # has no positively-identified single device-cell name to attribute a
 # specific polarity to -- a generic class name is used rather than guessing.
+#
+# MiM capacitor device recognition (issue #225), transcribed from the
+# official KLayout LVS deck's own derivation and extraction calls (see the
+# module docstring's provenance note above for the exact source files):
+#
+#     mimtm_virtual = fusetop.sized(1.06.um)
+#                            .and(topmin1_metal.interacting(fusetop))
+#     fuse_cap = fusetop.interacting(cap_mk).interacting(mim_l_mk)
+#                       .not(mimcap_exclude)   # mimcap_exclude = efuse_mk.join(plfuse)
+#     extract_devices(capacitor('cap_mim_2f0_m4m5_noshield', 2.0e-15, MIMCap),
+#                     { 'P1' => mimtm_virtual, 'P2' => fuse_cap })
+#
+# for `METAL_LEVEL = '5LM'` (this curated deck's own Metal1-Metal5 stack --
+# see the DRC deck's own "10.4 MIM Capacitor" note above on why only Option B
+# applies here) and the LVS deck's own default `MIM_CAP = '2'` (2.0fF/um^2 --
+# see the provenance note above on why this deck models only the default of
+# the PDK's three selectable densities, not all three: which one a given
+# fab run actually ships is a foundry-side option selected at LVS-runset
+# invocation time, not something a drawn layout's own geometry can
+# distinguish -- there is no per-instance layer marking "this cap uses the
+# 1.5fF option" the way `requires`/`excludes` narrows other device classes
+# below). `topmin1_metal` for `5LM` is `Metal4` (46/0, `metal4.not(metal4_res)`
+# in the official deck; this curated deck does not model `metal4_res`, the
+# separately-marked-resistor exclusion -- an unmodelled, narrow gap, mirrors
+# the "curated starter subset" scope guard elsewhere in this file).
+#
+# `top_plate`/`bottom_plate` are `FuseTop`/`Metal4` rather than any of this
+# deck's own `metals` (`metals` stops at Metal1 above) -- see
+# `CapacitorDevice`'s "Known limitation": the extracted capacitor's plate
+# nets are not wired into this deck's Metal1-only connectivity stack.
+# `bottom_plate_oversize_um=1.06` reproduces the official "virtual bottom
+# plate" derivation exactly (`extract.py`'s capacitor-resolution block
+# performs the same `interacting`-then-`sized`-`and` two-step). `CAP_MK`
+# (117/5) and `MIM_L_MK` (117/10) are both required on the top plate,
+# matching `fuse_cap`'s double `.interacting(...)` above; `efuse_mk` (80/5)
+# and `plfuse` (125/5) are excluded, matching `mimcap_exclude`.
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -527,6 +601,24 @@ EXTRACTION_DECK = ExtractionDeck(
             emitter=(22, 0),  # Comp
             marker=(127, 5),  # DRC_BJT
             class_name="bjt",
+        ),
+    ),
+    capacitors=(
+        CapacitorDevice(
+            name="cap_mim_2f0_m4m5_noshield",  # official LVS deck's own device name
+            top_plate=(75, 0),  # FuseTop
+            top_plate_requires=(
+                (117, 5),  # CAP_MK
+                (117, 10),  # MIM_L_MK
+            ),
+            top_plate_excludes=(
+                (80, 5),  # efuse_mk
+                (125, 5),  # plfuse
+            ),
+            bottom_plate=(46, 0),  # Metal4 (topmin1_metal for the 5LM stack)
+            # DRM 10.4.2 footnote 1 / MIMTM.1's "virtual bottom plate":
+            bottom_plate_oversize_um=1.06,
+            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
         ),
     ),
 )

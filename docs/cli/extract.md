@@ -57,7 +57,9 @@ for each — one generic `nfet`/`pfet` device class per deck (no
 voltage-flavor distinction). A deck may additionally declare one or more
 vertical-BJT device-recognition entries, run through KLayout's native
 `DeviceExtractorBJT3Transistor` — see "Bipolar (BJT) device recognition"
-below.
+below — and one or more drawn MiM-capacitor device-recognition entries, run
+through KLayout's native `DeviceExtractorCapacitor` — see "MiM capacitor
+device recognition" below.
 
 ## Deviation from the spike
 
@@ -139,6 +141,73 @@ so the collector terminal is tied to the deck's global substrate net
 area/perimeter parameters named `AE`/`AB`/`AC`/`PE`/`PB`/`PC`/`NE`, none of
 which match the `W`/`L` parameter names `devices[].params` extracts — see
 "JSON response" below).
+
+### MiM capacitor device recognition
+
+Both curated decks additionally declare one or more drawn MiM
+(Metal-Insulator-Metal) capacitor device-recognition entries
+(`ExtractionDeck.capacitors`, a tuple of `CapacitorDevice` — see its
+docstring in `src/klayout_tools/decks/__init__.py`), run through KLayout's
+native `DeviceExtractorCapacitor`. A MiM cap is two conductor plates
+separated by a thin dielectric, drawn as **two independent layers** — a
+purpose-drawn top plate and a bottom plate on an ordinary conductor — rather
+than one marked-up conductor the way a drawn resistor or the bipolar entries
+above reuse existing layers:
+
+| Deck | `devices[].class` | Top plate | Bottom plate | Capacitance density |
+| ---- | ------------------ | --------- | ------------ | -------------------- |
+| `gf180mcu` | `cap_mim_2f0_m4m5_noshield` | `FuseTop` (75/0), requires `CAP_MK` (117/5) + `MIM_L_MK` (117/10), excludes `efuse_mk`/`plfuse` | "Virtual bottom plate": `Metal4` (46/0) clipped to `FuseTop` sized (oversized) by 1.06µm | **2.0 fF/µm²** |
+| `sky130` | `sky130_fd_pr__model__cap_mim` | `capm.drawing` (89/44) | `met3.drawing` (70/20), unfiltered | **2.0 fF/µm²** |
+| `sky130` | `sky130_fd_pr__model__cap_mim_m4` | `capm2.drawing` (97/44) | `met4.drawing` (71/20), unfiltered | **2.0 fF/µm²** |
+
+KLayout computes `C = A * area_cap` from the two plates' actual geometric
+overlap area, so the capacitance-density number *is* the accuracy of the
+extracted value — the capacitor analogue of a drawn resistor's sheet
+resistance. Each is transcribed from that PDK's own official KLayout **LVS**
+deck (a different source than the DRC rule tables the rest of each deck
+module cites — sky130's `sky130.lvs`, gf180mcu's `mimcap_derivations.lvs` /
+`mimcap_extraction.lvs`) and cross-checked against independent sources in
+the same PDK install — see the per-deck module docstrings
+(`src/klayout_tools/decks/sky130.py`, `.../gf180mcu.py`) for the exact
+source files, the derivation each is transcribed from, and every
+approximation taken relative to it. gf180mcu's stack additionally needs a
+"virtual bottom plate" derivation (its bottom plate is ordinary `Metal4`
+routing, not a purpose-drawn cap layer the way sky130's `capm`/`capm2`
+are) — clipping the bottom conductor to the sized top-plate outline so an
+unrelated `Metal4` trace 1.06µm away from a real MiM cap is not swept in.
+
+Two consequences worth knowing:
+
+- **Unmarked conductor is never reclassified.** An ordinary
+  `Metal4`-`Metal3` (or, on sky130, plain `met3`/`met4`) overlap with no
+  `MIM_L_MK`/`capm`/`capm2` marker drawn stays ordinary connectivity, never
+  a capacitor — mirroring the "unmarked conductor is never reclassified"
+  guarantee drawn resistors give.
+- **Capacitor plate nets are not wired into the rest of this deck's metal
+  stack.** Neither deck's `metals` field (see "Coverage" above) reaches as
+  high as a MiM cap's plate layers (both stop at metal1); a recognised
+  capacitor's two terminal nets are therefore only as large as the plate
+  shapes `klt extract` itself recognises — multiple plate polygons that
+  touch merge into one net, but neither plate's net extends into whatever
+  real upper-metal routing a full metal-stack extraction would connect it
+  to. The *device* (a capacitor of the correct value between two
+  correctly-shaped plates) is still correctly recognised; only the net
+  names/connectivity of its two terminals carries this documented
+  approximation. A layout with no MiM-cap marker anywhere extracts
+  bit-for-bit as it did before this feature existed — the capacitor
+  extractor is never even invoked for an entry whose plate regions come out
+  empty.
+- **gf180mcu's stack models only the default of three selectable
+  densities.** The DRM/LVS deck's MiM cap supports 1.0/1.5/2.0 fF/µm²
+  dielectric-thickness options selected as a foundry-side runset option, not
+  something a drawn layout's own geometry can distinguish; this deck models
+  only the LVS runset's own default (2.0 fF/µm²) — see
+  `decks/gf180mcu.py`'s provenance note.
+
+**sky130 gap**: neither MoM (Metal-on-Metal, interdigitated-finger)
+capacitors nor any voltage-flavor/size variant beyond the two curated
+`capm`/`capm2` stacks above are modelled — out of scope for this curated
+starter subset, not a silent omission.
 
 ## PDK resolution
 
@@ -370,7 +439,13 @@ exit codes).
   "net_count": 6,
   "pin_count": 6,
   "device_counts": { "nfet": 1, "pfet": 1 },
-  "device_classes": ["nfet", "pfet", "pnp"],
+  "device_classes": [
+    "nfet",
+    "pfet",
+    "pnp",
+    "sky130_fd_pr__model__cap_mim",
+    "sky130_fd_pr__model__cap_mim_m4"
+  ],
   "devices": [
     {
       "name": "$1",
@@ -401,8 +476,8 @@ exit codes).
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
-| `device_counts`    | object\<string, int\>      | Per-device-class counts, keys sorted for determinism (`"nfet"`/`"pfet"` and, on decks that declare one, a bipolar class like `"pnp"`/`"bjt"`). What was actually **found**.  |
-| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `["nfet", "pfet", "pnp"]` or gf180mcu's `["nfet", "pfet", "bjt"]` — see "Bipolar (BJT) device recognition" above), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
+| `device_counts`    | object\<string, int\>      | Per-device-class counts, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"` and/or a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`). What was actually **found**.  |
+| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above — and a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |
@@ -419,9 +494,9 @@ consume.
 | Field    | Type                        | Description                                                                                    |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
-| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, or a declared bipolar class like `"pnp"` / `"bjt"`). |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). |
+| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, or a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`). |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**) and `"area_um2"` (the plates' overlap area, in square micrometres — `c_f = area_um2 * area_cap`, see "MiM capacitor device recognition" above). |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 
@@ -472,6 +547,12 @@ above, issue #217). The following remain out of scope:
   coefficients are representative, uncalibrated, order-of-magnitude starter
   values (see "Parasitic (RC) extraction"); calibrating them against silicon
   is an explicit non-goal (#216 "Non-goals").
+- **Drawn resistor device class.** Bipolar and MiM-capacitor devices are
+  recognised (see "Bipolar (BJT) device recognition" and "MiM capacitor
+  device recognition"), but neither deck declares a precision-resistor
+  extractor, so a resistor-marked conductor still extracts as ordinary
+  connectivity. Tracked as a sibling sub-issue of #219
+  ([#222](https://github.com/2AMLogic/klayout-tools/issues/222)).
 
 Netlist comparison (`klt lvs`) is a separate command; this command only
 produces the layout-side netlist half of that comparison.

@@ -114,6 +114,13 @@ class ExtractionDeck:
     docstring anticipates (see :attr:`device_classes` below). Empty for a
     deck with no curated bipolar recognition; non-empty decks may declare
     more than one entry (e.g. distinct NPN and PNP device families).
+
+    ``capacitors`` is an optional tuple of :class:`CapacitorDevice` entries
+    (empty by default) declaring this deck's drawn MiM (Metal-Insulator-Metal)
+    capacitor device-recognition layers (issue #225), the capacitor sibling of
+    ``bipolars`` above. Empty for a deck with no curated capacitor
+    recognition; non-empty decks may declare more than one entry (e.g.
+    sky130's two independent MiM stacks, one per metal level it is drawn on).
     """
 
     active: tuple[int, int]
@@ -130,28 +137,33 @@ class ExtractionDeck:
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
     bipolars: tuple[BipolarDevice, ...] = ()
+    capacitors: tuple[CapacitorDevice, ...] = ()
 
     @property
     def device_classes(self) -> tuple[str, ...]:
         """The device-class *roles* (not the ``devices[].class`` label
-        strings ``nfet_class``/``pfet_class``/``BipolarDevice.class_name``
-        provide) this deck is structurally capable of recognising --
-        independent of whether a given layout actually contains any devices
-        of that class (see ``device_counts`` in ``docs/cli/extract.md`` for
-        the "what was found" counterpart of this "what can be found"
-        declaration).
+        strings ``nfet_class``/``pfet_class``/``BipolarDevice.class_name``/
+        ``CapacitorDevice.name`` provide) this deck is structurally capable
+        of recognising -- independent of whether a given layout actually
+        contains any devices of that class (see ``device_counts`` in
+        ``docs/cli/extract.md`` for the "what was found" counterpart of this
+        "what can be found" declaration).
 
         Every registered deck extracts two-terminal-well MOS (``"nfet"``,
         ``"pfet"``); a deck that also declares one or more ``bipolars``
         entries (#223) appends each entry's ``class_name`` (in declaration
-        order, deduplicated) after those two. Resistor/capacitor extractors
-        (#219's remaining sibling sub-issues) should extend this the same
-        way once added.
+        order, deduplicated), and a deck that declares one or more
+        ``capacitors`` entries (#225) likewise appends each entry's ``name``
+        after that. A resistor extractor (#219's remaining sibling sub-issue,
+        #222) should extend this the same way once added.
         """
         classes = ["nfet", "pfet"]
         for bipolar in self.bipolars:
             if bipolar.class_name not in classes:
                 classes.append(bipolar.class_name)
+        for capacitor in self.capacitors:
+            if capacitor.name not in classes:
+                classes.append(capacitor.name)
         return tuple(classes)
 
 
@@ -204,6 +216,91 @@ class BipolarDevice:
     marker: tuple[int, int]
     collector: tuple[int, int] | None = None
     class_name: str = "bjt"
+
+
+@dataclass(frozen=True)
+class CapacitorDevice:
+    """One drawn MiM (Metal-Insulator-Metal) capacitor device-recognition
+    entry for an :class:`ExtractionDeck`'s optional ``capacitors`` field
+    (issue #225), consumed by ``extract.py``'s ``kdb.DeviceExtractorCapacitor``
+    wiring -- the capacitor sibling of :class:`BipolarDevice`.
+
+    A MiM cap is two conductor plates separated by a thin dielectric, drawn
+    as *two independent layers* rather than one marked-up conductor the way
+    :class:`BipolarDevice` reuses the deck's own MOS layers: ``top_plate`` is
+    the PDK's purpose-drawn top-plate layer (e.g. gf180mcu's ``FuseTop``,
+    sky130's ``capm``/``capm2`` "MiM cap plate" mark layers) and
+    ``bottom_plate`` is the conductor the bottom plate is drawn on (e.g.
+    gf180mcu's ``Metal4``, sky130's ``met3``/``met4``).
+
+    Unlike :class:`ResistorDevice`-shaped fields elsewhere in this codebase
+    (there is no such class yet -- see #222), ``bottom_plate`` does **not**
+    need to be one of the owning deck's own ``metals``: both curated decks'
+    tracked metal stack stops at metal1 (see ``ExtractionDeck``'s docstring),
+    while a MiM cap's plates live on a higher metal level neither deck
+    otherwise tracks. The two plate regions are therefore recognised as
+    their own new, self-connected connectivity nodes, not wired into the
+    rest of the deck's contact/via/metal connectivity graph -- see "Known
+    limitation" below.
+
+    Geometry (all layer fields are ``(layer, datatype)`` pairs):
+
+    - ``top_plate`` -- the purpose-drawn top-plate conductor. Narrowed by
+      ``top_plate_requires`` (all of which must also cover it) and
+      ``top_plate_excludes`` (subtracted), the same requires/excludes idiom
+      :class:`ResistorDevice` uses (#222) -- e.g. gf180mcu's ``FuseTop``
+      additionally requires both ``CAP_MK``/``MIM_L_MK`` and excludes
+      ``efuse_mk``/``plfuse``, mirroring the PDK's own official derivation.
+    - ``bottom_plate`` -- the conductor the bottom plate is drawn on, with
+      its own optional ``bottom_plate_requires``/``bottom_plate_excludes``.
+    - ``bottom_plate_oversize_um`` -- when nonzero, the bottom plate is not
+      the raw (filtered) ``bottom_plate`` region but the PDK's derived
+      "virtual bottom plate": the subset of that region already touching the
+      *unsized* ``top_plate`` region, clipped to ``top_plate`` sized
+      (oversized) by this many micrometres -- gf180mcu's own official
+      derivation for its MiM stack (``FuseTop.sized(1.06um) &
+      Metal4.interacting(FuseTop)``, the gf180mcu DRM's "10.4.2 MIM Option
+      B" footnote 1). Zero (the default) means the bottom plate is simply
+      the filtered ``bottom_plate`` region, unfiltered by any sizing step --
+      sky130's own official derivation, where the bottom plate is "whatever
+      conductor the purpose-built top-plate mark layer sits over," no
+      virtual-plate derivation needed.
+
+    ``area_cap_f_um2`` is the device's capacitance per square micrometre of
+    plate *overlap* area, in **Farads**. KLayout's
+    ``kdb.DeviceExtractorCapacitor`` computes ``C = A * area_cap`` from the
+    two plates' actual geometric overlap, so **this number is the whole
+    accuracy of the extracted capacitance** -- exactly the role
+    ``sheet_rho_ohm_sq`` plays for a resistor device (#222). Every deck that
+    sets it must cite the PDK/DRM source it came from inline.
+
+    ``name`` is the extracted device-class name (``devices[].class`` in the
+    JSON response, and one of the values :attr:`ExtractionDeck.device_classes`
+    reports for a deck that declares this entry).
+
+    Known limitation: because the plate layers are not part of
+    ``ExtractionDeck.metals``, a recognised capacitor's two terminal nets are
+    only as large as the plate shapes ``klt extract`` recognises as this
+    device -- multiple plate polygons that touch each other merge into one
+    net (e.g. a shared bottom plate across several caps), but neither
+    plate's net extends into whatever real upper-metal routing a full
+    metal-stack extraction would connect it to. The *device* itself (a
+    capacitor of the correct value between two correctly-shaped plates) is
+    still correctly recognised; only the *net names/connectivity* of its two
+    terminals is a documented approximation -- the same "curated starter
+    subset, not the full metal stack" scope guard the rest of this deck
+    already carries (see ``docs/cli/extract.md`` -> "Coverage").
+    """
+
+    name: str
+    top_plate: tuple[int, int]
+    bottom_plate: tuple[int, int]
+    area_cap_f_um2: float
+    top_plate_requires: tuple[tuple[int, int], ...] = ()
+    top_plate_excludes: tuple[tuple[int, int], ...] = ()
+    bottom_plate_requires: tuple[tuple[int, int], ...] = ()
+    bottom_plate_excludes: tuple[tuple[int, int], ...] = ()
+    bottom_plate_oversize_um: float = 0.0
 
 
 @dataclass(frozen=True)

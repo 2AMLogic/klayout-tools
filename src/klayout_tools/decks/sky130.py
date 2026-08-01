@@ -67,6 +67,46 @@ that positive confirmation (this repo vendors no sky130 device-library GDS to
 check directly), this deck stays with the one PNP entry it can attribute to a
 concretely-named device cell.
 
+``klt extract``'s MiM-capacitor device recognition (``EXTRACTION_DECK.capacitors``
+below, issue #225) is transcribed from a *different* source than the DRC
+rules above: neither ``sky130.lydrc`` nor ``sky130.lyt`` (both cited above)
+carries a MiM-cap device-recognition derivation or capacitance-per-area
+coefficient -- that lives in the companion **KLayout LVS** deck,
+``sky130.lvs``, which (like ``sky130A.lyp``, the layer-properties file naming
+the ``capm``/``capm2`` mark layers below) is fetched by ``open_pdks`` from a
+*different* upstream repo than the ``open-pdks`` mono-repo itself:
+``efabless/sky130_klayout_pdk`` (its ``klayout-repo`` Makefile target;
+confirmed via a real sky130A install, volare,
+``libs.tech/klayout/lvs/sky130.lvs`` / ``libs.tech/klayout/tech/sky130A.lyp``).
+``sky130.lvs`` derives and extracts sky130's two independent MiM stacks
+unconditionally (no foundry-side selectable-density option the way
+gf180mcu's does -- see ``gf180mcu.py``'s own provenance note)::
+
+    connect(capm , via3)
+    connect(met3_ncap, met3_con)
+    extract_devices(capacitor("sky130_fd_pr__model__cap_mim", 2e-15, MIMCap),
+                    { "P1" => met3_con, "P2" => capm })
+
+    connect(capm2, via4)
+    connect(met4_ncap, met4_con)
+    extract_devices(capacitor("sky130_fd_pr__model__cap_mim_m4", 2e-15, MIMCap),
+                    { "P1" => met4_con, "P2" => capm2 })
+
+i.e. sheet capacitance **2.0 fF/um^2** for both, a plain two-terminal
+``DeviceExtractorCapacitor`` (no bulk terminal), with the bottom plate simply
+"whatever conductor the purpose-drawn top-plate mark layer sits over" -- no
+"virtual bottom plate" sizing derivation needed the way gf180mcu's MiM stack
+requires (sky130's ``capm``/``capm2`` are purpose-built device-recognition
+layers, not an ordinary routing-metal layer a real device geometrically
+implies). Both curated `capacitors` entries below reuse the deck's own
+``met3``/``met4`` (70/20, 71/20) conductor layers as ``bottom_plate`` --
+unfiltered, since ``capm``/``capm2`` alone already scope recognition to
+genuine MiM-cap instances -- rather than the full official
+``met3_con``/``met4_con`` derivations (which additionally exclude
+``met3_res``/``met4_res``/``inductor``/``met3_fuse``/``met4_fuse``/``vpp``,
+none of which this curated deck otherwise models -- the same "curated
+starter subset" scope guard elsewhere in this file).
+
 Two rules below (``poly.width.1`` is not one of them) approximate an
 official rule defined on a *compound* layer expression (a union of two mask
 layers) as a check against a single drawn layer, because our engine (native
@@ -91,7 +131,14 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
 
 from __future__ import annotations
 
-from . import BipolarDevice, DrcRule, ExtractionDeck, LayerRC, ParasiticsDeck
+from . import (
+    BipolarDevice,
+    CapacitorDevice,
+    DrcRule,
+    ExtractionDeck,
+    LayerRC,
+    ParasiticsDeck,
+)
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
@@ -215,6 +262,11 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (68, 20): "met1.drawing",
     (68, 44): "via.drawing",
     (82, 44): "pnp.drawing",
+    (69, 20): "met2.drawing",
+    (70, 20): "met3.drawing",
+    (71, 20): "met4.drawing",
+    (89, 44): "capm.drawing",
+    (97, 44): "capm2.drawing",
 }
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +342,30 @@ EXTRACTION_DECK = ExtractionDeck(
             emitter=(65, 20),  # diff.drawing
             marker=(82, 44),  # pnp.drawing
             class_name="pnp",
+        ),
+    ),
+    # MiM capacitors (issue #225, see the module docstring's provenance note
+    # above): two independent stacks, one per metal level sky130's official
+    # LVS deck draws a purpose-built top-plate mark layer on. Neither
+    # `bottom_plate` (met3/met4) is one of this deck's own `metals` (which
+    # stops at met1 above) -- see `CapacitorDevice`'s "Known limitation": the
+    # extracted capacitors' plate nets are not wired into this deck's li1/
+    # met1-only connectivity stack. No `bottom_plate_oversize_um` -- unlike
+    # gf180mcu's MiM stack, sky130's bottom plate is simply the conductor the
+    # purpose-drawn top-plate layer sits over, no "virtual bottom plate"
+    # derivation needed.
+    capacitors=(
+        CapacitorDevice(
+            name="sky130_fd_pr__model__cap_mim",
+            top_plate=(89, 44),  # capm.drawing
+            bottom_plate=(70, 20),  # met3.drawing
+            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+        ),
+        CapacitorDevice(
+            name="sky130_fd_pr__model__cap_mim_m4",
+            top_plate=(97, 44),  # capm2.drawing
+            bottom_plate=(71, 20),  # met4.drawing
+            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
         ),
     ),
 )

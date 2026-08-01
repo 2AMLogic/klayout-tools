@@ -66,6 +66,16 @@ KLayout's native ``DeviceExtractorBJT3Transistor``. See
 :func:`_extract_netlist`'s bipolar wiring block for how the marker layer
 scopes recognition to genuine device-cell instances.
 
+A deck may also declare one or more drawn MiM-capacitor device-recognition
+entries (``ExtractionDeck.capacitors``, issue #225): two independent
+plate layers (a purpose-drawn top plate, a bottom plate on an ordinary
+conductor -- optionally derived through a PDK-specific "virtual bottom
+plate" sizing step) fed straight to KLayout's native
+``DeviceExtractorCapacitor``. See :class:`klayout_tools.decks.CapacitorDevice`
+for the layer-role contract, the capacitance-per-area provenance each deck
+must cite, and the documented "plate nets are not wired into the rest of
+this deck's metal stack" limitation.
+
 Verified compatible with ``klt sim``'s netlist convention (see
 ``docs/cli/sim.md`` -> "Netlist convention"): the written SPICE is a
 ``.SUBCKT ... .ENDS`` circuit body with no top-level ``.control``/``.end``
@@ -108,6 +118,16 @@ SCHEMA_VERSION = 1
 #: `0.14999999999999997`) without losing meaningful precision (sub-nm, well
 #: below any curated deck's dbu grid).
 _PARAM_PRECISION_UM = 6
+
+#: Decimal places a drawn capacitor's `devices[].params.c_f` (in **Farads**)
+#: is rounded to -- same floating-point-noise cleanup as `_PARAM_PRECISION_UM`,
+#: but a MiM cap's capacitance sits in the femtofarad-to-picofarad range
+#: (roughly 1e-14 to 1e-11 F for the curated decks' modelled plate sizes), so
+#: clearing noise at the same *absolute* micrometre-scale precision would
+#: zero out the whole value; this rounds at a correspondingly smaller
+#: absolute scale instead (still far more precision than any real dbu-grid
+#: geometry needs).
+_PARAM_PRECISION_FARAD = 21
 
 #: Lower bound (ohms) clamped onto an emitted parasitic series resistor so a
 #: net whose interconnect resistance rounds to ~0 still writes a well-formed,
@@ -586,6 +606,65 @@ def _extract_netlist(
             (bipolar, bipolar_base, bipolar_emitter, bipolar_collector)
         )
 
+    # MiM capacitor device recognition (issue #225): each of the deck's
+    # optional `capacitors` entries (see `CapacitorDevice` in
+    # `decks/__init__.py`) derives its own top-plate/bottom-plate geometry --
+    # narrowed by device-specific `requires`/`excludes` layers, and (for a
+    # PDK whose bottom plate is an ordinary routing metal rather than a
+    # purpose-drawn cap layer) the PDK's own "virtual bottom plate" oversize
+    # derivation -- then hands the two plate regions straight to KLayout's
+    # native `DeviceExtractorCapacitor`. Unlike the bipolar block above,
+    # neither plate layer is one of this deck's own MOS-recognition layers,
+    # so there is nothing to intersect against other than the device's own
+    # declared layers.
+    for capacitor in deck.capacitors:
+        top_region = _region(layout, top_cell, capacitor.top_plate)
+        for layer in capacitor.top_plate_requires:
+            top_region = top_region & _region(layout, top_cell, layer)
+        for layer in capacitor.top_plate_excludes:
+            top_region = top_region - _region(layout, top_cell, layer)
+
+        bottom_conductor = _region(layout, top_cell, capacitor.bottom_plate)
+        for layer in capacitor.bottom_plate_requires:
+            bottom_conductor = bottom_conductor & _region(layout, top_cell, layer)
+        for layer in capacitor.bottom_plate_excludes:
+            bottom_conductor = bottom_conductor - _region(layout, top_cell, layer)
+
+        if capacitor.bottom_plate_oversize_um:
+            # "Virtual bottom plate" derivation (e.g. gf180mcu's MiM stack):
+            # only bottom-conductor shapes that already touch the *unsized*
+            # top plate count (`interacting`), then clipped to the top
+            # plate's oversized outline for the exact overlap area -- the
+            # same two-step derivation the PDK's own official KLayout LVS
+            # deck uses (see `CapacitorDevice`'s docstring).
+            oversize_dbu = int(round(capacitor.bottom_plate_oversize_um / layout.dbu))
+            bottom_region = bottom_conductor.interacting(top_region) & (
+                top_region.sized(oversize_dbu)
+            )
+        else:
+            bottom_region = bottom_conductor
+
+        if top_region.is_empty() or bottom_region.is_empty():
+            # No PDK cap marker drawn anywhere on this layout -- the common
+            # case. Registering/extracting an empty device would be a no-op
+            # anyway, but skipping it entirely keeps a cap-free layout's
+            # extraction bit-for-bit what it was before this feature existed.
+            continue
+
+        # Plate layers are not part of this deck's `metals` connectivity
+        # stack (see `CapacitorDevice`'s "Known limitation"), so each plate
+        # is its own new, self-connected node: `connect()` merges polygons
+        # of the *same* plate that touch (e.g. a shared bottom plate across
+        # several caps) but wires nothing else to it.
+        l2n.register(bottom_region, f"{capacitor.name}_bottom")
+        l2n.register(top_region, f"{capacitor.name}_top")
+        l2n.connect(bottom_region)
+        l2n.connect(top_region)
+        l2n.extract_devices(
+            kdb.DeviceExtractorCapacitor(capacitor.name, capacitor.area_cap_f_um2),
+            {"P1": bottom_region, "P2": top_region},
+        )
+
     warnings = [str(entry.message) for entry in l2n.each_log_entry()]
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
@@ -921,6 +1000,27 @@ def _describe_devices(
                 )
             elif param.name == "L":
                 params["l_um"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_UM
+                )
+            elif param.name == "C":
+                # Drawn-capacitor device classes only (#225): KLayout's
+                # `DeviceClassCapacitor` reports capacitance in farads. MOS/
+                # bipolar classes have no `C` parameter, so this branch never
+                # fires for them.
+                params["c_f"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_FARAD
+                )
+            elif param.name == "A":
+                # Capacitor plate-overlap area in square micrometres -- the
+                # geometry `c_f` above was computed from (`C = A * area_cap`,
+                # see `CapacitorDevice`'s docstring), reported alongside it so
+                # a consumer can sanity-check the extracted value without
+                # re-deriving it from the layout. `DeviceClassCapacitor`'s own
+                # area/perimeter parameters are named `A`/`P` -- distinct from
+                # `DeviceClassBJT3Transistor`'s `AE`/`AB`/`AC`/`PE`/`PB`/`PC`
+                # (see "Bipolar (BJT) device recognition"), so this branch
+                # never fires for a bipolar device.
+                params["area_um2"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
 
