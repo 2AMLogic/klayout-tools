@@ -91,6 +91,16 @@ class ExtractionDeck:
     itself, e.g. sky130's ``VPB``) -- distinct from ``metal_labels``, which
     label metal-level pins/power straps.
 
+    ``poly_label`` is an optional text/label layer read directly off ``poly``
+    (mirroring ``well_label``'s "label a pin on the drawn layer itself"
+    pattern) so a gate/poly node can be named without a metal landing pad on
+    it -- a device gate that ``klt gen`` draws as bare poly (no contact/metal,
+    see ``gen.py``'s ``_mos_unit_layout``) still has no ``metals[]`` shape for
+    a ``metal_labels[]`` text to attach to, so a poly-level label layer is the
+    only way ``klt gen-compose``'s ``pins[]`` can promote such a port to a
+    named ``.SUBCKT`` pin (#210). ``None`` where a family's curated deck
+    declares no poly-label convention.
+
     ``nfet_class``/``pfet_class`` name the extracted ``DeviceClassMOS4Transistor``
     device classes (``devices[].class`` in the JSON response). ``substrate_net``
     is the global net name the NMOS body terminal is tied to when no drawn
@@ -106,6 +116,7 @@ class ExtractionDeck:
     metals: tuple[tuple[int, int], ...]
     tap: tuple[int, int] | None = None
     well_label: tuple[int, int] | None = None
+    poly_label: tuple[int, int] | None = None
     metal_labels: tuple[tuple[int, int] | None, ...] = ()
     vias: tuple[tuple[int, int], ...] = ()
     nfet_class: str = "nfet"

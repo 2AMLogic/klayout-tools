@@ -192,6 +192,68 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _make_bare_poly_gate_layout(gate_label, top_name="TOP"):
+    """One NMOS whose gate is a bare poly bar with NO gate contact/metal --
+    only a text on the poly-label layer (66/5) names it. Models a `klt gen`
+    MOS device gate, which has no metal landing pad, so the only way to name
+    it is the poly_label wiring #210 added to `EXTRACTION_DECK`."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (nmos active)
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (bare gate bar)
+    # S/D contacts + li1 pads, each labelled so the transistor has named S/D.
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (S)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (D)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (S)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (D)
+    label(67, 5, "SRC", 200, 500)
+    label(67, 5, "DRN", 1800, 500)
+    # The gate: labelled ONLY on poly.pin (66/5), no metal anywhere near it.
+    label(66, 5, gate_label, 1000, 1100)
+    return layout
+
+
+def test_bare_poly_gate_named_via_poly_label(tmp_path):
+    # #210: a text on the poly-label layer (66/5) names a bare-poly gate that
+    # has no metal landing pad, so it survives extraction as a NAMED pin
+    # instead of an anonymous $N net -- and device extraction is unaffected
+    # (still exactly one nfet).
+    path = _write_gds(_make_bare_poly_gate_layout("GATEN"), tmp_path / "bare_gate.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "bare_gate.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    assert nfet["nets"]["g"] == "GATEN"
+    pin_names = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "GATEN" in pin_names
+
+
+def test_bare_poly_gate_anonymous_without_poly_label(tmp_path):
+    # Control: the same layout with NO poly label leaves the gate an anonymous
+    # $N net (the pre-#210 friction), while device extraction is identical --
+    # proving the poly_label text is what promotes the gate, not a geometry
+    # change.
+    layout = _make_bare_poly_gate_layout("UNUSED")
+    # Drop the poly.pin label, keeping every other shape/label.
+    poly_pin = layout.layer(66, 5)
+    layout.top_cell().shapes(poly_pin).clear()
+    path = _write_gds(layout, tmp_path / "bare_gate_nolabel.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "nolabel.spice"))
+    assert report["device_counts"] == {"nfet": 1}
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    assert nfet["nets"]["g"].startswith("$")  # anonymous, unbiasable
+
+
 def test_synthetic_inverter_extracts_two_devices(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
 

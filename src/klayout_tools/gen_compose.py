@@ -321,6 +321,34 @@ def _parse_placement(
     return strategy, order, spacing_um
 
 
+def _validate_block_port(
+    blocks: dict[str, dict[str, Any]],
+    block_id: str,
+    port: str,
+    where: str,
+) -> dict[str, Any]:
+    """Validate that ``block_id``/``port`` name a real block port, raising a
+    :class:`GenComposeError` prefixed with ``where`` otherwise. Returns the
+    resolved block dict.
+
+    Shared by :func:`_parse_connectivity` and :func:`_parse_pins` so both
+    validate a ``{block, port}`` reference identically (a nonexistent block
+    ``id`` or port name is the same application error, exit code 1, regardless
+    of which request field named it). A block that reported no ``ports[]`` at
+    all skips the port-name check (it cannot be validated against an empty
+    set) -- the same latitude the connectivity path already allowed.
+    """
+    block = blocks.get(block_id)
+    if block is None:
+        raise GenComposeError(f"{where} references unknown block id '{block_id}'")
+    if block["port_names"] and port not in block["port_names"]:
+        raise GenComposeError(
+            f"{where} references unknown port '{port}' on block '{block_id}' -- "
+            f"available: {', '.join(sorted(block['port_names']))}"
+        )
+    return block
+
+
 def _parse_connectivity(
     raw_connectivity: Any, blocks: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -361,23 +389,106 @@ def _parse_connectivity(
                     f"request.connectivity[{index}] (net '{net}').pins[{pin_index}] "
                     "must have string 'block'/'port' fields"
                 )
-            block = blocks.get(block_id)
-            if block is None:
-                raise GenComposeError(
-                    f"request.connectivity[{index}] (net '{net}') references "
-                    f"unknown block id '{block_id}'"
-                )
-            if block["port_names"] and port not in block["port_names"]:
-                raise GenComposeError(
-                    f"request.connectivity[{index}] (net '{net}') references "
-                    f"unknown port '{port}' on block '{block_id}' -- available: "
-                    f"{', '.join(sorted(block['port_names']))}"
-                )
+            _validate_block_port(
+                blocks,
+                block_id,
+                port,
+                f"request.connectivity[{index}] (net '{net}')",
+            )
             parsed_pins.append({"block": block_id, "port": port})
 
         connectivity.append({"net": net, "pins": parsed_pins})
 
     return connectivity
+
+
+def _parse_pins(
+    raw_pins: Any,
+    blocks: dict[str, dict[str, Any]],
+    connectivity: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Parse and validate the ``pins[]`` request field (#210).
+
+    Each entry -- ``{"net": <string>, "block": <string>, "port": <string>}``
+    -- names *exactly one* block port (unlike ``connectivity[]``, whose
+    ``pins`` is a 2+ list of ports to wire together) to promote to a labelled,
+    top-level pin *without* routing any metal: the port's own already-drawn
+    geometry is what gets a ``kdb.Text`` label. Validated the same way
+    ``connectivity[]`` is (:func:`_validate_block_port`): an unknown
+    ``block``/``port`` is an application error (exit 1).
+
+    A ``(block, port)`` pair that also appears in any ``connectivity[]`` entry
+    is rejected: that shape is already labelled by the router, so a second,
+    possibly inconsistent ``pins[]`` label on it is ambiguous rather than
+    additive.
+
+    Returns a list of ``{net, block, port}`` dicts. ``None``/absent yields an
+    empty list (omitting ``pins[]`` entirely must not change any behavior).
+    """
+    if raw_pins is None:
+        return []
+    if not isinstance(raw_pins, list):
+        raise GenComposeError("request.pins must be an array")
+
+    connectivity_pairs = {
+        (pin["block"], pin["port"]) for entry in connectivity for pin in entry["pins"]
+    }
+
+    pins: list[dict[str, str]] = []
+    for index, entry in enumerate(raw_pins):
+        if not isinstance(entry, dict):
+            raise GenComposeError(f"request.pins[{index}] must be a JSON object")
+
+        net = entry.get("net")
+        if not isinstance(net, str) or not net:
+            raise GenComposeError(f"request.pins[{index}].net is required")
+
+        block_id = entry.get("block")
+        port = entry.get("port")
+        if not isinstance(block_id, str) or not isinstance(port, str):
+            raise GenComposeError(
+                f"request.pins[{index}] (net '{net}') must have string "
+                "'block'/'port' fields"
+            )
+
+        _validate_block_port(
+            blocks, block_id, port, f"request.pins[{index}] (net '{net}')"
+        )
+
+        if (block_id, port) in connectivity_pairs:
+            raise GenComposeError(
+                f"request.pins[{index}] (net '{net}') names port '{port}' on block "
+                f"'{block_id}', which is already labelled by a connectivity[] net "
+                "-- a port may be promoted by pins[] or wired by connectivity[], "
+                "not both"
+            )
+
+        pins.append({"net": net, "block": block_id, "port": port})
+
+    return pins
+
+
+def _port_has_geometry(port: Any) -> bool:
+    """Whether ``port`` carries the ``{x_um, y_um, layer{layer, datatype}}``
+    geometry a ``pins[]`` label needs to be placed. A block report that omits
+    a port's position/layer cannot be labelled -- reported as a partial-success
+    note rather than crashing (#210)."""
+    if not isinstance(port, dict):
+        return False
+    if not isinstance(port.get("x_um"), (int, float)) or isinstance(
+        port.get("x_um"), bool
+    ):
+        return False
+    if not isinstance(port.get("y_um"), (int, float)) or isinstance(
+        port.get("y_um"), bool
+    ):
+        return False
+    layer = port.get("layer")
+    return (
+        isinstance(layer, dict)
+        and isinstance(layer.get("layer"), int)
+        and isinstance(layer.get("datatype"), int)
+    )
 
 
 def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
@@ -414,36 +525,45 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
 
 
 def _resolve_label_layer(
-    variant: str, route_layer: tuple[int, int]
+    variant: str, draw_layer: tuple[int, int]
 ) -> tuple[int, int] | None:
     """Resolve the PDK-family net-label layer/datatype that pairs with
-    ``route_layer``, for naming a routed ``connectivity[]`` net.
+    ``draw_layer``, for naming a net on that drawn layer.
 
     Mirrors `klt extract`'s own label-recognition convention exactly --
     :class:`klayout_tools.decks.ExtractionDeck`'s ``metals[i]`` <->
     ``metal_labels[i]`` correspondence (see ``_extract_netlist()`` in
     ``extract.py``, which only promotes a net to a named ``.SUBCKT`` pin
     when a ``kdb.Text`` on ``metal_labels[i]`` touches a shape on
-    ``metals[i]``). This is the *same* per-PDK-family
-    :class:`~klayout_tools.decks.ExtractionDeck` every `klt extract` call
-    already resolves via ``get_extraction_deck`` -- never a second, private
-    label-layer table.
+    ``metals[i]``), plus the ``poly`` <-> ``poly_label`` correspondence the
+    deck uses to name a bare-poly gate node that has no metal landing pad
+    (#210, ``l2n.connect(poly, poly_label)``). This is the *same*
+    per-PDK-family :class:`~klayout_tools.decks.ExtractionDeck` every `klt
+    extract` call already resolves via ``get_extraction_deck`` -- never a
+    second, private label-layer table.
 
-    Returns ``None`` when ``route_layer`` does not match any of the
-    resolved family's ``ExtractionDeck.metals`` entries, or that entry has
-    no corresponding label layer -- routing still proceeds (the metal is
-    still drawn), just without a net label for `klt extract` to promote
-    into a pin.
+    ``draw_layer`` is the drawn ``(layer, datatype)`` a shape lives on: a
+    ``routing.layer_role``-resolved metal for a routed ``connectivity[]`` net,
+    or a ``pins[]`` port's own reported layer (which may be metal *or* poly).
+
+    Returns ``None`` when ``draw_layer`` is neither a ``metals[]`` entry with
+    a paired ``metal_labels[]`` layer nor the deck's ``poly`` layer with a
+    ``poly_label`` -- the shape is still drawn, just without a net label for
+    `klt extract` to promote into a pin (partial success, not an error).
     """
     family = _pdk_family(variant)
     deck = get_extraction_deck(family)
     try:
-        index = deck.metals.index(route_layer)
+        index = deck.metals.index(draw_layer)
     except ValueError:
-        return None
-    if index >= len(deck.metal_labels):
-        return None
-    return deck.metal_labels[index]
+        index = None
+    if index is not None:
+        if index >= len(deck.metal_labels):
+            return None
+        return deck.metal_labels[index]
+    if draw_layer == deck.poly:
+        return deck.poly_label
+    return None
 
 
 def _polyline_midpoint_um(
@@ -937,6 +1057,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         request.get("placement"), set(blocks)
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
+    promoted_pins = _parse_pins(request.get("pins"), blocks, connectivity)
 
     routing = request.get("routing") or {}
     if not isinstance(routing, dict):
@@ -1047,6 +1168,57 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
             unrouted_nets.append(net_label)
             notes.append(f"net '{net_label}' could not be routed: {result['reason']}")
 
+    # --- pins[] (#210): label a single port as a top-level pin, no routing --
+    # Each pins[] entry gets one kdb.Text at its port's own composed-frame
+    # position, on the label layer resolved for that port's OWN drawn layer
+    # (resolved per-entry -- each port can be on a different physical layer,
+    # unlike connectivity[]'s single shared routing.layer_role). A port whose
+    # layer has no ExtractionDeck label convention is a partial success: a
+    # drc_hints note, pin not labelled -- never a hard failure.
+    pin_placements: list[dict[str, Any]] = []
+    response_pins: list[dict[str, Any]] = []
+    for entry in promoted_pins:
+        net_label = entry["net"]
+        block_id = entry["block"]
+        port_name = entry["port"]
+        port = blocks[block_id]["ports"].get(port_name)
+        labelled = False
+        if not _port_has_geometry(port):
+            notes.append(
+                f"pin '{net_label}' (block '{block_id}' port '{port_name}') has no "
+                "reported {x_um, y_um, layer} geometry -- it was not labelled"
+            )
+        else:
+            draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
+            pin_label_layer = _resolve_label_layer(pdk_info["variant"], draw_layer)
+            if pin_label_layer is None:
+                notes.append(
+                    f"pin '{net_label}' (block '{block_id}' port '{port_name}') is "
+                    f"on layer {draw_layer[0]}/{draw_layer[1]}, which has no PDK "
+                    "label-layer convention `klt extract` recognises -- the pin was "
+                    "not labelled, so it will not survive as a named .SUBCKT pin "
+                    "after extraction"
+                )
+            else:
+                offset = offsets_um[block_id]
+                pin_placements.append(
+                    {
+                        "net": net_label,
+                        "x_um": port["x_um"] + offset["x"],
+                        "y_um": port["y_um"] + offset["y"],
+                        "layer": pin_label_layer,
+                    }
+                )
+                labelled = True
+        response_pins.append(
+            {
+                "net": net_label,
+                "block": block_id,
+                "port": port_name,
+                "labelled": labelled,
+            }
+        )
+
     _write_composed_gds(
         blocks,
         order,
@@ -1056,6 +1228,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         routed_geometry,
         route_layer,
         label_layer,
+        pin_placements,
     )
 
     # --- drc_hints: matched-group echo + tightest spacing used --------------
@@ -1091,6 +1264,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         "bbox_um": composed_bbox_um,
         "blocks": response_blocks,
         "nets": nets,
+        "pins": response_pins,
         "unrouted_nets": unrouted_nets,
         "drc_hints": {
             "min_spacing_um": min_spacing_um,
@@ -1137,6 +1311,7 @@ def _write_composed_gds(
     routed_geometry: list[dict[str, Any]] | None = None,
     route_layer: tuple[int, int] | None = None,
     label_layer: tuple[int, int] | None = None,
+    pin_placements: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -1161,6 +1336,15 @@ def _write_composed_gds(
     convention (``metals[i]``/``metal_labels[i]`` -- see
     :class:`klayout_tools.decks.ExtractionDeck`) promotes the net to a named
     ``.SUBCKT`` pin instead of an anonymous one (#200).
+
+    ``pin_placements`` (a list of ``{net, x_um, y_um, layer}``, pre-resolved by
+    :func:`compose` from the request's ``pins[]``) each get one
+    :class:`kdb.Text` at their own composed-frame ``(x_um, y_um)`` on their own
+    ``layer`` (a ``(layer, datatype)`` label pair) -- no metal is drawn, the
+    port's existing geometry is what the label attaches to. This is
+    independent of the ``routed_geometry``/``route_layer`` block above: a
+    ``pins[]`` label can land on a poly gate (via ``poly_label``) that carries
+    no routed metal at all (#210).
     """
     import klayout.db as kdb
 
@@ -1232,6 +1416,19 @@ def _write_composed_gds(
                 top.shapes(label_layer_index).insert(
                     kdb.Text(route["net"], kdb.Trans(label_point))
                 )
+
+    if pin_placements:
+        if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)
+            dbu = layout.dbu
+        for pin in pin_placements:
+            layer = pin["layer"]
+            pin_layer_index = layout.layer(layer[0], layer[1])
+            pin_point = kdb.Point(
+                int(round(pin["x_um"] / dbu)), int(round(pin["y_um"] / dbu))
+            )
+            top.shapes(pin_layer_index).insert(
+                kdb.Text(pin["net"], kdb.Trans(pin_point))
+            )
 
     try:
         layout.write(output_path)

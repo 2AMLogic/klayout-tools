@@ -457,12 +457,24 @@ def test_resolve_label_layer_gf180mcu_metal_role_is_metal1_pin():
     assert _resolve_label_layer("gf180mcuA", (34, 0)) == (34, 10)
 
 
+def test_resolve_label_layer_sky130_poly_resolves_to_poly_pin():
+    # #210: "poly" (66/20 on sky130) is not a `metals[]` entry, but the
+    # ExtractionDeck now pairs it with a poly-label layer (poly.pin, 66/5) so a
+    # bare-poly gate node can be named without a metal landing pad.
+    assert _resolve_label_layer("sky130A", (66, 20)) == (66, 5)
+
+
+def test_resolve_label_layer_gf180mcu_poly_resolves_to_poly_label():
+    # #210: Poly2 (30/0 on gf180mcu) pairs with its datatype-10 label purpose.
+    assert _resolve_label_layer("gf180mcuA", (30, 0)) == (30, 10)
+
+
 def test_resolve_label_layer_returns_none_for_a_layer_with_no_label_convention():
-    # "poly" (66/20 on sky130) is a valid routable role, but it's not one of
-    # the ExtractionDeck's `metals[]` entries -- no label-layer convention
-    # pairs with it, so routing on it draws metal without a net label rather
-    # than raising or guessing a layer.
-    assert _resolve_label_layer("sky130A", (66, 20)) is None
+    # A drawn layer that is neither a `metals[]` entry nor the deck's `poly`
+    # layer has no label-layer convention -- a shape on it draws without a net
+    # label rather than raising or guessing a layer. `contact` (licon1, 66/44
+    # on sky130) is such a layer.
+    assert _resolve_label_layer("sky130A", (66, 44)) is None
 
 
 def test_polyline_midpoint_um_straight_line_is_geometric_midpoint():
@@ -594,9 +606,11 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
 def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     tmp_path, pdk_root
 ):
-    # "poly" is a valid routable role but has no ExtractionDeck metal_labels
-    # counterpart -- the metal is still drawn, but no label, and a note
-    # explains why.
+    # "tap" is a valid routable role but is neither a `metals[]` entry nor the
+    # deck's `poly` layer, so `_resolve_label_layer` finds no label convention
+    # for it -- the metal is still drawn, but no label, and a note explains
+    # why. (Since #210 gave `poly` a `poly_label`, poly no longer exercises
+    # this path; `tap` still does.)
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
     r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
     output = tmp_path / "unlabelled.gds"
@@ -617,7 +631,7 @@ def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
                     ],
                 }
             ],
-            "routing": {"layer_role": "poly", "width_um": 0.17},
+            "routing": {"layer_role": "tap", "width_um": 0.17},
             "options": {"cell_name": "unlabelled_0", "output": str(output)},
         }
     )
@@ -631,8 +645,8 @@ def test_compose_notes_missing_label_convention_for_unlabelled_route_layer(
     layout = kdb.Layout()
     layout.read(str(output))
     top = layout.cell("unlabelled_0")
-    poly = layout.layer(66, 20)
-    paths = [s for s in top.shapes(poly).each() if s.is_path()]
+    tap = layout.layer(65, 44)
+    paths = [s for s in top.shapes(tap).each() if s.is_path()]
     assert len(paths) == 1  # metal still drawn
     li1_pin = layout.layer(67, 5)
     assert list(top.shapes(li1_pin).each()) == []  # but no label anywhere
@@ -1272,3 +1286,200 @@ def test_cli_gen_compose_bad_format_exit_2():
     with pytest.raises(SystemExit) as excinfo:
         main(["gen-compose", "some.json", "--format", "bogus"])
     assert excinfo.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# pins[] -- promote a single block port to a labelled top-level pin, no
+# routing (#210). Every device gate (and any unrouted S/D terminal) that
+# `connectivity[]` cannot express (it needs a 2-pin net) can be named this way.
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_pins_absent_leaves_response_and_output_unchanged(tmp_path, pdk_root):
+    # Omitting pins[] entirely must not change any existing behavior: the
+    # response gains only an empty `pins` array, and no extra label is drawn.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "no_pins.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+            "options": {"cell_name": "no_pins_0", "output": str(output)},
+        }
+    )
+    assert report["pins"] == []
+    assert report["nets"] == []
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_compose_pins_rejects_unknown_block(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="unknown block id"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+                "pins": [{"net": "VB", "block": "nope", "port": "P1"}],
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_pins_rejects_unknown_port(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="unknown port"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+                "pins": [{"net": "VB", "block": "b1", "port": "NOPE"}],
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_pins_rejects_port_also_in_connectivity(tmp_path, pdk_root):
+    # A (block, port) that connectivity[] already wires (and thus labels) may
+    # not also be promoted by pins[] -- a second, possibly inconsistent label
+    # on the same physical shape is ambiguous, not additive (exit 1).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    with pytest.raises(GenComposeError, match="already labelled by a connectivity"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": r1},
+                    {"id": "b2", "generator_report": r2},
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["b1", "b2"],
+                    "spacing_um": 1.0,
+                },
+                "connectivity": [
+                    {
+                        "net": "N1",
+                        "pins": [
+                            {"block": "b1", "port": "P2"},
+                            {"block": "b2", "port": "P1"},
+                        ],
+                    }
+                ],
+                "routing": {"layer_role": "metal", "width_um": 0.17},
+                "pins": [{"net": "N1_ALIAS", "block": "b1", "port": "P2"}],
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_pins_labels_metal_port_at_its_own_position(tmp_path, pdk_root):
+    # A pins[] entry on a metal port (resistor_strip P1, li1) is labelled on
+    # li1.pin (67/5) at the port's own composed-frame position -- the port's
+    # x_um/y_um plus its block's placement offset -- with no metal drawn.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    output = tmp_path / "pin_labelled.gds"
+    r1_p1 = next(p for p in r1["ports"] if p["name"] == "P1")
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 1.0},
+            "pins": [{"net": "VREF", "block": "b1", "port": "P1"}],
+            "options": {"cell_name": "pin_labelled_0", "output": str(output)},
+        }
+    )
+    assert report["pins"] == [
+        {"net": "VREF", "block": "b1", "port": "P1", "labelled": True}
+    ]
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("pin_labelled_0")
+    li1_pin = layout.layer(67, 5)
+    texts = list(top.shapes(li1_pin).each())
+    assert len(texts) == 1
+    text = texts[0]
+    assert text.text.string == "VREF"
+    # b1 is the first block (offset {0,0}), so the label sits at P1's own x/y.
+    dbu = layout.dbu
+    assert text.text.trans.disp.x * dbu == pytest.approx(r1_p1["x_um"], abs=dbu)
+    assert text.text.trans.disp.y * dbu == pytest.approx(r1_p1["y_um"], abs=dbu)
+
+
+def test_compose_pins_unmapped_layer_is_partial_success_note(tmp_path, pdk_root):
+    # A pins[] entry whose port sits on a layer with no ExtractionDeck label
+    # convention (here diff/active, 65/20 -- neither a `metals[]` entry nor the
+    # deck's `poly` layer) is not labelled: reported as a drc_hints note
+    # (partial success), not a hard failure. The block's own GDS is untouched;
+    # only the port's reported layer drives label resolution, so retagging one
+    # port in the report is a faithful stand-in for a generator whose port
+    # genuinely lands on an unmapped layer.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r1["ports"][0]["layer"] = {"layer": 65, "datatype": 20, "name": None}
+    unmapped_port = r1["ports"][0]["name"]
+
+    output = tmp_path / "pin_unmapped.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "g", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["g"], "spacing_um": 1.0},
+            "pins": [{"net": "VSUB", "block": "g", "port": unmapped_port}],
+            "options": {"cell_name": "pin_unmapped_0", "output": str(output)},
+        }
+    )
+    assert report["pins"] == [
+        {"net": "VSUB", "block": "g", "port": unmapped_port, "labelled": False}
+    ]
+    assert any(
+        "no PDK label-layer convention" in note for note in report["drc_hints"]["notes"]
+    )
+    assert output.is_file()
+
+
+def test_compose_pins_gate_port_survives_extraction_as_named_pin(tmp_path, pdk_root):
+    # #210's acceptance bar: a device GATE -- which `klt gen` draws as bare
+    # poly with no metal landing pad, so it is unrouteable/unlabelable by
+    # connectivity[] and is demoted to an anonymous $N net today -- becomes a
+    # NAMED .SUBCKT pin after `klt extract` once promoted via pins[]. Two
+    # blocks are composed so this exercises the real multi-block path.
+    tail = _gen_block(tmp_path, pdk_root, "mos_array", "tail", rows=1, cols=1)
+    load = _gen_block(tmp_path, pdk_root, "mos_array", "load", rows=1, cols=1)
+
+    output = tmp_path / "gate_pin.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "tail", "generator_report": tail},
+                {"id": "load", "generator_report": load},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["tail", "load"],
+                "spacing_um": 2.0,
+            },
+            "pins": [{"net": "VBIAS", "block": "tail", "port": "U0_G"}],
+            "options": {"cell_name": "gate_pin_0", "output": str(output)},
+        }
+    )
+    assert report["pins"] == [
+        {"net": "VBIAS", "block": "tail", "port": "U0_G", "labelled": True}
+    ]
+
+    result = extract.run_extract(str(output), "sky130", top="gate_pin_0")
+    pin_names = {net["name"] for net in result["nets"] if net["pin"]}
+    # The gate node now comes back as a real, biasable pin -- not an anonymous
+    # $N net (the friction #210 reports).
+    assert "VBIAS" in pin_names

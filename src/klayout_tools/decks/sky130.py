@@ -211,6 +211,10 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #     nwell.drawing   64/20
 #     nwell.pin       64/5   (a text/label layer -- carries the body-tie pin
 #                             name, e.g. "VPB", directly on the well shape)
+#     poly.pin        66/5   (a text/label layer on the poly shape itself --
+#                             the datatype-5 ".pin" convention every other
+#                             label layer here follows; used to name a gate
+#                             node that has no metal landing pad, see below)
 #     li1.pin         67/5
 #     met1.pin        68/5
 #
@@ -234,12 +238,23 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # expose an equivalent pin for the native substrate at the single-cell
 # level -- see the well-tap connectivity open question in
 # `docs/design/lvs-extraction-spike.md`).
+#
+# `poly_label` (66/5) mirrors `well_label`: a text on the poly layer names the
+# poly net directly, so a device gate `klt gen` draws as bare poly -- with no
+# contact/metal landing pad (see `gen.py`'s `_mos_unit_layout`, which gives
+# S/D segments a contact+metal pad but leaves gate fingers as bare poly) --
+# can still be promoted to a named `.SUBCKT` pin by `klt gen-compose`'s
+# `pins[]` (#210). Unlike the metal/well pins above, sky130's own corpus
+# cells route gates in li1 rather than labelling poly directly, so 66/5 has no
+# corpus precedent here; it is a curated choice consistent with the
+# datatype-5 ".pin" convention every other label layer in this deck follows.
 EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
     nwell=(64, 20),  # nwell.drawing
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
     well_label=(64, 5),  # nwell.pin
+    poly_label=(66, 5),  # poly.pin -- names a bare-poly gate node (#210)
     contact=(66, 44),  # licon1.drawing
     metals=((67, 20), (68, 20)),  # li1.drawing, met1.drawing
     metal_labels=((67, 5), (68, 5)),  # li1.pin, met1.pin
