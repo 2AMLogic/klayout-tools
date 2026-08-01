@@ -467,6 +467,15 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # which label every signal and power pin directly on 34/10 (e.g. "I", "ZN",
 # "VDD", "VSS").
 #
+# `poly_label` (30/10) applies that same pin/label purpose (datatype 10) to
+# the Poly2 layer, mirroring `well_label`'s pattern on sky130: a text on poly
+# names the poly net directly, so a device gate `klt gen` draws as bare poly
+# (no contact/metal landing pad -- see `gen.py`'s `_mos_unit_layout`) can be
+# promoted to a named `.SUBCKT` pin by `klt gen-compose`'s `pins[]` (#210).
+# Like sky130's 66/5, this has no corpus precedent (corpus cells route gates
+# in metal) -- a curated choice consistent with this deck's datatype-10 label
+# convention.
+#
 # Unlike sky130, gf180mcu's curated layer set has no distinct substrate/well
 # tie layer -- a well tap is drawn on the *same* `Comp` layer as transistor
 # active (`tap=None` below). This deck therefore does not attempt to derive
@@ -486,6 +495,7 @@ EXTRACTION_DECK = ExtractionDeck(
     poly=(30, 0),  # Poly2
     nwell=(21, 0),  # Nwell
     contact=(33, 0),  # Contact
+    poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
     metals=((34, 0),),  # Metal1
     metal_labels=((34, 10),),  # Metal1 pin/label purpose
 )

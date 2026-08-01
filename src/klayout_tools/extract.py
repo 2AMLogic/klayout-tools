@@ -338,6 +338,7 @@ def _extract_netlist(
     tap = _region(layout, top_cell, deck.tap)
     contact = _region(layout, top_cell, deck.contact)
     well_label = _texts(layout, top_cell, deck.well_label)
+    poly_label = _texts(layout, top_cell, deck.poly_label)
     metals = [_region(layout, top_cell, layer) for layer in deck.metals]
     metal_labels = [_texts(layout, top_cell, layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
@@ -373,6 +374,7 @@ def _extract_netlist(
     for index, region in enumerate(vias):
         l2n.register(region, f"via{index}")
     l2n.register(well_label, "well_label")
+    l2n.register(poly_label, "poly_label")
     for index, texts in enumerate(metal_labels):
         l2n.register(texts, f"metal{index}_label")
 
@@ -408,6 +410,12 @@ def _extract_netlist(
         l2n.connect(nwell, tap)
         l2n.connect(tap, contact)
     l2n.connect(nwell, well_label)
+    # Name a poly/gate node directly off a text on the poly-label layer -- the
+    # only way a bare-poly gate (no contact/metal landing pad) can carry a
+    # `klt gen-compose` `pins[]` label into extraction as a named pin (#210).
+    # No-op when the deck declares no `poly_label` (empty Texts) or no text is
+    # drawn on it.
+    l2n.connect(poly, poly_label)
     l2n.connect(contact)
     l2n.connect(nfet_sd, contact)
     l2n.connect(pfet_sd, contact)

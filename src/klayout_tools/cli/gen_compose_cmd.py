@@ -89,6 +89,14 @@ def _print_text(report: dict) -> None:
             else:
                 print(f"  {net['net']}  UNROUTED")
 
+    pins = report.get("pins") or []
+    if pins:
+        print()
+        print("pins:")
+        for pin in pins:
+            state = "labelled" if pin["labelled"] else "UNLABELLED"
+            print(f"  {pin['net']}  ({pin['block']}.{pin['port']})  {state}")
+
     drc_hints = report["drc_hints"]
     matched_groups = drc_hints.get("matched_groups") or []
     if matched_groups:

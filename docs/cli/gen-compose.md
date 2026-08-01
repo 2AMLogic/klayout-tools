@@ -59,6 +59,26 @@ cleanly.
   `"poly"`, which pairs with no `ExtractionDeck.metals[]` entry) still gets
   its metal drawn, just without a label — a `drc_hints.notes[]` entry
   explains why.
+- **Top-level pins without routing (`pins[]`, #210)** — a `connectivity[]`
+  net needs at least two pins to route, so a node with exactly one pin (a
+  bias/supply pad, an input, and — critically — every device **gate**) cannot
+  be expressed there. `pins[]` fills that gap: each entry
+  (`{net, block, port}`) names exactly one block port to promote to a labelled
+  top-level pin by dropping one `kdb.Text` at that port's own composed-frame
+  position — **no metal is routed**, the port's existing geometry is what the
+  label attaches to. The label lands on the label layer that pairs with the
+  port's **own** drawn layer (resolved per entry — each port can be on a
+  different physical layer, unlike `connectivity[]`'s single shared
+  `routing.layer_role`): a metal port on `metal_labels[]`, and a bare-poly
+  **gate** port on the `poly_label` layer the extraction deck gained for this
+  purpose (sky130 `poly.pin` `66/5`; gf180mcu `Poly2` label purpose `30/10`),
+  so a gate survives `klt extract` as a **named, biasable** `.SUBCKT` pin
+  instead of an anonymous `$N` net. A `(block, port)` also named in any
+  `connectivity[]` entry is rejected (exit 1) — a shape the router already
+  labels must not carry a second, possibly inconsistent `pins[]` label. A port
+  whose layer has no label convention (e.g. a `bjt_array` collector-ring
+  `COLL_*` tap on the diffusion layer) is a **partial success**: the pin is
+  left unlabelled with a `drc_hints.notes[]` entry, never a hard failure.
 - **`drc_hints`** — `matched_groups[]` reports every distinct
   `matched_group_id` seen among the input blocks (read-only echo of
   `generator_report.drc_hints.matched_group_id`, `placement_symmetric: null` —
@@ -121,11 +141,18 @@ workarounds a caller must apply, exactly as the worked example below does.
   routed net (see "Scope" above), so the 5T OTA's `.SUBCKT` below declares a
   pin for every `connectivity[]` net (`N1`, `TAIL_A|TAIL_B`, `VOUT`), not just
   `vsubs` — see the worked example's "Extraction and LVS" and "Simulation"
-  steps below. This only labels nets `klt gen-compose` itself routes; a
-  *single* `klt gen` generator's own `ports[]` (e.g. a lone `diff_pair`
-  block's gate/source/drain pins, never passed through `connectivity[]`) are
-  still unlabelled — that is a separate, `klt gen`-side follow-up, not part
-  of this fix.
+  steps below. The `connectivity[]` path only labels nets `klt gen-compose`
+  itself routes; a *single* block port never passed through `connectivity[]`
+  (a bias pad, an input, or a device **gate** — a one-pin node
+  `connectivity[]` cannot even express) is named instead via the `pins[]`
+  request field (#210, see "Scope" above). **Remaining gap:** `pins[]` can
+  label any port whose drawn layer has a label convention — every MOS
+  `mos_array`/`diff_pair` gate (poly), and every metal S/D, resistor, or
+  guard-ring tap port — but a `bjt_array` collector-ring `COLL_*` tap sits on
+  the diffusion/`active` layer, which has no label layer in either curated
+  extraction deck, so promoting one is a partial success (unlabelled, with a
+  `drc_hints.notes[]` entry). Giving that port a labelable layer is a
+  `klt gen`-side follow-up, not part of #210.
 - **`klt lvs`'s unused-device-class mismatch is now `severity: "warning"`
   (#201, fixed).** Previously, a device class (e.g. `pfet`) that `klt
   extract` always registers even when a layout has zero instances of it, if
@@ -228,6 +255,9 @@ exit codes).
       ]
     }
   ],
+  "pins": [
+    { "net": "VBIAS", "block": "tail", "port": "U0_G" }
+  ],
   "routing": { "layer_role": "metal", "width_um": 0.17 },
   "options": { "cell_name": "ota_top_0", "output": "ota_top_0.gds" }
 }
@@ -244,6 +274,10 @@ exit codes).
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. |
 | `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. |
 | `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. A **2-pin** net is routed point-to-point (see "Scope"); a **>2-pin** (bundle) net is left unrouted this phase. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
+| `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
+| `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
+| `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |
+| `pins[].port` | string | A port name from that block's own `generator_report.ports[]`. An unknown port is an application error (exit 1). A `(block, port)` that also appears in any `connectivity[]` entry is rejected (exit 1) — the router already labels that shape. The label lands at the port's own composed-frame position on the label layer paired with the port's own drawn layer; a port on a layer with no label convention is not labelled (a `drc_hints.notes[]` partial-success note, not an error). |
 | `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) when `connectivity[]` is non-empty; otherwise ignored. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** when `connectivity[]` is non-empty; otherwise ignored. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
@@ -276,6 +310,9 @@ exit codes).
       "route_length_um": 3.2
     }
   ],
+  "pins": [
+    { "net": "VBIAS", "block": "tail", "port": "U0_G", "labelled": true }
+  ],
   "unrouted_nets": [],
   "drc_hints": {
     "min_spacing_um": 1.0,
@@ -303,6 +340,7 @@ exit codes).
 | `bbox_um` | object | Bounding box of the *composed* cell — the union of every placed block's own `bbox_um`, translated by its `offset_um` (computed arithmetically from each block's reported `bbox_um`, never re-derived from drawn geometry). |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
 | `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean) and `route_length_um` (total routed wire length in um, or `null` when the net was not routed — for a caller doing a first-order parasitic estimate before extraction). Present for every net including bundle (>2-pin) and unroutable ones (with `routed: false`). |
+| `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not connect (an unroutable 2-pin net, or a >2-pin bundle net deferred this phase). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. |
@@ -370,7 +408,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` entry referencing a nonexistent block `id`/port, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed, or a >2-pin bundle net was deferred this phase). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 

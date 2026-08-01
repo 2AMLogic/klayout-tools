@@ -596,8 +596,18 @@ def test_mos_array_device_count_and_ports(tmp_path, pdk_root):
     assert report["device_count"] == 4
     # 3 ports (S/D/G) per real unit device, no ports for dummies.
     assert len(report["ports"]) == 12
-    port_names = {p["name"] for p in report["ports"]}
-    assert {"U0_S", "U0_D", "U0_G"} <= port_names
+    ports_by_name = {p["name"]: p for p in report["ports"]}
+    assert {"U0_S", "U0_D", "U0_G"} <= set(ports_by_name)
+
+    # #210 (Option B): the gate stays a bare-poly node -- U*_G is reported on
+    # the poly layer (66/20 on sky130), not metal. That is deliberate: rather
+    # than give every gate finger a metal landing pad (DRC-unsafe in a
+    # tight-pitch multi-row array), extraction now recognises a text on the
+    # poly-label layer, so `klt gen-compose`'s pins[] can name the gate on its
+    # own poly layer. S/D terminals keep their metal landing pads (67/20).
+    assert ports_by_name["U0_G"]["layer"] == {"layer": 66, "datatype": 20, "name": None}
+    assert ports_by_name["U0_S"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
+    assert ports_by_name["U0_D"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
 
 
 def test_mos_array_1x1_boundary(tmp_path, pdk_root):

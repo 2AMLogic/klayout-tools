@@ -2539,7 +2539,8 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         name="mos_array",
         summary=(
             "Matched MOS transistor array: identical unit devices (active + "
-            "poly gate + contact + local-metal S/D/G terminals) placed on a "
+            "poly gate; contact + local-metal landing pads on the S/D "
+            "terminals, gate exposed as bare poly) placed on a "
             "uniform grid, with optional dummy columns at each end and a "
             "centroid-symmetric port-numbering order for common-centroid "
             "matching -- family 1 of the analog primitive generators "
