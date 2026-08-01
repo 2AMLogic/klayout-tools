@@ -306,6 +306,144 @@ def test_extraction_does_not_require_pdk_resolution(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# --pdk-triggered SPICE model binding (issue #209): `X` subckt calls against
+# the resolved PDK's real device library, instead of the bare `M`-card
+# form -- a fabricated PDK install is enough (only `find_pdk`'s directory
+# probe is exercised; the curated model-name table itself does not read
+# anything off disk), mirroring `test_optional_pdk_resolution_is_reported`'s
+# idiom above.
+# --------------------------------------------------------------------------- #
+
+
+def _make_pdk_install(tmp_path, variant: str) -> str:
+    root = tmp_path / "pdk_install"
+    (root / variant / "libs.tech").mkdir(parents=True)
+    return str(root)
+
+
+def test_pdk_omitted_writes_unchanged_m_card_form(tmp_path):
+    """Regression: no --pdk/--pdk-root -> the written SPICE keeps today's
+    bare `M`-card form, byte-identical in shape to before issue #209."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    text = Path(report["netlist_path"]).read_text()
+    assert "\nM" in text or text.startswith("M")
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert device_lines, "expected at least one device card"
+    assert all(line.startswith("M") for line in device_lines)
+    assert "nfet" in text
+    assert "pfet" in text
+    assert "sky130_fd_pr__" not in text
+
+
+def test_pdk_resolved_writes_x_card_model_binding_sky130(tmp_path):
+    """--pdk sky130A resolves -> MOS devices are written as `X` subckt calls
+    against the curated sky130 primitive device library, not the deck's
+    bare `nfet`/`pfet` class label."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "inv.spice"),
+    )
+
+    # JSON device_counts/class labels are unaffected by model binding --
+    # only the written SPICE file's card shape changes (issue #209
+    # acceptance criteria).
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert {d["class"] for d in report["devices"]} == {"nfet", "pfet"}
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert device_lines, "expected at least one device card"
+    assert all(line.startswith("X") for line in device_lines)
+    assert any("sky130_fd_pr__nfet_01v8" in line for line in device_lines)
+    assert any("sky130_fd_pr__pfet_01v8" in line for line in device_lines)
+    # No bare M-card model reference to the deck's own class label leaks in.
+    assert not any(line.startswith("M") for line in device_lines)
+
+
+def test_pdk_resolved_writes_x_card_model_binding_gf180mcu(tmp_path):
+    """--pdk gf180mcuA resolves against the gf180mcu deck -> `X` subckt
+    calls against gf180mcu's real 3.3V-core primitive device library."""
+    layout_path = CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds"
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+
+    report = run_extract(
+        str(layout_path),
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "clkinv_1.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+
+    text = Path(report["netlist_path"]).read_text()
+    device_lines = [
+        line for line in text.splitlines() if line and line[0] in ("M", "X")
+    ]
+    assert device_lines
+    assert all(line.startswith("X") for line in device_lines)
+    assert any(" nfet_03v3 " in line for line in device_lines)
+    assert any(" pfet_03v3 " in line for line in device_lines)
+
+
+def test_pdk_resolved_x_card_carries_l_w_with_unit_suffix(tmp_path):
+    """The emitted `X` card's `L`/`W` use the same explicit micrometre unit
+    suffix `klt extract`'s own `M`-card writer already uses (see
+    `docs/cli/lvs.md`'s "Unit suffixes matter" note) -- unambiguous
+    regardless of what `.option scale` (if any) a caller's testbench sets."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "inv.spice"),
+    )
+
+    text = Path(report["netlist_path"]).read_text()
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    l_um, w_um = nfet["params"]["l_um"], nfet["params"]["w_um"]
+    assert f"L={l_um:g}U" in text
+    assert f"W={w_um:g}U" in text
+
+
+def test_pdk_resolved_but_deck_family_mismatch_is_application_error(tmp_path):
+    """A PDK that resolves fine, but whose family has no curated table entry
+    for the requesting deck (e.g. the `sky130` deck against a resolved
+    `gf180mcuA` install), is an `ExtractError` -- never a silent fallback to
+    the bare `M`-card form."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+
+    with pytest.raises(ExtractError, match="no curated PDK device-model binding"):
+        run_extract(path, "sky130", pdk_variant="gf180mcuA", pdk_root=root)
+
+
+def test_pdk_resolved_but_unrecognised_family_is_application_error(tmp_path):
+    """A resolved PDK variant whose name matches no known family prefix at
+    all is also an `ExtractError` naming what was tried."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "totallyUnknownVariant")
+
+    with pytest.raises(ExtractError, match="no curated PDK device-model binding"):
+        run_extract(path, "sky130", pdk_variant="totallyUnknownVariant", pdk_root=root)
+
+
+# --------------------------------------------------------------------------- #
 # CLI: exit codes, --format text/json
 # --------------------------------------------------------------------------- #
 
