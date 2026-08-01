@@ -98,7 +98,16 @@ centroid-symmetric partners. (Physical placement is the same uniform grid
 either way — `topology` changes the *numbering*, not the layout; see
 `diff_pair` below for a generator that physically interleaves two distinct
 devices.) `device_count` is `rows * cols` (dummies excluded).
-`drc_hints.matched_group_id` is `"mos_array:<rows>x<cols>:<topology>"`.
+`drc_hints.matched_group_id` is `"mos_array:<rows>x<cols>:<topology>"`
+(`flavor` is not folded in — a matched group is always one generator call by
+construction, so every instance in it already shares one `flavor`).
+
+`flavor="pfet"` additionally encloses every unit device's (real and dummy)
+active region in a single shared well shape, sized by `WELL_ENCLOSURE_MARGIN_UM`,
+on PDK families whose curated deck checks a well layer (both `sky130` and
+`gf180mcu`, as of this generator's `flavor` support — see `guard_ring` below
+for the layer numbers). `flavor="nfet"` (the default) draws no well shape at
+all — output for the default case is unchanged.
 
 | `params` field | Type   | Default            | Description |
 | -------------- | ------ | ------------------ | ----------- |
@@ -108,6 +117,7 @@ devices.) `device_count` is `rows * cols` (dummies excluded).
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
+| `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 
 ### `res_array` (family 2: resistor/capacitor array)
 
@@ -135,9 +145,14 @@ A tap ring (drawn as a single unbroken outer-box-minus-inner-box polygon, so
 there is no same-layer spacing violation between "segments") with
 `contacts_per_side` contacts evenly spaced along each side and a
 local-metal ring on top, optionally enclosed by a well tie (`add_well`) on
-PDK families whose curated deck checks a well layer (gf180mcu's `Nwell`;
-sky130's curated deck has no well-layer rule, so `add_well=true` there is a
-documented no-op, reported via `drc_hints.notes`). Four ports —
+PDK families whose curated deck checks a well layer (gf180mcu's `Nwell`
+`(21, 0)`; sky130's `nwell.drawing` `(64, 20)`, matching
+`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`). Both supported PDK
+families draw the well tie by default — sky130's curated *DRC* deck happens
+to check no rule against that layer (so drawing it there never affects DRC
+status), which is different from "the layer doesn't exist"; a family with
+neither a well layer nor a well rule would still get the documented no-op,
+reported via `drc_hints.notes`. Four ports —
 `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` — sit at the midpoint of each ring side.
 `device_count` is `contacts_per_side * 4`.
 **`drc_hints.matched_group_id` is always `null`** — a guard ring has no
@@ -167,7 +182,18 @@ named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
 is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
 `add_guard_ring` is `true`. `device_count` is `2 * splits`.
 `drc_hints.matched_group_id` is `"diff_pair:pair:<splits>"` (or
-`"diff_pair:mirror:<splits>"` with `params.mirror`).
+`"diff_pair:mirror:<splits>"` with `params.mirror`; `flavor` is not folded in
+— see `mos_array`'s equivalent note above).
+
+`flavor="pfet"` (composable with `mirror` — a mirror-labelled `pfet` pair is
+a PMOS current mirror) encloses the device pair's own active footprint in a
+well, independent of `add_guard_ring` (a PMOS pair with no automatic ring
+still needs its own well). `flavor="nfet"` (the default) draws no additional
+well shape — the default case's output is unchanged. Note that
+`add_guard_ring`'s own well tie (see `guard_ring` above) is orthogonal to
+`flavor`: on a PDK family whose curated deck checks a well layer, the
+automatically-sized ring already draws its own well tie regardless of
+`flavor`, same as the standalone `guard_ring` generator's `add_well` default.
 
 | `params` field    | Type   | Default | Description |
 | ------------------ | ------ | ------- | ----------- |
@@ -176,18 +202,21 @@ is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
 | `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. |
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
+| `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
 
 A `rows` × `cols` common-centroid (or plain-`array`) grid of identical unit
 vertical-bipolar devices, with `dummy` flanking columns each side. Each unit
 device is an emitter diffusion pad beside a base-tie diffusion pad (each with
-a contact and a covering local-metal pad); all units share **one** base well,
-are surrounded by a single collector guard ring, and — on PDK families whose
-curated deck checks a bipolar device-mark layer — are covered by that mark
-layer (gf180mcu's `DRC_BJT`, which its `bjt.separation.comp.1` / `BJT.3` rule
-keys off; sky130's curated deck has no bipolar rule, so no mark or well is
-drawn there and a `drc_hints.notes` entry says so).
+a contact and a covering local-metal pad); all units share **one** base well
+(drawn on both `sky130` and `gf180mcu` — see `guard_ring` above for the
+well-layer numbers), are surrounded by a single collector guard ring, and —
+on PDK families whose curated deck checks a bipolar device-mark layer — are
+covered by that mark layer (gf180mcu's `DRC_BJT`, which its
+`bjt.separation.comp.1` / `BJT.3` rule keys off; sky130's curated deck has no
+bipolar mark-layer rule, so no mark is drawn there and a `drc_hints.notes`
+entry says so).
 
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when

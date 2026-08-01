@@ -156,8 +156,11 @@ GUARD_RING_DEFAULT_PADDING_UM = 0.5
 #: pair -- the *same* numbers `klayout_tools.decks.sky130`/`gf180mcu`
 #: document and check, never a second, private layer map. `None` means that
 #: family's curated deck (see `klayout_tools.decks`) has no rule for the
-#: role at all (e.g. sky130's curated deck never checks a well layer), so a
-#: generator simply omits drawing it for that family.
+#: role at all (e.g. sky130's curated *DRC* deck never checks a well layer),
+#: so a generator simply omits drawing it for that family. That is distinct
+#: from "the layer doesn't exist" -- sky130's `well` entry below is a real
+#: GDS layer (`klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`), just one
+#: no curated *DRC* rule happens to check.
 _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "active": (65, 20),  # diff.drawing
@@ -166,7 +169,10 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "poly": (66, 20),  # poly.drawing
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing
-        "well": None,  # curated deck has no well-layer rule
+        "well": (64, 20),  # nwell.drawing -- matches
+        # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
+        # rule checks this layer, but it is real and extraction already
+        # trusts it to split nfet/pfet active regions (see `extract.py`).
         "bjt_mark": None,  # curated deck has no bipolar device mark-layer rule
     },
     "gf180mcu": {
@@ -220,13 +226,23 @@ def _resistor_strip_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
 
 def _device_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     """Hidden layer params for a generator drawing unit MOS-like devices
-    (``mos_array``, and the device half of ``diff_pair``)."""
+    (``mos_array``, and the device half of ``diff_pair``).
+
+    Resolves ``well_layer``/``well_present`` the same way
+    :func:`_ring_layer_params` already does, so a ``flavor="pfet"`` request
+    can enclose the unit device's active region in a well on PDK families
+    whose curated deck checks one."""
+    import klayout.db as kdb
+
     family = _pdk_family(pdk_info["variant"])
+    well = _role_layer_info(family, "well")
     return {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
         "metal_layer": _role_layer_info(family, "metal"),
+        "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
+        "well_present": well is not None,
     }
 
 
@@ -412,6 +428,14 @@ def _mos_array_layout(
     dummy: int,
     topology: str,
 ) -> dict[str, Any]:
+    """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
+    with ``dummy`` extra unit-device columns flanking each side.
+
+    Also computes ``well_box_um`` -- a single well shape (per
+    :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
+    active region, the same "one shared tub for the whole matched group"
+    shape :func:`_bjt_array_layout` draws for its own shared base well --
+    used only when the caller requests ``flavor="pfet"``."""
     unit = _mos_unit_layout(w_um, l_um, fingers)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
@@ -441,12 +465,21 @@ def _mos_array_layout(
                 }
             )
 
+    all_cells = cells + dummy_cells
+    min_x0 = min(c["x0_um"] for c in all_cells)
+    max_x1 = max(c["x0_um"] + unit["total_len_um"] for c in all_cells)
+    min_y0 = min(c["y0_um"] for c in all_cells)
+    max_y1 = max(c["y0_um"] + unit["height_um"] for c in all_cells)
+    margin = WELL_ENCLOSURE_MARGIN_UM
+    well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
+
     return {
         "unit": unit,
         "col_pitch_um": col_pitch,
         "row_pitch_um": row_pitch,
         "cells": cells,
         "dummy_cells": dummy_cells,
+        "well_box_um": well_box,
     }
 
 
@@ -1209,7 +1242,10 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         ``rows`` x ``cols`` grid of identical unit devices (see
         :func:`_mos_unit_layout`), with ``dummy`` extra unit-device columns
         flanking each side and a ``topology``-selected port-numbering order
-        (see :func:`_centroid_order`)."""
+        (see :func:`_centroid_order`). ``flavor="pfet"`` additionally
+        encloses every unit device (real and dummy) in a shared well on PDK
+        families whose curated deck checks one (see ``well_present``);
+        ``flavor="nfet"`` (the default) draws no well shape at all (#208)."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -1239,6 +1275,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=1,
             )
             self.param(
+                "flavor",
+                self.TypeString,
+                "Device flavor: 'nfet' (default, no well drawn) or 'pfet' "
+                "(unit devices enclosed in a well on PDK families that check one)",
+                default="nfet",
+            )
+            self.param(
                 "active_layer",
                 self.TypeLayer,
                 "Active/diffusion drawing layer",
@@ -1261,6 +1304,18 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Local routing metal drawing layer",
                 default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_layer",
+                self.TypeLayer,
+                "Well drawing layer (only used when flavor is 'pfet' and well_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_present",
+                self.TypeBoolean,
+                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
+                default=False,
             )
 
         def display_text_impl(self) -> str:
@@ -1292,6 +1347,10 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            if self.flavor == "pfet" and self.well_present:
+                li_well = self.layout.layer(self.well_layer)
+                _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
 
     class _ResArrayPCell(kdb.PCellDeclarationHelper):
         """Unit resistor/capacitor array (spike section 4's family 2): a row
@@ -1473,7 +1532,10 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         sub-instances, interleaved in a true common-centroid cross-quad
         pattern (see :func:`_diff_pair_layout`) -- composes ``mos_array``'s
         unit-device drawing (family 1) and ``guard_ring``'s ring drawing
-        (family 3)."""
+        (family 3). ``flavor="pfet"`` encloses the device pair's own active
+        footprint in a well (independent of ``add_guard_ring``'s own,
+        separate well tie -- see ``guard_ring``); ``flavor="nfet"`` (the
+        default) draws no additional well shape (#208)."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -1502,6 +1564,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Label devices M1/M2 (current mirror) instead of Q1/Q2 "
                 "(differential pair)",
                 default=False,
+            )
+            self.param(
+                "flavor",
+                self.TypeString,
+                "Device flavor: 'nfet' (default, no well drawn) or 'pfet' "
+                "(unit devices enclosed in a well on PDK families that check one)",
+                default="nfet",
             )
             self.param(
                 "active_layer",
@@ -1569,6 +1638,22 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            if self.flavor == "pfet" and self.well_present:
+                # Enclose the device pair's own active footprint in a well,
+                # independent of the (optional) automatically-sized guard
+                # ring's own well tie drawn below -- both land on the same
+                # well_layer, so they simply merge into one region on any
+                # boolean/DRC pass over it.
+                li_well = self.layout.layer(self.well_layer)
+                margin = WELL_ENCLOSURE_MARGIN_UM
+                device_well_box = (
+                    -margin,
+                    -margin,
+                    info["core_w_um"] + margin,
+                    info["core_h_um"] + margin,
+                )
+                _insert_boxes(self.cell, li_well, dbu, [device_well_box])
 
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
@@ -1880,6 +1965,8 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             "generator 'mos_array': params.topology must be 'array' or "
             "'common_centroid'"
         )
+    if params["flavor"] not in ("nfet", "pfet"):
+        raise GenError("generator 'mos_array': params.flavor must be 'nfet' or 'pfet'")
 
 
 def _mos_array_describe(
@@ -1947,9 +2034,18 @@ def _mos_array_describe(
             f"gate length below {GATE_LENGTH_SAFE_MIN_UM}um may violate the target "
             "PDK's poly minimum-width or S/D metal minimum-spacing rule"
         )
+    if params["flavor"] == "pfet" and _PDK_ROLE_LAYERS[family]["well"] is None:
+        notes.append(
+            f"params.flavor is 'pfet' but the resolved PDK family ('{family}') has "
+            "no well layer checked by its curated DRC deck -- no well shape was drawn"
+        )
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     grid = f"{params['rows']}x{params['cols']}"
+    # `flavor` is not folded into `matched_group_id` -- a matched group is
+    # always one generator call by construction, so every instance in it
+    # already shares one `flavor`; the id only needs to disambiguate groups
+    # from each other (see the issue's Implementation Guidance item 5).
     matched_group_id = f"mos_array:{grid}:{params['topology']}"
 
     return {
@@ -2164,6 +2260,8 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'diff_pair': params.l_um must be > 0")
     if params["splits"] < 1:
         raise GenError("generator 'diff_pair': params.splits must be >= 1")
+    if params["flavor"] not in ("nfet", "pfet"):
+        raise GenError("generator 'diff_pair': params.flavor must be 'nfet' or 'pfet'")
 
 
 def _diff_pair_describe(
@@ -2248,9 +2346,16 @@ def _diff_pair_describe(
             "no guard ring drawn (params.add_guard_ring is false) -- isolation from "
             "adjacent structures is the caller's responsibility"
         )
+    if params["flavor"] == "pfet" and _PDK_ROLE_LAYERS[family]["well"] is None:
+        notes.append(
+            f"params.flavor is 'pfet' but the resolved PDK family ('{family}') has "
+            "no well layer checked by its curated DRC deck -- no well shape was drawn"
+        )
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
+    # `flavor` is not folded into `matched_group_id` -- see the equivalent
+    # comment in `_mos_array_describe`.
     matched_group_id = f"diff_pair:{kind}:{params['splits']}"
 
     return {
