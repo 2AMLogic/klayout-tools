@@ -57,6 +57,15 @@ zoo" scope guard ``docs/cli/drc.md`` documents for the DRC decks. See
 roles and their known connectivity-fidelity limitations (well-tie handling
 in particular).
 
+A deck may additionally declare one or more vertical-BJT device-recognition
+entries (``ExtractionDeck.bipolars``, issue #223): the deck's ``nwell``/
+``active`` layers restricted to a PDK-specific bipolar device-mark layer
+(e.g. sky130's ``pnp.drawing`` 82/44, gf180mcu's ``DRC_BJT`` 127/5), fed to
+KLayout's native ``DeviceExtractorBJT3Transistor``. See
+:class:`klayout_tools.decks.BipolarDevice` for the layer-role contract and
+:func:`_extract_netlist`'s bipolar wiring block for how the marker layer
+scopes recognition to genuine device-cell instances.
+
 Verified compatible with ``klt sim``'s netlist convention (see
 ``docs/cli/sim.md`` -> "Netlist convention"): the written SPICE is a
 ``.SUBCKT ... .ENDS`` circuit body with no top-level ``.control``/``.end``
@@ -73,6 +82,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from .decks import (
+    BipolarDevice,
     ExtractionDeck,
     ParasiticsDeck,
     UnknownExtractionDeckError,
@@ -535,6 +545,47 @@ def _extract_netlist(
     l2n.extract_devices(nfet_extractor, {"SD": nfet_sd, "G": nfet_gate, "W": nfet_body})
     l2n.extract_devices(pfet_extractor, {"SD": pfet_sd, "G": pfet_gate, "W": nwell})
 
+    # Bipolar (BJT) device recognition (issue #223): each of the deck's
+    # optional `bipolars` entries (see `BipolarDevice` in `decks/__init__.py`)
+    # scopes recognition to genuine device-cell instances by intersecting the
+    # deck's own MOS-recognition `base`/`emitter` layers with the PDK's
+    # bipolar device-mark `marker` layer *before* handing them to KLayout's
+    # `DeviceExtractorBJT3Transistor` -- without that intersection, every
+    # ordinary PMOS nwell in the layout would be misrecognised as a bipolar
+    # base. `bipolar_regions` carries the built regions through to the
+    # connectivity section below (registration/extraction must happen once
+    # per entry, before any layer can be used in a `connect()` call).
+    bipolar_regions: list[tuple[BipolarDevice, kdb.Region, kdb.Region, kdb.Region]] = []
+    for bipolar in deck.bipolars:
+        bipolar_base_layer = _region(layout, top_cell, bipolar.base)
+        bipolar_marker = _region(layout, top_cell, bipolar.marker)
+        bipolar_emitter_layer = _region(layout, top_cell, bipolar.emitter)
+        bipolar_base = bipolar_base_layer & bipolar_marker
+        bipolar_emitter = bipolar_emitter_layer & bipolar_base
+        l2n.register(bipolar_base, f"{bipolar.class_name}_base")
+        l2n.register(bipolar_emitter, f"{bipolar.class_name}_emitter")
+        if bipolar.collector is not None:
+            bipolar_collector_layer = _region(layout, top_cell, bipolar.collector)
+            bipolar_collector = bipolar_collector_layer & bipolar_base
+        else:
+            # No drawn collector layer for this PDK's vertical bipolar --
+            # `DeviceExtractorBJT3Transistor` treats an empty `C` input as
+            # "collector formed by the substrate" and outputs the base
+            # region's own footprint onto it (see `BipolarDevice`'s
+            # docstring); `connect_global` below ties that footprint to the
+            # deck's substrate net, mirroring `nfet_body` above.
+            bipolar_collector = kdb.Region()
+        l2n.register(bipolar_collector, f"{bipolar.class_name}_collector")
+
+        bjt_extractor = kdb.DeviceExtractorBJT3Transistor(bipolar.class_name)
+        l2n.extract_devices(
+            bjt_extractor,
+            {"B": bipolar_base, "E": bipolar_emitter, "C": bipolar_collector},
+        )
+        bipolar_regions.append(
+            (bipolar, bipolar_base, bipolar_emitter, bipolar_collector)
+        )
+
     warnings = [str(entry.message) for entry in l2n.each_log_entry()]
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
@@ -581,6 +632,19 @@ def _extract_netlist(
                 l2n.connect(metals[index + 1], metal_labels[index + 1])
 
     l2n.connect_global(nfet_body, deck.substrate_net)
+
+    for bipolar, bipolar_base, bipolar_emitter, bipolar_collector in bipolar_regions:
+        # Base shares net identity with the deck's own `nwell` (`bipolar_base`
+        # is always a geometric subset of it, further restricted by the
+        # marker), so a base contact/pin already wired to `nwell` elsewhere in
+        # this function (`well_label`, `tap`, ...) correctly names the
+        # extracted base terminal's net.
+        l2n.connect(bipolar_base, nwell)
+        l2n.connect(bipolar_emitter, contact)
+        if bipolar.collector is not None:
+            l2n.connect(bipolar_collector, contact)
+        else:
+            l2n.connect_global(bipolar_collector, deck.substrate_net)
 
     l2n.extract_netlist()
     netlist = l2n.netlist()
