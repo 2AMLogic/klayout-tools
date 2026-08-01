@@ -138,6 +138,7 @@ from . import (
     ExtractionDeck,
     LayerRC,
     ParasiticsDeck,
+    ResistorDevice,
 )
 
 # This deck's rule thresholds below are authored assuming database units are
@@ -316,6 +317,57 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # cells route gates in li1 rather than labelling poly directly, so 66/5 has no
 # corpus precedent here; it is a curated choice consistent with the
 # datatype-5 ".pin" convention every other label layer in this deck follows.
+#
+# Drawn resistors (#222). Additional layer numbers, same sources as above:
+#
+#     poly.res    66/13  (the poly resistor-ID mark; named "poly.res - 66/13"
+#                         in sky130A.lyp's layer table, and defined as
+#                         `poly_res = polygons(66, 13)` in sky130.lvs)
+#     rpm         86/20  (300 ohm/sq precision-resistor implant mask)
+#     urpm        79/20  (2 kohm/sq precision-resistor implant mask)
+#
+# Provenance for the one resistor device modelled below is the *official*
+# sky130 KLayout LVS deck, `sky130/klayout/lvs/sky130.lvs` from the same
+# open_pdks source cited at the top of this module (as installed by volare
+# under `libs.tech/klayout/lvs/sky130.lvs`), which derives and extracts it as:
+#
+#     poly_res_exclude = diff.or(diff_res).or(diff_cut).or(tap).or(pwbm)
+#                            .or(hvtr).or(hvtp).or(lvtn).or(li_cut)
+#                            .or(vpp).or(npnid)
+#     poly_res_init    = poly.and(poly_res).not(poly_res_exclude)
+#     poly_res_generic = poly_res_init.not(rpm).not(urpm)
+#     poly_con         = poly.not(poly_res).not(vpp).not(npnid)
+#     extract_devices(resistor("sky130_fd_pr__res_generic_po", 48.2, NResistor),
+#                     { "R" => poly_res_generic, "C" => poly_con })
+#
+# i.e. sheet resistance **48.2 ohm/square**, a plain two-terminal
+# `DeviceExtractorResistor` (no bulk terminal). Cross-checked against a
+# second, independent source in the same PDK install: open_pdks' magic
+# technology file `libs.tech/magic/sky130A.tech`, whose extract section
+# reads `resist rmp/active 48200` and `resist mrp1/active 48200 0.5`
+# (milliohms per square = 48.2 ohm/sq) for the same `sky130_fd_pr__res_generic_po`
+# device (`device resistor sky130_fd_pr__res_generic_po rmp *poly`).
+#
+# Approximations relative to that official derivation, all conservative:
+#
+# - `excludes` models the four exclusion layers this curated deck actually
+#   knows about (diff, tap, rpm, urpm). The remaining upstream exclusions
+#   (diff_res, diff_cut, pwbm, hvtr, hvtp, lvtn, li_cut, vpp, npnid) are
+#   *not* modelled -- the curated-starter-subset scope guard this module
+#   documents for DRC applies to extraction too. A poly-res segment marked
+#   with one of those unmodelled layers extracts as this generic 48.2 ohm/sq
+#   device rather than being excluded.
+# - `rpm`/`urpm` ARE modelled, deliberately: they mark sky130's *other* poly
+#   resistor flavours (`sky130_fd_pr__res_high_po_*`, 319.8 ohm/sq, and
+#   `sky130_fd_pr__res_xhigh_po_*`, 2 kohm/sq -- both fixed-width devices with
+#   per-width device classes and a length tolerance this curated deck does not
+#   model). Excluding them leaves such a resistor as ordinary connected poly
+#   (today's behaviour -- a short) instead of reporting it with a ~6.6x/~41x
+#   wrong resistance, which would pass LVS with high confidence.
+# - The terminal ("C") region is `poly` minus the recognised body rather than
+#   upstream's `poly.not(poly_res)...`; the two agree except on marked poly
+#   that this deck does *not* recognise as a resistor, which stays ordinary
+#   connected poly here rather than being cut out of connectivity entirely.
 EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
@@ -366,6 +418,25 @@ EXTRACTION_DECK = ExtractionDeck(
             top_plate=(97, 44),  # capm2.drawing
             bottom_plate=(71, 20),  # met4.drawing
             area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+        ),
+    ),
+    # Drawn poly precision resistor (issue #222): the generic
+    # `sky130_fd_pr__res_generic_po` device -- a segment of poly.drawing
+    # covered by the poly.res resistor-ID marker. See the module comment
+    # above for why `rpm`/`urpm` (the other, higher-sheet-rho poly resistor
+    # flavours) are excluded rather than mis-extracted.
+    resistors=(
+        ResistorDevice(
+            name="res_generic_po",  # sky130_fd_pr__res_generic_po
+            body=(66, 20),  # poly.drawing
+            marker=(66, 13),  # poly.res
+            sheet_rho_ohm_sq=48.2,  # sky130.lvs / magic sky130A.tech, see above
+            excludes=(
+                (65, 20),  # diff.drawing -- a marked gate is a transistor
+                (65, 44),  # tap.drawing
+                (86, 20),  # rpm  -> sky130_fd_pr__res_high_po_*  (319.8 ohm/sq)
+                (79, 20),  # urpm -> sky130_fd_pr__res_xhigh_po_* (2 kohm/sq)
+            ),
         ),
     ),
 )

@@ -55,6 +55,84 @@ class UnknownDeckError(Exception):
 
 
 @dataclass(frozen=True)
+class ResistorDevice:
+    """One *drawn* precision-resistor device class an :class:`ExtractionDeck`
+    can recognise (issue #222).
+
+    A drawn resistor is a deliberately-marked segment of an ordinary
+    conductor (poly, diffusion, metal): the designer draws the conductor,
+    then covers the resistive part of it with the PDK's resistor-ID
+    ("marker") layer. Without this declaration that segment extracts as a
+    plain conductor -- i.e. a **short** between the resistor's two heads --
+    so a resistor drawn at the wrong length/width passes LVS silently. This
+    is the device-recognition analogue of :class:`ExtractionDeck`'s
+    ``nfet_class``/``pfet_class`` MOS wiring, driving KLayout's native
+    ``klayout.db.DeviceExtractorResistor`` /
+    ``...DeviceExtractorResistorWithBulk``.
+
+    Geometry (all fields are ``(layer, datatype)`` pairs, matching the
+    layout's own GDS numbering):
+
+    - ``body`` -- the drawn conductor layer the resistor lives on. **Must**
+      be one of the owning deck's own conductor layers (``poly``,
+      ``active``, or one of ``metals``), because the recognised resistor
+      body is *subtracted* from that layer's connectivity region: leaving it
+      in would short the two terminals together through the conductor and
+      defeat the whole point.
+    - ``marker`` -- the resistor-ID layer. The resistive segment is
+      ``body & marker`` (further narrowed by ``requires``/``excludes``); the
+      **terminals** are the rest of that conductor layer (``body`` minus the
+      recognised segment), i.e. the contacted heads on either side. This
+      mirrors both PDKs' own KLayout LVS decks, which derive the terminal
+      layer the same way (sky130's ``poly_con = poly.not(poly_res)``,
+      gf180mcu's ``poly2_con = poly2.not(res_mk)``).
+    - ``requires`` -- additional layers that must **all** cover the segment
+      for it to be this device (e.g. gf180mcu's ``Pplus`` + ``SAB``, which
+      are what distinguish a 350 ohm/sq *unsalicided* p+ poly resistor from
+      a 7.3 ohm/sq salicided one).
+    - ``excludes`` -- layers that disqualify the segment (subtracted from
+      it), e.g. sky130's ``rpm``/``urpm`` precision-resistor implant masks,
+      which mark the *other*, much-higher-sheet-rho poly resistor flavours.
+      A segment excluded here is left as ordinary connected conductor (it
+      keeps today's short) rather than extracted with the wrong resistance
+      -- a wrong value passing LVS with high confidence is worse than a
+      known-unmodelled device.
+    - ``terminal`` -- optional override naming a *different* deck conductor
+      layer to take the terminals from (defaults to ``body``). Like
+      ``body``, it must be one of the deck's own conductor layers.
+
+    ``sheet_rho_ohm_sq`` is the device's sheet resistance in ohms per
+    square; KLayout computes ``R = L / W * sheet_rho`` from the recognised
+    segment's own geometry, so **this number is the whole accuracy of the
+    extracted resistance**. Every deck that sets it must cite the PDK/DRM
+    source it came from inline, the same way the DRC decks cite rule ids.
+
+    ``name`` is the extracted device-class name (``devices[].class`` in the
+    JSON response, and the model token on the written ``R`` card -- a
+    consumer simulating the netlist supplies a matching ``.model``, exactly
+    as it already must for the ``nfet``/``pfet`` ``M`` cards).
+
+    ``bulk_to_substrate`` selects ``DeviceExtractorResistorWithBulk`` (a
+    third ``W`` terminal tied to the deck's ``substrate_net`` global)
+    instead of the plain two-terminal ``DeviceExtractorResistor``, for a
+    device whose PDK LVS deck models a bulk terminal (e.g. gf180mcu's
+    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It inherits the
+    same documented approximation as the NMOS body terminal: there is no
+    drawn substrate-tap geometry in these curated decks, so the bulk is the
+    global net, not a real extracted tap.
+    """
+
+    name: str
+    body: tuple[int, int]
+    marker: tuple[int, int]
+    sheet_rho_ohm_sq: float
+    requires: tuple[tuple[int, int], ...] = ()
+    excludes: tuple[tuple[int, int], ...] = ()
+    terminal: tuple[int, int] | None = None
+    bulk_to_substrate: bool = False
+
+
+@dataclass(frozen=True)
 class ExtractionDeck:
     """Connectivity + device-extraction rule set for ``klt extract`` (see
     ``docs/design/lvs-extraction-spike.md`` and ``docs/cli/extract.md``).
@@ -123,6 +201,13 @@ class ExtractionDeck:
     ``bipolars`` above. Empty for a deck with no curated capacitor
     recognition; non-empty decks may declare more than one entry (e.g.
     sky130's two independent MiM stacks, one per metal level it is drawn on).
+
+    ``resistors`` declares the deck's *drawn* precision-resistor device
+    classes (see :class:`ResistorDevice`), each recognised by KLayout's
+    ``DeviceExtractorResistor``/``...WithBulk``. Optional and empty by
+    default: a deck that declares none extracts exactly as it did before the
+    field existed (#222), and a conductor that carries no declared resistor
+    marker is never reclassified as a resistor.
     """
 
     active: tuple[int, int]
@@ -140,6 +225,7 @@ class ExtractionDeck:
     substrate_net: str = "vsubs"
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
+    resistors: tuple[ResistorDevice, ...] = ()
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -156,8 +242,10 @@ class ExtractionDeck:
         entries (#223) appends each entry's ``class_name`` (in declaration
         order, deduplicated), and a deck that declares one or more
         ``capacitors`` entries (#225) likewise appends each entry's ``name``
-        after that. A resistor extractor (#219's remaining sibling sub-issue,
-        #222) should extend this the same way once added.
+        after that. Finally, a deck that declares one or more ``resistors``
+        entries (#222) appends the ``"resistor"`` role after those -- a single
+        role token regardless of how many drawn-resistor device classes the
+        deck declares.
         """
         classes = ["nfet", "pfet"]
         for bipolar in self.bipolars:
@@ -166,6 +254,8 @@ class ExtractionDeck:
         for capacitor in self.capacitors:
             if capacitor.name not in classes:
                 classes.append(capacitor.name)
+        if self.resistors and "resistor" not in classes:
+            classes.append("resistor")
         return tuple(classes)
 
     @property
@@ -185,9 +275,10 @@ class ExtractionDeck:
         Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
         ``contact``, plus optional ``tap``), the ``metals``/``vias`` stack and
         every label layer (``well_label``/``poly_label``/``metal_labels``),
-        and each ``bipolars``/``capacitors`` entry's own recognition layers
-        (base/emitter/marker/collector; plate + requires/excludes). ``None``
-        entries (an absent optional layer) are skipped.
+        and each ``bipolars``/``capacitors``/``resistors`` entry's own
+        recognition layers (base/emitter/marker/collector; plate +
+        requires/excludes; body/marker/requires/excludes plus optional
+        terminal). ``None`` entries (an absent optional layer) are skipped.
         """
         layers: set[tuple[int, int]] = {
             self.active,
@@ -214,6 +305,13 @@ class ExtractionDeck:
             layers.update(capacitor.top_plate_excludes)
             layers.update(capacitor.bottom_plate_requires)
             layers.update(capacitor.bottom_plate_excludes)
+        for resistor in self.resistors:
+            layers.add(resistor.body)
+            layers.add(resistor.marker)
+            layers.update(resistor.requires)
+            layers.update(resistor.excludes)
+            if resistor.terminal is not None:
+                layers.add(resistor.terminal)
         return frozenset(layers)
 
 

@@ -60,9 +60,12 @@ for each — one generic `nfet`/`pfet` device class per deck (no
 voltage-flavor distinction). A deck may additionally declare one or more
 vertical-BJT device-recognition entries, run through KLayout's native
 `DeviceExtractorBJT3Transistor` — see "Bipolar (BJT) device recognition"
-below — and one or more drawn MiM-capacitor device-recognition entries, run
+below — one or more drawn MiM-capacitor device-recognition entries, run
 through KLayout's native `DeviceExtractorCapacitor` — see "MiM capacitor
-device recognition" below.
+device recognition" below — and one or more drawn precision-resistor
+device-recognition entries, run through KLayout's native
+`DeviceExtractorResistor`/`DeviceExtractorResistorWithBulk` — see "Drawn
+resistors" under Coverage.
 
 ## Deviation from the spike
 
@@ -216,6 +219,44 @@ Two consequences worth knowing:
 capacitors nor any voltage-flavor/size variant beyond the two curated
 `capm`/`capm2` stacks above are modelled — out of scope for this curated
 starter subset, not a silent omission.
+
+### Drawn resistors
+
+Both decks additionally recognise **one drawn precision-resistor device
+class** each (issue #222). A drawn resistor is a deliberately-marked segment
+of an ordinary conductor: the designer draws poly, then covers the resistive
+part with the PDK's resistor-ID layer. Without this recognition that segment
+extracts as a plain conductor — a **short** between the resistor's two heads
+— so a resistor drawn at the wrong length or width passes LVS silently.
+
+| Deck | `devices[].class` | Models | Body | Marker | Also requires | Sheet resistance |
+| ---- | ----------------- | ------ | ---- | ------ | ------------- | ---------------- |
+| `sky130`   | `res_generic_po` | `sky130_fd_pr__res_generic_po` | `poly.drawing` 66/20 | `poly.res` 66/13 | — | **48.2 Ω/□** |
+| `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** |
+
+KLayout computes `R = L / W * sheet_rho` from the recognised segment's own
+geometry, so the sheet-resistance number *is* the accuracy of the extracted
+value. Each is transcribed from that PDK's **own official KLayout LVS deck**
+and cross-checked against a second independent source (open_pdks' magic
+technology file) in the same PDK install — see the per-deck module docstrings
+(`src/klayout_tools/decks/sky130.py`, `.../gf180mcu.py`) for the exact source
+lines, the derivation each is transcribed from, and every approximation taken
+relative to it.
+
+Two consequences worth knowing:
+
+- **Unmarked conductor is never reclassified.** A resistor-*shaped* poly bar
+  with no resistor-ID layer over it stays ordinary routing, and a marked
+  segment over diffusion stays a transistor gate (both decks exclude their
+  own active/COMP layer from the resistor body, mirroring the PDKs' own LVS
+  derivations).
+- **A resistor flavour these curated decks do not model is left as a short,
+  not extracted with the wrong value.** sky130's `rpm`/`urpm` precision
+  implant masks (which select the 319.8 Ω/□ and 2 kΩ/□ poly resistors) and
+  gf180mcu's `Resistor` 62/0 high-sheet-rho mark are *exclusions*, and
+  gf180mcu's `SAB` is *required* (without it the real device is the ~48×
+  lower-resistance salicided `ppolyf_s`). A wrong resistance passing LVS with
+  high confidence is worse than a known-unmodelled short.
 
 ## PDK resolution
 
@@ -458,6 +499,14 @@ and adds the sources, and *that* testbench is the `klt sim` `netlist`.
 exercises exactly this against a real sky130 corpus cell end to end (skipped
 when `ngspice` is not installed).
 
+That testbench supplies the `.model` cards for the deck's device-class names
+(e.g. `.model nfet nmos level=1`) — the same convention applies to a drawn
+resistor, which is written as `R$1 A B 289.2 res_generic_po`: the extracted
+resistance plus the device-class name as a model token, so the testbench adds
+a matching `.model res_generic_po r`. (Unrelated to `--parasitics`, whose
+injected R/C elements are deliberately emitted as *bare* `R`/`C` cards with
+no model token.)
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -488,7 +537,8 @@ exit codes).
     "pfet",
     "pnp",
     "sky130_fd_pr__model__cap_mim",
-    "sky130_fd_pr__model__cap_mim_m4"
+    "sky130_fd_pr__model__cap_mim_m4",
+    "resistor"
   ],
   "devices": [
     {
@@ -526,9 +576,9 @@ exit codes).
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
-| `device_counts`    | object\<string, int\>      | Per-device-class counts, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"` and/or a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`). What was actually **found**.  |
+| `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |
 | `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. |
-| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above — and a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
+| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; and a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above), independent of what this layout happens to contain. Both registered decks currently report `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]`. Note the trailing `"resistor"` is a role token, not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |
@@ -546,9 +596,9 @@ consume.
 | Field    | Type                        | Description                                                                                    |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
-| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, or a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`). |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**) and `"area_um2"` (the plates' overlap area, in square micrometres — `c_f = area_um2 * area_cap`, see "MiM capacitor device recognition" above). |
+| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, or a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors"). |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**) and `"area_um2"` (the plates' overlap area, in square micrometres — `c_f = area_um2 * area_cap`, see "MiM capacitor device recognition" above). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho`. |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 
@@ -600,12 +650,12 @@ above, issue #217). The following remain out of scope:
   technology file (see "Parasitic (RC) extraction"), but they remain
   order-of-magnitude and uncalibrated to silicon; calibrating them against
   silicon is an explicit non-goal (#216 "Non-goals").
-- **Drawn resistor device class.** Bipolar and MiM-capacitor devices are
-  recognised (see "Bipolar (BJT) device recognition" and "MiM capacitor
-  device recognition"), but neither deck declares a precision-resistor
-  extractor, so a resistor-marked conductor still extracts as ordinary
-  connectivity. Tracked as a sibling sub-issue of #219
-  ([#222](https://github.com/2AMLogic/klayout-tools/issues/222)).
+- **Resistor flavours beyond one per deck.** Each deck declares a single
+  drawn-resistor device class (see "Drawn resistors", issue #222); a PDK's
+  other resistor flavours (sky130's `rpm`/`urpm` fixed-width precision
+  resistors, diffusion and metal resistors; gf180mcu's salicided,
+  high-sheet-rho, N+ poly, diffusion, well and metal resistors) are
+  deliberately excluded rather than approximated — see "Drawn resistors".
 
 Netlist comparison (`klt lvs`) is a separate command; this command only
 produces the layout-side netlist half of that comparison.

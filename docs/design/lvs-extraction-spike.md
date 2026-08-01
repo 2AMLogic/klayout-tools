@@ -714,6 +714,23 @@ engine):
   designer intentionally drew as a resistor/capacitor*, not the parasitic
   resistance/capacitance of ordinary interconnect wiring. It does not
   generalize to "compute R/C for every net's routing."
+
+  > **Decision, since built (#222).** `DeviceExtractorResistor` /
+  > `...WithBulk` is now wired into `klt extract` for **drawn** resistors,
+  > as a separate capability from `--parasitics` — confirming the
+  > distinction this bullet draws rather than blurring it. The two never
+  > interact: a drawn resistor is a *device* (it appears in `device_count`/
+  > `devices[]`/`device_counts`, with `params.r_ohm`), while `--parasitics`
+  > R/C elements are injected after the schematic-equivalent view is built
+  > and appear only in the written SPICE and the `parasitics` block. The
+  > per-PDK declaration lives in the same curated-deck table this addendum
+  > proposes for the RC coefficients (`ExtractionDeck.resistors`, one
+  > `ResistorDevice` per class), and its sheet-rho values come from each
+  > PDK's *own* official KLayout LVS deck rather than being curated by
+  > hand — a drawn resistor's whole value is that number, so an
+  > order-of-magnitude starter value (acceptable for `--parasitics`) is not
+  > acceptable here. Capacitor/bipolar recognition remains unbuilt (#219's
+  > sibling sub-issues #223/#225).
 - There is therefore **no built-in call to wrap** for genuine interconnect
   parasitics; a real implementation needs one of:
   1. **Build a first-order, lumped reduction ourselves** on top of the

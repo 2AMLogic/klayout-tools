@@ -25,7 +25,7 @@ import pytest
 
 from klayout_tools import pdk
 from klayout_tools.cli import main
-from klayout_tools.decks import get_extraction_deck
+from klayout_tools.decks import ExtractionDeck, get_extraction_deck
 from klayout_tools.extract import ExtractError, _n_squares, run_extract
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -235,13 +235,15 @@ def test_layout_with_no_devices_succeeds_with_zero_count(tmp_path):
     assert report["device_counts"] == {}
     # `device_classes` is what the deck *can* recognise, unaffected by this
     # layout happening to contain zero devices (issue #221) -- sky130 also
-    # declares a `pnp` bipolar entry (issue #223).
+    # declares a `pnp` bipolar entry (issue #223), two MiM capacitors
+    # (issue #225), and a drawn poly resistor (issue #222).
     assert report["device_classes"] == [
         "nfet",
         "pfet",
         "pnp",
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
+        "resistor",
     ]
 
 
@@ -334,6 +336,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "pnp",
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
+        "resistor",
     ]
     assert report["pdk"] is None
     assert report["warnings"] == []
@@ -483,6 +486,7 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
         "pnp",
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
+        "resistor",
     ]
 
     (device,) = report["devices"]
@@ -508,6 +512,7 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
         "pfet",
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
+        "resistor",
     ]
 
     (device,) = report["devices"]
@@ -894,9 +899,10 @@ def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
     "deck_name, expected",
     [
         # sky130 declares one bipolar entry, `pnp` (issue #223, its own
-        # `sky130_fd_pr__pnp_05v5` device cell), plus two MiM-capacitor
-        # entries (issue #225, one per metal level its official LVS deck
-        # draws a purpose-built top-plate mark layer on).
+        # `sky130_fd_pr__pnp_05v5` device cell), two MiM-capacitor entries
+        # (issue #225, one per metal level its official LVS deck draws a
+        # purpose-built top-plate mark layer on), and a drawn poly resistor
+        # (issue #222), so the `"resistor"` role trails the capacitor names.
         (
             "sky130",
             (
@@ -905,29 +911,283 @@ def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
                 "pnp",
                 "sky130_fd_pr__model__cap_mim",
                 "sky130_fd_pr__model__cap_mim_m4",
+                "resistor",
             ),
         ),
         # gf180mcu declares one bipolar entry, generic `bjt` (issue #223 --
         # the DRM's `DRC_BJT` mark layer covers both NPN and PNP polarities
         # with no single named device cell to attribute one to; see
-        # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note), plus one
-        # MiM-capacitor entry (issue #225, its own official LVS device name
-        # for the deck's Metal4/Metal5 MiM stack).
+        # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note), one MiM-capacitor
+        # entry (issue #225, its own official LVS device name for the deck's
+        # Metal4/Metal5 MiM stack), and a drawn poly resistor (issue #222).
         (
             "gf180mcu",
-            ("nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield"),
+            ("nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor"),
         ),
     ],
 )
-def test_extraction_deck_device_classes_reports_mos_bipolar_and_capacitor(
+def test_extraction_deck_device_classes_reports_mos_bipolar_capacitor_and_resistor(
     deck_name, expected
 ):
     """`device_classes` reports exactly what each deck is structurally
     capable of recognising -- two-terminal-well MOS plus each deck's
-    curated bipolar (issue #223) and MiM-capacitor (issue #225) entries --
-    independent of any particular layout."""
+    curated bipolar (issue #223), MiM-capacitor (issue #225), and drawn
+    resistor (issue #222) entries -- independent of any particular layout."""
     deck = get_extraction_deck(deck_name)
     assert deck.device_classes == expected
+
+
+def test_extraction_deck_without_resistors_reports_mos_only():
+    """The `resistors` field is additive/optional: a deck declaring none
+    reports the pre-#222 `("nfet", "pfet")` coverage unchanged."""
+    deck = ExtractionDeck(
+        active=(65, 20), poly=(66, 20), nwell=(64, 20), contact=(66, 44), metals=()
+    )
+    assert deck.resistors == ()
+    assert deck.device_classes == ("nfet", "pfet")
+
+
+# --------------------------------------------------------------------------- #
+# Drawn precision resistors (issue #222)
+# --------------------------------------------------------------------------- #
+#
+# One synthetic poly-resistor bar per deck, drawn to the same nominal
+# geometry so the expected resistance is `L / W * sheet_rho` with
+# `L = 6 um`, `W = 1 um` -> exactly 6 squares:
+#
+#     sky130   res_generic_po  6 * 48.2  =  289.2 ohm
+#     gf180mcu ppolyf_u        6 * 350.0 = 2100.0 ohm
+
+_RES_SQUARES = 6.0
+
+# poly bar: 12 um long, 1 um wide; the resistor-ID marker covers the middle
+# 6 um, leaving a 3 um contacted head at each end.
+_RES_BAR = kdb.Box(0, 0, 12000, 1000)
+_RES_MARKED = kdb.Box(3000, 0, 9000, 1000)
+
+
+def _make_poly_resistor_layout(
+    deck_name: str,
+    *,
+    marked: bool = True,
+    extra: tuple[tuple[int, int, kdb.Box], ...] = (),
+    top_name: str = "RES",
+) -> kdb.Layout:
+    """A single drawn poly resistor on `deck_name`'s layers: one poly bar
+    with the PDK's resistor-ID marker over its middle segment and a
+    contacted, labelled head at each end.
+
+    ``marked=False`` draws the identical bar with **no** marker layer -- the
+    edge case that ordinary poly routing must never be misclassified as a
+    resistor. ``extra`` draws additional `(layer, datatype, box)` shapes
+    (used to exercise the decks' `excludes`/`requires` layers).
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    required: tuple[tuple[int, int], ...]
+    if deck_name == "sky130":
+        poly = (66, 20)  # poly.drawing
+        marker = (66, 13)  # poly.res
+        contact = (66, 44)  # licon1.drawing
+        metal = (67, 20)  # li1.drawing
+        metal_label = (67, 5)  # li1.pin
+        # sky130's generic poly resistor needs no additional required layer.
+        required = ()
+    else:
+        poly = (30, 0)  # Poly2
+        marker = (110, 5)  # RES_MK
+        contact = (33, 0)  # Contact
+        metal = (34, 0)  # Metal1
+        metal_label = (34, 10)  # Metal1 pin
+        # gf180mcu's `ppolyf_u` is p+ (Pplus) *and* unsalicided (SAB).
+        required = ((31, 0), (49, 0))
+
+    draw(*poly, _RES_BAR)
+    if marked:
+        draw(*marker, _RES_MARKED)
+    for layer in required:
+        draw(*layer, _RES_MARKED.enlarged(500, 500))
+
+    # Contacted, labelled head at each end of the bar.
+    for x, name in ((1500, "RA"), (10500, "RB")):
+        draw(*contact, kdb.Box(x - 100, 400, x + 100, 600))
+        draw(*metal, kdb.Box(x - 400, 200, x + 400, 800))
+        label(*metal_label, name, x, 500)
+
+    for layer, datatype, box in extra:
+        draw(layer, datatype, box)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "device_class", "sheet_rho"),
+    [("sky130", "res_generic_po", 48.2), ("gf180mcu", "ppolyf_u", 350.0)],
+)
+def test_drawn_poly_resistor_extracts_with_expected_value(
+    tmp_path, deck_name, device_class, sheet_rho
+):
+    """A marked poly bar extracts as the deck's drawn-resistor device class
+    with `R = L / W * sheet_rho` (issue #222) -- not as a short."""
+    path = _write_gds(
+        _make_poly_resistor_layout(deck_name), tmp_path / f"{deck_name}_res.gds"
+    )
+    report = run_extract(path, deck_name, output=str(tmp_path / "res.spice"))
+
+    assert report["device_counts"] == {device_class: 1}
+    (device,) = report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * sheet_rho)
+    # Two terminals on two *distinct* nets -- the whole point: before #222
+    # the bar was one continuous conductor, i.e. a short.
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+    # `device_classes` is the deck's full structural coverage (MOS + each
+    # deck's curated bipolar/capacitor/resistor entries), independent of this
+    # layout containing only the one resistor.
+    assert report["device_classes"] == list(
+        get_extraction_deck(deck_name).device_classes
+    )
+    assert "resistor" in report["device_classes"]
+
+
+def test_gf180mcu_resistor_bulk_terminal_ties_to_substrate_global(tmp_path):
+    """gf180mcu's `ppolyf_u` is declared `bulk_to_substrate`, so it extracts
+    through `DeviceExtractorResistorWithBulk` with its third terminal on the
+    deck's substrate global (the same documented approximation the NMOS body
+    terminal uses)."""
+    path = _write_gds(_make_poly_resistor_layout("gf180mcu"), tmp_path / "res.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "res.spice"))
+
+    (device,) = report["devices"]
+    assert device["nets"]["w"] == get_extraction_deck("gf180mcu").substrate_net
+
+
+@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
+def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
+    """Edge case from the issue: a resistor-*shaped* polygon carrying no
+    resistor-ID marker stays ordinary connected routing -- no device, and
+    both heads remain one net."""
+    path = _write_gds(
+        _make_poly_resistor_layout(deck_name, marked=False),
+        tmp_path / f"{deck_name}_bar.gds",
+    )
+    report = run_extract(path, deck_name, output=str(tmp_path / "bar.spice"))
+
+    assert report["device_count"] == 0
+    assert report["device_counts"] == {}
+    # One continuous conductor with no device on it -- `netlist.purge()`
+    # drops the whole circuit, so there is nothing left to report (contrast
+    # the marked case above, which yields a device across two named nets).
+    assert report["nets"] == []
+
+
+def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_path):
+    """sky130's `rpm`/`urpm` masks select the 319.8 ohm/sq and 2 kohm/sq poly
+    resistor flavours this curated deck does not model. Such a segment must
+    NOT be reported as the 48.2 ohm/sq generic device (a ~6.6x/~41x wrong
+    resistance passing LVS with high confidence is worse than the
+    known-unmodelled short)."""
+    for mask in ((86, 20), (79, 20)):  # rpm, urpm
+        path = _write_gds(
+            _make_poly_resistor_layout(
+                "sky130", extra=((mask[0], mask[1], _RES_MARKED.enlarged(200, 200)),)
+            ),
+            tmp_path / f"rpm_{mask[0]}.gds",
+        )
+        report = run_extract(
+            path, "sky130", output=str(tmp_path / f"rpm_{mask[0]}.spice")
+        )
+        assert report["device_counts"] == {}
+
+
+def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
+    """gf180mcu's `ppolyf_u` requires SAB (salicide block). Without it the
+    real device is the 48x-lower-resistance salicided `ppolyf_s`, which this
+    curated deck does not model -- so nothing may be extracted."""
+    layout = _make_poly_resistor_layout("gf180mcu")
+    # Erase the SAB layer, leaving Pplus + RES_MK + Poly2 in place.
+    layout.clear_layer(layout.layer(49, 0))
+    path = _write_gds(layout, tmp_path / "salicided.gds")
+
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "salicided.spice"))
+    assert report["device_counts"] == {}
+
+
+def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
+    """A resistor marker over a *gate* must not turn a transistor into a
+    resistor: both decks exclude their active/COMP layer from the resistor
+    body, mirroring the PDKs' own LVS derivations."""
+    layout = _make_inverter_layout()
+    # poly.res over exactly the NMOS gate region (poly ∩ diff) -- the
+    # `diff.drawing` exclusion must win, leaving the gate intact.
+    layout.cell("TOP").shapes(layout.layer(66, 13)).insert(kdb.Box(800, 0, 1200, 1000))
+    path = _write_gds(layout, tmp_path / "marked_gate.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "marked_gate.spice"))
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+
+
+def test_resistor_free_layout_extracts_byte_identically(tmp_path):
+    """Regression guard for the additive contract: the synthetic inverter
+    (no resistor markers anywhere) writes the same netlist bytes it did
+    before drawn-resistor support existed."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert all("r_ohm" not in d["params"] for d in report["devices"])
+
+
+def test_resistor_written_spice_carries_r_card(tmp_path):
+    """The written netlist stays a `.SUBCKT` body `klt sim` can consume, with
+    the resistor emitted as an `R` card carrying its extracted value and the
+    deck's device-class name as the model token (same convention as the
+    `nfet`/`pfet` `M` cards)."""
+    path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "res.gds")
+    netlist_path = tmp_path / "res.spice"
+    run_extract(path, "sky130", output=str(netlist_path))
+
+    text = netlist_path.read_text()
+    assert ".SUBCKT RES" in text
+    assert "289.2 res_generic_po" in text
+
+
+def test_deck_resistor_on_a_non_conductor_layer_is_an_error(tmp_path):
+    """Deck-authoring guard: a `ResistorDevice.body` that is not one of the
+    deck's own conductor layers cannot have its body cut out of connectivity,
+    so it is rejected rather than silently extracted as a short."""
+    from klayout_tools.decks import ResistorDevice
+    from klayout_tools.extract import _extract_netlist
+
+    deck = get_extraction_deck("sky130")
+    broken = ExtractionDeck(
+        active=deck.active,
+        poly=deck.poly,
+        nwell=deck.nwell,
+        contact=deck.contact,
+        metals=deck.metals,
+        resistors=(
+            ResistorDevice(
+                name="bogus",
+                body=(99, 99),  # not a conductor layer of this deck
+                marker=(66, 13),
+                sheet_rho_ohm_sq=1.0,
+            ),
+        ),
+    )
+    layout = _make_poly_resistor_layout("sky130")
+    with pytest.raises(ExtractError, match="not one of the deck's conductor layers"):
+        _extract_netlist(layout, layout.top_cell(), broken)
 
 
 # --------------------------------------------------------------------------- #
@@ -995,6 +1255,7 @@ def test_sky130_inv_1_spot_check(tmp_path):
         "pnp",
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
+        "resistor",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -1024,6 +1285,7 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
         "pfet",
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
+        "resistor",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -1155,11 +1417,12 @@ def test_gf180mcu_deck_declares_full_metal_stack():
 
 
 def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
-    """A gf180mcu NMOS layout that also carries shapes on layers the deck's
-    connectivity graph does not read (Nplus 32/0, Dualgate 55/0) reports those
-    layers -- with their shape counts -- in `ignored_layers`, so a downstream
-    LVS mismatch on such geometry is diagnosable as a coverage gap rather than
-    a phantom layout bug."""
+    """A gf180mcu NMOS layout that also carries shapes on a layer the deck's
+    connectivity graph does not read (Dualgate 55/0) reports that layer --
+    with its shape count -- in `ignored_layers`, so a downstream LVS mismatch
+    on such geometry is diagnosable as a coverage gap rather than a phantom
+    layout bug. Nplus (32/0) is *not* ignored: the deck's drawn `ppolyf_u`
+    resistor declares it as an exclusion (#222), so it is a read layer."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -1170,7 +1433,7 @@ def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
     d(30, 0, kdb.Box(1300, -300, 1700, 1300))  # Poly2 (read)
     d(33, 0, kdb.Box(400, 300, 700, 700))  # Contact (read)
     d(34, 0, kdb.Box(200, 200, 900, 800))  # Metal1 (read)
-    d(32, 0, kdb.Box(0, 0, 500, 500))  # Nplus (NOT read)
+    d(32, 0, kdb.Box(0, 0, 500, 500))  # Nplus (read -- resistor exclusion, #222)
     d(55, 0, kdb.Box(0, 0, 3000, 1000))  # Dualgate (NOT read)
     d(55, 0, kdb.Box(0, 2000, 3000, 3000))  # a second Dualgate shape
 
@@ -1180,10 +1443,10 @@ def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
     ignored = {
         (e["layer"], e["datatype"]): e["shapes"] for e in report["ignored_layers"]
     }
-    assert (32, 0) in ignored and ignored[(32, 0)] == 1
     assert (55, 0) in ignored and ignored[(55, 0)] == 2
-    # Layers the deck *does* read are never reported as ignored.
-    for read_layer in [(22, 0), (30, 0), (33, 0), (34, 0)]:
+    # Layers the deck *does* read are never reported as ignored -- including
+    # Nplus (32/0), a read layer via the drawn-resistor exclusion (#222).
+    for read_layer in [(22, 0), (30, 0), (33, 0), (34, 0), (32, 0)]:
         assert read_layer not in ignored
 
 

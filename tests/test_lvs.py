@@ -1002,14 +1002,15 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
     assert body_unverified[0]["device"]["class"] == "nfet"
     # `layout.file` + `layout.deck` (inline extraction) was given -- echoes
     # the sky130 deck's device-class coverage (issue #221, extended by
-    # #223/#225) -- what the deck can *recognise*, independent of what this
-    # particular cap-free cell's netlist actually registered above.
+    # #223/#225/#222) -- what the deck can *recognise*, independent of what
+    # this particular cap-free cell's netlist actually registered above.
     assert report["device_classes"] == [
         "nfet",
         "pfet",
         "pnp",
         "sky130_fd_pr__model__cap_mim",
         "sky130_fd_pr__model__cap_mim_m4",
+        "resistor",
     ]
     assert (
         report["environment"]["extracted_netlist"] is None
