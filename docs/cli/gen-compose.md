@@ -8,6 +8,17 @@ of Epic #191, the build carried by the accepted spike,
 decision, section 5 for the phased scope proposal). This document is the
 shipped contract; where the two disagree, this document (and the code) win.
 
+Phase 3 (#196) is canary bring-up: this contract, unchanged from phases 1–2,
+was run end to end against the real sky130 5T OTA case #164 (Epic #153 phase
+4, loop closure) needs — a differential pair, a current-mirror load, and a
+tail current source, placed and wired with `connectivity[]` — through
+`klt gen-compose` → [`klt extract`](extract.md) → [`klt lvs`](lvs.md) →
+[`klt sim`](sim.md). See "Worked example" below for the exact request and
+results, and "Known limitations (found during phase 3 bring-up)" for the
+routing-geometry and loop-closure gaps the bring-up surfaced that phases 1–2
+did not anticipate — filed as friction (#199, #200, #201), not folded into
+this document's contract.
+
 ```
 klt gen-compose <request.json> [--format text|json]
 ```
@@ -42,6 +53,49 @@ cleanly.
 - **Geometry is advisory.** A routed net (`routed: true`) is *not* a DRC-clean
   guarantee — `klt drc` remains the rule-compliance authority on the composed
   output, exactly as it is on any single generator's output.
+
+## Known limitations (found during phase 3 bring-up, #196)
+
+Running the real 5T OTA case (below) surfaced gaps phases 1–2 did not
+anticipate — none is fixed in this phase (bring-up/integration only, per
+#196's scope); each is filed as its own follow-up issue (#199, #200, #201).
+
+- **The router has no obstacle-awareness against already-placed geometry.**
+  A routed net's Manhattan backbone is a straight line/single-jog between two
+  ports' positions (see "Engine" below) with no check for what lies *between*
+  them. Two cases produced a spurious device-level short (verified via
+  `klt extract`) during bring-up: **(1)** connecting two ports that face the
+  *same* absolute direction (e.g. two `_D` ports, both `direction_deg: 0`,
+  which is how every phase-2 generator's drain-side port always faces,
+  regardless of a block's position in the row) routes straight through the
+  *destination* device's nearer same-row pin (its `_S` port, since `_S` sits
+  closer to the approach side than `_D`), shorting that device's own source
+  and drain together; **(2)** routing into a block with `add_guard_ring:
+  true` (the default for `diff_pair`) from outside crosses the guard ring's
+  own local-metal ring, merging the signal net with the ring's tap net. The
+  worked example below works around both (an `add_guard_ring: false` block
+  parameter, and connectivity wired between *opposite*-facing port pairs
+  only) — filed as #199.
+- **The composed output carries no net labels**, so `klt extract`'s
+  pin-promotion (`Netlist.make_top_level_pins()` + `purge()`) keeps only the
+  one *globally*-connected net every deck ties every device body to (`vsubs`
+  in the sky130/gf180mcu curated decks) — every other net, including every
+  `connectivity[]` net this command itself just wired, is extraction-visible
+  only under an unstable, anonymous `$N` name, and is not addressable from a
+  `klt sim` testbench (which can only source/probe a `.subckt`'s *declared*
+  pins). `klt extract`/`klt lvs` are unaffected (both work from the full
+  net/device graph, not net names), but this blocks true post-extraction
+  `klt sim` bias for anything `klt gen-compose` produces — see the worked
+  example's "Simulation" step. Filed as #200.
+- **`klt lvs` logs a spurious `severity: "error"` mismatch** for a device
+  class (e.g. `pfet`) that `klt extract` always registers even when a
+  layout has zero instances of it, if the paired reference netlist
+  naturally omits that unused class — `status` still correctly reports
+  `"match"` (it is `NetlistComparer.compare()`'s own verdict, not derived
+  from `severity`), but a caller filtering `mismatches[]` on
+  `severity: "error"` alone would see a false positive. Not specific to
+  composed circuits, but first observed while LVS-checking the worked
+  example below. Filed as #201.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
@@ -294,35 +348,139 @@ printed.
 
 ## Worked example
 
-```bash
-# Generate three real blocks with `klt gen` (a differential pair, a
-# current-mirror-labelled load, and a single-device tail current source --
-# the #164 5T OTA case the composition spike's section 4 worked through):
-$ klt gen diff_pair --params '{"mirror": false}' --pdk sky130A \
-    -o diffpair.gds --format json > diffpair.json
-$ klt gen diff_pair --params '{"mirror": true}' --pdk sky130A \
-    -o mirror.gds --format json > mirror.json
-$ klt gen mos_array --params '{"rows": 1, "cols": 1}' --pdk sky130A \
-    -o tail.gds --format json > tail.json
+**Verified end to end (#196, phase 3 canary bring-up)**: the real sky130 5T
+OTA case #164 needs — a differential pair, a current-mirror load, and a
+single-device tail current source, composed and wired with
+`connectivity[]` — taken through `klt gen-compose` -> `klt extract` -> `klt
+lvs` cleanly, and `klt sim` far enough to hit the documented limitation
+above (#200), not a plumbing failure. The exact commands and results below
+are what #196 ran (sky130A; a gf180mcuA run of the same request produces
+byte-identical topology — see "gf180mcu bonus" below).
 
-# Compose them into one row-placed cell:
+Placement order is **`tail` first**, not `diffpair`/`mirror`/`tail` as a
+naive reading of the spike's illustrative request might suggest — every
+phase-2 generator's drain-side ports face east and source-side ports face
+west regardless of row position (see "Known limitations" above), so
+`tail`'s `_D` port only faces a same-row neighbour correctly when that
+neighbour is immediately to its *east*. `add_guard_ring: false` is passed
+to both `diff_pair` blocks for the same reason (#199) -- an external route
+into a guard-ringed block shorts against the ring's own metal.
+
+```bash
+# Generate three real blocks with `klt gen` (a tail current source, a
+# differential pair, and a current-mirror-labelled load -- the #164 5T OTA
+# case the composition spike's section 4 worked through). `splits: 1` keeps
+# each device a single instance (no common-centroid interleaving) so each
+# generator's own Q1/Q2 (or M1/M2) port pair is unambiguous; `add_guard_ring:
+# false` avoids the guard-ring finding above (#199):
+$ klt gen mos_array --params '{"rows": 1, "cols": 1, "dummy": 0}' --pdk sky130A \
+    -o tail.gds --format json > tail.json
+$ klt gen diff_pair --params '{"mirror": false, "splits": 1, "add_guard_ring": false}' \
+    --pdk sky130A -o diffpair.gds --format json > diffpair.json
+$ klt gen diff_pair --params '{"mirror": true, "splits": 1, "add_guard_ring": false}' \
+    --pdk sky130A -o mirror.gds --format json > mirror.json
+
+# Compose them into one row-placed cell. Connectivity: TAIL_A/TAIL_B tie the
+# pair's two source nodes and the tail device's drain into one three-way tail
+# node (decomposed into two 2-pin nets sharing the tail.U0_D endpoint, since
+# bundle/>2-pin nets are out of scope this phase); N1/VOUT tie each input
+# device's drain to the mirror's *source*-side port on the matching row --
+# not literally "drain to drain" (#199 above; see the comment there for why),
+# but the closest topologically-meaningful connection this phase's router can
+# make cleanly between the pair and its load:
 $ cat > compose_request.json <<'EOF'
 {
   "pdk": { "variant": "sky130A" },
   "blocks": [
+    { "id": "tail", "generator_report": "tail.json" },
     { "id": "diffpair", "generator_report": "diffpair.json" },
-    { "id": "mirror", "generator_report": "mirror.json" },
-    { "id": "tail", "generator_report": "tail.json" }
+    { "id": "mirror", "generator_report": "mirror.json" }
   ],
-  "placement": { "strategy": "row", "order": ["diffpair", "mirror", "tail"], "spacing_um": 1.0 },
+  "placement": { "strategy": "row", "order": ["tail", "diffpair", "mirror"], "spacing_um": 1.0 },
   "connectivity": [
-    { "net": "VOUT", "pins": [{ "block": "diffpair", "port": "Q1_1_D" }, { "block": "mirror", "port": "M1_1_D" }] }
+    { "net": "TAIL_A", "pins": [{ "block": "tail", "port": "U0_D" }, { "block": "diffpair", "port": "Q1_1_S" }] },
+    { "net": "TAIL_B", "pins": [{ "block": "tail", "port": "U0_D" }, { "block": "diffpair", "port": "Q2_1_S" }] },
+    { "net": "N1", "pins": [{ "block": "diffpair", "port": "Q1_1_D" }, { "block": "mirror", "port": "M1_1_S" }] },
+    { "net": "VOUT", "pins": [{ "block": "diffpair", "port": "Q2_1_D" }, { "block": "mirror", "port": "M2_1_S" }] }
   ],
   "routing": { "layer_role": "metal", "width_um": 0.17 },
   "options": { "cell_name": "ota_top_0", "output": "ota_top_0.gds" }
 }
 EOF
-# Exit 0 when every net routes; exit 3 (partial success) if any net lands in
-# unrouted_nets[] -- the full report is still emitted either way.
+# Exit 0 -- every block placed, every net routed (unrouted_nets: []).
 $ klt gen-compose compose_request.json --format json
 ```
+
+### Extraction and LVS
+
+```bash
+# Extract the composed GDS (5 devices: tail + 2 diff-pair + 2 mirror, all
+# nfet -- diff_pair's "mirror" naming is a labelling convention only, see
+# docs/cli/gen.md; it draws the same NMOS geometry either way):
+$ klt extract ota_top_0.gds --deck sky130 --top ota_top_0 \
+    -o ota_top_0.spice --format json
+# device_count: 5, device_counts: {"nfet": 5}, exit 0.
+
+# Compare against a hand-written reference netlist with the same topology
+# (three-way tail node, two 2-terminal load nodes, five isolated gate nets,
+# three isolated floating terminals meant for VDD/VSS in a real bias -- see
+# "Known limitations" above for why those can't be reached from `klt sim`):
+$ cat > ota_reference.spice <<'EOF'
+.subckt ota_top_0 vsubs
+M1 tail_node g1 flt1 vsubs nfet L=0.28U W=0.42U
+M2 tail_node g2 n1_node vsubs nfet L=0.28U W=0.42U
+M3 n1_node g3 flt3 vsubs nfet L=0.28U W=0.42U
+M4 tail_node g4 vout_node vsubs nfet L=0.28U W=0.42U
+M5 vout_node g5 flt5 vsubs nfet L=0.28U W=0.42U
+.ends
+EOF
+$ cat > lvs_request.json <<'EOF'
+{
+  "schema": "klt.lvs.request/1",
+  "layout": { "file": "ota_top_0.gds", "deck": "sky130", "top": "ota_top_0" },
+  "reference": { "netlist": "ota_reference.spice", "top": "ota_top_0" }
+}
+EOF
+# status: "match", counts: nets 12/12/12, devices 5/5/5, pins 1/1/1, exit 0.
+# mismatch_count is 3 (two "ambiguous net pairing" warnings -- expected,
+# since S/D are symmetric MOS terminals and this circuit has no
+# hints.same_nets to pin them down -- plus one spurious device_class_mismatch
+# error, #201 above); none of the three changes `status`.
+$ klt lvs lvs_request.json --format json
+```
+
+### Simulation
+
+```bash
+# Per docs/cli/extract.md's documented pattern: a thin testbench `.include`s
+# the extracted file unmodified and instantiates the `.subckt`. This composed
+# circuit's *only* declared pin is `vsubs` (see "Known limitations" -- #200):
+$ cat > testbench.spice <<'EOF'
+.include "ota_top_0.spice"
+.model nfet nmos level=1
+Vvsubs vsubs 0 DC 0
+Xota vsubs ota_top_0
+EOF
+$ cat > sim_request.json <<'EOF'
+{
+  "netlist": "testbench.spice",
+  "analysis": { "kind": "op", "args": "" },
+  "measurements": [{ "name": "vsubs", "spice": ".meas op vsubs find v(vsubs)" }]
+}
+EOF
+# exit 4: every device's gate (and every other non-pin node) is unreachable
+# from this testbench, so ngspice reports singular_matrix -- klt sim
+# classifies this correctly per its own documented contract (not a crash);
+# it is the direct, expected consequence of #200, not a `klt sim` bug.
+$ klt sim sim_request.json --format json
+```
+
+### gf180mcu bonus
+
+The identical `compose_request.json`/`lvs_request.json` shape, with
+`sky130A` -> `gf180mcuA` and `--deck sky130` -> `--deck gf180mcu`, produces
+byte-identical device/net topology (`device_count: 5`,
+`device_counts: {"nfet": 5}`) and an identical `klt lvs` `"match"` verdict
+against the same reference netlist -- every phase-2 generator's layout
+shape is PDK-family-agnostic (`docs/cli/gen.md`), so this composition and
+its connectivity carry over unchanged.
