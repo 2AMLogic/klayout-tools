@@ -90,6 +90,8 @@ _HIDDEN_PARAMS = {
     "tap_layer",
     "well_layer",
     "well_present",
+    "bjt_mark_layer",
+    "bjt_mark_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -165,6 +167,7 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing
         "well": None,  # curated deck has no well-layer rule
+        "bjt_mark": None,  # curated deck has no bipolar device mark-layer rule
     },
     "gf180mcu": {
         "active": (22, 0),  # Comp
@@ -173,6 +176,9 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "contact": (33, 0),  # Contact
         "metal": (34, 0),  # Metal1
         "well": (21, 0),  # Nwell
+        "bjt_mark": (127, 5),  # DRC_BJT -- the vertical-bipolar device mark
+        # layer the curated deck's `bjt.separation.comp.1` (`BJT.3`) rule keys
+        # off (see klayout_tools.decks.gf180mcu).
     },
 }
 
@@ -257,6 +263,38 @@ def _diff_pair_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     params = _device_layer_params(pdk_info)
     params.update(_ring_layer_params(pdk_info))
     return params
+
+
+def _bjt_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+    """Hidden layer params for ``bjt_array`` (a matched vertical-bipolar/PNP
+    array drawn from base layers -- see the module docstring and
+    ``docs/design/gen-bjt-array-spike.md`` for why draw-from-scratch was
+    chosen over vendor-library-cell instantiation).
+
+    A unit device draws its emitter/base/collector diffusion on the ``active``
+    (COMP/diff) role, contacts on ``contact``, local metal on ``metal``, an
+    optional shared base ``well`` (Nwell on gf180mcu; sky130's curated deck
+    checks none), and an optional per-array ``bjt_mark`` device-marking layer
+    (gf180mcu's ``DRC_BJT``, which its ``bjt.separation.comp.1`` rule keys off;
+    sky130's curated deck has no bipolar mark layer -- see
+    :data:`_PDK_ROLE_LAYERS`). ``*_present`` flags follow ``guard_ring``'s
+    ``well_present`` precedent so the generator omits a role its resolved PDK
+    family's curated deck does not check.
+    """
+    import klayout.db as kdb
+
+    family = _pdk_family(pdk_info["variant"])
+    well = _role_layer_info(family, "well")
+    mark = _role_layer_info(family, "bjt_mark")
+    return {
+        "active_layer": _role_layer_info(family, "active"),
+        "contact_layer": _role_layer_info(family, "contact"),
+        "metal_layer": _role_layer_info(family, "metal"),
+        "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
+        "well_present": well is not None,
+        "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
+        "bjt_mark_present": mark is not None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -563,6 +601,155 @@ def _diff_pair_layout(
         "row_pitch_um": row_pitch,
         "core_w_um": core_w,
         "core_h_um": core_h,
+        "ring": ring,
+        "ring_offset_um": ring_offset,
+    }
+
+
+#: Gap (um) kept between the shared base well and the collector guard ring
+#: that surrounds it -- exceeds gf180mcu's ``comp.space.1`` (0.28um), so the
+#: collector COMP ring never crowds the emitter/base COMP inside the well.
+BJT_COLLECTOR_GAP_UM = 0.4
+
+
+def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
+    """One vertical-PNP unit device, drawn from base layers (not a vendor
+    library cell -- see ``docs/design/gen-bjt-array-spike.md``): a square
+    emitter diffusion pad beside a base-tie diffusion pad, each with a
+    contact and a covering local-metal pad, both sitting inside the array's
+    shared base well.
+
+    The two pads model the device's emitter (P+ in the Nwell base) and its
+    base tie (N+ Nwell contact) as adjacent COMP/diff regions -- a
+    DRC-clean, matching-faithful *floorplan* of the device, deliberately not
+    a process-exact vertical cross-section (the curated decks check no
+    implant layer, so emitter/base/collector all draw on the one ``active``
+    role; that fidelity limit is recorded in the design note). The array's
+    collector guard ring is drawn once at array level, not per unit (see
+    :func:`_bjt_array_layout`).
+    """
+    contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    gap = MIN_SAME_LAYER_SPACING_UM
+    base_x0 = emitter_um + gap
+    base_x1 = base_x0 + contact_region_um
+    total_len_um = base_x1
+    height_um = emitter_um
+
+    emitter_box = (0.0, 0.0, emitter_um, height_um)
+    base_box = (base_x0, 0.0, base_x1, height_um)
+
+    contact_half = CONTACT_SIZE_UM / 2.0
+    ecx, ecy = emitter_um / 2.0, height_um / 2.0
+    bcx, bcy = (base_x0 + base_x1) / 2.0, height_um / 2.0
+
+    def _contact_box(cx: float, cy: float) -> tuple[float, float, float, float]:
+        return (
+            cx - contact_half,
+            cy - contact_half,
+            cx + contact_half,
+            cy + contact_half,
+        )
+
+    contacts = [_contact_box(ecx, ecy), _contact_box(bcx, bcy)]
+
+    boxes: dict[str, list[tuple[float, float, float, float]]] = {
+        "active": [emitter_box, base_box],
+        "contact": contacts,
+        "metal": [emitter_box, base_box],
+    }
+    return {
+        "total_len_um": total_len_um,
+        "height_um": height_um,
+        "boxes_um": boxes,
+        "e_xy": (ecx, ecy),
+        "b_xy": (bcx, bcy),
+    }
+
+
+def _bjt_array_layout(
+    emitter_um: float,
+    rows: int,
+    cols: int,
+    dummy: int,
+    topology: str,
+    add_collector_ring: bool,
+) -> dict[str, Any]:
+    """A ``rows`` x ``cols`` common-centroid (or plain-array) grid of
+    :func:`_bjt_unit_layout` unit devices, with ``dummy`` flanking columns
+    each side, a single shared base well enclosing every unit's diffusion,
+    an optional collector guard ring (drawn via :func:`_ring_layout` so it is
+    one unbroken polygon), and an array-level device-mark box coincident with
+    the shared well.
+
+    The mark box is coincident with (encloses) every unit's diffusion, so the
+    ``DRC_BJT``-to-COMP separation rule sees zero separation there, while the
+    collector ring is held :data:`BJT_COLLECTOR_GAP_UM` outside the well, well
+    beyond the rule's 0.1um limit -- see :func:`_bjt_unit_layout` and the
+    design note.
+    """
+    unit = _bjt_unit_layout(emitter_um)
+    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+
+    order = (
+        _centroid_order(rows, cols)
+        if topology == "common_centroid"
+        else [(r, c) for r in range(rows) for c in range(cols)]
+    )
+    cells = [
+        {"idx": idx, "row": r, "col": c, "x0_um": c * col_pitch, "y0_um": r * row_pitch}
+        for idx, (r, c) in enumerate(order)
+    ]
+
+    dummy_cells = []
+    for r in range(rows):
+        for dc in range(1, dummy + 1):
+            dummy_cells.append(
+                {"row": r, "col": -dc, "x0_um": -dc * col_pitch, "y0_um": r * row_pitch}
+            )
+            dummy_cells.append(
+                {
+                    "row": r,
+                    "col": cols - 1 + dc,
+                    "x0_um": (cols - 1 + dc) * col_pitch,
+                    "y0_um": r * row_pitch,
+                }
+            )
+
+    all_cells = cells + dummy_cells
+    min_x0 = min(c["x0_um"] for c in all_cells)
+    max_x1 = max(c["x0_um"] + unit["total_len_um"] for c in all_cells)
+    min_y0 = min(c["y0_um"] for c in all_cells)
+    max_y1 = max(c["y0_um"] + unit["height_um"] for c in all_cells)
+
+    margin = WELL_ENCLOSURE_MARGIN_UM
+    well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
+    # The device-mark box is coincident with the shared well -- it encloses
+    # every unit's diffusion (zero DRC_BJT-to-COMP separation) and stays
+    # BJT_COLLECTOR_GAP_UM clear of the collector ring's COMP.
+    mark_box = well_box
+
+    ring = None
+    ring_offset = (0.0, 0.0)
+    if add_collector_ring:
+        gap = BJT_COLLECTOR_GAP_UM
+        ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+        inner_x0 = well_box[0] - gap
+        inner_y0 = well_box[1] - gap
+        inner_w = (well_box[2] - well_box[0]) + 2 * gap
+        inner_h = (well_box[3] - well_box[1]) + 2 * gap
+        contacts_per_side = max(1, min(rows + cols, 4))
+        ring = _ring_layout(inner_w, inner_h, ring_w, contacts_per_side)
+        ring_offset = (inner_x0 - ring_w, inner_y0 - ring_w)
+
+    return {
+        "unit": unit,
+        "cells": cells,
+        "dummy_cells": dummy_cells,
+        "col_pitch_um": col_pitch,
+        "row_pitch_um": row_pitch,
+        "well_box_um": well_box,
+        "mark_box_um": mark_box,
         "ring": ring,
         "ring_offset_um": ring_offset,
     }
@@ -1417,12 +1604,164 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li_well, dbu, [_shift_box(well_box, ox, oy)]
                     )
 
+    class _BjtArrayPCell(kdb.PCellDeclarationHelper):
+        """Matched vertical-bipolar (PNP/BJT) array (Epic #152 phase 4): a
+        ``rows`` x ``cols`` common-centroid grid of identical unit devices
+        (see :func:`_bjt_unit_layout`), sharing one base well, surrounded by
+        a collector guard ring and covered by a device-mark layer on PDK
+        families whose curated deck checks one (gf180mcu's ``DRC_BJT``).
+
+        Draws from base layers rather than instantiating a vendor library
+        cell (e.g. gf180mcu ``pnp_05p00x05p00``) -- the design note
+        ``docs/design/gen-bjt-array-spike.md`` records why: this repo's
+        ``find_pdk`` has no library-GDS-instantiation path, CI never has a
+        real PDK installed, and CLAUDE.md forbids vendoring PDK cell data.
+        The trade-off (a DRC-clean matching floorplan, not a SPICE-model-
+        exact device) is recorded there too.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.param(
+                "emitter_um",
+                self.TypeDouble,
+                "Emitter diffusion side length (um)",
+                default=0.6,
+            )
+            self.param("rows", self.TypeInt, "Array rows", default=3)
+            self.param("cols", self.TypeInt, "Array columns", default=3)
+            self.param(
+                "topology",
+                self.TypeString,
+                "Placement topology: 'array' (row-major) or "
+                "'common_centroid' (centroid-symmetric pairing)",
+                default="common_centroid",
+            )
+            self.param(
+                "dummy",
+                self.TypeInt,
+                "Dummy unit-device columns added on each side of the array",
+                default=1,
+            )
+            self.param(
+                "ratio",
+                self.TypeInt,
+                "Intended emitter matching ratio (e.g. 8 for a bandgap's "
+                "8:1 group) -- documented in the matched-group id and hints",
+                default=8,
+            )
+            self.param(
+                "add_collector_ring",
+                self.TypeBoolean,
+                "Surround the array with a collector/substrate guard ring",
+                default=True,
+            )
+            self.param(
+                "active_layer",
+                self.TypeLayer,
+                "Emitter/base/collector diffusion (COMP) drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "contact_layer",
+                self.TypeLayer,
+                "Contact drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "metal_layer",
+                self.TypeLayer,
+                "Local routing metal drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_layer",
+                self.TypeLayer,
+                "Shared base well drawing layer (only used when well_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "well_present",
+                self.TypeBoolean,
+                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
+                default=False,
+            )
+            self.param(
+                "bjt_mark_layer",
+                self.TypeLayer,
+                "Bipolar device-mark drawing layer (only used when bjt_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "bjt_mark_present",
+                self.TypeBoolean,
+                "Whether bjt_mark_layer is a real, DRC-checked layer for the PDK",
+                default=False,
+            )
+
+        def display_text_impl(self) -> str:
+            return f"bjt_array({self.rows}x{self.cols},e={self.emitter_um})"
+
+        def produce_impl(self) -> None:
+            dbu = self.layout.dbu
+            li_active = self.layout.layer(self.active_layer)
+            li_contact = self.layout.layer(self.contact_layer)
+            li_metal = self.layout.layer(self.metal_layer)
+            info = _bjt_array_layout(
+                self.emitter_um,
+                self.rows,
+                self.cols,
+                self.dummy,
+                self.topology,
+                self.add_collector_ring,
+            )
+            unit_boxes = info["unit"]["boxes_um"]
+            for c in info["cells"] + info["dummy_cells"]:
+                for role, li in (
+                    ("active", li_active),
+                    ("contact", li_contact),
+                    ("metal", li_metal),
+                ):
+                    _insert_boxes(
+                        self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
+                    )
+
+            if self.well_present:
+                li_well = self.layout.layer(self.well_layer)
+                _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
+
+            if info["ring"] is not None and self.add_collector_ring:
+                ring = info["ring"]
+                ox, oy = info["ring_offset_um"]
+                _insert_ring(
+                    self.cell,
+                    li_active,
+                    dbu,
+                    _shift_box(ring["outer_box_um"], ox, oy),
+                    _shift_box(ring["inner_box_um"], ox, oy),
+                )
+                _insert_ring(
+                    self.cell,
+                    li_metal,
+                    dbu,
+                    _shift_box(ring["outer_box_um"], ox, oy),
+                    _shift_box(ring["inner_box_um"], ox, oy),
+                )
+                _insert_boxes(
+                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
+                )
+
+            if self.bjt_mark_present:
+                li_mark = self.layout.layer(self.bjt_mark_layer)
+                _insert_boxes(self.cell, li_mark, dbu, [info["mark_box_um"]])
+
     return {
         "resistor_strip": _ResistorStripPCell,
         "mos_array": _MosArrayPCell,
         "res_array": _ResArrayPCell,
         "guard_ring": _GuardRingPCell,
         "diff_pair": _DiffPairPCell,
+        "bjt_array": _BjtArrayPCell,
     }
 
 
@@ -1931,6 +2270,142 @@ def _diff_pair_describe(
     }
 
 
+def _bjt_array_validate(params: dict[str, Any]) -> None:
+    if params["emitter_um"] < UNIT_MIN_W_UM:
+        raise GenError(
+            f"generator 'bjt_array': params.emitter_um must be >= {UNIT_MIN_W_UM}"
+        )
+    if params["rows"] < 1:
+        raise GenError("generator 'bjt_array': params.rows must be >= 1")
+    if params["cols"] < 1:
+        raise GenError("generator 'bjt_array': params.cols must be >= 1")
+    if params["dummy"] < 0:
+        raise GenError("generator 'bjt_array': params.dummy must be >= 0")
+    if params["ratio"] < 1:
+        raise GenError("generator 'bjt_array': params.ratio must be >= 1")
+    if params["topology"] not in ("array", "common_centroid"):
+        raise GenError(
+            "generator 'bjt_array': params.topology must be 'array' or "
+            "'common_centroid'"
+        )
+
+
+def _bjt_array_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    family = _pdk_family(pdk_info["variant"])
+    info = _bjt_array_layout(
+        params["emitter_um"],
+        params["rows"],
+        params["cols"],
+        params["dummy"],
+        params["topology"],
+        params["add_collector_ring"],
+    )
+    unit = info["unit"]
+    active_pair = _PDK_ROLE_LAYERS[family]["active"]
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    active_layer = {"layer": active_pair[0], "datatype": active_pair[1], "name": None}
+    metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
+    well_supported = _PDK_ROLE_LAYERS[family]["well"] is not None
+    mark_supported = _PDK_ROLE_LAYERS[family]["bjt_mark"] is not None
+
+    ports = []
+    ex, ey = unit["e_xy"]
+    bx, by = unit["b_xy"]
+    for c in info["cells"]:
+        idx = c["idx"]
+        ports.append(
+            {
+                "name": f"Q{idx}_E",
+                "net": None,
+                "layer": metal_layer,
+                "x_um": c["x0_um"] + ex,
+                "y_um": c["y0_um"] + ey,
+                "width_um": CONTACT_SIZE_UM,
+                "direction_deg": 90,
+            }
+        )
+        ports.append(
+            {
+                "name": f"Q{idx}_B",
+                "net": None,
+                "layer": metal_layer,
+                "x_um": c["x0_um"] + bx,
+                "y_um": c["y0_um"] + by,
+                "width_um": CONTACT_SIZE_UM,
+                "direction_deg": 90,
+            }
+        )
+
+    if info["ring"] is not None and params["add_collector_ring"]:
+        ox, oy = info["ring_offset_um"]
+        ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+        for name, direction in (
+            ("COLL_N", 90),
+            ("COLL_S", 270),
+            ("COLL_E", 0),
+            ("COLL_W", 180),
+        ):
+            px, py = info["ring"]["ports"][name[-1]]
+            ports.append(
+                {
+                    "name": name,
+                    "net": None,
+                    "layer": active_layer,
+                    "x_um": px + ox,
+                    "y_um": py + oy,
+                    "width_um": ring_w,
+                    "direction_deg": direction,
+                }
+            )
+
+    notes = []
+    if not mark_supported:
+        notes.append(
+            f"the resolved PDK family ('{family}') has no bipolar device-mark "
+            "layer checked by its curated DRC deck -- no device-mark shape was "
+            "drawn; the vertical-bipolar geometry is a DRC-clean matching "
+            "floorplan, not a SPICE-model-exact device (see "
+            "docs/design/gen-bjt-array-spike.md)"
+        )
+    if not well_supported:
+        notes.append(
+            f"the resolved PDK family ('{family}') has no well layer checked by "
+            "its curated DRC deck -- no shared base-well shape was drawn"
+        )
+    if not params["add_collector_ring"]:
+        notes.append(
+            "no collector guard ring drawn (params.add_collector_ring is false)"
+        )
+    if params["rows"] * params["cols"] < params["ratio"] + 1:
+        notes.append(
+            f"array holds {params['rows'] * params['cols']} devices -- too few to "
+            f"realise the requested {params['ratio']}:1 matching ratio around a "
+            "single reference device"
+        )
+
+    snapped = _grid_snapped(dbu, params["emitter_um"])
+    grid = f"{params['rows']}x{params['cols']}"
+    matched_group_id = f"bjt_array:{grid}:{params['topology']}:ratio{params['ratio']}"
+
+    return {
+        "device_count": params["rows"] * params["cols"],
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
+            "matched_group_id": matched_group_id,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
+
+
 #: Maps ``PCellParameterDeclaration`` type constants to the JSON type names
 #: reported by ``klt gen --list``.
 _PARAM_TYPE_NAMES = {
@@ -2008,5 +2483,21 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_diff_pair_validate,
         describe=_diff_pair_describe,
         layer_params=_diff_pair_layer_params,
+    ),
+    "bjt_array": _GeneratorSpec(
+        name="bjt_array",
+        summary=(
+            "Matched vertical-bipolar (PNP/BJT) array: a common-centroid grid "
+            "of identical unit devices (emitter + base-tie diffusion with "
+            "contacts and local metal) sharing one base well, enclosed by a "
+            "collector guard ring and a bipolar device-mark layer on PDK "
+            "families whose curated deck checks one (gf180mcu's DRC_BJT) -- "
+            "Epic #152 phase 4, drawn from base layers per "
+            "docs/design/gen-bjt-array-spike.md."
+        ),
+        dbu=0.001,
+        validate=_bjt_array_validate,
+        describe=_bjt_array_describe,
+        layer_params=_bjt_layer_params,
     ),
 }
