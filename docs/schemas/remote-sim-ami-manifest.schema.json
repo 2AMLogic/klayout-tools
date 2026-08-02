@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/remote-sim-ami-manifest.schema.json",
+  "title": "klayout-tools remote-sim AMI manifest",
+  "description": "The published-AMI registry the `remote` `klt sim` backend's launcher (src/klayout_tools/remote_launcher.py) resolves against, per docs/design/remote-sim-backend-spike.md decision 4 (bake ngspice + curated PDK decks into a maintained, versioned AMI -- never fetched per job). Produced/refreshed by scripts/aws/build-remote-sim-ami.sh, one entry per (pdk, region) build. `resolve_ami()` picks the most recently built entry for a given (pdk, region) pair; it never guesses across regions or falls back to a stale entry silently.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "images"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Manifest format version, independent of any `klt` command's own JSON `schema_version` (see docs/json-contract.md) -- this file is build-pipeline output, not a `klt` command response."
+    },
+    "images": {
+      "type": "array",
+      "description": "One entry per published AMI build. Multiple entries may share a (pdk, region) pair across builds -- resolve_ami() always selects the entry with the latest `built_at` for a given pair, so older entries are kept only as an audit trail, not pruned by this schema.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pdk", "region", "ami_id", "pdk_snapshot", "ngspice_version", "built_at"],
+        "properties": {
+          "pdk": {
+            "type": "string",
+            "enum": ["sky130A", "gf180mcu"],
+            "description": "PDK combination this AMI's baked model decks cover. Must match src/klayout_tools/remote_launcher.py's SUPPORTED_PDKS."
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1,
+            "description": "AWS region this AMI is published/copied into (an AMI id is region-scoped; a multi-region rollout needs one entry per region, per scripts/aws/build-remote-sim-ami.sh's --copy-to-region)."
+          },
+          "ami_id": {
+            "type": "string",
+            "pattern": "^ami-[0-9a-f]{8,17}$",
+            "description": "The published AMI id, e.g. ami-0123456789abcdef0."
+          },
+          "pdk_snapshot": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The PDK's own release identifier baked into this AMI (e.g. 'sky130A-2026.06.01') -- decision 5's reproducibility provenance, echoed into a `remote` run's response `environment.remote.pdk_snapshot`."
+          },
+          "ngspice_version": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ngspice version baked into this AMI (e.g. '46') -- pinned to the same major version this repo tests against, per the design note's decision 5."
+          },
+          "built_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 build timestamp (UTC). resolve_ami() compares this string directly (ISO-8601 sorts chronologically as a plain string) to pick the most recent entry for a (pdk, region) pair."
+          },
+          "notes": {
+            "type": ["string", "null"],
+            "description": "Free-form build notes (e.g. base AMI id, packer/build-tool version). Optional."
+          }
+        }
+      }
+    }
+  }
+}
