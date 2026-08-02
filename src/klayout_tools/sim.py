@@ -72,6 +72,14 @@ DEFAULT_TIMEOUT_S = 120
 #: docstring and the spike's engine survey for why.
 SUPPORTED_ENGINES = ("ngspice",)
 
+#: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
+#: sequentially in-process (today's only behaviour). Like ``engine``,
+#: ``backend`` is a request *data* field, not part of the JSON shape -- the
+#: selection is a seam future ``local-parallel``/``remote`` backends plug into
+#: (Epic #253), reserved but unimplemented here. Unknown names raise
+#: :class:`SimError` before any corner runs, mirroring ``engine`` validation.
+SUPPORTED_BACKENDS = ("local",)
+
 #: Recognised ``.meas`` failure line, e.g.
 #: `` .meas tran vout_high find v(out) when v(out)=5 failed!``
 _MEAS_FAILED_RE = re.compile(
@@ -213,7 +221,12 @@ def _validate_meas_card(name: str, spice: str) -> None:
         )
 
 
-def run_sim(request_path: str, *, artifacts_dir: str | None = None) -> dict[str, Any]:
+def run_sim(
+    request_path: str,
+    *,
+    artifacts_dir: str | None = None,
+    backend: str | None = None,
+) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
     ``artifacts_dir`` overrides where per-corner logs/rawfiles are written
@@ -221,11 +234,17 @@ def run_sim(request_path: str, *, artifacts_dir: str | None = None) -> dict[str,
     directory next to the request file (the same "next to the input"
     convention as ``klt render``'s default output directory).
 
+    ``backend`` selects the execution backend, overriding the request's own
+    ``backend`` field when given (the ``--backend`` CLI flag path). When both
+    are omitted the backend defaults to ``local``. Only ``local`` is
+    implemented in this phase; any other name raises :class:`SimError` (see
+    :data:`SUPPORTED_BACKENDS`).
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
     the sweep from starting at all (bad request, unresolvable netlist/model
-    library, unsupported engine) -- once the sweep starts, every corner is
-    reported in the response, including ones that error.
+    library, unsupported engine, unknown backend) -- once the sweep starts,
+    every corner is reported in the response, including ones that error.
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -234,6 +253,13 @@ def run_sim(request_path: str, *, artifacts_dir: str | None = None) -> dict[str,
     if engine not in SUPPORTED_ENGINES:
         raise SimError(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+        )
+
+    backend = backend if backend is not None else request.get("backend", "local")
+    if backend not in SUPPORTED_BACKENDS:
+        raise SimError(
+            f"unsupported backend '{backend}' "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
         )
 
     netlist_ref = request["netlist"]
@@ -272,23 +298,17 @@ def run_sim(request_path: str, *, artifacts_dir: str | None = None) -> dict[str,
 
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
-    engine_version: str | None = None
-    corners: list[dict[str, Any]] = []
-    for point in corner_points:
-        result, version = _run_corner(
-            point=point,
-            netlist_path=netlist_path,
-            models_lib=models_lib,
-            analysis=analysis,
-            measurements_spec=measurements_spec,
-            timeout_s=timeout_s,
-            keep_artifacts=keep_artifacts,
-            want_waveforms=want_waveforms,
-            artifacts_dir=artifacts_dir,
-        )
-        corners.append(result)
-        if version is not None:
-            engine_version = version
+    corners, engine_version = _BACKENDS[backend](
+        corner_points=corner_points,
+        netlist_path=netlist_path,
+        models_lib=models_lib,
+        analysis=analysis,
+        measurements_spec=measurements_spec,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        artifacts_dir=artifacts_dir,
+    )
 
     measurements_rollup = _rollup_measurements(measurements_spec, corners)
 
@@ -496,6 +516,60 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
         else:
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Execution backends
+# --------------------------------------------------------------------------- #
+
+
+def _run_local(
+    *,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    models_lib: str | None,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    artifacts_dir: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The ``local`` backend: run each expanded corner sequentially in-process.
+
+    This is the unit a backend implements -- given the expanded corner list
+    plus the already-resolved netlist/model paths and run options, return
+    ``(per_corner_reports, engine_version)``. It intentionally reproduces the
+    original in-line loop byte-for-byte (same ordering, same
+    ``engine_version`` last-writer-wins tracking) so the report JSON and
+    on-disk artifacts are unchanged from before the backend seam existed.
+    Future ``local-parallel``/``remote`` backends (Epic #253) implement this
+    same signature.
+    """
+    engine_version: str | None = None
+    corners: list[dict[str, Any]] = []
+    for point in corner_points:
+        result, version = _run_corner(
+            point=point,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=artifacts_dir,
+        )
+        corners.append(result)
+        if version is not None:
+            engine_version = version
+    return corners, engine_version
+
+
+#: Backend registry: name -> implementation. Membership is validated against
+#: :data:`SUPPORTED_BACKENDS` in :func:`run_sim` before dispatch, so this only
+#: ever holds implemented backends. ``local`` is the sole entry in this phase.
+_BACKENDS = {"local": _run_local}
 
 
 # --------------------------------------------------------------------------- #

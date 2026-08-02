@@ -6,7 +6,7 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 Exit codes (see ``docs/cli/sim.md`` for the full table):
     0 - every corner passed
     1 - failed to run at all (bad request, unresolvable netlist/model
-        library, unsupported engine) -- returned by ``emit_error`` as
+        library, unsupported engine, unknown backend) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
     3 - ran successfully, at least one measurement failed a limit
     4 - at least one corner errored -- the sweep is incomplete/untrustworthy
@@ -29,7 +29,7 @@ EXIT_CORNER_ERRORED = 4
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_sim(args.request, artifacts_dir=args.outdir)
+        report = run_sim(args.request, artifacts_dir=args.outdir, backend=args.backend)
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)
 
