@@ -24,6 +24,7 @@ from . import (
     pdk_cmd,
     precheck_cmd,
     render_cmd,
+    report_cmd,
     sim_cmd,
     socket_check_cmd,
     stats_cmd,
@@ -613,6 +614,37 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     sim_parser.set_defaults(func=sim_cmd.run)
+
+    report_parser = subparsers.add_parser(
+        "report",
+        help="render one or more klt JSON envelopes into a text/markdown report",
+        description=(
+            "Read one or more `klt` JSON envelope files (or '-' for stdin) "
+            "and render them into a single combined report. Each envelope's "
+            "kind (a klt drc/lvs-style violations/mismatches report, a klt "
+            "layout-metrics-style key-metrics report, or a captured error "
+            "envelope) is detected from its own JSON structure, per "
+            "docs/json-contract.md -- not hardcoded per verb. "
+            "`--format github-summary` emits GitHub Flavored Markdown "
+            "suitable for `$GITHUB_STEP_SUMMARY`. See docs/cli/report.md."
+        ),
+    )
+    report_parser.add_argument(
+        "files",
+        nargs="+",
+        help="path(s) to klt JSON envelope files, or '-' to read one from stdin",
+    )
+    report_parser.add_argument(
+        "--format",
+        choices=["text", "json", "github-summary"],
+        default="text",
+        help=(
+            "output format (default: text). github-summary emits GitHub "
+            "Flavored Markdown; json emits this command's own JSON envelope "
+            "(including the rendered markdown), per docs/json-contract.md."
+        ),
+    )
+    report_parser.set_defaults(func=report_cmd.run)
 
     _add_kb_parser(subparsers)
 
