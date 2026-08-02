@@ -21,6 +21,7 @@
     "extract.nets_count": 31,
     "extract.pin_count": 2,
     "extract.schema_version": 1,
+    "extract.unmodelled_poly_count": 0,
     "extract.warnings_count": 0,
     "gen_compose.bbox_um.x0": 0.0,
     "gen_compose.bbox_um.x1": {
