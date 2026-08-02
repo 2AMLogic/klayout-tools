@@ -56,6 +56,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .pdk import PdkNotFoundError, find_pdk
@@ -73,12 +74,24 @@ DEFAULT_TIMEOUT_S = 120
 SUPPORTED_ENGINES = ("ngspice",)
 
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
-#: sequentially in-process (today's only behaviour). Like ``engine``,
-#: ``backend`` is a request *data* field, not part of the JSON shape -- the
-#: selection is a seam future ``local-parallel``/``remote`` backends plug into
-#: (Epic #253), reserved but unimplemented here. Unknown names raise
-#: :class:`SimError` before any corner runs, mirroring ``engine`` validation.
-SUPPORTED_BACKENDS = ("local",)
+#: sequentially in-process (the original behaviour). ``local-parallel`` fans
+#: the same expanded corner list across a bounded local worker pool (Epic
+#: #253 Phase 1) -- corners share nothing (each is a pure function of
+#: netlist + models + corner), so this is purely a concurrency seam: same
+#: request in, same report out, just faster on a multi-core box. Like
+#: ``engine``, ``backend`` is a request *data* field, not part of the JSON
+#: shape -- ``remote`` (Epic #253 later phases) is reserved but unimplemented
+#: here. Unknown names raise :class:`SimError` before any corner runs,
+#: mirroring ``engine`` validation.
+SUPPORTED_BACKENDS = ("local", "local-parallel")
+
+#: Assumed ngspice worker-thread count used to derive the ``local-parallel``
+#: backend's conservative default ``max_workers`` -- see :func:`_default_max_workers`.
+#: Each ``ngspice -b`` process is itself internally multi-threaded (BLAS/matrix
+#: solve), so a naive one-worker-per-corner pool oversubscribes a small box
+#: immediately (see #253/#168's design note); this factor is a deliberately
+#: conservative estimate, not a measured value.
+_ASSUMED_THREADS_PER_NGSPICE = 8
 
 #: Recognised ``.meas`` failure line, e.g.
 #: `` .meas tran vout_high find v(out) when v(out)=5 failed!``
@@ -226,6 +239,7 @@ def run_sim(
     *,
     artifacts_dir: str | None = None,
     backend: str | None = None,
+    max_workers: int | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -236,9 +250,18 @@ def run_sim(
 
     ``backend`` selects the execution backend, overriding the request's own
     ``backend`` field when given (the ``--backend`` CLI flag path). When both
-    are omitted the backend defaults to ``local``. Only ``local`` is
-    implemented in this phase; any other name raises :class:`SimError` (see
-    :data:`SUPPORTED_BACKENDS`).
+    are omitted the backend defaults to ``local``. ``local`` and
+    ``local-parallel`` are implemented; any other name raises
+    :class:`SimError` (see :data:`SUPPORTED_BACKENDS`).
+
+    ``max_workers`` bounds the ``local-parallel`` backend's worker pool,
+    overriding the request's own ``options.max_workers`` when given (the
+    ``--max-workers`` CLI flag path). Ignored by ``local``. When both are
+    omitted, defaults to a conservative estimate derived from
+    ``os.cpu_count()`` (see :func:`_default_max_workers`) -- each ``ngspice``
+    process is itself internally multi-threaded, so one worker per CPU
+    oversubscribes a small box immediately. Must be a positive integer when
+    given explicitly; a non-positive value raises :class:`SimError`.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
@@ -293,6 +316,15 @@ def run_sim(
     keep_artifacts = bool(options.get("keep_artifacts", False))
     want_waveforms = bool(options.get("waveforms", False))
 
+    max_workers = max_workers if max_workers is not None else options.get("max_workers")
+    if max_workers is not None:
+        if (
+            not isinstance(max_workers, int)
+            or isinstance(max_workers, bool)
+            or max_workers < 1
+        ):
+            raise SimError("options.max_workers must be a positive integer")
+
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "sim")
 
@@ -308,6 +340,7 @@ def run_sim(
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
         artifacts_dir=artifacts_dir,
+        max_workers=max_workers,
     )
 
     measurements_rollup = _rollup_measurements(measurements_spec, corners)
@@ -534,6 +567,7 @@ def _run_local(
     keep_artifacts: bool,
     want_waveforms: bool,
     artifacts_dir: str,
+    max_workers: int | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -543,9 +577,11 @@ def _run_local(
     original in-line loop byte-for-byte (same ordering, same
     ``engine_version`` last-writer-wins tracking) so the report JSON and
     on-disk artifacts are unchanged from before the backend seam existed.
-    Future ``local-parallel``/``remote`` backends (Epic #253) implement this
-    same signature.
+    ``max_workers`` is accepted for signature parity with the other backends
+    (every entry in :data:`_BACKENDS` is called with the same keyword set)
+    but is meaningless for a sequential runner, so it is ignored here.
     """
+    del max_workers  # unused: sequential by definition, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     for point in corner_points:
@@ -566,10 +602,98 @@ def _run_local(
     return corners, engine_version
 
 
+def _default_max_workers() -> int:
+    """Conservative default worker count for the ``local-parallel`` backend.
+
+    Each ``ngspice -b`` process is itself internally multi-threaded (matrix
+    solve/BLAS), so naive one-worker-per-corner on a small box oversubscribes
+    immediately (see #253/#168's design note). The default divides the local
+    CPU count by :data:`_ASSUMED_THREADS_PER_NGSPICE`, floored to at least 1
+    worker -- useful headroom on a workstation, but callers running on a
+    shared/CI box should still set ``options.max_workers``/``--max-workers``
+    explicitly (see docs/cli/sim.md's shared-worker warning); ``local``
+    remains the default backend everywhere for exactly that reason.
+    """
+    cpu_count = os.cpu_count() or 1
+    return max(1, cpu_count // _ASSUMED_THREADS_PER_NGSPICE)
+
+
+def _run_local_parallel(
+    *,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    models_lib: str | None,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    artifacts_dir: str,
+    max_workers: int | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The ``local-parallel`` backend: fan the expanded corner list across a
+    bounded local worker pool.
+
+    Corners share nothing -- each is a pure function of netlist + models +
+    corner (see this module's docstring and #253/#168) -- so this is a
+    :class:`~concurrent.futures.ThreadPoolExecutor` pool over :func:`_run_corner`
+    (a thread, not a process, pool: the actual work is the ``ngspice``
+    subprocess call, which releases the GIL for the duration of the wait, so
+    threads give the same concurrency as processes here without the
+    pickling/import overhead of ``ProcessPoolExecutor``). Futures are indexed
+    by each corner's position in ``corner_points`` and reassembled into that
+    same order after every future completes, regardless of completion order
+    -- the acceptance criterion that this backend's report is order-identical
+    to ``local`` for the same request. ``engine_version`` is derived the same
+    "last non-``None`` wins, in corner-list order" way ``local`` computes it,
+    for the same reason: deterministic given a deterministic corner list,
+    independent of which corner's process happened to finish last.
+
+    A failing/erroring corner is reported exactly as :func:`_run_corner`
+    reports it (that function never raises) and does not abort any sibling
+    corner -- each future is independent.
+    """
+    resolved_workers = (
+        max_workers if max_workers is not None else _default_max_workers()
+    )
+
+    results: list[tuple[dict[str, Any], str | None] | None] = [None] * len(
+        corner_points
+    )
+    with ThreadPoolExecutor(max_workers=resolved_workers) as pool:
+        future_to_index = {
+            pool.submit(
+                _run_corner,
+                point=point,
+                netlist_path=netlist_path,
+                models_lib=models_lib,
+                analysis=analysis,
+                measurements_spec=measurements_spec,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+            ): index
+            for index, point in enumerate(corner_points)
+        }
+        for future in as_completed(future_to_index):
+            results[future_to_index[future]] = future.result()
+
+    engine_version: str | None = None
+    corners: list[dict[str, Any]] = []
+    for result in results:
+        assert result is not None  # every index was submitted exactly once
+        corner, version = result
+        corners.append(corner)
+        if version is not None:
+            engine_version = version
+    return corners, engine_version
+
+
 #: Backend registry: name -> implementation. Membership is validated against
 #: :data:`SUPPORTED_BACKENDS` in :func:`run_sim` before dispatch, so this only
-#: ever holds implemented backends. ``local`` is the sole entry in this phase.
-_BACKENDS = {"local": _run_local}
+#: ever holds implemented backends.
+_BACKENDS = {"local": _run_local, "local-parallel": _run_local_parallel}
 
 
 # --------------------------------------------------------------------------- #

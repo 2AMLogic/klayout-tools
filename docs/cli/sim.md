@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -20,6 +20,11 @@ this document (and the code) win.
   request sets `options.keep_artifacts`. Defaults to a `.klt/sim/` directory
   next to the request file (the same "next to the input" convention as `klt
   render`'s default output directory).
+- `--backend` — execution backend for the corner matrix, overriding the
+  request's own `backend` field when given. See "Execution backends" below.
+- `--max-workers` — worker-pool size for the `local-parallel` backend,
+  overriding the request's own `options.max_workers` when given. Ignored by
+  `local`. See "Execution backends" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -32,6 +37,46 @@ story for a future `max_parallel`. The JSON contract does not name the engine
 in its *shape* — `request.engine` is a data field, not a code path — but only
 `"ngspice"` is implemented in this version; an unsupported value is an
 application error (exit 1).
+
+## Execution backends
+
+`request.backend` (overridable with `--backend`) selects how the expanded
+corner matrix is run. Corners share nothing — each is a pure function of
+netlist + models + corner — so every backend produces the **same report
+JSON, in the same corner order**, for the same request; the backend only
+changes how fast (and where) the sweep runs. An unsupported name is an
+application error (exit 1), exactly like an unsupported `engine`.
+
+| `backend`        | Behaviour                                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `local` (default) | Runs corners sequentially, one `ngspice -b` subprocess at a time, in-process.                                       |
+| `local-parallel`  | Fans the same expanded corner list across a bounded local worker pool (`concurrent.futures`) — same report, same corner order, just concurrent. |
+| `remote`           | Reserved for a future phase (Epic #253) — not implemented; requesting it is an error.                                |
+
+**`local-parallel` worker count.** `options.max_workers` (overridable with
+`--max-workers`) bounds the pool size. When omitted, it defaults to a
+conservative estimate: `os.cpu_count() // 8`, floored to at least `1` — each
+`ngspice -b` process is itself internally multi-threaded (matrix
+solve/BLAS), so naive one-worker-per-corner oversubscribes a small box
+immediately. A non-positive or non-integer `max_workers` is an application
+error (exit 1).
+
+**Useful on a workstation, harmful on a shared worker.** `local-parallel`
+trades CPU/memory for wall-clock time — fine on a dedicated development
+machine with idle cores, but a bad default on a shared CI runner or
+multi-tenant build box, where an uncoordinated worker pool competes with
+everything else running there. `local` remains the default **everywhere**
+for exactly this reason; opt into `local-parallel` deliberately (and size
+`max_workers` for the box you're actually running on), never as a blanket
+default.
+
+**Ordering and failure isolation.** `local-parallel`'s report lists corners
+in the same order `local` would produce, regardless of which corner's
+`ngspice` process actually finishes first — completion order never leaks
+into the response. A corner that errors (timeout, singular matrix, missing
+measurement, …) is reported exactly as `local` reports it and does not abort
+its sibling corners; only that corner's own `status`/`diagnostics` reflect
+the failure.
 
 ## Deviation from the spike
 
@@ -214,7 +259,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | ------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
-| `backend`                | string            | Execution backend for the corner matrix. Defaults to, and currently only supports, `"local"` (runs corners sequentially in-process). Other names (e.g. `local-parallel`, `remote`) are reserved but unimplemented — requesting one is an error. Overridable with the `--backend` CLI flag. |
+| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool. `"remote"` is reserved but unimplemented. See "Execution backends" above. Overridable with the `--backend` CLI flag. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
 | `corners.process`        | array\<string\>   | Process-corner axis — opaque `.lib` section names.                                                                                                                     |
@@ -226,6 +271,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
+| `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag. |
 
 ### Response
 
