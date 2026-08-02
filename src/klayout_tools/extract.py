@@ -106,6 +106,7 @@ import math
 import os
 from typing import TYPE_CHECKING, Any
 
+from ._annotation import is_reserved_annotation_layer
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
@@ -698,17 +699,6 @@ def _reconcile_top_pins(
     return sorted(affected)
 
 
-#: GDS layer numbers reserved for out-of-band annotation (issue #289;
-#: verified against each PDK's full official layer table -- see
-#: ``docs/cli/drc.md``'s "Reserved annotation layer" for the cross-check and
-#: the rationale for this specific range). Any datatype on a layer number in
-#: this range is inert to both ``klt drc`` and ``klt extract``'s connectivity
-#: graph; ``(994, 0)`` is the documented single canonical pair when one value
-#: is wanted.
-_BLACK_BOX_LAYER_MIN = 990
-_BLACK_BOX_LAYER_MAX = 999
-
-
 def _resolve_black_box_regions(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -738,7 +728,7 @@ def _resolve_black_box_regions(
     """Resolve black-box/abstract regions (issue #293) against this layout.
 
     A shape drawn on any reserved annotation layer (990-999, any datatype --
-    see ``_BLACK_BOX_LAYER_MIN``/``_BLACK_BOX_LAYER_MAX`` above) directly
+    see :func:`is_reserved_annotation_layer` in ``_annotation.py``) directly
     under ``top_cell`` marks a region whose contents are deliberately out of
     scope for connectivity: a sub-cell that will be drawn later (its
     hierarchy/area needs to be recorded now, its content doesn't yet), or a
@@ -775,7 +765,7 @@ def _resolve_black_box_regions(
     marker = kdb.Region()
     for layer_index in layout.layer_indexes():
         info = layout.get_info(layer_index)
-        if _BLACK_BOX_LAYER_MIN <= info.layer <= _BLACK_BOX_LAYER_MAX:
+        if is_reserved_annotation_layer(info.layer, info.datatype):
             marker += kdb.Region(top_cell.begin_shapes_rec(layer_index))
     marker = marker.merged()
 
