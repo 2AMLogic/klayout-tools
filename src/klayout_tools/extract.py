@@ -76,10 +76,19 @@ entries (``ExtractionDeck.capacitors``, issue #225): two independent
 plate layers (a purpose-drawn top plate, a bottom plate on an ordinary
 conductor -- optionally derived through a PDK-specific "virtual bottom
 plate" sizing step) fed straight to KLayout's native
-``DeviceExtractorCapacitor``. See :class:`klayout_tools.decks.CapacitorDevice`
-for the layer-role contract, the capacitance-per-area provenance each deck
-must cite, and the documented "plate nets are not wired into the rest of
-this deck's metal stack" limitation.
+``DeviceExtractorCapacitor``. Each plate is registered as its own
+self-connected node, and is wired into the rest of the deck's metal stack
+per plate, where the deck declares how (issue #314): the bottom plate joins
+the ``metals[]`` node whose layer its ``bottom_plate`` matches, and the top
+plate joins the ``metals[]`` node named by ``top_plate_via_metal`` through
+the ``top_plate_via`` layer when the deck declares both. A plate for which
+the deck declares neither -- e.g. sky130's MiM top plates, whose real via
+lands on a metal this curated deck does not track -- stays an isolated node:
+the device and its capacitance are still extracted correctly, only that
+plate's net connectivity carries the documented approximation. See
+:class:`klayout_tools.decks.CapacitorDevice` for the layer-role contract, the
+capacitance-per-area provenance each deck must cite, and the exact scope of
+that per-plate limitation.
 
 Every connectivity layer above (``poly``, ``contact``, ``metals``, ...) is
 wired up unconditionally, regardless of whether any device extractor above
@@ -1302,6 +1311,25 @@ def _extract_netlist(
     # so there is nothing to intersect against other than the device's own
     # declared layers.
     for capacitor in deck.capacitors:
+        # Deck-authoring validation (issue #314): checked unconditionally,
+        # like `_resolve_resistors`'s own `_conductor` helper, so a mistake
+        # in a deck module is caught even on a cap-free layout rather than
+        # only surfacing once someone draws a MiM cap.
+        if (capacitor.top_plate_via is None) != (capacitor.top_plate_via_metal is None):
+            raise ExtractError(
+                f"capacitor '{capacitor.name}': top_plate_via and "
+                "top_plate_via_metal must both be set or both be left unset"
+            )
+        if (
+            capacitor.top_plate_via_metal is not None
+            and capacitor.top_plate_via_metal not in deck.metals
+        ):
+            layer, datatype = capacitor.top_plate_via_metal
+            raise ExtractError(
+                f"capacitor '{capacitor.name}': top_plate_via_metal "
+                f"{layer}/{datatype} is not one of the deck's metals[] layers"
+            )
+
         top_region = _region(layout, top_cell, capacitor.top_plate)
         for layer in capacitor.top_plate_requires:
             top_region = top_region & _region(layout, top_cell, layer)
@@ -1335,15 +1363,39 @@ def _extract_netlist(
             # extraction bit-for-bit what it was before this feature existed.
             continue
 
-        # Plate layers are not part of this deck's `metals` connectivity
-        # stack (see `CapacitorDevice`'s "Known limitation"), so each plate
-        # is its own new, self-connected node: `connect()` merges polygons
-        # of the *same* plate that touch (e.g. a shared bottom plate across
-        # several caps) but wires nothing else to it.
+        # Each plate is its own new, self-connected node: `connect()` merges
+        # polygons of the *same* plate that touch (e.g. a shared bottom
+        # plate across several caps).
         l2n.register(bottom_region, f"{capacitor.name}_bottom")
         l2n.register(top_region, f"{capacitor.name}_top")
         l2n.connect(bottom_region)
         l2n.connect(top_region)
+
+        # Bottom-plate connectivity (issue #314): when the declared
+        # `bottom_plate` conductor is one of this deck's own tracked
+        # `metals[]` layers, tie the recognised (possibly virtual-plate-
+        # clipped) bottom region into that metal's connectivity node, so
+        # ordinary contact/via/metal routing to that metal reaches this
+        # terminal instead of leaving it an isolated, anonymous net -- see
+        # `CapacitorDevice`'s docstring.
+        if capacitor.bottom_plate in deck.metals:
+            bottom_metal_index = deck.metals.index(capacitor.bottom_plate)
+            l2n.connect(bottom_region, metals[bottom_metal_index])
+
+        # Top-plate connectivity (issue #314): when the deck declares the
+        # via layer that lands on the top plate and the metal it lands on
+        # (`top_plate_via`/`top_plate_via_metal`), wire the top plate
+        # through that via into the corresponding `metals[]` node -- the
+        # top-plate analogue of the bottom-plate wiring above. Left unwired
+        # (isolated node, documented) when the deck declares neither field.
+        if capacitor.top_plate_via is not None:
+            top_via_region = _region(layout, top_cell, capacitor.top_plate_via)
+            l2n.register(top_via_region, f"{capacitor.name}_top_via")
+            l2n.connect(top_via_region)
+            l2n.connect(top_region, top_via_region)
+            top_via_metal_index = deck.metals.index(capacitor.top_plate_via_metal)
+            l2n.connect(top_via_region, metals[top_via_metal_index])
+
         l2n.extract_devices(
             kdb.DeviceExtractorCapacitor(capacitor.name, capacitor.area_cap_f_um2),
             {"P1": bottom_region, "P2": top_region},

@@ -585,12 +585,16 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # separately-marked-resistor exclusion -- an unmodelled, narrow gap, mirrors
 # the "curated starter subset" scope guard elsewhere in this file).
 #
-# `top_plate`/`bottom_plate` are `FuseTop`/`Metal4`. Even though `Metal4` is
-# now part of this deck's `metals` connectivity stack (#220), the capacitor's
-# plate regions are registered as their own separate, self-connected layers in
-# `extract.py` (a distinct `_region(bottom_plate)` clip, not `metals[3]`
-# itself) -- see `CapacitorDevice`'s "Known limitation": the extracted
-# capacitor's plate nets are not wired into the routing connectivity stack.
+# `top_plate`/`bottom_plate` are `FuseTop`/`Metal4`. `Metal4` is part of this
+# deck's `metals` connectivity stack (#220) -- `extract.py`'s bottom-plate
+# connectivity wiring (issue #314) ties the recognised (virtual-plate-clipped)
+# bottom region into `metals[3]` because `bottom_plate` matches that entry,
+# so ordinary routing to `Metal4` reaches this terminal. `top_plate_via`/
+# `top_plate_via_metal` (`Via4` 41/0 / `Metal5` 81/0, #314) wire the top plate
+# the same way: the official deck's `main.drc` connectivity confirms
+# `top_via = via4` lands on `top_metal = metal5` for this stack (see the
+# module docstring's "10.4 MIM Capacitor" note), the same `Via4`/`Metal5`
+# entries already in this deck's own `vias`/`metals` tuples above.
 # `bottom_plate_oversize_um=1.06` reproduces the official "virtual bottom
 # plate" derivation exactly (`extract.py`'s capacitor-resolution block
 # performs the same `interacting`-then-`sized`-`and` two-step). `CAP_MK`
@@ -778,6 +782,12 @@ EXTRACTION_DECK = ExtractionDeck(
             # DRM 10.4.2 footnote 1 / MIMTM.1's "virtual bottom plate":
             bottom_plate_oversize_um=1.06,
             area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+            # Top-plate connectivity (issue #314): `main.drc`'s own
+            # `top_via = via4` / `top_metal = metal5` confirms Via4 lands
+            # directly on FuseTop and connects up to Metal5 for this 5LM
+            # stack -- see the module docstring's "10.4 MIM Capacitor" note.
+            top_plate_via=(41, 0),  # Via4
+            top_plate_via_metal=(81, 0),  # Metal5
         ),
     ),
     resistors=(

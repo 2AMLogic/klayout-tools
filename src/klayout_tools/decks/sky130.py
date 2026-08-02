@@ -458,12 +458,18 @@ EXTRACTION_DECK = ExtractionDeck(
     # above): two independent stacks, one per metal level sky130's official
     # LVS deck draws a purpose-built top-plate mark layer on. Neither
     # `bottom_plate` (met3/met4) is one of this deck's own `metals` (which
-    # stops at met1 above) -- see `CapacitorDevice`'s "Known limitation": the
-    # extracted capacitors' plate nets are not wired into this deck's li1/
-    # met1-only connectivity stack. No `bottom_plate_oversize_um` -- unlike
-    # gf180mcu's MiM stack, sky130's bottom plate is simply the conductor the
-    # purpose-drawn top-plate layer sits over, no "virtual bottom plate"
-    # derivation needed.
+    # stops at met1 above), so `extract.py`'s bottom-plate connectivity wiring
+    # (issue #314) has nothing to match against -- both plates stay isolated
+    # connectivity nodes, not wired into this deck's li1/met1-only stack. No
+    # `top_plate_via`/`top_plate_via_metal` either: sky130's real MiM stacks
+    # do have a landing via for each (`sky130.lvs`'s `connect(capm, via3)` /
+    # `connect(capm2, via4)`, see the module docstring's provenance note),
+    # but they land on `met4`/`met5` -- also above this curated deck's
+    # `metals` stack -- so there is no tracked metal to wire them to either;
+    # see `CapacitorDevice`'s "Known limitation". No `bottom_plate_oversize_um`
+    # -- unlike gf180mcu's MiM stack, sky130's bottom plate is simply the
+    # conductor the purpose-drawn top-plate layer sits over, no "virtual
+    # bottom plate" derivation needed.
     capacitors=(
         CapacitorDevice(
             name="sky130_fd_pr__model__cap_mim",

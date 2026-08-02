@@ -280,19 +280,38 @@ Two consequences worth knowing:
   `MIM_L_MK`/`capm`/`capm2` marker drawn stays ordinary connectivity, never
   a capacitor — mirroring the "unmarked conductor is never reclassified"
   guarantee drawn resistors give.
-- **Capacitor plate nets are not wired into the rest of this deck's metal
-  stack.** A MiM cap's plate regions are registered as their own separate
-  connectivity nodes, derived from a distinct plate-layer clip rather than
-  the deck's `metals` regions — even where a plate happens to sit on a
-  tracked metal (e.g. gf180mcu's bottom plate is `Metal4`, now part of the
-  `Metal1`–`Metal5` stack). A recognised capacitor's two terminal nets are
-  therefore only as large as the plate shapes `klt extract` itself
-  recognises — multiple plate polygons that touch merge into one net, but
-  neither plate's net extends into whatever real upper-metal routing the
-  deck's metal-stack connectivity would otherwise connect it to. The *device* (a capacitor of the correct value between two
-  correctly-shaped plates) is still correctly recognised; only the net
-  names/connectivity of its two terminals carries this documented
-  approximation. A layout with no MiM-cap marker anywhere extracts
+- **Capacitor plate nets are wired into the rest of this deck's metal stack
+  wherever the deck declares how (issue #314).** A recognised bottom-plate
+  region is tied into the deck's own `metals[]` connectivity node whenever
+  `CapacitorDevice.bottom_plate` matches one of the deck's tracked `metals`
+  layers, and a recognised top-plate region is tied in the same way through
+  an optional declared `top_plate_via`/`top_plate_via_metal` pair — so
+  ordinary contact/via/metal routing to either plate's conductor reaches
+  that capacitor terminal, and `klt lvs` can match it against a schematic
+  net the way it does an ordinary MOS terminal. Neither is a given for every
+  deck/plate combination, though:
+  - **gf180mcu**: both plates are wired. `bottom_plate` is `Metal4`, one of
+    the deck's own `Metal1`–`Metal5` `metals` entries, so the bottom
+    terminal is tied straight in. `top_plate_via`/`top_plate_via_metal`
+    declare `Via4`/`Metal5` (the official deck's own `main.drc` connectivity,
+    `top_via = via4` landing on `top_metal = metal5` for this stack), so the
+    top terminal is tied in the same way.
+  - **sky130**: neither plate is wired. `met3`/`met4` (the two stacks'
+    `bottom_plate` layers) are not among this curated deck's own `metals`
+    (`li1`/`met1` only), and while the real PDK's MiM stacks do have a
+    landing via for the top plate too (`sky130.lvs`'s `connect(capm, via3)`
+    / `connect(capm2, via4)`), those land on `met4`/`met5` — also above this
+    curated deck's `metals` stack — so `CapacitorDevice.top_plate_via` is
+    left unset here. Both of sky130's plate terminals therefore remain their
+    own isolated, self-connected connectivity nodes exactly as before #314:
+    multiple plate polygons that touch merge into one net (e.g. a shared
+    bottom plate across several caps), but neither plate's net extends into
+    any real routing.
+
+  In every case the *device* itself (a capacitor of the correct value
+  between two correctly-shaped plates) is recognised identically; only an
+  unwired plate's *net name/connectivity* carries the documented
+  approximation above. A layout with no MiM-cap marker anywhere extracts
   bit-for-bit as it did before this feature existed — the capacitor
   extractor is never even invoked for an entry whose plate regions come out
   empty.
