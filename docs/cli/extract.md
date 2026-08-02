@@ -308,17 +308,22 @@ starter subset, not a silent omission.
 
 ### Drawn resistors
 
-Both decks additionally recognise **one drawn precision-resistor device
-class** each (issue #222). A drawn resistor is a deliberately-marked segment
-of an ordinary conductor: the designer draws poly, then covers the resistive
-part with the PDK's resistor-ID layer. Without this recognition that segment
-extracts as a plain conductor — a **short** between the resistor's two heads
-— so a resistor drawn at the wrong length or width passes LVS silently.
+Both decks additionally recognise **drawn precision-resistor device
+classes** (issue #222, extended to cover each deck's other selectable
+sheet-rho flavour by issue #299). A drawn resistor is a deliberately-marked
+segment of an ordinary conductor: the designer draws poly, then covers the
+resistive part with the PDK's resistor-ID layer. Without this recognition
+that segment extracts as a plain conductor — a **short** between the
+resistor's two heads — so a resistor drawn at the wrong length or width
+passes LVS silently.
 
 | Deck | `devices[].class` | Models | Body | Marker | Also requires | Sheet resistance |
 | ---- | ----------------- | ------ | ---- | ------ | ------------- | ---------------- |
 | `sky130`   | `res_generic_po` | `sky130_fd_pr__res_generic_po` | `poly.drawing` 66/20 | `poly.res` 66/13 | — | **48.2 Ω/□** |
+| `sky130`   | `res_high_po` | `sky130_fd_pr__res_high_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `rpm` 86/20 | **319.8 Ω/□** |
+| `sky130`   | `res_xhigh_po` | `sky130_fd_pr__res_xhigh_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `urpm` 79/20 | **2000 Ω/□** |
 | `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** |
+| `gf180mcu` | `ppolyf_u_1k` | `gf180mcu_fd_pr__ppolyf_u_1k` (`POLY_RES='1k'` default) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000 Ω/□** |
 
 KLayout computes `R = L / W * sheet_rho` from the recognised segment's own
 geometry, so the sheet-resistance number *is* the accuracy of the extracted
@@ -329,7 +334,7 @@ technology file) in the same PDK install — see the per-deck module docstrings
 lines, the derivation each is transcribed from, and every approximation taken
 relative to it.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - **Unmarked conductor is never reclassified.** A resistor-*shaped* poly bar
   with no resistor-ID layer over it stays ordinary routing, and a marked
@@ -338,11 +343,24 @@ Two consequences worth knowing:
   derivations).
 - **A resistor flavour these curated decks do not model is left as a short,
   not extracted with the wrong value.** sky130's `rpm`/`urpm` precision
-  implant masks (which select the 319.8 Ω/□ and 2 kΩ/□ poly resistors) and
-  gf180mcu's `Resistor` 62/0 high-sheet-rho mark are *exclusions*, and
-  gf180mcu's `SAB` is *required* (without it the real device is the ~48×
-  lower-resistance salicided `ppolyf_s`). A wrong resistance passing LVS with
-  high confidence is worse than a known-unmodelled short.
+  implant masks each select their *own* wired device class above (so a
+  segment marked with one is never mistaken for the other, nor for the
+  48.2 Ω/□ generic flavour); gf180mcu's `Resistor` 62/0 high-sheet-rho mark
+  selects `ppolyf_u_1k` (only the PDK's own `POLY_RES='1k'` default — its
+  `_2k`/`_3k` siblings share *identical* drawn geometry with `_1k`,
+  selected only by a build-time option no drawn layer distinguishes, so
+  they remain deliberately unmodelled). gf180mcu's `SAB` is *required* on
+  both `ppolyf_u` entries (without it the real device is the ~48×
+  lower-resistance salicided `ppolyf_s`). A wrong resistance passing LVS
+  with high confidence is worse than a known-unmodelled short.
+- **A "deck-coverage gap" warns differently from unmarked geometry.** A
+  segment that carries a resistor-marker layer this deck knows about, but
+  whose `requires`/`excludes` conditions it does not satisfy (e.g. a
+  gf180mcu poly segment marked `RES_MK` without the `Pplus`/`SAB` combination
+  either wired flavour above needs), still extracts as an unintended short
+  — but is flagged by a **different** `warnings[]` string than fully
+  unmarked geometry; see "Known limitation: unmodelled device geometry"
+  below.
 
 ### Known limitation: unmodelled device geometry (issue #288)
 
@@ -379,11 +397,34 @@ sharing poly + contact that no MOS gate extractor claims. Specifically,
   resistor-body signature: a two-terminal segment contacted at each end,
   distinct from a routing run with a single landing pad).
 
-A flagged shape is reported as a warning string pointing back at this
-section — it is a **diagnostic, not a device extractor**: it never
-identifies *which* device class the geometry is (the deck still has no
-device-extraction logic for it), and it is deliberately conservative rather
-than exhaustive. It does **not** catch every possible unmodelled-device
+Since issue #299, a flagged component is further split by whether it
+overlaps *any* of the active deck's declared `ResistorDevice.marker` layers
+(the raw marker geometry, not narrowed by that entry's own
+`requires`/`excludes`) — producing up to two separate warning strings in
+`warnings[]`:
+
+- **"…carry no resistor-marker layer at all"** — the original #288 signature:
+  no declared resistor marker covers this shape anywhere. Either an entirely
+  undeclared device class (this deck has no `ResistorDevice`/other extractor
+  for it at all) or a resistor drawn with no marker.
+- **"…carry a resistor-marker layer, but do not match any of this deck's
+  declared `ResistorDevice` requires/excludes conditions"** — a **deck-
+  coverage gap**: the shape *is* marked with a resistor-ID layer this deck
+  recognises in principle, but the specific combination of
+  `requires`/`excludes` layers actually drawn on it does not match any
+  declared flavour (e.g. gf180mcu's `RES_MK` present without `SAB`, or
+  present with a fourth, still-unmodelled `POLY_RES` value gf180mcu's
+  drawn geometry cannot distinguish from `ppolyf_u_1k` in the first place —
+  see "Drawn resistors" above). This case means the deck's *authors* already
+  know this marker layer exists and chose not to (or cannot yet) model this
+  particular combination — a narrower, more actionable signal than "unmarked
+  geometry" for deciding whether to file a coverage-gap issue.
+
+Both strings are reported as warnings pointing back at this section — they
+are a **diagnostic, not a device extractor**: neither ever identifies
+*which* device class the geometry is (the deck still has no
+device-extraction logic for it), and both are deliberately conservative
+rather than exhaustive. Neither catches every possible unmodelled-device
 shape — e.g. a device that never touches `poly`/`contact` at all, or one
 whose body has only a single contact cluster, produces no warning. Treat a
 non-empty match here as a strong signal to investigate, and treat its
@@ -828,11 +869,18 @@ above, issue #217). The following remain out of scope:
   technology file (see "Parasitic (RC) extraction"), but they remain
   order-of-magnitude and uncalibrated to silicon; calibrating them against
   silicon is an explicit non-goal (#216 "Non-goals").
-- **Resistor flavours beyond one per deck.** Each deck declares a single
-  drawn-resistor device class (see "Drawn resistors", issue #222); a PDK's
-  other resistor flavours (sky130's `rpm`/`urpm` fixed-width precision
-  resistors, diffusion and metal resistors; gf180mcu's salicided,
-  high-sheet-rho, N+ poly, diffusion, well and metal resistors) are
+- **Resistor flavours beyond what's wired.** Each deck now declares more
+  than one drawn-resistor device class (issue #222, extended by #299 --
+  see "Drawn resistors"), but not every PDK flavour: sky130 models its
+  generic, `rpm`, and `urpm` poly resistors (each with a *single* flat
+  sheet-rho, not the official deck's five-way per-length device-class split
+  — see the `res_high_po`/`res_xhigh_po` provenance note in
+  `decks/sky130.py`), but not its diffusion or metal resistors; gf180mcu
+  models its unsalicided p+ poly resistor at both its base sheet-rho and its
+  PDK-default `POLY_RES='1k'` high-sheet-rho variant (the `_2k`/`_3k`
+  siblings are geometrically indistinguishable from `_1k` in a drawn
+  layout — see `decks/gf180mcu.py`), but not its salicided, N+ poly,
+  diffusion, well, or metal resistors. These remaining flavours are
   deliberately excluded rather than approximated — see "Drawn resistors".
 
 Netlist comparison (`klt lvs`) is a separate command; this command only
