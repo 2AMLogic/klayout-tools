@@ -109,6 +109,66 @@ follow-on issues.
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
 
+## Reserved annotation layer
+
+Both decks read a fixed, enumerable set of `(layer, datatype)` pairs (a
+deck's `coverage.deck_layers`, below). Any GDS layer number outside that set
+is, by construction, invisible to `klt drc` and `klt extract` today — but
+"invisible today" is an emergent property of the current deck tables, not a
+guarantee, since both decks are curated starter subsets that are expected to
+grow (see "Coverage" above). Recording a floorplan reservation, an
+out-of-scope region, or a black-box sub-cell placeholder in the GDS stream
+needs a layer number that stays unclaimed as that coverage grows — not a
+number picked only because it happens to be unused by today's deck code.
+
+**Reserved for annotation: GDS layer numbers 990-999, any datatype.** Use
+`(994, 0)` as the single canonical pair when one value is wanted. This was
+verified against each PDK's **full official layer table**, not just the
+numeric range the curated decks currently read (sky130's 64-97, gf180mcu's
+21-127 — see "Coverage" above for why relying on that narrower range would
+be unsafe: neither deck yet covers every layer its own PDK defines, e.g.
+gf180mcu's implant/`LVPWELL`/`DNWELL`/high-voltage gaps noted above):
+
+- **sky130**: cross-checked against KLayout's own bundled `sky130`/`sky130A`
+  technology's full named `layer_map(...)` (the `.lyt`/`.lyp` triad KLayout
+  ships for this PDK; 90 distinct layer numbers spanning drawing, pin,
+  label, net, blockage, and metal-option/PSA sublayers) plus the SkyWater
+  `open_pdks`-adjacent Mabrains KLayout PCell layer constants
+  (`layers_def.py`, which additionally names `rpm_high`/`urpm` on layer 79 —
+  a real sky130 device layer, used by this repo's own `res_generic_po`
+  exclusion list in `sky130.py`, that is absent from the display `.lyp` but
+  present in the process). Every sky130 layer number found across those
+  sources is `<= 235` (`prBoundary.boundary`, `235/4`, the highest by a wide
+  margin — the rest top out at `127`).
+- **gf180mcu**: cross-checked against GlobalFoundries' own KLayout
+  technology layer-properties file (`gf180mcu.lyp`, published in the
+  `google/gf180mcu-pdk` repo and byte-identical across the `gf180mcuA`-`D`
+  process-corner variants; 117 named entries covering every physical mask
+  plus the DRC-result marker layers KLayout's ruledeck runner uses). The
+  highest layer number present is `241` (a text/marker layer); the highest
+  drawn-mask layer is `227`.
+
+990-999 sits roughly 750 layer numbers above the highest number found in
+either PDK's full official layer table. That gap is deliberate headroom for
+"a second PDK family" whose own layer-numbering convention is unknown
+today: every published open-source PDK layer table checked for this project
+so far stays in the low hundreds, so a three-digit reservation starting at
+990 is safe against any PDK that follows the same convention, with margin
+to spare even if a given deck's *own* coverage keeps growing toward its
+PDK's full layer set.
+
+**Verifying the reservation stays inert.** Draw the annotation on a layer in
+the 990-999 range, run `klt drc --deck <deck> <file> --format json` against
+it, and confirm `coverage.layers_in_stream_without_rules` includes the
+`"994/0"`-style entry for that layer while `violation_count` is unaffected
+by it (see "`coverage`" below). The extraction-side analogue,
+`ignored_layers`, provides the same check for `klt extract` — see
+[`docs/cli/extract.md`](extract.md) → "Reserved annotation layer". Both
+fields already exist and need no new code for this purpose: they are
+exactly the "still inert" signal a future deck increment would have to
+break for the reservation to stop being safe, and that break would be
+visible in these fields the moment it happened.
+
 ## Limitation: whole-layout, flattened
 
 Each rule is checked against the **whole layout**, flattened per top cell

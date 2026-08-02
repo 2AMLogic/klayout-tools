@@ -118,6 +118,31 @@ shorts every transistor terminal inside the well together. See
 `ExtractionDeck`'s docstring in `src/klayout_tools/decks/__init__.py` for
 the full reasoning.
 
+### Reserved annotation layer
+
+Recording a floorplan reservation, an out-of-scope region, or a black-box
+sub-cell placeholder in the GDS stream needs a layer number guaranteed to
+stay outside both decks' connectivity graph as their coverage grows — not
+just a layer number that happens to be unclaimed by today's deck code (both
+decks are curated starter subsets, per "Coverage" above).
+
+**GDS layers 990-999 (any datatype; `(994, 0)` as the single canonical
+pair) are reserved for this purpose**, verified against each PDK's full
+official layer table — not just the numeric range `ExtractionDeck`'s
+`sky130`/`gf180mcu` instances currently declare. The full cross-check
+against each PDK's official KLayout technology files and the rationale for
+the specific range is in [`docs/cli/drc.md`](drc.md) → "Reserved annotation
+layer" (the same reservation applies to both `klt drc` and `klt extract`,
+since both read `(layer, datatype)` pairs out of the same PDK layer space).
+
+Geometry drawn on a reserved layer shows up in `ignored_layers` (see below)
+with its stream shape count and is otherwise completely inert to
+extraction — the same mechanism that already reports any other
+deck-unclaimed layer. Verifying the reservation stays inert therefore needs
+no new code: re-run `klt extract --format json` and confirm the
+`{ "layer": 994, "datatype": 0, ... }`-style entry is present in
+`ignored_layers` while `device_count`/`net_count` are unaffected by it.
+
 ### Bipolar (BJT) device recognition
 
 Both curated decks additionally declare one vertical-BJT device-recognition
