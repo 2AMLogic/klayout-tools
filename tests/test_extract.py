@@ -45,7 +45,9 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 
 
 def _make_inverter_layout(
-    top_name: str = "TOP", a_label_in_subcell: bool = False
+    top_name: str = "TOP",
+    a_label_in_subcell: bool = False,
+    extra_y_label: str | None = None,
 ) -> kdb.Layout:
     """A minimal inverter: one NMOS (active outside nwell) and one PMOS
     (active inside nwell) sharing a poly gate, contacted up through li1 to
@@ -57,6 +59,13 @@ def _make_inverter_layout(
     coordinates) rather than directly in the top cell. Extraction is flat, so
     ``A`` still names the gate net -- but its naming label now lives *below* an
     instance boundary, exercising issue #291's below-top-label pin promotion.
+
+    When ``extra_y_label`` is given, a second, distinct text label with that
+    string is drawn on the PMOS-side ``Y`` pad (same li1 shape, a different
+    coordinate within it) so the net carries two distinct label texts --
+    KLayout's ``Net.expanded_name()`` joins multiple distinct labels on one
+    net with a comma (e.g. ``Y,<extra_y_label>``), which is issue #312's
+    multi-label repro case.
     """
     layout = kdb.Layout()
     top = layout.create_cell(top_name)
@@ -98,6 +107,8 @@ def _make_inverter_layout(
     label(67, 5, "Y", 1800, 500)
     label(67, 5, "VPWR", 200, 2500)
     label(67, 5, "Y", 1800, 2500)
+    if extra_y_label is not None:
+        label(67, 5, extra_y_label, 1650, 2500)
     if a_label_in_subcell:
         sub = layout.create_cell("A_LABEL")
         sub.shapes(layout.layer(67, 5)).insert(kdb.Text("A", kdb.Trans(1000, 1500)))
@@ -2537,6 +2548,132 @@ def test_parasitics_covers_internal_unlabelled_nets_with_real_geometry(tmp_path)
     assert "Y" in para_nets
     assert para_nets["VGND"]["capacitance_ff"] > 0.0
     assert para_nets["Y"]["capacitance_ff"] > 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Instance-name sanitization for parasitic R/C cards (issue #312)
+# --------------------------------------------------------------------------- #
+
+
+def test_sanitize_instance_name_maps_spice_special_chars_to_underscore():
+    """Unit-level: every character outside `[A-Za-z0-9_]` becomes `_`, one
+    for one -- covering the two characters `net.expanded_name()` actually
+    produces (`,` for multi-label nets, `$` for KLayout's anonymous-net
+    placeholder) plus the originally-reported `|` and a plain name that
+    should pass through untouched."""
+    from klayout_tools.extract import _sanitize_instance_name
+
+    assert _sanitize_instance_name("Y,Y2") == "Y_Y2"
+    assert _sanitize_instance_name("$3") == "_3"
+    assert _sanitize_instance_name("A|B") == "A_B"
+    assert _sanitize_instance_name("plain_name1") == "plain_name1"
+
+
+def _assert_rc_cards_have_safe_instance_names(netlist_text: str) -> None:
+    """Every emitted `R`/`C` card's instance name (the token right after the
+    leading `R`/`C`, before the first space) is alnum/underscore-only, and
+    the card is still a well-formed 4-token bare card (`R<name> n1 n2
+    <value>`, no trailing model token)."""
+    rc_lines = [
+        ln
+        for ln in netlist_text.splitlines()
+        if ln.startswith("R") or ln.startswith("C")
+    ]
+    assert rc_lines, "expected at least one injected parasitic R/C card"
+    for ln in rc_lines:
+        instance_name = ln.split()[0][1:]
+        assert instance_name, f"empty instance name in card: {ln!r}"
+        assert all(ch.isalnum() or ch == "_" for ch in instance_name), (
+            f"unsafe instance name {instance_name!r} in card: {ln!r}"
+        )
+        assert len(ln.split()) == 4, f"card is not a bare 4-token R/C card: {ln!r}"
+
+
+def test_parasitics_sanitizes_unlabelled_net_instance_name(tmp_path):
+    """Regression (issue #312): an unlabelled/internal net's
+    `expanded_name()` is KLayout's auto-generated `$<n>` placeholder (e.g.
+    `$3`). `$` is inline-comment syntax to some SPICE dialects and must not
+    leak into the parasitic R/C *instance* name verbatim."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "series.spice"), parasitics=True
+    )
+    para_names = [n["net"] for n in report["parasitics"]["nets"]]
+    assert any(name.startswith("$") for name in para_names)  # sanity: repro present
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    _assert_rc_cards_have_safe_instance_names(netlist_text)
+
+
+def test_parasitics_sanitizes_multi_label_net_instance_name(tmp_path):
+    """Regression (issue #312): a net with two distinct text labels joins as
+    `Y,Y2` via `net.expanded_name()`. ngspice does not reject the comma --
+    it silently splits the card into an extra positional node, corrupting
+    the card's arity. The parasitic R/C *instance* name must be sanitized to
+    alnum/underscore only."""
+    path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "multi.spice"), parasitics=True
+    )
+    para_names = [n["net"] for n in report["parasitics"]["nets"]]
+    assert any("," in name for name in para_names)  # sanity: repro present
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    _assert_rc_cards_have_safe_instance_names(netlist_text)
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitics_multi_label_net_loads_in_ngspice(tmp_path):
+    """Integration regression (issue #312): before the instance-name
+    sanitization fix, this exact fixture produced a `RY,Y2`/`CY,Y2`-shaped
+    card. ngspice does not reject the comma -- it mis-parses it as a token
+    separator, corrupting the card's arity, and bails out with "device
+    already exists" against an unrelated node instead of a clean syntax
+    error. Confirms the sanitized netlist loads and elaborates cleanly in
+    `ngspice -b` (skipped when ngspice is not installed, matching this
+    file's `HAVE_NGSPICE` gate elsewhere)."""
+    import subprocess
+
+    layout_path = _write_gds(
+        _make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds"
+    )
+    netlist_path = tmp_path / "multi.spice"
+    report = run_extract(
+        layout_path, "sky130", output=str(netlist_path), parasitics=True
+    )
+    assert report["parasitics"]["r_count"] >= 1
+
+    netlist_text = netlist_path.read_text()
+    subckt_line = next(
+        ln for ln in netlist_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    pins = subckt_line.split()[2:]
+
+    deck_path = tmp_path / "deck.cir"
+    ties = "\n".join(f"V{i} {pin} 0 DC 0" for i, pin in enumerate(pins, start=1))
+    deck_path.write_text(
+        "* issue #312 regression -- multi-label net + --parasitics\n"
+        f'.include "{netlist_path}"\n'
+        ".model nfet nmos level=1\n"
+        ".model pfet pmos level=1\n"
+        f"{ties}\n"
+        f"Xinv {' '.join(pins)} TOP\n"
+        ".control\n"
+        "op\n"
+        "quit\n"
+        ".endc\n"
+        ".end\n"
+    )
+
+    completed = subprocess.run(
+        ["ngspice", "-b", str(deck_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    combined_output = completed.stdout + completed.stderr
+    assert "device already exists" not in combined_output
+    assert completed.returncode == 0, combined_output
 
 
 @_SKIP_NO_NGSPICE

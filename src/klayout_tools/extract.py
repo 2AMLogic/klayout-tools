@@ -106,6 +106,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
@@ -1721,12 +1722,13 @@ def _inject_parasitics(
         r_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
         c_farad = entry["capacitance_ff"] * 1e-15
 
-        r_dev = circuit.create_device(res_class, entry["net"])
+        instance_name = _sanitize_instance_name(entry["net"])
+        r_dev = circuit.create_device(res_class, instance_name)
         r_dev.connect_terminal("A", net)
         r_dev.connect_terminal("B", internal)
         r_dev.set_parameter("R", r_ohm)
 
-        c_dev = circuit.create_device(cap_class, entry["net"])
+        c_dev = circuit.create_device(cap_class, instance_name)
         c_dev.connect_terminal("A", internal)
         c_dev.connect_terminal("B", ground)
         c_dev.set_parameter("C", c_farad)
@@ -1749,6 +1751,29 @@ def _inject_parasitics(
         "total_capacitance_ff": round(total_c_ff, 6),
         "nets": report_nets,
     }
+
+
+_INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _sanitize_instance_name(name: str) -> str:
+    """Map every character outside ``[A-Za-z0-9_]`` in a parasitic *device
+    instance* name to ``_`` (issue #312).
+
+    Device instance names are cosmetic handles -- nothing downstream matches
+    an ``R``/``C`` card's instance name against the raw net name it was
+    derived from (the ``devices[]``/``nets[]`` JSON and the netlist's ``*
+    device instance ...`` comment carry the real identity; *node* names are
+    escaped separately, by KLayout's own ``NetlistSpiceWriter``). Left
+    unsanitized, a net's ``expanded_name()`` can carry characters a SPICE
+    reader treats as syntax rather than an opaque token: ``$`` (KLayout's
+    anonymous/unlabelled-net placeholder, e.g. ``$12``) and ``,`` (KLayout's
+    join character when multiple text labels land on one net, e.g.
+    ``Y,Y2``). ngspice does not reject either -- it silently splits the
+    comma-joined form into extra tokens, corrupting the card's arity and
+    surfacing a confusing error against an unrelated node.
+    """
+    return _INSTANCE_NAME_UNSAFE_RE.sub("_", name)
 
 
 def _unique_net_name(base: str, existing: set[str]) -> str:

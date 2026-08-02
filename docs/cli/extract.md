@@ -747,6 +747,28 @@ Each `nets[]` entry: `net` (the schematic-equivalent net name), `resistance_ohm`
 `capacitance_ff`, and `internal_node` (the injected internal parasitic node's
 name, `<net>__par`, or a collision-suffixed variant).
 
+### Parasitic R/C instance names are sanitized, not literal net names
+
+The `R`/`C` cards `--parasitics` injects into the written SPICE are named
+after each net's own `net` value above (e.g. net `Y` gets an `RY`/`CY` pair),
+but with every character outside `[A-Za-z0-9_]` mapped to `_` first (issue
+#312). This matters because a net's name can carry characters a SPICE reader
+treats as syntax rather than an opaque token — `$` (KLayout's placeholder for
+an unlabelled/anonymous net, e.g. `$12`) and `,` (KLayout's join character
+when multiple text labels land on one net, e.g. `Y,Y2`). ngspice does not
+reject either: it silently splits the comma-joined form at the comma into an
+extra positional node, corrupting the card's arity and erroring against an
+unrelated node instead of a clean syntax error.
+
+The sanitization applies to the **instance name only** — a cosmetic handle
+nothing downstream keys off of. The `net` field in the `parasitics.nets[]`
+JSON above, the `internal_node` name, and the `.SUBCKT` pin interface are all
+unaffected and still carry the literal net identity (further escaped by
+KLayout's own `NetlistSpiceWriter` where node syntax requires it). If you need
+to map an emitted `R`/`C` card back to the net it parasitizes, use
+`parasitics.nets[].net` (or the netlist's own node names on that card), not
+the sanitized instance name.
+
 ## Verified compatible with `klt sim`'s netlist convention
 
 Hard acceptance bar (Epic #153: "`klt extract` output feeds `klt sim`
