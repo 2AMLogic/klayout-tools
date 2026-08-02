@@ -22,6 +22,7 @@ from . import (
     layout_metrics_cmd,
     lvs_cmd,
     pdk_cmd,
+    precheck_cmd,
     render_cmd,
     sim_cmd,
     stats_cmd,
@@ -130,6 +131,59 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     drc_parser.set_defaults(func=drc_cmd.run)
+
+    precheck_parser = subparsers.add_parser(
+        "precheck",
+        help="run a named battery of layout-hygiene checks",
+        description=(
+            "Run an ordered battery of independently-named layout-hygiene "
+            "checks (off-grid geometry, zero-area polygons, cell-name "
+            "hygiene, an optional layer whitelist, and pin labels landing "
+            "on drawn geometry) against a GDSII or OASIS layout file, and "
+            "report each check's own pass/fail/skipped result -- distinct "
+            "from `klt drc`'s width/space/enclosure design-rule deck. Runs "
+            "fully headless via KLayout's native batch database API -- no "
+            "GUI, no Qt."
+        ),
+    )
+    precheck_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    precheck_parser.add_argument(
+        "--grid-um",
+        dest="grid_um",
+        type=float,
+        default=None,
+        help=(
+            "manufacturing grid in micrometres for the `offgrid` check "
+            "(e.g. 0.005); omit to skip that check -- this repo curates no "
+            "per-PDK grid table"
+        ),
+    )
+    precheck_parser.add_argument(
+        "--allowed-layers",
+        dest="allowed_layers",
+        default=None,
+        help=(
+            "layer whitelist for the `layer_whitelist` check: a path to a "
+            "JSON file, or an inline JSON array, of [layer, datatype] pairs "
+            "(e.g. '[[65, 20], [66, 20]]'); omit to skip that check"
+        ),
+    )
+    precheck_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "extraction deck to source label/drawing layer pairs from for "
+            "the `pin_labels_over_drawing` check (currently: sky130, "
+            "gf180mcu); omit to skip that check"
+        ),
+    )
+    precheck_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    precheck_parser.set_defaults(func=precheck_cmd.run)
 
     layout_metrics_parser = subparsers.add_parser(
         "layout-metrics",
