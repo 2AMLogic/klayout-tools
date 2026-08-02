@@ -207,9 +207,16 @@ runs:
         DECK: ${{ inputs.deck }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
       run: |
-        # Not `set -e`: a verb's non-zero exit (e.g. klt drc's exit 3 for
-        # "violations found") is data this step records, not a script bug.
+        # GitHub Actions always invokes composite `shell: bash` steps as
+        # `bash --noprofile --norc -e -o pipefail {0}`, so errexit is active
+        # before this script body runs and `set -uo pipefail` alone cannot
+        # turn it back off. We explicitly `set +e` here because a verb's
+        # non-zero exit (e.g. klt drc's exit 3 for "violations found") is
+        # data this step records, not a script bug -- errexit must not abort
+        # the loop before the remaining verbs run and overall-status is
+        # written to $GITHUB_OUTPUT.
         set -uo pipefail
+        set +e
 
         mkdir -p "$OUTPUT_DIR"
         block="$BLOCK"

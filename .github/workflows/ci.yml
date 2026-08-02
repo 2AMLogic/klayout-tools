@@ -137,6 +137,11 @@ jobs:
           verbs: drc,layout-metrics,layers,render
           deck: sky130
           output-dir: klt-action-output/clean
+          # Distinct artifact names per invocation: both clean and violating
+          # steps upload in the same workflow run, so sharing the default
+          # names would 409 on the second actions/upload-artifact call.
+          json-artifact-name: klt-json-outputs-clean
+          render-artifact-name: klt-render-clean
 
       - name: Assert clean-layout status is success
         run: |
@@ -158,6 +163,8 @@ jobs:
           deck: sky130
           output-dir: klt-action-output/violating
           fail-on-findings: false
+          json-artifact-name: klt-json-outputs-violating
+          render-artifact-name: klt-render-violating
 
       - name: Assert violating-layout status is failure
         run: |
