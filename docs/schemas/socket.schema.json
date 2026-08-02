@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/socket.schema.json",
+  "title": "klayout-tools socket/template descriptor",
+  "description": "A machine-readable contract for the interface a block's layout must fit: its outline (bounding box), its named pins (position, layer, and an informational size), layers reserved for the integrator (forbidden to the block), and numeric interface budgets. Checked against an actual GDSII/OASIS layout by `klt socket-check` -- see docs/cli/socket-check.md. Also intended as the shape a future `klt gen-compose` placement target or an S2 architecture-partition design stage could emit/consume, though no such integration exists yet -- see issue #246.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "outline"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "klt.socket/1",
+      "description": "Descriptor format identifier, versioned independently of the `klt socket-check` command's own response `schema_version` (see docs/json-contract.md). Bump the trailing integer only on a breaking (non-additive) change to this descriptor shape."
+    },
+    "name": {
+      "description": "Human-readable name for the block/socket this descriptor targets. Optional: omit or set null when not yet named.",
+      "type": ["string", "null"]
+    },
+    "outline": {
+      "type": "object",
+      "description": "The block's bounding box, in micrometres, in the same coordinate space as `pins[].x`/`pins[].y`. Every drawn shape in the checked layout must fall within this box (the `outline` check).",
+      "additionalProperties": false,
+      "required": ["x0", "y0", "x1", "y1"],
+      "properties": {
+        "x0": { "type": "number", "description": "Lower-left x, in micrometres." },
+        "y0": { "type": "number", "description": "Lower-left y, in micrometres." },
+        "x1": { "type": "number", "description": "Upper-right x, in micrometres. Must be greater than x0." },
+        "y1": { "type": "number", "description": "Upper-right y, in micrometres. Must be greater than y0." }
+      }
+    },
+    "pins": {
+      "description": "Named interface points the block must expose as a text label on a declared layer, at a declared position. Optional: omit, null, or empty when the socket declares no pins yet. Checked by the `pins` check -- see docs/cli/socket-check.md.",
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "layer", "x", "y"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Expected pin-label text (matched verbatim against a text shape's string in the checked layout)."
+          },
+          "layer": {
+            "type": "array",
+            "description": "The `[layer, datatype]` pair the pin's text label is expected to be drawn on.",
+            "items": { "type": "integer" },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "x": { "type": "number", "description": "Expected label position, x, in micrometres." },
+          "y": { "type": "number", "description": "Expected label position, y, in micrometres." },
+          "tolerance_um": {
+            "description": "Per-axis (Chebyshev) tolerance around (x, y) within which a matching label still counts as correctly placed. Optional: omit or null for an exact match (default 0).",
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "width_um": {
+            "description": "Informational: the pin's expected minimum footprint width, in micrometres -- e.g. a minimum power-stripe width. Descriptive metadata only in this version: not yet checked against drawn geometry by `klt socket-check` (see docs/cli/socket-check.md's Scope section). Optional: omit or null when not specified.",
+            "type": ["number", "null"]
+          },
+          "height_um": {
+            "description": "Informational: the pin's expected minimum footprint height, in micrometres. Same scope note as width_um. Optional: omit or null when not specified.",
+            "type": ["number", "null"]
+          }
+        }
+      }
+    },
+    "reserved_layers": {
+      "description": "`[layer, datatype]` pairs forbidden to this block (reserved for the integrator, e.g. a top-level routing or seal-ring layer). Any shape drawn on a reserved layer is a violation of the `reserved_layers` check. Optional: omit, null, or empty when the socket reserves no layers.",
+      "type": ["array", "null"],
+      "items": {
+        "type": "array",
+        "items": { "type": "integer" },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "budgets": {
+      "description": "Arbitrary named numeric interface budgets (e.g. max signal-path resistance/capacitance/current, minimum power-stripe width) declared for this socket. Budget names are never hardcoded by this schema -- they vary per block class. `klt socket-check` reports every budget back verbatim with a `declared_unverified` status: this repo's checker has no simulation/extraction data to mechanically verify an R/C/current budget against, so it deliberately does not attempt a check it cannot actually run -- see docs/cli/socket-check.md's Scope section. Optional: omit, null, or empty when the socket declares no budgets.",
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value", "unit"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "description": "Budget name, e.g. 'signal_r_max' or 'power_stripe_min_width'." },
+          "value": { "type": "number", "description": "Numeric budget value." },
+          "unit": { "type": "string", "minLength": 1, "description": "Unit string, e.g. 'ohm', 'fF', 'mA', 'um'." },
+          "notes": {
+            "description": "Free-form prose about the budget (e.g. at what corner/condition it was derived). Optional: omit or null when there is nothing to add.",
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}
