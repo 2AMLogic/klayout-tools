@@ -9,6 +9,7 @@
     "drc.schema_version": 1,
     "drc.violation_count": 0,
     "drc.violations_count": 0,
+    "extract.black_box_regions_count": 0,
     "extract.dbu_um": 0.001,
     "extract.device_classes_count": 6,
     "extract.device_count": 11,

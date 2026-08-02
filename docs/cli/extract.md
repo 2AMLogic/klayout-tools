@@ -148,13 +148,61 @@ the specific range is in [`docs/cli/drc.md`](drc.md) → "Reserved annotation
 layer" (the same reservation applies to both `klt drc` and `klt extract`,
 since both read `(layer, datatype)` pairs out of the same PDK layer space).
 
-Geometry drawn on a reserved layer shows up in `ignored_layers` (see below)
-with its stream shape count and is otherwise completely inert to
-extraction — the same mechanism that already reports any other
-deck-unclaimed layer. Verifying the reservation stays inert therefore needs
-no new code: re-run `klt extract --format json` and confirm the
-`{ "layer": 994, "datatype": 0, ... }`-style entry is present in
-`ignored_layers` while `device_count`/`net_count` are unaffected by it.
+The marker layer itself carries no connectivity meaning: a shape drawn on it
+shows up in `ignored_layers` (see below) with its stream shape count exactly
+like any other deck-unclaimed layer, and is never registered with the
+connectivity graph. What geometry drawn *underneath* a marker shape does is
+covered next.
+
+### Black-box / abstract regions (issue #293)
+
+A shape drawn on a reserved layer (see above) marks a **black-box/abstract
+region**: everything drawn geometrically inside it — on any conductor or
+label layer this deck's connectivity graph reads (`active`, `poly`, `nwell`,
+`tap`, `contact`, `metals`, `vias`, and the `well_label`/`poly_label`/
+`metal_labels` label layers) — is excluded from connectivity **before** any
+device extractor runs, rather than merely left unread. This is the mechanism
+for two situations that previously had no way to record themselves in the
+GDS stream itself:
+
+- **A sub-cell that will be drawn later.** Its hierarchy/area needs to exist
+  now (so downstream floorplanning/DRC/placement tooling sees it), but its
+  content doesn't yet — drawing a black-box marker over the reserved area
+  records the placeholder instead of leaving the area undrawn (which loses
+  the hierarchy/area record) or documenting the omission only in prose
+  outside the GDS.
+- **A drawn region deliberately out of scope for a compare.** Geometry that
+  exists in the layout but should not participate in this run's `klt
+  extract`/`klt lvs` connectivity (e.g. a region carrying non-functional test
+  structures) can be marked out without deleting it from the layout.
+
+Resolved *before* every other device-recognition step (drawn resistors,
+bipolar, MiM capacitor, and the NMOS/PMOS split itself) — see
+`extract.py`'s `_resolve_black_box_regions()` — so device-recognition
+geometry that happens to sit inside a black-box region (e.g. a resistor
+marker) is excluded outright, not "found" by its own extractor first and
+only then short-circuited.
+
+`klt extract`'s JSON response reports every black-box region it excluded in
+a new `black_box_regions` field (see "JSON schema" below): one entry per
+geometrically separate marker shape (two non-touching marker shapes are
+always reported as two entries, never merged into one bbox), each carrying
+its bounding box in micrometres and the count of conductor/label shapes the
+exclusion actually removed. Always present as a list; empty when the layout
+draws no reserved-layer geometry, in which case the rest of the response is
+byte-identical to a run before this feature existed. Verifying a black-box
+region works therefore needs no new tooling: draw a marker rectangle over a
+device, re-run `klt extract --format json`, and confirm that device is
+absent from `devices[]`/its nets from `nets[]` while `black_box_regions`
+reports the rectangle's bbox with a non-zero `shapes_excluded` — and that
+the marker layer itself still shows up in `ignored_layers` exactly as before
+(it is never registered with the connectivity graph either way).
+
+**Out of scope**: this mechanism is region-granular — it excludes everything
+geometrically inside its bbox, indiscriminately. It is not a substitute for
+marking an individual *device* (e.g. a dummy MOS device interleaved with the
+functional devices it surrounds) as non-functional; that needs a
+device-granular marker, tracked separately.
 
 ### Bipolar (BJT) device recognition
 
@@ -678,6 +726,7 @@ exit codes).
   ],
   "nets": [{ "name": "A", "pin": true, "device_count": 2 }],
   "warnings": [],
+  "black_box_regions": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -710,6 +759,7 @@ exit codes).
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
+| `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash. |

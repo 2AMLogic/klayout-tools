@@ -1712,6 +1712,183 @@ def test_ignored_layers_present_in_cli_json(tmp_path, capsys):
     assert {"layer": 55, "datatype": 0, "shapes": 1} in out["ignored_layers"]
 
 
+# --------------------------------------------------------------------------- #
+# Black-box / abstract regions (issue #293): geometry drawn on a reserved
+# annotation layer (990-999, any datatype -- issue #289) is excluded from
+# connectivity, and the exclusion is reported in `black_box_regions`.
+# --------------------------------------------------------------------------- #
+
+#: The single canonical reserved-layer pair (see docs/cli/drc.md's "Reserved
+#: annotation layer") used to draw a black-box marker shape in these tests.
+_BLACK_BOX_LAYER = (994, 0)
+
+
+def _make_two_nmos_layout() -> kdb.Layout:
+    """Two independent, non-touching NMOS devices on sky130 deck layers --
+    device "A" at x=0, device "B" at x=6000 -- for black-box region tests:
+    each device's active/poly/contact/li1 geometry is fully disjoint from the
+    other's, so black-boxing one device's bbox cannot incidentally reach the
+    other's geometry."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    def build_nmos(x0, gate_label, drain_label, source_label):
+        draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing (active)
+        # Gate poly, extended above active for an off-active strap contact.
+        draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1300))  # poly.drawing
+        # Source (S) / drain (D) contacts + li1, both within active.
+        draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
+        draw(67, 20, kdb.Box(x0, 200, x0 + 400, 800))  # li1 (S)
+        draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D)
+        draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D)
+        # Gate strap contact, off active (y 1000..1200).
+        draw(66, 44, kdb.Box(x0 + 900, 1000, x0 + 1100, 1200))  # licon1 (G)
+        draw(67, 20, kdb.Box(x0 + 850, 950, x0 + 1150, 1250))  # li1 (G)
+        label(67, 5, source_label, x0 + 200, 500)
+        label(67, 5, drain_label, x0 + 1800, 500)
+        label(67, 5, gate_label, x0 + 1000, 1100)
+
+    build_nmos(0, "AG", "AD", "AS")
+    build_nmos(6000, "BG", "BD", "BS")
+    return layout
+
+
+def test_black_box_regions_empty_when_no_reserved_layer_geometry(tmp_path):
+    """A layout that draws no reserved-annotation-layer geometry reports an
+    empty `black_box_regions` -- additive-field, off-by-default contract."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["black_box_regions"] == []
+    # Existing behaviour is otherwise unaffected: same device/net counts as
+    # the baseline synthetic-inverter assertions.
+    assert report["device_count"] == 2
+
+
+def test_black_box_region_fully_excludes_covered_device(tmp_path):
+    """A rectangle on the reserved layer covering device "A"'s full extent
+    excludes it entirely from connectivity: device "B" (untouched) is the
+    only device left, and the exclusion is reported with its bbox and a
+    non-zero `shapes_excluded`. The marker geometry itself is never
+    registered with `l2n`, so it still shows up in `ignored_layers` exactly
+    as any other deck-unclaimed layer would (docs/cli/extract.md's "Reserved
+    annotation layer")."""
+    layout = _make_two_nmos_layout()
+    layout.cell("TOP").shapes(layout.layer(*_BLACK_BOX_LAYER)).insert(
+        kdb.Box(-500, -500, 2500, 1500)
+    )
+    path = _write_gds(layout, tmp_path / "bb.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "bb.spice"))
+
+    assert report["device_count"] == 1
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["g"] == "BG"
+    assert device["nets"]["d"] == "BD"
+    assert device["nets"]["s"] == "BS"
+
+    net_names = {n["name"] for n in report["nets"]}
+    assert {"AG", "AD", "AS"}.isdisjoint(net_names)
+    assert {"BG", "BD", "BS"}.issubset(net_names)
+
+    black_box_regions = report["black_box_regions"]
+    assert len(black_box_regions) == 1
+    entry = black_box_regions[0]
+    assert entry["bbox_um"] == {
+        "left": pytest.approx(-0.5),
+        "bottom": pytest.approx(-0.5),
+        "right": pytest.approx(2.5),
+        "top": pytest.approx(1.5),
+    }
+    assert entry["shapes_excluded"] > 0
+
+    ignored = {
+        (e["layer"], e["datatype"]): e["shapes"] for e in report["ignored_layers"]
+    }
+    assert ignored.get(_BLACK_BOX_LAYER) == 1
+
+
+def test_two_non_overlapping_black_box_regions_reported_separately(tmp_path):
+    """Two geometrically separate marker shapes are each reported as their
+    own entry, not merged into one bbox."""
+    layout = _make_two_nmos_layout()
+    top = layout.cell("TOP")
+    marker_layer = layout.layer(*_BLACK_BOX_LAYER)
+    top.shapes(marker_layer).insert(kdb.Box(-500, -500, 2500, 1500))  # over "A"
+    top.shapes(marker_layer).insert(kdb.Box(5500, -500, 8500, 1500))  # over "B"
+    path = _write_gds(layout, tmp_path / "bb2.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "bb2.spice"))
+
+    assert report["device_count"] == 0
+    black_box_regions = report["black_box_regions"]
+    assert len(black_box_regions) == 2
+    # Sorted by (left, bottom) ascending.
+    lefts = [entry["bbox_um"]["left"] for entry in black_box_regions]
+    assert lefts == sorted(lefts)
+    assert black_box_regions[0]["bbox_um"]["left"] == pytest.approx(-0.5)
+    assert black_box_regions[1]["bbox_um"]["left"] == pytest.approx(5.5)
+    assert all(entry["shapes_excluded"] > 0 for entry in black_box_regions)
+
+
+def test_black_box_region_partial_overlap_is_geometric_cut_not_device_deletion(
+    tmp_path,
+):
+    """A marker shape covering only device "A"'s drain contact/pad (not its
+    gate or source) cuts exactly that geometry -- the device is still
+    recognised (a geometric cut, not an all-or-nothing device exclusion):
+    the gate/source terminals keep their labelled nets, while the drain
+    terminal loses its label (its contact/pad were excluded) without the
+    whole device disappearing."""
+    layout = _make_two_nmos_layout()
+    # Covers device "A"'s drain contact (1700..1900, 300..700), li1 drain pad
+    # (1600..2000, 200..800), and its "AD" label (1800, 500) -- but not the
+    # gate (800..1200) or source (0..400) geometry.
+    layout.cell("TOP").shapes(layout.layer(*_BLACK_BOX_LAYER)).insert(
+        kdb.Box(1550, 150, 2050, 850)
+    )
+    path = _write_gds(layout, tmp_path / "bb_partial.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "bb_partial.spice"))
+
+    assert report["device_count"] == 2  # both transistors still recognised
+    device_a = next(d for d in report["devices"] if d["nets"]["g"] == "AG")
+    assert device_a["nets"]["s"] == "AS"
+    # The drain's contact/label were excluded -- it keeps *a* net (the bare
+    # active polygon is still there), just not the named "AD" net anymore.
+    assert device_a["nets"]["d"] != "AD"
+    assert device_a["nets"]["d"] is not None
+
+    device_b = next(d for d in report["devices"] if d["nets"]["g"] == "BG")
+    assert device_b["nets"]["d"] == "BD"
+    assert device_b["nets"]["s"] == "BS"
+
+    (entry,) = report["black_box_regions"]
+    assert entry["shapes_excluded"] > 0
+
+
+def test_black_box_regions_present_in_cli_json(tmp_path, capsys):
+    """`black_box_regions` is part of the JSON contract and is emitted by the
+    CLI."""
+    layout = _make_two_nmos_layout()
+    layout.cell("TOP").shapes(layout.layer(*_BLACK_BOX_LAYER)).insert(
+        kdb.Box(-500, -500, 2500, 1500)
+    )
+    path = _write_gds(layout, tmp_path / "bb_cli.gds")
+
+    exit_code = main(["extract", str(path), "--deck", "sky130", "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "black_box_regions" in out
+    assert len(out["black_box_regions"]) == 1
+    assert out["black_box_regions"][0]["shapes_excluded"] > 0
+
+
 def test_extraction_deck_connectivity_layers_covers_all_role_layers():
     """`ExtractionDeck.connectivity_layers` includes every layer the deck's
     extraction actually reads -- MOS-recognition, metal/via stack, labels, and
