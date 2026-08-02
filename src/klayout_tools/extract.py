@@ -989,13 +989,22 @@ def _inject_parasitics(
     if ground is None:
         ground = circuit.create_net(ground_net_name)
 
-    existing_names = {net.expanded_name() for net in circuit.each_net()}
+    # Keyed by `expanded_name()` rather than looked up via `net_by_name()`
+    # per entry: `net_by_name()` only resolves *named* nets (an explicit
+    # layout label), so it silently returns `None` -- and drops the entry --
+    # for every genuinely internal/unlabelled net, whose `expanded_name()` is
+    # KLayout's auto-generated `$<n>` form rather than a real `.name`. Issue
+    # #283: `_compute_parasitics` already measures these nets correctly (the
+    # geometry is there), so this lookup must resolve them too or the R/C it
+    # computed for them is discarded right here.
+    nets_by_name = {net.expanded_name(): net for net in circuit.each_net()}
+    existing_names = set(nets_by_name)
 
     report_nets: list[dict[str, Any]] = []
     total_r = 0.0
     total_c_ff = 0.0
     for entry in parasitic_nets:
-        net = circuit.net_by_name(entry["net"])
+        net = nets_by_name.get(entry["net"])
         if net is None:
             continue
         internal_name = _unique_net_name(entry["net"], existing_names)

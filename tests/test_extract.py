@@ -1558,6 +1558,96 @@ def test_parasitics_excludes_transistor_gate_poly(tmp_path):
     assert overhang_nets["GATEONLY"]["capacitance_ff"] > 0.0
 
 
+def _make_series_nmos_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Two NMOS in series, T1's drain tied to T2's source through a long,
+    unlabelled li1 run -- a genuinely *internal* node (two device terminals,
+    zero pin labels, real routed geometry) exactly like the issue #283 repro:
+    a driver's output net that only becomes a pin when promoted one hierarchy
+    level up. T1's source (``VGND``), T2's drain (``Y``), and both gates
+    (``A1``/``A2``) *are* labelled, so this fixture also carries the normal
+    labelled-net case for comparison."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Text(text, kdb.Trans(x, y)))
+
+    # T1: active 0..2000 x 0..1000, gate at x 800..1200.
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (T1 gate)
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # T1 source contact
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # T1 source li1
+    label(67, 5, "VGND", 200, 500)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # T1 drain contact
+    # T1 drain -> T2 source: one continuous, unlabelled li1 run (real
+    # interconnect -- same shape kind that scores non-zero on a pin).
+    draw(67, 20, kdb.Box(1600, 200, 6300, 800))
+
+    # T2: active 6000..8000 x 0..1000, gate at x 6800..7200.
+    draw(65, 20, kdb.Box(6000, 0, 8000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(6800, -200, 7200, 1200))  # poly.drawing (T2 gate)
+    draw(66, 44, kdb.Box(6100, 300, 6300, 700))  # T2 source contact
+    draw(66, 44, kdb.Box(7700, 300, 7900, 700))  # T2 drain contact
+    draw(67, 20, kdb.Box(7600, 200, 8000, 800))  # T2 drain li1
+    label(67, 5, "Y", 7800, 500)
+
+    # Gates: named separately so the two transistors don't share a net.
+    draw(67, 20, kdb.Box(850, 1050, 1150, 1250))
+    label(67, 5, "A1", 1000, 1150)
+    draw(66, 44, kdb.Box(900, 1050, 1100, 1150))
+    draw(67, 20, kdb.Box(6850, 1050, 7150, 1250))
+    label(67, 5, "A2", 7000, 1150)
+    draw(66, 44, kdb.Box(6900, 1050, 7100, 1150))
+
+    return layout
+
+
+def test_parasitics_covers_internal_unlabelled_nets_with_real_geometry(tmp_path):
+    """Regression (issue #283): a purely internal (non-pin, unlabelled) net
+    with real routed interconnect gets a real, non-zero parasitics entry --
+    not silently dropped because it has no layout label.
+
+    Before the fix, `_compute_parasitics()` measured this net's geometry
+    correctly (the shapes are there), but `_inject_parasitics()` re-resolved
+    it by `Circuit.net_by_name()`, which only finds *named* nets. An
+    unlabelled net's `expanded_name()` is KLayout's auto-generated `$<n>`
+    form rather than a real `.name`, so the lookup silently returned `None`
+    and the already-computed R/C was discarded -- the net vanished from
+    `parasitics.nets[]` with no signal anywhere in the JSON."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "series.spice"), parasitics=True
+    )
+    assert report["device_counts"] == {"nfet": 2}
+
+    # The internal node is a real, unlabelled, two-terminal net in the
+    # schematic-equivalent view -- confirming the fixture actually exercises
+    # the internal-node case (not e.g. accidentally promoted to a pin).
+    internal_nets = [
+        n for n in report["nets"] if not n["pin"] and n["device_count"] == 2
+    ]
+    assert len(internal_nets) == 1
+    internal_name = internal_nets[0]["name"]
+    assert internal_name.startswith("$")  # KLayout's auto-generated form
+
+    para_nets = {n["net"]: n for n in report["parasitics"]["nets"]}
+    assert internal_name in para_nets
+    assert para_nets[internal_name]["capacitance_ff"] > 0.0
+    assert para_nets[internal_name]["resistance_ohm"] > 0.0
+    assert para_nets[internal_name]["internal_node"].startswith(f"{internal_name}__par")
+
+    # The labelled nets on either side of the series pair are unaffected.
+    assert "VGND" in para_nets
+    assert "Y" in para_nets
+    assert para_nets["VGND"]["capacitance_ff"] > 0.0
+    assert para_nets["Y"]["capacitance_ff"] > 0.0
+
+
 @_SKIP_NO_NGSPICE
 def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
     """Acceptance bar (issue #217): a `--parasitics` netlist stays a drop-in
