@@ -25,6 +25,7 @@ from . import (
     precheck_cmd,
     render_cmd,
     report_cmd,
+    ring_check_cmd,
     sim_cmd,
     socket_check_cmd,
     stats_cmd,
@@ -227,6 +228,63 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
+
+    ring_check_parser = subparsers.add_parser(
+        "ring-check",
+        help="assert a layer set forms a single closed annulus (guard/tap ring)",
+        description=(
+            "Assert that a caller-specified layer set forms a single closed "
+            "annulus -- a guard ring, tap ring, or seam moat -- and report "
+            "the break location when it does not. Purely geometric: the "
+            "shapes on the given layers are merged and the result must be "
+            "exactly one polygon with exactly one hole. A plain connectivity "
+            "check is insufficient (a ring is redundant by construction, so a "
+            "single break still leaves one connected group) -- this asserts "
+            "the annulus, not just connectedness, catching a gap cut into one "
+            "segment that every width/spacing/enclosure rule passes. No "
+            "extraction or netlist needed. Runs fully headless via KLayout's "
+            "native batch database API -- no GUI, no Qt. See "
+            "docs/cli/ring-check.md."
+        ),
+    )
+    ring_check_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    ring_check_parser.add_argument(
+        "--layers",
+        required=True,
+        help=(
+            "ring layer set as a path to a JSON file, or an inline JSON array "
+            "of [layer, datatype] pairs (e.g. '[[33, 0], [66, 44]]'); the "
+            "shapes on these layers are merged and their union must form the "
+            "annulus. Not validated by argparse -- an empty/malformed value "
+            "exits 1 with a clean error, per docs/cli/ring-check.md's "
+            "exit-code contract, rather than argparse's usage-error exit 2."
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "optional clip window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top] (e.g. '[0, 0, 100, 100]') "
+            "used to isolate one ring in a stream with other geometry on the "
+            "same layers; omit to check every shape on the layer set"
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    ring_check_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
     layout_metrics_parser = subparsers.add_parser(
         "layout-metrics",
