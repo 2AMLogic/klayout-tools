@@ -20,7 +20,7 @@ That sentence names the stages but not how to move between them. This
 document is the decomposition: eleven stages, the loops between them, a
 proposed input/output contract per stage, which class of model should run
 each one, and an honest accounting of which stages `klt` already serves
-versus which are blocked on other work.
+versus which still await tooling.
 
 ## Scope: skills are procedure, not strategy
 
@@ -104,8 +104,8 @@ iteration has become stuck:
 
 - **Members:** S7 (layout generation) and S8 (DRC/LVS).
 - **Iterating:** each pass edits geometry (or generator parameters) in
-  response to `klt drc`'s violation list (`docs/cli/drc.md`) and, once
-  LVS exists (#54), netlist-mismatch reports.
+  response to `klt drc`'s violation list (`docs/cli/drc.md`) and `klt
+  lvs`'s netlist-mismatch reports (`docs/cli/lvs.md`).
 - **Exit criteria (converged):** `klt drc` reports zero violations and LVS
   reports a clean device/net compare — the literal "DRC/LVS clean" clause
   of the vision sentence.
@@ -151,7 +151,7 @@ that command's own doc rather than re-describing it.
 | Output artifact | `klt.pipeline.proposal/1` (proposed): normalized problem statement — target function, top-level specs as known, constraints, open questions. |
 | Entry criteria | Always available — the pipeline's start state. |
 | Exit criteria | Every top-level spec field is either a number/range or explicitly marked "to be resolved in S2/S3"; no silent gaps. |
-| `klt` verbs | None — this stage is pure intake, out of tool scope by design. `klt kb search`/`show` (once #110 ships) may inform what's achievable. |
+| `klt` verbs | None — this stage is pure intake, out of tool scope by design. `klt kb search`/`show` ([docs/cli/kb.md](../cli/kb.md), shipped) may inform what's achievable. |
 | Failure modes | Underspecification passed downstream as if resolved (the single most expensive failure to catch late); scope too broad for the pipeline's target (full-chip digital — an explicit ROADMAP.md non-goal). |
 
 ### S2 — system architecture & budget partition
@@ -184,7 +184,7 @@ that command's own doc rather than re-describing it.
 | Output artifact | `klt.pipeline.topology/1` (proposed): selected topology reference (a KB `id` when matched, or a description when none matches), rationale, and the spec fields the choice was made against. |
 | Entry criteria | Block spec is complete per S3's exit criteria. |
 | Exit criteria | A topology is chosen and its known limitations against the spec (if any) are recorded, not silently absorbed. |
-| `klt` verbs | `klt kb search`/`show`/`list` once shipped (Epic #102 Phase 2, #110 — **not yet shipped**, see §4); until then this stage runs entirely on model knowledge, which is exactly the gap the KB epic exists to close. |
+| `klt` verbs | `klt kb search`/`show`/`list` ([docs/cli/kb.md](../cli/kb.md), shipped — Epic #102 Phase 2, #110, closed) query the KB corpus this stage matches a topology against; the remaining work is corpus breadth, not the query surface. |
 | Failure modes | No KB entry matches and the agent proceeds on an unvalidated topology without flagging it; a topology chosen for KB familiarity rather than spec fit. |
 
 ### S5 — sizing
@@ -214,10 +214,10 @@ that command's own doc rather than re-describing it.
 | | |
 | --- | --- |
 | Input artifact | S6's netlist + S5's sized parameters (a generator needs both topology/connectivity and device sizes). |
-| Output artifact | GDSII/OASIS layout stream, plus a structured report (ports, bounding box, DRC-relevant metadata) — the shape proposed in #104's "proposed contract" section. |
+| Output artifact | GDSII/OASIS layout stream, plus a structured report (ports, bounding box, DRC-relevant metadata) — the shipped shape documented in `docs/cli/gen.md`/`gen-compose.md`. |
 | Entry criteria | Netlist elaborates cleanly (S6 exit criteria met). |
 | Exit criteria | Loop B's convergence criterion (§1): zero DRC violations and clean LVS. |
-| `klt` verbs | `klt render` to visually inspect a generated/edited layout; `klt layout-metrics` for area/utilization; no layout-*generation* verb exists yet — blocked on #104 (see §4). |
+| `klt` verbs | `klt gen`/`klt gen-compose` ([docs/cli/gen.md](../cli/gen.md), [docs/cli/gen-compose.md](../cli/gen-compose.md), shipped — #104, closed) generate/compose layout from a netlist + parameters; `klt render` to visually inspect a generated/edited layout; `klt layout-metrics` for area/utilization. |
 | Failure modes | Loop B's stuck condition (§1); a generator producing DRC-clean geometry whose connectivity doesn't match S6 (an LVS failure masquerading as a DRC pass). |
 
 ### S8 — DRC/LVS
@@ -225,10 +225,10 @@ that command's own doc rather than re-describing it.
 | | |
 | --- | --- |
 | Input artifact | S7's layout stream (+ S6's netlist, for the LVS half). |
-| Output artifact | DRC: `klt drc`'s shipped JSON report (`docs/cli/drc.md`). LVS: no shipped contract yet — proposed shape tracked with #54. |
+| Output artifact | DRC: `klt drc`'s shipped JSON report (`docs/cli/drc.md`). LVS: `klt lvs`'s shipped device/net compare report (`docs/cli/lvs.md`). |
 | Entry criteria | A layout stream exists (any pass of S7, converged or not — this is the loop's other half). |
 | Exit criteria | Loop B's convergence criterion (§1). |
-| `klt` verbs | `klt drc` (shipped). LVS verb blocked on #54 (see §4). |
+| `klt` verbs | `klt drc` ([docs/cli/drc.md](../cli/drc.md), shipped); `klt lvs` ([docs/cli/lvs.md](../cli/lvs.md), shipped — phase 3 of Epic #153, #54 closed). |
 | Failure modes | DRC-clean but LVS-dirty (or the reverse, once LVS exists) — Loop B's tradeoff case (§1); a curated DRC deck subset (`docs/cli/drc.md` → "Coverage") passing while the full foundry deck would not — a known fidelity gap, not a pipeline bug. |
 
 ### S9 — extraction
@@ -236,10 +236,10 @@ that command's own doc rather than re-describing it.
 | | |
 | --- | --- |
 | Input artifact | S8-clean layout stream. |
-| Output artifact | Extracted netlist (with parasitics), format TBD by #54's eventual contract — the artifact that makes the S10 pass here "post-layout" rather than schematic-level. |
+| Output artifact | Extracted netlist (devices + connectivity, optional RC parasitics via `--parasitics`) — the artifact that makes the S10 pass here "post-layout" rather than schematic-level. Contract documented in `docs/cli/extract.md`. |
 | Entry criteria | Loop B converged (S8 exit criteria met) — extracting a DRC/LVS-dirty layout produces a netlist nothing downstream should trust. |
 | Exit criteria | Extracted netlist elaborates cleanly and its device/net topology matches the S6 netlist it was extracted from (this is itself an LVS-shaped check, and per the spike's own open question, `environment` should record which side of the loop — schematic vs. extracted — a given netlist represents). |
-| `klt` verbs | None — blocked on #54, same as LVS (extraction and LVS are one friction issue and, most likely, one engine — see #54's curator note on `pya.LayoutToNetlist`/`pya.NetlistComparer`). |
+| `klt` verbs | `klt extract` ([docs/cli/extract.md](../cli/extract.md), shipped — Epic #153; extraction and LVS share the `pya.LayoutToNetlist`/`pya.NetlistComparer` engine, hence the common lineage with `klt lvs`). `--parasitics` adds RC extraction (#216/#217, closed). |
 | Failure modes | Parasitics that flip a measurement's pass/fail relative to the schematic-level S5 result — the entire reason S10 must run again post-extraction rather than trusting the pre-layout sizing pass. |
 
 ### S10 — simulation across corners
@@ -261,7 +261,7 @@ that command's own doc rather than re-describing it.
 | Output artifact | `klt.pipeline.signoff/1` (proposed): pass/fail against every S3 spec field, with the corner/measurement/violation evidence each verdict rests on, and provenance hashes for every input artifact (mirroring `klt sim`'s `environment` block's reproducibility discipline). |
 | Entry criteria | Both S8 and S10 converged on the same layout/netlist generation (not a stale mix of an old layout's DRC pass and a newer netlist's sim pass). |
 | Exit criteria | Every S3 spec field has a recorded verdict; no field is silently unaddressed. |
-| `klt` verbs | None currently — aggregation across `klt drc`/`klt sim` (and, later, LVS/extraction) JSON outputs into one signoff artifact is unbuilt; no friction issue is filed for it yet (see §4). |
+| `klt` verbs | None currently — aggregation across `klt drc`/`klt lvs`/`klt sim`/`klt extract` JSON outputs into one signoff artifact is unbuilt; tracked as #309 (see §4). |
 | Failure modes | A spec field with no corresponding check anywhere upstream, discovered only here (the "signoff rejection" backtrack in §1); provenance mismatch between the layout and netlist being signed off (stale artifact pairing). |
 
 ## 3. Model-class matrix
@@ -281,7 +281,7 @@ throughput, best at well-specified mechanical transformations).
 | S4 topology selection (KB-assisted) | mid-tier | A structured KB query plus fit-to-spec matching — bounded search over documented candidates, not open-ended design. | Escalate to frontier-reasoning when the KB returns no matching entry, or multiple entries tie and the choice needs first-principles judgment the KB doesn't encode. |
 | S5 sizing | mid-tier | Iterative numeric optimization against simulator feedback — mechanical for a converging loop. **This is the epic's own worked example**: "sizing runs mid-tier, escalates to frontier after N failed corner iterations." | Escalate to frontier-reasoning after N consecutive Loop-A passes (§1) show non-monotonic margins or an unresolved measurement tradeoff. |
 | S6 schematic/netlist | small-fast | Mechanical instantiation of already-sized devices into netlist syntax; no open design decision remains. | Escalate to mid-tier when elaboration errors persist across N passes (a topology/connectivity mismatch a small model can't diagnose). |
-| S7 layout generation | mid-tier | Mapping sized devices onto generator parameters (grid, matching, guard rings) requires layout-idiom judgment even when the generator itself is mechanical. | Escalate to frontier-reasoning when no generator primitive fits the block's topology (a floorplan-level decision, not a parameter tweak) — presently unconditional until #104 lands generators at all. |
+| S7 layout generation | mid-tier | Mapping sized devices onto generator parameters (grid, matching, guard rings) requires layout-idiom judgment even when the generator itself is mechanical. | Escalate to frontier-reasoning when no generator primitive fits the block's topology (a floorplan-level decision, not a parameter tweak). |
 | S8 DRC/LVS | small-fast | Rule-by-rule violation fixing against a structured, itemized report is close-to-mechanical for a converging loop. | Escalate to mid-tier, then frontier-reasoning, after N consecutive Loop-B passes (§1) show non-monotonic violation counts or a DRC/LVS tradeoff. |
 | S9 extraction | small-fast | Tool invocation plus a structural netlist-match check; no design judgment in a converging case. | Escalate to mid-tier when the extracted netlist mismatches the pre-layout netlist unexpectedly (debugging a topology discrepancy, not re-running the tool). |
 | S10 simulation across corners | small-fast to invoke; mid-tier to interpret failures | Running `klt sim` and reading its structured pass/fail is mechanical; diagnosing *why* a corner failed (feeding Loop A) needs more judgment — hence the split, folded into S5's escalation rule above rather than duplicated here. | See S5. |
@@ -297,28 +297,30 @@ layout-generator spike issue.
 | S1 design proposal | None — intentionally out of tool scope (free-form intake). | — |
 | S2 system architecture & budget partition | None. | No friction issue filed yet; a candidate future optimization/partition capability per `docs/ARCHITECTURE.md`'s "optimization" scope line, not yet demanded loudly enough to spike. |
 | S3 block specs | None. | No friction issue filed yet — currently absorbed into S1/S2's human/agent judgment. |
-| S4 topology selection (KB-assisted) | Partial. KB corpus exists as flat files (`kb/`, Epic #102 Phase 1); the query verb this stage names, `klt kb`, is specified but **not yet shipped** (#110, Epic #102 Phase 2). Corpus breadth itself is still being grown (#106 sourcing playbook, #107/#108/#109 entry batches). | #110 (verb), #102 (epic) |
-| S5 sizing | Partial. `klt sim` (shipped, #96) gives the feedback signal Loop A needs; no dedicated sizing/optimization tool proposes the next candidate — that reasoning is presently fully agent-side. | No friction issue filed yet. |
+| S4 topology selection (KB-assisted) | Shipped. `klt kb list`/`show`/`search`/`validate` (`docs/cli/kb.md`) query the KB corpus (`kb/`); Epic #102 (corpus + query surface) and its sub-issues (#106–#110) are closed. What remains is corpus *breadth*, grown incrementally, not the query surface. | — |
+| S5 sizing | Partial. `klt sim` (shipped, #96) gives the feedback signal Loop A needs; no dedicated sizing/optimization tool proposes the next candidate — that reasoning is presently fully agent-side. | #310 (sizing candidate proposer) |
 | S6 schematic/netlist | None in `klt`. Schematic capture and netlist export live outside the repo today (xschem); the specific staleness/testbench-vs-block/config gaps a shared `klt netlist` (or documented helper) would close are filed. | #55 |
-| S7 layout generation | None. `klt render` (visual check) and `klt layout-metrics` (area/utilization) exist but there is no generator — the design spike surveying frameworks and proposing a contract is itself still open. | #104 |
-| S8 DRC/LVS | Half shipped. `klt drc` is shipped (`docs/cli/drc.md`) with a curated sky130/gf180mcu deck subset (see that doc's "Coverage" section for fidelity caveats). LVS does not exist. | #54 (LVS) |
-| S9 extraction | Shipped. `klt extract` produces a schematic-equivalent netlist (devices + connectivity, sky130/gf180mcu) independently of #54 (LVS's device-matching engine decision, closed). What remains gapped is RC-parasitic extraction — tracked separately by #216 (decision, recorded) / #217 (implementation, unscheduled); see `.claude/skills/design-extraction/SKILL.md`. | #216/#217 (RC parasitics) |
+| S7 layout generation | Shipped. `klt gen`/`klt gen-compose` (`docs/cli/gen.md`, `docs/cli/gen-compose.md`) generate and compose layout from a netlist + parameters; `klt render` (visual check) and `klt layout-metrics` (area/utilization) support inspection. #104 closed; `klt gen-compose` was driven end-to-end against a real sky130 5T OTA (Epic #153 phase 4, #164/#196). | — |
+| S8 DRC/LVS | Shipped. `klt drc` (`docs/cli/drc.md`) runs a curated sky130/gf180mcu deck subset (see that doc's "Coverage" section for fidelity caveats); `klt lvs` (`docs/cli/lvs.md`) runs a device/net compare (phase 3 of Epic #153). #54 closed. | — |
+| S9 extraction | Shipped. `klt extract` (`docs/cli/extract.md`) produces a schematic-equivalent netlist (devices + connectivity, sky130/gf180mcu) and, with `--parasitics`, RC-parasitic extraction (#216 decision / #217 implementation, both closed); see `.claude/skills/design-extraction/SKILL.md`. | — |
 | S10 simulation across corners | Mostly shipped. `klt sim` (#96) covers scalar `.meas`-based corner sweeps per the accepted spike. Sequence/waveform measurements (jitter, cycle-to-cycle, TIE) beyond scalar reduction are not covered. | #56 (waveform post-processing) |
-| S11 signoff report | None. No tool aggregates `klt drc`/`klt sim` (and future LVS/extraction) JSON into one signoff artifact. | No friction issue filed yet. |
+| S11 signoff report | None. No tool aggregates `klt drc`/`klt lvs`/`klt sim`/`klt extract` JSON into one signoff artifact. | #309 (signoff aggregator) |
 
-**Reading the map:** the loop this pipeline cares most about converging
-before anything else — Loop A (sizing ↔ simulation) — is the
-best-supported half of the graph today (`klt sim` shipped, KB query landing
-imminently). Loop B (layout ↔ DRC/LVS) is the weaker half: DRC exists,
-but neither layout generation (S7, #104) nor LVS (S8/S9, #54) does yet,
-which means Loop B cannot run end to end today — an agent can check a
-hand-edited layout but cannot yet generate one from a netlist or close the
-loop against LVS. This is consistent with ROADMAP.md's own phase ordering
-(Phase 3 "write" and Phase 4 "extract & verify" both still open) and is the
-reason Epic #105's Phase 3 worked example (§ epic, "Issue E") is scoped to
-drive every *non-blocked* stage rather than claim a full closed-loop run —
-S7 and S8's LVS half, S9, and S11 will show as explicit stubs in that
-worked example until #104 and #54 land.
+**Reading the map:** both structural loops now have their core tooling
+shipped. Loop A (sizing ↔ simulation) is served by `klt sim` (feedback) and
+`klt kb` (topology query), with only the sizing-*candidate* proposer still
+agent-side (#310). Loop B (layout ↔ DRC/LVS) has been driven end to end for
+the sky130 5T OTA canary — `klt gen-compose` → `klt extract` → `klt lvs` →
+`klt sim` closing the loop against a real block (Epic #153 phase 4, #164),
+including the follow-on friction it surfaced (#199/#200/#201 —
+obstacle-unaware routing, missing net labels, a spurious LVS device-class
+mismatch — all closed). The stages that remain unbuilt are not loop
+tooling but the *bracketing* stages: S2/S3 spec-and-partition work (no
+tool, by design), the S5 sizing proposer (#310), S6 netlist export (#55),
+S10 waveform post-processing (#56), and S11 signoff aggregation (#309).
+Epic #105's Phase 3 worked example can now drive a genuine closed-loop run
+through Loop B rather than stubbing S7/S8/S9, with those bracketing stages
+the remaining explicit gaps.
 
 ## Out of scope for this doc
 
