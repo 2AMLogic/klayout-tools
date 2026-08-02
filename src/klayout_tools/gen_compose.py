@@ -114,7 +114,18 @@ class GenComposeError(Exception):
     """
 
 
-def load_generator_report_arg(value: Any) -> dict[str, Any]:
+def _resolve_relative(path: str, base_dir: str) -> str:
+    """Expand env vars/``~`` in ``path``; join relative paths against
+    ``base_dir`` (same idiom as ``lvs.py``'s/``sim.py``'s ``_resolve_relative``)."""
+    expanded = os.path.expanduser(os.path.expandvars(path))
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(base_dir, expanded)
+
+
+def load_generator_report_arg(
+    value: Any, request_dir: str | None = None
+) -> dict[str, Any]:
     """Resolve one ``blocks[].generator_report`` value into a report dict.
 
     ``value`` is either an inline JSON object (already a ``dict`` -- the
@@ -122,6 +133,13 @@ def load_generator_report_arg(value: Any) -> dict[str, Any]:
     one (a ``klt gen`` response captured to disk), mirroring
     ``klt gen --params``'s own path-or-inline duality
     (:func:`klayout_tools.gen.load_params_arg`).
+
+    A relative path string resolves against ``request_dir`` (the directory
+    holding the request document itself -- defaults to the current working
+    directory when omitted, e.g. for a caller with no request file at all),
+    mirroring ``klt lvs``'s ``load_request_arg``/``_resolve_relative``
+    convention (``lvs.py``) rather than the process's own cwd. An absolute
+    path is unaffected by ``request_dir``.
 
     Raises :class:`GenComposeError` if ``value`` is neither a ``dict`` nor a
     readable JSON file, or the file doesn't decode to a JSON object.
@@ -134,24 +152,25 @@ def load_generator_report_arg(value: Any) -> dict[str, Any]:
             "blocks[].generator_report must be a JSON object or a path to one"
         )
 
-    if not os.path.isfile(value):
-        raise GenComposeError(f"generator_report file not found: '{value}'")
+    resolved = _resolve_relative(value, request_dir or os.getcwd())
+    if not os.path.isfile(resolved):
+        raise GenComposeError(f"generator_report file not found: '{resolved}'")
 
     try:
-        with open(value, encoding="utf-8") as handle:
+        with open(resolved, encoding="utf-8") as handle:
             data = json.load(handle)
     except OSError as exc:
         raise GenComposeError(
-            f"could not read generator_report '{value}': {exc}"
+            f"could not read generator_report '{resolved}': {exc}"
         ) from exc
     except json.JSONDecodeError as exc:
         raise GenComposeError(
-            f"generator_report '{value}' is not valid JSON: {exc}"
+            f"generator_report '{resolved}' is not valid JSON: {exc}"
         ) from exc
 
     if not isinstance(data, dict):
         raise GenComposeError(
-            f"generator_report '{value}' must decode to a JSON object"
+            f"generator_report '{resolved}' must decode to a JSON object"
         )
     return data
 
@@ -259,7 +278,9 @@ def _require_bbox(value: Any, where: str) -> dict[str, float]:
         ) from exc
 
 
-def _parse_blocks(raw_blocks: Any) -> dict[str, dict[str, Any]]:
+def _parse_blocks(
+    raw_blocks: Any, request_dir: str | None = None
+) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
 
@@ -274,7 +295,9 @@ def _parse_blocks(raw_blocks: Any) -> dict[str, dict[str, Any]]:
         if block_id in blocks:
             raise GenComposeError(f"request.blocks contains duplicate id '{block_id}'")
 
-        report = load_generator_report_arg(raw_block.get("generator_report"))
+        report = load_generator_report_arg(
+            raw_block.get("generator_report"), request_dir
+        )
         generator = report.get("generator")
         cell_name = report.get("cell_name")
         gds_path = report.get("gds_path")
@@ -1112,7 +1135,16 @@ def route_two_pin(
     }
 
 
-def compose(request: dict[str, Any]) -> dict[str, Any]:
+#: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
+#: application error rather than a silent fallback -- see #328: a typo such
+#: as ``{"pdk": {"name": "gf180mcuD"}}`` (``name`` being what ``klt gen``'s
+#: own response calls this field) would otherwise be silently treated as
+#: ``request.pdk == {}`` and resolve whatever ``$PDK``/the default search
+#: order picks, with no indication the request's own value was never read.
+_ALLOWED_PDK_KEYS = {"variant", "root"}
+
+
+def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str, Any]:
     """Run one composition request end-to-end and return the response envelope.
 
     ``request`` follows the ``klt.gen_compose.request/1`` shape (spike
@@ -1136,16 +1168,30 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         }
 
     ``pdk``/``connectivity``/``routing``/``options`` are all optional.
-    ``connectivity[]`` is validated (every referenced block ``id``/port must
-    exist) but not yet routed -- ``routing`` is accepted and otherwise
-    ignored this phase (phase 2 implements point-to-point routing; see the
-    module docstring). Returns a dict matching the documented response
-    schema (see ``docs/cli/gen-compose.md``).
+    ``request.pdk`` only accepts ``variant``/``root`` (:data:`_ALLOWED_PDK_KEYS`)
+    -- an unrecognised key (e.g. ``name``, a plausible typo for ``variant``)
+    is an application error, not a silent fallback to ``$PDK``/the default
+    search order (#328). ``connectivity[]`` is validated (every referenced
+    block ``id``/port must exist) but not yet routed -- ``routing`` is
+    accepted and otherwise ignored this phase (phase 2 implements
+    point-to-point routing; see the module docstring). Returns a dict
+    matching the documented response schema (see ``docs/cli/gen-compose.md``).
 
-    Raises :class:`GenComposeError` for an unresolvable PDK, a malformed
-    request, an unsupported ``placement.strategy``, a ``connectivity[]``
-    reference to a nonexistent block ``id``/port, or a GDS read/write
-    failure.
+    ``request_dir`` is the directory a relative ``blocks[].generator_report``
+    path string resolves against (mirrors ``klt lvs``'s
+    ``load_request_arg``/``_resolve_relative`` convention, ``lvs.py``) --
+    normally the request document's own directory, passed in by
+    ``cli/gen_compose_cmd.py``. Defaults to the current working directory
+    when omitted (``None``), so a direct/library caller with no request file
+    at all (e.g. an inline dict, as ``tests/test_metrics_regression.py``
+    calls this function) keeps resolving cwd-relative paths unchanged. An
+    absolute ``generator_report`` path, or one given as an inline JSON
+    object, is unaffected by ``request_dir`` either way.
+
+    Raises :class:`GenComposeError` for an unresolvable PDK, an unrecognised
+    ``request.pdk`` key, a malformed request, an unsupported
+    ``placement.strategy``, a ``connectivity[]`` reference to a nonexistent
+    block ``id``/port, or a GDS read/write failure.
     """
     if not isinstance(request, dict):
         raise GenComposeError("request must be a JSON object")
@@ -1153,6 +1199,13 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
     pdk_request = request.get("pdk") or {}
     if not isinstance(pdk_request, dict):
         raise GenComposeError("request.pdk must be a JSON object")
+    unknown_pdk_keys = set(pdk_request) - _ALLOWED_PDK_KEYS
+    if unknown_pdk_keys:
+        allowed = ", ".join(sorted(_ALLOWED_PDK_KEYS))
+        raise GenComposeError(
+            "request.pdk has unknown field(s): "
+            f"{', '.join(sorted(unknown_pdk_keys))} -- allowed: {allowed}"
+        )
     try:
         pdk_info = find_pdk(
             variant=pdk_request.get("variant"), root=pdk_request.get("root")
@@ -1160,7 +1213,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
-    blocks = _parse_blocks(request.get("blocks"))
+    blocks = _parse_blocks(request.get("blocks"), request_dir or os.getcwd())
     strategy, order, spacing_um, origins_um = _parse_placement(
         request.get("placement"), set(blocks)
     )
