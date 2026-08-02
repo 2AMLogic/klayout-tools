@@ -38,6 +38,29 @@ contract.
   documentation (e.g. `docs/cli/layers.md`).
 - Written to **stdout only**, as indented JSON with a trailing newline.
 
+### Pre-1.0 caveat: value sets within an unchanged shape can grow
+
+The `schema_version`/`klt --version` policy above covers the *shape* of a
+payload (which top-level fields exist), not the full *set of values* a field
+can take on. Before `klt` reaches `1.0`, an additive change can introduce a
+new enum-like value — most notably a new `mismatches[].category` (and
+therefore a new `category_counts` key) for `klt lvs`, or a new `violations[]`
+rule id for `klt drc` — without a `schema_version` bump and without changing
+the reported `klt --version` string. Such a change is a deliberate, additive
+behavior improvement (e.g. a new class of finding the tool did not previously
+surface), not schema drift, but it does mean two runs of the identical `klt`
+binary and identical `0.1.0` version string are **not** guaranteed to report
+the same category set for the same input across time, or across two builds
+snapshotted on different days. `CHANGELOG.md` is the source of truth for
+*which* categories/rule ids exist as of a given date — check it first before
+assuming a category change is a bug.
+
+If a downstream project needs to pin exact reproducibility (e.g. golden
+acceptance data keyed on `category_counts`), key that pin off the shared
+`provenance` block's `deck` (`sha256:` content hash) and `klayout_version`
+fields below — not `klt --version` — until `klt` reaches `1.0` and this
+caveat is retired.
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule

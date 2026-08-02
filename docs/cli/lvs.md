@@ -369,6 +369,51 @@ not of any individual device pairing or `hints`), always `severity:
 semantics — they only make it visible, in-band, that this dimension of the
 compare was not fully verified against the schematic.
 
+#### `topology`: catch-all for circuit-, device-class-, and net-identity-level mismatches
+
+`topology` is the category for structural findings that don't fit any of the
+narrower `net.*`/`device.*`/`pin.unmatched` categories: a whole circuit or
+subcircuit instance with no counterpart, a device class with no counterpart,
+an ambiguous net pairing the comparer resolved on its own, or two nets paired
+despite a name/identity conflict. Six classification sites inside
+`_build_mismatches`/`_classify_net_mismatches`
+(`src/klayout_tools/lvs.py`) each map one `NetlistComparer` event kind to a
+`topology` entry:
+
+- **Circuit mismatch** (`lvs.py:1132-1141`, from `logger.circuit_mismatches`)
+  — a circuit (module) on one side has no counterpart on the other. Always
+  `severity: "error"`.
+- **Subcircuit mismatch** (`lvs.py:1143-1152`, from
+  `logger.subcircuit_mismatches`) — a subcircuit instance has no
+  counterpart. Always `"error"`.
+- **Device-class mismatch** (`lvs.py:1154-1192`, from
+  `logger.device_class_mismatches`) — a device class (e.g. `nfet`)
+  registered on one side has no counterpart class on the other side.
+  Downgraded to `"warning"` when that side's netlist has zero actual
+  instances of the class (`klt extract` always registers both
+  `nfet`/`pfet` device classes even when a layout only instantiates one
+  polarity, so an all-`nfet` layout compared against an all-`nfet`
+  reference is not a real defect); `"error"` when the class has one or
+  more real instances.
+- **Ambiguous net pairing** (`lvs.py:1194-1207`, from
+  `logger.ambiguous_net_matches`) — nets were paired ambiguously and the
+  comparer resolved it structurally on its own (consider adding a
+  `hints.same_nets` entry to pin the pairing down explicitly). Always
+  `"warning"`; never changes `status`.
+- **Net identity conflict with no leftover** (`lvs.py:1539-1549`, inside
+  `_classify_net_mismatches`) — two nets were paired despite a name/identity
+  conflict, and neither side has an accompanying one-sided leftover net
+  (the merge/split case documented below, which absorbs the same
+  underlying event when a leftover is present). Always `"error"`.
+
+A seventh entry (`lvs.py:377`) is a safety net, not a classification site: if
+`NetlistComparer.compare()` reports a mismatch but none of the sources above
+produced any structured entry (a gap in this module's own event coverage,
+not a clean run), `klt lvs` reports one generic `severity: "error"`,
+`side: "both"` `topology` entry rather than silently reporting
+`status: "match"` — see this module's docstring on the "`compare()` is
+always authoritative" invariant.
+
 #### Net-merge/net-split classification (a documented simplification)
 
 `NetlistComparer`'s own event stream does not label a net mismatch as
