@@ -1,5 +1,14 @@
 # Changelog
 
+`klt` has not yet reached `1.0`; per [`docs/json-contract.md`](docs/json-contract.md),
+`schema_version` only bumps for non-additive (breaking) shape changes to a
+command's own payload. Additive behavior changes — including new
+`mismatches[].category` values `klt lvs` can emit — land under the same
+`0.1.0` package version and are recorded here instead. This file is the
+source of truth for which categories exist as of a given date; pin
+`provenance.deck` (sha256) and `provenance.klayout_version`, not
+`klt --version`, if you need to detect this kind of drift.
+
 ## 0.1.0 (2026-07-31)
 
 Initial release — the agent-native IC layout toolkit, first cut.
@@ -20,3 +29,24 @@ Initial release — the agent-native IC layout toolkit, first cut.
 - sky130/gf180mcu test corpus with golden fixtures; CI (ruff + pytest, Python 3.10–3.13)
 - Docs: architecture, JSON contract, per-verb CLI references, macOS KLayout
   source-build guide; site at klayout-tools.org
+
+### Added since release (still reporting `0.1.0`)
+
+`klt` has grown considerably since the initial release above without a
+version bump (see the pre-1.0 note at the top of this file); the entries
+below are the user-visible, additive behavior changes worth calling out
+explicitly because they affect a verb's output under an unchanged reported
+version. Not an exhaustive commit-by-commit log.
+
+- 2026-08-02 — `klt lvs`: new `device.body_unverified` mismatch category
+  (`a483ed0`, #281/#285). Warns (`severity: "warning"`, never changes
+  `status`) when a MOS body terminal was extracted onto a deck-synthesized
+  net rather than a real drawn tap/well-label net — an NMOS entry fires on
+  every inline-extraction LVS run with one or more NMOS devices (no curated
+  deck draws a distinct NMOS substrate/tap layer), and a PMOS entry
+  additionally fires for decks with no distinct well-tap layer (gf180mcu
+  today). This is purely additive (no `schema_version` bump) but changes
+  `category_counts` for any gf180mcu (and, for the NMOS case, sky130)
+  inline-extraction fixture that previously reported an empty
+  `category_counts: {}` — see `docs/cli/lvs.md`'s `device.body_unverified`
+  subsection for the full trigger conditions.
