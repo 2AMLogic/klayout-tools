@@ -142,6 +142,14 @@ Extraction and compare are separable steps that also compose in one call:
 - **Inline extraction** — `{"file": "design.gds", "deck": "sky130", "top": "ota_5t"}`. Runs `klt extract`'s core extraction (the same `extract_netlist_from_layout` function `klt extract` itself calls) against the named curated deck (`sky130`/`gf180mcu`), then compares the resulting in-memory netlist directly — no SPICE round-trip is required unless `options.keep_extracted` is set. `top` is optional (defaults to the layout's sole top cell, same as `klt extract --top`); `deck` is required in this shape.
 - **Pre-extracted netlist** — `{"netlist": "design.spice", "top": "ota_5t"}`. Reads an existing extracted (or hand-written) SPICE netlist directly via `NetlistSpiceReader`, skipping extraction entirely. `top` is optional (defaults to the sole top circuit).
 
+`layout.top`/`reference.top` are always compared as a declared pair, even
+when their names differ — the two selected circuits are pinned together
+(`NetlistComparer.same_circuits`) rather than left to the comparer's default
+by-name matching. Without this, a layout top named differently from the
+reference's `.SUBCKT` would collapse every finding to a generic `topology`
+"could not be matched to a counterpart" entry instead of the specific
+`net`/`device` mismatches underneath.
+
 ## Response
 
 ```json
