@@ -1203,6 +1203,102 @@ def test_corpus_parasitics_produce_positive_rc(deck, layout_path, tmp_path):
     assert report["device_count"] == 2
 
 
+def test_parasitics_coefficients_sourced_from_pdk_tech():
+    """Spot-check that the PARASITICS tables carry the values transcribed from
+    each PDK's published magic tech file (issue #226) -- a guard against an
+    accidental revert to the pre-#226 uncited starter numbers. One updated
+    field per PDK, plus the dropped diffusion role."""
+    from klayout_tools.decks import gf180mcu, sky130
+
+    # sky130: met1 (metals[1]) area cap from sky130.tech `defaultareacap`.
+    assert sky130.PARASITICS.metals[1].cap_area_ff_um2 == pytest.approx(0.02578)
+    # sky130: met1 fringe cap from sky130.tech `defaultperimeter`.
+    assert sky130.PARASITICS.metals[1].cap_perim_ff_um == pytest.approx(0.04057)
+    # gf180mcu: poly sheet R from gf180mcu.tech `resist (allpolynonres)/active
+    # 7300` (7300 milliohm/sq = 7.3 ohm/sq).
+    assert gf180mcu.PARASITICS.poly.sheet_res_ohm_sq == pytest.approx(7.3)
+    # gf180mcu: poly area cap from gf180mcu.tech `defaultareacap`.
+    assert gf180mcu.PARASITICS.poly.cap_area_ff_um2 == pytest.approx(0.11067)
+
+    # Both decks drop the diffusion role: junction capacitance is already
+    # carried by each M card's AS/AD/PS/PD, so a diffusion cap term would
+    # double-count it (issue #226).
+    assert sky130.PARASITICS.diffusion is None
+    assert gf180mcu.PARASITICS.diffusion is None
+
+
+def _make_poly_gate_net_layout(poly_y0, poly_y1, top_name="TOP"):
+    """One NMOS whose gate poly bar spans ``poly_y0..poly_y1`` in y while the
+    active strip is fixed at y 0..1000. When the poly bar coincides with active
+    in y (0..1000), the gate net's *only* poly geometry is the transistor gate
+    itself; extending it beyond active adds poly interconnect that is not gate.
+    The gate net carries no metal, so its parasitic capacitance is purely
+    poly-derived -- exercising the issue #226 gate-poly exclusion."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (nmos active)
+    # Poly bar crosses active fully in x (splitting it into two S/D pads); its
+    # y-extent is the variable under test.
+    draw(66, 20, kdb.Box(800, poly_y0, 1200, poly_y1))  # poly.drawing (gate)
+    # S/D contacts + li1 pads, each named so the transistor has named S/D.
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (S)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (D)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (S)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (D)
+    label(67, 5, "SRC", 200, 500)
+    label(67, 5, "DRN", 1800, 500)
+    # The gate: named ONLY on poly.pin (66/5), with no metal anywhere near it.
+    label(66, 5, "GATEONLY", 1000, 500)
+    return layout
+
+
+def test_parasitics_excludes_transistor_gate_poly(tmp_path):
+    """Regression (issue #226): the transistor gate is subtracted from a net's
+    poly shapes before measuring parasitic capacitance.
+
+    Two layouts differ only in the gate poly's y-extent. When the poly bar
+    coincides exactly with the active strip (y 0..1000) the gate net's only
+    poly geometry *is* the gate, so after the exclusion it has zero
+    poly-derived capacitance and -- carrying no metal -- drops out of
+    ``parasitics.nets``. Extending the poly bar past active (y -400..1400) adds
+    non-gate poly interconnect, so the same net reappears with positive
+    capacitance. The device extracts identically in both cases."""
+    all_gate = _write_gds(
+        _make_poly_gate_net_layout(0, 1000), tmp_path / "all_gate.gds"
+    )
+    report_all_gate = run_extract(
+        all_gate, "sky130", output=str(tmp_path / "all_gate.spice"), parasitics=True
+    )
+    assert report_all_gate["device_counts"] == {"nfet": 1}
+    names_all_gate = [n["net"] for n in report_all_gate["parasitics"]["nets"]]
+    # Gate-only poly + no metal -> zero parasitic capacitance -> not reported.
+    assert "GATEONLY" not in names_all_gate
+
+    with_overhang = _write_gds(
+        _make_poly_gate_net_layout(-400, 1400), tmp_path / "overhang.gds"
+    )
+    report_overhang = run_extract(
+        with_overhang,
+        "sky130",
+        output=str(tmp_path / "overhang.spice"),
+        parasitics=True,
+    )
+    assert report_overhang["device_counts"] == {"nfet": 1}
+    overhang_nets = {n["net"]: n for n in report_overhang["parasitics"]["nets"]}
+    # The non-gate poly overhang is measured, so the net now carries R/C.
+    assert "GATEONLY" in overhang_nets
+    assert overhang_nets["GATEONLY"]["capacitance_ff"] > 0.0
+
+
 @_SKIP_NO_NGSPICE
 def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
     """Acceptance bar (issue #217): a `--parasitics` netlist stays a drop-in

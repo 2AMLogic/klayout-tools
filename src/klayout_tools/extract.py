@@ -786,17 +786,33 @@ def _n_squares(area_um2: float, perimeter_um: float) -> float:
 
 
 def _net_area_perim_um(
-    l2n: kdb.LayoutToNetlist, net: kdb.Net, dbu: float, indices: list[int]
+    l2n: kdb.LayoutToNetlist,
+    net: kdb.Net,
+    dbu: float,
+    indices: list[int],
+    subtract_indices: list[int] | None = None,
 ) -> tuple[float, float]:
     """Total ``(area_um2, perimeter_um)`` of ``net``'s shapes across the
     given registered layer ``indices`` (each an index returned by
-    ``LayoutToNetlist.register``)."""
-    area_um2 = 0.0
-    perim_um = 0.0
+    ``LayoutToNetlist.register``), with any ``subtract_indices`` layers
+    geometrically removed first.
+
+    ``subtract_indices`` lets the poly role exclude the transistor gate
+    regions from a net's poly shapes before measuring (issue #226): the gate
+    sits over the channel, not the substrate the coefficients describe, and
+    its capacitance is already captured by the device model. The subtraction
+    is a purely local operation on the per-net ``Region`` returned by
+    ``polygons_of_net`` -- it registers no extra ``LayoutToNetlist`` layer, so
+    the connectivity graph is untouched."""
+    import klayout.db as kdb
+
+    region = kdb.Region()
     for index in indices:
-        polys = l2n.polygons_of_net(net, index)
-        area_um2 += polys.area() * dbu * dbu
-        perim_um += polys.perimeter() * dbu
+        region += l2n.polygons_of_net(net, index)
+    for index in subtract_indices or ():
+        region -= l2n.polygons_of_net(net, index)
+    area_um2 = region.area() * dbu * dbu
+    perim_um = region.perimeter() * dbu
     return area_um2, perim_um
 
 
@@ -821,11 +837,15 @@ def _compute_parasitics(
     - **series R** = sum over conductor roles of ``sheet_res * n_squares``
       (ohms), the net's lumped interconnect resistance.
 
-    Roles map to the registered geometry layers: ``diffusion`` aggregates the
-    NMOS+PMOS source/drain regions, ``poly`` the poly region, and
-    ``metals[i]`` each metal-stack layer (index-aligned with the deck's
-    ``metals``). Net-to-net coupling capacitance is explicitly **not** modeled
-    (issue #216: ground capacitance only in the first increment).
+    Roles map to the registered geometry layers: ``poly`` the poly region with
+    the transistor gate regions subtracted out (issue #226 -- gate capacitance
+    lives in the device model), and ``metals[i]`` each metal-stack layer
+    (index-aligned with the deck's ``metals``). The optional ``diffusion`` role
+    (NMOS+PMOS source/drain) is left unset by the shipped decks: the M cards'
+    ``AS``/``AD``/``PS``/``PD`` already feed the device model's junction
+    capacitance, so a diffusion cap term would double-count it. Net-to-net
+    coupling capacitance is explicitly **not** modeled (issue #216: ground
+    capacitance only in the first increment).
 
     Returns a list (sorted by net name for deterministic output) of
     ``{"net", "resistance_ohm", "capacitance_ff"}`` for every net with a
@@ -835,21 +855,36 @@ def _compute_parasitics(
     if circuit is None:
         return []
 
-    # (LayerRC, [registered layer indices]) for every role that has both a
-    # coefficient set and at least one present layer.
-    roles: list[tuple[Any, list[int]]] = []
+    # (LayerRC, [include indices], [subtract indices]) for every role that has
+    # both a coefficient set and at least one present layer. The subtract list
+    # is empty except for the poly role, which removes the transistor gate
+    # regions (see below).
+    roles: list[tuple[Any, list[int], list[int]]] = []
     if parasitics_deck.diffusion is not None:
         roles.append(
             (
                 parasitics_deck.diffusion,
                 [layer_index["nfet_sd"], layer_index["pfet_sd"]],
+                [],
             )
         )
     if parasitics_deck.poly is not None:
-        roles.append((parasitics_deck.poly, [layer_index["poly"]]))
+        # Exclude the transistor gate regions from the poly role (issue #226):
+        # gate poly sits over the channel (not the substrate these coefficients
+        # describe) and its capacitance is already in the device model, so the
+        # nfet/pfet gate shapes are subtracted from the net's poly shapes before
+        # measuring. These registrations back the device connectivity too and
+        # are left untouched -- only the parasitic measurement subtracts them.
+        roles.append(
+            (
+                parasitics_deck.poly,
+                [layer_index["poly"]],
+                [layer_index["nfet_gate"], layer_index["pfet_gate"]],
+            )
+        )
     for i, layer_rc in enumerate(parasitics_deck.metals):
         if layer_rc is not None and i < len(metal_index):
-            roles.append((layer_rc, [metal_index[i]]))
+            roles.append((layer_rc, [metal_index[i]], []))
 
     results: list[dict[str, Any]] = []
     for net in circuit.each_net():
@@ -858,8 +893,8 @@ def _compute_parasitics(
             continue
         r_ohm = 0.0
         c_ff = 0.0
-        for layer_rc, indices in roles:
-            area_um2, perim_um = _net_area_perim_um(l2n, net, dbu, indices)
+        for layer_rc, indices, subtract in roles:
+            area_um2, perim_um = _net_area_perim_um(l2n, net, dbu, indices, subtract)
             if area_um2 <= 0.0:
                 continue
             c_ff += (
