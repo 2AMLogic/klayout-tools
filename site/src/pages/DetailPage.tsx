@@ -24,6 +24,16 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * controls and a client-side ngspice re-run — a downloads section gated
  * behind `layout.downloadable`, and a back-link to the gallery index.
  *
+ * The downloads section also links out to Tiny Tapeout's hosted GDS/OAS
+ * viewer (issue #249, Option 1 of that issue: link-out to a hosted viewer
+ * rather than embedding one in this site — cheapest way to prove the
+ * pattern, revisit only if the operator wants a same-origin viewer later)
+ * so a reviewer can zoom/pan/toggle layers without a local KLayout install.
+ * Every gallery block is currently sky130, so the PDK query param is
+ * hardcoded (`sky130A`, Tiny Tapeout's own PDK identifier) rather than
+ * plumbed through a new `Layout` field — revisit if a non-sky130 PDK is
+ * ever added to the gallery.
+ *
  * Matches the original Astro page's chrome exactly: no shared Header/Footer
  * — this page has always been a standalone document (see `[slug].astro`,
  * which never imported `Layout.astro`), preserved here rather than "fixed"
@@ -39,6 +49,30 @@ const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
   no_artifacts: "border-fog-dim text-fog-dim",
   "in design — simulation evidence": "border-cyan text-cyan",
 };
+
+/**
+ * Deployed origin for the static site (see `CLAUDE.md`: klayout-tools.org).
+ * Hardcoded rather than derived from `window.location` because this page is
+ * also rendered server-side at build time (`entry-server.tsx` via
+ * `scripts/prerender.mjs`), where no `window` exists — and the viewer link
+ * needs an absolute, publicly fetchable URL regardless of render context
+ * (Tiny Tapeout's hosted viewer fetches the file cross-origin).
+ */
+const SITE_ORIGIN = "https://klayout-tools.org";
+
+/** Every gallery block is currently sky130 (see module doc comment above). */
+const GALLERY_PDK = "sky130A";
+
+/**
+ * Builds a Tiny Tapeout hosted-viewer link for a block's layout file (issue
+ * #249). Mirrors Tiny Tapeout's own `?model=<url>&pdk=<pdk>` convention
+ * (github.com/TinyTapeout/tt-gds-action) so the file can be inspected
+ * (zoom/pan/layer toggle) from a browser with no local KLayout install.
+ */
+function gdsViewerUrl(fileUrl: string): string {
+  const params = new URLSearchParams({ model: fileUrl, pdk: GALLERY_PDK });
+  return `https://gds-viewer.tinytapeout.com/?${params.toString()}`;
+}
 
 export function DetailPage({ layout }: DetailPageProps) {
   const displayName = layout.name;
@@ -69,6 +103,9 @@ export function DetailPage({ layout }: DetailPageProps) {
   }
 
   const canDownload = layout.downloadable === true && layout.layout_file !== undefined;
+  const layoutFileUrl = canDownload
+    ? `${SITE_ORIGIN}${blockAssetUrl(layout.slug, layout.layout_file as string)}`
+    : undefined;
 
   return (
     <main className="mx-auto max-w-[44rem] px-6 pt-12 pb-16">
@@ -195,7 +232,7 @@ export function DetailPage({ layout }: DetailPageProps) {
 
       <section aria-label="Downloads" className="mt-9">
         <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Downloads</h2>
-        {canDownload ? (
+        {canDownload && layoutFileUrl ? (
           <ul className="flex list-none flex-col gap-2.5 p-0">
             <li>
               <a
@@ -204,6 +241,16 @@ export function DetailPage({ layout }: DetailPageProps) {
                 className="inline-block rounded-lg border border-border bg-panel px-[0.9rem] py-[0.55rem] text-[0.9rem] text-fog no-underline hover:border-cyan focus-visible:border-cyan focus-visible:outline-none"
               >
                 Layout ({layout.layout_file})
+              </a>
+            </li>
+            <li>
+              <a
+                href={gdsViewerUrl(layoutFileUrl)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block rounded-lg border border-border bg-panel px-[0.9rem] py-[0.55rem] text-[0.9rem] text-fog no-underline hover:border-cyan focus-visible:border-cyan focus-visible:outline-none"
+              >
+                View in browser
               </a>
             </li>
           </ul>
