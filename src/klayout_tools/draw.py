@@ -289,8 +289,7 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
     geometry_keys = [k for k in ("rect_um", "polygon_um") if k in shape]
     if len(geometry_keys) != 1:
         raise DrawError(
-            f"shape[{index}] must have exactly one geometry key "
-            "(rect_um or polygon_um)"
+            f"shape[{index}] must have exactly one geometry key (rect_um or polygon_um)"
         )
 
     if "rect_um" in shape:
@@ -322,9 +321,7 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
             or len(point) != 2
             or any(not _is_number(v) for v in point)
         ):
-            raise DrawError(
-                f"shape[{index}].polygon_um[{j}] must be an [x, y] pair"
-            )
+            raise DrawError(f"shape[{index}].polygon_um[{j}] must be an [x, y] pair")
         kdb_points.append(kdb.Point(to_dbu(point[0]), to_dbu(point[1])))
     return kdb.Polygon(kdb_points)
 
@@ -335,11 +332,7 @@ def _build_label(label: dict[str, Any], index: int, to_dbu, kdb) -> Any:
         raise DrawError(f"label[{index}].text must be a non-empty string")
 
     at = label.get("at_um")
-    if (
-        not isinstance(at, list)
-        or len(at) != 2
-        or any(not _is_number(v) for v in at)
-    ):
+    if not isinstance(at, list) or len(at) != 2 or any(not _is_number(v) for v in at):
         raise DrawError(f"label[{index}].at_um must be an [x, y] pair of numbers")
 
     return kdb.Text(text, kdb.Trans(kdb.Vector(to_dbu(at[0]), to_dbu(at[1]))))
