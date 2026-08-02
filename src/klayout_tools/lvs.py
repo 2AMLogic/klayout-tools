@@ -531,7 +531,11 @@ def _resolve_layout(
             # return (black_box_regions, issue #293) still takes effect --
             # any reserved-annotation-layer region in the layout is excluded
             # from connectivity the same as `klt extract` -- but is not
-            # surfaced in `klt lvs`'s own response, out of scope here.
+            # surfaced in `klt lvs`'s own response, out of scope here. The 7th
+            # return (dummy_devices_dropped, #295) is a report-only count
+            # surfaced by `klt extract`; the compare only cares that dummy
+            # gates never became devices, which the suppression already
+            # guarantees.
             (
                 netlist,
                 top_cell_name,
@@ -539,6 +543,7 @@ def _resolve_layout(
                 _warnings,
                 _parasitics,
                 _black_box_regions,
+                _dummy,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

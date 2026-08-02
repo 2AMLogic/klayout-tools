@@ -16,6 +16,7 @@ Two tiers, mirroring `tests/test_drc.py`:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 from pathlib import Path
@@ -2370,3 +2371,168 @@ def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
 
     assert sim_report["status"] == "pass"
     assert sim_report["measurements"][0]["worst_case"]["value"] == pytest.approx(1.8)
+
+
+# --------------------------------------------------------------------------- #
+# Dummy-device suppression (issue #295)
+# --------------------------------------------------------------------------- #
+
+#: An unused (layer, datatype) the tests draw dummy markers on -- outside
+#: every sky130 connectivity layer so it is invisible to extraction except
+#: through the `dummy` field these tests configure.
+_DUMMY_MARKER = (100, 0)
+
+
+def _dummy_deck(name: str = "sky130") -> ExtractionDeck:
+    """The registered ``name`` extraction deck (sky130 by default), with the
+    optional ``dummy`` marker layer set to :data:`_DUMMY_MARKER` (issue #295).
+    Everything else is identical, so a layout with no shapes on that layer
+    extracts exactly as it does under the shipped deck.
+
+    Written to accept the ``name`` argument so it can stand in for
+    ``get_extraction_deck`` under ``monkeypatch.setattr``. The
+    ``get_extraction_deck`` it calls is this test module's own import from
+    ``klayout_tools.decks`` -- distinct from the ``klayout_tools.extract``
+    reference the tests patch -- so there is no recursion."""
+    return dataclasses.replace(get_extraction_deck(name), dummy=_DUMMY_MARKER)
+
+
+def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> None:
+    """Draw a standalone dummy NMOS (poly gate over diffusion, outside any
+    nwell) into ``layout``'s single top cell at x-offset ``x0``.
+
+    ``marker`` controls the dummy-marker shape drawn over the gate:
+
+    - ``"full"``   -- covers the whole gate; the gate is fully consumed by the
+      subtraction, so the device is dropped and counted.
+    - ``"partial"``-- covers only the top of the gate; the remaining gate area
+      still spans both source/drain, so a valid device survives the clean
+      geometric cut and is *not* counted as dropped.
+    - ``"none"``   -- no marker shape at all.
+
+    The gate region is ``diff & poly`` = ``(x0+800 .. x0+1200, 0 .. 1000)``.
+    """
+    top = layout.top_cell()
+    diff = layout.layer(65, 20)  # diff.drawing
+    poly = layout.layer(66, 20)  # poly.drawing
+    top.shapes(diff).insert(kdb.Box(x0, 0, x0 + 2000, 1000))
+    top.shapes(poly).insert(kdb.Box(x0 + 800, -200, x0 + 1200, 1200))
+    if marker == "full":
+        mk = layout.layer(*_DUMMY_MARKER)
+        top.shapes(mk).insert(kdb.Box(x0 + 700, -100, x0 + 1300, 1100))
+    elif marker == "partial":
+        mk = layout.layer(*_DUMMY_MARKER)
+        # Only the top strip of the gate (y 800..1000); the remaining gate
+        # (y 0..800) still spans the full x-width between both S/D regions.
+        top.shapes(mk).insert(kdb.Box(x0 + 700, 800, x0 + 1300, 1100))
+    elif marker != "none":
+        raise ValueError(f"bad marker mode: {marker!r}")
+
+
+def test_dummy_field_defaults_none_on_shipped_decks():
+    """The `dummy` field is opt-in: no shipped deck sets it, so existing
+    extraction is unaffected (issue #295, additive contract)."""
+    assert get_extraction_deck("sky130").dummy is None
+    assert get_extraction_deck("gf180mcu").dummy is None
+
+
+def test_dummy_devices_dropped_is_zero_without_dummy_layer(tmp_path):
+    """A plain inverter under the shipped (no-`dummy`) deck reports
+    `dummy_devices_dropped: 0` -- the additive field is always present."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == 2
+
+
+def test_dummy_configured_but_no_dummy_geometry_is_identical(tmp_path, monkeypatch):
+    """A deck that declares a `dummy` layer, run on a layout that draws no
+    shapes on it, produces byte-identical extraction output (same netlist,
+    same devices) as the shipped deck -- `dummy` only ever *removes* marked
+    geometry (issue #295)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    with_dummy = run_extract(path, "sky130", output=str(tmp_path / "dummy.spice"))
+
+    assert with_dummy["dummy_devices_dropped"] == 0
+    assert with_dummy["device_count"] == baseline["device_count"]
+    assert with_dummy["device_counts"] == baseline["device_counts"]
+    assert with_dummy["devices"] == baseline["devices"]
+    assert with_dummy["nets"] == baseline["nets"]
+    # Byte-identical written netlist: nothing was suppressed.
+    assert with_dummy["netlist_sha256"] == baseline["netlist_sha256"]
+
+
+def test_one_dummy_device_is_excluded_and_counted(tmp_path, monkeypatch):
+    """A dummy MOS whose gate is fully covered by the `dummy` marker is
+    dropped from the extracted netlist; the functional pair still extracts
+    and `dummy_devices_dropped == 1` (issue #295)."""
+    layout = _make_inverter_layout()
+    _add_dummy_nfet(layout, 3000, marker="full")
+    path = _write_gds(layout, tmp_path / "inv_dummy.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 1
+    # Only the functional inverter pair remains -- the dummy is gone.
+    assert report["device_count"] == 2
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+
+
+def test_one_dummy_device_would_extract_without_the_marker(tmp_path, monkeypatch):
+    """Control for the previous test: the same dummy geometry with *no*
+    marker drawn extracts as an ordinary third device -- proving the
+    exclusion is the marker's doing, not the geometry being unrecognisable."""
+    layout = _make_inverter_layout()
+    _add_dummy_nfet(layout, 3000, marker="none")
+    path = _write_gds(layout, tmp_path / "inv_nomark.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == 3
+    assert report["device_counts"] == {"nfet": 2, "pfet": 1}
+
+
+def test_two_dummy_devices_are_both_dropped(tmp_path, monkeypatch):
+    """Two non-touching dummy MOS, each marked, are both suppressed and
+    counted -- `dummy_devices_dropped == 2` via the connected-component
+    idiom (issue #295)."""
+    layout = _make_inverter_layout()
+    _add_dummy_nfet(layout, 3000, marker="full")
+    _add_dummy_nfet(layout, 6000, marker="full")
+    path = _write_gds(layout, tmp_path / "inv_two_dummies.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 2
+    assert report["device_count"] == 2
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+
+
+def test_partial_marker_coverage_is_a_clean_cut_not_a_drop(tmp_path, monkeypatch):
+    """A `dummy` marker that only partially covers a gate is a clean
+    geometric cut, not an all-or-nothing misclassification: the gate is not
+    fully consumed, so the device is *not* counted as dropped and still
+    extracts (issue #295's complex edge case)."""
+    layout = _make_inverter_layout()
+    _add_dummy_nfet(layout, 3000, marker="partial")
+    path = _write_gds(layout, tmp_path / "inv_partial.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    # Gate only partially covered -> not fully consumed -> not a dropped device.
+    assert report["dummy_devices_dropped"] == 0
+    # The partially-cut gate still spans both S/D, so the device survives:
+    # inverter pair + the surviving dummy-shaped device = 3.
+    assert report["device_count"] == 3
+    assert report["device_counts"] == {"nfet": 2, "pfet": 1}
