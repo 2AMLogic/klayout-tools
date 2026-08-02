@@ -1,17 +1,28 @@
-"""SSH/SCP push-then-pull transport for the ``remote`` `klt sim` backend.
+"""SSH/SCP push-then-pull transport for a remote ``klt`` job -- generalized
+in issue #278 (Epic #253 Phase 3) so a future ``extract``/``lvs``/DRC remote
+backend can reuse this module directly, per the epic's "job type is a
+parameter of the backend" success criterion.
 
 Implements the Phase 2 transport decision from
 ``docs/design/remote-sim-backend-spike.md`` ("Transport: SSH/SCP
 push-then-pull by default" -- the credential-minimalism win from #264's
 no-IAM-profile default): the launcher (running with the operator's own
-AWS/SSH credentials) pushes the netlist and a request-specific copy of the
-request document to the instance :mod:`klayout_tools.remote_launcher`
-provisioned, invokes the **same** ``local-parallel`` worker-pool code
-``sim.py`` already implements (#255) on that box via ``klt sim ... --backend
-local-parallel``, and pulls the resulting report/artifacts back over the
-same channel. The guest never calls an AWS API (see
-``remote_launcher.build_run_instances_args``'s "no IAM instance profile by
-default").
+AWS/SSH credentials) pushes a job's input files to the instance
+:mod:`klayout_tools.remote_launcher` provisioned, runs one caller-supplied
+remote command in the pushed job directory, and pulls a caller-named
+artifacts subdirectory back over the same channel. The guest never calls an
+AWS API (see ``remote_launcher.build_run_instances_args``'s "no IAM instance
+profile by default").
+
+**What is pushed, what runs, and what is collected back are all data**,
+carried by :class:`JobDescription` (built from :class:`JobInput`) --
+:mod:`klayout_tools.sim`'s ``remote`` backend is the only caller today
+(see ``sim._build_remote_job_description``), and it supplies the ``klt
+sim ... --backend local-parallel`` command, the pushed netlist/request
+files, and the ``.klt/sim`` artifacts subdirectory as *its own* job
+description; nothing in this module hard-codes ``klt sim``, a netlist, or a
+SPICE report. See ``docs/design/remote-job-description.md`` for the full
+contract a future job type implements against.
 
 Every function here takes an injectable ``runner`` (mirroring
 ``remote_launcher.AwsRunner``) so :mod:`klayout_tools.sim`'s ``remote``
@@ -21,10 +32,11 @@ always"/"runnable in CI" requirement.
 
 Scope note: this module is transport plumbing only. Corner expansion,
 ordering, measurement extraction, and pass/fail classification are never
-reimplemented here -- they live entirely in the ``klt sim`` invocation that
-runs *on the remote host* (the same ``sim.py`` module, unmodified), per
-decision 5's "same code path" guarantee. This module's job is limited to
-"get the inputs there, get the report/artifacts back."
+reimplemented here -- for the ``klt sim`` job type they live entirely in the
+``klt sim`` invocation that runs *on the remote host* (the same ``sim.py``
+module, unmodified), per decision 5's "same code path" guarantee. This
+module's job is limited to "get the inputs there, run the command, get the
+named output directory back" -- for *any* job description, not just sim's.
 """
 
 from __future__ import annotations
@@ -37,6 +49,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 #: Default SSH login user for the baked Ubuntu-based AMI (see
@@ -45,14 +58,26 @@ from typing import Any
 DEFAULT_SSH_USER = "ubuntu"
 
 #: Job-relative filename the pushed netlist is written to on the remote
-#: host -- referenced by the generated remote request's own ``netlist``
-#: field (see ``sim._build_remote_request``).
+#: host, for the ``klt sim`` job description -- referenced by the generated
+#: remote request's own ``netlist`` field (see ``sim._build_remote_request``).
+#: A sim-specific convenience constant, not a module-wide assumption: any
+#: :class:`JobInput`'s ``remote_name`` may be any job-relative filename a
+#: caller's job description chooses.
 REMOTE_NETLIST_FILENAME = "netlist.cir"
 
 #: Job-relative filename the generated remote request document is written
-#: to -- this is the path the remote ``klt sim`` invocation itself is
-#: pointed at.
+#: to, for the ``klt sim`` job description -- this is the path the remote
+#: ``klt sim`` invocation itself is pointed at. Same convenience-constant
+#: caveat as :data:`REMOTE_NETLIST_FILENAME`.
 REMOTE_REQUEST_FILENAME = "request.json"
+
+#: Default job-relative artifacts subdirectory :func:`artifacts_root`
+#: resolves to when a caller doesn't override it -- mirrors ``sim.run_sim``'s
+#: own default (a ``.klt/sim/`` directory next to the request file), since
+#: the ``klt sim`` job description never passes the remote invocation an
+#: explicit ``--outdir`` override. A future job type supplies its own value
+#: via ``JobDescription.artifacts_relative_dir``.
+DEFAULT_ARTIFACTS_RELATIVE_DIR = ".klt/sim"
 
 #: Default per-command SSH connect timeout (seconds) -- how long a single
 #: SSH attempt waits to establish the TCP+handshake, independent of
@@ -62,8 +87,9 @@ DEFAULT_CONNECT_TIMEOUT_S = 10
 
 class RemoteTransportError(Exception):
     """Raised when the SSH/SCP push-then-pull transport itself fails: SSH
-    never becomes reachable, a push/pull command fails, or the remote ``klt
-    sim`` invocation does not return a parseable report.
+    never becomes reachable, a push/pull command fails, or the remote job's
+    own command does not return the output its :class:`JobDescription`
+    promised (parseable JSON on stdout, when ``parse_json_stdout`` is set).
 
     Mirrors ``remote_launcher.RemoteLaunchError``'s "fails loudly, never a
     silent default" role, scoped to the transport rather than provisioning.
@@ -72,6 +98,82 @@ class RemoteTransportError(Exception):
     corner ever ran, the same "sweep never started" class as an unresolvable
     netlist or model library.
     """
+
+
+# --------------------------------------------------------------------------- #
+# Generic job description (issue #278 / Epic #253 Phase 3)
+# --------------------------------------------------------------------------- #
+#
+# Everything that used to be "what klt sim pushes / runs / collects" is now
+# data a caller builds and passes in, not something push_job/run_remote_job/
+# pull_artifacts hard-code. See docs/design/remote-job-description.md for the
+# contract a future extract/lvs/DRC remote backend implements against.
+
+
+@dataclass(frozen=True)
+class JobInput:
+    """One local file (or inline text payload) :func:`push_job` uploads into
+    the remote job directory before :class:`JobDescription`'s ``command``
+    runs, landing at ``<remote_job_dir>/<remote_name>``.
+
+    Exactly one of ``local_path`` (an existing file, uploaded directly via
+    ``scp``) or ``content`` (a string written to a local temp file, uploaded,
+    then removed -- see :func:`push_job`) must be given. ``label`` is a
+    short human-readable name used only in a push failure's error message
+    (e.g. ``"scp <label> push failed"``) -- it never reaches the remote host.
+    """
+
+    remote_name: str
+    label: str
+    local_path: str | None = None
+    content: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.local_path is None) == (self.content is None):
+            raise ValueError(
+                "JobInput requires exactly one of local_path or content "
+                f"(remote_name={self.remote_name!r})"
+            )
+
+
+@dataclass(frozen=True)
+class JobDescription:
+    """The generic push/run/collect contract :func:`push_job`,
+    :func:`run_remote_job`, and :func:`pull_artifacts` execute against --
+    the parameterization this module's docstring and
+    ``docs/design/remote-job-description.md`` describe.
+
+    - ``inputs``: what :func:`push_job` uploads into the remote job
+      directory (the "input payload").
+    - ``command``: the shell command :func:`run_remote_job` runs *inside*
+      the remote job directory (the "remote command") -- this module always
+      ``cd``'s into the job directory first, so ``command`` itself only
+      needs to reference job-relative paths (see :class:`JobInput`'s
+      ``remote_name``).
+    - ``success_exit_codes``: which exit codes from ``command`` mean "ran to
+      completion and produced parseable output" rather than "the transport
+      itself failed" -- e.g. ``klt sim``'s own 0 (pass)/3 (measurement
+      failure)/4 (corner error) all mean a report exists to parse.
+    - ``parse_json_stdout``: whether :func:`run_remote_job` should parse
+      ``command``'s stdout as a JSON object and return it (the default,
+      matching every `klt` verb's own JSON-contract convention) or return
+      the raw stdout string unparsed.
+    - ``artifacts_relative_dir``: the job-relative directory
+      :func:`pull_artifacts` copies back (the "output collection glob/
+      manifest", in the simplest form this issue implements: one directory
+      tree, not yet a glob pattern -- see the design note's "Open
+      questions"). ``None`` means the job produces nothing to pull back.
+    - ``label``: a short human-readable name used in :class:`JobDescription`-
+      generic error/log messages (e.g. ``"remote '<label>' failed"``);
+      never sent to the remote host.
+    """
+
+    label: str
+    inputs: tuple[JobInput, ...]
+    command: str
+    success_exit_codes: tuple[int, ...] = (0,)
+    parse_json_stdout: bool = True
+    artifacts_relative_dir: str | None = None
 
 
 #: Signature of the injectable low-level command runner: full argv
@@ -99,17 +201,18 @@ def job_dir(user: str, job_id: str) -> str:
     return f"/home/{user}/{job_id}"
 
 
-def artifacts_root(remote_job_dir: str) -> str:
-    """Where a remote ``klt sim`` run writes ``keep_artifacts`` output, given
-    it is invoked against ``<remote_job_dir>/request.json``.
-
-    Mirrors ``sim.run_sim``'s own default: "a ``.klt/sim/`` directory next to
-    the request file" -- since the pushed request lives at
-    ``<remote_job_dir>/request.json``, its default ``artifacts_dir`` is
-    ``<remote_job_dir>/.klt/sim``, and the remote invocation is never given
-    an explicit ``--outdir`` override, so this default always applies.
+def artifacts_root(
+    remote_job_dir: str, relative_dir: str = DEFAULT_ARTIFACTS_RELATIVE_DIR
+) -> str:
+    """Join ``remote_job_dir`` with a job-relative artifacts directory,
+    defaulting to :data:`DEFAULT_ARTIFACTS_RELATIVE_DIR` (the ``klt sim`` job
+    description's own ``.klt/sim`` convention -- see that constant's
+    docstring). ``relative_dir`` is normally a :class:`JobDescription`'s own
+    ``artifacts_relative_dir``, so a future job type's differently-shaped
+    output directory resolves the same way without this function hard-coding
+    ``klt sim``'s path.
     """
-    return f"{remote_job_dir}/.klt/sim"
+    return f"{remote_job_dir}/{relative_dir}"
 
 
 # --------------------------------------------------------------------------- #
@@ -273,20 +376,22 @@ def push_job(
     *,
     host: str,
     remote_job_dir: str,
-    local_netlist_path: str,
-    remote_request: dict[str, Any],
+    job: JobDescription,
     user: str = DEFAULT_SSH_USER,
     identity_file: str | None = None,
     port: int = 22,
     timeout_s: float = 60.0,
     runner: CommandRunner | None = None,
 ) -> None:
-    """Create ``remote_job_dir`` and push the netlist plus the generated
-    remote request document into it.
+    """Create ``remote_job_dir`` and push every ``job.inputs`` entry into it,
+    at ``<remote_job_dir>/<JobInput.remote_name>``.
 
-    Only the netlist and the (kilobytes-scale) request document are pushed
-    per job -- per decision 4, the PDK model library is already baked into
-    the AMI, never fetched/pushed per job.
+    A :class:`JobInput` with ``content`` set is written to a local temp file
+    first (removed again once its upload completes or fails); one with
+    ``local_path`` set is uploaded directly. Only ``job.inputs`` is ever
+    pushed -- per decision 4, the PDK model library (or, for a future job
+    type, any other large baked dependency) is already on the AMI, never
+    fetched/pushed per job.
     """
     run = runner or _run_subprocess
 
@@ -299,69 +404,74 @@ def push_job(
     )
     _run_checked(run, mkdir_argv, timeout_s, "remote mkdir")
 
-    netlist_dest = f"{remote_job_dir}/{REMOTE_NETLIST_FILENAME}"
-    scp_netlist_argv = build_scp_upload_argv(
-        local_netlist_path,
-        netlist_dest,
-        host=host,
-        user=user,
-        identity_file=identity_file,
-        port=port,
-    )
-    _run_checked(run, scp_netlist_argv, timeout_s, "scp netlist push")
+    for item in job.inputs:
+        dest = f"{remote_job_dir}/{item.remote_name}"
+        if item.local_path is not None:
+            scp_argv = build_scp_upload_argv(
+                item.local_path,
+                dest,
+                host=host,
+                user=user,
+                identity_file=identity_file,
+                port=port,
+            )
+            _run_checked(run, scp_argv, timeout_s, f"scp {item.label} push")
+            continue
 
-    tmp_handle = tempfile.NamedTemporaryFile(
-        "w", suffix=".json", delete=False, encoding="utf-8"
-    )
-    try:
-        json.dump(remote_request, tmp_handle)
-        tmp_handle.close()
-        request_dest = f"{remote_job_dir}/{REMOTE_REQUEST_FILENAME}"
-        scp_request_argv = build_scp_upload_argv(
-            tmp_handle.name,
-            request_dest,
-            host=host,
-            user=user,
-            identity_file=identity_file,
-            port=port,
+        suffix = os.path.splitext(item.remote_name)[1] or ".tmp"
+        tmp_handle = tempfile.NamedTemporaryFile(
+            "w", suffix=suffix, delete=False, encoding="utf-8"
         )
-        _run_checked(run, scp_request_argv, timeout_s, "scp request push")
-    finally:
-        os.unlink(tmp_handle.name)
+        try:
+            assert item.content is not None  # JobInput.__post_init__ guarantees this
+            tmp_handle.write(item.content)
+            tmp_handle.close()
+            scp_argv = build_scp_upload_argv(
+                tmp_handle.name,
+                dest,
+                host=host,
+                user=user,
+                identity_file=identity_file,
+                port=port,
+            )
+            _run_checked(run, scp_argv, timeout_s, f"scp {item.label} push")
+        finally:
+            os.unlink(tmp_handle.name)
 
 
-def run_remote_sim(
+def run_remote_job(
     *,
     host: str,
     remote_job_dir: str,
+    job: JobDescription,
     timeout_s: float,
     user: str = DEFAULT_SSH_USER,
     identity_file: str | None = None,
     port: int = 22,
     runner: CommandRunner | None = None,
-) -> dict[str, Any]:
-    """SSH-invoke ``klt sim request.json --backend local-parallel --format
-    json`` in ``remote_job_dir`` and parse its stdout as the report JSON.
+) -> Any:
+    """SSH-invoke ``job.command`` inside ``remote_job_dir`` and, when
+    ``job.parse_json_stdout`` is true (the default), parse its stdout as a
+    JSON value and return it; otherwise return the raw stdout string.
 
-    This is the literal reuse point: the code that expands corners, fans
-    them across a worker pool, extracts measurements, and classifies
-    pass/fail is ``sim.py``'s own ``local-parallel`` backend, executing on
-    the provisioned box exactly as it would for a local caller -- nothing
-    here re-implements any of that logic (see this module's docstring and
-    decision 5).
+    For the ``klt sim`` job description (see
+    ``sim._build_remote_job_description``), this is the literal reuse
+    point: the code that expands corners, fans them across a worker pool,
+    extracts measurements, and classifies pass/fail is ``sim.py``'s own
+    ``local-parallel`` backend, executing on the provisioned box exactly as
+    it would for a local caller -- nothing here re-implements any of that
+    logic (see this module's docstring and decision 5).
 
-    ``klt sim``'s own exit codes 0 (pass)/3 (measurement failure)/4 (corner
-    error) all mean the sweep ran and produced a report (see
-    ``docs/cli/sim.md``'s exit-code table) -- only some other exit code (a
-    ``SimError`` on the remote side, an ``ssh`` connection failure, ``klt``
-    missing on ``PATH``, ...) means no report exists to parse, and raises
-    :class:`RemoteTransportError`.
+    ``job.success_exit_codes`` are the exit codes that mean "the command ran
+    to completion and produced the promised output" -- for ``klt sim``,
+    0 (pass)/3 (measurement failure)/4 (corner error) all mean the sweep ran
+    and produced a report (see ``docs/cli/sim.md``'s exit-code table). Any
+    other exit code (a ``SimError`` on the remote side, an ``ssh``
+    connection failure, ``klt`` missing on ``PATH``, ...) means no output
+    exists to parse, and raises :class:`RemoteTransportError`.
     """
     run = runner or _run_subprocess
-    remote_command = (
-        f"cd {shlex.quote(remote_job_dir)} && "
-        f"klt sim {REMOTE_REQUEST_FILENAME} --backend local-parallel --format json"
-    )
+    remote_command = f"cd {shlex.quote(remote_job_dir)} && {job.command}"
     argv = build_ssh_argv(
         host=host,
         user=user,
@@ -373,23 +483,25 @@ def run_remote_sim(
         result = run(argv, timeout_s)
     except subprocess.TimeoutExpired as exc:
         raise RemoteTransportError(
-            f"remote 'klt sim' timed out after {timeout_s}s"
+            f"remote '{job.label}' timed out after {timeout_s}s"
         ) from exc
 
-    if result.returncode not in (0, 3, 4):
+    if result.returncode not in job.success_exit_codes:
         raise RemoteTransportError(
-            f"remote 'klt sim' failed (exit {result.returncode}): "
+            f"remote '{job.label}' failed (exit {result.returncode}): "
             f"{(result.stderr or '').strip()}"
         )
+    if not job.parse_json_stdout:
+        return result.stdout
     try:
-        report = json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise RemoteTransportError(
-            f"remote 'klt sim' did not return valid JSON on stdout: {exc}"
+            f"remote '{job.label}' did not return valid JSON on stdout: {exc}"
         ) from exc
-    if not isinstance(report, dict):
-        raise RemoteTransportError("remote 'klt sim' returned non-object JSON")
-    return report
+    if not isinstance(parsed, dict):
+        raise RemoteTransportError(f"remote '{job.label}' returned non-object JSON")
+    return parsed
 
 
 def pull_artifacts(
@@ -397,23 +509,30 @@ def pull_artifacts(
     host: str,
     remote_job_dir: str,
     local_artifacts_dir: str,
+    job: JobDescription,
     user: str = DEFAULT_SSH_USER,
     identity_file: str | None = None,
     port: int = 22,
     timeout_s: float = 180.0,
     runner: CommandRunner | None = None,
 ) -> None:
-    """Pull the remote run's ``keep_artifacts`` tree (logs/rawfiles/waveform
-    JSON) down into ``local_artifacts_dir``, over the same SSH/SCP channel.
+    """Pull ``job.artifacts_relative_dir`` (job-relative -- for ``klt sim``,
+    the ``keep_artifacts`` tree of logs/rawfiles/waveform JSON) down into
+    ``local_artifacts_dir``, over the same SSH/SCP channel. A no-op when
+    ``job.artifacts_relative_dir`` is ``None`` (the job produces nothing to
+    pull back).
 
     Stages the pull into a fresh temp directory first, then copies its
     contents into ``local_artifacts_dir`` -- avoids depending on ``scp``'s
     destination-exists-or-not rename semantics, which differ depending on
     whether ``local_artifacts_dir`` already exists.
     """
+    if job.artifacts_relative_dir is None:
+        return
+
     run = runner or _run_subprocess
-    remote_source = artifacts_root(remote_job_dir)
-    staging_dir = tempfile.mkdtemp(prefix="klt-remote-sim-pull-")
+    remote_source = artifacts_root(remote_job_dir, job.artifacts_relative_dir)
+    staging_dir = tempfile.mkdtemp(prefix="klt-remote-job-pull-")
     try:
         staged_target = os.path.join(staging_dir, "pulled")
         scp_argv = build_scp_download_argv(

@@ -789,7 +789,11 @@ def _run_remote(
     local-parallel`` -- not a reimplementation of corner expansion, ordering,
     measurement extraction, or pass/fail classification (see
     ``docs/design/remote-sim-backend-spike.md`` decisions 2 and 5, and
-    :mod:`klayout_tools.remote_transport`'s :func:`remote_transport.run_remote_sim`).
+    :mod:`klayout_tools.remote_transport`'s :func:`remote_transport.run_remote_job`).
+    The generic push/run/collect job description built here
+    (:func:`_build_remote_job_description`) is `klt sim`'s own instance of
+    the contract ``docs/design/remote-job-description.md`` documents (issue
+    #278, Epic #253 Phase 3).
 
     ``analysis``/``measurements_spec``/``models_lib`` are accepted for
     signature parity with the other backends but unused directly here --
@@ -875,19 +879,20 @@ def _run_remote(
                 keep_artifacts=keep_artifacts,
                 want_waveforms=want_waveforms,
             )
+            job = _build_remote_job_description(remote_request, netlist_path)
             remote_transport.push_job(
                 host=public_ip,
                 user=ssh_user,
                 identity_file=ssh_key_path,
-                local_netlist_path=netlist_path,
-                remote_request=remote_request,
                 remote_job_dir=remote_job_dir,
+                job=job,
             )
-            remote_report = remote_transport.run_remote_sim(
+            remote_report = remote_transport.run_remote_job(
                 host=public_ip,
                 user=ssh_user,
                 identity_file=ssh_key_path,
                 remote_job_dir=remote_job_dir,
+                job=job,
                 timeout_s=remote_spec.get(
                     "ssh_timeout_s",
                     _default_remote_run_timeout_s(len(corner_points), timeout_s),
@@ -900,6 +905,7 @@ def _run_remote(
                     identity_file=ssh_key_path,
                     remote_job_dir=remote_job_dir,
                     local_artifacts_dir=artifacts_dir,
+                    job=job,
                 )
             remote_transport.cleanup_job(
                 host=public_ip,
@@ -916,7 +922,9 @@ def _run_remote(
     if keep_artifacts:
         _rewrite_remote_artifact_paths(
             corners,
-            remote_root=remote_transport.artifacts_root(remote_job_dir),
+            remote_root=remote_transport.artifacts_root(
+                remote_job_dir, job.artifacts_relative_dir
+            ),
             local_root=artifacts_dir,
         )
     engine_version = (remote_report.get("environment") or {}).get("engine_version")
@@ -969,6 +977,54 @@ def _build_remote_request(
     options.pop("max_workers", None)
     remote_request["options"] = options
     return remote_request
+
+
+#: `klt sim`'s own remote-command exit codes that still mean "the sweep ran
+#: and produced a report": 0 (pass)/3 (measurement failure)/4 (corner error)
+#: -- see ``docs/cli/sim.md``'s exit-code table and
+#: ``remote_transport.run_remote_job``'s docstring.
+_REMOTE_SIM_SUCCESS_EXIT_CODES: tuple[int, ...] = (0, 3, 4)
+
+
+def _build_remote_job_description(
+    remote_request: dict[str, Any], netlist_path: str
+) -> remote_transport.JobDescription:
+    """Build the `klt sim` corner-fan-out job as a generic
+    :class:`remote_transport.JobDescription` (issue #278, Epic #253 Phase
+    3): the netlist and the generated ``remote_request`` document are the
+    pushed inputs, ``klt sim ... --backend local-parallel --format json`` is
+    the remote command, and ``.klt/sim`` (``sim.run_sim``'s own
+    ``keep_artifacts`` default, since the remote invocation is never given
+    an explicit ``--outdir``) is the collected artifacts directory.
+
+    This is the one and only place `klt sim`'s remote job shape is
+    constructed -- :mod:`klayout_tools.remote_transport`'s push/run/collect
+    functions accept it as data and hard-code none of it, so a future
+    `extract`/`lvs`/DRC remote backend builds its own
+    :class:`remote_transport.JobDescription` here instead (see
+    ``docs/design/remote-job-description.md``).
+    """
+    return remote_transport.JobDescription(
+        label="klt sim",
+        inputs=(
+            remote_transport.JobInput(
+                remote_name=remote_transport.REMOTE_NETLIST_FILENAME,
+                label="netlist",
+                local_path=netlist_path,
+            ),
+            remote_transport.JobInput(
+                remote_name=remote_transport.REMOTE_REQUEST_FILENAME,
+                label="request",
+                content=json.dumps(remote_request),
+            ),
+        ),
+        command=(
+            f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
+            "--backend local-parallel --format json"
+        ),
+        success_exit_codes=_REMOTE_SIM_SUCCESS_EXIT_CODES,
+        artifacts_relative_dir=remote_transport.DEFAULT_ARTIFACTS_RELATIVE_DIR,
+    )
 
 
 def _default_remote_run_timeout_s(
