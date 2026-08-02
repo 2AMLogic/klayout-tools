@@ -44,7 +44,7 @@ issue; design decision recorded in
 | Input artifact | S8-clean layout stream — i.e. Loop B already converged (design doc §1). |
 | Output artifact | `klt extract`'s SPICE netlist today: devices + connectivity, no parasitics (shipped). Extracted netlist *with* RC parasitics: format decided by #216's design record (`--parasitics` flag, additive to the existing contract); **not implemented** (#217). |
 | Entry criteria | Loop B converged (S8 exit criteria met) — extracting a DRC/LVS-dirty layout produces a netlist nothing downstream should trust. |
-| Exit criteria | Extracted netlist elaborates cleanly and its device/net topology matches the S6 netlist it was extracted from (itself an LVS-shaped check, `klt lvs`). Per the design doc's own open question, `environment` should record which side of the loop — schematic vs. extracted — a given netlist represents, once a contract exists. |
+| Exit criteria | Extracted netlist elaborates cleanly and its device/net topology matches the S6 netlist it was extracted from (itself an LVS-shaped check, `klt lvs`). `klt sim`'s optional `request.netlist_source` field (`"schematic"` \| `"extracted"`, echoed into the response's `environment.netlist_source` when provided) now closes the design doc's open question — see "Post-layout re-verification workflow" below. |
 | `klt` verbs | `klt extract` (schematic-equivalent, shipped), `klt lvs` (shipped). RC-parasitic extraction: none yet — see #216/#217. |
 | Failure modes | Parasitics that flip a measurement's pass/fail relative to the schematic-level S5 result — the entire reason S10 must re-run post-extraction rather than trusting the pre-layout sizing pass. Today's `klt extract` output cannot surface this class of failure at all (no parasitics), so an S10 pass against it remains schematic-accurate, not truly post-layout. |
 
@@ -65,6 +65,42 @@ warns against, design doc §2 S10). If a pipeline run reaches this stage:
 3. If this gap causes concrete friction driving a real block through the
    pipeline (Epic #105 Phase 3's worked example), comment on #216 or #217
    rather than filing a duplicate.
+
+## Post-layout re-verification workflow (netlist_source)
+
+Once Loop B converges (S8 clean) and S9 extraction/LVS pass, re-run the
+**same** S5 sizing testbench/corner-matrix request through `klt sim` against
+the extracted netlist — same stimuli, same measurement limits — labeled with
+`request.netlist_source: "extracted"` (contract: `docs/cli/sim.md`, "Post-layout
+verification"):
+
+1. `klt extract` the S8-clean layout to produce the SPICE netlist; `klt lvs`
+   to confirm it matches the S6 schematic topologically (this section's
+   "Contract" table, above).
+2. Take the S5/S10 request that already converged against the schematic
+   netlist (Loop A's exit criteria) and point its `netlist` field at the
+   extracted netlist instead — do not write a new testbench or relax any
+   `measurements[].limits`; the whole point is an apples-to-apples rerun.
+3. Add `"netlist_source": "extracted"` to that request (the schematic-side
+   run may set `"schematic"`, or omit the field — both are equivalent by
+   convention) and run `klt sim`.
+4. Compare the two runs' `status`/`measurements[]`: a pass-to-fail flip
+   between the schematic-labeled and extracted-labeled runs signals
+   device-parameter drift the layout introduced (e.g. a resistor drawn at
+   the wrong length) — catchable *today*, even before RC parasitics land.
+
+**Honesty constraint (per this file's "Status" section above):** until RC
+parasitic extraction ships (#216/#217), `klt extract`'s netlist carries no
+interconnect R/C, so an `"extracted"`-labeled pass mostly re-proves LVS
+correctness rather than a true parasitic-aware post-layout result — still
+worth running (it catches device-parameter drift and gives the signoff shape
+a real second data point), just don't overstate what it proves. `klt sim`
+applies no extra gating for this field; a corner still passes or fails on
+exactly the per-corner measurement limits it always has.
+
+Aggregating the two runs into a single signoff verdict (S11) is out of
+scope here — `design-signoff`'s SKILL.md documents that stage as an
+intentional stub.
 
 ## Model-class assignment (design doc §3)
 

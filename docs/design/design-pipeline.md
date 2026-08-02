@@ -302,7 +302,7 @@ layout-generator spike issue.
 | S6 schematic/netlist | None in `klt`. Schematic capture and netlist export live outside the repo today (xschem); the specific staleness/testbench-vs-block/config gaps a shared `klt netlist` (or documented helper) would close are filed. | #55 |
 | S7 layout generation | None. `klt render` (visual check) and `klt layout-metrics` (area/utilization) exist but there is no generator — the design spike surveying frameworks and proposing a contract is itself still open. | #104 |
 | S8 DRC/LVS | Half shipped. `klt drc` is shipped (`docs/cli/drc.md`) with a curated sky130/gf180mcu deck subset (see that doc's "Coverage" section for fidelity caveats). LVS does not exist. | #54 (LVS) |
-| S9 extraction | None. Bundled with LVS in the same friction issue and, per that issue's curator note, likely the same engine (`pya.LayoutToNetlist`). | #54 |
+| S9 extraction | Shipped. `klt extract` produces a schematic-equivalent netlist (devices + connectivity, sky130/gf180mcu) independently of #54 (LVS's device-matching engine decision, closed). What remains gapped is RC-parasitic extraction — tracked separately by #216 (decision, recorded) / #217 (implementation, unscheduled); see `.claude/skills/design-extraction/SKILL.md`. | #216/#217 (RC parasitics) |
 | S10 simulation across corners | Mostly shipped. `klt sim` (#96) covers scalar `.meas`-based corner sweeps per the accepted spike. Sequence/waveform measurements (jitter, cycle-to-cycle, TIE) beyond scalar reduction are not covered. | #56 (waveform post-processing) |
 | S11 signoff report | None. No tool aggregates `klt drc`/`klt sim` (and future LVS/extraction) JSON into one signoff artifact. | No friction issue filed yet. |
 
