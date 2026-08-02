@@ -12,6 +12,7 @@ from .. import __version__
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
+    draw_cmd,
     drc_cmd,
     extract_cmd,
     gen_cmd,
@@ -410,6 +411,52 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     gen_compose_parser.set_defaults(func=gen_compose_cmd.run)
+
+    draw_parser = subparsers.add_parser(
+        "draw",
+        help="write a primitive GDSII/OASIS stream from a JSON shape description",
+        description=(
+            "Write a GDSII/OASIS stream verbatim from a JSON description of "
+            "polygons and labels on explicit (layer, datatype) pairs. The "
+            "deliberately-dumb write-side counterpart to the read-side verbs: "
+            "no PDK awareness and no rule checking -- so a DRC flow's negative "
+            "case (a known-bad fixture that must come back flagged) can be "
+            "produced with klt alone, along with minimal deck-bug reproducers "
+            "and layer-map sanity checks. Unlike `klt gen`, it will happily "
+            "emit rule-violating geometry; every response is stamped with a "
+            "loud not-design-legal warning. See docs/cli/draw.md for the "
+            "request/response contract. Runs fully headless via klayout.db -- "
+            "no GUI, no Qt."
+        ),
+    )
+    draw_parser.add_argument(
+        "--params",
+        default=None,
+        help=(
+            "shape/label description as a path to a JSON file, or an inline "
+            'JSON object (e.g. \'{"shapes": [{"layer": [66, 20], '
+            '"rect_um": [0, 0, 1, 0.15]}]}\'); required'
+        ),
+    )
+    draw_parser.add_argument(
+        "--cell-name",
+        dest="cell_name",
+        default=None,
+        help="name for the written top cell (default: TOP)",
+    )
+    draw_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="output GDS/OASIS path (default: <cell_name>.gds)",
+    )
+    draw_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    draw_parser.set_defaults(func=draw_cmd.run)
 
     sim_parser = subparsers.add_parser(
         "sim",
