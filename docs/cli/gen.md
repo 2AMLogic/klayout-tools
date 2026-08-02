@@ -111,7 +111,7 @@ all — output for the default case is unchanged.
 
 | `params` field | Type   | Default            | Description |
 | -------------- | ------ | ------------------ | ----------- |
-| `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact). |
+| `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
 | `l_um`         | double | `0.28`             | Gate length (µm). Must be `> 0`; below `0.28`um risks violating a target PDK's poly-width or S/D metal-spacing rule (flagged via `drc_hints.notes`, not rejected). |
 | `fingers`      | int    | `1`                | Gate fingers per unit device. Must be `>= 1`. |
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
@@ -197,7 +197,7 @@ automatically-sized ring already draws its own well tie regardless of
 
 | `params` field    | Type   | Default | Description |
 | ------------------ | ------ | ------- | ----------- |
-| `w_um`             | double | `0.42`  | Unit device width (µm). Must be `>= 0.42`. |
+| `w_um`             | double | `0.42`  | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
 | `l_um`             | double | `0.28`  | Gate length (µm). Must be `> 0`. |
 | `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. |
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
