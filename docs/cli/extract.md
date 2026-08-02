@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -37,6 +37,19 @@ two disagree, this document (and the code) win.
   extra `R`/`C` cards in the written netlist and a `parasitics` block in the
   JSON. When omitted, the output is byte-identical to a schematic-equivalent
   extraction. See "Parasitic (RC) extraction" below.
+- `--top-cell-pins` — optional, off by default. Promote **only** labels drawn
+  directly in the top cell to top-level pins. Because extraction is flat
+  (`begin_shapes_rec`), the default behaviour promotes *every* named net to a
+  pin — including nets that are named only because a label sits inside an
+  instanced sub-cell, which are ordinary internal nodes once instanced (issue
+  #291). With this flag such a below-top label keeps its net *name* but is not
+  forced to a pin, so instancing a verified sub-cell no longer leaks its port
+  labels out as spurious parent pins. Independent of the flag, a `warnings`
+  entry names any net whose promotion came from a label found below the top
+  cell — so the promotion is always visible rather than silently inferred from
+  an unexpected pin count. A flat layout (no instances), or any layout whose
+  pin labels all live in the top cell, is byte-for-byte unchanged. See
+  "Top-cell-only pin promotion" below.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -335,6 +348,43 @@ yet extract, and track the omission separately, until either the device
 class is added to the deck or a broader detection mechanism (e.g. a
 deck-declarable "device-marker layer" list, tracked as a possible follow-up)
 lands.
+
+## Top-cell-only pin promotion (`--top-cell-pins`, #291)
+
+Extraction ends by turning named nets into the top circuit's `.SUBCKT` pins
+(KLayout's `Netlist.make_top_level_pins()`). Because extraction is flat, "named
+net" includes any net that is named only because a label sits inside an
+**instanced sub-cell** — labels that were that sub-cell's own port names when it
+was checked standalone, and are ordinary internal nodes once it is instanced.
+Left unqualified, those sub-cell labels leak out as spurious **parent** pins, so
+composing a verified sub-cell into a larger cell (the normal hierarchical-reuse
+story) forces the reference netlist in a downstream `klt lvs` to declare those
+internal nodes as ports just to make pin counts match.
+
+`--top-cell-pins` changes which labels are allowed to promote: only labels drawn
+**directly in the top cell** become pins. A net named solely by a label found
+below an instance boundary keeps its net *name* (still useful in the written
+SPICE and in `nets[]`) but is **not** promoted to a pin — it stays the internal
+node it actually is once instanced.
+
+How the two sets are distinguished: the strings on each label layer drawn
+directly in the top cell (`Cell.shapes`) versus the full recursive flatten
+(`Cell.begin_shapes_rec`); a string present recursively but never directly in
+the top cell is a below-top label. A net's global/substrate name (from
+`connect_global`, not a drawn text) is never a below-top label, so the substrate
+pin is never affected.
+
+**Always** — with or without the flag — a `warnings` entry names any net whose
+pin promotion came from a below-top label, so the behaviour is visible rather
+than something you deduce from an unexpected pin count. Without the flag the
+warning reports the promotion (default behaviour is unchanged, so existing
+output is byte-for-byte identical); with the flag it reports that the net was
+kept internal.
+
+A flat layout (no instances), or any layout whose pin labels all live in the top
+cell, has an empty below-top set: `--top-cell-pins` is then a no-op and no
+warning fires. `klt lvs` exposes the same control as the `layout.top_cell_pins`
+request field (see [`docs/cli/lvs.md`](lvs.md)).
 
 ## PDK resolution
 
@@ -659,7 +709,7 @@ exit codes).
 | `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; and a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above), independent of what this layout happens to contain. Both registered decks currently report `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]`. Note the trailing `"resistor"` is a role token, not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
-| `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, or the unmodelled-device-geometry heuristic below). Always present, empty when clean. |
+| `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash. |

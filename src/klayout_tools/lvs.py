@@ -518,12 +518,22 @@ def _resolve_layout(
         if not deck_name:
             raise LvsError("request.layout.deck is required when layout.file is given")
 
+        # Issue #291: `top_cell_pins` keeps nets named only by a label inside an
+        # instanced sub-cell internal, instead of promoting them to top-level
+        # pins the reference netlist would then have to declare as ports. LVS is
+        # topological, so the emitted extraction warning is not surfaced here
+        # (the flag is the fix); the pin counts simply match without polluting
+        # the reference interface.
+        top_cell_pins_only = bool(layout_spec.get("top_cell_pins", False))
         try:
             # LVS is topological -- no parasitics_deck, so the 5th return
             # (parasitic_nets) is always None here and is ignored.
             netlist, top_cell_name, _dbu_um, _warnings, _parasitics = (
                 extract_netlist_from_layout(
-                    layout_file, deck_name, top=layout_spec.get("top")
+                    layout_file,
+                    deck_name,
+                    top=layout_spec.get("top"),
+                    top_cell_pins_only=top_cell_pins_only,
                 )
             )
         except ExtractError as exc:
