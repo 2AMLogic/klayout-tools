@@ -73,6 +73,16 @@ DEFAULT_TIMEOUT_S = 120
 #: docstring and the spike's engine survey for why.
 SUPPORTED_ENGINES = ("ngspice",)
 
+#: Recognised values for the optional ``request.netlist_source`` field --
+#: caller-declared provenance of ``request.netlist``, distinguishing a
+#: pre-layout schematic-level netlist (S6 in the stage graph) from a
+#: post-layout netlist extracted from the laid-out design (S9). Mirrors the
+#: caller-declares-intent pattern already used for ``engine``/``backend``
+#: rather than trying to auto-detect provenance from the netlist file itself
+#: (fragile -- a schematic and an extracted netlist can look syntactically
+#: identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
+SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
+
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
 #: sequentially in-process (the original behaviour). ``local-parallel`` fans
 #: the same expanded corner list across a bounded local worker pool (Epic
@@ -290,6 +300,13 @@ def run_sim(
     if not os.path.isfile(netlist_path):
         raise SimError(f"netlist not found: {netlist_path}")
 
+    netlist_source = request.get("netlist_source")
+    if netlist_source is not None and netlist_source not in SUPPORTED_NETLIST_SOURCES:
+        raise SimError(
+            f"unsupported netlist_source '{netlist_source}' "
+            f"(supported: {', '.join(SUPPORTED_NETLIST_SOURCES)})"
+        )
+
     corners_spec = request.get("corners") or {}
     models = request.get("models") or {}
     models_lib: str | None = None
@@ -355,6 +372,19 @@ def run_sim(
     else:
         status = "pass"
 
+    environment: dict[str, Any] = {
+        "engine": engine,
+        "engine_version": engine_version,
+        "models_lib": models_lib,
+        "models_lib_sha256": _sha256_file(models_lib),
+        "netlist_sha256": _sha256_file(netlist_path),
+    }
+    if netlist_source is not None:
+        # Additive/optional: only present when the request declares it, so
+        # existing consumers of a request that omits netlist_source see an
+        # unchanged environment block (see docs/cli/sim.md).
+        environment["netlist_source"] = netlist_source
+
     return {
         "schema_version": SCHEMA_VERSION,
         "netlist": netlist_ref,
@@ -363,13 +393,7 @@ def run_sim(
         "passed": passed,
         "failed": failed,
         "errored": errored,
-        "environment": {
-            "engine": engine,
-            "engine_version": engine_version,
-            "models_lib": models_lib,
-            "models_lib_sha256": _sha256_file(models_lib),
-            "netlist_sha256": _sha256_file(netlist_path),
-        },
+        "environment": environment,
         "measurements": measurements_rollup,
         "corners": corners,
     }

@@ -65,7 +65,10 @@ Suggested working shape (not a shipped contract):
   fast-loop exit for iterating sizing, but does **not** retire the pipeline
   stage — the vision sentence's "simulation-verified" is only satisfied by a
   post-extraction (S9 -> S10) pass, per the design doc's S10 row. Don't let a
-  clean pre-layout run get reported as final.
+  clean pre-layout run get reported as final. See
+  `.claude/skills/design-extraction/SKILL.md`'s "Post-layout re-verification
+  workflow" for how to re-run this same testbench against the extracted
+  netlist (`klt sim`'s `netlist_source` field).
 
 ## Applicable `klt` verbs
 

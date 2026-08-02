@@ -209,6 +209,23 @@ def test_run_sim_measurement_missing_fields_raises(tmp_path):
         sim.run_sim(str(request))
 
 
+def test_run_sim_netlist_source_invalid_value_raises(tmp_path):
+    # Per the JSON contract's error shape (docs/json-contract.md), an
+    # unrecognized netlist_source is a loud application error (SimError,
+    # exit 1) -- never silently ignored or coerced.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "netlist_source": "post-layout",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="unsupported netlist_source"):
+        sim.run_sim(str(request))
+
+
 # --------------------------------------------------------------------------- #
 # `.meas op` rejection -- ngspice has no `.MEASURE OP` analysis type (#205)
 # --------------------------------------------------------------------------- #
@@ -784,6 +801,52 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     (corner,) = report["corners"]
     assert corner["measurements"][0]["value"] == 1.0
     assert corner["measurements"][0]["status"] == "pass"
+
+
+@pytest.mark.parametrize("netlist_source", ["schematic", "extracted"])
+def test_run_sim_stubbed_netlist_source_echoed_in_environment(
+    tmp_path, monkeypatch, netlist_source
+):
+    # request.netlist_source, when present and valid, is echoed verbatim
+    # into environment.netlist_source (see docs/cli/sim.md's "Post-layout
+    # verification" section) -- this is how a caller distinguishes a
+    # pre-layout (S6) sim pass from a post-layout (S9) one.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "netlist_source": netlist_source,
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["environment"]["netlist_source"] == netlist_source
+
+
+def test_run_sim_stubbed_netlist_source_absent_omits_environment_key(
+    tmp_path, monkeypatch
+):
+    # Omitting netlist_source is unchanged, backward-compatible behavior:
+    # no netlist_source key appears in environment at all (not null, not
+    # an empty string) and every other field/behavior is unaffected.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert "netlist_source" not in report["environment"]
+    assert report["status"] == "pass"
 
 
 def _stripped_report(report: dict) -> dict:

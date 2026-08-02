@@ -222,6 +222,37 @@ per declared variable, in `variables[].index` order. Waveform data is never
 inlined into the response — only `artifacts.raw` (the rawfile itself) and
 `artifacts.waveform` (its parsed JSON) paths are.
 
+## Post-layout verification (`netlist_source`)
+
+`request.netlist_source` (optional, `"schematic"` | `"extracted"`) lets a
+caller declare which side of the design loop a given `netlist` represents. It
+is a plain data field — `klt sim` never tries to infer provenance from the
+netlist file itself (a schematic-level netlist and one extracted from a
+laid-out design can be syntactically indistinguishable), so the caller states
+it explicitly, the same pattern already used for `engine`/`backend`. When
+provided, it is echoed back verbatim in the response's
+`environment.netlist_source`; when omitted, `environment` has no such key and
+every other field is unaffected — this is an additive, backward-compatible
+change.
+
+The intended use is the post-layout re-verification pass: after Loop B
+converges (DRC/LVS clean), run `klt extract` on the layout and re-run the
+*same* testbench/corner-matrix request — same stimuli, same measurement
+limits — against the extracted netlist, this time with
+`netlist_source: "extracted"`. Comparing that run's `environment` block
+against the earlier `netlist_source: "schematic"` run (or a request that
+omitted the field, treated as pre-layout by convention) is how a caller
+distinguishes "simulation-verified pre-layout" from "simulation-verified
+post-layout" results for the same design. `klt sim` applies no extra
+pass/fail gating based on this field — a corner matrix run with
+`netlist_source: "extracted"` passes or fails on exactly the same per-corner
+measurement limits as any other run. For the full workflow (why this matters,
+how it fits the extract→sim handoff, and what it does and does not prove
+before RC-parasitic extraction lands) see
+[`.claude/skills/design-extraction/SKILL.md`](../../.claude/skills/design-extraction/SKILL.md)
+and [`docs/design/design-pipeline.md`](../design/design-pipeline.md)'s S9/S10
+stages.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the schema
@@ -272,6 +303,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag. |
+| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 
 ### Response
 
@@ -289,7 +321,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
     "engine_version": "46",
     "models_lib": "/abs/path/corner.lib",
     "models_lib_sha256": "3ccce27a...",
-    "netlist_sha256": "71d273ab..."
+    "netlist_sha256": "71d273ab...",
+    "netlist_source": "extracted"
   },
   "measurements": [
     {
@@ -327,7 +360,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256.             |
+| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares it) `netlist_source`. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners, including the worst case and which corner produced it.                |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 
