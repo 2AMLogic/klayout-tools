@@ -73,7 +73,8 @@ With `--per-layer`, `layers` is a list instead of `null`:
     "area_um2": 2.0,
     "density": 0.2222222222222222,
     "polygon_count": 2,
-    "vertex_count": 8
+    "vertex_count": 8,
+    "annotation": false
   },
   {
     "layer": 2,
@@ -82,7 +83,8 @@ With `--per-layer`, `layers` is a list instead of `null`:
     "area_um2": 0.125,
     "density": 0.013888888888888888,
     "polygon_count": 1,
-    "vertex_count": 3
+    "vertex_count": 3,
+    "annotation": false
   }
 ]
 ```
@@ -123,6 +125,7 @@ All zero if the layout has no cells.
 | `density`       | number (float)   | `area_um2 / bbox_um area`; `0.0` if the bounding box has zero area.  |
 | `polygon_count` | integer          | Number of area-bearing shapes (boxes, polygons, paths).              |
 | `vertex_count`  | integer          | Total vertex count across those shapes.                              |
+| `annotation`    | boolean          | *(`layers[]` only)* `true` when `(layer, datatype)` falls in the reserved annotation range (see below). |
 
 ### Semantics and guarantees
 
@@ -147,6 +150,14 @@ All zero if the layout has no cells.
   they carry no drawn area or meaningful vertex count.
 - **Names.** OASIS supports named layers; plain GDSII typically does not, so
   `name` is usually `null` for GDSII inputs, matching `klt layers`.
+- **Reserved annotation layers.** `annotation` is `true` when the layer
+  number falls in **990-999 (any datatype)**, the range reserved for
+  floorplan reservations, out-of-scope regions, and black-box sub-cell
+  placeholders — see [`docs/cli/drc.md`](drc.md) → "Reserved annotation
+  layer" for the full rationale and cross-check (`(994, 0)` is the documented
+  single canonical pair when one value is wanted; the same reservation
+  applies to `klt drc`, `klt extract`, `klt layers`, and this command),
+  matching `klt layers`.
 
 ## Text format
 
@@ -165,11 +176,13 @@ density: 0.2361111111111111
 polygons: 3
 vertices: 11
 
-layer  datatype  name  area_um2  density              polygons  vertices
------  --------  ----  --------  -------------------  --------  --------
-    1         0  -          2.0  0.2222222222222222          2         8
-    2         0  -        0.125  0.013888888888888888        1         3
+layer  datatype  name  area_um2  density              polygons  vertices  annotation
+-----  --------  ----  --------  -------------------  --------  --------  ----------
+    1         0  -          2.0  0.2222222222222222          2         8  -
+    2         0  -        0.125  0.013888888888888888        1         3  -
 ```
+
+A layer whose `annotation` field is `true` renders as `yes` in the table.
 
 ## Exit codes and errors
 

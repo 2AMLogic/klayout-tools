@@ -41,21 +41,23 @@ def _print_text(report: dict) -> None:
             str(entry["datatype"]),
             entry["name"] if entry["name"] is not None else "-",
             str(entry["shapes"]),
+            "yes" if entry["annotation"] else "-",
             entry["path"] if entry["path"] is not None else "-",
         )
         for entry in layers
     ]
-    headers = ("layer", "datatype", "name", "shapes", "path")
+    headers = ("layer", "datatype", "name", "shapes", "annotation", "path")
     widths = [
         max(len(headers[col]), max(len(row[col]) for row in rows))
         for col in range(len(headers))
     ]
 
     def fmt(row: tuple[str, ...]) -> str:
-        # layer/datatype/shapes right-aligned (numeric), name/path left-aligned.
+        # layer/datatype/shapes/annotation right-aligned (numeric-ish),
+        # name/path left-aligned.
         return "  ".join(
             row[col].ljust(widths[col])
-            if col in (2, 4)
+            if col in (2, 5)
             else row[col].rjust(widths[col])
             for col in range(len(headers))
         )

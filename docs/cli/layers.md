@@ -29,9 +29,10 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "dbu_um": 0.001,
   "layer_count": 3,
   "layers": [
-    { "layer": 1,  "datatype": 0,  "name": "metal1", "shapes": 2 },
-    { "layer": 5,  "datatype": 0,  "name": "empty",  "shapes": 0 },
-    { "layer": 66, "datatype": 20, "name": null,     "shapes": 3 }
+    { "layer": 1,  "datatype": 0,  "name": "metal1", "shapes": 2, "annotation": false },
+    { "layer": 5,  "datatype": 0,  "name": "empty",  "shapes": 0, "annotation": false },
+    { "layer": 66, "datatype": 20, "name": null,     "shapes": 3, "annotation": false },
+    { "layer": 994, "datatype": 0, "name": null,     "shapes": 1, "annotation": true }
   ]
 }
 ```
@@ -54,6 +55,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `datatype` | integer          | Datatype number.                                                            |
 | `name`     | string \| null   | Layer name carried in the stream, or `null` for unnamed layers.             |
 | `shapes`   | integer          | Shape count summed across all cell **definitions** (see semantics below).   |
+| `annotation` | boolean        | `true` when `(layer, datatype)` falls in the reserved annotation range (see below). |
 
 ### Semantics and guarantees
 
@@ -69,6 +71,18 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 - **Names.** OASIS supports named layers; plain GDSII typically does not, so
   `name` is usually `null` for GDSII inputs. An empty layer name is normalised
   to `null` (never an empty string).
+- **Reserved annotation layers.** `annotation` is `true` when the layer
+  number falls in **990-999 (any datatype)**, the range reserved for
+  floorplan reservations, out-of-scope regions, and black-box sub-cell
+  placeholders — see [`docs/cli/drc.md`](drc.md) → "Reserved annotation
+  layer" for the full rationale and cross-check (`(994, 0)` is the documented
+  single canonical pair when one value is wanted; the same reservation
+  applies to `klt drc`, `klt extract`, `klt stats`, and this command). This
+  lets a reader distinguish "this is a floorplan reservation" from "this is
+  unrecognised real geometry" without opening the source that generated the
+  GDS. `annotation` reflects only the `(layer, datatype)` pair — it says
+  nothing about whether the layer actually carries shapes (`shapes` may be
+  `0` for a declared-but-empty annotation layer, same as any other layer).
 
 ## Text format
 
@@ -82,14 +96,15 @@ file: design.oas
 dbu_um: 0.001
 layers: 3
 
-layer  datatype  name    shapes
------  --------  ------  ------
-    1         0  metal1       2
-    5         0  empty        0
-   66        20  -            3
+layer  datatype  name    shapes  annotation
+-----  --------  ------  ------  ----------
+    1         0  metal1       2  -
+    5         0  empty        0  -
+   66        20  -            3  -
 ```
 
-Unnamed layers render as `-` in the table (and as `null` in JSON).
+Unnamed layers render as `-` in the table (and as `null` in JSON). A layer
+whose `annotation` field is `true` renders as `yes` in the table.
 
 ## Exit codes and errors
 
