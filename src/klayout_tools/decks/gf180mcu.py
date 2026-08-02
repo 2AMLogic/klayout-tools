@@ -644,12 +644,13 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #   the same magic tech file) -- a ~48x difference. A salicided p+ poly
 #   resistor therefore stays ordinary connected poly here (today's behaviour
 #   -- a short) rather than being reported with a 48x-too-large resistance.
-# - `Resistor` (62/0) is an exclusion for the same reason: it marks the
-#   high-sheet-rho `ppolyf_u_1k`/`_2k`/`_3k` flavours (1000/2000/3000 ohm/sq,
-#   selected upstream by a `POLY_RES` deck option this curated deck has no
-#   equivalent of). Upstream drops the whole shape (`not_interacting`); this
-#   deck subtracts it (`not`), which differs only for a marked segment the
-#   `Resistor` layer partially covers.
+# - `Resistor` (62/0) is an exclusion for `ppolyf_u`: it marks the
+#   high-sheet-rho `ppolyf_u_1k`/`_2k`/`_3k` flavours (1000/2000/3000 ohm/sq;
+#   see the `ppolyf_u_1k` entry immediately below, which now claims that
+#   marked geometry instead of leaving it an unmodelled short). Upstream
+#   drops the whole shape (`not_interacting`); this deck subtracts it
+#   (`not`), which differs only for a marked segment the `Resistor` layer
+#   partially covers.
 # - `res_exclude` (esd, fusewindow_d, polyfuse, diode_mk, drc_bjt, nat,
 #   mos_cap_mk, esd_mk, lvs_source, efuse_mk, plfuse, mvsd, mvpsd,
 #   ldmos_xtor, schottky_diode) is **not** modelled -- none of those layers
@@ -659,6 +660,51 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #   than upstream's `poly2.not(res_mk).not(plfuse)`; the two agree except on
 #   marked poly this deck does not recognise as a resistor, which stays
 #   ordinary connected poly here rather than being cut out of connectivity.
+#
+# `ppolyf_u_1k` (issue #299): the high-sheet-rho flavour `ppolyf_u`'s own
+# `excludes` above rules out. The official LVS deck's own `res_derivations.lvs`
+# derives it as one single region regardless of which of the three named
+# flavours a given fab run selects:
+#
+#     ppoly_exclude = poly_exclude.join(nplus)   # poly_exclude = comp.join(res_exclude)
+#     ppolyf_u_h    = poly2.and(sab).and(res_mk).and(resistor)
+#                          .not(dnwell).not(v5_xtor).not(dualgate).not(ppoly_exclude)
+#
+# and `res_extraction.lvs` then extracts *that same* `ppolyf_u_h` region three
+# separate ways, selected by a build-time `POLY_RES` deck option this curated
+# deck models no equivalent of -- **not** by any additional drawn geometry:
+#
+#     case POLY_RES
+#     when '1k'  extract_devices(resistor_with_bulk('ppolyf_u_1k', 1000, BResistor), ..)
+#     when '2k'  extract_devices(resistor_with_bulk('ppolyf_u_2k', 2000, BResistor), ..)
+#     when '3k'  extract_devices(resistor_with_bulk('ppolyf_u_3k', 3000, BResistor), ..)
+#     end
+#
+# i.e. a drawn `Resistor`-marked poly segment is geometrically identical
+# regardless of which of the three sheet-rho values it is meant to model --
+# the same "no per-instance layer marking distinguishes the option" situation
+# `EXTRACTION_DECK.capacitors`' MiM density note above already documents for
+# `POLY_RES`'s sibling `MIM_CAP` option. Wiring all three as separate
+# `ResistorDevice` entries would therefore have every one of them recognise
+# the *same* drawn shape and each cut it out of `poly` in turn -- three
+# duplicate `R` devices across one physical resistor, not three selectable
+# flavours a layout can actually distinguish between. So only **one** entry
+# is added here, using the PDK's own default: `gf180mcu.lvs` sets
+# `POLY_RES = $poly_res || '1k'` when the invoking flow does not override it,
+# and (like the MiM density default cited above) this is independently
+# confirmed as the default *this specific PDK build* ships by open_pdks'
+# `gf180mcu.json` variant-description string, `"...2fF MiM + 1k high sheet
+# rho poly"`. The `_2k`/`_3k` flavours remain deliberately unmodelled (today's
+# short, not a guessed-wrong resistance) -- picking up either of them
+# requires a deck-level option this curated deck does not have, tracked as a
+# known, explicit gap rather than a silent one (see #299's own "Non-goals").
+#
+# Unlike the base `ppolyf_u` entry, `ppolyf_u_h` above does **not** `.and()`
+# `Pplus`: the official H-POLY-RES derivation recognises this flavour off
+# `SAB`/`RES_MK`/`Resistor` alone (narrowed only by `not(comp)`/`not(nplus)`/
+# `not(dnwell)`), so `ppolyf_u_1k` below mirrors that by requiring `SAB` +
+# `Resistor` (its own high-sheet-rho marker) without also requiring `Pplus`,
+# deliberately not adding a stricter condition the real deck does not apply.
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -738,6 +784,26 @@ EXTRACTION_DECK = ExtractionDeck(
                 (22, 0),  # Comp   -- a marked gate is a transistor
                 (32, 0),  # Nplus  -> npolyf_* devices, not this one
                 (62, 0),  # Resistor -> ppolyf_u_{1k,2k,3k} high-sheet-rho poly
+                (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
+            ),
+            bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+        ),
+        # High-sheet-rho flavour (issue #299), see the module docstring's
+        # `ppolyf_u_1k` note above for the full derivation and why only the
+        # PDK's own '1k' default (of the three POLY_RES-selectable options)
+        # is wired here.
+        ResistorDevice(
+            name="ppolyf_u_1k",  # gf180mcu_fd_pr__ppolyf_u_1k (POLY_RES='1k' default)
+            body=(30, 0),  # Poly2
+            marker=(110, 5),  # RES_MK
+            sheet_rho_ohm_sq=1000.0,  # res_extraction.lvs 'when 1k', see above
+            requires=(
+                (49, 0),  # SAB      -- unsalicided, same as the base ppolyf_u
+                (62, 0),  # Resistor -- the high-sheet-rho marker itself
+            ),
+            excludes=(
+                (22, 0),  # Comp   -- a marked gate is a transistor
+                (32, 0),  # Nplus  -> npolyf_* devices, not this one
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub

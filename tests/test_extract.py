@@ -1173,6 +1173,64 @@ def test_gf180mcu_resistor_bulk_terminal_ties_to_substrate_global(tmp_path):
     assert device["nets"]["w"] == get_extraction_deck("gf180mcu").substrate_net
 
 
+# --------------------------------------------------------------------------- #
+# A deck's other selectable sheet-rho poly-resistor flavours (issue #299):
+# gf180mcu's `Resistor`-marked high-sheet-rho poly and sky130's `rpm`/`urpm`
+# precision-implant poly resistors, previously pure exclusions on the base
+# flavour and therefore an unmodelled short when actually drawn.
+# --------------------------------------------------------------------------- #
+
+
+def test_gf180mcu_high_sheet_rho_poly_extracts_as_ppolyf_u_1k(tmp_path):
+    """A poly segment additionally marked with gf180mcu's `Resistor` (62/0)
+    high-sheet-rho layer -- on top of the base flavour's own `RES_MK`/`SAB`
+    -- now extracts as `ppolyf_u_1k` (1000 ohm/sq, the PDK's own
+    `POLY_RES='1k'` default) instead of collapsing to a short."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "ppolyf_u_1k.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "ppolyf_u_1k.spice"))
+
+    assert report["device_counts"] == {"ppolyf_u_1k": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "ppolyf_u_1k"
+    assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * 1000.0)
+    assert device["nets"]["w"] == get_extraction_deck("gf180mcu").substrate_net
+
+
+@pytest.mark.parametrize(
+    ("mask", "device_class", "sheet_rho"),
+    [((86, 20), "res_high_po", 319.8), ((79, 20), "res_xhigh_po", 2000.0)],
+)
+def test_sky130_precision_implant_mask_extracts_own_flavour(
+    tmp_path, mask, device_class, sheet_rho
+):
+    """A poly segment marked with sky130's `rpm`/`urpm` precision-implant
+    masks *and* the `psdm` P+ implant layer both wired flavours also
+    require now extracts as `res_high_po`/`res_xhigh_po` (319.8/2000
+    ohm/sq) instead of collapsing to a short."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "sky130",
+            extra=(
+                (mask[0], mask[1], _RES_MARKED.enlarged(200, 200)),
+                (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+            ),
+        ),
+        tmp_path / f"{device_class}.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / f"{device_class}.spice"))
+
+    assert report["device_counts"] == {device_class: 1}
+    (device,) = report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * sheet_rho)
+    assert device["nets"]["w"] == get_extraction_deck("sky130").substrate_net
+
+
 @pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
 def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
     """Edge case from the issue: a resistor-*shaped* polygon carrying no
@@ -1194,10 +1252,16 @@ def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
 
 def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_path):
     """sky130's `rpm`/`urpm` masks select the 319.8 ohm/sq and 2 kohm/sq poly
-    resistor flavours this curated deck does not model. Such a segment must
-    NOT be reported as the 48.2 ohm/sq generic device (a ~6.6x/~41x wrong
-    resistance passing LVS with high confidence is worse than the
-    known-unmodelled short)."""
+    resistor flavours (`res_high_po`/`res_xhigh_po`, issue #299). Such a
+    segment must NOT be reported as the 48.2 ohm/sq generic device (a
+    ~6.6x/~41x wrong resistance passing LVS with high confidence is worse
+    than the known-unmodelled short) -- and here, with no `psdm` P+ implant
+    layer drawn (both wired high-sheet-rho flavours also require it, see
+    `test_sky130_precision_implant_mask_extracts_own_flavour`), it doesn't
+    match either high-sheet-rho flavour either, so nothing extracts at all.
+    Because the shape *does* carry a resistor marker this deck recognises in
+    principle (`poly.res` + `rpm`/`urpm`), it must be flagged by the
+    'deck-coverage gap' warning, not the plain unmarked-geometry one."""
     for mask in ((86, 20), (79, 20)):  # rpm, urpm
         path = _write_gds(
             _make_poly_resistor_layout(
@@ -1209,12 +1273,18 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
             path, "sky130", output=str(tmp_path / f"rpm_{mask[0]}.spice")
         )
         assert report["device_counts"] == {}
+        assert len(report["warnings"]) == 1
+        assert "deck-coverage gap" in report["warnings"][0]
+        assert "carry no resistor-marker layer at all" not in report["warnings"][0]
 
 
 def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
-    """gf180mcu's `ppolyf_u` requires SAB (salicide block). Without it the
-    real device is the 48x-lower-resistance salicided `ppolyf_s`, which this
-    curated deck does not model -- so nothing may be extracted."""
+    """gf180mcu's `ppolyf_u`/`ppolyf_u_1k` both require SAB (salicide
+    block). Without it the real device is the 48x-lower-resistance salicided
+    `ppolyf_s`, which this curated deck does not model -- so nothing may be
+    extracted, but the shape still carries a resistor marker (`RES_MK`) this
+    deck recognises in principle, so it is flagged by the 'deck-coverage
+    gap' warning (issue #299), not the plain unmarked-geometry one."""
     layout = _make_poly_resistor_layout("gf180mcu")
     # Erase the SAB layer, leaving Pplus + RES_MK + Poly2 in place.
     layout.clear_layer(layout.layer(49, 0))
@@ -1222,6 +1292,9 @@ def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_pa
 
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "salicided.spice"))
     assert report["device_counts"] == {}
+    assert len(report["warnings"]) == 1
+    assert "deck-coverage gap" in report["warnings"][0]
+    assert "carry no resistor-marker layer at all" not in report["warnings"][0]
 
 
 def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
@@ -1266,6 +1339,60 @@ def test_unmarked_poly_bar_triggers_unmodelled_device_warning(tmp_path, deck_nam
     assert len(report["warnings"]) == 1
     assert _UNMODELLED_WARNING_SNIPPET in report["warnings"][0]
     assert "docs/cli/extract.md" in report["warnings"][0]
+
+
+def _make_mixed_unmodelled_poly_layout() -> kdb.Layout:
+    """Two independent resistor-shaped `sky130` poly bars, well clear of
+    each other, each contacted at two separate points and touching no MOS
+    gate: one carries no resistor marker at all (the #288 signature), the
+    other carries `poly.res` + `rpm` but not `psdm` -- a marker this deck
+    recognises, just not narrowed to any wired flavour (the #299
+    "deck-coverage gap" signature). Both must be flagged, each under its
+    own distinct warning string (issue #299)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(x_offset: int, layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box.moved(x_offset, 0))
+
+    def label(
+        x_offset: int, layer: int, datatype: int, text: str, x: int, y: int
+    ) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x + x_offset, y))
+        )
+
+    for x_offset, marker in ((0, None), (30000, (86, 20))):  # rpm on the 2nd bar
+        draw(x_offset, 66, 20, _RES_BAR)  # poly.drawing
+        if marker is not None:
+            draw(x_offset, 66, 13, _RES_MARKED)  # poly.res -- deck-recognised marker
+            draw(x_offset, marker[0], marker[1], _RES_MARKED.enlarged(200, 200))
+        for x, name in ((1500, "A"), (10500, "B")):
+            draw(x_offset, 66, 44, kdb.Box(x - 100, 400, x + 100, 600))
+            draw(x_offset, 67, 20, kdb.Box(x - 400, 200, x + 400, 800))
+            label(x_offset, 67, 5, f"{name}{x_offset}", x, 500)
+
+    return layout
+
+
+def test_unmodelled_poly_warning_distinguishes_marked_from_unmarked(tmp_path):
+    """A layout with both signatures at once produces *two* separate
+    warnings, each with its own count and phrasing -- unmarked geometry
+    (the #288 case) is never conflated with a marked-but-unrecognised
+    deck-coverage gap (issue #299)."""
+    path = _write_gds(_make_mixed_unmodelled_poly_layout(), tmp_path / "mixed.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mixed.spice"))
+
+    assert report["device_count"] == 0
+    assert len(report["warnings"]) == 2
+    unmarked = [
+        w for w in report["warnings"] if "carry no resistor-marker layer at all" in w
+    ]
+    coverage_gap = [w for w in report["warnings"] if "deck-coverage gap" in w]
+    assert len(unmarked) == 1
+    assert "1 poly-layer shape" in unmarked[0]
+    assert len(coverage_gap) == 1
+    assert "1 poly-layer shape" in coverage_gap[0]
 
 
 def _make_poly_gate_strap_layout(top_name: str = "TOP") -> kdb.Layout:

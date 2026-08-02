@@ -318,18 +318,23 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # corpus precedent here; it is a curated choice consistent with the
 # datatype-5 ".pin" convention every other label layer in this deck follows.
 #
-# Drawn resistors (#222). Additional layer numbers, same sources as above:
+# Drawn resistors (#222, extended by #299). Additional layer numbers, same
+# sources as above:
 #
 #     poly.res    66/13  (the poly resistor-ID mark; named "poly.res - 66/13"
 #                         in sky130A.lyp's layer table, and defined as
 #                         `poly_res = polygons(66, 13)` in sky130.lvs)
 #     rpm         86/20  (300 ohm/sq precision-resistor implant mask)
 #     urpm        79/20  (2 kohm/sq precision-resistor implant mask)
+#     psdm        94/20  (P+ implant -- `polygons(94, 20)` in sky130.lvs;
+#                         gates the two higher-sheet-rho flavours below,
+#                         not otherwise modelled elsewhere in this deck)
 #
-# Provenance for the one resistor device modelled below is the *official*
+# Provenance for the resistor devices modelled below is the *official*
 # sky130 KLayout LVS deck, `sky130/klayout/lvs/sky130.lvs` from the same
 # open_pdks source cited at the top of this module (as installed by volare
-# under `libs.tech/klayout/lvs/sky130.lvs`), which derives and extracts it as:
+# under `libs.tech/klayout/lvs/sky130.lvs`), which derives and extracts the
+# generic (`res_generic_po`) flavour as:
 #
 #     poly_res_exclude = diff.or(diff_res).or(diff_cut).or(tap).or(pwbm)
 #                            .or(hvtr).or(hvtp).or(lvtn).or(li_cut)
@@ -357,17 +362,55 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #   documents for DRC applies to extraction too. A poly-res segment marked
 #   with one of those unmodelled layers extracts as this generic 48.2 ohm/sq
 #   device rather than being excluded.
-# - `rpm`/`urpm` ARE modelled, deliberately: they mark sky130's *other* poly
-#   resistor flavours (`sky130_fd_pr__res_high_po_*`, 319.8 ohm/sq, and
-#   `sky130_fd_pr__res_xhigh_po_*`, 2 kohm/sq -- both fixed-width devices with
-#   per-width device classes and a length tolerance this curated deck does not
-#   model). Excluding them leaves such a resistor as ordinary connected poly
-#   (today's behaviour -- a short) instead of reporting it with a ~6.6x/~41x
-#   wrong resistance, which would pass LVS with high confidence.
+# - `rpm`/`urpm` are each *also* now their own wired `ResistorDevice` entry
+#   below (issue #299 -- previously they were pure exclusions on
+#   `res_generic_po`, leaving the shapes they mark an unmodelled short; see
+#   the `res_high_po`/`res_xhigh_po` note further below), so `res_generic_po`
+#   itself still excludes both -- `rpm`/`urpm`-marked poly is a *different*
+#   device class, never this 48.2 ohm/sq generic one.
 # - The terminal ("C") region is `poly` minus the recognised body rather than
 #   upstream's `poly.not(poly_res)...`; the two agree except on marked poly
 #   that this deck does *not* recognise as a resistor, which stays ordinary
 #   connected poly here rather than being cut out of connectivity entirely.
+#
+# `res_high_po`/`res_xhigh_po` (issue #299): sky130's *other* two poly
+# resistor flavours, each keyed off the same `poly.res` marker as
+# `res_generic_po` plus one of the two precision-implant masks above. The
+# official `sky130.lvs` derives both off one shared implant-gated base
+# (`poly_res_init = poly.and(poly_res).not(poly_res_exclude)`, the same
+# exclusion set `res_generic_po` above already transcribes) and its own P+
+# implant mask, `psdm` (94/20, `polygons(94, 20)` in the same layer table --
+# not otherwise modelled by this curated deck, added here only as an
+# additional `requires` layer):
+#
+#     poly_res_300 = poly_res_init.and(psdm).and(rpm).not(urpm)
+#     poly_res_2k  = poly_res_init.and(psdm).not(rpm).and(urpm)
+#
+# `rpm`/`urpm` are mutually exclusive by construction here (each requires the
+# other's absence), so the two device classes below recognise disjoint
+# geometry -- unlike gf180mcu's `POLY_RES`-selected flavours (see
+# `gf180mcu.py`'s `ppolyf_u_1k` note), a real drawn `sky130` resistor's
+# `rpm` vs. `urpm` choice *is* distinguishable from the layout alone.
+# `sky130.lvs` then further splits each by one of five fixed lengths
+# (0.35/0.69/1.41/2.85/5.73 um, `poly_high_0p35`, etc.) into per-length
+# device classes -- but every one of those five extracts with the *same*
+# sheet-rho value (319.8 or 2000 ohm/sq respectively; confirmed directly
+# against `sky130.lvs`'s own `extract_devices` calls, e.g.
+# `resistor_with_bulk("sky130_fd_pr__res_high_po_0p35", 319.8, BResistor)`
+# through `..._5p73`, all 319.8), so the length split changes only the
+# extracted *device-class name* (presumably for downstream SPICE-model
+# binding to a fixed-length parasitic-end-effect correction), not the sheet
+# resistance `R = L / W * sheet_rho` computes from the segment's own drawn
+# geometry. This curated deck's `ResistorDevice` has no fixed-length-variant
+# concept (the same "per-width device classes and a length tolerance this
+# curated deck does not model" limitation already flagged above), so both
+# entries below are wired as one flat device class each, independent of the
+# segment's drawn length -- giving the correct resistance for any length,
+# just not upstream's own per-length class name/model-binding split.
+# Both entries also extract `resistor_with_bulk` (bulk tied to `sub`, the
+# native P-substrate) in the official deck, hence `bulk_to_substrate=True`
+# below -- the same substrate-global approximation the NMOS body terminal and
+# gf180mcu's `ppolyf_u` already carry.
 EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
@@ -420,11 +463,11 @@ EXTRACTION_DECK = ExtractionDeck(
             area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
         ),
     ),
-    # Drawn poly precision resistor (issue #222): the generic
-    # `sky130_fd_pr__res_generic_po` device -- a segment of poly.drawing
-    # covered by the poly.res resistor-ID marker. See the module comment
-    # above for why `rpm`/`urpm` (the other, higher-sheet-rho poly resistor
-    # flavours) are excluded rather than mis-extracted.
+    # Drawn poly precision resistors (issue #222, extended by #299): the
+    # generic `sky130_fd_pr__res_generic_po` device -- a segment of
+    # poly.drawing covered by the poly.res resistor-ID marker -- plus the two
+    # higher-sheet-rho flavours `rpm`/`urpm` additionally select. See the
+    # module comment above for the full derivation/provenance of all three.
     resistors=(
         ResistorDevice(
             name="res_generic_po",  # sky130_fd_pr__res_generic_po
@@ -437,6 +480,38 @@ EXTRACTION_DECK = ExtractionDeck(
                 (86, 20),  # rpm  -> sky130_fd_pr__res_high_po_*  (319.8 ohm/sq)
                 (79, 20),  # urpm -> sky130_fd_pr__res_xhigh_po_* (2 kohm/sq)
             ),
+        ),
+        ResistorDevice(
+            name="res_high_po",  # sky130_fd_pr__res_high_po_* (lengths merged)
+            body=(66, 20),  # poly.drawing
+            marker=(66, 13),  # poly.res
+            sheet_rho_ohm_sq=319.8,  # sky130.lvs res_high_po_* extract_devices calls
+            requires=(
+                (94, 20),  # psdm -- P+ implant, see the module comment above
+                (86, 20),  # rpm  -- 300 ohm precision-resistor implant mask
+            ),
+            excludes=(
+                (65, 20),  # diff.drawing -- a marked gate is a transistor
+                (65, 44),  # tap.drawing
+                (79, 20),  # urpm -- mutually exclusive with rpm, see above
+            ),
+            bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+        ),
+        ResistorDevice(
+            name="res_xhigh_po",  # sky130_fd_pr__res_xhigh_po_* (lengths merged)
+            body=(66, 20),  # poly.drawing
+            marker=(66, 13),  # poly.res
+            sheet_rho_ohm_sq=2000.0,  # sky130.lvs res_xhigh_po_* extract_devices calls
+            requires=(
+                (94, 20),  # psdm -- P+ implant, see the module comment above
+                (79, 20),  # urpm -- 2 kohm precision-resistor implant mask
+            ),
+            excludes=(
+                (65, 20),  # diff.drawing -- a marked gate is a transistor
+                (65, 44),  # tap.drawing
+                (86, 20),  # rpm -- mutually exclusive with urpm, see above
+            ),
+            bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
         ),
     ),
 )

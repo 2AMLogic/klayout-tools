@@ -87,10 +87,12 @@ claims the geometry drawn on it: geometry for a device class the deck does
 not (yet) implement is absorbed into ordinary interconnect -- a silent short
 between what should be distinct terminals -- rather than skipped or flagged
 (issue #288). ``warnings`` gains one narrowly-scoped heuristic diagnostic for
-the most common shape of this problem: see
-:func:`_detect_unmodelled_poly_bodies` and ``docs/cli/extract.md``'s "Known
-limitation: unmodelled device geometry" for the exact signature it looks
-for and its documented false-negative surface.
+the most common shape of this problem, split (issue #299) into a distinct
+string for "carries no declared resistor-marker layer at all" versus "carries
+a marker this deck knows about, but no declared ``ResistorDevice`` claims it"
+(a deck-coverage gap): see :func:`_detect_unmodelled_poly_bodies` and
+``docs/cli/extract.md``'s "Known limitation: unmodelled device geometry" for
+the exact signature it looks for and its documented false-negative surface.
 
 Verified compatible with ``klt sim``'s netlist convention (see
 ``docs/cli/sim.md`` -> "Netlist convention"): the written SPICE is a
@@ -937,6 +939,7 @@ def _detect_unmodelled_poly_bodies(
     contact: kdb.Region,
     nfet_gate: kdb.Region,
     pfet_gate: kdb.Region,
+    resistor_markers: kdb.Region | None = None,
 ) -> list[str]:
     """Flag ``poly`` connected components that no MOS gate extractor claims
     and that touch ``contact`` at two or more geometrically separate
@@ -971,33 +974,71 @@ def _detect_unmodelled_poly_bodies(
     ends of such a run are one merged polygon together with the gates
     themselves), never a candidate unmodelled-device body.
 
-    Returns a list with at most one warning string (empty when nothing is
-    flagged), naming how many components were flagged and pointing at the
-    documented limitation rather than guessing a device name.
+    ``resistor_markers`` (issue #299) is the union of every ``ResistorDevice``
+    marker layer this deck declares on ``poly`` (regardless of any
+    ``requires``/``excludes`` narrowing) -- the raw resistor-ID geometry, not
+    the narrower recognised-body region ``_resolve_resistors`` already cut
+    out. It distinguishes two different reasons a flagged component reaches
+    this heuristic at all: a component overlapping it carries a resistor
+    marker this deck *knows about* but whose ``requires``/``excludes``
+    conditions this specific segment did not satisfy (a **deck-coverage
+    gap** -- e.g. gf180mcu's ``RES_MK`` present without the ``SAB``/``Pplus``
+    combination any declared entry needs), versus a component that carries
+    none of this deck's resistor markers at all (an **unmarked** shape, the
+    original #288 case -- some other, entirely undeclared device class, or a
+    resistor with no marker drawn). ``None`` (the default) treats every
+    flagged component as unmarked, matching this function's behaviour before
+    #299.
+
+    Returns a list with up to two warning strings (empty when nothing is
+    flagged) -- at most one for unmarked shapes and one for marked-but-
+    unrecognised ones -- each naming how many components were flagged and
+    pointing at the documented limitation rather than guessing a device
+    name.
     """
     import klayout.db as kdb
 
     gate_regions = nfet_gate + pfet_gate
-    flagged = 0
+    markers = resistor_markers if resistor_markers is not None else kdb.Region()
+    unmarked = 0
+    marked_unrecognised = 0
     for component in poly.merged().each():
         candidate = kdb.Region(component)
         if not candidate.interacting(gate_regions).is_empty():
             continue
         contact_clusters = (candidate & contact).merged().count()
-        if contact_clusters >= _UNMODELLED_POLY_MIN_CONTACT_CLUSTERS:
-            flagged += 1
+        if contact_clusters < _UNMODELLED_POLY_MIN_CONTACT_CLUSTERS:
+            continue
+        if candidate.interacting(markers).is_empty():
+            unmarked += 1
+        else:
+            marked_unrecognised += 1
 
-    if flagged == 0:
-        return []
-    shape_word = "shape" if flagged == 1 else "shapes"
-    return [
-        f"{flagged} poly-layer {shape_word} not part of any recognised nfet/pfet "
-        "gate touch contact at 2+ separate points (the resistor-body "
-        "signature); this deck may not model the device class drawn here, and "
-        "its terminals have been absorbed into ordinary interconnect as an "
-        "unintended short -- see docs/cli/extract.md's 'Known limitation: "
-        "unmodelled device geometry'."
-    ]
+    warnings: list[str] = []
+    if unmarked:
+        shape_word = "shape" if unmarked == 1 else "shapes"
+        warnings.append(
+            f"{unmarked} poly-layer {shape_word} not part of any recognised nfet/pfet "
+            "gate touch contact at 2+ separate points (the resistor-body "
+            "signature) and carry no resistor-marker layer at all; this deck "
+            "may not model the device class drawn here, and its terminals "
+            "have been absorbed into ordinary interconnect as an unintended "
+            "short -- see docs/cli/extract.md's 'Known limitation: unmodelled "
+            "device geometry'."
+        )
+    if marked_unrecognised:
+        shape_word = "shape" if marked_unrecognised == 1 else "shapes"
+        warnings.append(
+            f"{marked_unrecognised} poly-layer {shape_word} not part of any "
+            "recognised nfet/pfet gate touch contact at 2+ separate points "
+            "(the resistor-body signature) and carry a resistor-marker layer, "
+            "but do not match any of this deck's declared ResistorDevice "
+            "requires/excludes conditions (a deck-coverage gap, not unmarked "
+            "geometry); their terminals have been absorbed into ordinary "
+            "interconnect as an unintended short -- see docs/cli/extract.md's "
+            "'Known limitation: unmodelled device geometry'."
+        )
+    return warnings
 
 
 def _extract_netlist(
@@ -1108,14 +1149,22 @@ def _extract_netlist(
     nfet_sd = nfet_active - poly
     pfet_sd = pfet_active - poly
 
-    # Unmodelled-device diagnostic (issue #288): computed against `poly` as
-    # it stands right here -- *after* `_resolve_resistors` has already cut
-    # out every resistor body this deck *does* recognise, and *before* the
-    # blanket `l2n.connect(poly, contact)` (and friends) below absorbs
-    # whatever is left into ordinary interconnect. See the function's
-    # docstring for the heuristic itself.
+    # Unmodelled-device diagnostic (issue #288, split by marker presence in
+    # #299): computed against `poly` as it stands right here -- *after*
+    # `_resolve_resistors` has already cut out every resistor body this deck
+    # *does* recognise, and *before* the blanket `l2n.connect(poly, contact)`
+    # (and friends) below absorbs whatever is left into ordinary
+    # interconnect. `poly_resistor_markers` is the raw union of every
+    # declared `ResistorDevice.marker` on `poly` (unnarrowed by that entry's
+    # own `requires`/`excludes`), letting the heuristic tell a "carries a
+    # marker this deck knows about, but requires/excludes ruled it out" gap
+    # apart from "carries no marker at all" -- see the function's docstring.
+    poly_resistor_markers = kdb.Region()
+    for spec in deck.resistors:
+        if spec.body == deck.poly:
+            poly_resistor_markers += _region(layout, top_cell, spec.marker)
     unmodelled_device_warnings = _detect_unmodelled_poly_bodies(
-        poly, contact, nfet_gate, pfet_gate
+        poly, contact, nfet_gate, pfet_gate, poly_resistor_markers
     )
 
     # Dummy-device suppression (issue #295): a deck may declare an optional
