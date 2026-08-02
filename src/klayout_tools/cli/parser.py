@@ -25,6 +25,7 @@ from . import (
     precheck_cmd,
     render_cmd,
     sim_cmd,
+    socket_check_cmd,
     stats_cmd,
 )
 
@@ -184,6 +185,47 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     precheck_parser.set_defaults(func=precheck_cmd.run)
+
+    socket_check_parser = subparsers.add_parser(
+        "socket-check",
+        help="check a GDSII/OASIS stream against a socket/template descriptor",
+        description=(
+            "Check a GDSII or OASIS layout file against a socket/template "
+            "descriptor -- a JSON contract declaring the block's outline "
+            "(bounding box), named pins (position, layer, informational "
+            "size), reserved layers, and numeric interface budgets. Reports "
+            "missing/misplaced/wrong-layer pins, geometry outside the "
+            "outline, and reserved-layer usage as structured violations; "
+            "budgets are reported back declared-but-unverified, since "
+            "verifying an R/C/current budget needs simulation/extraction "
+            "data this checker doesn't have. See "
+            "docs/schemas/socket.schema.json for the descriptor shape and "
+            "docs/cli/socket-check.md for the CLI surface. Runs fully "
+            "headless via KLayout's native batch database API -- no GUI, "
+            "no Qt."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "file", help="path to a GDSII or OASIS layout file"
+    )
+    socket_check_parser.add_argument(
+        "--socket",
+        required=True,
+        help=(
+            "path to a socket descriptor JSON file (see "
+            "docs/schemas/socket.schema.json). Not validated by argparse -- "
+            "a missing/malformed descriptor exits 1 with a clean error, per "
+            "docs/cli/socket-check.md's exit-code contract, rather than "
+            "argparse's usage-error exit 2."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    socket_check_parser.set_defaults(func=socket_check_cmd.run)
 
     layout_metrics_parser = subparsers.add_parser(
         "layout-metrics",
