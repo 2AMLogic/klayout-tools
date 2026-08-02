@@ -26,6 +26,20 @@ def _make_install(root, variant):
     return variant_dir
 
 
+def _assert_gds_geometry_equal(path_a, path_b):
+    """Assert two GDS files hold identical layer/cell geometry, ignoring the
+    GDS stream's BGNLIB/BGNSTR write timestamps (which a raw byte compare
+    would trip on if the two `generate()` calls straddle a second/minute
+    boundary -- issue #229)."""
+    import klayout.db as kdb
+
+    layout_a = kdb.Layout()
+    layout_a.read(str(path_a))
+    layout_b = kdb.Layout()
+    layout_b.read(str(path_b))
+    assert kdb.LayoutDiff().compare(layout_a.top_cell(), layout_b.top_cell())
+
+
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
     """Scrub PDK env vars and empty the host search space -- see test_pdk.py."""
@@ -713,7 +727,7 @@ def test_mos_array_invalid_params_rejected(tmp_path, pdk_root, params):
 
 def test_mos_array_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
     """`flavor` defaults to `'nfet'`, which must draw *no* well shape --
-    byte-identical to a request that never even mentions `flavor` (issue
+    geometry-identical to a request that never even mentions `flavor` (issue
     #208 acceptance criterion: the default case is not allowed to change)."""
     import klayout.db as kdb
 
@@ -734,7 +748,7 @@ def test_mos_array_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
             "options": {"output": str(explicit)},
         }
     )
-    assert implicit.read_bytes() == explicit.read_bytes()
+    _assert_gds_geometry_equal(implicit, explicit)
 
     layout = kdb.Layout()
     layout.read(str(implicit))
@@ -1042,7 +1056,7 @@ def test_diff_pair_invalid_params_rejected(tmp_path, pdk_root, params):
 
 
 def test_diff_pair_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
-    """`flavor` defaults to `'nfet'` -- byte-identical whether a request
+    """`flavor` defaults to `'nfet'` -- geometry-identical whether a request
     omits it or sets it explicitly (issue #208 acceptance criterion: this
     issue's new device-flavor logic is not allowed to change the default
     case)."""
@@ -1063,7 +1077,7 @@ def test_diff_pair_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
             "options": {"output": str(explicit)},
         }
     )
-    assert implicit.read_bytes() == explicit.read_bytes()
+    _assert_gds_geometry_equal(implicit, explicit)
 
 
 def test_diff_pair_flavor_nfet_without_guard_ring_draws_no_well(tmp_path, pdk_root):
