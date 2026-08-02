@@ -171,6 +171,20 @@ class ExtractionDeck:
     itself, e.g. sky130's ``VPB``) -- distinct from ``metal_labels``, which
     label metal-level pins/power straps.
 
+    ``dummy`` is an optional marker layer declaring drawn-but-non-functional
+    "dummy" devices (issue #295): matched-pair/array edge fill whose gate and
+    diffusions are tied off to a rail so the device contributes nothing to the
+    circuit, yet must be *drawn* on the real device layers next to the devices
+    it protects. Any MOS gate lying under a shape on this layer is dropped
+    before device recognition (``extract.py`` subtracts it from the
+    NMOS/PMOS gate regions), so the dummy never appears in the extracted
+    netlist and ``klt lvs`` no longer reports a spurious ``device.unmatched``
+    for it -- while the dummy's diffusions still extract as ordinary
+    interconnect (they tie to the rail as drawn). ``None`` (the default) is
+    fully backward-compatible: a deck that declares no ``dummy`` layer
+    extracts exactly as it did before the field existed. Whether a given PDK
+    draws a native dummy-marker layer is left to the deck author to declare.
+
     ``poly_label`` is an optional text/label layer read directly off ``poly``
     (mirroring ``well_label``'s "label a pin on the drawn layer itself"
     pattern) so a gate/poly node can be named without a metal landing pad on
@@ -218,6 +232,7 @@ class ExtractionDeck:
     tap: tuple[int, int] | None = None
     well_label: tuple[int, int] | None = None
     poly_label: tuple[int, int] | None = None
+    dummy: tuple[int, int] | None = None
     metal_labels: tuple[tuple[int, int] | None, ...] = ()
     vias: tuple[tuple[int, int], ...] = ()
     nfet_class: str = "nfet"
@@ -286,7 +301,7 @@ class ExtractionDeck:
             self.nwell,
             self.contact,
         }
-        for optional in (self.tap, self.well_label, self.poly_label):
+        for optional in (self.tap, self.well_label, self.poly_label, self.dummy):
             if optional is not None:
                 layers.add(optional)
         layers.update(self.metals)

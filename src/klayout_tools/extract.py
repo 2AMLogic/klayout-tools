@@ -348,14 +348,20 @@ def run_extract(
         except UnknownExtractionDeckError as exc:
             raise ExtractError(str(exc)) from exc
 
-    netlist, top_cell_name, dbu_um, warnings, parasitic_nets, black_box_regions = (
-        extract_netlist_from_layout(
-            path,
-            deck_name,
-            top=top,
-            parasitics_deck=parasitics_deck,
-            top_cell_pins_only=top_cell_pins_only,
-        )
+    (
+        netlist,
+        top_cell_name,
+        dbu_um,
+        warnings,
+        parasitic_nets,
+        black_box_regions,
+        dummy_devices_dropped,
+    ) = extract_netlist_from_layout(
+        path,
+        deck_name,
+        top=top,
+        parasitics_deck=parasitics_deck,
+        top_cell_pins_only=top_cell_pins_only,
     )
 
     import klayout.db as kdb
@@ -443,6 +449,7 @@ def run_extract(
         "net_count": len(nets),
         "pin_count": sum(1 for net in nets if net["pin"]),
         "device_counts": dict(sorted(device_counts.items())),
+        "dummy_devices_dropped": dummy_devices_dropped,
         "ignored_layers": ignored_layers,
         "device_classes": list(deck.device_classes),
         "devices": devices,
@@ -488,11 +495,12 @@ def extract_netlist_from_layout(
     list[str],
     list[dict[str, Any]] | None,
     list[dict[str, Any]],
+    int,
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
-    black_box_regions)``.
+    black_box_regions, dummy_devices_dropped)``.
 
     ``top_cell_pins_only`` (issue #291): when ``True``, only labels drawn
     directly in the top cell are promoted to top-level pins -- a net named
@@ -546,7 +554,13 @@ def extract_netlist_from_layout(
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
     top_cell = _resolve_top_cell(layout, top, path)
-    netlist, warnings, parasitic_nets, black_box_regions = _extract_netlist(
+    (
+        netlist,
+        warnings,
+        parasitic_nets,
+        black_box_regions,
+        dummy_devices_dropped,
+    ) = _extract_netlist(
         layout, top_cell, deck, parasitics_deck, top_cell_pins_only=top_cell_pins_only
     )
     return (
@@ -556,6 +570,7 @@ def extract_netlist_from_layout(
         warnings,
         parasitic_nets,
         black_box_regions,
+        dummy_devices_dropped,
     )
 
 
@@ -991,7 +1006,13 @@ def _extract_netlist(
     deck: ExtractionDeck,
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
-) -> tuple[kdb.Netlist, list[str], list[dict[str, Any]] | None, list[dict[str, Any]]]:
+) -> tuple[
+    kdb.Netlist,
+    list[str],
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]],
+    int,
+]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
 
@@ -1000,16 +1021,20 @@ def _extract_netlist(
     ``begin_shapes_rec``), the same whole-layout flattening idiom
     ``drc.py`` uses -- see ``docs/cli/extract.md``'s limitation note.
 
-    Returns ``(netlist, warnings, parasitic_nets, black_box_regions)``.
+    Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
+    dummy_devices_dropped)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
     ``parasitics_deck`` is given, in which case it is the per-net lumped-RC
     data computed from ``LayoutToNetlist.polygons_of_net`` while ``l2n`` is
     still alive (see :func:`_compute_parasitics`). ``black_box_regions`` is
-    the JSON response's new field (issue #293) -- see
+    the JSON response's field (issue #293) -- see
     :func:`_resolve_black_box_regions` -- always a list, empty when the
     layout draws no reserved-annotation-layer geometry.
+    ``dummy_devices_dropped`` is the number of MOS gates suppressed by the
+    deck's optional ``dummy`` marker layer (issue #295), ``0`` when no
+    ``dummy`` layer is configured or no dummy geometry is drawn.
     """
     import klayout.db as kdb
 
@@ -1092,6 +1117,39 @@ def _extract_netlist(
     unmodelled_device_warnings = _detect_unmodelled_poly_bodies(
         poly, contact, nfet_gate, pfet_gate
     )
+
+    # Dummy-device suppression (issue #295): a deck may declare an optional
+    # `dummy` marker layer (see `ExtractionDeck.dummy`) covering drawn-but-
+    # non-functional dummy devices -- the matched-pair/array edge fill whose
+    # gate and diffusions are tied off to a rail. A MOS gate lying under that
+    # marker must not become a device in the extracted netlist (otherwise
+    # every dummy is a spurious `device.unmatched` under `klt lvs`), so
+    # subtract the marker from the NMOS/PMOS gate regions *before* device
+    # recognition: a gate fully covered by the marker is never handed to
+    # `extract_devices` and so is never recognised as a device at all. Only
+    # the gate is cut -- the dummy's diffusions (`nfet_sd`/`pfet_sd`) and its
+    # gate poly stay in `poly`, so they still participate in ordinary
+    # connectivity below and tie off to the rail exactly as drawn.
+    #
+    # Ordered *after* the unmodelled-device diagnostic above (so a dummy gate
+    # is still recognised as a gate there and never misflagged as unmodelled
+    # poly) and *before* registration/extraction below (so the suppressed gate
+    # area reaches neither the device extractor nor the parasitics pass).
+    # `dummy_devices_dropped` counts gate components fully consumed by the
+    # marker -- a device that genuinely vanishes -- using the same
+    # `region.merged().each()` connected-component idiom as
+    # `_detect_unmodelled_poly_bodies`. A marker only partially covering a
+    # gate is a clean geometric cut, not a dropped device: the remaining gate
+    # area still extracts, so it is not counted.
+    dummy = _region(layout, top_cell, deck.dummy)
+    dummy_devices_dropped = 0
+    if not dummy.is_empty():
+        for gate in (nfet_gate, pfet_gate):
+            for component in gate.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+        nfet_gate = nfet_gate - dummy
+        pfet_gate = pfet_gate - dummy
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
     # `register` returns the layer index `polygons_of_net(net, index)` needs
@@ -1376,7 +1434,13 @@ def _extract_netlist(
     # garbage-collected once this function returns, which invalidates the
     # netlist it produced (KLayout raises on subsequent use) -- `dup()`
     # detaches an independently-owned copy.
-    return netlist.dup(), warnings, parasitic_nets, black_box_regions
+    return (
+        netlist.dup(),
+        warnings,
+        parasitic_nets,
+        black_box_regions,
+        dummy_devices_dropped,
+    )
 
 
 def _n_squares(area_um2: float, perimeter_um: float) -> float:

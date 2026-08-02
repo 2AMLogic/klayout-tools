@@ -15,6 +15,7 @@
     "extract.device_count": 11,
     "extract.device_counts.nfet": 11,
     "extract.devices_count": 11,
+    "extract.dummy_devices_dropped": 0,
     "extract.ignored_layers_count": 0,
     "extract.net_count": 31,
     "extract.nets_count": 31,
