@@ -29,7 +29,12 @@ from __future__ import annotations
 from typing import Any
 
 from ._layout import load_layout
-from .decks import UnknownExtractionDeckError, get_extraction_deck
+from ._provenance import build_provenance
+from .decks import (
+    UnknownExtractionDeckError,
+    deck_source_path,
+    get_extraction_deck,
+)
 
 #: Characters that break downstream tooling if they appear in a cell name:
 #: filesystem-path-reserved characters (POSIX ``/`` and Windows'
@@ -159,6 +164,10 @@ def run_precheck(
         "status": overall_status,
         "check_count": len(checks),
         "checks": checks,
+        "provenance": build_provenance(
+            deck_name=deck,
+            deck_path=(deck_source_path(deck) if deck else None),
+        ),
     }
 
 

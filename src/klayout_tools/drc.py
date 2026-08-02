@@ -24,7 +24,15 @@ import os
 from typing import Any
 
 from ._layout import load_layout
-from .decks import DrcRule, UnknownDeckError, get_deck, get_layer_names, get_nominal_dbu
+from ._provenance import build_provenance
+from .decks import (
+    DrcRule,
+    UnknownDeckError,
+    deck_source_path,
+    get_deck,
+    get_layer_names,
+    get_nominal_dbu,
+)
 from .layers import layers_report
 
 # Check kinds that operate on a single region (no other_layer).
@@ -70,6 +78,12 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 "layers_checked": ["<layer>/<datatype>", ...],
                 "layers_in_stream_without_rules": ["<layer>/<datatype>", ...],
                 "rules_skipped": [<rule id>, ...],
+            },
+            "provenance": {  # shared reproducibility block, see _provenance.py
+                "klt_version": <str | None>,
+                "klayout_version": <str | None>,
+                "pdk": None,  # klt drc resolves no PDK
+                "deck": {"name": <deck name>, "content_hash": "sha256:..."},
             },
         }
 
@@ -248,6 +262,9 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
         "coverage": coverage,
+        "provenance": build_provenance(
+            deck_name=deck_name, deck_path=deck_source_path(deck_name)
+        ),
     }
 
 

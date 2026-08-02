@@ -51,13 +51,13 @@ documents its own curated-deck connectivity-fidelity limits.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
 from typing import TYPE_CHECKING, Any
 
-from .decks import get_extraction_deck
+from ._provenance import build_provenance, sha256_file
+from .decks import deck_source_path, get_extraction_deck
 from .extract import ExtractError, extract_netlist_from_layout
 
 if TYPE_CHECKING:
@@ -222,6 +222,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     -- when ``layout.file`` + ``layout.deck`` (inline extraction) was given;
     ``null`` when ``layout.netlist`` (pre-extracted, no deck involved) was
     given instead.
+
+    The response also carries the shared ``provenance`` block (see
+    :func:`klayout_tools._provenance.build_provenance`); its ``deck`` is the
+    layout-side extraction deck (``null`` for the pre-extracted-netlist form,
+    matching ``device_classes``), and ``pdk`` is ``null`` (LVS is topological
+    and resolves no PDK).
     """
     request, request_dir = load_request_arg(request)
 
@@ -362,10 +368,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         "environment": {
             "engine": engine,
             "engine_version": _engine_version(),
-            "layout_sha256": _sha256_file(layout_hash_source),
-            "reference_sha256": _sha256_file(reference_netlist_path),
+            "layout_sha256": sha256_file(layout_hash_source),
+            "reference_sha256": sha256_file(reference_netlist_path),
             "extracted_netlist": extracted_netlist_path,
         },
+        "provenance": build_provenance(
+            deck_name=layout_deck_name,
+            deck_path=(
+                deck_source_path(layout_deck_name) if layout_deck_name else None
+            ),
+        ),
         "mismatches": mismatches,
     }
 
@@ -1027,11 +1039,3 @@ def _engine_version() -> str | None:
     import klayout
 
     return getattr(klayout, "__version__", None)
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

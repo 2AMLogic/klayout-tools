@@ -419,6 +419,12 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
     "netlist_sha256": "71d273ab...",
     "netlist_source": "extracted"
   },
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.30.10",
+    "pdk": { "name": "sky130A", "source": "volare", "version": "<stamp>" },
+    "deck": { "name": "corner.lib", "content_hash": "sha256:<hex>" }
+  },
   "measurements": [
     {
       "name": "vout",
@@ -456,6 +462,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares it) `netlist_source`. |
+| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners, including the worst case and which corner produced it.                |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 

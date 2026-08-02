@@ -38,6 +38,42 @@ contract.
   documentation (e.g. `docs/cli/layers.md`).
 - Written to **stdout only**, as indented JSON with a trailing newline.
 
+## Shared `provenance` block
+
+Verbs whose verdict depends on the exact tool build, PDK release, and rule
+deck — currently `drc`, `lvs`, `extract`, `sim`, and `precheck` — emit a
+shared top-level `provenance` block so a "clean"/"pass"/"match" result is
+auditable and reproducible later. Two runs made against different deck
+revisions or PDK releases are otherwise indistinguishable in the output, so a
+signoff claim can't be checked or reproduced. This block is **additive** (see
+above): adopting it required no `schema_version` bump on any verb.
+
+```json
+"provenance": {
+  "klt_version": "0.4.2",
+  "klayout_version": "0.29.8",
+  "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
+  "deck": {"name": "sky130", "content_hash": "sha256:<hex>"}
+}
+```
+
+- `klt_version` — the running `klt` package version (`klayout_tools.__version__`).
+- `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
+  or `null` if unresolvable.
+- `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
+  variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
+  `null` when the run resolved no PDK (e.g. `klt drc`, which resolves none, or
+  a `lvs` compare, which is topological).
+- `deck` — the rule (or model) deck the run used, as `{name, content_hash}`.
+  `content_hash` is a `sha256:`-prefixed hex digest of the deck file actually
+  used, so "clean against *this exact* rule set" is a checkable claim. `null`
+  when no deck was involved (e.g. `lvs` against a pre-extracted netlist).
+
+Fields that can't be resolved are `null` per the envelope convention — never
+silently fabricated. The block is built once in
+`src/klayout_tools/_provenance.py`; each verb's `docs/cli/<verb>.md` notes only
+which of `pdk`/`deck` it populates.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written

@@ -50,7 +50,6 @@ real failure.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -59,6 +58,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -316,6 +316,20 @@ def run_sim(
         # docstring and the spike's "Native PVT sweeping" survey row).
         models_lib = _resolve_models_lib(models, request_dir)
 
+    # Best-effort PDK resolution for the shared `provenance` block: `models`
+    # may name a PDK variant (`models.pdk`) whose release stamps the run's
+    # model library. Never fatal -- the sweep already resolved `models_lib`
+    # above; if the variant can't be found here, provenance.pdk is null
+    # rather than fabricated (see `_provenance.build_provenance`).
+    provenance_pdk: dict[str, Any] | None = None
+    if models.get("pdk") or models.get("pdk_root"):
+        try:
+            provenance_pdk = find_pdk(
+                variant=models.get("pdk"), root=models.get("pdk_root")
+            )
+        except PdkNotFoundError:
+            provenance_pdk = None
+
     analysis = request.get("analysis") or {}
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
@@ -376,8 +390,8 @@ def run_sim(
         "engine": engine,
         "engine_version": engine_version,
         "models_lib": models_lib,
-        "models_lib_sha256": _sha256_file(models_lib),
-        "netlist_sha256": _sha256_file(netlist_path),
+        "models_lib_sha256": sha256_file(models_lib),
+        "netlist_sha256": sha256_file(netlist_path),
     }
     if netlist_source is not None:
         # Additive/optional: only present when the request declares it, so
@@ -394,6 +408,11 @@ def run_sim(
         "failed": failed,
         "errored": errored,
         "environment": environment,
+        "provenance": build_provenance(
+            deck_name=(os.path.basename(models_lib) if models_lib else None),
+            deck_path=models_lib,
+            pdk=provenance_pdk,
+        ),
         "measurements": measurements_rollup,
         "corners": corners,
     }
@@ -1217,13 +1236,3 @@ def _parse_and_persist_waveform(raw_path: str) -> str:
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(waveform, handle)
     return json_path
-
-
-def _sha256_file(path: str) -> str | None:
-    if not path or not os.path.isfile(path):
-        return None
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

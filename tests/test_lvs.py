@@ -440,6 +440,14 @@ def test_clean_self_compare_reports_match(tmp_path):
     assert len(report["environment"]["reference_sha256"]) == 64
     assert report["environment"]["extracted_netlist"] is None
 
+    prov = report["provenance"]
+    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert isinstance(prov["klt_version"], str)
+    # LVS is topological -- no PDK resolved; and a pre-extracted `layout.netlist`
+    # involves no extraction deck, so `deck` is null (mirrors device_classes).
+    assert prov["pdk"] is None
+    assert prov["deck"] is None
+
 
 def test_auto_selected_top_matches_explicit_top(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
@@ -788,6 +796,11 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
     assert (
         report["environment"]["extracted_netlist"] is None
     )  # keep_extracted defaults False
+
+    # Inline extraction => the layout-side extraction deck is pinned in the
+    # shared provenance block, hashed for reproducibility.
+    assert report["provenance"]["deck"]["name"] == "sky130"
+    assert report["provenance"]["deck"]["content_hash"].startswith("sha256:")
 
 
 def test_keep_extracted_writes_and_echoes_intermediate_netlist(tmp_path):

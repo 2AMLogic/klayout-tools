@@ -484,7 +484,13 @@ exit codes).
   "nets": [{ "name": "A", "pin": true, "device_count": 2 }],
   "warnings": [],
   "pdk": null,
-  "parasitics": null
+  "parasitics": null,
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": null,
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" }
+  }
 }
 ```
 
@@ -511,6 +517,7 @@ exit codes).
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
+| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash. |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want
 structure without re-parsing SPICE; the **netlist file at `netlist_path` is

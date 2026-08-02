@@ -192,6 +192,12 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
     "reference_sha256": "c93e...",
     "extracted_netlist": null
   },
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" }
+  },
   "mismatches": []
 }
 ```
@@ -211,6 +217,7 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. |
 | `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Present (currently always `["nfet", "pfet"]`) when `layout.file` + `layout.deck` (inline extraction) was given; `null` when `layout.netlist` (pre-extracted, no deck involved) was given instead. |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
+| `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (LVS is topological and resolves no PDK); `deck` pins the layout-side extraction deck by name and `sha256:` content hash, and is `null` for the pre-extracted `layout.netlist` form (matching `device_classes`). |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
 
 ### `mismatches[]` entries

@@ -339,6 +339,10 @@ def test_pin_labels_passes_when_label_lands_on_drawing(tmp_path):
 
     assert check["status"] == "pass"
 
+    # With a --deck given, provenance pins that deck with a content hash.
+    assert report["provenance"]["deck"]["name"] == "sky130"
+    assert report["provenance"]["deck"]["content_hash"].startswith("sha256:")
+
 
 def test_pin_labels_raises_on_unknown_deck(tmp_path):
     path = _write(_sky130_well_label_layout(stray=False), tmp_path)
@@ -409,10 +413,18 @@ def test_json_contract(tmp_path, capsys):
         "status",
         "check_count",
         "checks",
+        "provenance",
     }
     assert data["schema_version"] == 1
     assert data["status"] == "fail"
     assert data["check_count"] == len(CHECK_NAMES)
+
+    prov = data["provenance"]
+    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert isinstance(prov["klt_version"], str)
+    assert prov["pdk"] is None
+    # No --deck was given, so no extraction deck is resolved.
+    assert prov["deck"] is None
 
     for check in data["checks"]:
         assert set(check.keys()) == {

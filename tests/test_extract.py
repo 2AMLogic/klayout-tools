@@ -338,6 +338,13 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert report["pdk"] is None
     assert report["warnings"] == []
 
+    prov = report["provenance"]
+    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert isinstance(prov["klt_version"], str)
+    assert prov["pdk"] is None
+    assert prov["deck"]["name"] == "sky130"
+    assert prov["deck"]["content_hash"].startswith("sha256:")
+
     devices = report["devices"]
     assert [d["name"] for d in devices] == sorted(d["name"] for d in devices)
     classes = {d["class"] for d in devices}
@@ -675,6 +682,15 @@ def test_optional_pdk_resolution_is_reported(tmp_path):
         "root": str(tmp_path / "pdk_install"),
         "version": None,
     }
+
+    # The shared provenance block mirrors the resolved PDK (name/source/
+    # version), independent of extract's own richer `pdk` echo above.
+    assert report["provenance"]["pdk"] == {
+        "name": "sky130A",
+        "source": report["provenance"]["pdk"]["source"],
+        "version": None,
+    }
+    assert report["provenance"]["pdk"]["source"] is not None
 
 
 def test_extraction_does_not_require_pdk_resolution(tmp_path):

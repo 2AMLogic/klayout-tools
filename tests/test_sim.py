@@ -849,6 +849,32 @@ def test_run_sim_stubbed_netlist_source_absent_omits_environment_key(
     assert report["status"] == "pass"
 
 
+def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
+    """A process-axis sweep resolves a model library; the shared provenance
+    block pins it as the run's `deck` with a `sha256:` content hash."""
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {"process": ["tt"]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    report = sim.run_sim(str(request))
+
+    prov = report["provenance"]
+    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    # No PDK variant declared in `models`, so no PDK is resolved.
+    assert prov["pdk"] is None
+    assert prov["deck"]["name"] == "corner.lib"
+    assert prov["deck"]["content_hash"].startswith("sha256:")
+
+
 def _stripped_report(report: dict) -> dict:
     """Drop the two fields the docs flag as legitimately varying between
     runs (`runtime_s`, `engine_version`) so the rest of the report can be
@@ -1354,9 +1380,17 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "failed",
         "errored",
         "environment",
+        "provenance",
         "measurements",
         "corners",
     }
+    prov = data["provenance"]
+    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert isinstance(prov["klt_version"], str)
+    # This request declares no process axis / model library, so no model
+    # deck or PDK is resolved.
+    assert prov["pdk"] is None
+    assert prov["deck"] is None
 
 
 def test_cli_default_format_is_text(tmp_path, monkeypatch, capsys):
