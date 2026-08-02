@@ -1,4 +1,4 @@
-"""Shared layout-loading preamble for ``klt`` library modules.
+"""Shared layout-loading/writing preamble for ``klt`` library modules.
 
 Every ``*_report``/``run_*`` entry point that reads a GDSII/OASIS stream via
 ``klayout.db`` (``layers.py``, ``stats.py``, ``cells.py``, ``drc.py``) starts
@@ -6,6 +6,15 @@ with the same three checks: does the path exist, is it a file (not a
 directory), and does ``klayout.db`` accept it as a recognisable stream. This
 module is the single place that logic lives, so a future fix (e.g. a better
 read-error message) only needs to land once.
+
+Every generator/drawing entry point that *writes* a stream (``gen.py``,
+``gen_compose.py``, ``draw.py``) shares the same requirement: output must be
+byte-reproducible across runs with identical inputs, so a generated GDS can
+be committed as a golden artifact or used as a cache key (#320). KLayout's
+default ``Layout.write(path)`` overload stamps the GDS2 ``BGNLIB``/``BGNSTR``
+records with the current wall-clock time, which breaks that. :func:`write_layout`
+is the single place that disables it, via ``SaveLayoutOptions.gds2_write_timestamps
+= False`` (a no-op for non-GDS2 formats).
 
 The per-verb exception classes (``LayersError``, ``StatsError``, ...) stay in
 their own modules -- they are importable API and let callers write
@@ -46,3 +55,28 @@ def load_layout(path: str, error_cls: type[Exception]) -> kdb.Layout:
         raise error_cls(f"could not read layout '{path}': {exc}") from exc
 
     return layout
+
+
+def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:
+    """Write ``layout`` to ``path`` with deterministic (reproducible-build) output.
+
+    KLayout's zero-arg ``Layout.write(path)`` overload defaults to stamping
+    the GDS2 ``BGNLIB``/``BGNSTR`` timestamp records with the current
+    wall-clock time, so two runs of the same generator with identical inputs
+    produce byte-different streams (#320). This helper always passes a
+    ``SaveLayoutOptions`` with ``gds2_write_timestamps = False`` instead, so
+    those fields are written as zero -- the usual convention for generated
+    GDSII, and a no-op for non-GDS2 output formats (e.g. OASIS).
+
+    Raises ``error_cls`` (constructed with a single message string) if the
+    write fails (e.g. an unwritable path or unrecognised format).
+    """
+    # Imported lazily, matching load_layout()'s lazy `klayout.db` import.
+    import klayout.db as kdb
+
+    options = kdb.SaveLayoutOptions()
+    options.gds2_write_timestamps = False
+    try:
+        layout.write(path, options)
+    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
+        raise error_cls(f"could not write output '{path}': {exc}") from exc

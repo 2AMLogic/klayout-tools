@@ -56,6 +56,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ._layout import write_layout
 from .pdk import PdkNotFoundError, find_pdk
 
 if TYPE_CHECKING:
@@ -1021,10 +1022,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
 
     layout, top_cell = _produce(spec, cell_name, resolved_params, pdk_info)
 
-    try:
-        layout.write(output_path)
-    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
-        raise GenError(f"could not write output '{output_path}': {exc}") from exc
+    write_layout(layout, output_path, GenError)
 
     dbu = layout.dbu
     bbox = top_cell.bbox()

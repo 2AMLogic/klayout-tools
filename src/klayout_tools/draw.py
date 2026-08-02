@@ -21,6 +21,8 @@ import json
 import os
 from typing import Any
 
+from ._layout import write_layout
+
 #: Request-envelope schema identifier (see ``docs/cli/draw.md``).
 REQUEST_SCHEMA = "klt.draw.request/1"
 
@@ -206,10 +208,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         text = _build_label(label, i, _to_dbu, kdb)
         top.shapes(idx).insert(text)
 
-    try:
-        layout.write(output_path)
-    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
-        raise DrawError(f"could not write output '{output_path}': {exc}") from exc
+    write_layout(layout, output_path, DrawError)
 
     bbox = top.bbox()
     if bbox.empty():

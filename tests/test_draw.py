@@ -38,6 +38,27 @@ def _draw(tmp_path, params, cell_name=None, name="out.gds"):
 # --------------------------------------------------------------------------- #
 
 
+def test_draw_output_is_byte_reproducible(tmp_path):
+    """Two `draw()` runs with identical params/inputs must produce
+    byte-identical GDS streams (#320), matching `klt gen`'s reproducibility
+    guarantee -- see `test_gen.test_generate_output_is_byte_reproducible`."""
+    import time
+
+    params = {
+        "shapes": [
+            {"layer": [66, 20], "name": "poly.drawing", "rect_um": [0, 0, 0.1, 2.0]}
+        ]
+    }
+
+    _, output_a = _draw(tmp_path, params, name="a.gds")
+    time.sleep(1.1)
+    _, output_b = _draw(tmp_path, params, name="b.gds")
+
+    from pathlib import Path
+
+    assert Path(output_a).read_bytes() == Path(output_b).read_bytes()
+
+
 def test_rect_round_trips_to_requested_layer_and_coords(tmp_path):
     report, output = _draw(
         tmp_path,
