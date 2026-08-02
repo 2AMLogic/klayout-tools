@@ -20,6 +20,7 @@ Exit codes (see ``docs/cli/gen-compose.md`` for the full table):
 
 import argparse
 import json
+import os
 
 from ..gen_compose import GenComposeError, compose
 from .output import emit_error, emit_success
@@ -29,6 +30,7 @@ PARTIAL_SUCCESS_EXIT_CODE = 3
 
 
 def run(args: argparse.Namespace) -> int:
+    request_dir = os.path.dirname(os.path.abspath(args.request))
     try:
         with open(args.request, encoding="utf-8") as handle:
             request = json.load(handle)
@@ -46,7 +48,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     try:
-        report = compose(request)
+        report = compose(request, request_dir=request_dir)
     except GenComposeError as exc:
         return emit_error("gen-compose", str(exc), args.format)
 

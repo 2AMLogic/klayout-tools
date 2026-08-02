@@ -205,6 +205,39 @@ def test_load_generator_report_arg_rejects_non_dict_non_str():
         load_generator_report_arg(42)
 
 
+def test_load_generator_report_arg_resolves_relative_to_request_dir(tmp_path):
+    # A relative path resolves against request_dir (#328), not the process cwd
+    # -- mirrors klt lvs's load_request_arg/_resolve_relative convention.
+    report = {"generator": "resistor_strip", "cell_name": "x", "gds_path": "x.gds"}
+    request_dir = tmp_path / "some" / "dir"
+    request_dir.mkdir(parents=True)
+    (request_dir / "report.json").write_text(json.dumps(report))
+
+    assert load_generator_report_arg("report.json", str(request_dir)) == report
+
+
+def test_load_generator_report_arg_defaults_to_cwd_when_no_request_dir(
+    tmp_path, monkeypatch
+):
+    # request_dir omitted (None) -- backward compat with a caller that has no
+    # request file at all: resolve against the process's own cwd, unchanged.
+    report = {"generator": "resistor_strip", "cell_name": "x", "gds_path": "x.gds"}
+    (tmp_path / "report.json").write_text(json.dumps(report))
+    monkeypatch.chdir(tmp_path)
+
+    assert load_generator_report_arg("report.json") == report
+
+
+def test_load_generator_report_arg_absolute_path_unaffected_by_request_dir(tmp_path):
+    report = {"generator": "resistor_strip", "cell_name": "x", "gds_path": "x.gds"}
+    path = tmp_path / "abs_report.json"
+    path.write_text(json.dumps(report))
+    other_dir = tmp_path / "unrelated"
+    other_dir.mkdir()
+
+    assert load_generator_report_arg(str(path), str(other_dir)) == report
+
+
 # --------------------------------------------------------------------------- #
 # compose() -- request-shape validation
 # --------------------------------------------------------------------------- #
@@ -259,6 +292,194 @@ def test_compose_rejects_negative_spacing(tmp_path, pdk_root):
                 "placement": {"strategy": "row", "order": ["r"], "spacing_um": -1.0},
             }
         )
+
+
+# --------------------------------------------------------------------------- #
+# compose() -- request.pdk unknown-key validation (#328)
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_rejects_unknown_pdk_key_name_typo(tmp_path, pdk_root):
+    # {"pdk": {"name": ...}} is a plausible typo for "variant" (klt gen's own
+    # response calls this field "name") -- must be an application error, not
+    # a silent fallback to a different resolved PDK variant.
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    with pytest.raises(GenComposeError, match="name"):
+        compose(
+            {
+                "pdk": {"name": "gf180mcuD"},
+                "blocks": [{"id": "r", "generator_report": block}],
+                "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            }
+        )
+
+
+def test_compose_rejects_unknown_pdk_key_alongside_valid_ones(tmp_path, pdk_root):
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    with pytest.raises(GenComposeError, match="bogus"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root), "bogus": 1},
+                "blocks": [{"id": "r", "generator_report": block}],
+                "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            }
+        )
+
+
+def test_compose_accepts_pdk_variant_and_root(tmp_path, pdk_root):
+    # Regression guard: the documented {"pdk": {"variant": ..., "root": ...}}
+    # shape must keep working unaffected by the new allow-list check.
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    output = tmp_path / "valid_pdk.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "r", "generator_report": block}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {"cell_name": "valid_pdk_0", "output": str(output)},
+        }
+    )
+    assert report["pdk"]["variant"] == "sky130A"
+
+
+def test_compose_accepts_empty_pdk_object(tmp_path, pdk_root, monkeypatch):
+    # Regression guard: an absent pdk key, and an explicitly empty {}, must
+    # both keep resolving via find_pdk()'s own $PDK/default fallback exactly
+    # as before -- the allow-list check must not reject an empty dict.
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    monkeypatch.setenv("PDK", "sky130A")
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    output = tmp_path / "empty_pdk.gds"
+    report = compose(
+        {
+            "pdk": {},
+            "blocks": [{"id": "r", "generator_report": block}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {"cell_name": "empty_pdk_0", "output": str(output)},
+        }
+    )
+    assert report["pdk"]["variant"] == "sky130A"
+
+
+def test_compose_accepts_absent_pdk_key(tmp_path, pdk_root, monkeypatch):
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    monkeypatch.setenv("PDK", "sky130A")
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    output = tmp_path / "no_pdk_key.gds"
+    report = compose(
+        {
+            "blocks": [{"id": "r", "generator_report": block}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {"cell_name": "no_pdk_key_0", "output": str(output)},
+        }
+    )
+    assert report["pdk"]["variant"] == "sky130A"
+
+
+# --------------------------------------------------------------------------- #
+# compose() -- request_dir threading for blocks[].generator_report (#328)
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_generator_report_path_resolves_against_request_dir(
+    tmp_path, pdk_root, monkeypatch
+):
+    # A relative generator_report path resolves against request_dir, not the
+    # process cwd -- confirm by running compose() from an unrelated cwd.
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    report_path = request_dir / "r0.json"
+    report_path.write_text(json.dumps(block))
+
+    unrelated_cwd = tmp_path / "unrelated"
+    unrelated_cwd.mkdir()
+    monkeypatch.chdir(unrelated_cwd)
+
+    output = tmp_path / "request_dir_relative.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "r", "generator_report": "r0.json"}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {"cell_name": "request_dir_relative", "output": str(output)},
+        },
+        request_dir=str(request_dir),
+    )
+    assert output.is_file()
+    assert report["blocks"][0]["id"] == "r"
+
+
+def test_compose_generator_report_path_resolves_against_cwd_without_request_dir(
+    tmp_path, pdk_root, monkeypatch
+):
+    # No request_dir given (None) -- backward compat: resolve a relative
+    # generator_report against the process's own cwd, as before #328
+    # (test_metrics_regression.py's existing compose() call site relies on
+    # this).
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    report_path = tmp_path / "r0.json"
+    report_path.write_text(json.dumps(block))
+    monkeypatch.chdir(tmp_path)
+
+    output = tmp_path / "cwd_relative.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "r", "generator_report": "r0.json"}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {"cell_name": "cwd_relative", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["blocks"][0]["id"] == "r"
+
+
+def test_compose_generator_report_absolute_path_unaffected_by_request_dir(
+    tmp_path, pdk_root
+):
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    report_path = tmp_path / "abs_r0.json"
+    report_path.write_text(json.dumps(block))
+
+    other_dir = tmp_path / "unrelated_request_dir"
+    other_dir.mkdir()
+
+    output = tmp_path / "abs_generator_report.gds"
+    compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "r", "generator_report": str(report_path)}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {"cell_name": "abs_generator_report_0", "output": str(output)},
+        },
+        request_dir=str(other_dir),
+    )
+    assert output.is_file()
+
+
+def test_compose_generator_report_inline_object_unaffected_by_request_dir(
+    tmp_path, pdk_root
+):
+    # generator_report given inline (an object, not a path string) never
+    # touches the filesystem at all -- request_dir must have no effect on it.
+    block = _gen_block(tmp_path, pdk_root, "resistor_strip", "r0")
+    nonexistent_dir = str(tmp_path / "does_not_exist")
+
+    output = tmp_path / "inline_generator_report.gds"
+    compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "r", "generator_report": block}],
+            "placement": {"strategy": "row", "order": ["r"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": "inline_generator_report_0",
+                "output": str(output),
+            },
+        },
+        request_dir=nonexistent_dir,
+    )
+    assert output.is_file()
 
 
 # --------------------------------------------------------------------------- #
@@ -1501,6 +1722,85 @@ def test_cli_gen_compose_json(tmp_path, pdk_root, capsys):
     assert data["schema_version"] == 1
     assert data["cell_name"] == "cli_composed"
     assert output.is_file()
+
+
+def test_cli_gen_compose_generator_report_resolves_against_request_dir(
+    tmp_path, pdk_root, capsys, monkeypatch
+):
+    # #328: blocks[].generator_report given as a path relative to the request
+    # file's own directory (not the invoking cwd) must still resolve when
+    # `klt gen-compose` is invoked from an unrelated cwd.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    request_dir = tmp_path / "some" / "dir"
+    request_dir.mkdir(parents=True)
+    (request_dir / "r1.json").write_text(json.dumps(r1))
+
+    request_path = request_dir / "request.json"
+    output = tmp_path / "cli_request_dir_relative.gds"
+    request_path.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "r1", "generator_report": "r1.json"}],
+                "placement": {"strategy": "row", "order": ["r1"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "cli_request_dir_relative",
+                    "output": str(output),
+                },
+            }
+        )
+    )
+
+    unrelated_cwd = tmp_path / "unrelated"
+    unrelated_cwd.mkdir()
+    monkeypatch.chdir(unrelated_cwd)
+
+    exit_code = main(["gen-compose", str(request_path), "--format", "json"])
+    assert exit_code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["cell_name"] == "cli_request_dir_relative"
+    assert output.is_file()
+
+
+def test_cli_gen_compose_generator_report_relative_to_cwd_fails(
+    tmp_path, pdk_root, capsys, monkeypatch
+):
+    # Regression guard for the bug this issue fixes: a generator_report path
+    # that is only valid relative to the invoking cwd (not the request
+    # file's own directory) must now fail -- confirming the CLI genuinely
+    # switched to request-dir-relative resolution rather than accidentally
+    # keeping cwd-relative as a fallback.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    request_dir = tmp_path / "some" / "dir"
+    request_dir.mkdir(parents=True)
+
+    unrelated_cwd = tmp_path / "unrelated"
+    unrelated_cwd.mkdir()
+    (unrelated_cwd / "r1.json").write_text(json.dumps(r1))
+
+    request_path = request_dir / "request.json"
+    output = tmp_path / "cli_cwd_relative_should_fail.gds"
+    request_path.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "r1", "generator_report": "r1.json"}],
+                "placement": {"strategy": "row", "order": ["r1"], "spacing_um": 1.0},
+                "options": {
+                    "cell_name": "cli_cwd_relative_should_fail",
+                    "output": str(output),
+                },
+            }
+        )
+    )
+
+    monkeypatch.chdir(unrelated_cwd)
+
+    exit_code = main(["gen-compose", str(request_path), "--format", "json"])
+    assert exit_code == 1
+    error = json.loads(capsys.readouterr().err)
+    assert "not found" in error["error"]["message"]
+    assert not output.exists()
 
 
 def test_cli_gen_compose_explicit_placement_json(tmp_path, pdk_root, capsys):
