@@ -614,6 +614,67 @@ R2 VDD $2 1k
     assert by_reference["P2"]["pin"] is False
 
 
+def test_net_correspondence_scopes_dedup_by_circuit(tmp_path):
+    """Issue #311 regression: in a multi-circuit hierarchy, two distinct
+    subcircuits routinely share a local net name. The dedup key must be
+    scoped by circuit, not by bare net name -- otherwise those unrelated
+    nets silently collapse into one entry, dropping the other's
+    correspondence and reporting the wrong `pin` flag for whichever won
+    the dedup race.
+
+    Here `cellA` and `cellB` both have local nets named `IN`, `MID`, and
+    `OUT`, but only `cellA` declares `MID` as a pin; in `cellB` `MID` is a
+    purely internal net. A name-only dedup key collapsed all three shared
+    names (11 matched nets -> 8 entries) and reported a single `MID` entry
+    with a `pin` flag that was right for at most one of the two circuits.
+    With a circuit-scoped key every matched net appears, the documented
+    invariant `len(net_correspondence) == counts.nets.matched` holds, and
+    both `MID` nets are represented with their own (differing) `pin`
+    flags."""
+    hierarchy_spice = """
+.subckt cellA IN MID OUT
+R1 IN MID 1k
+R2 MID OUT 1k
+.ends
+.subckt cellB IN OUT
+R1 IN MID 1k
+R2 MID OUT 1k
+.ends
+.subckt top
+X1 a1 a2 a3 cellA
+X2 b1 b2 cellB
+.ends
+"""
+    layout_path = _write(tmp_path / "layout.spice", hierarchy_spice)
+    reference_path = _write(tmp_path / "ref.spice", hierarchy_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    # The invariant the field documents in docs/cli/lvs.md: every matched
+    # net has exactly one correspondence entry, even across a hierarchy
+    # with cross-circuit name collisions.
+    assert len(correspondence) == report["counts"]["nets"]["matched"] == 11
+
+    # `MID` exists in both cellA (a declared pin) and cellB (internal). A
+    # name-only key would have kept just one; the scoped key keeps both,
+    # each with its own `pin` flag.
+    mid_entries = [e for e in correspondence if e["reference"] == "MID"]
+    assert len(mid_entries) == 2
+    assert {e["pin"] for e in mid_entries} == {True, False}
+    # The other cross-circuit collisions (`IN`, `OUT`) are likewise kept
+    # as two entries apiece rather than merged into one.
+    assert len([e for e in correspondence if e["reference"] == "IN"]) == 2
+    assert len([e for e in correspondence if e["reference"] == "OUT"]) == 2
+
+
 def test_auto_selected_top_matches_explicit_top(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)

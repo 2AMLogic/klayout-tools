@@ -374,9 +374,15 @@ net with no counterpart at all, e.g. one side dropped a device entirely,
 simply has no entry). `device_correspondence` (the same idea for devices)
 is not yet implemented — track it separately if needed.
 
-Sorted by `(reference, layout)`, deduplicated on the same key, so repeated
-runs against the same inputs produce identical, diff-clean output — the
-same ordering guarantee `mismatches[]` makes.
+Sorted by `(reference, layout)`, so repeated runs against the same inputs
+produce identical, diff-clean output — the same ordering guarantee
+`mismatches[]` makes. Deduplication is scoped **per circuit** (by the
+comparer's circuit scope, not by net name alone): a hierarchical netlist
+routinely reuses a local net name — `MID`, `OUT`, `A` — across unrelated
+subcircuits, and each such net is a distinct correspondence with its own
+`pin` flag. Two entries can therefore share the same `layout`/`reference`
+name (one per circuit) — that is expected, and is what keeps
+`len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
 
 #### `device.body_unverified`: MOS body terminals compared against a deck-synthesized net
 
