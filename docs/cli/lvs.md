@@ -164,6 +164,43 @@ independently:
 
 `tests/test_lvs.py` exercises both independently, per this guidance.
 
+### On a minimal cell, read the severities
+
+`NetlistComparer` pairs devices from the *surrounding* net structure and only
+then compares their parameters. On a cell small enough that the corrupted
+device's own terminals are that structure — the canonical case being a
+two-device inverter whose bulk terminals sit on their own substrate/well nets
+rather than on the supplies — a parameter-only defect leaves it nothing to
+anchor the pairing on. Its raw event stream degrades: an unmatched device on
+each side, plus one unmatched net for every net only those two devices
+touched, and no parameter event at all.
+
+`klt lvs` recovers the intended signal from that stream (issue #282). When
+exactly one device per side is unmatched, the two share a device class and
+terminal set, every terminal lands on the same net on both sides, and a
+parameter actually differs, the report gets the `device.property` entry the
+negative control is looking for — with the `property: {name, layout,
+reference}` naming the wrong parameter — and the collateral
+`device.unmatched`/`net.unmatched` entries are downgraded to `severity:
+"warning"`. So on a minimal cell:
+
+- **filter on `severity: "error"`** and the width change is the only finding;
+- `category_counts` still counts the collateral entries (they did happen, and
+  `mismatches[]` never disagrees with the comparer's own log), so assert on
+  `category_counts["device.property"]`, not on the exact `category_counts`
+  dict.
+
+The recovery is deliberately narrow, since a wrong claim would mask a real
+connectivity defect: any additional unmatched device, a device-class
+difference, or a terminal that lands on a *different* net on each side makes
+it decline, and the degraded `device.unmatched` + `net.unmatched` cascade is
+reported as-is, all at `severity: "error"`. Two corrupted devices in the same
+minimal cell also decline — nothing in the event stream says which layout
+device belongs to which reference device.
+
+The verdict itself is unaffected either way: `status` and the exit code come
+from `compare()`, which reports the mismatch in every one of these cases.
+
 **Also worth knowing**: `klayout.db.NetlistComparer`'s default net matching
 does not lock onto layout net *labels* to constrain the compare — a pure
 pin/device-topology isomorphism is accepted even when net names differ
@@ -285,7 +322,7 @@ objects involved.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `pin.unmatched`, `topology`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), and every `device.body_unverified` entry (see below). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |

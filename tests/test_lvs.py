@@ -68,6 +68,18 @@ M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
 .ends
 """
 
+# Issue #282's exact reproduction: the *minimal* cell -- a 5-pin inverter
+# whose NMOS body and PMOS well sit on their own nets (`vsubs`, `NW1`),
+# distinct from the supplies. Unlike `_INVERTER_SPICE` (bodies tied straight
+# to `VPWR`/`VGND`), this leaves `NetlistComparer` nothing to anchor a device
+# pairing on when a parameter is the only difference.
+_MINIMAL_INVERTER_SPICE = """
+.SUBCKT inv A Y VDD VSS vsubs
+M1 Y A VSS vsubs nfet L=0.5U W=1U
+M2 Y A VDD NW1 pfet L=0.5U W=2U
+.ENDS inv
+"""
+
 _BUF2_REFERENCE_SPICE = """
 .subckt buf2 A Y VPWR VGND
 M1 MID A VGND VGND nfet W=0.65U L=0.15U
@@ -572,6 +584,168 @@ def test_device_width_change_reports_device_property_mismatch(tmp_path):
         "layout": pytest.approx(1.0),
         "reference": pytest.approx(2.0),
     }
+
+
+# --------------------------------------------------------------------------- #
+# device.property on the minimal cell (issue #282: the degraded
+# `device.unmatched` + `net.unmatched` cascade recovered into the documented
+# category)
+# --------------------------------------------------------------------------- #
+
+
+def _minimal_inverter_report(tmp_path, reference_text: str):
+    layout_path = _write(tmp_path / "layout.spice", _MINIMAL_INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", reference_text)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    return run_lvs(path)
+
+
+def test_minimal_cell_width_change_reports_device_property(tmp_path):
+    """Issue #282's reproduction verbatim: on a two-device inverter with its
+    own substrate/well nets, changing only `M2`'s `W` used to report
+    `{"device.unmatched": 2, "net.unmatched": 4}` and no `device.property`
+    entry at all -- the report pointed at connectivity when the defect was a
+    width."""
+    report = _minimal_inverter_report(
+        tmp_path, _MINIMAL_INVERTER_SPICE.replace("W=2U", "W=4U")
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"]["device.property"] == 1
+
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == lvs.CATEGORY_DEVICE_PROPERTY
+    ]
+    assert entry["severity"] == "error"
+    assert entry["side"] == "both"
+    assert entry["device"]["class"] == "PFET"
+    assert entry["property"] == {
+        "name": "w_um",
+        "layout": pytest.approx(2.0),
+        "reference": pytest.approx(4.0),
+    }
+
+    # The parameter entry is the only `error`; the unmatched device pair and
+    # the four nets it dragged in are collateral, reported as warnings so a
+    # caller filtering on severity reads the root cause first.
+    errors = [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert errors == [entry]
+    collateral = [m for m in report["mismatches"] if m["severity"] == "warning"]
+    assert sorted(m["category"] for m in collateral) == [
+        lvs.CATEGORY_DEVICE_UNMATCHED,
+        lvs.CATEGORY_DEVICE_UNMATCHED,
+        lvs.CATEGORY_NET_UNMATCHED,
+        lvs.CATEGORY_NET_UNMATCHED,
+        lvs.CATEGORY_NET_UNMATCHED,
+        lvs.CATEGORY_NET_UNMATCHED,
+    ]
+
+
+@pytest.mark.parametrize("width", ["W=2.001U", "W=2.5U", "W=4U"])
+def test_minimal_cell_width_change_reports_device_property_at_any_delta(
+    tmp_path, width
+):
+    """Not a tolerance effect -- the issue reports the same degraded cascade
+    from `W=2.001U` through `W=4U`."""
+    report = _minimal_inverter_report(
+        tmp_path, _MINIMAL_INVERTER_SPICE.replace("W=2U", width)
+    )
+    assert report["status"] == "mismatch"
+    assert report["category_counts"]["device.property"] == 1
+
+
+def test_minimal_cell_length_change_reports_device_property(tmp_path):
+    """The recovery names whichever parameter actually differs, not just `W`."""
+    report = _minimal_inverter_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE.replace(
+            "M2 Y A VDD NW1 pfet L=0.5U", "M2 Y A VDD NW1 pfet L=0.6U"
+        ),
+    )
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == lvs.CATEGORY_DEVICE_PROPERTY
+    ]
+    assert entry["property"]["name"] == "l_um"
+    assert entry["property"]["layout"] == pytest.approx(0.5)
+    assert entry["property"]["reference"] == pytest.approx(0.6)
+
+
+def test_minimal_cell_width_change_survives_a_renamed_well_net(tmp_path):
+    """The well net is dangling (only the mismatching device touches it), so
+    the recovery pairs it structurally rather than by name -- the realistic
+    layout-vs-schematic case, where extraction rarely reproduces the
+    schematic's own net name."""
+    report = _minimal_inverter_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE.replace(
+            "NW1 pfet L=0.5U W=2U", "NWELL pfet L=0.5U W=4U"
+        ),
+    )
+    assert report["category_counts"]["device.property"] == 1
+
+
+def test_minimal_cell_rewired_device_is_not_reported_as_a_parameter_defect(tmp_path):
+    """Negative control for the recovery itself: a genuine connectivity
+    defect (the PMOS source moved from `VDD` to `VSS`) with no parameter
+    change must stay a connectivity finding."""
+    report = _minimal_inverter_report(
+        tmp_path, _MINIMAL_INVERTER_SPICE.replace("M2 Y A VDD NW1", "M2 Y A VSS NW1")
+    )
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
+    assert all(m["severity"] == "error" for m in report["mismatches"])
+
+
+def test_minimal_cell_rewired_and_resized_device_is_not_downgraded(tmp_path):
+    """A width change *and* a rewire together: the terminal nets no longer
+    correspond, so the recovery declines and nothing is downgraded to a
+    warning -- masking the connectivity defect would be the one genuinely
+    harmful outcome."""
+    report = _minimal_inverter_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE.replace(
+            "M2 Y A VDD NW1 pfet L=0.5U W=2U", "M2 Y A VSS NW1 pfet L=0.5U W=4U"
+        ),
+    )
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
+    assert all(m["severity"] == "error" for m in report["mismatches"])
+
+
+def test_minimal_cell_device_class_swap_is_not_a_parameter_defect(tmp_path):
+    """Two unmatched devices of *different* classes are not a degraded
+    parameter pair, however small the circuit."""
+    report = _minimal_inverter_report(
+        tmp_path, _MINIMAL_INVERTER_SPICE.replace("NW1 pfet", "NW1 nfet")
+    )
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
+
+
+def test_minimal_cell_two_wrong_widths_are_not_recovered(tmp_path):
+    """The recovery is scoped to a *single* unmatched device pair -- with two
+    corrupted devices the comparer's event stream no longer identifies which
+    layout device belongs to which reference device, so nothing is claimed."""
+    report = _minimal_inverter_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE.replace("W=1U", "W=1.5U").replace("W=2U", "W=4U"),
+    )
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
+
+
+def test_minimal_cell_identical_netlists_still_match(tmp_path):
+    """The recovery never manufactures a finding: an unchanged self-compare
+    of the same minimal cell is still clean."""
+    report = _minimal_inverter_report(tmp_path, _MINIMAL_INVERTER_SPICE)
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1152,7 +1326,14 @@ class _FakeDevice:
 
 class _FakeLogger:
     """Mimics the public attribute surface `lvs._build_mismatches` reads
-    from the real compare logger (see `lvs._make_compare_logger`)."""
+    from the real compare logger (see `lvs._make_compare_logger`).
+
+    Deliberately omits the real logger's net-key/scope bookkeeping
+    (`matched_net_keys`, `net_mismatch_keys`, `device_mismatch_scopes`),
+    which only the issue #282 minimal-cell recovery reads and which
+    `_build_mismatches` treats as optional -- these tests pin the per-category
+    classification, not that recovery (which is covered end-to-end against the
+    real engine above)."""
 
     def __init__(self) -> None:
         self.net_mismatches: list[tuple] = []

@@ -47,6 +47,18 @@ case. This heuristic is verified against synthetic merge/split fixtures in
 ``tests/test_lvs.py`` but is not a formal proof for arbitrary multi-defect
 inputs -- documented here as a known limitation, the same way ``extract.py``
 documents its own curated-deck connectivity-fidelity limits.
+
+Minimal-cell parameter recovery (issue #282): the comparer pairs devices from
+the *surrounding* net structure and only then compares parameters, so on a
+cell small enough that a device's own terminals are that structure (a
+two-device inverter with its own substrate/well nets), a parameter-only
+defect degrades into one unmatched device per side plus a collateral
+unmatched net for each net only those devices touched -- and no parameter
+event at all. ``_degraded_param_pair`` recovers the intended
+``device.property`` entry from exactly that pattern and downgrades the
+collateral to ``severity: "warning"``; see its docstring for the (deliberately
+narrow) conditions and ``docs/cli/lvs.md`` -> "Negative controls" for the
+caller-facing statement of it.
 """
 
 from __future__ import annotations
@@ -54,7 +66,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._provenance import build_provenance, sha256_file
 from .decks import deck_source_path, get_extraction_deck
@@ -105,6 +117,16 @@ _PARAM_DISPLAY_NAMES = {"W": "w_um", "L": "l_um"}
 #: tolerance instead of an output rounding.
 _PARAM_ABS_EPSILON = 1e-9
 _PARAM_REL_EPSILON = 1e-6
+
+#: Description carried by a ``net.unmatched`` entry that is pure collateral
+#: from a single unmatched device pair already reported as
+#: ``device.property`` (issue #282, see ``_degraded_param_pair``).
+_COLLATERAL_NET_DESCRIPTION = (
+    "net has no counterpart on the other side, but only because the one "
+    "device pair reported as 'device.property' failed to pair -- no other "
+    "device or subcircuit touches this net, so it is collateral, not an "
+    "independent connectivity defect"
+)
 
 
 class LvsError(Exception):
@@ -790,19 +812,50 @@ def _make_compare_logger() -> Any:
             self.subcircuit_mismatches: list[tuple[Any, Any]] = []
             self.device_class_mismatches: list[tuple[Any, Any]] = []
             self.ambiguous_net_matches: list[tuple[Any, Any]] = []
+            # Scope counter: `begin_circuit` opens one compare scope per
+            # circuit pair, and every event until `end_circuit` belongs to
+            # it. Net/device names are unique within a circuit, so
+            # `(scope, expanded_name)` is a stable identity for an event's
+            # subject -- and, unlike `Net.circuit()`, is readable from the
+            # *const* references the logger receives. Used by
+            # `_degraded_param_pair` (issue #282).
+            self.scope = 0
+            #: ``(layout key, reference key)`` for every successful net
+            #: pairing (matched or ambiguously matched).
+            self.matched_net_keys: list[tuple[_NetKey, _NetKey]] = []
+            #: Parallel to ``net_mismatches``: the key of each side's net
+            #: (``None`` where that side had none).
+            self.net_mismatch_keys: list[tuple[_NetKey | None, _NetKey | None]] = []
+            #: Parallel to ``device_mismatches``: the scope each was seen in.
+            self.device_mismatch_scopes: list[int] = []
             self.matched_nets = 0
             self.matched_devices = 0
             self.matched_pins = 0
 
+        def _net_key(self, net: Any) -> _NetKey | None:
+            return None if net is None else (self.scope, net.expanded_name())
+
+        def begin_circuit(self, a: Any, b: Any) -> None:
+            self.scope += 1
+
         def match_nets(self, a: Any, b: Any) -> None:
             self.matched_nets += 1
+            key_a = self._net_key(a)
+            key_b = self._net_key(b)
+            if key_a is not None and key_b is not None:
+                self.matched_net_keys.append((key_a, key_b))
 
         def match_ambiguous_nets(self, a: Any, b: Any, msg: str) -> None:
             self.matched_nets += 1
+            key_a = self._net_key(a)
+            key_b = self._net_key(b)
+            if key_a is not None and key_b is not None:
+                self.matched_net_keys.append((key_a, key_b))
             self.ambiguous_net_matches.append((a, b))
 
         def net_mismatch(self, a: Any, b: Any, msg: str) -> None:
             self.net_mismatches.append((a, b))
+            self.net_mismatch_keys.append((self._net_key(a), self._net_key(b)))
 
         def match_devices(self, a: Any, b: Any) -> None:
             self.matched_devices += 1
@@ -817,6 +870,7 @@ def _make_compare_logger() -> Any:
 
         def device_mismatch(self, a: Any, b: Any, msg: str) -> None:
             self.device_mismatches.append((a, b))
+            self.device_mismatch_scopes.append(self.scope)
 
         def match_pins(self, a: Any, b: Any) -> None:
             self.matched_pins += 1
@@ -965,7 +1019,25 @@ def _build_mismatches(
 ) -> list[dict[str, Any]]:
     mismatches: list[dict[str, Any]] = []
 
-    mismatches.extend(_classify_net_mismatches(logger.net_mismatches))
+    # Issue #282: on a minimal circuit the comparer may decline to pair two
+    # otherwise-identical devices whose only difference is a parameter,
+    # reporting `device_mismatch` on each side (plus collateral net
+    # mismatches) instead of the `match_devices_with_different_parameters`
+    # event that yields `device.property`. Recover that here.
+    degraded = _degraded_param_pair(logger)
+
+    mismatches.extend(
+        _classify_net_mismatches(
+            logger.net_mismatches,
+            event_keys=getattr(logger, "net_mismatch_keys", None),
+            explained_layout_nets=(
+                degraded.explained_layout_nets if degraded else frozenset()
+            ),
+            explained_reference_nets=(
+                degraded.explained_reference_nets if degraded else frozenset()
+            ),
+        )
+    )
 
     for a, b in logger.device_mismatches:
         side = "layout" if b is None else "reference"
@@ -977,8 +1049,16 @@ def _build_mismatches(
         mismatches.append(
             _mismatch(
                 CATEGORY_DEVICE_UNMATCHED,
-                "error",
-                "device has no counterpart on the other side",
+                "warning" if degraded else "error",
+                (
+                    "device has no counterpart on the other side, but the "
+                    "circuit is too small for the comparer to pair it "
+                    "structurally -- the root cause is the parameter "
+                    "difference reported as 'device.property' on this same "
+                    'device pair (see docs/cli/lvs.md, "Negative controls")'
+                )
+                if degraded
+                else "device has no counterpart on the other side",
                 side,
                 device={
                     "layout": _name_or_none(a),
@@ -986,6 +1066,11 @@ def _build_mismatches(
                     "class": class_name,
                 },
             )
+        )
+
+    if degraded is not None:
+        mismatches.extend(
+            _classify_param_mismatch(degraded.layout_device, degraded.reference_device)
         )
 
     for a, b in logger.param_mismatches:
@@ -1101,6 +1186,180 @@ def _build_mismatches(
     return mismatches
 
 
+#: ``(compare scope, expanded net name)`` -- see ``_make_compare_logger``'s
+#: ``scope`` counter for why identity is keyed this way rather than by the
+#: net's circuit (which is not readable from a const reference).
+_NetKey = tuple[int, str]
+
+
+class _DegradedParamPair(NamedTuple):
+    """One unmatched-device pair that :func:`_degraded_param_pair` proved is
+    really a parameter difference (issue #282).
+
+    ``explained_layout_nets``/``explained_reference_nets`` are the
+    :data:`_NetKey` s of the one-sided net mismatches whose unmatched-ness is
+    *fully* accounted for by this device pair (the nets touch no other device
+    and carry no subcircuit pin) -- collateral, not independent findings.
+    """
+
+    layout_device: Any
+    reference_device: Any
+    explained_layout_nets: frozenset[_NetKey]
+    explained_reference_nets: frozenset[_NetKey]
+
+
+def _net_correspondence(
+    logger: Any,
+) -> tuple[dict[_NetKey, _NetKey], set[_NetKey], set[_NetKey]]:
+    """``(layout->reference net pairing, layout-only nets, reference-only nets)``
+    as the comparer saw them, in :data:`_NetKey` terms.
+
+    The pairing includes both cleanly matched nets and *both-sided* net
+    mismatch events: the comparer did associate those two nets with each
+    other, it just also flagged the pairing -- for the purpose of deciding
+    whether two devices sit on the same nets, an associated pair is an
+    association.
+    """
+    paired: dict[_NetKey, _NetKey] = dict(logger.matched_net_keys)
+    layout_only: set[_NetKey] = set()
+    reference_only: set[_NetKey] = set()
+    for key_a, key_b in logger.net_mismatch_keys:
+        if key_a is not None and key_b is not None:
+            paired.setdefault(key_a, key_b)
+        elif key_a is not None:
+            layout_only.add(key_a)
+        elif key_b is not None:
+            reference_only.add(key_b)
+    return paired, layout_only, reference_only
+
+
+def _net_is_explained_by_device(net: Any, device: Any) -> bool:
+    """True when ``net``'s only device connection is ``device`` and it carries
+    no subcircuit pin -- i.e. nothing but this one device can explain why the
+    comparer failed to pair the net."""
+    if net.subcircuit_pin_count() != 0:
+        return False
+    device_name = device.expanded_name()
+    return all(
+        ref.device().expanded_name() == device_name for ref in net.each_terminal()
+    )
+
+
+def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
+    """Detect the minimal-circuit degradation issue #282 describes and return
+    the device pair behind it, or ``None``.
+
+    ``NetlistComparer`` pairs devices from the surrounding net structure and
+    only *then* compares parameters. On a circuit small enough that the
+    devices' own terminals are the structure (the canonical case: a
+    two-device inverter whose bulk terminals sit on their own substrate/well
+    nets), a single wrong ``W`` leaves it with nothing to anchor the pairing
+    on: it emits ``device_mismatch`` on each side plus a collateral one-sided
+    net mismatch for every net that only those two devices touched, and never
+    the ``match_devices_with_different_parameters`` event that would produce
+    ``device.property``. The report then points at connectivity when the
+    defect is a number.
+
+    Everything needed to say so is already in hand, so this recovers it --
+    deliberately narrowly, since a wrong claim here would mask a real
+    connectivity defect. All of the following must hold:
+
+    * exactly one unmatched device on each side and no other device mismatch;
+    * identical device class name, terminal definitions and parameter
+      definitions;
+    * every terminal of the layout device lands on the net the reference
+      device's same terminal lands on -- either a net the comparer explicitly
+      paired, or a net left unpaired on *both* sides with the same top-level
+      pin count and either the same name or no other device/subcircuit
+      touching it (the collateral the device pair itself caused);
+    * at least one parameter actually differs by more than this module's
+      floating-point epsilon.
+
+    The verdict is untouched either way: ``compare()`` already said
+    "mismatch" and still does. This only decides which entry the caller reads
+    first.
+    """
+    device_mismatches = list(logger.device_mismatches)
+    scopes = list(getattr(logger, "device_mismatch_scopes", ()))
+    if len(device_mismatches) != 2 or len(scopes) != 2:
+        # A logger without the parallel bookkeeping (the fake loggers the
+        # classification unit tests use) never enters this path.
+        return None
+    if scopes[0] != scopes[1]:
+        # One unmatched device in each of two *different* circuits is two
+        # findings, not one degraded pair.
+        return None
+    layout_only = [a for a, b in device_mismatches if a is not None and b is None]
+    reference_only = [b for a, b in device_mismatches if a is None and b is not None]
+    if len(layout_only) != 1 or len(reference_only) != 1:
+        return None
+    a, b = layout_only[0], reference_only[0]
+
+    class_a = a.device_class()
+    class_b = b.device_class()
+    if class_a.name != class_b.name:
+        return None
+    if not hasattr(class_a, "terminal_definitions") or not hasattr(
+        class_b, "terminal_definitions"
+    ):
+        return None
+
+    terminals_a = [(t.id(), t.name) for t in class_a.terminal_definitions()]
+    if terminals_a != [(t.id(), t.name) for t in class_b.terminal_definitions()]:
+        return None
+    params_a = list(class_a.parameter_definitions())
+    if [(p.id(), p.name) for p in params_a] != [
+        (p.id(), p.name) for p in class_b.parameter_definitions()
+    ]:
+        return None
+
+    paired, unpaired_layout, unpaired_reference = _net_correspondence(logger)
+    scope = scopes[0]
+    explained_layout: set[_NetKey] = set()
+    explained_reference: set[_NetKey] = set()
+
+    for terminal_id, _terminal_name in terminals_a:
+        net_a = a.net_for_terminal(terminal_id)
+        net_b = b.net_for_terminal(terminal_id)
+        if net_a is None and net_b is None:
+            continue
+        if net_a is None or net_b is None:
+            return None
+        key_a = (scope, net_a.expanded_name())
+        key_b = (scope, net_b.expanded_name())
+        if key_a in paired:
+            if paired[key_a] != key_b:
+                return None
+            continue
+        if key_a not in unpaired_layout or key_b not in unpaired_reference:
+            return None
+        # Both sides left this net unpaired. It corresponds only if the two
+        # are interchangeable: same number of top-level pins, and either the
+        # same name or -- for a net nothing but this one device touches (a
+        # dangling well/bulk net is the common case) -- structurally
+        # identical, whatever it happens to be called on each side.
+        if net_a.pin_count() != net_b.pin_count():
+            return None
+        collateral = _net_is_explained_by_device(
+            net_a, a
+        ) and _net_is_explained_by_device(net_b, b)
+        if not collateral and net_a.expanded_name() != net_b.expanded_name():
+            return None
+        if collateral:
+            explained_layout.add(key_a)
+            explained_reference.add(key_b)
+
+    if not any(
+        _values_differ(a.parameter(param.id()), b.parameter(param.id()))
+        for param in params_a
+    ):
+        return None
+
+    return _DegradedParamPair(
+        a, b, frozenset(explained_layout), frozenset(explained_reference)
+    )
+
+
 def _classify_param_mismatch(a: Any, b: Any) -> list[dict[str, Any]]:
     """Turn one ``match_devices_with_different_parameters`` event into one
     ``device.property`` mismatch entry per parameter that actually differs
@@ -1159,12 +1418,37 @@ def _values_differ(a_value: float, b_value: float) -> bool:
     )
 
 
-def _classify_net_mismatches(events: list[tuple[Any, Any]]) -> list[dict[str, Any]]:
+def _classify_net_mismatches(
+    events: list[tuple[Any, Any]],
+    *,
+    event_keys: list[tuple[_NetKey | None, _NetKey | None]] | None = None,
+    explained_layout_nets: frozenset[_NetKey] = frozenset(),
+    explained_reference_nets: frozenset[_NetKey] = frozenset(),
+) -> list[dict[str, Any]]:
     """Classify raw ``net_mismatch`` events into ``net.unmatched``/
     ``net.merged``/``net.split``/``topology`` entries -- see this module's
-    docstring for the heuristic and its documented limitation."""
-    one_sided_layout = [(a, b) for a, b in events if a is not None and b is None]
-    one_sided_reference = [(a, b) for a, b in events if a is None and b is not None]
+    docstring for the heuristic and its documented limitation.
+
+    ``explained_*_nets`` (issue #282) name the one-sided nets whose
+    unmatched-ness is entirely collateral from a device pair reported
+    separately as ``device.property`` (see :func:`_degraded_param_pair`).
+    Those keep their category -- the event really did happen, and dropping it
+    would make ``mismatches[]`` disagree with the comparer's own log -- but
+    report ``severity: "warning"``, so a caller filtering on ``"error"``
+    reads the parameter defect instead of four fine nets. ``event_keys`` is
+    the compare logger's key list, parallel to ``events`` (omitted by the
+    fake-logger unit tests, in which case nothing is ever "explained").
+    """
+    keys: list[tuple[_NetKey | None, _NetKey | None]] = (
+        list(event_keys) if event_keys is not None else [(None, None)] * len(events)
+    )
+    tagged = list(zip(events, keys, strict=True))
+    one_sided_layout = [
+        (a, key) for (a, b), key in tagged if a is not None and b is None
+    ]
+    one_sided_reference = [
+        (b, key) for (a, b), key in tagged if a is None and b is not None
+    ]
     both_sided = [(a, b) for a, b in events if a is not None and b is not None]
     both_sided_renamed = [
         (a, b) for a, b in both_sided if a.expanded_name() != b.expanded_name()
@@ -1173,7 +1457,7 @@ def _classify_net_mismatches(events: list[tuple[Any, Any]]) -> list[dict[str, An
     entries: list[dict[str, Any]] = []
 
     if one_sided_layout and both_sided_renamed:
-        for a, _b in one_sided_layout:
+        for a, _key in one_sided_layout:
             entries.append(
                 _mismatch(
                     CATEGORY_NET_SPLIT,
@@ -1184,19 +1468,22 @@ def _classify_net_mismatches(events: list[tuple[Any, Any]]) -> list[dict[str, An
                 )
             )
     elif one_sided_layout:
-        for a, _b in one_sided_layout:
+        for a, key in one_sided_layout:
+            explained = key[0] in explained_layout_nets
             entries.append(
                 _mismatch(
                     CATEGORY_NET_UNMATCHED,
-                    "error",
-                    "layout net has no reference counterpart",
+                    "warning" if explained else "error",
+                    _COLLATERAL_NET_DESCRIPTION
+                    if explained
+                    else "layout net has no reference counterpart",
                     "layout",
                     net={"layout": _name_or_none(a), "reference": None},
                 )
             )
 
     if one_sided_reference and both_sided_renamed:
-        for _a, b in one_sided_reference:
+        for b, _key in one_sided_reference:
             entries.append(
                 _mismatch(
                     CATEGORY_NET_MERGED,
@@ -1207,12 +1494,15 @@ def _classify_net_mismatches(events: list[tuple[Any, Any]]) -> list[dict[str, An
                 )
             )
     elif one_sided_reference:
-        for _a, b in one_sided_reference:
+        for b, key in one_sided_reference:
+            explained = key[1] in explained_reference_nets
             entries.append(
                 _mismatch(
                     CATEGORY_NET_UNMATCHED,
-                    "error",
-                    "reference net has no layout counterpart",
+                    "warning" if explained else "error",
+                    _COLLATERAL_NET_DESCRIPTION
+                    if explained
+                    else "reference net has no layout counterpart",
                     "reference",
                     net={"layout": None, "reference": _name_or_none(b)},
                 )
