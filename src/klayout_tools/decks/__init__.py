@@ -331,6 +331,8 @@ class ExtractionDeck:
             layers.update(capacitor.top_plate_excludes)
             layers.update(capacitor.bottom_plate_requires)
             layers.update(capacitor.bottom_plate_excludes)
+            if capacitor.top_plate_via is not None:
+                layers.add(capacitor.top_plate_via)
         for resistor in self.resistors:
             layers.add(resistor.body)
             layers.add(resistor.marker)
@@ -432,14 +434,16 @@ class CapacitorDevice:
 
     Unlike :class:`ResistorDevice`-shaped fields elsewhere in this codebase
     (there is no such class yet -- see #222), ``bottom_plate`` does **not**
-    need to be one of the owning deck's own ``metals`` -- and even when it
-    *is* (e.g. gf180mcu's bottom plate is ``Metal4``, which the deck now
-    tracks as part of its full Metal1-Metal5 stack since #220), the two plate
-    regions are still recognised as their own new, self-connected connectivity
-    nodes, derived from a *separately* registered ``top_plate``/``bottom_plate``
-    clip rather than the ``metals[]`` region itself, and so are not wired into
-    the rest of the deck's contact/via/metal connectivity graph -- see "Known
-    limitation" below.
+    need to be one of the owning deck's own ``metals``. When it *is* (e.g.
+    gf180mcu's bottom plate is ``Metal4``, which the deck now tracks as part
+    of its full Metal1-Metal5 stack since #220), ``extract.py`` ties the
+    recognised bottom-plate region directly into that ``metals[]`` node
+    (issue #314), so ordinary contact/via/metal routing to that metal reaches
+    the capacitor's bottom terminal. When it is *not* (e.g. sky130's
+    ``met3``/``met4`` bottom plates, which sit above this curated deck's
+    ``metals`` stack -- ``li1``/``met1`` only), the bottom plate stays its
+    own new, self-connected connectivity node, isolated from the rest of the
+    deck's graph -- see "Known limitation" below.
 
     Geometry (all layer fields are ``(layer, datatype)`` pairs):
 
@@ -451,6 +455,10 @@ class CapacitorDevice:
       ``efuse_mk``/``plfuse``, mirroring the PDK's own official derivation.
     - ``bottom_plate`` -- the conductor the bottom plate is drawn on, with
       its own optional ``bottom_plate_requires``/``bottom_plate_excludes``.
+      When this layer matches one of the owning deck's own ``metals`` (by
+      ``(layer, datatype)`` value), ``extract.py`` connects the recognised
+      bottom-plate region into that ``metals[]`` connectivity node (#314) --
+      see "Known limitation" below for when it does not match.
     - ``bottom_plate_oversize_um`` -- when nonzero, the bottom plate is not
       the raw (filtered) ``bottom_plate`` region but the PDK's derived
       "virtual bottom plate": the subset of that region already touching the
@@ -463,6 +471,28 @@ class CapacitorDevice:
       sky130's own official derivation, where the bottom plate is "whatever
       conductor the purpose-built top-plate mark layer sits over," no
       virtual-plate derivation needed.
+    - ``top_plate_via``/``top_plate_via_metal`` -- optional declaration of
+      the via layer that lands directly on the top plate and the ``metals[]``
+      layer it connects up to (#314). When both are set, ``extract.py`` reads
+      the raw ``top_plate_via`` layer as its own region, connects it to the
+      recognised top-plate region wherever the two geometrically touch, and
+      connects it on to the ``metals[]`` entry matching
+      ``top_plate_via_metal`` -- the top-plate analogue of ``bottom_plate``
+      matching a tracked metal above. Both default to ``None`` (no top-plate
+      connectivity beyond the plate's own self-merge); ``top_plate_via_metal``
+      must be one of the deck's own ``metals`` when ``top_plate_via`` is set
+      (``extract.py`` raises :class:`~klayout_tools.extract.ExtractError` for
+      a deck that sets one without the other, or sets
+      ``top_plate_via_metal`` to a layer the deck does not track -- a
+      deck-authoring mistake, the same class of check
+      :func:`~klayout_tools.extract._resolve_resistors` already performs for
+      a resistor's ``body``/``terminal`` layers). Left unset for a PDK/deck
+      combination where the top plate's real via either does not exist or
+      lands on a metal this curated deck's own ``metals`` stack does not
+      track (e.g. sky130's MiM stacks, whose real ``via3``/``via4`` land on
+      ``met4``/``met5`` -- neither tracked by this curated deck's ``li1``/
+      ``met1``-only ``metals`` stack) -- documented, not silently claimed as
+      fixed.
 
     ``area_cap_f_um2`` is the device's capacitance per square micrometre of
     plate *overlap* area, in **Farads**. KLayout's
@@ -476,18 +506,17 @@ class CapacitorDevice:
     JSON response, and one of the values :attr:`ExtractionDeck.device_classes`
     reports for a deck that declares this entry).
 
-    Known limitation: because the plate regions are registered as their own
-    separate connectivity nodes (not the deck's ``metals[]`` layers, even
-    where a plate happens to be drawn on a tracked metal), a recognised
-    capacitor's two terminal nets are only as large as the plate shapes
-    ``klt extract`` recognises as this device -- multiple plate polygons that
-    touch each other merge into one net (e.g. a shared bottom plate across
-    several caps), but neither plate's net extends into whatever real
-    upper-metal routing the deck's metal-stack connectivity would otherwise
-    connect it to. The *device* itself (a
-    capacitor of the correct value between two correctly-shaped plates) is
-    still correctly recognised; only the *net names/connectivity* of its two
-    terminals is a documented approximation -- the same "curated starter
+    Known limitation: a plate whose declared layer does not resolve to one
+    of the deck's tracked ``metals[]`` entries (``bottom_plate`` that is not
+    one of ``metals``, or a ``top_plate`` with no ``top_plate_via`` declared)
+    is still registered as its own new, self-connected connectivity node --
+    multiple plate polygons that touch each other merge into one net (e.g. a
+    shared bottom plate across several caps), but that plate's net does not
+    extend into whatever real routing the deck's metal-stack connectivity
+    would otherwise connect it to. The *device* itself (a capacitor of the
+    correct value between two correctly-shaped plates) is still correctly
+    recognised in every case; only an unwired plate's *net name/connectivity*
+    carries this documented approximation -- the same "curated starter
     subset, not the full metal stack" scope guard the rest of this deck
     already carries (see ``docs/cli/extract.md`` -> "Coverage").
     """
@@ -501,6 +530,8 @@ class CapacitorDevice:
     bottom_plate_requires: tuple[tuple[int, int], ...] = ()
     bottom_plate_excludes: tuple[tuple[int, int], ...] = ()
     bottom_plate_oversize_um: float = 0.0
+    top_plate_via: tuple[int, int] | None = None
+    top_plate_via_metal: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)

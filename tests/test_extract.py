@@ -714,6 +714,12 @@ def _box_um(x0, y0, x1, y1, dbu=0.001):
     return kdb.Box(round(x0 / dbu), round(y0 / dbu), round(x1 / dbu), round(y1 / dbu))
 
 
+def _trans_um(x, y, dbu=0.001):
+    """A `kdb.Trans` (label placement point) from micrometre coordinates --
+    the point-placement analogue of `_box_um`."""
+    return kdb.Trans(round(x / dbu), round(y / dbu))
+
+
 def _make_gf180mcu_mim_layout(*, marked: bool = True) -> kdb.Layout:
     """A minimal gf180mcu MiM-cap layout on the curated deck's Option-B
     stack: a 10x10um `FuseTop` top plate (marked with both `CAP_MK`/
@@ -794,6 +800,120 @@ def test_gf180mcu_unmarked_metal4_fusetop_overlap_is_not_a_capacitor(tmp_path):
 
     assert report["device_count"] == 0
     assert report["device_counts"] == {}
+
+
+def _make_gf180mcu_mim_layout_with_bottom_routing(label: str) -> kdb.Layout:
+    """Like `_make_gf180mcu_mim_layout` (marked), plus a `Via3`/`Metal3`
+    landing pad wired to the same `Metal4` bottom-plate conductor, well away
+    from the cap itself, and labelled on `Metal3`'s pin/label layer -- the
+    "bottom plate routed down through contact/metal/via to a labelled net"
+    regression case issue #314 describes: before the fix, the labelled net
+    is invisible to the capacitor's P1 terminal regardless of this routing.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, _box_um(-20, -20, 20, 20))  # Metal4 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+
+    # Route the bottom plate's Metal4 conductor down to a labelled Metal3
+    # net, well away from the cap itself (still inside the big Metal4 box
+    # above, so the fix's `metals[]` connectivity has to reach across it).
+    draw(40, 0, _box_um(-15, -15, -13, -13))  # Via3 (Metal3 <-> Metal4)
+    draw(42, 0, _box_um(-16, -16, -12, -12))  # Metal3
+    top.shapes(layout.layer(42, 10)).insert(  # Metal3 pin/label
+        kdb.Text(label, _trans_um(-14, -14))
+    )
+
+    return layout
+
+
+def _make_gf180mcu_mim_layout_with_top_routing(label: str) -> kdb.Layout:
+    """A gf180mcu MiM-cap layout whose top plate (`FuseTop`) is routed up
+    through `Via4` to a labelled `Metal5` net -- the top-plate analogue of
+    `_make_gf180mcu_mim_layout_with_bottom_routing`, exercising
+    `CapacitorDevice.top_plate_via`/`top_plate_via_metal` (issue #314).
+
+    `FuseTop` (and its `CAP_MK`/`MIM_L_MK` markers) extends 2um further in
+    x than the `Metal4` bottom-plate conductor beneath it, so the `Via4`
+    landing pad can sit inside `FuseTop`'s own footprint (this device's
+    `top_region`) without also touching `Metal4` -- avoiding a confound
+    where the landing pad's own overlap with `Metal4` would tie the bottom
+    and top plates together through the deck's ordinary blanket
+    `Metal4`<->`Via4`<->`Metal5` connectivity, rather than through the
+    top-plate-specific wiring this test exists to exercise."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, _box_um(0, 0, 10, 10))  # Metal4 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 12, 10))  # FuseTop (top plate), wider than Metal4
+    draw(117, 5, _box_um(-5, -5, 17, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 17, 15))  # MIM_L_MK
+
+    # Via4 landing pad inside FuseTop's extended footprint (x = 10..12um),
+    # where Metal4 is absent -- lands up to a labelled Metal5 net.
+    draw(41, 0, _box_um(10.5, 4, 11.5, 6))  # Via4
+    draw(81, 0, _box_um(10, 3, 12, 7))  # Metal5
+    top.shapes(layout.layer(81, 10)).insert(  # Metal5 pin/label
+        kdb.Text(label, _trans_um(11, 5))
+    )
+
+    return layout
+
+
+def test_gf180mcu_capacitor_bottom_plate_connects_to_routed_metal_net(tmp_path):
+    """Issue #314: a bottom plate wired down through `Via3` to a labelled
+    `Metal3` net extracts with the capacitor's P1/bottom terminal (reported
+    as `nets.a`, the first terminal passed to `extract_devices`) on that
+    same labelled net, not an anonymous device-only net -- the "Confirmed on
+    a minimal test case" regression this issue describes. The unrouted top
+    plate stays on its own anonymous net."""
+    path = _write_gds(
+        _make_gf180mcu_mim_layout_with_bottom_routing("VBOT"),
+        tmp_path / "mim_bottom_routed.gds",
+    )
+    report = run_extract(
+        path, "gf180mcu", output=str(tmp_path / "mim_bottom_routed.spice")
+    )
+
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    (device,) = report["devices"]
+    assert device["params"]["c_f"] == pytest.approx(2.0e-13)
+    assert device["params"]["area_um2"] == pytest.approx(100.0)
+    assert device["nets"]["a"] == "VBOT"
+    assert device["nets"]["b"].startswith("$")
+
+
+def test_gf180mcu_capacitor_top_plate_connects_to_routed_metal_net(tmp_path):
+    """Issue #314: a top plate wired up through the deck's declared
+    `top_plate_via`/`top_plate_via_metal` (`Via4` -> `Metal5`) to a labelled
+    net extracts with the capacitor's P2/top terminal (reported as
+    `nets.b`, the second terminal passed to `extract_devices`) on that same
+    labelled net. The bottom plate's `Metal4` conductor is drawn here but
+    carries no label/further routing of its own, so it stays on its own
+    anonymous net even though it is tied into the `metals[]` graph."""
+    path = _write_gds(
+        _make_gf180mcu_mim_layout_with_top_routing("VTOP"),
+        tmp_path / "mim_top_routed.gds",
+    )
+    report = run_extract(
+        path, "gf180mcu", output=str(tmp_path / "mim_top_routed.spice")
+    )
+
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    (device,) = report["devices"]
+    assert device["params"]["c_f"] == pytest.approx(2.0e-13)
+    assert device["params"]["area_um2"] == pytest.approx(100.0)
+    assert device["nets"]["b"] == "VTOP"
+    assert device["nets"]["a"].startswith("$")
 
 
 @pytest.mark.parametrize(
