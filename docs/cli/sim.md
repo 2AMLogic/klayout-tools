@@ -214,6 +214,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | ------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
+| `backend`                | string            | Execution backend for the corner matrix. Defaults to, and currently only supports, `"local"` (runs corners sequentially in-process). Other names (e.g. `local-parallel`, `remote`) are reserved but unimplemented — requesting one is an error. Overridable with the `--backend` CLI flag. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
 | `corners.process`        | array\<string\>   | Process-corner axis — opaque `.lib` section names.                                                                                                                     |
@@ -333,7 +334,7 @@ the full reasoning):
 | Code | Meaning                                                                    |
 | ---- | ---------------------------------------------------------------------------- |
 | `0`  | Every corner passed.                                                         |
-| `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine. |
+| `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. |
 | `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. |

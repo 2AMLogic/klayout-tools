@@ -131,6 +131,35 @@ def test_run_sim_unsupported_engine_raises(tmp_path):
         sim.run_sim(str(request))
 
 
+def test_run_sim_unsupported_backend_raises(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "bogus",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="unsupported backend"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_unsupported_backend_via_cli_flag_raises(tmp_path):
+    # The --backend flag overrides the request field and is validated the
+    # same way (unknown name -> SimError, not a silent fallback to local).
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="unsupported backend"):
+        sim.run_sim(str(request), backend="remote")
+
+
 def test_run_sim_netlist_not_found_raises(tmp_path):
     request = _write_request(
         tmp_path,
@@ -753,6 +782,71 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     (corner,) = report["corners"]
     assert corner["measurements"][0]["value"] == 1.0
     assert corner["measurements"][0]["status"] == "pass"
+
+
+def _stripped_report(report: dict) -> dict:
+    """Drop the two fields the docs flag as legitimately varying between
+    runs (`runtime_s`, `engine_version`) so the rest of the report can be
+    compared for byte-identical equality (see docs/cli/sim.md's
+    byte-exact-fixture caveat)."""
+    clone = json.loads(json.dumps(report))
+    clone["environment"].pop("engine_version", None)
+    for corner in clone["corners"]:
+        corner.pop("runtime_s", None)
+    return clone
+
+
+def test_run_sim_local_backend_is_byte_identical_to_default(tmp_path, monkeypatch):
+    # The `local` backend (explicit, and via the --backend flag override)
+    # must reproduce the pre-seam default behaviour exactly: same report
+    # JSON, same corner ordering. Uses a multi-corner matrix so ordering is
+    # actually exercised, not just a single-corner smoke test.
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    base = {
+        "netlist": "body.spice",
+        "models": {"lib": "corner.lib"},
+        "corners": {
+            "process": ["tt", "ss"],
+            "temperature_c": [-40, 125],
+        },
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=1u",
+                "limits": {"min": 0.5},
+            }
+        ],
+    }
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    default_req = _write_request(tmp_path, base, name="default.json")
+    explicit_req = _write_request(
+        tmp_path, {**base, "backend": "local"}, name="explicit.json"
+    )
+
+    default_report = sim.run_sim(str(default_req))
+    explicit_report = sim.run_sim(str(explicit_req))
+    flag_report = sim.run_sim(str(default_req), backend="local")
+
+    # `netlist` echoes the request path field, identical across all three.
+    assert _stripped_report(default_report) == _stripped_report(explicit_report)
+    assert _stripped_report(default_report) == _stripped_report(flag_report)
+
+    # Ordering is the odometer process x temperature expansion, unchanged.
+    assert [c["corner_id"] for c in default_report["corners"]] == [
+        "tt/novdd/-40C",
+        "tt/novdd/125C",
+        "ss/novdd/-40C",
+        "ss/novdd/125C",
+    ]
 
 
 def test_run_sim_stubbed_fail(tmp_path, monkeypatch):

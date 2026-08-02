@@ -488,6 +488,15 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     sim_parser.add_argument(
+        "--backend",
+        default=None,
+        help=(
+            "execution backend (default: local, or the request's `backend` "
+            "field); overrides the request field when given. Only `local` is "
+            "implemented; other names are reserved (see docs/cli/sim.md)."
+        ),
+    )
+    sim_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
