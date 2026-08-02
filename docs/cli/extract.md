@@ -898,7 +898,8 @@ exit codes).
     "klt_version": "0.4.2",
     "klayout_version": "0.29.8",
     "pdk": null,
-    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" }
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" },
+    "input": { "content_hash": "sha256:<hex>" }
   }
 }
 ```
@@ -929,7 +930,7 @@ exit codes).
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
-| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash. |
+| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want
 structure without re-parsing SPICE; the **netlist file at `netlist_path` is

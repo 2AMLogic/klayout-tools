@@ -871,11 +871,20 @@ def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
     report = sim.run_sim(str(request))
 
     prov = report["provenance"]
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     # No PDK variant declared in `models`, so no PDK is resolved.
     assert prov["pdk"] is None
     assert prov["deck"]["name"] == "corner.lib"
     assert prov["deck"]["content_hash"].startswith("sha256:")
+    # Issue #331 added `provenance.input`, but `sim` wasn't in scope for it --
+    # stays null here.
+    assert prov["input"] is None
 
 
 def _stripped_report(report: dict) -> dict:
@@ -1726,12 +1735,19 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "corners",
     }
     prov = data["provenance"]
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     assert isinstance(prov["klt_version"], str)
     # This request declares no process axis / model library, so no model
     # deck or PDK is resolved.
     assert prov["pdk"] is None
     assert prov["deck"] is None
+    assert prov["input"] is None
 
 
 def test_cli_default_format_is_text(tmp_path, monkeypatch, capsys):

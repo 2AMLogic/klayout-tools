@@ -368,11 +368,22 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert report["warnings"] == []
 
     prov = report["provenance"]
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     assert isinstance(prov["klt_version"], str)
     assert prov["pdk"] is None
     assert prov["deck"]["name"] == "sky130"
     assert prov["deck"]["content_hash"].startswith("sha256:")
+    # Issue #331: the input layout stream is hashed too -- distinct from
+    # `netlist_sha256` above, which hashes the *written* netlist.
+    assert prov["input"]["content_hash"].startswith("sha256:")
+    input_digest = prov["input"]["content_hash"].removeprefix("sha256:")
+    assert input_digest != report["netlist_sha256"]
 
     devices = report["devices"]
     assert [d["name"] for d in devices] == sorted(d["name"] for d in devices)
@@ -400,6 +411,36 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert report["pin_count"] == len(
         nets
     )  # make_top_level_pins() promotes every named net
+
+
+def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
+    """Issue #331: `provenance.input.content_hash` identifies the input
+    layout *stream* a report was produced from -- byte-identical inputs hash
+    the same, and a real geometry change (which a stale committed report
+    would not otherwise reveal) produces a different hash."""
+    path_a = _write_gds(_make_inverter_layout(), tmp_path / "inv_a.gds")
+    path_b = _write_gds(_make_inverter_layout(), tmp_path / "inv_b.gds")
+
+    report_a = run_extract(path_a, "sky130", output=str(tmp_path / "a.spice"))
+    report_b = run_extract(path_b, "sky130", output=str(tmp_path / "b.spice"))
+    assert (
+        report_a["provenance"]["input"]["content_hash"]
+        == report_b["provenance"]["input"]["content_hash"]
+    )
+
+    # A layout with different geometry hashes differently, even though the
+    # deck/version fields do not change.
+    modified_layout = _make_bare_poly_gate_layout("UNUSED")
+    path_c = _write_gds(modified_layout, tmp_path / "inv_c.gds")
+    report_c = run_extract(path_c, "sky130", output=str(tmp_path / "c.spice"))
+
+    assert (
+        report_c["provenance"]["input"]["content_hash"]
+        != report_a["provenance"]["input"]["content_hash"]
+    )
+    assert (
+        report_c["provenance"]["klt_version"] == report_a["provenance"]["klt_version"]
+    )
 
 
 # --------------------------------------------------------------------------- #
