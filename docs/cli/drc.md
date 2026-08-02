@@ -169,6 +169,13 @@ exactly the "still inert" signal a future deck increment would have to
 break for the reservation to stop being safe, and that break would be
 visible in these fields the moment it happened.
 
+`klt layers` and `klt stats` also **name** shapes on a reserved layer rather
+than reporting them as ordinary, unrecognised geometry: each `layers[]`
+entry carries an `annotation: true` field when its `(layer, datatype)` falls
+in the 990-999 range — see [`docs/cli/layers.md`](layers.md) → "Semantics
+and guarantees" and [`docs/cli/stats.md`](stats.md) → "Semantics and
+guarantees".
+
 ## Limitation: whole-layout, flattened
 
 Each rule is checked against the **whole layout**, flattened per top cell

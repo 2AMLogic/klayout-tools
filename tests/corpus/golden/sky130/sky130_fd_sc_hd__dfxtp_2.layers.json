@@ -8,133 +8,155 @@
       "layer": 64,
       "datatype": 5,
       "name": null,
-      "shapes": 2
+      "shapes": 2,
+      "annotation": false
     },
     {
       "layer": 64,
       "datatype": 16,
       "name": null,
-      "shapes": 2
+      "shapes": 2,
+      "annotation": false
     },
     {
       "layer": 64,
       "datatype": 20,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 64,
       "datatype": 59,
       "name": null,
-      "shapes": 2
+      "shapes": 2,
+      "annotation": false
     },
     {
       "layer": 65,
       "datatype": 20,
       "name": null,
-      "shapes": 6
+      "shapes": 6,
+      "annotation": false
     },
     {
       "layer": 66,
       "datatype": 20,
       "name": null,
-      "shapes": 14
+      "shapes": 14,
+      "annotation": false
     },
     {
       "layer": 66,
       "datatype": 44,
       "name": null,
-      "shapes": 53
+      "shapes": 53,
+      "annotation": false
     },
     {
       "layer": 67,
       "datatype": 5,
       "name": null,
-      "shapes": 3
+      "shapes": 3,
+      "annotation": false
     },
     {
       "layer": 67,
       "datatype": 16,
       "name": null,
-      "shapes": 3
+      "shapes": 3,
+      "annotation": false
     },
     {
       "layer": 67,
       "datatype": 20,
       "name": null,
-      "shapes": 16
+      "shapes": 16,
+      "annotation": false
     },
     {
       "layer": 67,
       "datatype": 44,
       "name": null,
-      "shapes": 40
+      "shapes": 40,
+      "annotation": false
     },
     {
       "layer": 68,
       "datatype": 5,
       "name": null,
-      "shapes": 2
+      "shapes": 2,
+      "annotation": false
     },
     {
       "layer": 68,
       "datatype": 16,
       "name": null,
-      "shapes": 2
+      "shapes": 2,
+      "annotation": false
     },
     {
       "layer": 68,
       "datatype": 20,
       "name": null,
-      "shapes": 4
+      "shapes": 4,
+      "annotation": false
     },
     {
       "layer": 78,
       "datatype": 44,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 81,
       "datatype": 4,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 83,
       "datatype": 44,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 93,
       "datatype": 44,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 94,
       "datatype": 20,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 95,
       "datatype": 20,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     },
     {
       "layer": 122,
       "datatype": 16,
       "name": null,
-      "shapes": 2
+      "shapes": 2,
+      "annotation": false
     },
     {
       "layer": 236,
       "datatype": 0,
       "name": null,
-      "shapes": 1
+      "shapes": 1,
+      "annotation": false
     }
   ]
 }

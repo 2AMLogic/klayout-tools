@@ -31,9 +31,11 @@ def _print_text(report: dict) -> None:
             str(entry["datatype"]),
             entry["name"] if entry["name"] is not None else "-",
             str(entry["shapes"]),
+            "yes" if entry["annotation"] else "-",
         )
         for entry in layers
     ]
-    headers = ("layer", "datatype", "name", "shapes")
-    # layer/datatype/shapes right-aligned (numeric), name (col 2) left-aligned.
+    headers = ("layer", "datatype", "name", "shapes", "annotation")
+    # layer/datatype/shapes/annotation right-aligned (numeric-ish), name
+    # (col 2) left-aligned.
     render_table(headers, rows, left_aligned={2})

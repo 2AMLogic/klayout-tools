@@ -72,6 +72,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
       "datatype": 0,
       "name": "metal1",
       "shapes": 2,
+      "annotation": false,
       "path": "design_dir/renders/1_0.png",
       "rendered": true
     },
@@ -80,6 +81,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
       "datatype": 0,
       "name": "empty",
       "shapes": 0,
+      "annotation": false,
       "path": null,
       "rendered": false
     },
@@ -88,6 +90,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
       "datatype": 20,
       "name": null,
       "shapes": 3,
+      "annotation": false,
       "path": "design_dir/renders/66_20.png",
       "rendered": true
     }
@@ -118,6 +121,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `datatype` | integer          | Datatype number.                                                            |
 | `name`     | string \| null   | Layer name carried in the stream, or `null` for unnamed layers.             |
 | `shapes`   | integer          | Shape count for this layer (same semantics as `klt layers`).                |
+| `annotation` | boolean        | `true` when `(layer, datatype)` falls in the reserved annotation range (same semantics as `klt layers` — see [`docs/cli/layers.md`](layers.md) → "Semantics and guarantees"). |
 | `path`     | string \| null   | Path to the rendered PNG, or `null` if this layer was not rendered.         |
 | `rendered` | boolean          | `true` if a PNG was written for this layer (`shapes > 0`).                  |
 
@@ -135,11 +139,11 @@ size: 1024x768
 layers: 3
 rendered: 2
 
-layer  datatype  name    shapes  path
------  --------  ------  ------  ------------------------------
-    1         0  metal1       2  design_dir/renders/1_0.png
-    5         0  empty        0  -
-   66        20  -            3  design_dir/renders/66_20.png
+layer  datatype  name    shapes  annotation  path
+-----  --------  ------  ------  ----------  ------------------------------
+    1         0  metal1       2  -           design_dir/renders/1_0.png
+    5         0  empty        0  -           -
+   66        20  -            3  -           design_dir/renders/66_20.png
 ```
 
 ## Exit codes and errors

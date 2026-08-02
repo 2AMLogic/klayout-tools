@@ -51,6 +51,7 @@ def _print_text(report: dict) -> None:
             str(entry["density"]),
             str(entry["polygon_count"]),
             str(entry["vertex_count"]),
+            "yes" if entry["annotation"] else "-",
         )
         for entry in layers
     ]
@@ -62,6 +63,7 @@ def _print_text(report: dict) -> None:
         "density",
         "polygons",
         "vertices",
+        "annotation",
     )
-    # name (col 2) left-aligned; everything else numeric, right-aligned.
+    # name (col 2) left-aligned; everything else numeric-ish, right-aligned.
     render_table(headers, rows, left_aligned={2})
