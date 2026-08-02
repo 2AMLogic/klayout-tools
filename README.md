@@ -73,6 +73,7 @@ klt layers design.gds                    # enumerate layers, JSON out
 klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
+klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
 klt render design.gds                    # per-layer PNGs, headless
