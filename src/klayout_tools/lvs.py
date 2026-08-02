@@ -246,6 +246,7 @@ def run_lvs(request: str) -> dict[str, Any]:
 
     options = request.get("options") or {}
     keep_extracted = bool(options.get("keep_extracted", False))
+    combine_devices = bool(options.get("combine_devices", False))
 
     import klayout.db as kdb
 
@@ -269,6 +270,27 @@ def run_lvs(request: str) -> dict[str, Any]:
 
     _prune_extra_top_circuits(layout_netlist, layout_circuit)
     _prune_extra_top_circuits(reference_netlist, reference_circuit)
+
+    if combine_devices:
+        # Opt-in (issue #261): `Netlist.combine_devices()` merges devices
+        # that a device class's own `combine_devices` logic recognises as
+        # combinable (e.g. parallel/series MOSFETs with matching gate/S/D/B
+        # connectivity) -- exactly the folded/multi-finger and split/
+        # interleaved layout constructions standard to analog matching and
+        # drive-strength splitting. It is a whole-`Netlist` method (not
+        # scoped to one `Circuit`), so it is applied once per netlist here.
+        # Applied symmetrically to *both* sides so a reference netlist that
+        # already lumps a device is not penalized relative to one that
+        # doesn't (and vice versa). Left opt-in, not unconditional: it would
+        # also collapse genuinely-distinct parallel devices (e.g. a DAC
+        # array's intentionally-separate legs) some callers want reported
+        # individually -- see docs/cli/lvs.md's `options.combine_devices`
+        # entry. Run after pruning (so it only ever touches the selected top
+        # circuit's hierarchy) and before the comparer is constructed, so
+        # every subsequent step (`same_circuits`, hints, `compare()`) sees
+        # the already-combined device set.
+        layout_netlist.combine_devices()
+        reference_netlist.combine_devices()
 
     logger = _make_compare_logger()
     comparer = kdb.NetlistComparer(logger)
