@@ -67,6 +67,7 @@ import json
 import os
 from typing import Any
 
+from ._layout import write_layout
 from .decks import get_extraction_deck
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 from .pdk import PdkNotFoundError, find_pdk
@@ -1430,7 +1431,4 @@ def _write_composed_gds(
                 kdb.Text(pin["net"], kdb.Trans(pin_point))
             )
 
-    try:
-        layout.write(output_path)
-    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
-        raise GenComposeError(f"could not write output '{output_path}': {exc}") from exc
+    write_layout(layout, output_path, GenComposeError)

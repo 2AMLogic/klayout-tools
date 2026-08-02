@@ -182,6 +182,33 @@ def test_generate_uses_default_params_when_omitted(tmp_path, pdk_root):
     assert report["device_count"] == 4  # PCell default
 
 
+def test_generate_output_is_byte_reproducible(tmp_path, pdk_root):
+    """Two `generate()` runs with identical params/PDK/inputs must produce
+    byte-identical GDS streams (#320) -- generated GDS must be usable as a
+    committed golden artifact or a content-addressed/cache-keyed build input.
+
+    A raw byte compare would have tripped on the GDS2 BGNLIB/BGNSTR
+    wall-clock write timestamps before the fix; the `time.sleep` straddles a
+    whole second so a regression back to wall-clock timestamps is guaranteed
+    to be caught, not merely likely."""
+    import time
+
+    request = {
+        "generator": "resistor_strip",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": {"length_um": 1.5, "width_um": 0.3, "spacing_um": 0.5, "num": 3},
+        "options": {"cell_name": "res_strip_0"},
+    }
+
+    output_a = tmp_path / "a.gds"
+    generate({**request, "options": {**request["options"], "output": str(output_a)}})
+    time.sleep(1.1)
+    output_b = tmp_path / "b.gds"
+    generate({**request, "options": {**request["options"], "output": str(output_b)}})
+
+    assert output_a.read_bytes() == output_b.read_bytes()
+
+
 def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
     output = tmp_path / "out.gds"
     report = generate(
