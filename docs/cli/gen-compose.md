@@ -33,9 +33,24 @@ cleanly.
 
 ## Scope (phases 1–2)
 
-- **Placement** — `placement.strategy: "row"` only: a single horizontal row,
-  left to right in caller-declared `placement.order`. `"grid"` is spike-scoped
-  for a later phase.
+- **Placement** — two strategies:
+  - `"row"` — a single horizontal row, left to right in caller-declared
+    `placement.order`, at a uniform `placement.spacing_um` between adjacent
+    blocks.
+  - `"explicit"` (#321) — each block in `placement.order` is placed at a
+    caller-declared `placement.origins_um[id]` `{x, y}` origin instead of a
+    computed row offset, so a genuinely two-dimensional floorplan (arbitrary
+    positions, per-pair separation) can be expressed directly rather than
+    forced through a single row's uniform spacing. `placement.spacing_um` is
+    not read under `"explicit"` — the declared origins are the whole
+    placement. **Two things `"explicit"` does not do**: it supports no
+    orientation/rotation (translation only, exactly like `"row"`), and it
+    performs no overlap validation of its own — an overlapping or abutting
+    pair of declared origins composes successfully; `klt drc` remains the
+    rule-compliance authority on the composed output (see "Geometry is
+    advisory" below).
+
+  `"grid"` is spike-scoped for a later phase.
 - **Routing** — two-pin, point-to-point Manhattan routing between the named
   ports listed in `connectivity[]`. Each 2-pin net is drawn as a native
   `pya.Path` (backbone → corner bends → straight fill) on the resolved
@@ -270,9 +285,10 @@ exit codes).
 | `blocks[]` | array\<object\> | Each already-generated primitive to place — see below. |
 | `blocks[].id` | string | Caller-chosen label used to address the block's ports elsewhere in this request (`placement.order`, `connectivity[].pins[].block`). Must be unique within `blocks[]`. |
 | `blocks[].generator_report` | object \| string | The block's own [`klt gen`](gen.md) JSON response — either an inline object, or a path to a file holding one (mirrors `klt gen --params`'s own path-or-inline duality). This command's only input about a block's geometry is its already-reported `bbox_um`/`ports[]`/`cell_name`/`gds_path` — never a second, private inspection of the GDS stream at request-parse time. |
-| `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`) — the only strategy implemented this phase. Any other value is an application error (exit 1). |
-| `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. |
-| `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. |
+| `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`) or `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`). Any other value (e.g. `"grid"`) is an application error (exit 1). |
+| `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. Response `blocks[]` ordering follows `order` under both strategies. |
+| `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"`. |
+| `placement.origins_um` | object | **Required when `strategy: "explicit"`**, otherwise not read. Maps every `placement.order` block `id` to its own `{"x": number, "y": number}` origin — that block's `offset_um`, applied exactly like a `"row"` offset (added directly to the block's own reported `bbox_um`; see "`blocks[]` entries" below). The key set must equal `order` exactly — a missing, extra, or unknown `id` is an application error (exit 1), as is a non-numeric `x`/`y`. |
 | `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. A **2-pin** net is routed point-to-point (see "Scope"); a **>2-pin** (bundle) net is left unrouted this phase. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
 | `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
@@ -349,7 +365,7 @@ exit codes).
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed). `null` when no `connectivity[]` was supplied (nothing was routed, so no routing/placement spacing was exercised as a clearance). |
+| `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed) — **`"row"` placement only**. `null` when no `connectivity[]` was supplied (nothing was routed, so no routing/placement spacing was exercised as a clearance), and always `null` under `"explicit"` placement (#321) — there is no single shared spacing value to report; per-pair separation is exactly what a caller-declared origin expresses. |
 | `matched_groups[]` | array\<object\> | One entry per distinct `matched_group_id` seen among the input blocks' own `generator_report.drc_hints.matched_group_id` (in first-seen order): `matched_group_id` (echoed), `blocks` (the request-level block `id`s carrying it), and `placement_symmetric` (always `null` this phase — symmetry *verification* against a declared symmetry axis is out of scope). Empty when no input block carries a `matched_group_id`. |
 | `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, or a bundle net deferred this phase). Always present, empty when there is nothing to report. |
 
@@ -359,7 +375,7 @@ exit codes).
 | ----- | ---- | ----------- |
 | `id` | string | Echo of the request's `blocks[].id`. |
 | `generator` | string | Echoed from that block's own `generator_report.generator`. |
-| `offset_um` | object | `{x, y}` — the translation applied to place this block. The first block in `placement.order` always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). |
+| `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). |
 | `bbox_um` | object | That block's own `generator_report.bbox_um`, translated by `offset_um`, in the composed cell's coordinate frame. |
 
 ### Semantics and guarantees
@@ -408,7 +424,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, malformed request (missing/invalid `blocks[]`, `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed, or a >2-pin bundle net was deferred this phase). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -423,6 +439,52 @@ printed.
   ```json
   { "schema_version": 1, "error": { "command": "gen-compose", "message": "request.connectivity[0] (net 'VOUT') references unknown port 'NOPE' on block 'diffpair' -- available: Q1_1_D, Q1_1_G, Q1_1_S, ..." } }
   ```
+
+## Explicit placement (a two-dimensional floorplan, #321)
+
+`"row"` can only express a single left-to-right strip at one uniform
+`spacing_um`. `"explicit"` instead lets the caller declare each block's own
+`(x, y)` origin, so an arrangement like an L-shape — or any other
+two-dimensional floorplan with per-pair separation — can be composed and
+DRC'd as one thing, with a usable `bbox_um` reflecting the actual arrangement
+rather than a wide, mostly-empty row:
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [
+    { "id": "diffpair", "generator_report": "diffpair.json" },
+    { "id": "mirror", "generator_report": "mirror.json" },
+    { "id": "tail", "generator_report": "tail.json" }
+  ],
+  "placement": {
+    "strategy": "explicit",
+    "order": ["diffpair", "mirror", "tail"],
+    "origins_um": {
+      "diffpair": { "x": 0.0, "y": 0.0 },
+      "mirror": { "x": 0.0, "y": 40.0 },
+      "tail": { "x": 60.0, "y": 20.0 }
+    }
+  },
+  "options": { "cell_name": "floorplan_0", "output": "floorplan_0.gds" }
+}
+```
+
+`diffpair` and `mirror` share an `x` (stacked along `y`); `tail` sits to the
+east at a third `y`. `connectivity[]` and `pins[]` work identically to
+`"row"` — `route_two_pin`/`manhattan_backbone` resolve each port's own
+composed-frame position (`x_um`/`y_um` plus its block's `offset_um`) and
+route generically against `(x, y)`, with no assumption that ports differ
+only along `x`; a net between two blocks placed at different `y` (not just
+different `x`) routes through a **vertical** jog exactly the same way a
+row-placed net routes through a horizontal one.
+
+Two things `"explicit"` deliberately does not add (see "Scope" above):
+placed blocks carry no orientation/rotation (an origin is a translation
+only), and `gen-compose` performs no overlap check of its own — a caller
+that declares two blocks at overlapping origins gets a composed GDS with
+overlapping geometry and no error from this command; `klt drc` remains the
+authority that would catch an actually-illegal result.
 
 ## Worked example
 
