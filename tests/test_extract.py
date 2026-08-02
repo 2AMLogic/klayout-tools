@@ -1138,6 +1138,144 @@ def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
     assert report["device_counts"] == {"nfet": 1, "pfet": 1}
 
 
+# --------------------------------------------------------------------------- #
+# Unmodelled-device diagnostic (issue #288): warn on a poly+contact shape no
+# device extractor claims, instead of silently absorbing it into interconnect.
+# --------------------------------------------------------------------------- #
+
+_UNMODELLED_WARNING_SNIPPET = "resistor-body signature"
+
+
+@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
+def test_unmarked_poly_bar_triggers_unmodelled_device_warning(tmp_path, deck_name):
+    """The exact repro from the issue: a resistor-*shaped* poly bar (no
+    resistor-ID marker, so #222's device extractor does not claim it) is
+    contacted at each end and touches no MOS gate anywhere -- the deck
+    absorbs it into ordinary interconnect (see
+    ``test_unmarked_poly_bar_is_not_a_resistor``), but that absorption must
+    now be flagged rather than silent."""
+    path = _write_gds(
+        _make_poly_resistor_layout(deck_name, marked=False),
+        tmp_path / f"{deck_name}_unmarked_bar.gds",
+    )
+    report = run_extract(
+        path, deck_name, output=str(tmp_path / f"{deck_name}_unmarked_bar.spice")
+    )
+
+    assert report["device_count"] == 0
+    assert len(report["warnings"]) == 1
+    assert _UNMODELLED_WARNING_SNIPPET in report["warnings"][0]
+    assert "docs/cli/extract.md" in report["warnings"][0]
+
+
+def _make_poly_gate_strap_layout(top_name: str = "TOP") -> kdb.Layout:
+    """One NMOS whose gate poly extends well past the active strip into a
+    bare strap, contacted at **two** separate points along the strap (a
+    legitimate poly-contacted gate strap, e.g. tying the gate up to a metal
+    landing pad away from the channel). The strap is one continuous polygon
+    with the transistor's own gate, so it must never be mistaken for an
+    unmodelled device body no matter how many contacts land on it."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (nmos active)
+    # Gate poly: coincides with active in x (800..1200) but its y-extent runs
+    # from -3000 to 0, i.e. entirely a strap *below* the active strip.
+    draw(66, 20, kdb.Box(800, -3000, 1200, 1000))  # poly.drawing (gate + strap)
+
+    # S/D contacts (ordinary transistor terminals).
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (S)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (D)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (S)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (D)
+    label(67, 5, "SRC", 200, 500)
+    label(67, 5, "DRN", 1800, 500)
+
+    # Two separate contacts landing on the strap portion, well clear of the
+    # gate-over-active region and of each other.
+    draw(66, 44, kdb.Box(900, -2600, 1100, -2400))  # strap contact 1
+    draw(67, 20, kdb.Box(800, -2700, 1200, -2300))
+    draw(66, 44, kdb.Box(900, -900, 1100, -700))  # strap contact 2
+    draw(67, 20, kdb.Box(800, -1000, 1200, -600))
+    label(67, 5, "GATESTRAP", 1000, -2500)
+
+    return layout
+
+
+def test_poly_contacted_gate_strap_does_not_trigger_unmodelled_warning(tmp_path):
+    """Edge case from the issue: a real MOS gate with contacts on its poly
+    (a legitimate poly-contacted gate strap) must not trigger the new
+    warning, even though it has two geometrically separate contact
+    clusters -- it touches a recognised gate, so it is excluded outright."""
+    path = _write_gds(_make_poly_gate_strap_layout(), tmp_path / "strap.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "strap.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["warnings"] == []
+
+
+def _make_poly_routing_between_gates_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Two separate NMOS devices sharing one continuous poly gate bar (the
+    same "shared gate line" shape as `_make_inverter_layout`), with **two**
+    separate contacts landing on the connecting segment between the two
+    active strips -- ordinary poly routing/gate-tie between two recognised
+    transistors, not an unmodelled device body."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # Two NMOS active strips, y 0..1000 and y 2000..3000, joined by one
+    # continuous poly bar (x 800..1200) spanning y -200..3200.
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))
+    draw(65, 20, kdb.Box(0, 2000, 2000, 3000))
+    draw(66, 20, kdb.Box(800, -200, 1200, 3200))  # poly.drawing (shared gate bar)
+
+    for y0 in (0, 2000):
+        draw(66, 44, kdb.Box(100, y0 + 300, 300, y0 + 700))  # licon1 (S)
+        draw(66, 44, kdb.Box(1700, y0 + 300, 1900, y0 + 700))  # licon1 (D)
+        draw(67, 20, kdb.Box(0, y0 + 200, 400, y0 + 800))  # li1 (S)
+        draw(67, 20, kdb.Box(1600, y0 + 200, 2000, y0 + 800))  # li1 (D)
+
+    # Two separate contacts on the connecting segment (y 1000..2000), well
+    # clear of either gate-over-active region and of each other.
+    draw(66, 44, kdb.Box(900, 1200, 1100, 1400))
+    draw(67, 20, kdb.Box(800, 1100, 1200, 1500))
+    draw(66, 44, kdb.Box(900, 1600, 1100, 1800))
+    draw(67, 20, kdb.Box(800, 1500, 1200, 1900))
+    label(67, 5, "GATE_TIE", 1000, 1500)
+
+    return layout
+
+
+def test_poly_routing_between_gates_does_not_trigger_unmodelled_warning(tmp_path):
+    """Edge case from the issue: ordinary poly routing between two recognised
+    transistor gates must not trigger the new warning, even with two
+    separate contact clusters landing on the connecting run -- the whole
+    bar is one merged polygon touching both gates."""
+    path = _write_gds(
+        _make_poly_routing_between_gates_layout(), tmp_path / "routing.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "routing.spice"))
+
+    assert report["device_counts"] == {"nfet": 2}
+    assert report["warnings"] == []
+
+
 def test_resistor_free_layout_extracts_byte_identically(tmp_path):
     """Regression guard for the additive contract: the synthetic inverter
     (no resistor markers anywhere) writes the same netlist bytes it did
