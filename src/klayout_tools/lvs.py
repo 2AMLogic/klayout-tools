@@ -527,14 +527,23 @@ def _resolve_layout(
         top_cell_pins_only = bool(layout_spec.get("top_cell_pins", False))
         try:
             # LVS is topological -- no parasitics_deck, so the 5th return
-            # (parasitic_nets) is always None here and is ignored.
-            netlist, top_cell_name, _dbu_um, _warnings, _parasitics = (
-                extract_netlist_from_layout(
-                    layout_file,
-                    deck_name,
-                    top=layout_spec.get("top"),
-                    top_cell_pins_only=top_cell_pins_only,
-                )
+            # (parasitic_nets) is always None here and is ignored. The 6th
+            # return (black_box_regions, issue #293) still takes effect --
+            # any reserved-annotation-layer region in the layout is excluded
+            # from connectivity the same as `klt extract` -- but is not
+            # surfaced in `klt lvs`'s own response, out of scope here.
+            (
+                netlist,
+                top_cell_name,
+                _dbu_um,
+                _warnings,
+                _parasitics,
+                _black_box_regions,
+            ) = extract_netlist_from_layout(
+                layout_file,
+                deck_name,
+                top=layout_spec.get("top"),
+                top_cell_pins_only=top_cell_pins_only,
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc

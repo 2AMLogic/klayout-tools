@@ -106,6 +106,7 @@ import math
 import os
 from typing import TYPE_CHECKING, Any
 
+from ._annotation import is_reserved_annotation_layer
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
@@ -242,6 +243,16 @@ def run_extract(
             ],
             "nets": [{"name": str, "pin": bool, "device_count": int}, ...],
             "warnings": [str, ...],
+            "black_box_regions": [
+                {
+                    "bbox_um": {
+                        "left": float, "bottom": float,
+                        "right": float, "top": float,
+                    },
+                    "shapes_excluded": int,
+                },
+                ...
+            ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -273,6 +284,24 @@ def run_extract(
     A non-empty ``ignored_layers`` with a material shape count is the signal
     that a downstream ``klt lvs`` mismatch is a deck-coverage gap, not a
     layout bug. Empty when every shape-bearing layer is one the deck reads.
+
+    ``black_box_regions`` (issue #293) reports every black-box/abstract
+    region this run excluded from connectivity: a shape drawn on any
+    reserved annotation layer (990-999, any datatype -- issue #289, see
+    ``docs/cli/extract.md``'s "Reserved annotation layer") marks a region
+    whose contents are deliberately out of scope -- a sub-cell that will be
+    drawn later, or a drawn region deliberately out of scope for a compare.
+    Everything geometrically inside it is excluded from the connectivity
+    graph *before* device extraction runs, rather than left undrawn (losing
+    the hierarchy/area record) or documented only in prose outside the GDS.
+    One entry per geometrically separate marker shape (non-touching shapes
+    are never merged into one bbox), each ``{"bbox_um": {"left", "bottom",
+    "right", "top"}, "shapes_excluded": <int>}`` -- ``shapes_excluded`` counts
+    the conductor/label shapes actually removed by the exclusion, the signal
+    that it did something rather than that a marker shape merely exists.
+    Always a list, empty when the layout draws no reserved-layer geometry
+    (byte-identical to the response before this field existed, other than
+    the field's own presence).
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
@@ -319,7 +348,7 @@ def run_extract(
         except UnknownExtractionDeckError as exc:
             raise ExtractError(str(exc)) from exc
 
-    netlist, top_cell_name, dbu_um, warnings, parasitic_nets = (
+    netlist, top_cell_name, dbu_um, warnings, parasitic_nets, black_box_regions = (
         extract_netlist_from_layout(
             path,
             deck_name,
@@ -419,6 +448,10 @@ def run_extract(
         "devices": devices,
         "nets": nets,
         "warnings": warnings,
+        # Additive field (issue #293): always a list, empty when the layout
+        # draws no reserved-annotation-layer geometry -- see run_extract's
+        # docstring for the field's full meaning.
+        "black_box_regions": black_box_regions,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -448,10 +481,18 @@ def extract_netlist_from_layout(
     top: str | None = None,
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
-) -> tuple[kdb.Netlist, str, float, list[str], list[dict[str, Any]] | None]:
+) -> tuple[
+    kdb.Netlist,
+    str,
+    float,
+    list[str],
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]],
+]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
-    ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets)``.
+    ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
+    black_box_regions)``.
 
     ``top_cell_pins_only`` (issue #291): when ``True``, only labels drawn
     directly in the top cell are promoted to top-level pins -- a net named
@@ -505,10 +546,17 @@ def extract_netlist_from_layout(
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
     top_cell = _resolve_top_cell(layout, top, path)
-    netlist, warnings, parasitic_nets = _extract_netlist(
+    netlist, warnings, parasitic_nets, black_box_regions = _extract_netlist(
         layout, top_cell, deck, parasitics_deck, top_cell_pins_only=top_cell_pins_only
     )
-    return netlist, top_cell.name, layout.dbu, warnings, parasitic_nets
+    return (
+        netlist,
+        top_cell.name,
+        layout.dbu,
+        warnings,
+        parasitic_nets,
+        black_box_regions,
+    )
 
 
 def _resolve_top_cell(layout: kdb.Layout, top: str | None, path: str) -> kdb.Cell:
@@ -649,6 +697,135 @@ def _reconcile_top_pins(
         circuit.remove_pin(pin_id)
 
     return sorted(affected)
+
+
+def _resolve_black_box_regions(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    active: kdb.Region,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    contact: kdb.Region,
+    metals: list[kdb.Region],
+    vias: list[kdb.Region],
+    well_label: kdb.Texts,
+    poly_label: kdb.Texts,
+    metal_labels: list[kdb.Texts],
+) -> tuple[
+    list[dict[str, Any]],
+    kdb.Region,
+    kdb.Region,
+    kdb.Region,
+    kdb.Region,
+    kdb.Region,
+    list[kdb.Region],
+    list[kdb.Region],
+    kdb.Texts,
+    kdb.Texts,
+    list[kdb.Texts],
+]:
+    """Resolve black-box/abstract regions (issue #293) against this layout.
+
+    A shape drawn on any reserved annotation layer (990-999, any datatype --
+    see :func:`is_reserved_annotation_layer` in ``_annotation.py``) directly
+    under ``top_cell`` marks a region whose contents are deliberately out of
+    scope for connectivity: a sub-cell that will be drawn later (its
+    hierarchy/area needs to be recorded now, its content doesn't yet), or a
+    drawn region that is deliberately out of scope for a compare. Everything
+    geometrically inside such a marker shape is excluded from the
+    connectivity graph *before* any device extractor runs -- the same "cut a
+    hole in the conductor region" shape :func:`_resolve_resistors` below
+    uses for a single conductor layer, generalised here to every conductor/
+    label layer this deck's connectivity graph reads.
+
+    Returns ``(black_box_regions, active, poly, nwell, tap, contact, metals,
+    vias, well_label, poly_label, metal_labels)`` where ``black_box_regions``
+    is the JSON response's new field (one entry per geometrically separate
+    marker shape -- non-touching marker shapes are reported individually,
+    never merged into one bbox) and the remaining values are the caller's
+    originals with every black-box region **subtracted**. A layout with no
+    reserved-layer geometry returns the inputs unchanged and an empty list,
+    so extraction of a layout that never uses this feature is bit-for-bit
+    what it was before this feature existed.
+
+    ``black_box_regions[].shapes_excluded`` counts, per marked region, the
+    conductor/label shapes that actually overlap it (summed across every
+    layer subtracted below) -- the signal that the exclusion did something,
+    not just that a marker shape exists somewhere in the stream.
+
+    The marker layer itself is never registered with ``l2n`` (nothing else in
+    this module calls :func:`_region`/:func:`_texts` for a reserved layer),
+    so it stays absent from ``ignored_layers`` exactly as it was before this
+    feature existed -- see ``docs/cli/extract.md``'s "Reserved annotation
+    layer".
+    """
+    import klayout.db as kdb
+
+    marker = kdb.Region()
+    for layer_index in layout.layer_indexes():
+        info = layout.get_info(layer_index)
+        if is_reserved_annotation_layer(info.layer, info.datatype):
+            marker += kdb.Region(top_cell.begin_shapes_rec(layer_index))
+    marker = marker.merged()
+
+    if marker.is_empty():
+        return (
+            [],
+            active,
+            poly,
+            nwell,
+            tap,
+            contact,
+            metals,
+            vias,
+            well_label,
+            poly_label,
+            metal_labels,
+        )
+
+    dbu = layout.dbu
+    conductor_regions = [active, poly, nwell, tap, contact, *metals, *vias]
+    label_collections = [well_label, poly_label, *metal_labels]
+
+    black_box_regions: list[dict[str, Any]] = []
+    for component in marker.each():
+        component_region = kdb.Region(component)
+        shapes_excluded = sum(
+            region.interacting(component_region).count() for region in conductor_regions
+        ) + sum(
+            texts.interacting(component_region).count() for texts in label_collections
+        )
+        box = component.bbox()
+        black_box_regions.append(
+            {
+                "bbox_um": {
+                    "left": round(box.left * dbu, _PARAM_PRECISION_UM),
+                    "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
+                    "right": round(box.right * dbu, _PARAM_PRECISION_UM),
+                    "top": round(box.top * dbu, _PARAM_PRECISION_UM),
+                },
+                "shapes_excluded": shapes_excluded,
+            }
+        )
+
+    black_box_regions.sort(
+        key=lambda entry: (entry["bbox_um"]["left"], entry["bbox_um"]["bottom"])
+    )
+
+    return (
+        black_box_regions,
+        active - marker,
+        poly - marker,
+        nwell - marker,
+        tap - marker,
+        contact - marker,
+        [region - marker for region in metals],
+        [region - marker for region in vias],
+        well_label.not_interacting(marker),
+        poly_label.not_interacting(marker),
+        [texts.not_interacting(marker) for texts in metal_labels],
+    )
 
 
 def _resolve_resistors(
@@ -814,7 +991,7 @@ def _extract_netlist(
     deck: ExtractionDeck,
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
-) -> tuple[kdb.Netlist, list[str], list[dict[str, Any]] | None]:
+) -> tuple[kdb.Netlist, list[str], list[dict[str, Any]] | None, list[dict[str, Any]]]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
 
@@ -823,13 +1000,16 @@ def _extract_netlist(
     ``begin_shapes_rec``), the same whole-layout flattening idiom
     ``drc.py`` uses -- see ``docs/cli/extract.md``'s limitation note.
 
-    Returns ``(netlist, warnings, parasitic_nets)``. ``warnings`` is built
-    from the extractor's own log entries (e.g. a gate touching no diffusion)
-    -- non-fatal notes surfaced in the JSON response's ``warnings`` field.
-    ``parasitic_nets`` is ``None`` unless ``parasitics_deck`` is given, in
-    which case it is the per-net lumped-RC data computed from
-    ``LayoutToNetlist.polygons_of_net`` while ``l2n`` is still alive (see
-    :func:`_compute_parasitics`).
+    Returns ``(netlist, warnings, parasitic_nets, black_box_regions)``.
+    ``warnings`` is built from the extractor's own log entries (e.g. a gate
+    touching no diffusion) -- non-fatal notes surfaced in the JSON response's
+    ``warnings`` field. ``parasitic_nets`` is ``None`` unless
+    ``parasitics_deck`` is given, in which case it is the per-net lumped-RC
+    data computed from ``LayoutToNetlist.polygons_of_net`` while ``l2n`` is
+    still alive (see :func:`_compute_parasitics`). ``black_box_regions`` is
+    the JSON response's new field (issue #293) -- see
+    :func:`_resolve_black_box_regions` -- always a list, empty when the
+    layout draws no reserved-annotation-layer geometry.
     """
     import klayout.db as kdb
 
@@ -843,6 +1023,41 @@ def _extract_netlist(
     metals = [_region(layout, top_cell, layer) for layer in deck.metals]
     metal_labels = [_texts(layout, top_cell, layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+
+    # Black-box/abstract regions (#293), resolved *before* everything else
+    # below (including the resistor resolution that follows): geometry
+    # inside a marker shape on a reserved annotation layer (990-999, any
+    # datatype -- issue #289) is masked out of every conductor/label region
+    # first, so a resistor marker (or any other device-recognition geometry)
+    # that happens to sit inside a black-box region is excluded outright
+    # rather than "found" by a later device extractor and only then
+    # short-circuited.
+    (
+        black_box_regions,
+        active,
+        poly,
+        nwell,
+        tap,
+        contact,
+        metals,
+        vias,
+        well_label,
+        poly_label,
+        metal_labels,
+    ) = _resolve_black_box_regions(
+        layout,
+        top_cell,
+        active,
+        poly,
+        nwell,
+        tap,
+        contact,
+        metals,
+        vias,
+        well_label,
+        poly_label,
+        metal_labels,
+    )
 
     # Drawn precision resistors (#222), resolved *before* the MOS split
     # below: a recognised resistor body is cut out of its own conductor
@@ -1161,7 +1376,7 @@ def _extract_netlist(
     # garbage-collected once this function returns, which invalidates the
     # netlist it produced (KLayout raises on subsequent use) -- `dup()`
     # detaches an independently-owned copy.
-    return netlist.dup(), warnings, parasitic_nets
+    return netlist.dup(), warnings, parasitic_nets, black_box_regions
 
 
 def _n_squares(area_um2: float, perimeter_um: float) -> float:
