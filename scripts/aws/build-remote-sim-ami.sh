@@ -13,6 +13,21 @@
 # data/remote-sim-ami-manifest.json (see
 # docs/schemas/remote-sim-ami-manifest.schema.json for that file's shape).
 #
+# Also bakes `klt` itself (issue #265's SSH/SCP transport requirement): the
+# `remote` backend's corner fan-out invokes `klt sim ... --backend
+# local-parallel` directly on the provisioned box (the literal reuse of
+# #255's worker-pool code the design note's decision 5 requires), so the AMI
+# must ship the exact same `klayout-tools` code the launcher itself runs.
+# Installed from this repo's own git history, pinned to `--klt-ref` (default:
+# the commit this script is run from) rather than "whatever `main` is at
+# build time" — reproducible the same way decision 4 pins the PDK snapshot.
+# The PDK model library is installed under a fixed `$PDK_ROOT` (persisted to
+# `/etc/environment` so it is visible to a non-interactive SSH command, not
+# just an interactive login shell) so the remote host's own `klt sim`
+# invocation resolves `request.models.pdk` via `pdk.find_pdk`'s existing
+# `$PDK_ROOT` lookup -- the same code path a local run already uses, no
+# remote-specific model resolution logic.
+#
 # This is an OPERATIONAL script, not exercised by this repo's test suite or
 # CI (see CLAUDE.md's "headless always" + this issue's own instruction: an
 # automated test must never spin up real EC2 instances). It requires:
@@ -21,21 +36,21 @@
 #     `.claude/skills/repo/scripts/repo-remote.sh` already uses).
 #   - The `aws` CLI and `jq` on PATH.
 #   - Real cloud spend: a build instance runs for the duration of the
-#     ngspice/PDK-deck install (minutes), then `create-image` snapshots and
-#     terminates it. This is the one-time-per-refresh cost of maintaining
-#     the AMI, distinct from the per-job spend RemoteLauncher gates in
-#     src/klayout_tools/remote_launcher.py.
+#     ngspice/PDK-deck/`klt`-package install (minutes), then `create-image`
+#     snapshots and terminates it. This is the one-time-per-refresh cost of
+#     maintaining the AMI, distinct from the per-job spend RemoteLauncher
+#     gates in src/klayout_tools/remote_launcher.py.
 #
 # Deferred/not run in this change: no AMI has actually been built by this
-# script yet (no AWS credentials/spend available while authoring #264) — see
-# data/README.md. data/remote-sim-ami-manifest.json ships with an empty
-# `images` array; an operator runs this script once per (pdk, region) they
-# need and the manifest gains real entries from there.
+# script yet (no AWS credentials/spend available while authoring #264/#265)
+# — see data/README.md. data/remote-sim-ami-manifest.json ships with an
+# empty `images` array; an operator runs this script once per (pdk, region)
+# they need and the manifest gains real entries from there.
 #
 # Usage:
 #   scripts/aws/build-remote-sim-ami.sh --pdk sky130A --region us-east-1 \
 #       [--instance-type c7i.xlarge] [--copy-to-region us-west-2 ...] \
-#       [--manifest <path>] [--yes]
+#       [--klt-ref <git-ref>] [--manifest <path>] [--yes]
 #
 #   Without --yes: prints the resolved build plan (PDK, region, base AMI,
 #   instance type, estimated one-time build cost) and exits — nothing is
@@ -58,12 +73,21 @@ REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 INSTANCE_TYPE="c7i.xlarge"  # build instance -- installs only, not sized for a corner matrix
 COPY_TO_REGIONS=()
 YES=false
+#: Pinned to the commit this script itself is run from by default --
+#: reproducible, matches whatever `remote_launcher`/`sim.py`/`remote_transport`
+#: code this checkout actually has (see #265's header comment above).
+KLT_REF="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo main)"
+#: Fixed baked-model-library root, persisted to /etc/environment on the
+#: build instance so it is visible to a non-interactive SSH command (see
+#: #265's header comment on why `$PDK_ROOT` -- not a `--pdk-root` request
+#: field -- is how the remote host resolves `request.models.pdk`).
+PDK_ROOT="/opt/pdk"
 
 log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
 
 usage() {
-  sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -72,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     --region) REGION="$2"; shift 2 ;;
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --copy-to-region) COPY_TO_REGIONS+=("$2"); shift 2 ;;
+    --klt-ref) KLT_REF="$2"; shift 2 ;;
     --manifest) MANIFEST="$2"; shift 2 ;;
     --yes) YES=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -96,7 +121,7 @@ command -v uv  >/dev/null 2>&1 || die 2 "'uv' is required on PATH (idle-guard sc
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NGSPICE_VERSION_HINT="46"  # the version this repo's own test matrix pins against; verified post-install below
 
-log "plan: build a ${PDK} AMI in ${REGION} (build instance type ${INSTANCE_TYPE}); copy-to: ${COPY_TO_REGIONS[*]:-<none>}"
+log "plan: build a ${PDK} AMI in ${REGION} (build instance type ${INSTANCE_TYPE}, klt-ref ${KLT_REF}); copy-to: ${COPY_TO_REGIONS[*]:-<none>}"
 
 if [[ "$YES" != true ]]; then
   log "dry-run (pass --yes to actually build). Nothing was created."
@@ -123,15 +148,17 @@ IDLE_GUARD_SCRIPT="$(cd "$REPO_ROOT" && uv run python3 -c \
 # ── per-PDK install recipe. Fetches the same curated open-PDK ngspice model
 # decks klt's own docs/design/remote-sim-backend-spike.md decision 4 scopes
 # this AMI to (sky130A, gf180mcu) -- via the PDK's own published release
-# artifact, never an ad hoc mirror. ─────────────────────────────────────────
+# artifact, never an ad hoc mirror. Installed under the fixed $PDK_ROOT this
+# script bakes into /etc/environment below, so `pdk.find_pdk` resolves it
+# identically to a local install (see #265's header comment). ──────────────
 # shellcheck disable=SC2016  # intentional: $(...) expands later, inside the
 # build instance's own user-data shell (BUILD_USERDATA below), not here.
 case "$PDK" in
   sky130A)
-    PDK_FETCH_CMDS='pip install --break-system-packages volare && volare enable --pdk sky130 $(volare list-remote --pdk sky130 | tail -n1)'
+    PDK_FETCH_CMDS='pip install --break-system-packages volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 $(volare list-remote --pdk sky130 | tail -n1)'
     ;;
   gf180mcu)
-    PDK_FETCH_CMDS='pip install --break-system-packages volare && volare enable --pdk gf180mcu $(volare list-remote --pdk gf180mcu | tail -n1)'
+    PDK_FETCH_CMDS='pip install --break-system-packages volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu $(volare list-remote --pdk gf180mcu | tail -n1)'
     ;;
 esac
 
@@ -141,8 +168,15 @@ cat > "$BUILD_USERDATA" <<USERDATA
 #!/bin/bash
 set -euxo pipefail
 apt-get update
-apt-get install -y ngspice python3-pip
+apt-get install -y ngspice python3-pip python3-venv git
+mkdir -p ${PDK_ROOT}
+echo "PDK_ROOT=${PDK_ROOT}" >> /etc/environment
 ${PDK_FETCH_CMDS}
+# Bake klt itself (issue #265) -- the remote backend's SSH/SCP transport
+# invokes \`klt sim ... --backend local-parallel\` directly on this box, so
+# it must ship the exact klayout-tools code the launcher itself runs,
+# pinned to the same commit (see this script's header comment).
+pip install --break-system-packages "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_REF}"
 ${IDLE_GUARD_SCRIPT}
 touch /var/log/klt-remote-sim-ami-build-complete
 USERDATA

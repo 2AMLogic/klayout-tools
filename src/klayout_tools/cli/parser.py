@@ -589,9 +589,9 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "execution backend (default: local, or the request's `backend` "
-            "field); overrides the request field when given. `local` and "
-            "`local-parallel` are implemented; other names are reserved "
-            "(see docs/cli/sim.md)."
+            "field); overrides the request field when given. `local`, "
+            "`local-parallel`, and `remote` (provisions an EC2 instance) "
+            "are implemented -- see docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

@@ -43,14 +43,14 @@ credential host profile and IAM shape", and "Guardrail mechanics" SS2-3):
   of whether (a)'s explicit ``terminate-instances`` call ever arrives.
 
 Scope note: this module provisions and tears down the instance and resolves
-the AMI/sizing/cost inputs to do so. It does **not** implement the SSH/SCP
-corner-fan-out transport (pushing the netlist, running the worker pool
-remotely, pulling results back) -- that is explicitly a follow-on issue's
-scope per #264's own body ("future corner fan-out ... issues will hook into
-the launcher this issue builds"). ``sim.py``'s ``SUPPORTED_BACKENDS`` /
-``_BACKENDS`` registry is therefore left untouched by this module; ``remote``
-stays reserved-but-unimplemented there until that follow-on issue wires this
-launcher's :class:`RemoteLauncher` into ``run_sim``.
+the AMI/sizing/cost inputs to do so, plus (:meth:`RemoteLauncher.get_public_ip`)
+resolving how to *reach* what it provisioned. It does **not** implement the
+SSH/SCP corner-fan-out transport itself (pushing the netlist, running the
+worker pool remotely, pulling results back) -- that lives in
+:mod:`klayout_tools.remote_transport` and is wired into ``sim.py``'s
+``remote`` backend, per issue #265 (the follow-on issue #264's own body
+anticipated: "future corner fan-out ... issues will hook into the launcher
+this issue builds").
 """
 
 from __future__ import annotations
@@ -831,6 +831,63 @@ class RemoteLauncher:
             )
             instance_id = self._aws(on_demand_args)
             return instance_id, False
+
+    # -- connectivity (issue #265's SSH/SCP transport) -----------------------
+
+    def get_public_ip(self) -> str:
+        """Wait for the provisioned instance to reach ``running`` and return
+        its public IP address.
+
+        Additive to :meth:`provision` rather than folded into it: existing
+        callers of :meth:`provision` (and its test suite) are unaffected --
+        this method is opt-in, called by the ``remote`` `klt sim` backend's
+        SSH/SCP transport (#265) only once it actually needs to open a
+        connection. Uses the same injectable ``aws_runner`` :meth:`provision`
+        does, so no real ``aws`` CLI call happens in a test that never calls
+        this method.
+
+        Raises :class:`RemoteLaunchError` if :meth:`provision` has not
+        succeeded yet, or if the instance has no public IP address (a
+        private-subnet instance is not supported by the SSH/SCP transport --
+        see the design note's "Network posture", which assumes direct SSH
+        reachability from the launcher).
+        """
+        if self.instance_id is None:
+            raise RemoteLaunchError(
+                "provision() must succeed before get_public_ip() can be called"
+            )
+        self._aws(
+            [
+                "ec2",
+                "wait",
+                "instance-running",
+                "--region",
+                self.region,
+                "--instance-ids",
+                self.instance_id,
+            ]
+        )
+        ip = self._aws(
+            [
+                "ec2",
+                "describe-instances",
+                "--region",
+                self.region,
+                "--instance-ids",
+                self.instance_id,
+                "--query",
+                "Reservations[0].Instances[0].PublicIpAddress",
+                "--output",
+                "text",
+            ]
+        ).strip()
+        if not ip or ip == "None":
+            raise RemoteLaunchError(
+                f"instance {self.instance_id} has no public IP address -- "
+                "the SSH/SCP transport requires direct SSH reachability "
+                "(see the design note's Network posture section)"
+            )
+        return ip
 
     # -- teardown (mechanism (a)'s explicit call) ---------------------------
 

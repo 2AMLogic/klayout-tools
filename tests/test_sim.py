@@ -31,7 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import pdk, sim
+from klayout_tools import pdk, remote_transport, sim
+from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
 HAVE_NGSPICE = shutil.which("ngspice") is not None
@@ -150,6 +151,8 @@ def test_run_sim_unsupported_backend_raises(tmp_path):
 def test_run_sim_unsupported_backend_via_cli_flag_raises(tmp_path):
     # The --backend flag overrides the request field and is validated the
     # same way (unknown name -> SimError, not a silent fallback to local).
+    # "remote" is a real, implemented backend as of #265 -- use a genuinely
+    # unsupported name here instead.
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -159,7 +162,7 @@ def test_run_sim_unsupported_backend_via_cli_flag_raises(tmp_path):
         },
     )
     with pytest.raises(sim.SimError, match="unsupported backend"):
-        sim.run_sim(str(request), backend="remote")
+        sim.run_sim(str(request), backend="quantum")
 
 
 def test_run_sim_netlist_not_found_raises(tmp_path):
@@ -1336,6 +1339,339 @@ def test_run_sim_without_keep_artifacts_cleans_up(tmp_path, monkeypatch):
         "raw": None,
         "waveform": None,
     }
+
+
+# --------------------------------------------------------------------------- #
+# remote backend (#265) -- provisioning/transport are always faked; no test
+# in this section ever touches a real AWS API, `ssh`/`scp` binary, or network
+# socket (see remote_launcher/remote_transport's own test suites for their
+# unit coverage of that plumbing in isolation).
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRemoteLauncher:
+    """Drop-in stand-in for ``remote_launcher.RemoteLauncher``: no AWS call,
+    records constructor kwargs, tracks whether teardown (``__exit__``) ran."""
+
+    #: Populated by the most recently constructed instance -- tests read this
+    #: after ``run_sim`` returns (the launcher instance itself isn't
+    #: reachable from the caller).
+    last_instance: _FakeRemoteLauncher | None = None
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.terminated = False
+        self.provision_error: Exception | None = None
+        type(self).last_instance = self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.terminated = True
+        return False
+
+    def provision(self):
+        if self.provision_error is not None:
+            raise self.provision_error
+        return {
+            "provider": "aws",
+            "region": self.kwargs["region"],
+            "instance_type": "c7i.xlarge",
+            "instance_id": "i-fake123",
+            "spot": True,
+            "estimated_hourly_cost_usd": 0.1785,
+            "ami_id": "ami-fake",
+            "pdk_snapshot": "sky130A-2026.06.01",
+            "spin_up_s": 1.2,
+        }
+
+    def get_public_ip(self):
+        return "203.0.113.9"
+
+
+def _base_remote_request(**overrides) -> dict:
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "models": {"pdk": "sky130A"},
+        "backend": "remote",
+        "remote": {
+            "region": "us-east-1",
+            "key_name": "fake-key",
+            "ssh_key_path": "/fake/key.pem",
+            "launcher_cidr": "203.0.113.4/32",
+        },
+    }
+    request.update(overrides)
+    return request
+
+
+def _install_fake_remote_transport(monkeypatch, *, remote_report_factory=None):
+    """Patch every ``sim.remote_transport``/``sim.RemoteLauncher`` call site
+    ``_run_remote`` uses with an in-memory fake, and return the shared
+    ``state`` dict the fakes record their calls into."""
+    state: dict = {"push_job_calls": 0, "pull_calls": 0, "cleanup_calls": 0}
+
+    monkeypatch.setattr(sim, "RemoteLauncher", _FakeRemoteLauncher)
+    monkeypatch.setattr(sim.remote_transport, "wait_for_ssh", lambda *a, **k: 0.5)
+
+    def fake_push_job(
+        *, host, remote_job_dir, local_netlist_path, remote_request, **kwargs
+    ):
+        state["push_job_calls"] += 1
+        state["host"] = host
+        state["remote_job_dir"] = remote_job_dir
+        state["local_netlist_path"] = local_netlist_path
+        state["remote_request"] = remote_request
+
+    def fake_run_remote_sim(*, host, remote_job_dir, timeout_s, **kwargs):
+        state["run_remote_sim_timeout_s"] = timeout_s
+        if remote_report_factory is not None:
+            return remote_report_factory(state)
+        return {
+            "schema_version": 1,
+            "status": "pass",
+            "corner_count": 1,
+            "passed": 1,
+            "failed": 0,
+            "errored": 0,
+            "environment": {"engine": "ngspice", "engine_version": "46"},
+            "measurements": [],
+            "corners": [],
+        }
+
+    def fake_pull_artifacts(**kwargs):
+        state["pull_calls"] += 1
+        state["pull_kwargs"] = kwargs
+
+    def fake_cleanup_job(**kwargs):
+        state["cleanup_calls"] += 1
+
+    monkeypatch.setattr(sim.remote_transport, "push_job", fake_push_job)
+    monkeypatch.setattr(sim.remote_transport, "run_remote_sim", fake_run_remote_sim)
+    monkeypatch.setattr(sim.remote_transport, "pull_artifacts", fake_pull_artifacts)
+    monkeypatch.setattr(sim.remote_transport, "cleanup_job", fake_cleanup_job)
+    return state
+
+
+def test_run_sim_remote_backend_requires_models_pdk(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request(models={}))
+    with pytest.raises(sim.SimError, match="requires request.models.pdk"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_remote_backend_requires_ssh_key_path(tmp_path):
+    _write_body(tmp_path)
+    bad = _base_remote_request()
+    bad["remote"] = {**bad["remote"]}
+    del bad["remote"]["ssh_key_path"]
+    request = _write_request(tmp_path, bad)
+    with pytest.raises(sim.SimError, match="requires request.remote.ssh_key_path"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_remote_backend_populates_environment_remote_block(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    _install_fake_remote_transport(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    remote_env = report["environment"]["remote"]
+    assert remote_env["provider"] == "aws"
+    assert remote_env["region"] == "us-east-1"
+    assert remote_env["instance_type"] == "c7i.xlarge"
+    assert remote_env["instance_id"] == "i-fake123"
+    assert remote_env["spot"] is True
+    assert remote_env["ami_id"] == "ami-fake"
+    assert remote_env["pdk_snapshot"] == "sky130A-2026.06.01"
+    assert isinstance(remote_env["estimated_hourly_cost_usd"], float)
+    assert isinstance(remote_env["spin_up_s"], float)
+    # engine_version comes from the remote report, not the local process.
+    assert report["environment"]["engine_version"] == "46"
+
+
+def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path, _base_remote_request(corners={"temperature_c": [10, 40]})
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    pushed = state["remote_request"]
+    assert pushed["backend"] == "local-parallel"
+    assert pushed["netlist"] == remote_transport.REMOTE_NETLIST_FILENAME
+    assert "remote" not in pushed
+    assert pushed["corners"] == {"temperature_c": [10, 40]}
+    assert state["local_netlist_path"].endswith("body.spice")
+    assert state["push_job_calls"] == 1
+    assert state["cleanup_calls"] == 1
+
+
+def test_run_sim_remote_backend_provisioning_failure_raises_simerror_and_tears_down(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    _install_fake_remote_transport(monkeypatch)
+
+    original_init = _FakeRemoteLauncher.__init__
+
+    def failing_init(self, **kwargs):
+        original_init(self, **kwargs)
+        self.provision_error = rl.RemoteLaunchError("estimated cost exceeds ceiling")
+
+    monkeypatch.setattr(_FakeRemoteLauncher, "__init__", failing_init)
+
+    with pytest.raises(sim.SimError, match="remote backend failed"):
+        sim.run_sim(str(request))
+
+    assert _FakeRemoteLauncher.last_instance.terminated is True
+
+
+def test_run_sim_remote_backend_keep_artifacts_pulls_and_rewrites_paths(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    request = _write_request(
+        tmp_path, _base_remote_request(options={"keep_artifacts": True})
+    )
+
+    def remote_report_factory(state):
+        remote_root = remote_transport.artifacts_root(state["remote_job_dir"])
+        return {
+            "schema_version": 1,
+            "status": "pass",
+            "corner_count": 1,
+            "passed": 1,
+            "failed": 0,
+            "errored": 0,
+            "environment": {"engine": "ngspice", "engine_version": "46"},
+            "measurements": [],
+            "corners": [
+                {
+                    "corner_id": "default/novdd/27C",
+                    "status": "pass",
+                    "runtime_s": 0.1,
+                    "measurements": [],
+                    "diagnostics": [],
+                    "artifacts": {
+                        "log": f"{remote_root}/default_novdd_27C/ngspice.log",
+                        "raw": None,
+                        "waveform": None,
+                    },
+                }
+            ],
+        }
+
+    state = _install_fake_remote_transport(
+        monkeypatch, remote_report_factory=remote_report_factory
+    )
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts_dir))
+
+    assert state["pull_calls"] == 1
+    assert state["pull_kwargs"]["local_artifacts_dir"] == str(artifacts_dir)
+    log_path = report["corners"][0]["artifacts"]["log"]
+    assert log_path == str(artifacts_dir / "default_novdd_27C" / "ngspice.log")
+
+
+def _corner_measurement_summary(report: dict) -> list[dict]:
+    """Extract only the values a `remote` run is guaranteed to reproduce
+    bit-for-bit against an equivalent `local` run (decision 5) -- corner id,
+    status, and each measurement's value/status/margin. Excludes
+    `runtime_s`/`artifacts` (paths/timing legitimately differ by backend)."""
+    return [
+        {
+            "corner_id": c["corner_id"],
+            "status": c["status"],
+            "measurements": [
+                {
+                    "name": m["name"],
+                    "value": m["value"],
+                    "status": m["status"],
+                    "margin": m["margin"],
+                }
+                for m in c["measurements"]
+            ],
+        }
+        for c in report["corners"]
+    ]
+
+
+def test_run_sim_remote_backend_measurements_are_value_identical_to_local(
+    tmp_path, monkeypatch
+):
+    # Acceptance criterion: "A `remote` run against the same netlist/models
+    # as a `local` run produces value-identical `.meas` measurements". The
+    # remote transport's `run_remote_sim` is faked to actually invoke
+    # `sim.run_sim(..., backend="local-parallel")` locally against the
+    # pushed request+netlist -- exactly what a real remote host would do by
+    # running `klt sim ... --backend local-parallel` -- so this exercises
+    # the real `_run_local_parallel`/`_run_corner` code path twice (once as
+    # `local`, once "as if remote") against the identical stubbed ngspice
+    # subprocess, proving the two backends are the same code, not two
+    # implementations that happen to agree.
+    _write_body(tmp_path)
+    base = {
+        "netlist": "body.spice",
+        "corners": {"temperature_c": [10, 40]},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=1u",
+                "limits": {"min": 0.5},
+            }
+        ],
+    }
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    local_request = _write_request(tmp_path, base, name="local.json")
+    local_report = sim.run_sim(str(local_request), backend="local")
+
+    remote_request = _write_request(
+        tmp_path,
+        _base_remote_request(**base, models={"pdk": "sky130A"}),
+        name="remote.json",
+    )
+
+    remote_side_dir = tmp_path / "remote_side"
+    remote_side_dir.mkdir()
+
+    def remote_report_factory(state):
+        netlist_dst = remote_side_dir / remote_transport.REMOTE_NETLIST_FILENAME
+        netlist_dst.write_text(Path(state["local_netlist_path"]).read_text())
+        request_dst = remote_side_dir / remote_transport.REMOTE_REQUEST_FILENAME
+        request_dst.write_text(json.dumps(state["remote_request"]))
+        return sim.run_sim(str(request_dst))
+
+    _install_fake_remote_transport(
+        monkeypatch, remote_report_factory=remote_report_factory
+    )
+
+    remote_report = sim.run_sim(str(remote_request))
+
+    assert _corner_measurement_summary(local_report) == _corner_measurement_summary(
+        remote_report
+    )
+    assert (
+        local_report["environment"]["engine_version"]
+        == remote_report["environment"]["engine_version"]
+    )
 
 
 # --------------------------------------------------------------------------- #
