@@ -1772,6 +1772,66 @@ def test_deck_resistor_on_a_non_conductor_layer_is_an_error(tmp_path):
         _extract_netlist(layout, layout.top_cell(), broken)
 
 
+@pytest.mark.parametrize(
+    "top_plate_via, top_plate_via_metal, expected",
+    [
+        pytest.param(
+            (41, 0),
+            None,
+            "must both be set or both be left unset",
+            id="via-without-metal",
+        ),
+        pytest.param(
+            None,
+            (81, 0),
+            "must both be set or both be left unset",
+            id="metal-without-via",
+        ),
+        pytest.param(
+            (41, 0),
+            (99, 99),
+            r"top_plate_via_metal 99/99 is not one of the deck's metals\[\] layers",
+            id="metal-not-tracked",
+        ),
+    ],
+)
+def test_deck_capacitor_top_plate_via_declaration_must_be_coherent(
+    top_plate_via, top_plate_via_metal, expected
+):
+    """Deck-authoring guard (issue #314): the optional top-plate wiring pair
+    is only meaningful when both halves are declared *and* the metal they land
+    on is one this deck actually tracks -- otherwise `extract.py` could not
+    wire the plate anywhere, so the deck is rejected rather than silently
+    extracting an isolated top-plate net that looks deliberate. Mirrors
+    `test_deck_resistor_on_a_non_conductor_layer_is_an_error`'s shape, and the
+    check is unconditional (see `_extract_netlist`'s capacitor loop), so it
+    fires on any layout rather than only once a MiM cap is drawn."""
+    from klayout_tools.decks import CapacitorDevice
+    from klayout_tools.extract import _extract_netlist
+
+    deck = get_extraction_deck("gf180mcu")
+    broken = ExtractionDeck(
+        active=deck.active,
+        poly=deck.poly,
+        nwell=deck.nwell,
+        contact=deck.contact,
+        metals=deck.metals,
+        capacitors=(
+            CapacitorDevice(
+                name="bogus_cap",
+                top_plate=(75, 0),  # FuseTop
+                bottom_plate=(46, 0),  # Metal4
+                area_cap_f_um2=2.0e-15,
+                top_plate_via=top_plate_via,
+                top_plate_via_metal=top_plate_via_metal,
+            ),
+        ),
+    )
+    layout = _make_gf180mcu_mim_layout()
+    with pytest.raises(ExtractError, match=expected):
+        _extract_netlist(layout, layout.top_cell(), broken)
+
+
 # --------------------------------------------------------------------------- #
 # Corpus round-trip: real sky130 / gf180mcu standard cells
 # --------------------------------------------------------------------------- #

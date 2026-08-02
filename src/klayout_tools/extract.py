@@ -76,10 +76,19 @@ entries (``ExtractionDeck.capacitors``, issue #225): two independent
 plate layers (a purpose-drawn top plate, a bottom plate on an ordinary
 conductor -- optionally derived through a PDK-specific "virtual bottom
 plate" sizing step) fed straight to KLayout's native
-``DeviceExtractorCapacitor``. See :class:`klayout_tools.decks.CapacitorDevice`
-for the layer-role contract, the capacitance-per-area provenance each deck
-must cite, and the documented "plate nets are not wired into the rest of
-this deck's metal stack" limitation.
+``DeviceExtractorCapacitor``. Each plate is registered as its own
+self-connected node, and is wired into the rest of the deck's metal stack
+per plate, where the deck declares how (issue #314): the bottom plate joins
+the ``metals[]`` node whose layer its ``bottom_plate`` matches, and the top
+plate joins the ``metals[]`` node named by ``top_plate_via_metal`` through
+the ``top_plate_via`` layer when the deck declares both. A plate for which
+the deck declares neither -- e.g. sky130's MiM top plates, whose real via
+lands on a metal this curated deck does not track -- stays an isolated node:
+the device and its capacitance are still extracted correctly, only that
+plate's net connectivity carries the documented approximation. See
+:class:`klayout_tools.decks.CapacitorDevice` for the layer-role contract, the
+capacitance-per-area provenance each deck must cite, and the exact scope of
+that per-plate limitation.
 
 Every connectivity layer above (``poly``, ``contact``, ``metals``, ...) is
 wired up unconditionally, regardless of whether any device extractor above
