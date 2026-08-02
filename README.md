@@ -79,6 +79,7 @@ klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSO
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
 klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)
+klt draw --params shapes.json -o out.gds # write a primitive stream (no rule checking)
 klt extract design.gds --deck sky130     # layout -> schematic-equivalent netlist
 ```
 
