@@ -78,15 +78,66 @@ M1 d g s b nfet L=0.15U W=0.65U
 
 — **not** a SPICE simulation deck's subcircuit-call form for a PDK whose
 models are subcircuits (`XM1 d g s b sky130_fd_pr__nfet_01v8 L=... W=...`).
-Handing `NetlistSpiceReader` the subcircuit-call form does not error: it
-reads the call as an instance of an undefined subcircuit, the circuit
-collapses toward a single merged net, and the compare reports a confusing
-`net.merged`/`topology` mismatch that reads like a layout bug but is actually
-a netlist-form mismatch. If a caller's schematic tool can only emit the
-simulation form, convert it (element letter + model name + the geometric
-parameter subset) before pointing a `klt lvs` request at it — this is a
-small, mechanical, PDK-parameterized transform, not something this command
-attempts to detect or normalise in this version.
+Real open-PDK schematic flows (xschem/ngspice against sky130 or gf180mcu) emit
+that simulation form, because both PDKs ship their primitive MOS device as a
+`.subckt` rather than a built-in model.
+
+### Detection (default): a specific error, not a silent cascade
+
+Handing `NetlistSpiceReader` the subcircuit-call form directly would not
+error — it reads the call as an instance of an undefined subcircuit, the
+circuit collapses toward a single merged net, and the compare reports a
+confusing `net.merged`/`topology` mismatch that reads like a layout bug but is
+actually a netlist-form mismatch. `klt lvs` guards against this: when a
+reference netlist (in the default `plain-element` form) instantiates a
+**curated PDK device subcircuit** (e.g. `sky130_fd_pr__nfet_01v8`,
+`nfet_03v3`) via an *undefined* `X` card, the run fails with a specific,
+actionable error naming the form mismatch instead of producing the misleading
+cascade.
+
+### Conversion (opt-in): `reference.form = "subckt-call"`
+
+To convert the simulation form automatically, set the reference's `form` to
+`"subckt-call"`:
+
+```json
+{
+  "layout":    { "file": "block.gds", "deck": "sky130" },
+  "reference": { "netlist": "block.sim.spice", "form": "subckt-call" }
+}
+```
+
+Device subcircuit names resolve through the same curated table `klt extract
+--pdk` uses (`klayout_tools.pdk_models`), so the common case needs no map.
+When a device name is not one of the curated devices, supply it explicitly:
+
+- `reference.deck` — `"sky130"` / `"gf180mcu"`, selects that deck's device
+  map (validates names against it).
+- `reference.device_map` — an explicit `{ "<subckt-name>": "<nfet|pfet>" }`
+  override, merged on top of the deck's map.
+
+The conversion is deliberately narrow and loud (a wrong parameter/unit mapping
+into a sign-off tool must never pass silently):
+
+- Only `X` cards that carry an `l`/`w` parameter are treated as MOS devices;
+  a genuine hierarchical subcircuit instance passes through untouched.
+- `L`/`W` are carried and converted to explicit micrometre-suffixed literals
+  (`0.5u` → `L=0.5U`; SI metres `1.5e-6` → `W=1.5U`). A `.option scale`
+  bare-micrometre convention is **not** inferred — emit explicit unit
+  suffixes (see "Unit suffixes matter" below).
+- Every other parameter is dropped: the parasitic-only
+  `ad`/`as`/`pd`/`ps`/`nrd`/`nrs`/`sa`/`sb`/`sd` (which `klt extract` does not
+  carry either) and any other model parameter.
+- `nf`/`m` > 1 (a multi-finger/multiplied device the curated plain-element
+  form cannot represent) is **rejected** with a specific error naming the
+  device — never silently dropped or misinterpreted. Flatten it (one device
+  per drawn gate) in the schematic netlist first.
+- A device-like `X` card whose subcircuit name is not in the resolved device
+  map is a hard error, never a silent pass-through.
+
+A reference netlist that *mixes* plain-element `M` cards and subckt-call `X`
+device cards converts correctly under `form: "subckt-call"` — the `M` cards
+pass through unchanged.
 
 **Unit suffixes matter.** `NetlistSpiceReader` interprets a bare numeric
 literal for a MOS `W`/`L` parameter as plain SI (metres) per the SPICE
@@ -148,6 +199,9 @@ each resolves relative paths inside the document.
 | `layout` | object | The layout side — see "`layout` shapes" below. Exactly one of `file`/`netlist` is required. |
 | `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory (or the current working directory for the `-`/inline-JSON request forms — see the `<request>` bullet above). |
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
+| `reference.form` | string | `"plain-element"` (default) or `"subckt-call"`. `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. |
+| `reference.deck` | string | Only used with `form: "subckt-call"`. `"sky130"`/`"gf180mcu"` — selects that deck's curated device-name map for the conversion (and validates device names against it). Omit to auto-resolve each device subcircuit name against the whole curated table. |
+| `reference.device_map` | object\<string, string\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": "<nfet\|pfet>" }` overrides, merged on top of `reference.deck`'s map — for a device subcircuit name the curated table does not cover. |
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. |
 | `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |
 | `options.keep_extracted` | boolean | When `layout.file` is given (inline extraction), retain the intermediate extracted netlist on disk at `<request-dir>/.klt/lvs/<top>.spice` and echo its path in `environment.extracted_netlist`, where `<request-dir>` is the request file's directory (or the current working directory for the `-`/inline-JSON forms). Default `false` (nothing is written to disk). |

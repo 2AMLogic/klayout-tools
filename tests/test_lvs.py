@@ -1443,3 +1443,249 @@ def test_cli_stdin_request(tmp_path, capsys, monkeypatch):
     assert exit_code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# Reference netlist form: subckt-call -> plain-element conversion + detection
+# (issue #280)
+# --------------------------------------------------------------------------- #
+
+from klayout_tools.netlist_normalize import (  # noqa: E402
+    NormalizeError,
+    detect_subckt_call_devices,
+    normalize_reference_netlist,
+)
+
+# sky130 inverter in the *simulation* (subckt-call) form a real xschem/ngspice
+# flow emits: `X`-card instances of the PDK's primitive MOS `.subckt`, carrying
+# parasitic params `klt lvs`'s plain-element form does not model. Converts to
+# exactly `_INVERTER_SPICE`'s topology/parameters.
+_INVERTER_SUBCKT_CALL_SKY130 = """
+.subckt inv A Y VPWR VGND
+XM1 Y A VGND VGND sky130_fd_pr__nfet_01v8 L=0.15u W=0.65u nf=1 ad=1e-12 as=1e-12
++ pd=2u ps=2u
+XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
+.ends
+"""
+
+# The same inverter using gf180mcu device names and gf180mcu's real in-the-wild
+# SI-metre geometry convention (`w=6.5e-7` == 0.65 um), plus a `+` continuation.
+_INVERTER_SUBCKT_CALL_GF180 = """
+.subckt inv A Y VPWR VGND
+XM1 Y A VGND VGND nfet_03v3 L=1.5e-7 W=6.5e-7 m=1
++ ad='int((nf+1)/2) * w/nf * 0.18u' nrd=0.1
+XM2 Y A VPWR VPWR pfet_03v3 L=1.5e-7 W=1e-6
+.ends
+"""
+
+
+def test_normalize_sky130_device_names_resolve_auto():
+    out = normalize_reference_netlist(_INVERTER_SUBCKT_CALL_SKY130)
+    assert "M1 Y A VGND VGND nfet L=0.15U W=0.65U" in out
+    assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
+    # Parasitic-only params are dropped, not carried onto the plain-element card.
+    for dropped in ("ad=", "as=", "pd=", "ps=", "nf="):
+        assert dropped not in out
+    assert "sky130_fd_pr__" not in out
+
+
+def test_normalize_gf180_device_names_resolve_with_deck():
+    out = normalize_reference_netlist(_INVERTER_SUBCKT_CALL_GF180, deck="gf180mcu")
+    # SI-metre geometry converts to explicit micrometre-suffixed literals.
+    assert "M1 Y A VGND VGND nfet L=0.15U W=0.65U" in out
+    assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
+    assert "nfet_03v3" not in out and "pfet_03v3" not in out
+
+
+def test_normalize_unit_suffix_conversion():
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=0.5u W=1u\n", deck="gf180mcu"
+    )
+    assert "L=0.5U" in out
+    assert "W=1U" in out
+
+
+def test_normalize_si_and_eng_suffixes_convert_to_um():
+    # 500n == 0.5 um; 1.5e-6 m == 1.5 um.
+    out = normalize_reference_netlist(
+        "XM1 d g s b nfet_03v3 L=500n W=1.5e-6\n", deck="gf180mcu"
+    )
+    assert "L=0.5U" in out
+    assert "W=1.5U" in out
+
+
+def test_normalize_unknown_subckt_name_fails_clearly():
+    with pytest.raises(NormalizeError, match="not a known"):
+        normalize_reference_netlist(
+            "XM1 d g s b totally_made_up L=0.5u W=1u\n", deck="sky130"
+        )
+
+
+def test_normalize_wrong_deck_device_name_fails():
+    # A gf180mcu device name against the sky130 deck's map is not resolvable.
+    with pytest.raises(NormalizeError, match="not a known device"):
+        normalize_reference_netlist(
+            "XM1 d g s b nfet_03v3 L=0.5u W=1u\n", deck="sky130"
+        )
+
+
+def test_normalize_device_map_override():
+    out = normalize_reference_netlist(
+        "XM1 d g s b my_custom_nfet L=0.5u W=1u\n",
+        device_map={"my_custom_nfet": "nfet"},
+    )
+    assert "M1 d g s b nfet L=0.5U W=1U" in out
+
+
+@pytest.mark.parametrize("param,value", [("nf", "2"), ("m", "4"), ("mult", "2")])
+def test_normalize_multiplicity_gt_one_rejected(param, value):
+    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
+        normalize_reference_netlist(
+            f"XM1 d g s b nfet_03v3 L=0.5u W=1u {param}={value}\n", deck="gf180mcu"
+        )
+
+
+@pytest.mark.parametrize("param", ["nf", "m", "mult"])
+def test_normalize_multiplicity_of_one_is_dropped_not_rejected(param):
+    out = normalize_reference_netlist(
+        f"XM1 d g s b nfet_03v3 L=0.5u W=1u {param}=1\n", deck="gf180mcu"
+    )
+    assert "M1 d g s b nfet L=0.5U W=1U" in out
+    assert f"{param}=" not in out
+
+
+def test_normalize_wrong_terminal_count_fails():
+    # A device-like X card (has l/w) with the wrong number of nodes is an error.
+    with pytest.raises(NormalizeError, match="expected 4 terminals"):
+        normalize_reference_netlist(
+            "XM1 d g s nfet_03v3 L=0.5u W=1u\n", deck="gf180mcu"
+        )
+
+
+def test_normalize_expression_valued_geometry_fails():
+    with pytest.raises(NormalizeError, match="not a plain numeric literal"):
+        normalize_reference_netlist(
+            "XM1 d g s b nfet_03v3 L='w/2' W=1u\n", deck="gf180mcu"
+        )
+
+
+def test_normalize_non_device_subckt_passes_through():
+    # An X card with no l/w is a genuine hierarchical subcircuit instance and
+    # must pass through untouched (not be mistaken for a device).
+    text = "X1 A Y VPWR VGND some_hierarchical_block\n"
+    assert normalize_reference_netlist(text).strip() == text.strip()
+
+
+def test_normalize_mixed_plain_and_subckt_call_lines():
+    mixed = """
+.subckt inv A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.65U L=0.15U
+XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
+.ends
+"""
+    out = normalize_reference_netlist(mixed)
+    # The plain-element M card passes through verbatim; the X card converts.
+    assert "M1 Y A VGND VGND nfet W=0.65U L=0.15U" in out
+    assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
+
+
+def test_detect_reports_undefined_known_device():
+    assert detect_subckt_call_devices(_INVERTER_SUBCKT_CALL_SKY130) == [
+        "sky130_fd_pr__nfet_01v8",
+        "sky130_fd_pr__pfet_01v8",
+    ]
+
+
+def test_detect_ignores_defined_subckt():
+    # A device subcircuit that is actually defined in the file is not reported
+    # (the reader can read it as a subcircuit -- a different, out-of-scope case).
+    text = ".subckt nfet_03v3 d g s b\n.ends\nXM1 d g s b nfet_03v3 L=0.5u W=1u\n"
+    assert detect_subckt_call_devices(text) == []
+
+
+def test_detect_empty_for_plain_element_netlist():
+    assert detect_subckt_call_devices(_INVERTER_SPICE) == []
+
+
+# --- integration through run_lvs -------------------------------------------- #
+
+
+def test_run_lvs_subckt_call_reference_converts_and_matches(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_SKY130)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv", "form": "subckt-call"},
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+
+def test_run_lvs_subckt_call_reference_gf180_converts_and_matches(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_GF180)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "inv",
+            "form": "subckt-call",
+            "deck": "gf180mcu",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_default_form_detects_subckt_call_and_errors(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_SKY130)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    with pytest.raises(LvsError, match="simulation .subcircuit-call. form"):
+        run_lvs(json.dumps(request))
+
+
+def test_run_lvs_invalid_reference_form_raises(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv", "form": "bogus"},
+    }
+    with pytest.raises(LvsError, match="reference.form must be one of"):
+        run_lvs(json.dumps(request))
+
+
+def test_run_lvs_reference_device_map_must_be_object(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "inv",
+            "device_map": ["not", "an", "object"],
+        },
+    }
+    with pytest.raises(LvsError, match="device_map must be a JSON object"):
+        run_lvs(json.dumps(request))
+
+
+def test_run_lvs_subckt_call_unknown_device_errors(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt inv A Y VPWR VGND\n"
+        "XM1 Y A VGND VGND not_a_real_device L=0.15u W=0.65u\n"
+        ".ends\n",
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv", "form": "subckt-call"},
+    }
+    with pytest.raises(LvsError, match="could not convert subckt-call"):
+        run_lvs(json.dumps(request))

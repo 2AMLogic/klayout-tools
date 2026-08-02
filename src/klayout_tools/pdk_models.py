@@ -181,6 +181,58 @@ def resolve_mos_model_table(deck_name: str, pdk_variant: str) -> dict[str, str]:
     return table
 
 
+def resolve_mos_model_table_for_deck(deck_name: str) -> dict[str, str]:
+    """Resolve the curated ``{"nfet": ..., "pfet": ...}`` subcircuit-name
+    table for ``deck_name`` when only the deck name is known (no resolved
+    ``--pdk`` variant), as in a ``klt lvs`` request that names a curated deck
+    but resolves no PDK install.
+
+    The curated table's deck names coincide with its PDK-family keys
+    (``sky130``/``gf180mcu`` are both), so this is
+    :func:`resolve_mos_model_table` with the deck name standing in for the
+    variant -- it raises the same :class:`ModelBindingError` for an unknown
+    deck rather than returning a partial/guessed table.
+    """
+    return resolve_mos_model_table(deck_name, deck_name)
+
+
+def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
+    """Reverse of :func:`resolve_mos_model_table_for_deck`: a
+    ``<subckt-name> -> <device-class>`` map (e.g.
+    ``"sky130_fd_pr__nfet_01v8" -> "nfet"``) for turning a PDK schematic
+    flow's subcircuit-call device cards *back* into the curated deck's
+    plain-element device form (the ``klt lvs`` reference-netlist direction,
+    issue #280) -- the mirror of the writer delegate's plain-element ->
+    subckt-call direction (:func:`create_model_binding_delegate`).
+
+    Raises :class:`ModelBindingError` (via
+    :func:`resolve_mos_model_table_for_deck`) for an unknown deck.
+    """
+    return {
+        subckt: device_class
+        for device_class, subckt in resolve_mos_model_table_for_deck(deck_name).items()
+    }
+
+
+def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
+    """Every curated MOS device subcircuit name across *all* decks, mapped to
+    the ``(deck_name, device_class)`` it resolves to (e.g.
+    ``"nfet_03v3" -> ("gf180mcu", "nfet")``).
+
+    Used for *detection* without a caller-supplied deck: a ``klt lvs``
+    reference netlist that instantiates one of these names via an ``X``
+    subcircuit call is in the simulation (subckt-call) form, not the
+    schematic-equivalent plain-element form ``klt lvs`` requires (issue #280).
+    Subcircuit names are unique across the curated decks, so the mapping is
+    unambiguous.
+    """
+    result: dict[str, tuple[str, str]] = {}
+    for (deck_name, _family), table in _MOS_MODEL_TABLE.items():
+        for device_class, subckt in table.items():
+            result[subckt] = (deck_name, device_class)
+    return result
+
+
 def _format_um(value: float) -> str:
     """Format a micrometre value the same way KLayout's own default
     ``M``-card writer formats ``L``/``W`` (e.g. ``8.0`` -> ``"8U"``, ``0.5``
