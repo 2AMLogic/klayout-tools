@@ -51,7 +51,7 @@ application error (exit 1), exactly like an unsupported `engine`.
 | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `local` (default) | Runs corners sequentially, one `ngspice -b` subprocess at a time, in-process.                                       |
 | `local-parallel`  | Fans the same expanded corner list across a bounded local worker pool (`concurrent.futures`) — same report, same corner order, just concurrent. |
-| `remote`           | Reserved for a future phase (Epic #253) — not implemented; requesting it is an error.                                |
+| `remote`           | Reserved for a future phase (Epic #253) — not implemented; requesting it is an error. See "Remote backend (reserved schema)" below. |
 
 **`local-parallel` worker count.** `options.max_workers` (overridable with
 `--max-workers`) bounds the pool size. When omitted, it defaults to a
@@ -77,6 +77,100 @@ into the response. A corner that errors (timeout, singular matrix, missing
 measurement, …) is reported exactly as `local` reports it and does not abort
 its sibling corners; only that corner's own `status`/`diagnostics` reflect
 the failure.
+
+## Remote backend (reserved schema, not yet implemented)
+
+`request.backend: "remote"` still raises `SimError` in this version — see
+"Execution backends" above. This section documents the `remote.*` request
+fields and the additive `environment.remote` response block **the schema
+now reserves for it**, per Epic #253 Phase 2's provisioning work
+([#264](https://github.com/2AMLogic/klayout-tools/issues/264),
+[`docs/design/remote-sim-backend-spike.md`](../design/remote-sim-backend-spike.md)'s
+"Proposed additive contract fields"). #264 built the EC2 provisioning +
+teardown launcher (`src/klayout_tools/remote_launcher.py`) and the AMI
+build/refresh pipeline (`scripts/aws/build-remote-sim-ami.sh`) these fields
+describe; a follow-on issue wires that launcher into `run_sim` (adding
+`"remote"` to `SUPPORTED_BACKENDS`) and implements the SSH/SCP corner
+fan-out transport. Documenting the shape now — additive only, nothing
+existing renamed/removed/retyped — means a caller can already validate a
+request against the eventual contract before the backend itself lands.
+
+```json
+{
+  "backend": "remote",
+  "remote": {
+    "provider": "aws",
+    "region": "us-east-1",
+    "spot": true,
+    "max_hourly_cost_usd": 5.0
+  }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `remote.provider` | string | `"aws"` for v1 — present from day one so provider is data, not a code path. |
+| `remote.region` | string | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
+| `remote.spot` | boolean | Request a spot instance. Defaults to `true` — corners are trivially re-runnable, so spot is a natural fit. `false` requests on-demand directly. |
+| `remote.max_hourly_cost_usd` | number | Optional caller-side ceiling on the *estimated* hourly rate (a transparency guardrail, not a spend cap — see the design note's "AWS-native budget boundary vs. tool-side mechanical guardrails"). If the resolved instance type's estimated cost exceeds it, provisioning fails before any billable AWS API call. |
+
+Once wired into `run_sim`, a `remote` run's response adds an additive
+`environment.remote` block:
+
+```json
+{
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "46",
+    "remote": {
+      "provider": "aws",
+      "region": "us-east-1",
+      "instance_type": "c7i.12xlarge",
+      "instance_id": "i-0123456789abcdef0",
+      "spot": true,
+      "estimated_hourly_cost_usd": 0.9639,
+      "ami_id": "ami-0123456789abcdef0",
+      "pdk_snapshot": "sky130A-2026.06.01",
+      "spin_up_s": 118.4
+    }
+  }
+}
+```
+
+`remote.provider`/`region`/`instance_type`/`spot` echo what actually ran
+(an instance-type override or a spot-to-on-demand fallback is visible here,
+not just the request's own ask — see `remote_launcher.RemoteLauncher`'s
+spot-capacity-failure retry). `estimated_hourly_cost_usd` is the guardrail
+mechanics cost-gate estimate, carried into the report for auditability.
+`ami_id`/`pdk_snapshot` are decision 4/5's reproducibility provenance — which
+baked image and which PDK snapshot produced this result, the same role
+`environment.models_lib_sha256` plays for `local`/`local-parallel`.
+`spin_up_s` is the measured wall-clock from provisioning start to the
+instance reaching `running`.
+
+**Provisioning + teardown lifecycle (implemented, not yet wired into
+`run_sim`).** `remote_launcher.select_instance_type()` sizes one instance for
+the whole requested corner matrix (`corner_count * threads_per_corner`, ~20%
+headroom, smallest fitting `c7i` size — the 5-corner × 8-thread case selects
+`c7i.12xlarge`, 48 vCPU). `remote_launcher.resolve_ami()` resolves a
+`(pdk, region)` pair against the versioned AMI manifest
+(`data/remote-sim-ami-manifest.json`, schema at
+`docs/schemas/remote-sim-ami-manifest.schema.json`) produced by
+`scripts/aws/build-remote-sim-ami.sh` — ngspice and the curated `sky130A`/
+`gf180mcu` model decks are baked into the AMI, never fetched per job. No IAM
+instance profile is attached to the guest by default (baked AMI + SSH/SCP
+transport means the guest never calls an AWS API); network posture is
+SSH-inbound-only from the launcher's own IP/CIDR, with outbound egress
+revoked once the security group is created. An idle-shutdown guard (~12
+minutes, materially shorter than `repo:remote`'s 120-minute dev-session
+default) is baked into the AMI itself. `remote_launcher.RemoteLauncher` is a
+context manager that guarantees `terminate-instances` runs on normal
+completion, any exception raised inside the block, or a caught
+SIGINT/SIGTERM — plus `InstanceInitiatedShutdownBehavior=terminate` at
+launch as a host-side backstop independent of whether that explicit call
+ever arrives. See `src/klayout_tools/remote_launcher.py`'s module docstring
+for the full mapping from these mechanics to
+`docs/design/remote-sim-backend-spike.md`'s decisions.
 
 ## Deviation from the spike
 
@@ -259,7 +353,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | ------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
-| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool. `"remote"` is reserved but unimplemented. See "Execution backends" above. Overridable with the `--backend` CLI flag. |
+| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool. `"remote"` is reserved but unimplemented (see "Execution backends" and "Remote backend (reserved schema, not yet implemented)" above). Overridable with the `--backend` CLI flag. |
+| `remote.*`               | object            | Reserved request fields for the future `remote` backend (`provider`, `region`, `spot`, `max_hourly_cost_usd`) — see "Remote backend (reserved schema, not yet implemented)" above. Not read or validated by this version (only reached once `backend: "remote"` is accepted). |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
 | `corners.process`        | array\<string\>   | Process-corner axis — opaque `.lib` section names.                                                                                                                     |
