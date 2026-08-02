@@ -51,7 +51,7 @@ application error (exit 1), exactly like an unsupported `engine`.
 | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `local` (default) | Runs corners sequentially, one `ngspice -b` subprocess at a time, in-process.                                       |
 | `local-parallel`  | Fans the same expanded corner list across a bounded local worker pool (`concurrent.futures`) — same report, same corner order, just concurrent. |
-| `remote`           | Reserved for a future phase (Epic #253) — not implemented; requesting it is an error. See "Remote backend (reserved schema)" below. |
+| `remote`           | Provisions one right-sized EC2 instance and runs the *same* `local-parallel` worker-pool code on it over SSH/SCP instead of the caller's own cores (Epic #253 Phase 2). See "Remote backend" below. |
 
 **`local-parallel` worker count.** `options.max_workers` (overridable with
 `--max-workers`) bounds the pool size. When omitted, it defaults to a
@@ -78,29 +78,32 @@ measurement, …) is reported exactly as `local` reports it and does not abort
 its sibling corners; only that corner's own `status`/`diagnostics` reflect
 the failure.
 
-## Remote backend (reserved schema, not yet implemented)
+## Remote backend
 
-`request.backend: "remote"` still raises `SimError` in this version — see
-"Execution backends" above. This section documents the `remote.*` request
-fields and the additive `environment.remote` response block **the schema
-now reserves for it**, per Epic #253 Phase 2's provisioning work
-([#264](https://github.com/2AMLogic/klayout-tools/issues/264),
-[`docs/design/remote-sim-backend-spike.md`](../design/remote-sim-backend-spike.md)'s
-"Proposed additive contract fields"). #264 built the EC2 provisioning +
-teardown launcher (`src/klayout_tools/remote_launcher.py`) and the AMI
-build/refresh pipeline (`scripts/aws/build-remote-sim-ami.sh`) these fields
-describe; a follow-on issue wires that launcher into `run_sim` (adding
-`"remote"` to `SUPPORTED_BACKENDS`) and implements the SSH/SCP corner
-fan-out transport. Documenting the shape now — additive only, nothing
-existing renamed/removed/retyped — means a caller can already validate a
-request against the eventual contract before the backend itself lands.
+`request.backend: "remote"` provisions one right-sized EC2 instance
+(`remote_launcher.RemoteLauncher`, [#264](https://github.com/2AMLogic/klayout-tools/issues/264))
+and runs the corner matrix on it, per Epic #253 Phase 2
+([#265](https://github.com/2AMLogic/klayout-tools/issues/265),
+[`docs/design/remote-sim-backend-spike.md`](../design/remote-sim-backend-spike.md)).
+It is **the same code path as `local-parallel`, run on a different box**: the
+launcher pushes the netlist and a request-specific copy of the request over
+SSH/SCP, then invokes `klt sim ... --backend local-parallel` directly on the
+provisioned instance (which the AMI build pipeline,
+`scripts/aws/build-remote-sim-ami.sh`, bakes `klt` itself into) and pulls the
+resulting report/artifacts back over the same channel — corner expansion,
+ordering, measurement extraction, and pass/fail classification are never
+reimplemented for `remote`; they are the literal `_run_local_parallel`/
+`_run_corner` functions, executing unmodified on the remote host.
 
 ```json
 {
   "backend": "remote",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
   "remote": {
-    "provider": "aws",
     "region": "us-east-1",
+    "key_name": "my-ec2-keypair",
+    "ssh_key_path": "~/.ssh/my-ec2-keypair.pem",
+    "launcher_cidr": "203.0.113.4/32",
     "spot": true,
     "max_hourly_cost_usd": 5.0
   }
@@ -109,13 +112,22 @@ request against the eventual contract before the backend itself lands.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
+| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. |
+| `remote.region` | string, required | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
+| `remote.key_name` | string, required | AWS EC2 keypair name attached to the provisioned instance, so `remote.ssh_key_path`'s private key can authenticate. |
+| `remote.ssh_key_path` | string, required | Local path to the private key matching `remote.key_name`, used for every SSH/SCP call the transport makes. |
+| `remote.launcher_cidr` | string | Source CIDR (typically the launcher's own public IP, e.g. `"203.0.113.4/32"`) allowed inbound SSH — the design note's SSH-inbound-only network posture. Required unless `remote.security_group_id` names an existing group. |
+| `remote.security_group_id` | string | Reuse an existing security group instead of creating a fresh ephemeral one. |
+| `remote.subnet_id` | string | Optional subnet to launch into. |
+| `remote.ssh_user` | string | SSH login user for the baked AMI. Defaults to `"ubuntu"` (the base Ubuntu 22.04 image `scripts/aws/build-remote-sim-ami.sh` builds from). |
 | `remote.provider` | string | `"aws"` for v1 — present from day one so provider is data, not a code path. |
-| `remote.region` | string | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
 | `remote.spot` | boolean | Request a spot instance. Defaults to `true` — corners are trivially re-runnable, so spot is a natural fit. `false` requests on-demand directly. |
 | `remote.max_hourly_cost_usd` | number | Optional caller-side ceiling on the *estimated* hourly rate (a transparency guardrail, not a spend cap — see the design note's "AWS-native budget boundary vs. tool-side mechanical guardrails"). If the resolved instance type's estimated cost exceeds it, provisioning fails before any billable AWS API call. |
+| `remote.ssh_ready_timeout_s` | number | Overall budget waiting for SSH to become reachable after the instance reaches `running`. Defaults to 240s. |
+| `remote.ssh_timeout_s` | number | Overall SSH-command timeout for the remote `klt sim` invocation itself. Defaults to a conservative fully-serial-worst-case bound (`options.timeout_s * corner_count + 120`) — the provisioned box is right-sized to run every corner concurrently, so real runs finish far faster. |
 
-Once wired into `run_sim`, a `remote` run's response adds an additive
-`environment.remote` block:
+A `remote` run's response adds an additive `environment.remote` block —
+report schema is otherwise **unchanged** from `local`/`local-parallel`:
 
 ```json
 {
@@ -146,31 +158,48 @@ mechanics cost-gate estimate, carried into the report for auditability.
 baked image and which PDK snapshot produced this result, the same role
 `environment.models_lib_sha256` plays for `local`/`local-parallel`.
 `spin_up_s` is the measured wall-clock from provisioning start to the
-instance reaching `running`.
+remote host being ready to accept the first corner (instance reaching
+`running` plus SSH becoming reachable) — `runtime_s`/`engine_version` remain
+the only fields that legitimately vary between a `local` and a `remote` run
+of the same request (see "Semantics and guarantees" below); given a matching
+`engine_version` and PDK snapshot hash, `.meas` measurements are expected to
+match bit-for-bit.
 
-**Provisioning + teardown lifecycle (implemented, not yet wired into
-`run_sim`).** `remote_launcher.select_instance_type()` sizes one instance for
-the whole requested corner matrix (`corner_count * threads_per_corner`, ~20%
+**Transport: SSH/SCP push-then-pull, no IAM instance profile on the
+guest.** `remote_launcher.select_instance_type()` sizes one instance for the
+whole requested corner matrix (`corner_count * threads_per_corner`, ~20%
 headroom, smallest fitting `c7i` size — the 5-corner × 8-thread case selects
 `c7i.12xlarge`, 48 vCPU). `remote_launcher.resolve_ami()` resolves a
 `(pdk, region)` pair against the versioned AMI manifest
 (`data/remote-sim-ami-manifest.json`, schema at
 `docs/schemas/remote-sim-ami-manifest.schema.json`) produced by
-`scripts/aws/build-remote-sim-ami.sh` — ngspice and the curated `sky130A`/
-`gf180mcu` model decks are baked into the AMI, never fetched per job. No IAM
-instance profile is attached to the guest by default (baked AMI + SSH/SCP
-transport means the guest never calls an AWS API); network posture is
-SSH-inbound-only from the launcher's own IP/CIDR, with outbound egress
-revoked once the security group is created. An idle-shutdown guard (~12
-minutes, materially shorter than `repo:remote`'s 120-minute dev-session
-default) is baked into the AMI itself. `remote_launcher.RemoteLauncher` is a
-context manager that guarantees `terminate-instances` runs on normal
-completion, any exception raised inside the block, or a caught
+`scripts/aws/build-remote-sim-ami.sh` — ngspice, the curated `sky130A`/
+`gf180mcu` model decks, and `klt` itself are baked into the AMI, never
+fetched per job. Only the netlist and a generated request document
+(kilobytes to low megabytes) are pushed per job, by
+`klayout_tools.remote_transport` — no IAM instance profile is attached to
+the guest by default (baked AMI + SSH/SCP transport means the guest never
+calls an AWS API); network posture is SSH-inbound-only from the launcher's
+own IP/CIDR, with outbound egress revoked once the security group is
+created. `options.keep_artifacts`/`waveforms` are collected back the same
+way, over `scp -r`. An idle-shutdown guard (~12 minutes, materially shorter
+than `repo:remote`'s 120-minute dev-session default) is baked into the AMI
+itself. `remote_launcher.RemoteLauncher` is a context manager that
+guarantees `terminate-instances` runs on normal completion, any exception
+raised inside the block (including a transport failure), or a caught
 SIGINT/SIGTERM — plus `InstanceInitiatedShutdownBehavior=terminate` at
 launch as a host-side backstop independent of whether that explicit call
-ever arrives. See `src/klayout_tools/remote_launcher.py`'s module docstring
-for the full mapping from these mechanics to
+ever arrives. See `src/klayout_tools/remote_launcher.py`'s and
+`src/klayout_tools/remote_transport.py`'s module docstrings for the full
+mapping from these mechanics to
 `docs/design/remote-sim-backend-spike.md`'s decisions.
+
+**When to prefer `remote` over `local`/`local-parallel`.** Spin-up is a
+one-time, amortised cost per request (roughly 1-3 minutes, documented not yet
+measured — see the design note's decision 3), so `remote` pays off once a
+matrix's uncontended wall-clock would run several minutes or more, or
+whenever the caller's own host is already contended; prefer
+`local`/`local-parallel` for a single-corner smoke check.
 
 ## Deviation from the spike
 
@@ -384,8 +413,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | ------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
-| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool. `"remote"` is reserved but unimplemented (see "Execution backends" and "Remote backend (reserved schema, not yet implemented)" above). Overridable with the `--backend` CLI flag. |
-| `remote.*`               | object            | Reserved request fields for the future `remote` backend (`provider`, `region`, `spot`, `max_hourly_cost_usd`) — see "Remote backend (reserved schema, not yet implemented)" above. Not read or validated by this version (only reached once `backend: "remote"` is accepted). |
+| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there (see "Execution backends" and "Remote backend" above). Overridable with the `--backend` CLI flag. |
+| `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
 | `corners.process`        | array\<string\>   | Process-corner axis — opaque `.lib` section names.                                                                                                                     |

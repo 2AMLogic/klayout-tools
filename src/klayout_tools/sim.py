@@ -55,11 +55,14 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from . import remote_transport
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
+from .remote_launcher import RemoteLauncher, RemoteLaunchError
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -88,12 +91,17 @@ SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
 #: the same expanded corner list across a bounded local worker pool (Epic
 #: #253 Phase 1) -- corners share nothing (each is a pure function of
 #: netlist + models + corner), so this is purely a concurrency seam: same
-#: request in, same report out, just faster on a multi-core box. Like
+#: request in, same report out, just faster on a multi-core box. ``remote``
+#: (Epic #253 Phase 2, issue #265) provisions one right-sized EC2 instance
+#: (``remote_launcher.RemoteLauncher``, #264) and runs the *same*
+#: ``local-parallel`` worker-pool code on that box instead of the caller's
+#: own cores, via the SSH/SCP push-then-pull transport in
+#: :mod:`klayout_tools.remote_transport` -- see ``_run_remote`` and
+#: ``docs/design/remote-sim-backend-spike.md`` decisions 2/5. Like
 #: ``engine``, ``backend`` is a request *data* field, not part of the JSON
-#: shape -- ``remote`` (Epic #253 later phases) is reserved but unimplemented
-#: here. Unknown names raise :class:`SimError` before any corner runs,
+#: shape. Unknown names raise :class:`SimError` before any corner runs,
 #: mirroring ``engine`` validation.
-SUPPORTED_BACKENDS = ("local", "local-parallel")
+SUPPORTED_BACKENDS = ("local", "local-parallel", "remote")
 
 #: Assumed ngspice worker-thread count used to derive the ``local-parallel``
 #: backend's conservative default ``max_workers`` -- see :func:`_default_max_workers`.
@@ -260,9 +268,11 @@ def run_sim(
 
     ``backend`` selects the execution backend, overriding the request's own
     ``backend`` field when given (the ``--backend`` CLI flag path). When both
-    are omitted the backend defaults to ``local``. ``local`` and
-    ``local-parallel`` are implemented; any other name raises
-    :class:`SimError` (see :data:`SUPPORTED_BACKENDS`).
+    are omitted the backend defaults to ``local``. ``local``,
+    ``local-parallel``, and ``remote`` are implemented; any other name raises
+    :class:`SimError` (see :data:`SUPPORTED_BACKENDS`). ``remote`` requires
+    ``request.remote`` and ``request.models.pdk`` -- see ``docs/cli/sim.md``'s
+    "Remote backend" section.
 
     ``max_workers`` bounds the ``local-parallel`` backend's worker pool,
     overriding the request's own ``options.max_workers`` when given (the
@@ -361,7 +371,7 @@ def run_sim(
 
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
-    corners, engine_version = _BACKENDS[backend](
+    corners, engine_version, remote_environment = _BACKENDS[backend](
         corner_points=corner_points,
         netlist_path=netlist_path,
         models_lib=models_lib,
@@ -372,6 +382,7 @@ def run_sim(
         want_waveforms=want_waveforms,
         artifacts_dir=artifacts_dir,
         max_workers=max_workers,
+        request=request,
     )
 
     measurements_rollup = _rollup_measurements(measurements_spec, corners)
@@ -398,6 +409,10 @@ def run_sim(
         # existing consumers of a request that omits netlist_source see an
         # unchanged environment block (see docs/cli/sim.md).
         environment["netlist_source"] = netlist_source
+    if remote_environment is not None:
+        # Additive/optional: only present for the `remote` backend -- see
+        # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
+        environment["remote"] = remote_environment
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -611,20 +626,23 @@ def _run_local(
     want_waveforms: bool,
     artifacts_dir: str,
     max_workers: int | None,
-) -> tuple[list[dict[str, Any]], str | None]:
+    request: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
     This is the unit a backend implements -- given the expanded corner list
     plus the already-resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version)``. It intentionally reproduces the
-    original in-line loop byte-for-byte (same ordering, same
-    ``engine_version`` last-writer-wins tracking) so the report JSON and
-    on-disk artifacts are unchanged from before the backend seam existed.
-    ``max_workers`` is accepted for signature parity with the other backends
-    (every entry in :data:`_BACKENDS` is called with the same keyword set)
-    but is meaningless for a sequential runner, so it is ignored here.
+    ``(per_corner_reports, engine_version, remote_environment)``. It
+    intentionally reproduces the original in-line loop byte-for-byte (same
+    ordering, same ``engine_version`` last-writer-wins tracking) so the
+    report JSON and on-disk artifacts are unchanged from before the backend
+    seam existed. ``max_workers``/``request`` are accepted for signature
+    parity with the other backends (every entry in :data:`_BACKENDS` is
+    called with the same keyword set) but are meaningless for a sequential
+    local runner, so both are ignored here; the third return value is always
+    ``None`` (only ``remote`` populates it).
     """
-    del max_workers  # unused: sequential by definition, see docstring
+    del max_workers, request  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     for point in corner_points:
@@ -642,7 +660,7 @@ def _run_local(
         corners.append(result)
         if version is not None:
             engine_version = version
-    return corners, engine_version
+    return corners, engine_version, None
 
 
 def _default_max_workers() -> int:
@@ -673,7 +691,8 @@ def _run_local_parallel(
     want_waveforms: bool,
     artifacts_dir: str,
     max_workers: int | None,
-) -> tuple[list[dict[str, Any]], str | None]:
+    request: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
 
@@ -695,7 +714,12 @@ def _run_local_parallel(
     A failing/erroring corner is reported exactly as :func:`_run_corner`
     reports it (that function never raises) and does not abort any sibling
     corner -- each future is independent.
+
+    ``request`` is accepted for signature parity with the other backends
+    (only ``remote`` reads it) and ignored; the third return value is always
+    ``None`` here.
     """
+    del request  # unused: local-parallel needs no request-level context
     resolved_workers = (
         max_workers if max_workers is not None else _default_max_workers()
     )
@@ -730,13 +754,268 @@ def _run_local_parallel(
         corners.append(corner)
         if version is not None:
             engine_version = version
-    return corners, engine_version
+    return corners, engine_version, None
+
+
+#: Default idle-poll interval for :func:`remote_transport.wait_for_ssh` when
+#: called from :func:`_run_remote` -- kept short so tests exercising a
+#: timeout don't stall, while still reasonable against real EC2 boot times.
+_REMOTE_SSH_POLL_INTERVAL_S = 5.0
+
+#: Default overall SSH-readiness budget, per the design note's documented
+#: 1-3 minute spin-up estimate plus slack (decision 3) -- generous, not
+#: measured; see docs/design/remote-sim-backend-spike.md.
+_REMOTE_SSH_READY_TIMEOUT_S = 240.0
+
+
+def _run_remote(
+    *,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    models_lib: str | None,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    artifacts_dir: str,
+    max_workers: int | None,
+    request: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The ``remote`` backend: provision one EC2 instance sized for the whole
+    corner matrix, push the netlist + a request-specific copy of ``request``
+    to it over SSH/SCP, and run the *same* ``local-parallel`` worker-pool
+    code (unmodified, on the provisioned box) via ``klt sim ... --backend
+    local-parallel`` -- not a reimplementation of corner expansion, ordering,
+    measurement extraction, or pass/fail classification (see
+    ``docs/design/remote-sim-backend-spike.md`` decisions 2 and 5, and
+    :mod:`klayout_tools.remote_transport`'s :func:`remote_transport.run_remote_sim`).
+
+    ``analysis``/``measurements_spec``/``models_lib`` are accepted for
+    signature parity with the other backends but unused directly here --
+    they are already embedded in ``request`` (the remote request document is
+    built from ``request`` itself, see :func:`_build_remote_request`), and
+    ``models_lib`` is a *local* path resolution only used for this run's
+    ``environment.models_lib``/``models_lib_sha256`` provenance (computed by
+    ``run_sim`` regardless of backend); the remote host resolves its own
+    baked model library from ``request.models`` and its own ``$PDK_ROOT``
+    (see decision 4).
+
+    ``max_workers`` (the caller's *local* worker-pool override) is ignored --
+    the provisioned box was already sized to fit
+    ``corner_count * threads_per_corner`` with headroom
+    (``remote_launcher.select_instance_type``), so its own
+    ``local-parallel`` default (``_default_max_workers``, derived from that
+    box's own CPU count) is already right-sized without an override.
+
+    Teardown is guaranteed on every exit path -- normal completion, any
+    exception raised in this function's body (including a transport
+    failure), or a caught SIGINT/SIGTERM -- by ``RemoteLauncher``'s own
+    context-manager guarantee (guardrail mechanics SS3(a)). A provisioning or
+    transport failure is re-raised as :class:`SimError`: no corner ever ran,
+    the same "the sweep never started" class as an unresolvable netlist or
+    model library.
+    """
+    del analysis, measurements_spec, models_lib, max_workers  # see docstring
+
+    remote_spec = request.get("remote") or {}
+    region = remote_spec.get("region")
+    pdk = (request.get("models") or {}).get("pdk")
+    if not pdk:
+        raise SimError(
+            "backend 'remote' requires request.models.pdk (selects which "
+            "baked-AMI PDK to provision -- see "
+            "remote_launcher.SUPPORTED_PDKS and docs/cli/sim.md)"
+        )
+    ssh_key_path = remote_spec.get("ssh_key_path")
+    if not ssh_key_path:
+        raise SimError(
+            "backend 'remote' requires request.remote.ssh_key_path (local "
+            "private key matching request.remote.key_name, used to SSH/SCP "
+            "into the provisioned instance)"
+        )
+    ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+
+    job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
+    launcher = RemoteLauncher(
+        region=region,
+        pdk=pdk,
+        corner_count=len(corner_points),
+        job_id=job_id,
+        spot=remote_spec.get("spot", True),
+        max_hourly_cost_usd=remote_spec.get("max_hourly_cost_usd"),
+        launcher_cidr=remote_spec.get("launcher_cidr"),
+        security_group_id=remote_spec.get("security_group_id"),
+        key_name=remote_spec.get("key_name"),
+        subnet_id=remote_spec.get("subnet_id"),
+    )
+
+    started = time.monotonic()
+    info: dict[str, Any] | None = None
+    remote_report: dict[str, Any] | None = None
+    try:
+        with launcher:
+            info = launcher.provision()
+            public_ip = launcher.get_public_ip()
+            remote_transport.wait_for_ssh(
+                public_ip,
+                user=ssh_user,
+                identity_file=ssh_key_path,
+                timeout_s=remote_spec.get(
+                    "ssh_ready_timeout_s", _REMOTE_SSH_READY_TIMEOUT_S
+                ),
+                poll_interval_s=_REMOTE_SSH_POLL_INTERVAL_S,
+            )
+            spin_up_s = round(time.monotonic() - started, 3)
+
+            remote_job_dir = remote_transport.job_dir(ssh_user, job_id)
+            remote_request = _build_remote_request(
+                request,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+            )
+            remote_transport.push_job(
+                host=public_ip,
+                user=ssh_user,
+                identity_file=ssh_key_path,
+                local_netlist_path=netlist_path,
+                remote_request=remote_request,
+                remote_job_dir=remote_job_dir,
+            )
+            remote_report = remote_transport.run_remote_sim(
+                host=public_ip,
+                user=ssh_user,
+                identity_file=ssh_key_path,
+                remote_job_dir=remote_job_dir,
+                timeout_s=remote_spec.get(
+                    "ssh_timeout_s",
+                    _default_remote_run_timeout_s(len(corner_points), timeout_s),
+                ),
+            )
+            if keep_artifacts:
+                remote_transport.pull_artifacts(
+                    host=public_ip,
+                    user=ssh_user,
+                    identity_file=ssh_key_path,
+                    remote_job_dir=remote_job_dir,
+                    local_artifacts_dir=artifacts_dir,
+                )
+            remote_transport.cleanup_job(
+                host=public_ip,
+                user=ssh_user,
+                identity_file=ssh_key_path,
+                remote_job_dir=remote_job_dir,
+            )
+    except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
+        raise SimError(f"remote backend failed: {exc}") from exc
+
+    assert info is not None and remote_report is not None  # provision()/run succeeded
+
+    corners = remote_report.get("corners", [])
+    if keep_artifacts:
+        _rewrite_remote_artifact_paths(
+            corners,
+            remote_root=remote_transport.artifacts_root(remote_job_dir),
+            local_root=artifacts_dir,
+        )
+    engine_version = (remote_report.get("environment") or {}).get("engine_version")
+
+    remote_environment = {
+        "provider": info["provider"],
+        "region": info["region"],
+        "instance_type": info["instance_type"],
+        "instance_id": info["instance_id"],
+        "spot": info["spot"],
+        "estimated_hourly_cost_usd": info["estimated_hourly_cost_usd"],
+        "ami_id": info["ami_id"],
+        "pdk_snapshot": info["pdk_snapshot"],
+        "spin_up_s": spin_up_s,
+    }
+    return corners, engine_version, remote_environment
+
+
+def _build_remote_request(
+    request: dict[str, Any],
+    *,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+) -> dict[str, Any]:
+    """Build the request document pushed to the remote host: a copy of the
+    caller's own request with ``backend`` forced to ``local-parallel`` (per
+    decision 2 -- the box runs #255's worker pool directly, never ``remote``
+    recursively) and ``netlist`` repointed at the pushed file's job-relative
+    path.
+
+    ``models`` is forwarded unchanged -- per decision 4, the remote host
+    resolves its own baked model library the same way ``_resolve_models_lib``
+    resolves a local one (``models.pdk`` plus the AMI's own ``$PDK_ROOT``, so
+    long as ``models.pdk_root`` is not itself an operator-local absolute path
+    that only exists on the caller's own machine -- see docs/cli/sim.md's
+    "Remote backend" section for this constraint). ``options.max_workers`` is
+    dropped so the remote run resolves its own default from that box's own
+    CPU count (see ``_run_remote``'s docstring).
+    """
+    remote_request = dict(request)
+    remote_request.pop("remote", None)
+    remote_request["backend"] = "local-parallel"
+    remote_request["netlist"] = remote_transport.REMOTE_NETLIST_FILENAME
+
+    options = dict(request.get("options") or {})
+    options["timeout_s"] = timeout_s
+    options["keep_artifacts"] = keep_artifacts
+    options["waveforms"] = want_waveforms
+    options.pop("max_workers", None)
+    remote_request["options"] = options
+    return remote_request
+
+
+def _default_remote_run_timeout_s(
+    corner_count: int, per_corner_timeout_s: float
+) -> float:
+    """Conservative SSH-command timeout for the remote ``klt sim`` invocation:
+    the fully-serial worst case (every corner hits its own timeout, one
+    after another) plus slack for SSH/``klt`` startup.
+
+    The provisioned box is right-sized to run every corner concurrently
+    (``remote_launcher.select_instance_type``), so real runs are expected to
+    finish far faster than this bound -- it exists only so a genuinely
+    wedged remote run doesn't hang the SSH channel forever. Overridable via
+    ``request.remote.ssh_timeout_s``.
+    """
+    return per_corner_timeout_s * corner_count + 120.0
+
+
+def _rewrite_remote_artifact_paths(
+    corners: list[dict[str, Any]], *, remote_root: str, local_root: str
+) -> None:
+    """Rewrite each corner's ``artifacts.*`` paths from the remote host's
+    filesystem (where the pulled report JSON was generated) to the local
+    path :func:`remote_transport.pull_artifacts` just copied them to.
+
+    The response's ``artifacts`` block always describes paths on the machine
+    the caller is running on -- ``local``/``local-parallel``/``remote``
+    alike -- so a raw remote path would be meaningless (and unreadable) to a
+    caller inspecting the returned report.
+    """
+    for corner in corners:
+        artifacts = corner.get("artifacts") or {}
+        for key, value in list(artifacts.items()):
+            if not value:
+                continue
+            relative = os.path.relpath(value, remote_root)
+            artifacts[key] = os.path.join(local_root, relative)
 
 
 #: Backend registry: name -> implementation. Membership is validated against
 #: :data:`SUPPORTED_BACKENDS` in :func:`run_sim` before dispatch, so this only
 #: ever holds implemented backends.
-_BACKENDS = {"local": _run_local, "local-parallel": _run_local_parallel}
+_BACKENDS = {
+    "local": _run_local,
+    "local-parallel": _run_local_parallel,
+    "remote": _run_remote,
+}
 
 
 # --------------------------------------------------------------------------- #

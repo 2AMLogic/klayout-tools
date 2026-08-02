@@ -698,6 +698,49 @@ def test_terminate_security_group_cleanup_is_best_effort(manifest_path):
 
 
 # --------------------------------------------------------------------------- #
+# get_public_ip (issue #265's SSH/SCP transport enabler)
+# --------------------------------------------------------------------------- #
+
+
+def test_get_public_ip_returns_resolved_address(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+    aws.respond("ec2", "wait", "")
+    aws.respond("ec2", "describe-instances", "203.0.113.9")
+
+    launcher = _make_launcher(manifest_path, aws)
+    launcher.provision()
+    ip = launcher.get_public_ip()
+
+    assert ip == "203.0.113.9"
+    assert ["ec2", "wait"] in [c[:2] for c in aws.calls]
+    launcher.instance_id = None  # avoid a real terminate call in fixture teardown
+
+
+def test_get_public_ip_before_provision_raises(manifest_path):
+    aws = _FakeAws(manifest_path)
+    launcher = _make_launcher(manifest_path, aws)
+    with pytest.raises(rl.RemoteLaunchError, match="provision"):
+        launcher.get_public_ip()
+
+
+@pytest.mark.parametrize("bad_ip", ["", "None"])
+def test_get_public_ip_no_address_raises(manifest_path, bad_ip):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+    aws.respond("ec2", "wait", "")
+    aws.respond("ec2", "describe-instances", bad_ip)
+
+    launcher = _make_launcher(manifest_path, aws)
+    launcher.provision()
+    with pytest.raises(rl.RemoteLaunchError, match="no public IP address"):
+        launcher.get_public_ip()
+    launcher.instance_id = None
+
+
+# --------------------------------------------------------------------------- #
 # Default AWS-CLI runner: never invoked when aws_runner is injected
 # --------------------------------------------------------------------------- #
 
