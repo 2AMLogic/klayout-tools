@@ -607,12 +607,26 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
     # sky130 also declares a `pnp` bipolar entry (issue #223); this cell
     # draws none, so the comparer's one mismatch is the pre-existing
     # "class declared but zero instances on both sides" warning (#204's own
-    # downgrade-to-warning precedent) -- not a real topology defect.
+    # downgrade-to-warning precedent) -- not a real topology defect. sky130's
+    # two MiM-capacitor entries (issue #225) do *not* add further mismatches
+    # here: unlike a bipolar entry, `extract.py` never even registers a
+    # capacitor device class on a layout that draws no matching marker at
+    # all (see `CapacitorDevice`'s "empty region -> skipped entirely" note),
+    # so this cap-free cell's extracted netlist carries no such class for
+    # the comparer to report as unmatched.
     assert report["mismatch_count"] == 1
     assert report["mismatches"][0]["severity"] == "warning"
     # `layout.file` + `layout.deck` (inline extraction) was given -- echoes
-    # the sky130 deck's device-class coverage (issue #221, extended by #223).
-    assert report["device_classes"] == ["nfet", "pfet", "pnp"]
+    # the sky130 deck's device-class coverage (issue #221, extended by
+    # #223/#225) -- what the deck can *recognise*, independent of what this
+    # particular cap-free cell's netlist actually registered above.
+    assert report["device_classes"] == [
+        "nfet",
+        "pfet",
+        "pnp",
+        "sky130_fd_pr__model__cap_mim",
+        "sky130_fd_pr__model__cap_mim_m4",
+    ]
     assert (
         report["environment"]["extracted_netlist"] is None
     )  # keep_extracted defaults False

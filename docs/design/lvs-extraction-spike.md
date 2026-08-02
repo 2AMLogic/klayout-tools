@@ -821,3 +821,53 @@ this document's own opening note) and
 layer-role contract. Resistor and capacitor device classes (#219's
 remaining sibling sub-issues, e.g. #222 for resistors) are unaffected by
 this addendum and remain separately tracked.
+
+## Addendum (#225): MiM-capacitor device-class recognition, realized
+
+**Status:** implementation note, not a fresh design decision -- the
+"Coupling model" section above already identified `db.DeviceExtractorCapacitor`
+/ `...CapacitorWithBulk` live alongside `DeviceExtractorResistor` and
+`DeviceExtractorMOS4Transistor`, and already drew the line this
+implementation confirms: it recognizes a *device the designer intentionally
+drew as a capacitor* (a MiM stack), not the parasitic capacitance of
+ordinary interconnect wiring -- the two never interact (a drawn capacitor
+appears in `device_count`/`devices[]`/`device_counts` with `params.c_f`;
+`--parasitics`' injected `C` elements are unnamed, model-token-free cards in
+the written SPICE and the separate `parasitics` block only, per the #216
+addendum above).
+
+`klt extract` now recognises one or more curated MiM-capacitor devices per
+deck (gf180mcu's one `cap_mim_2f0_m4m5_noshield`, sky130's two --
+`sky130_fd_pr__model__cap_mim`/`_m4`, one per metal level its official LVS
+deck draws a purpose-built top-plate mark layer on) via that extractor,
+mirroring the bipolar device-recognition pattern the #223 addendum above
+established: an optional `ExtractionDeck.capacitors` field (a tuple of
+`CapacitorDevice` -- top-plate/bottom-plate layer roles, each independently
+narrowable by `requires`/`excludes`, plus an optional "virtual bottom
+plate" oversize derivation) feeds `DeviceExtractorCapacitor`.
+
+One structural difference from both `BipolarDevice` and the (still
+unmerged, #222) resistor pattern: a MiM cap's two plates are **two
+independent layers**, not one deck conductor narrowed by a marker -- so
+unlike a bipolar entry's `base`/`emitter` (which reuse the deck's own
+`nwell`/`active` MOS-recognition layers) or a resistor's `body` (which must
+be one of the deck's own `metals`), a `CapacitorDevice`'s `top_plate`/
+`bottom_plate` are **not** required to be part of `ExtractionDeck.metals` --
+both curated decks' tracked metal stack stops at metal1, while a MiM cap's
+plates live on a higher metal level (gf180mcu's Metal4/FuseTop, sky130's
+met3-met4/capm/capm2) neither deck otherwise tracks. The two plate regions
+are therefore recognised as their own new, self-connected connectivity
+nodes: the *device* (a capacitor of the correct value between two
+correctly-shaped plates) is still correctly recognised, but its two
+terminal nets do not extend into whatever real upper-metal routing a full
+metal-stack extraction would connect them to -- a documented, narrower-scope
+approximation than the bipolar/MOS terminals' well-tie handling, called out
+explicitly in `CapacitorDevice`'s own docstring rather than glossed over.
+
+See `docs/cli/extract.md` -> "MiM capacitor device recognition" for the
+shipped contract (the authoritative source once code and this survey
+disagree, per this document's own opening note) and
+`src/klayout_tools/decks/__init__.py`'s `CapacitorDevice` docstring for the
+layer-role contract. The resistor device class (#219's one remaining
+sibling sub-issue, #222) is unaffected by this addendum and remains
+separately tracked.
