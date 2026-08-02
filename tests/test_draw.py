@@ -81,9 +81,7 @@ def test_polygon_round_trips(tmp_path):
             ]
         },
     )
-    assert report["layers"] == [
-        {"layer": 34, "datatype": 0, "name": None, "shapes": 1}
-    ]
+    assert report["layers"] == [{"layer": 34, "datatype": 0, "name": None, "shapes": 1}]
 
     layout = kdb.Layout()
     layout.read(output)

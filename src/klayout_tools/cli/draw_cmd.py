@@ -50,9 +50,7 @@ def _print_text(report: dict) -> None:
 
     bbox = report["bbox_um"]
     if bbox is not None:
-        print(
-            f"bbox_um: ({bbox['x0']}, {bbox['y0']}) - ({bbox['x1']}, {bbox['y1']})"
-        )
+        print(f"bbox_um: ({bbox['x0']}, {bbox['y0']}) - ({bbox['x1']}, {bbox['y1']})")
 
     layers = report["layers"]
     if layers:
