@@ -54,15 +54,22 @@ def test_sha256_file_changes_with_content(tmp_path):
 
 def test_build_provenance_always_reports_versions():
     prov = _provenance.build_provenance()
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     # klt_version resolves from the installed package metadata.
     assert isinstance(prov["klt_version"], str)
 
 
-def test_build_provenance_no_deck_no_pdk_are_null():
+def test_build_provenance_no_deck_no_pdk_no_input_are_null():
     prov = _provenance.build_provenance()
     assert prov["deck"] is None
     assert prov["pdk"] is None
+    assert prov["input"] is None
 
 
 def test_build_provenance_deck_hash_is_sha256_prefixed(tmp_path):
@@ -99,6 +106,43 @@ def test_build_provenance_pdk_maps_find_pdk_shape():
 
 def test_build_provenance_pdk_none_when_unresolved():
     assert _provenance.build_provenance(pdk=None)["pdk"] is None
+
+
+def test_build_provenance_input_hash_is_sha256_prefixed(tmp_path):
+    layout_file = tmp_path / "top.gds"
+    layout_file.write_bytes(b"gds bytes\n")
+
+    prov = _provenance.build_provenance(input_path=str(layout_file))
+    digest = hashlib.sha256(b"gds bytes\n").hexdigest()
+    assert prov["input"] == {"content_hash": f"sha256:{digest}"}
+
+
+def test_build_provenance_input_none_when_path_not_given():
+    # No input_path passed at all -- the default, used by verbs (like `lvs`)
+    # that pin their input(s) some other way -- keeps `input` null rather
+    # than fabricating a block.
+    assert _provenance.build_provenance()["input"] is None
+
+
+def test_build_provenance_input_hash_changes_with_content(tmp_path):
+    layout_file = tmp_path / "top.gds"
+    layout_file.write_bytes(b"revision 1\n")
+    first = _provenance.build_provenance(input_path=str(layout_file))
+
+    layout_file.write_bytes(b"revision 2\n")
+    second = _provenance.build_provenance(input_path=str(layout_file))
+
+    assert first["input"]["content_hash"] != second["input"]["content_hash"]
+
+
+def test_build_provenance_input_hash_null_for_unresolvable_path(tmp_path):
+    # A given-but-nonexistent input path keeps the `input` block present
+    # (the caller did ask to pin an input) but nulls the hash rather than
+    # raising or fabricating one -- mirrors `deck`'s
+    # name-without-resolvable-path behaviour.
+    missing = tmp_path / "nope.gds"
+    prov = _provenance.build_provenance(input_path=str(missing))
+    assert prov["input"] == {"content_hash": None}
 
 
 # --------------------------------------------------------------------------- #

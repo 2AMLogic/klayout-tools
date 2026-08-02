@@ -518,6 +518,7 @@ def run_extract(
         deck_name=deck_name,
         deck_path=deck_source_path(deck_name),
         pdk=pdk_info,
+        input_path=path,
     )
 
     # Additive, independently-optional field (issue #216 addendum): `null`

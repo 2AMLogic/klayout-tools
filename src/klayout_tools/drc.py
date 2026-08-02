@@ -301,7 +301,9 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         "violations": violations,
         "coverage": coverage,
         "provenance": build_provenance(
-            deck_name=deck_name, deck_path=deck_source_path(deck_name)
+            deck_name=deck_name,
+            deck_path=deck_source_path(deck_name),
+            input_path=path,
         ),
     }
 

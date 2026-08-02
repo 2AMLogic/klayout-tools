@@ -12,7 +12,8 @@ this module builds:
         "klt_version": "0.4.2",
         "klayout_version": "0.29.8",
         "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
-        "deck": {"name": "sky130", "content_hash": "sha256:..."}
+        "deck": {"name": "sky130", "content_hash": "sha256:..."},
+        "input": {"content_hash": "sha256:..."}
     }
 
 The block is purely *additive* to the shared envelope (see
@@ -98,11 +99,20 @@ def _deck_block(name: str | None, path: str | None) -> dict[str, Any] | None:
     return {"name": name, "content_hash": _content_hash(path)}
 
 
+def _input_block(path: str | None) -> dict[str, Any] | None:
+    """The provenance ``input`` shape ``{content_hash}``, mirroring ``deck``;
+    ``None`` when no input path was given (or it can't be hashed)."""
+    if path is None:
+        return None
+    return {"content_hash": _content_hash(path)}
+
+
 def build_provenance(
     *,
     deck_name: str | None = None,
     deck_path: str | None = None,
     pdk: dict[str, Any] | None = None,
+    input_path: str | None = None,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
@@ -110,11 +120,19 @@ def build_provenance(
     and the file whose content is hashed to pin it; pass both ``None`` when no
     deck was involved. ``pdk`` is a :func:`klayout_tools.pdk.find_pdk`-style
     dict (``variant``/``resolved_via``/``version``), or ``None`` when the run
-    resolved no PDK. ``klt_version``/``klayout_version`` are read at call time.
+    resolved no PDK. ``input_path`` is the input layout stream a verb ran
+    against; when given, its content hash is recorded as ``provenance.input``
+    (the same ``{content_hash}`` shape as ``deck``) so a stale committed
+    report is a one-line diff against a freshly computed hash. Pass ``None``
+    (the default) when the verb has no single input layout to pin (or already
+    covers this itself, as ``klt lvs`` does via
+    ``environment.layout_sha256``/``reference_sha256``).
+    ``klt_version``/``klayout_version`` are read at call time.
     """
     return {
         "klt_version": _klt_version(),
         "klayout_version": _klayout_version(),
         "pdk": _pdk_block(pdk),
         "deck": _deck_block(deck_name, deck_path),
+        "input": _input_block(input_path),
     }

@@ -488,12 +488,22 @@ def test_clean_self_compare_reports_match(tmp_path):
     assert report["environment"]["extracted_netlist"] is None
 
     prov = report["provenance"]
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     assert isinstance(prov["klt_version"], str)
     # LVS is topological -- no PDK resolved; and a pre-extracted `layout.netlist`
     # involves no extraction deck, so `deck` is null (mirrors device_classes).
     assert prov["pdk"] is None
     assert prov["deck"] is None
+    # Issue #331: `lvs` already pins its two inputs via its own
+    # `environment.layout_sha256`/`reference_sha256` above (unchanged by this
+    # issue), so `provenance.input` stays null rather than duplicating that.
+    assert prov["input"] is None
 
 
 def test_net_correspondence_lists_all_matched_nets_with_pin_flag(tmp_path):

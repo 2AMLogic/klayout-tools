@@ -264,12 +264,21 @@ def test_json_contract(tmp_path, capsys):
     assert data["schema_version"] == 1
 
     prov = data["provenance"]
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     assert isinstance(prov["klt_version"], str)
     # klt drc resolves no PDK.
     assert prov["pdk"] is None
     assert prov["deck"]["name"] == "sky130"
     assert prov["deck"]["content_hash"].startswith("sha256:")
+    # Issue #331: the input layout stream is now hashed too, distinct from
+    # the deck's own content hash above.
+    assert prov["input"]["content_hash"].startswith("sha256:")
     assert isinstance(data["file"], str)
     assert data["deck"] == "sky130"
     assert isinstance(data["dbu_um"], float)
@@ -316,6 +325,43 @@ def test_json_contract(tmp_path, capsys):
     for field in coverage.values():
         assert isinstance(field, list)
         assert all(isinstance(v, str) for v in field)
+
+
+def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
+    """Issue #331: `provenance.input.content_hash` identifies the *stream* a
+    report was produced from -- two byte-identical layouts hash the same,
+    and a real geometry change (which a stale committed report would
+    otherwise not reveal) produces a different hash."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(64, 20)).insert(kdb.Box(0, 0, 1000, 1000))
+
+    path_a = tmp_path / "a.gds"
+    path_b = tmp_path / "b.gds"
+    layout.write(str(path_a))
+    layout.write(str(path_b))
+
+    report_a = run_drc(str(path_a), "sky130")
+    report_b = run_drc(str(path_b), "sky130")
+    assert (
+        report_a["provenance"]["input"]["content_hash"]
+        == report_b["provenance"]["input"]["content_hash"]
+    )
+
+    # Now mutate one file's geometry and re-run: the hash must change even
+    # though the deck/version fields do not.
+    top.shapes(layout.layer(64, 20)).insert(kdb.Box(2000, 2000, 3000, 3000))
+    layout.write(str(path_b))
+    report_b_modified = run_drc(str(path_b), "sky130")
+
+    assert (
+        report_b_modified["provenance"]["input"]["content_hash"]
+        != report_a["provenance"]["input"]["content_hash"]
+    )
+    assert (
+        report_b_modified["provenance"]["klt_version"]
+        == report_a["provenance"]["klt_version"]
+    )
 
 
 def test_json_contract_clean(tmp_path, capsys):

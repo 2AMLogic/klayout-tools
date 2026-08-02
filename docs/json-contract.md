@@ -76,7 +76,8 @@ above): adopting it required no `schema_version` bump on any verb.
   "klt_version": "0.4.2",
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
-  "deck": {"name": "sky130", "content_hash": "sha256:<hex>"}
+  "deck": {"name": "sky130", "content_hash": "sha256:<hex>"},
+  "input": {"content_hash": "sha256:<hex>"}
 }
 ```
 
@@ -91,11 +92,20 @@ above): adopting it required no `schema_version` bump on any verb.
   `content_hash` is a `sha256:`-prefixed hex digest of the deck file actually
   used, so "clean against *this exact* rule set" is a checkable claim. `null`
   when no deck was involved (e.g. `lvs` against a pre-extracted netlist).
+- `input` — the input layout stream the run was made against, as
+  `{content_hash}` (same shape as `deck`). `content_hash` is a
+  `sha256:`-prefixed hex digest of the file, so a stale committed report is a
+  one-line diff against a freshly computed hash instead of being
+  byte-identical to a current run. Populated by `drc` and `extract`; `null`
+  when a verb has no single input layout to pin this way, including `lvs`,
+  which already covers its two inputs via its own
+  `environment.layout_sha256`/`reference_sha256` fields (predates this block
+  and is intentionally not folded into it).
 
 Fields that can't be resolved are `null` per the envelope convention — never
 silently fabricated. The block is built once in
 `src/klayout_tools/_provenance.py`; each verb's `docs/cli/<verb>.md` notes only
-which of `pdk`/`deck` it populates.
+which of `pdk`/`deck`/`input` it populates.
 
 ## Error shape
 

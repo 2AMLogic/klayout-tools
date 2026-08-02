@@ -420,11 +420,20 @@ def test_json_contract(tmp_path, capsys):
     assert data["check_count"] == len(CHECK_NAMES)
 
     prov = data["provenance"]
-    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert set(prov.keys()) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
     assert isinstance(prov["klt_version"], str)
     assert prov["pdk"] is None
     # No --deck was given, so no extraction deck is resolved.
     assert prov["deck"] is None
+    # Issue #331 added `provenance.input`, but `precheck` wasn't in scope for
+    # it -- stays null here.
+    assert prov["input"] is None
 
     for check in data["checks"]:
         assert set(check.keys()) == {
