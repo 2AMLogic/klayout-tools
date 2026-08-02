@@ -95,6 +95,15 @@ ordering, measurement extraction, and pass/fail classification are never
 reimplemented for `remote`; they are the literal `_run_local_parallel`/
 `_run_corner` functions, executing unmodified on the remote host.
 
+`remote_launcher.py`/`remote_transport.py` themselves are job-type-neutral:
+`sim.py`'s `_build_remote_job_description` supplies what gets pushed, the
+remote command, and what gets collected back as a
+`remote_transport.JobDescription`, rather than either module hard-coding
+`klt sim`'s own shape (Epic #253 Phase 3, #278) — see
+[`docs/design/remote-job-description.md`](../design/remote-job-description.md)
+for the generic contract a future `extract`/`lvs`/DRC remote backend
+implements against.
+
 ```json
 {
   "backend": "remote",

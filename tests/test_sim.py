@@ -1416,17 +1416,22 @@ def _install_fake_remote_transport(monkeypatch, *, remote_report_factory=None):
     monkeypatch.setattr(sim, "RemoteLauncher", _FakeRemoteLauncher)
     monkeypatch.setattr(sim.remote_transport, "wait_for_ssh", lambda *a, **k: 0.5)
 
-    def fake_push_job(
-        *, host, remote_job_dir, local_netlist_path, remote_request, **kwargs
-    ):
+    def fake_push_job(*, host, remote_job_dir, job, **kwargs):
         state["push_job_calls"] += 1
         state["host"] = host
         state["remote_job_dir"] = remote_job_dir
-        state["local_netlist_path"] = local_netlist_path
-        state["remote_request"] = remote_request
+        state["job"] = job
+        # Recover the two `_build_remote_job_description` inputs by their
+        # `label` (see `sim._build_remote_job_description`) -- mirrors what
+        # a real `push_job` call would have uploaded.
+        for item in job.inputs:
+            if item.label == "netlist":
+                state["local_netlist_path"] = item.local_path
+            elif item.label == "request":
+                state["remote_request"] = json.loads(item.content)
 
-    def fake_run_remote_sim(*, host, remote_job_dir, timeout_s, **kwargs):
-        state["run_remote_sim_timeout_s"] = timeout_s
+    def fake_run_remote_job(*, host, remote_job_dir, job, timeout_s, **kwargs):
+        state["run_remote_job_timeout_s"] = timeout_s
         if remote_report_factory is not None:
             return remote_report_factory(state)
         return {
@@ -1449,7 +1454,7 @@ def _install_fake_remote_transport(monkeypatch, *, remote_report_factory=None):
         state["cleanup_calls"] += 1
 
     monkeypatch.setattr(sim.remote_transport, "push_job", fake_push_job)
-    monkeypatch.setattr(sim.remote_transport, "run_remote_sim", fake_run_remote_sim)
+    monkeypatch.setattr(sim.remote_transport, "run_remote_job", fake_run_remote_job)
     monkeypatch.setattr(sim.remote_transport, "pull_artifacts", fake_pull_artifacts)
     monkeypatch.setattr(sim.remote_transport, "cleanup_job", fake_cleanup_job)
     return state
@@ -1611,7 +1616,7 @@ def test_run_sim_remote_backend_measurements_are_value_identical_to_local(
 ):
     # Acceptance criterion: "A `remote` run against the same netlist/models
     # as a `local` run produces value-identical `.meas` measurements". The
-    # remote transport's `run_remote_sim` is faked to actually invoke
+    # remote transport's `run_remote_job` is faked to actually invoke
     # `sim.run_sim(..., backend="local-parallel")` locally against the
     # pushed request+netlist -- exactly what a real remote host would do by
     # running `klt sim ... --backend local-parallel` -- so this exercises

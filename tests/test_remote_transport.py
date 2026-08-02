@@ -1,5 +1,10 @@
-"""Tests for the `remote` `klt sim` backend's SSH/SCP push-then-pull
-transport (issue #265, `src/klayout_tools/remote_transport.py`).
+"""Tests for the SSH/SCP push-then-pull transport (issue #265,
+`src/klayout_tools/remote_transport.py`), generalized in issue #278 (Epic
+#253 Phase 3) into a generic push/run/collect surface driven by a
+`JobDescription`. Most tests below exercise that generic surface directly
+with a `klt sim`-shaped `JobDescription` (`_sim_job`, matching what
+`sim._build_remote_job_description` actually builds) -- `tests/test_sim.py`
+covers the `sim.py` call site that constructs it for real.
 
 Every test here injects a fake ``runner`` callable in place of the real
 subprocess-spawning default, so **no test in this file ever invokes the real
@@ -16,6 +21,25 @@ import subprocess
 import pytest
 
 from klayout_tools import remote_transport as rt
+
+
+def _sim_job(**overrides) -> rt.JobDescription:
+    """The `klt sim` job description, reconstructed here the same way
+    `sim._build_remote_job_description` builds it -- this test module
+    exercises the generic push/run/collect surface (issue #278), not
+    `sim.py` itself (see `tests/test_sim.py`'s own remote-backend section
+    for that), so it supplies this job description as data like any other
+    caller would. ``inputs`` defaults to empty -- pass a concrete tuple of
+    :class:`rt.JobInput` for a ``push_job`` test."""
+    fields: dict = dict(
+        label="klt sim",
+        inputs=(),
+        command="klt sim request.json --backend local-parallel --format json",
+        success_exit_codes=(0, 3, 4),
+        artifacts_relative_dir=".klt/sim",
+    )
+    fields.update(overrides)
+    return rt.JobDescription(**fields)
 
 
 class _FakeResult:
@@ -154,6 +178,19 @@ def test_wait_for_ssh_tolerates_subprocess_timeout():
 # --------------------------------------------------------------------------- #
 
 
+def _netlist_and_request_inputs(netlist_path: str, request: dict) -> tuple:
+    """The two `JobInput`s the `klt sim` job description pushes -- mirrors
+    `sim._build_remote_job_description`'s own `inputs` tuple."""
+    return (
+        rt.JobInput(
+            remote_name="netlist.cir", label="netlist", local_path=netlist_path
+        ),
+        rt.JobInput(
+            remote_name="request.json", label="request", content=json.dumps(request)
+        ),
+    )
+
+
 def test_push_job_creates_dir_and_pushes_netlist_and_request(tmp_path):
     runner = _FakeRunner()
     netlist_path = tmp_path / "netlist.cir"
@@ -162,8 +199,12 @@ def test_push_job_creates_dir_and_pushes_netlist_and_request(tmp_path):
     rt.push_job(
         host="h",
         remote_job_dir="/home/ubuntu/job-1",
-        local_netlist_path=str(netlist_path),
-        remote_request={"netlist": "netlist.cir", "analysis": {"kind": "tran"}},
+        job=_sim_job(
+            inputs=_netlist_and_request_inputs(
+                str(netlist_path),
+                {"netlist": "netlist.cir", "analysis": {"kind": "tran"}},
+            )
+        ),
         runner=runner,
     )
 
@@ -190,8 +231,7 @@ def test_push_job_mkdir_failure_raises(tmp_path):
         rt.push_job(
             host="h",
             remote_job_dir="/home/ubuntu/job-1",
-            local_netlist_path=str(netlist_path),
-            remote_request={},
+            job=_sim_job(inputs=_netlist_and_request_inputs(str(netlist_path), {})),
             runner=runner,
         )
 
@@ -207,14 +247,13 @@ def test_push_job_scp_failure_raises(tmp_path):
         rt.push_job(
             host="h",
             remote_job_dir="/home/ubuntu/job-1",
-            local_netlist_path=str(netlist_path),
-            remote_request={},
+            job=_sim_job(inputs=_netlist_and_request_inputs(str(netlist_path), {})),
             runner=runner,
         )
 
 
 # --------------------------------------------------------------------------- #
-# run_remote_sim
+# run_remote_job
 # --------------------------------------------------------------------------- #
 
 
@@ -230,37 +269,49 @@ def _report_json(status: str = "pass") -> str:
 
 
 @pytest.mark.parametrize("exit_code", [0, 3, 4])
-def test_run_remote_sim_parses_report_on_klt_exit_codes(exit_code):
+def test_run_remote_job_parses_report_on_klt_exit_codes(exit_code):
     runner = _FakeRunner()
     runner.default = _FakeResult(returncode=exit_code, stdout=_report_json())
 
-    report = rt.run_remote_sim(
-        host="h", remote_job_dir="/home/ubuntu/job-1", timeout_s=30, runner=runner
+    report = rt.run_remote_job(
+        host="h",
+        remote_job_dir="/home/ubuntu/job-1",
+        job=_sim_job(),
+        timeout_s=30,
+        runner=runner,
     )
     assert report["environment"]["engine_version"] == "46"
     remote_cmd = runner.calls[0][-1]
     assert "klt sim request.json --backend local-parallel --format json" in remote_cmd
 
 
-def test_run_remote_sim_nonzero_unexpected_exit_raises():
+def test_run_remote_job_nonzero_unexpected_exit_raises():
     runner = _FakeRunner()
     runner.default = _FakeResult(returncode=127, stderr="klt: command not found")
     with pytest.raises(rt.RemoteTransportError, match="remote 'klt sim' failed"):
-        rt.run_remote_sim(
-            host="h", remote_job_dir="/home/ubuntu/job-1", timeout_s=30, runner=runner
+        rt.run_remote_job(
+            host="h",
+            remote_job_dir="/home/ubuntu/job-1",
+            job=_sim_job(),
+            timeout_s=30,
+            runner=runner,
         )
 
 
-def test_run_remote_sim_invalid_json_raises():
+def test_run_remote_job_invalid_json_raises():
     runner = _FakeRunner()
     runner.default = _FakeResult(returncode=0, stdout="not json")
     with pytest.raises(rt.RemoteTransportError, match="did not return valid JSON"):
-        rt.run_remote_sim(
-            host="h", remote_job_dir="/home/ubuntu/job-1", timeout_s=30, runner=runner
+        rt.run_remote_job(
+            host="h",
+            remote_job_dir="/home/ubuntu/job-1",
+            job=_sim_job(),
+            timeout_s=30,
+            runner=runner,
         )
 
 
-def test_run_remote_sim_timeout_raises():
+def test_run_remote_job_timeout_raises():
     runner = _FakeRunner()
     runner.default = subprocess.TimeoutExpired(cmd=["ssh"], timeout=30)
 
@@ -268,9 +319,10 @@ def test_run_remote_sim_timeout_raises():
         raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout_s)
 
     with pytest.raises(rt.RemoteTransportError, match="timed out"):
-        rt.run_remote_sim(
+        rt.run_remote_job(
             host="h",
             remote_job_dir="/home/ubuntu/job-1",
+            job=_sim_job(),
             timeout_s=30,
             runner=raising_runner,
         )
@@ -298,6 +350,7 @@ def test_pull_artifacts_copies_staged_tree_into_local_dir(tmp_path, monkeypatch)
         host="h",
         remote_job_dir="/home/ubuntu/job-1",
         local_artifacts_dir=str(local_artifacts_dir),
+        job=_sim_job(),
         runner=fake_runner,
     )
 
@@ -314,8 +367,23 @@ def test_pull_artifacts_scp_failure_raises(tmp_path):
             host="h",
             remote_job_dir="/home/ubuntu/job-1",
             local_artifacts_dir=str(tmp_path / "artifacts"),
+            job=_sim_job(),
             runner=runner,
         )
+
+
+def test_pull_artifacts_noop_when_job_has_no_artifacts_dir(tmp_path):
+    # A future job type with nothing to collect back
+    # (`artifacts_relative_dir=None`) must not attempt any scp call.
+    runner = _FakeRunner()
+    rt.pull_artifacts(
+        host="h",
+        remote_job_dir="/home/ubuntu/job-1",
+        local_artifacts_dir=str(tmp_path / "artifacts"),
+        job=_sim_job(artifacts_relative_dir=None),
+        runner=runner,
+    )
+    assert runner.calls == []
 
 
 # --------------------------------------------------------------------------- #
@@ -335,3 +403,28 @@ def test_cleanup_job_never_raises_on_timeout():
         raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout_s)
 
     rt.cleanup_job(host="h", remote_job_dir="/home/ubuntu/job-1", runner=raising_runner)
+
+
+# --------------------------------------------------------------------------- #
+# JobInput / JobDescription (issue #278's generic job-description contract)
+# --------------------------------------------------------------------------- #
+
+
+def test_job_input_requires_exactly_one_of_local_path_or_content():
+    with pytest.raises(ValueError, match="exactly one of local_path or content"):
+        rt.JobInput(remote_name="x", label="x")
+
+
+def test_job_input_rejects_both_local_path_and_content():
+    with pytest.raises(ValueError, match="exactly one of local_path or content"):
+        rt.JobInput(remote_name="x", label="x", local_path="/a", content="b")
+
+
+def test_job_description_defaults_match_generic_conventions():
+    # A minimal job description (a future job type with no artifacts to
+    # collect and a plain-text, not JSON, expected exit code) -- proves the
+    # dataclass itself imposes no `klt sim`-specific requirement.
+    job = rt.JobDescription(label="future-job", inputs=(), command="true")
+    assert job.success_exit_codes == (0,)
+    assert job.parse_json_stdout is True
+    assert job.artifacts_relative_dir is None
