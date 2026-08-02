@@ -187,6 +187,9 @@ def run_extract(
             "net_count": <int>,
             "pin_count": <int>,
             "device_counts": {<device class>: <int>, ...},
+            "ignored_layers": [
+                {"layer": int, "datatype": int, "shapes": int}, ...
+            ],
             "device_classes": [<device class role>, ...],
             "devices": [
                 {
@@ -211,6 +214,17 @@ def run_extract(
     time whether a deck can even produce a given device class (e.g. before
     pairing it with a reference netlist for ``klt lvs``) reads this field
     instead of inferring "not supported" from a zero count.
+
+    ``ignored_layers`` (issue #220) lists ``(layer, datatype)`` pairs that
+    carry shapes in the input stream but are *not* read by this deck's
+    connectivity graph (:attr:`ExtractionDeck.connectivity_layers`), each with
+    its stream shape count. It is the extraction-side analogue of ``klt
+    drc``'s ``coverage.layers_in_stream_without_rules``: geometry on such a
+    layer is invisible to extraction, so a block routed on a metal level the
+    deck does not declare silently extracts as a pile of disconnected nets.
+    A non-empty ``ignored_layers`` with a material shape count is the signal
+    that a downstream ``klt lvs`` mismatch is a deck-coverage gap, not a
+    layout bug. Empty when every shape-bearing layer is one the deck reads.
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
@@ -294,6 +308,11 @@ def run_extract(
     else:
         devices, device_counts, nets = [], {}, []
 
+    # Layers carrying shapes the deck's connectivity graph never reads (issue
+    # #220): geometry there is invisible to extraction, so surface it rather
+    # than let it become a silent LVS mismatch downstream.
+    ignored_layers = _describe_ignored_layers(path, deck)
+
     parasitics_report: dict[str, Any] | None = None
     if parasitic_nets is not None:
         if circuit is not None and parasitic_nets:
@@ -338,6 +357,7 @@ def run_extract(
         "net_count": len(nets),
         "pin_count": sum(1 for net in nets if net["pin"]),
         "device_counts": dict(sorted(device_counts.items())),
+        "ignored_layers": ignored_layers,
         "device_classes": list(deck.device_classes),
         "devices": devices,
         "nets": nets,
@@ -1090,6 +1110,38 @@ def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
 
     nets.sort(key=lambda entry: entry["name"])
     return nets
+
+
+def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:
+    """Build the response's ``ignored_layers[]`` array (issue #220).
+
+    Enumerates the input stream's layers (reusing ``layers.py``'s existing
+    per-layer walk, the same one ``klt drc``'s coverage report leans on) and
+    returns the shape-bearing ``(layer, datatype)`` pairs that are *not* in
+    ``deck.connectivity_layers`` -- geometry the extraction connectivity graph
+    never reads. Each entry carries its stream ``shapes`` count so a consumer
+    can judge whether the amount is material (a stray annotation vs. a whole
+    block routed on an undeclared metal level). Empty-layer entries (``shapes
+    == 0``) are skipped; the list is sorted by ``(layer, datatype)``.
+    """
+    from .layers import layers_report
+
+    read_layers = deck.connectivity_layers
+    ignored: list[dict[str, Any]] = []
+    for entry in layers_report(path)["layers"]:
+        if entry["shapes"] <= 0:
+            continue
+        if (entry["layer"], entry["datatype"]) in read_layers:
+            continue
+        ignored.append(
+            {
+                "layer": entry["layer"],
+                "datatype": entry["datatype"],
+                "shapes": entry["shapes"],
+            }
+        )
+    ignored.sort(key=lambda e: (e["layer"], e["datatype"]))
+    return ignored
 
 
 def _each_pin_net(circuit: kdb.Circuit) -> list[kdb.Net]:

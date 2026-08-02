@@ -63,9 +63,11 @@ class ExtractionDeck:
     ``klayout.db.LayoutToNetlist`` -- the extraction analogue of
     :class:`DrcRule`'s curated width/space/enclosure table, covering a
     two-terminal-well CMOS stack (NMOS/PMOS via one drawn well layer,
-    contact/local-interconnect up through one or two metal levels) rather
-    than a full PDK's device zoo. All layer fields are ``(layer, datatype)``
-    pairs, matching the layout's own GDS numbering.
+    contact/local-interconnect up through the PDK's declared metal stack --
+    an arbitrary number of ``metals`` levels joined by ``vias``, e.g.
+    gf180mcu's full ``Metal1``-``Metal5``) rather than a full PDK's device
+    zoo. All layer fields are ``(layer, datatype)`` pairs, matching the
+    layout's own GDS numbering.
 
     ``active``/``poly``/``nwell`` are the device-recognition layers: NMOS is
     ``active - nwell``, PMOS is ``active & nwell`` (KLayout's standard
@@ -166,6 +168,54 @@ class ExtractionDeck:
                 classes.append(capacitor.name)
         return tuple(classes)
 
+    @property
+    def connectivity_layers(self) -> frozenset[tuple[int, int]]:
+        """Every ``(layer, datatype)`` this deck actually reads during
+        extraction -- the device-recognition, connectivity, and label layers
+        ``extract.py``'s ``_extract_netlist`` loads a ``Region``/``Texts`` for.
+
+        Consumed by ``klt extract`` to compute the response's
+        ``ignored_layers`` field (issue #220): shapes drawn on a layer *not*
+        in this set are invisible to the connectivity graph, so a block routed
+        on such a layer silently extracts as disconnected nets. Reporting the
+        set difference against what the stream actually carries turns that
+        silent mis-extraction into a diagnostic (the extraction-side analogue
+        of ``klt drc``'s ``coverage.layers_in_stream_without_rules``).
+
+        Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
+        ``contact``, plus optional ``tap``), the ``metals``/``vias`` stack and
+        every label layer (``well_label``/``poly_label``/``metal_labels``),
+        and each ``bipolars``/``capacitors`` entry's own recognition layers
+        (base/emitter/marker/collector; plate + requires/excludes). ``None``
+        entries (an absent optional layer) are skipped.
+        """
+        layers: set[tuple[int, int]] = {
+            self.active,
+            self.poly,
+            self.nwell,
+            self.contact,
+        }
+        for optional in (self.tap, self.well_label, self.poly_label):
+            if optional is not None:
+                layers.add(optional)
+        layers.update(self.metals)
+        layers.update(self.vias)
+        layers.update(label for label in self.metal_labels if label is not None)
+        for bipolar in self.bipolars:
+            layers.add(bipolar.base)
+            layers.add(bipolar.emitter)
+            layers.add(bipolar.marker)
+            if bipolar.collector is not None:
+                layers.add(bipolar.collector)
+        for capacitor in self.capacitors:
+            layers.add(capacitor.top_plate)
+            layers.add(capacitor.bottom_plate)
+            layers.update(capacitor.top_plate_requires)
+            layers.update(capacitor.top_plate_excludes)
+            layers.update(capacitor.bottom_plate_requires)
+            layers.update(capacitor.bottom_plate_excludes)
+        return frozenset(layers)
+
 
 @dataclass(frozen=True)
 class BipolarDevice:
@@ -235,12 +285,13 @@ class CapacitorDevice:
 
     Unlike :class:`ResistorDevice`-shaped fields elsewhere in this codebase
     (there is no such class yet -- see #222), ``bottom_plate`` does **not**
-    need to be one of the owning deck's own ``metals``: both curated decks'
-    tracked metal stack stops at metal1 (see ``ExtractionDeck``'s docstring),
-    while a MiM cap's plates live on a higher metal level neither deck
-    otherwise tracks. The two plate regions are therefore recognised as
-    their own new, self-connected connectivity nodes, not wired into the
-    rest of the deck's contact/via/metal connectivity graph -- see "Known
+    need to be one of the owning deck's own ``metals`` -- and even when it
+    *is* (e.g. gf180mcu's bottom plate is ``Metal4``, which the deck now
+    tracks as part of its full Metal1-Metal5 stack since #220), the two plate
+    regions are still recognised as their own new, self-connected connectivity
+    nodes, derived from a *separately* registered ``top_plate``/``bottom_plate``
+    clip rather than the ``metals[]`` region itself, and so are not wired into
+    the rest of the deck's contact/via/metal connectivity graph -- see "Known
     limitation" below.
 
     Geometry (all layer fields are ``(layer, datatype)`` pairs):
@@ -278,13 +329,15 @@ class CapacitorDevice:
     JSON response, and one of the values :attr:`ExtractionDeck.device_classes`
     reports for a deck that declares this entry).
 
-    Known limitation: because the plate layers are not part of
-    ``ExtractionDeck.metals``, a recognised capacitor's two terminal nets are
-    only as large as the plate shapes ``klt extract`` recognises as this
-    device -- multiple plate polygons that touch each other merge into one
-    net (e.g. a shared bottom plate across several caps), but neither
-    plate's net extends into whatever real upper-metal routing a full
-    metal-stack extraction would connect it to. The *device* itself (a
+    Known limitation: because the plate regions are registered as their own
+    separate connectivity nodes (not the deck's ``metals[]`` layers, even
+    where a plate happens to be drawn on a tracked metal), a recognised
+    capacitor's two terminal nets are only as large as the plate shapes
+    ``klt extract`` recognises as this device -- multiple plate polygons that
+    touch each other merge into one net (e.g. a shared bottom plate across
+    several caps), but neither plate's net extends into whatever real
+    upper-metal routing the deck's metal-stack connectivity would otherwise
+    connect it to. The *device* itself (a
     capacitor of the correct value between two correctly-shaped plates) is
     still correctly recognised; only the *net names/connectivity* of its two
     terminals is a documented approximation -- the same "curated starter

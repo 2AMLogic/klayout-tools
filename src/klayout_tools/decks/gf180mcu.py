@@ -186,7 +186,11 @@ metal2-metal5/metaltop/MiM-stack layers added by #188) against the DRM's own
 ``tables_clear/06_Drawn_layer10.csv`` drawn-layer/GDS-number table; the
 #188 additions are *also* independently confirmed present in ``main.drc``
 itself, e.g. ``metaltop_drawn = get_polygons(53, 0)`` and ``mim_l_mk =
-get_polygons(117, 10)``):
+get_polygons(117, 10)``. The ``Via1``/``Via2``/``Via3`` numbers added by #220
+(to populate ``EXTRACTION_DECK``'s inter-metal connectivity) come from the
+same ``main.drc`` via-layer derivations -- ``via1 = get_polygons(35, 0)``,
+``via2 = get_polygons(38, 0)``, ``via3 = get_polygons(40, 0)`` -- which sit
+alongside the already-transcribed ``via4 = get_polygons(41, 0)``):
 
     Nwell     21/0
     Comp      22/0
@@ -195,8 +199,11 @@ get_polygons(117, 10)``):
     Poly2     30/0
     Contact   33/0
     Metal1    34/0
+    Via1      35/0
     Metal2    36/0
+    Via2      38/0
     Metal3    42/0
+    Via3      40/0
     Metal4    46/0
     Via4      41/0
     Metal5    81/0
@@ -577,10 +584,12 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # separately-marked-resistor exclusion -- an unmodelled, narrow gap, mirrors
 # the "curated starter subset" scope guard elsewhere in this file).
 #
-# `top_plate`/`bottom_plate` are `FuseTop`/`Metal4` rather than any of this
-# deck's own `metals` (`metals` stops at Metal1 above) -- see
-# `CapacitorDevice`'s "Known limitation": the extracted capacitor's plate
-# nets are not wired into this deck's Metal1-only connectivity stack.
+# `top_plate`/`bottom_plate` are `FuseTop`/`Metal4`. Even though `Metal4` is
+# now part of this deck's `metals` connectivity stack (#220), the capacitor's
+# plate regions are registered as their own separate, self-connected layers in
+# `extract.py` (a distinct `_region(bottom_plate)` clip, not `metals[3]`
+# itself) -- see `CapacitorDevice`'s "Known limitation": the extracted
+# capacitor's plate nets are not wired into the routing connectivity stack.
 # `bottom_plate_oversize_um=1.06` reproduces the official "virtual bottom
 # plate" derivation exactly (`extract.py`'s capacitor-resolution block
 # performs the same `interacting`-then-`sized`-`and` two-step). `CAP_MK`
@@ -593,8 +602,39 @@ EXTRACTION_DECK = ExtractionDeck(
     nwell=(21, 0),  # Nwell
     contact=(33, 0),  # Contact
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
-    metals=((34, 0),),  # Metal1
-    metal_labels=((34, 10),),  # Metal1 pin/label purpose
+    # Full Metal1-Metal5 routing stack (#220). Before this, `metals` stopped
+    # at Metal1, so anything drawn above it was invisible to the connectivity
+    # graph and a normally-routed block extracted as a pile of disconnected
+    # nets (LVS then reported a mismatch on essentially every net). The engine
+    # loop in `extract.py`'s `_extract_netlist` is already generic over an
+    # arbitrary-depth stack (`vias[i]` connects `metals[i]` to `metals[i+1]`);
+    # this is deck data, not new machinery.
+    metals=(
+        (34, 0),  # Metal1
+        (36, 0),  # Metal2
+        (42, 0),  # Metal3
+        (46, 0),  # Metal4
+        (81, 0),  # Metal5
+    ),
+    # `vias[i]` connects `metals[i]` to `metals[i + 1]`, so this tuple has
+    # `len(metals) - 1` entries. Layer numbers from `main.drc`'s via-layer
+    # derivations (see the module docstring's layer table): Via1 35/0,
+    # Via2 38/0, Via3 40/0, Via4 41/0.
+    vias=(
+        (35, 0),  # Via1 (Metal1 <-> Metal2)
+        (38, 0),  # Via2 (Metal2 <-> Metal3)
+        (40, 0),  # Via3 (Metal3 <-> Metal4)
+        (41, 0),  # Via4 (Metal4 <-> Metal5)
+    ),
+    # Each metal's pin/label purpose is datatype 10 (gf180mcu's convention,
+    # same as Metal1's already-shipped 34/10). Index-aligned with `metals`.
+    metal_labels=(
+        (34, 10),  # Metal1 pin/label purpose
+        (36, 10),  # Metal2 pin/label purpose
+        (42, 10),  # Metal3 pin/label purpose
+        (46, 10),  # Metal4 pin/label purpose
+        (81, 10),  # Metal5 pin/label purpose
+    ),
     bipolars=(
         BipolarDevice(
             base=(21, 0),  # Nwell

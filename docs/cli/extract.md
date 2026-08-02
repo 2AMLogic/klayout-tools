@@ -78,7 +78,10 @@ The `sky130` and `gf180mcu` decks are **curated starter subsets**, the
 extraction analogue of `klt drc`'s curated rule decks (see
 [`docs/cli/drc.md`](drc.md) → "Coverage"): a two-terminal-well CMOS stack
 (one drawn well layer splitting NMOS/PMOS, contact/local-interconnect up
-through one or two metal levels), not a full PDK's device zoo. Both decks
+through the PDK's metal stack — sky130's `li1`/`met1` and gf180mcu's full
+`Metal1`–`Metal5` with `Via1`–`Via4` between them, so a block routed on any
+declared level extracts as connected nets, not a pile of disconnected
+ones), not a full PDK's device zoo. Both decks
 are defined in `src/klayout_tools/decks/sky130.py` /
 `src/klayout_tools/decks/gf180mcu.py` as an `ExtractionDeck` (layer roles:
 `active`, `poly`, `nwell`, optional `tap`, `contact`, an ordered `metals`
@@ -184,13 +187,15 @@ Two consequences worth knowing:
   a capacitor — mirroring the "unmarked conductor is never reclassified"
   guarantee drawn resistors give.
 - **Capacitor plate nets are not wired into the rest of this deck's metal
-  stack.** Neither deck's `metals` field (see "Coverage" above) reaches as
-  high as a MiM cap's plate layers (both stop at metal1); a recognised
-  capacitor's two terminal nets are therefore only as large as the plate
-  shapes `klt extract` itself recognises — multiple plate polygons that
-  touch merge into one net, but neither plate's net extends into whatever
-  real upper-metal routing a full metal-stack extraction would connect it
-  to. The *device* (a capacitor of the correct value between two
+  stack.** A MiM cap's plate regions are registered as their own separate
+  connectivity nodes, derived from a distinct plate-layer clip rather than
+  the deck's `metals` regions — even where a plate happens to sit on a
+  tracked metal (e.g. gf180mcu's bottom plate is `Metal4`, now part of the
+  `Metal1`–`Metal5` stack). A recognised capacitor's two terminal nets are
+  therefore only as large as the plate shapes `klt extract` itself
+  recognises — multiple plate polygons that touch merge into one net, but
+  neither plate's net extends into whatever real upper-metal routing the
+  deck's metal-stack connectivity would otherwise connect it to. The *device* (a capacitor of the correct value between two
   correctly-shaped plates) is still correctly recognised; only the net
   names/connectivity of its two terminals carries this documented
   approximation. A layout with no MiM-cap marker anywhere extracts
@@ -457,6 +462,7 @@ exit codes).
   "net_count": 6,
   "pin_count": 6,
   "device_counts": { "nfet": 1, "pfet": 1 },
+  "ignored_layers": [{ "layer": 55, "datatype": 0, "shapes": 12 }],
   "device_classes": [
     "nfet",
     "pfet",
@@ -495,6 +501,7 @@ exit codes).
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"` and/or a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`). What was actually **found**.  |
+| `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. |
 | `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above — and a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above), independent of what this layout happens to contain. What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |

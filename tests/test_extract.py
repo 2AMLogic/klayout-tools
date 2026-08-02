@@ -978,6 +978,202 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Multi-level metal stack: routing above Metal1 extracts as connected nets
+# (issue #220 -- gf180mcu's deck now declares Metal1-Metal5 + Via1-Via4)
+# --------------------------------------------------------------------------- #
+
+
+def _draw_gf180mcu_nmos(top, layout, x0, source_label, drain_label=None):
+    """Draw one gf180mcu NMOS at ``x0`` and return its drain-pad footprint box
+    (for stacking a via chain on). ``source_label``/``drain_label`` name the
+    respective Metal1 pads (drain optional)."""
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    d(22, 0, kdb.Box(x0, 0, x0 + 3000, 1000))  # Comp (active)
+    d(30, 0, kdb.Box(x0 + 1300, -300, x0 + 1700, 1300))  # Poly2 gate (crosses)
+    # Source pad: Contact + Metal1, labelled.
+    d(33, 0, kdb.Box(x0 + 400, 300, x0 + 700, 700))
+    d(34, 0, kdb.Box(x0 + 200, 200, x0 + 900, 800))
+    label(34, 10, source_label, x0 + 500, 500)
+    # Drain pad: Contact + Metal1, optionally labelled.
+    d(33, 0, kdb.Box(x0 + 2300, 300, x0 + 2600, 700))
+    d(34, 0, kdb.Box(x0 + 2000, 200, x0 + 2900, 800))
+    if drain_label is not None:
+        label(34, 10, drain_label, x0 + 2450, 500)
+    return kdb.Box(x0 + 2300, 300, x0 + 2600, 700)  # drain via-stack footprint
+
+
+# Via1..Via4 layers, bottom-up: connecting Metal1<->Metal2<->...<->Metal5.
+_GF180MCU_VIA_STACK = [(35, 0), (36, 0), (38, 0), (42, 0), (40, 0), (46, 0), (41, 0)]
+
+
+def _make_gf180mcu_metal_bridge_layout(*, bridge: bool) -> kdb.Layout:
+    """Two gf180mcu NMOS transistors whose drains are separated in Metal1 and
+    (when ``bridge``) joined *only* through the upper metal stack: a full
+    Via1/Metal2/Via2/Metal3/Via3/Metal4/Via4 column at each drain up to a
+    long-haul Metal5 span between them. The drains touch on no shared Metal1
+    shape, so they extract as one net *iff* the deck reads Metal2-Metal5 and
+    Via1-Via4 (the #220 fix); with ``bridge=False`` the upper stack is absent
+    and the two drains stay distinct -- the in-suite counterfactual."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    fa = _draw_gf180mcu_nmos(top, layout, 0, "S1", drain_label="OUT")
+    fb = _draw_gf180mcu_nmos(top, layout, 8000, "S2")
+
+    if bridge:
+
+        def d(layer, datatype, box):
+            top.shapes(layout.layer(layer, datatype)).insert(box)
+
+        for layer, datatype in _GF180MCU_VIA_STACK:
+            d(layer, datatype, fa)
+            d(layer, datatype, fb)
+        # Metal5 long-haul span joining the two drain columns.
+        d(81, 0, kdb.Box(fa.left, fa.bottom, fb.right, fb.top))
+
+    return layout
+
+
+def test_gf180mcu_metal2_bridge_joins_drains_into_one_net(tmp_path):
+    """Two NMOS drains joined only through the Metal2-Metal5/Via1-Via4 stack
+    extract as a single connected net -- the core #220 fix. Before the deck
+    declared the full stack, everything above Metal1 was invisible to the
+    connectivity graph and the drains extracted as two disconnected nets."""
+    path = _write_gds(
+        _make_gf180mcu_metal_bridge_layout(bridge=True), tmp_path / "bridge.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bridge.spice"))
+
+    nfets = [d for d in report["devices"] if d["class"] == "nfet"]
+    assert len(nfets) == 2
+    drains = {d["nets"]["d"] for d in nfets}
+    assert drains == {"OUT"}, f"drains should share the bridged net, got {drains}"
+
+
+def test_gf180mcu_without_upper_stack_drains_stay_disconnected(tmp_path):
+    """Counterfactual for the test above: with the upper metal stack removed,
+    the same two drains extract as two distinct nets. Guards against a false
+    pass where the drains merged for some reason other than the via stack."""
+    path = _write_gds(
+        _make_gf180mcu_metal_bridge_layout(bridge=False), tmp_path / "nobridge.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "nobridge.spice"))
+
+    nfets = [d for d in report["devices"] if d["class"] == "nfet"]
+    assert len(nfets) == 2
+    drains = {d["nets"]["d"] for d in nfets}
+    assert len(drains) == 2, f"drains should be disconnected without a bridge, {drains}"
+
+
+def test_gf180mcu_deck_declares_full_metal_stack():
+    """The gf180mcu extraction deck declares Metal1-Metal5 with a Via1-Via4
+    chain between them (index-aligned, `len(metals) - 1` vias) and a pin/label
+    layer per metal level -- the deck-data half of #220."""
+    deck = get_extraction_deck("gf180mcu")
+    assert deck.metals == ((34, 0), (36, 0), (42, 0), (46, 0), (81, 0))
+    assert deck.vias == ((35, 0), (38, 0), (40, 0), (41, 0))
+    assert deck.metal_labels == ((34, 10), (36, 10), (42, 10), (46, 10), (81, 10))
+    assert len(deck.vias) == len(deck.metals) - 1
+
+
+# --------------------------------------------------------------------------- #
+# ignored_layers: shapes on layers the deck's connectivity graph never reads
+# (issue #220 interim ask -- the extraction-side analogue of `klt drc`'s
+# coverage.layers_in_stream_without_rules)
+# --------------------------------------------------------------------------- #
+
+
+def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
+    """A gf180mcu NMOS layout that also carries shapes on layers the deck's
+    connectivity graph does not read (Nplus 32/0, Dualgate 55/0) reports those
+    layers -- with their shape counts -- in `ignored_layers`, so a downstream
+    LVS mismatch on such geometry is diagnosable as a coverage gap rather than
+    a phantom layout bug."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    d(22, 0, kdb.Box(0, 0, 3000, 1000))  # Comp (read)
+    d(30, 0, kdb.Box(1300, -300, 1700, 1300))  # Poly2 (read)
+    d(33, 0, kdb.Box(400, 300, 700, 700))  # Contact (read)
+    d(34, 0, kdb.Box(200, 200, 900, 800))  # Metal1 (read)
+    d(32, 0, kdb.Box(0, 0, 500, 500))  # Nplus (NOT read)
+    d(55, 0, kdb.Box(0, 0, 3000, 1000))  # Dualgate (NOT read)
+    d(55, 0, kdb.Box(0, 2000, 3000, 3000))  # a second Dualgate shape
+
+    path = _write_gds(layout, tmp_path / "ign.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "ign.spice"))
+
+    ignored = {
+        (e["layer"], e["datatype"]): e["shapes"] for e in report["ignored_layers"]
+    }
+    assert (32, 0) in ignored and ignored[(32, 0)] == 1
+    assert (55, 0) in ignored and ignored[(55, 0)] == 2
+    # Layers the deck *does* read are never reported as ignored.
+    for read_layer in [(22, 0), (30, 0), (33, 0), (34, 0)]:
+        assert read_layer not in ignored
+
+
+def test_ignored_layers_empty_when_every_layer_is_read(tmp_path):
+    """A layout drawn entirely on layers the deck reads (the sky130 inverter
+    fixture, shaped to exercise every `EXTRACTION_DECK` layer role) reports an
+    empty `ignored_layers` -- no false positives."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["ignored_layers"] == []
+
+
+def test_ignored_layers_present_in_cli_json(tmp_path, capsys):
+    """The `ignored_layers` field is part of the JSON contract and is emitted
+    by the CLI."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(22, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Comp
+    top.shapes(layout.layer(55, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Dualgate
+    path = _write_gds(layout, tmp_path / "cli.gds")
+
+    exit_code = main(["extract", str(path), "--deck", "gf180mcu", "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "ignored_layers" in out
+    assert {"layer": 55, "datatype": 0, "shapes": 1} in out["ignored_layers"]
+
+
+def test_extraction_deck_connectivity_layers_covers_all_role_layers():
+    """`ExtractionDeck.connectivity_layers` includes every layer the deck's
+    extraction actually reads -- MOS-recognition, metal/via stack, labels, and
+    each bipolar/capacitor entry's own layers -- and skips absent optionals."""
+    deck = get_extraction_deck("gf180mcu")
+    conn = deck.connectivity_layers
+    # MOS + stack + labels
+    for expected in [(22, 0), (30, 0), (21, 0), (33, 0), (30, 10)]:
+        assert expected in conn
+    for metal in deck.metals:
+        assert metal in conn
+    for via in deck.vias:
+        assert via in conn
+    for label in deck.metal_labels:
+        assert label in conn
+    # Bipolar + capacitor recognition layers
+    for bipolar in deck.bipolars:
+        assert bipolar.base in conn
+        assert bipolar.marker in conn
+    for capacitor in deck.capacitors:
+        assert capacitor.top_plate in conn
+        assert capacitor.bottom_plate in conn
+
+
+# --------------------------------------------------------------------------- #
 # Loop closure: extracted netlist feeds `klt sim` with no reformatting
 # --------------------------------------------------------------------------- #
 
