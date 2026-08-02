@@ -50,3 +50,11 @@ version. Not an exhaustive commit-by-commit log.
   inline-extraction fixture that previously reported an empty
   `category_counts: {}` — see `docs/cli/lvs.md`'s `device.body_unverified`
   subsection for the full trigger conditions.
+- 2026-08-02 — `klt lvs`: new top-level `net_correspondence[]` response
+  field (#311). Lists every layout↔reference net pairing the comparer
+  matched — unambiguous and ambiguously-resolved alike — as `{layout,
+  reference, pin}` entries, sorted and deduplicated per circuit scope so
+  `len(net_correspondence) == counts.nets.matched` holds even across a
+  hierarchy with cross-circuit net-name collisions. Purely additive (no
+  `schema_version` bump) — see `docs/cli/lvs.md`'s `net_correspondence[]
+  entries` subsection.

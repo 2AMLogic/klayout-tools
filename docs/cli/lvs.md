@@ -290,7 +290,13 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
     "pdk": null,
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>" }
   },
-  "mismatches": []
+  "mismatches": [],
+  "net_correspondence": [
+    { "layout": "A", "reference": "A", "pin": true },
+    { "layout": "VGND", "reference": "VGND", "pin": true },
+    { "layout": "VPWR", "reference": "VPWR", "pin": true },
+    { "layout": "Y", "reference": "Y", "pin": true }
+  ]
 }
 ```
 
@@ -311,6 +317,7 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
 | `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (LVS is topological and resolves no PDK); `deck` pins the layout-side extraction deck by name and `sha256:` content hash, and is `null` for the pre-extracted `layout.netlist` form (matching `device_classes`). |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
+| `net_correspondence` | array\<object\> | The layout↔reference net pairing `NetlistComparer` produced — see "`net_correspondence[]` entries" below. `len(net_correspondence) == counts.nets.matched` (the example above is illustrative, not exhaustive, for a 7-net compare). |
 
 ### `mismatches[]` entries
 
@@ -333,6 +340,49 @@ objects involved.
 net.layout, net.reference)` (missing fields sort first) so repeated runs
 against the same inputs produce identical, diff-clean output — the same
 canonical-ordering guarantee `klt drc` makes about `violations`.
+
+### `net_correspondence[]` entries
+
+`klt lvs` computes a full layout-net ↔ reference-net correspondence
+internally (that is what makes `counts.nets.matched` meaningful), but until
+this field existed the report never surfaced it — a caller could not attach
+anything to a *named* schematic node without re-deriving the pairing itself.
+An extracted netlist's net names are mostly not the schematic's: extraction
+names a net after a drawn label if there is one and positionally (`$5`,
+`$12`, …) otherwise, so for every internal node the schematic name exists
+only on the reference side and the extracted name only on the layout side.
+`net_correspondence` closes that gap directly from the comparer's own
+`match_nets`/`match_ambiguous_nets` callbacks — no re-derivation, no graph
+isomorphism reimplemented downstream.
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `layout` | string | The layout net's name (`Net.expanded_name()` — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases joined, e.g. `"VPWR|VDD"`). |
+| `reference` | string | The paired reference net's name, same convention. |
+| `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
+
+Populated for every successful pairing the comparer made — both an
+unambiguous `match_nets` event and an ambiguously-resolved
+`match_ambiguous_nets` event (the same events that also produce the
+`topology`/`"warning"` entry in `mismatches[]` — see "Ambiguous net
+pairing" below; a pairing can appear in both places at once, since one
+documents *that* an ambiguity was resolved and the other documents *what*
+it resolved to). Emitted whenever the comparer produced at least one net
+pairing, regardless of `status` — on a partial/failed compare, the pairs
+that *did* match are still useful for localising the ones that did not (a
+net with no counterpart at all, e.g. one side dropped a device entirely,
+simply has no entry). `device_correspondence` (the same idea for devices)
+is not yet implemented — track it separately if needed.
+
+Sorted by `(reference, layout)`, so repeated runs against the same inputs
+produce identical, diff-clean output — the same ordering guarantee
+`mismatches[]` makes. Deduplication is scoped **per circuit** (by the
+comparer's circuit scope, not by net name alone): a hierarchical netlist
+routinely reuses a local net name — `MID`, `OUT`, `A` — across unrelated
+subcircuits, and each such net is a distinct correspondence with its own
+`pin` flag. Two entries can therefore share the same `layout`/`reference`
+name (one per circuit) — that is expected, and is what keeps
+`len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
 
 #### `device.body_unverified`: MOS body terminals compared against a deck-synthesized net
 

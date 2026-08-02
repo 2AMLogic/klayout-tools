@@ -496,6 +496,185 @@ def test_clean_self_compare_reports_match(tmp_path):
     assert prov["deck"] is None
 
 
+def test_net_correspondence_lists_all_matched_nets_with_pin_flag(tmp_path):
+    """Issue #311: a clean match's ``net_correspondence`` names every
+    matched net pair. All four of `_INVERTER_SPICE`'s nets (`A`, `Y`,
+    `VPWR`, `VGND`) are declared pins of `.subckt inv`, so every entry's
+    `pin` is `True` and, since layout/reference share the same names here,
+    `layout` == `reference` on every entry."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    assert len(correspondence) == 4 == report["counts"]["nets"]["matched"]
+    assert {entry["reference"] for entry in correspondence} == {
+        "A",
+        "Y",
+        "VPWR",
+        "VGND",
+    }
+    for entry in correspondence:
+        assert entry["layout"] == entry["reference"]
+        assert entry["pin"] is True
+    # Sorted by (reference, layout) for determinism.
+    assert [entry["reference"] for entry in correspondence] == sorted(
+        entry["reference"] for entry in correspondence
+    )
+
+
+def test_net_correspondence_partial_on_mismatch(tmp_path):
+    """Issue #311: even on `status: "mismatch"`, `net_correspondence`
+    reports the pairs that *did* match -- here `A`/`B` (both sides keep
+    `R1`), while `C`/`D` never appear (the layout dropped `R2` entirely, so
+    those two nets have no counterpart to pair with)."""
+    reference_spice = """
+.subckt cell A B C D
+R1 A B 1k
+R2 C D 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell A B C D
+R1 A B 1k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "cell"},
+            "reference": {"netlist": reference_path, "top": "cell"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    correspondence = report["net_correspondence"]
+    assert {(e["layout"], e["reference"]) for e in correspondence} == {
+        ("A", "A"),
+        ("B", "B"),
+    }
+    assert all(entry["pin"] is True for entry in correspondence)
+
+
+def test_net_correspondence_includes_ambiguous_matches(tmp_path):
+    """Issue #311: an ambiguously-resolved net pairing (see
+    `test_same_nets_hint_resolves_an_otherwise_ambiguous_match`) is still a
+    real match the comparer made -- it must appear in `net_correspondence`,
+    not just the declared-pin `VDD` net that matched unambiguously."""
+    reference_spice = """
+.subckt cell VDD
+R1 VDD P1 1k
+R2 VDD P2 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell VDD
+R1 VDD $1 1k
+R2 VDD $2 1k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "cell"},
+            "reference": {"netlist": reference_path, "top": "cell"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    assert len(correspondence) == 3 == report["counts"]["nets"]["matched"]
+
+    by_reference = {entry["reference"]: entry for entry in correspondence}
+    assert by_reference["VDD"] == {"layout": "VDD", "reference": "VDD", "pin": True}
+    assert {"P1", "P2"} <= by_reference.keys()
+    # The ambiguous pair's layout side is `$1`/`$2` (unlabelled, neither a
+    # declared pin) -- which reference name each happened to resolve to is
+    # not asserted, since the comparer's own tie-break is not part of this
+    # module's documented contract.
+    assert {by_reference["P1"]["layout"], by_reference["P2"]["layout"]} == {
+        "$1",
+        "$2",
+    }
+    assert by_reference["P1"]["pin"] is False
+    assert by_reference["P2"]["pin"] is False
+
+
+def test_net_correspondence_scopes_dedup_by_circuit(tmp_path):
+    """Issue #311 regression: in a multi-circuit hierarchy, two distinct
+    subcircuits routinely share a local net name. The dedup key must be
+    scoped by circuit, not by bare net name -- otherwise those unrelated
+    nets silently collapse into one entry, dropping the other's
+    correspondence and reporting the wrong `pin` flag for whichever won
+    the dedup race.
+
+    Here `cellA` and `cellB` both have local nets named `IN`, `MID`, and
+    `OUT`, but only `cellA` declares `MID` as a pin; in `cellB` `MID` is a
+    purely internal net. A name-only dedup key collapsed all three shared
+    names (11 matched nets -> 8 entries) and reported a single `MID` entry
+    with a `pin` flag that was right for at most one of the two circuits.
+    With a circuit-scoped key every matched net appears, the documented
+    invariant `len(net_correspondence) == counts.nets.matched` holds, and
+    both `MID` nets are represented with their own (differing) `pin`
+    flags."""
+    hierarchy_spice = """
+.subckt cellA IN MID OUT
+R1 IN MID 1k
+R2 MID OUT 1k
+.ends
+.subckt cellB IN OUT
+R1 IN MID 1k
+R2 MID OUT 1k
+.ends
+.subckt top
+X1 a1 a2 a3 cellA
+X2 b1 b2 cellB
+.ends
+"""
+    layout_path = _write(tmp_path / "layout.spice", hierarchy_spice)
+    reference_path = _write(tmp_path / "ref.spice", hierarchy_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    # The invariant the field documents in docs/cli/lvs.md: every matched
+    # net has exactly one correspondence entry, even across a hierarchy
+    # with cross-circuit name collisions.
+    assert len(correspondence) == report["counts"]["nets"]["matched"] == 11
+
+    # `MID` exists in both cellA (a declared pin) and cellB (internal). A
+    # name-only key would have kept just one; the scoped key keeps both,
+    # each with its own `pin` flag.
+    mid_entries = [e for e in correspondence if e["reference"] == "MID"]
+    assert len(mid_entries) == 2
+    assert {e["pin"] for e in mid_entries} == {True, False}
+    # The other cross-circuit collisions (`IN`, `OUT`) are likewise kept
+    # as two entries apiece rather than merged into one.
+    assert len([e for e in correspondence if e["reference"] == "IN"]) == 2
+    assert len([e for e in correspondence if e["reference"] == "OUT"]) == 2
+
+
 def test_auto_selected_top_matches_explicit_top(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
