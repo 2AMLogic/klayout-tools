@@ -97,6 +97,8 @@ def test_stats_report_per_layer(tmp_path):
     assert layer2["density"] == pytest.approx(125_000 / 9_000_000)
     assert layer2["polygon_count"] == 1
     assert layer2["vertex_count"] == 3
+    assert layer2["annotation"] is False
+    assert metal1["annotation"] is False
 
 
 def test_stats_report_gds_round_trip(tmp_path):
@@ -202,7 +204,9 @@ def test_json_contract(tmp_path, capsys):
             "density",
             "polygon_count",
             "vertex_count",
+            "annotation",
         }
+        assert isinstance(entry["annotation"], bool)
 
     # Sorted ascending by (layer, datatype).
     pairs = [(e["layer"], e["datatype"]) for e in data["layers"]]
@@ -227,6 +231,7 @@ def test_default_format_is_text(tmp_path, capsys):
     assert "file:" in out
     assert "area_um2:" in out and "density:" in out
     assert "layer" in out and "polygons" in out and "vertices" in out
+    assert "annotation" in out
     # Not JSON.
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -235,3 +240,31 @@ def test_default_format_is_text(tmp_path, capsys):
 def test_stats_report_raises_on_missing():
     with pytest.raises(StatsError):
         stats_report("/no/such/path/design.gds")
+
+
+@pytest.mark.parametrize(
+    ("layer", "datatype", "expected"),
+    [
+        (989, 0, False),  # just below the reserved range
+        (990, 0, True),  # lower bound
+        (994, 0, True),  # documented canonical pair
+        (994, 5, True),  # any datatype qualifies
+        (999, 44, True),  # upper bound, non-zero datatype
+        (1000, 0, False),  # just above the reserved range
+    ],
+)
+def test_stats_report_annotation_range_boundaries(tmp_path, layer, datatype, expected):
+    """(layer, datatype) pairs are named `annotation: true` iff the layer
+    number falls in the reserved 990-999 range, regardless of datatype."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li = layout.layer(layer, datatype)
+    top.shapes(li).insert(kdb.Box(0, 0, 1, 1))
+    path = tmp_path / "design.oas"
+    layout.write(str(path))
+
+    report = stats_report(str(path), per_layer=True)
+    entry = next(
+        e for e in report["layers"] if (e["layer"], e["datatype"]) == (layer, datatype)
+    )
+    assert entry["annotation"] is expected

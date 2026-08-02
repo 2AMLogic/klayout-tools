@@ -227,10 +227,12 @@ def test_json_contract(tmp_path, capsys):
             "datatype",
             "name",
             "shapes",
+            "annotation",
             "path",
             "rendered",
         }
         assert isinstance(entry["rendered"], bool)
+        assert isinstance(entry["annotation"], bool)
         assert entry["path"] is None or isinstance(entry["path"], str)
 
 

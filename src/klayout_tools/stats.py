@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._annotation import is_reserved_annotation_layer
 from ._layout import load_layout
 
 
@@ -113,7 +114,8 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
             "layers": None | [
                 {"layer": int, "datatype": int, "name": str | None,
                  "area_um2": float, "density": float,
-                 "polygon_count": int, "vertex_count": int},
+                 "polygon_count": int, "vertex_count": int,
+                 "annotation": bool},
                 ...
             ],
         }
@@ -130,6 +132,10 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
 
     ``layers`` is ``None`` unless ``per_layer=True``, in which case it is a
     list sorted by ``(layer, datatype)`` ascending for deterministic output.
+    Each entry's ``annotation`` is ``True`` when the layer number falls in
+    the reserved annotation-layer range (GDS layers 990-999, any datatype --
+    see ``docs/cli/drc.md`` -> "Reserved annotation layer"), matching ``klt
+    layers``.
 
     Raises :class:`StatsError` if the file is missing, unreadable, not a
     recognisable layout stream, or has more than one top cell (ambiguous
@@ -177,6 +183,9 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
                     "density": _density(area_dbu2, bbox_area_dbu2),
                     "polygon_count": polygon_count,
                     "vertex_count": vertex_count,
+                    "annotation": is_reserved_annotation_layer(
+                        info.layer, info.datatype
+                    ),
                 }
             )
 

@@ -19,6 +19,7 @@ def _make_layout() -> kdb.Layout:
     - (1, 0)   named "metal1", 2 shapes
     - (66, 20) unnamed,        3 shapes
     - (5, 0)   named "empty",  0 shapes (declared but empty)
+    - (994, 0) unnamed,        1 shape (reserved annotation layer)
     """
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
@@ -38,6 +39,9 @@ def _make_layout() -> kdb.Layout:
     empty = layout.layer(5, 0)
     layout.set_info(empty, kdb.LayerInfo(5, 0, "empty"))
 
+    annotation = layout.layer(994, 0)
+    top.shapes(annotation).insert(kdb.Box(0, 0, 1, 1))
+
     return layout
 
 
@@ -51,23 +55,29 @@ def test_layers_report_oasis(tmp_path):
 
     assert report["file"] == str(path)
     assert report["dbu_um"] == 0.001
-    assert report["layer_count"] == 3
+    assert report["layer_count"] == 4
 
     layers = report["layers"]
-    # Sorted by (layer, datatype): (1,0), (5,0), (66,20)
+    # Sorted by (layer, datatype): (1,0), (5,0), (66,20), (994,0)
     assert [(entry["layer"], entry["datatype"]) for entry in layers] == [
         (1, 0),
         (5, 0),
         (66, 20),
+        (994, 0),
     ]
 
     by_pair = {(entry["layer"], entry["datatype"]): entry for entry in layers}
     assert by_pair[(1, 0)]["name"] == "metal1"
     assert by_pair[(1, 0)]["shapes"] == 2
+    assert by_pair[(1, 0)]["annotation"] is False
     assert by_pair[(5, 0)]["name"] == "empty"
     assert by_pair[(5, 0)]["shapes"] == 0  # declared but empty
+    assert by_pair[(5, 0)]["annotation"] is False
     assert by_pair[(66, 20)]["name"] is None  # unnamed -> null
     assert by_pair[(66, 20)]["shapes"] == 3
+    assert by_pair[(66, 20)]["annotation"] is False
+    assert by_pair[(994, 0)]["shapes"] == 1
+    assert by_pair[(994, 0)]["annotation"] is True
 
 
 def test_layers_report_gds(tmp_path):
@@ -81,6 +91,7 @@ def test_layers_report_gds(tmp_path):
     by_pair = {(entry["layer"], entry["datatype"]): entry for entry in report["layers"]}
     assert by_pair[(1, 0)]["shapes"] == 2
     assert by_pair[(66, 20)]["shapes"] == 3
+    assert by_pair[(994, 0)]["annotation"] is True
     # Plain GDSII carries no layer names.
     assert all(entry["name"] is None for entry in report["layers"])
 
@@ -108,11 +119,18 @@ def test_json_contract(tmp_path, capsys):
     assert isinstance(data["layers"], list)
 
     for entry in data["layers"]:
-        assert set(entry.keys()) == {"layer", "datatype", "name", "shapes"}
+        assert set(entry.keys()) == {
+            "layer",
+            "datatype",
+            "name",
+            "shapes",
+            "annotation",
+        }
         assert isinstance(entry["layer"], int)
         assert isinstance(entry["datatype"], int)
         assert entry["name"] is None or isinstance(entry["name"], str)
         assert isinstance(entry["shapes"], int)
+        assert isinstance(entry["annotation"], bool)
 
     # Sorted ascending by (layer, datatype).
     pairs = [(e["layer"], e["datatype"]) for e in data["layers"]]
@@ -122,6 +140,9 @@ def test_json_contract(tmp_path, capsys):
     by_pair = {(e["layer"], e["datatype"]): e for e in data["layers"]}
     assert by_pair[(66, 20)]["name"] is None
     assert by_pair[(5, 0)]["shapes"] == 0
+    # Reserved annotation range (990-999, any datatype) is named as such.
+    assert by_pair[(994, 0)]["annotation"] is True
+    assert by_pair[(1, 0)]["annotation"] is False
 
 
 def test_default_format_is_text(tmp_path, capsys):
@@ -132,6 +153,7 @@ def test_default_format_is_text(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "file:" in out
     assert "layer" in out and "datatype" in out and "shapes" in out
+    assert "annotation" in out
     # Not JSON.
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -140,3 +162,31 @@ def test_default_format_is_text(tmp_path, capsys):
 def test_layers_report_raises_on_missing():
     with pytest.raises(LayersError):
         layers_report("/no/such/path/design.gds")
+
+
+@pytest.mark.parametrize(
+    ("layer", "datatype", "expected"),
+    [
+        (989, 0, False),  # just below the reserved range
+        (990, 0, True),  # lower bound
+        (994, 0, True),  # documented canonical pair
+        (994, 5, True),  # any datatype qualifies
+        (999, 44, True),  # upper bound, non-zero datatype
+        (1000, 0, False),  # just above the reserved range
+    ],
+)
+def test_layers_report_annotation_range_boundaries(tmp_path, layer, datatype, expected):
+    """(layer, datatype) pairs are named `annotation: true` iff the layer
+    number falls in the reserved 990-999 range, regardless of datatype."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li = layout.layer(layer, datatype)
+    top.shapes(li).insert(kdb.Box(0, 0, 1, 1))
+    path = tmp_path / "design.oas"
+    layout.write(str(path))
+
+    report = layers_report(str(path))
+    entry = next(
+        e for e in report["layers"] if (e["layer"], e["datatype"]) == (layer, datatype)
+    )
+    assert entry["annotation"] is expected

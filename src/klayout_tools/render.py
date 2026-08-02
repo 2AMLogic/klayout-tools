@@ -94,6 +94,7 @@ def render_report(
                     "datatype": int,
                     "name": str | None,
                     "shapes": int,
+                    "annotation": bool,
                     "path": <path to the PNG, or None if not rendered>,
                     "rendered": bool,
                 },
@@ -108,6 +109,11 @@ def render_report(
     ``layers_report()``) are listed but not rendered (``rendered: false``,
     ``path: null``): an isolated render of an empty layer is a blank image,
     which carries no information worth the render cost.
+
+    Each ``layers[]`` entry's ``annotation`` field is passed straight through
+    from ``layers_report()`` -- see its docstring -- so a layer in the
+    reserved 990-999 range is still named as such here, even if it happens
+    to carry shapes and gets rendered.
 
     Raises :class:`RenderError` if the file is missing, unreadable, not a
     recognisable layout stream, or ``width``/``height`` is not positive.

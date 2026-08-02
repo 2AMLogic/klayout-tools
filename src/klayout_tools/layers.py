@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._annotation import is_reserved_annotation_layer
 from ._layout import load_layout
 
 
@@ -39,7 +40,13 @@ def layers_report(path: str) -> dict[str, Any]:
             "dbu_um": <database unit in micrometres, float>,
             "layer_count": <number of layers, int>,
             "layers": [
-                {"layer": int, "datatype": int, "name": str | None, "shapes": int},
+                {
+                    "layer": int,
+                    "datatype": int,
+                    "name": str | None,
+                    "shapes": int,
+                    "annotation": bool,
+                },
                 ...
             ],
         }
@@ -52,7 +59,12 @@ def layers_report(path: str) -> dict[str, Any]:
     output. Unnamed layers report ``name: None``. ``shapes`` is the count summed
     across all cell *definitions* (each shape counted once where it is defined,
     not multiplied by instantiation); layers present in the layout's layer table
-    but carrying no shapes are still listed with ``shapes: 0``.
+    but carrying no shapes are still listed with ``shapes: 0``. ``annotation``
+    is ``True`` when the layer number falls in the reserved annotation-layer
+    range (GDS layers 990-999, any datatype -- see
+    ``docs/cli/drc.md`` -> "Reserved annotation layer"), so a reader can tell
+    "this is a floorplan reservation" from "this is unrecognised real
+    geometry" without opening the source that generated the GDS.
 
     Raises :class:`LayersError` if the file is missing, unreadable, or not a
     recognisable layout stream.
@@ -72,6 +84,7 @@ def layers_report(path: str) -> dict[str, Any]:
                 # LayerInfo.name is "" for unnamed layers -> normalise to None.
                 "name": info.name if info.name else None,
                 "shapes": shape_count,
+                "annotation": is_reserved_annotation_layer(info.layer, info.datatype),
             }
         )
 
