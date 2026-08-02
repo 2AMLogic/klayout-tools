@@ -373,6 +373,23 @@ data, calibrating parasitic-extraction *accuracy* against silicon is an
 explicit non-goal of this first cut (#216 "Non-goals"). The model is fixed,
 not tunable — there is no `fast`/`accurate` mode selector.
 
+### Coverage: every net with interconnect, not just labelled pins (#283)
+
+Every net with eligible interconnect geometry gets a `parasitics.nets[]`
+entry — including purely **internal, unlabelled** nets (e.g. a local driver's
+output inside a larger block, which is only a pin one hierarchy level down).
+A net does not need a layout label or a `.SUBCKT` pin to be measured: the pass
+reads geometry per net object directly from `LayoutToNetlist`, independent of
+whether that net happens to carry a name. This matters because the internal
+nodes are usually the ones a post-layout resimulation cares about most (DAC
+bottom plates, comparator regeneration nodes) — a supply pin's lumped C is
+comparatively uninteresting.
+
+A net is omitted from `parasitics.nets[]` only when it is the deck's
+substrate/ground net, or when it has genuinely **zero** eligible interconnect
+geometry (e.g. a net whose only poly is a transistor gate, already excluded
+above, and that carries no metal) — not because it lacks a label.
+
 ### What it does *not* do
 
 - **Net-to-net coupling capacitance** is explicitly out of scope for this
