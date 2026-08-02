@@ -198,6 +198,25 @@ def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
     ]  # snap note lands in top-level `warnings`, per spike sec.2
 
 
+def test_generate_is_byte_reproducible(tmp_path, pdk_root):
+    """Two runs of the same generator with identical params/PDK must produce
+    byte-identical streams -- the BGNLIB/BGNSTR timestamps are zeroed rather
+    than stamped with the wall clock (issue #320). This is the "regenerate and
+    byte-diff against a committed golden artefact" regression guard."""
+    first = tmp_path / "first.gds"
+    second = tmp_path / "second.gds"
+    request = {
+        "generator": "guard_ring",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": {"inner_width_um": 10, "inner_height_um": 10},
+        "options": {"cell_name": "gA"},
+    }
+    generate({**request, "options": {**request["options"], "output": str(first)}})
+    generate({**request, "options": {**request["options"], "output": str(second)}})
+
+    assert first.read_bytes() == second.read_bytes()
+
+
 def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
     output = tmp_path / "res.gds"
     exit_code = main(

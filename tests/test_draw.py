@@ -38,6 +38,21 @@ def _draw(tmp_path, params, cell_name=None, name="out.gds"):
 # --------------------------------------------------------------------------- #
 
 
+def test_draw_is_byte_reproducible(tmp_path):
+    """`klt draw` zeroes the BGNLIB/BGNSTR timestamps, so two runs of the same
+    description produce byte-identical streams (issue #320)."""
+    params = {
+        "shapes": [
+            {"layer": [66, 20], "name": "poly.drawing", "rect_um": [0, 0, 0.1, 2.0]}
+        ]
+    }
+    _, first = _draw(tmp_path, params, name="first.gds")
+    _, second = _draw(tmp_path, params, name="second.gds")
+
+    with open(first, "rb") as fh_a, open(second, "rb") as fh_b:
+        assert fh_a.read() == fh_b.read()
+
+
 def test_rect_round_trips_to_requested_layer_and_coords(tmp_path):
     report, output = _draw(
         tmp_path,

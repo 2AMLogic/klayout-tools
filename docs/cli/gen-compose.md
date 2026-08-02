@@ -378,6 +378,11 @@ are consumed exactly as its own `generator_report` reported them — this
 command never re-derives a block's placement math from its GDS stream (see
 "Engine" above).
 
+**Byte-reproducible output.** Like `klt gen`, the composed stream is
+deterministic: the GDSII `BGNLIB`/`BGNSTR` timestamp records are zeroed rather
+than stamped with the wall clock, so composing the same blocks twice yields
+byte-identical files (see `docs/cli/gen.md`).
+
 ## Text format
 
 The default `text` format prints a short summary. It is intended for human

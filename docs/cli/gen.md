@@ -373,6 +373,15 @@ resolver, and the envelope is additive — new fields may be added without a
 schema/`schema_version` bump; renaming, removing, or retyping an existing
 field requires one.
 
+**Byte-reproducible output.** The written stream is deterministic: two runs of
+the same generator with identical `params`/PDK produce byte-identical files.
+The GDSII `BGNLIB`/`BGNSTR` timestamp records are written as all-zero fields
+(the standard convention for generated GDSII) rather than the wall-clock time,
+so a generated stream can be committed as a golden artefact and regressions
+caught with a raw byte-diff, and the output is a stable content-addressed /
+cache-keyed build input. `klt gen-compose` and `klt draw` share this
+guarantee.
+
 ## `klt gen --list`
 
 Enumerates every registered generator and its `params` schema — the same data

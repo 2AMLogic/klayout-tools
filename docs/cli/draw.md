@@ -107,6 +107,11 @@ in CI.
 - `warnings` — always carries the loud not-design-legal marker, so a caller can
   never mistake a `draw` output for a rule-checked, PDK-legal cell.
 
+**Byte-reproducible output.** The written stream is deterministic: the GDSII
+`BGNLIB`/`BGNSTR` timestamp records are zeroed rather than stamped with the
+wall clock, so drawing the same description twice yields byte-identical files
+(see `docs/cli/gen.md`).
+
 ## Exit codes
 
 | Code | Meaning |

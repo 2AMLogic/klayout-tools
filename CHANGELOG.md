@@ -38,6 +38,15 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
+- 2026-08-02 — `klt gen`, `klt gen-compose`, `klt draw`: generated GDSII
+  streams are now byte-reproducible (#320). The `BGNLIB` (0x0102) and
+  `BGNSTR` (0x0502) timestamp records are written as all-zero fields (the
+  standard convention for generated GDSII) instead of the current wall-clock
+  time, so two runs of the same generator with identical params/PDK produce
+  byte-identical streams. This restores the "regenerate and byte-diff against
+  a committed golden artefact" regression guard and makes `klt`-generated GDS
+  usable as a content-addressed / cache-keyed build input. No JSON payload or
+  geometry change.
 - 2026-08-02 — `klt lvs`: new `device.body_unverified` mismatch category
   (`a483ed0`, #281/#285). Warns (`severity: "warning"`, never changes
   `status`) when a MOS body terminal was extracted onto a deck-synthesized

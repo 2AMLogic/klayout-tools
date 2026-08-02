@@ -353,6 +353,38 @@ def test_compose_row_places_two_real_blocks(tmp_path, pdk_root):
     assert offsets_seen == expected
 
 
+def test_compose_is_byte_reproducible(tmp_path, pdk_root):
+    """`klt gen-compose` zeroes the BGNLIB/BGNSTR timestamps, so composing the
+    same blocks twice produces byte-identical streams (issue #320)."""
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", num=2)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", num=3)
+
+    def _compose(out):
+        compose(
+            {
+                "schema": gen_compose.REQUEST_SCHEMA,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": r1},
+                    {"id": "b2", "generator_report": r2},
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["b1", "b2"],
+                    "spacing_um": 1.0,
+                },
+                "options": {"cell_name": "composed_0", "output": str(out)},
+            }
+        )
+
+    first = tmp_path / "first.gds"
+    second = tmp_path / "second.gds"
+    _compose(first)
+    _compose(second)
+
+    assert first.read_bytes() == second.read_bytes()
+
+
 def test_compose_single_block_degenerate_case(tmp_path, pdk_root):
     r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "solo")
     output = tmp_path / "solo_composed.gds"
