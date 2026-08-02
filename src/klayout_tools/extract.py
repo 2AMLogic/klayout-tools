@@ -81,6 +81,17 @@ for the layer-role contract, the capacitance-per-area provenance each deck
 must cite, and the documented "plate nets are not wired into the rest of
 this deck's metal stack" limitation.
 
+Every connectivity layer above (``poly``, ``contact``, ``metals``, ...) is
+wired up unconditionally, regardless of whether any device extractor above
+claims the geometry drawn on it: geometry for a device class the deck does
+not (yet) implement is absorbed into ordinary interconnect -- a silent short
+between what should be distinct terminals -- rather than skipped or flagged
+(issue #288). ``warnings`` gains one narrowly-scoped heuristic diagnostic for
+the most common shape of this problem: see
+:func:`_detect_unmodelled_poly_bodies` and ``docs/cli/extract.md``'s "Known
+limitation: unmodelled device geometry" for the exact signature it looks
+for and its documented false-negative surface.
+
 Verified compatible with ``klt sim``'s netlist convention (see
 ``docs/cli/sim.md`` -> "Netlist convention"): the written SPICE is a
 ``.SUBCKT ... .ENDS`` circuit body with no top-level ``.control``/``.end``
@@ -614,6 +625,81 @@ def _resolve_resistors(
     )
 
 
+#: Minimum number of geometrically separate `contact` clusters a candidate
+#: poly component must touch to be flagged by `_detect_unmodelled_poly_bodies`
+#: -- the "resistor-body signature": a two-terminal conductor segment
+#: contacted at *each* end, rather than routing with a single landing pad.
+_UNMODELLED_POLY_MIN_CONTACT_CLUSTERS = 2
+
+
+def _detect_unmodelled_poly_bodies(
+    poly: kdb.Region,
+    contact: kdb.Region,
+    nfet_gate: kdb.Region,
+    pfet_gate: kdb.Region,
+) -> list[str]:
+    """Flag ``poly`` connected components that no MOS gate extractor claims
+    and that touch ``contact`` at two or more geometrically separate
+    locations -- the resistor-body signature (issue #288).
+
+    This deck's device extractors are a fixed, curated subset (today:
+    ``nfet``/``pfet``, an optional declared drawn resistor/bipolar/
+    capacitor). Geometry drawn for any device class the deck does not
+    (yet) recognise is still built out of ordinary connectivity layers
+    (``poly``, ``contact``, ...), so :func:`_extract_netlist`'s blanket
+    ``l2n.connect(poly, contact)`` (and friends) absorbs it into ordinary
+    interconnect -- silently shorting two terminals a schematic keeps
+    distinct, with zero signal in ``warnings`` today. This is a narrowly
+    scoped *diagnostic* heuristic, not a device extractor: it identifies
+    the shape, not the missing device class, and is deliberately
+    conservative to avoid false positives on real layouts (see
+    ``docs/cli/extract.md``'s "Known limitation: unmodelled device
+    geometry").
+
+    Called with ``poly`` as it stands *after* :func:`_resolve_resistors`
+    has already subtracted out every resistor body this deck's own
+    ``ResistorDevice`` declarations recognise -- so a properly marked
+    drawn resistor never reaches this heuristic at all. What is left is
+    only genuinely unrecognised geometry: a resistor drawn without (or
+    excluded from) the deck's marker layer, or any other not-yet-modelled
+    device class that happens to share poly + contact.
+
+    A component is skipped unconditionally if it touches ``nfet_gate``/
+    ``pfet_gate`` anywhere -- a real MOS gate (with or without a
+    legitimate poly-contacted gate strap) or ordinary poly routing between
+    two recognised gates (poly needs no via to route on itself, so both
+    ends of such a run are one merged polygon together with the gates
+    themselves), never a candidate unmodelled-device body.
+
+    Returns a list with at most one warning string (empty when nothing is
+    flagged), naming how many components were flagged and pointing at the
+    documented limitation rather than guessing a device name.
+    """
+    import klayout.db as kdb
+
+    gate_regions = nfet_gate + pfet_gate
+    flagged = 0
+    for component in poly.merged().each():
+        candidate = kdb.Region(component)
+        if not candidate.interacting(gate_regions).is_empty():
+            continue
+        contact_clusters = (candidate & contact).merged().count()
+        if contact_clusters >= _UNMODELLED_POLY_MIN_CONTACT_CLUSTERS:
+            flagged += 1
+
+    if flagged == 0:
+        return []
+    shape_word = "shape" if flagged == 1 else "shapes"
+    return [
+        f"{flagged} poly-layer {shape_word} not part of any recognised nfet/pfet "
+        "gate touch contact at 2+ separate points (the resistor-body "
+        "signature); this deck may not model the device class drawn here, and "
+        "its terminals have been absorbed into ordinary interconnect as an "
+        "unintended short -- see docs/cli/extract.md's 'Known limitation: "
+        "unmodelled device geometry'."
+    ]
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -672,6 +758,16 @@ def _extract_netlist(
     pfet_gate = pfet_active & poly
     nfet_sd = nfet_active - poly
     pfet_sd = pfet_active - poly
+
+    # Unmodelled-device diagnostic (issue #288): computed against `poly` as
+    # it stands right here -- *after* `_resolve_resistors` has already cut
+    # out every resistor body this deck *does* recognise, and *before* the
+    # blanket `l2n.connect(poly, contact)` (and friends) below absorbs
+    # whatever is left into ordinary interconnect. See the function's
+    # docstring for the heuristic itself.
+    unmodelled_device_warnings = _detect_unmodelled_poly_bodies(
+        poly, contact, nfet_gate, pfet_gate
+    )
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
     # `register` returns the layer index `polygons_of_net(net, index)` needs
@@ -831,7 +927,9 @@ def _extract_netlist(
                 {"R": body, "C": terminal},
             )
 
-    warnings = [str(entry.message) for entry in l2n.each_log_entry()]
+    warnings = [
+        str(entry.message) for entry in l2n.each_log_entry()
+    ] + unmodelled_device_warnings
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
     # `contact` as a blanket rule -- see `ExtractionDeck`'s docstring: the

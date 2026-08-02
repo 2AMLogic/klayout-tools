@@ -258,6 +258,59 @@ Two consequences worth knowing:
   lower-resistance salicided `ppolyf_s`). A wrong resistance passing LVS with
   high confidence is worse than a known-unmodelled short.
 
+### Known limitation: unmodelled device geometry (issue #288)
+
+Every layer this deck reads (`active`, `poly`, `nwell`, `contact`, `metals`,
+...) is a **connectivity layer**, wired up unconditionally by
+`_extract_netlist`'s connectivity block regardless of whether any device
+extractor claims the geometry drawn on it. If a layout contains geometry
+drawn for a device class the active deck does not (yet) implement — today,
+anything beyond `nfet`/`pfet` plus each deck's curated resistor/bipolar/MiM-
+cap entries above — that geometry is **not skipped**. It is absorbed into
+ordinary interconnect exactly like a routing shape: the device's two (or
+more) terminals extract as a **single shorted net** instead of the distinct
+nets a schematic keeps them as. `klt extract` still exits `0`; nothing in the
+JSON response says "this geometry was not recognised as a device" — the only
+symptom is a `klt lvs` net/topology mismatch downstream that reads exactly
+like an ordinary routing bug, with nothing pointing at the real cause. The
+same failure mode reproduces for the *next* unmodelled device class even
+after every device class on today's roadmap lands — it is a property of
+"connectivity layer with no matching extractor", not of any specific missing
+class.
+
+`warnings[]` now carries one narrowly-scoped heuristic diagnostic for the
+most common shape of this problem: a **poly resistor body** drawn without
+(or excluded from) a resistor-ID marker layer, or any other conductor shape
+sharing poly + contact that no MOS gate extractor claims. Specifically,
+`klt extract` flags a `poly` connected component when **both**:
+
+- it does not touch any extracted `nfet`/`pfet` gate region anywhere (a real
+  MOS gate, including a legitimate poly-contacted gate strap, and ordinary
+  poly routing between two recognised gates — poly needs no via to route on
+  itself, so both are one merged polygon *with* the gates — are excluded
+  unconditionally), **and**
+- it touches `contact` at two or more geometrically separate locations (the
+  resistor-body signature: a two-terminal segment contacted at each end,
+  distinct from a routing run with a single landing pad).
+
+A flagged shape is reported as a warning string pointing back at this
+section — it is a **diagnostic, not a device extractor**: it never
+identifies *which* device class the geometry is (the deck still has no
+device-extraction logic for it), and it is deliberately conservative rather
+than exhaustive. It does **not** catch every possible unmodelled-device
+shape — e.g. a device that never touches `poly`/`contact` at all, or one
+whose body has only a single contact cluster, produces no warning. Treat a
+non-empty match here as a strong signal to investigate, and treat its
+absence as "nothing matched this specific signature", not as a general
+guarantee that every device in the layout was recognised.
+
+The only complete workaround today, for a device class this heuristic does
+not catch: do not draw geometry for a device class the active deck cannot
+yet extract, and track the omission separately, until either the device
+class is added to the deck or a broader detection mechanism (e.g. a
+deck-declarable "device-marker layer" list, tracked as a possible follow-up)
+lands.
+
 ## PDK resolution
 
 `--pdk`/`--pdk-root` are **optional** and resolved through
@@ -581,7 +634,7 @@ exit codes).
 | `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; and a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above), independent of what this layout happens to contain. Both registered decks currently report `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]`. Note the trailing `"resistor"` is a role token, not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
-| `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion). Always present, empty when clean. |
+| `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, or the unmodelled-device-geometry heuristic below). Always present, empty when clean. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash. |
