@@ -752,6 +752,26 @@ def test_mos_array_invalid_params_rejected(tmp_path, pdk_root, params):
         )
 
 
+def test_mos_array_w_um_error_explains_contact_fit_not_pdk_minimum(tmp_path, pdk_root):
+    """The `w_um` floor (`UNIT_MIN_W_UM`) is a generator-side structural
+    constraint (room for an enclosed contact), not a target PDK's own
+    diffusion-width DRC minimum -- the error message must say so instead of
+    reading like a PDK-mandated rule (issue #322)."""
+    with pytest.raises(GenError) as excinfo:
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"w_um": 0.1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+    message = str(excinfo.value)
+    assert "0.42" in message
+    assert "enclosed contact" in message
+    assert "not the target PDK's own" in message
+
+
 def test_mos_array_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):
     """`flavor` defaults to `'nfet'`, which must draw *no* well shape --
     geometry-identical to a request that never even mentions `flavor` (issue
@@ -1080,6 +1100,25 @@ def test_diff_pair_invalid_params_rejected(tmp_path, pdk_root, params):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+def test_diff_pair_w_um_error_explains_contact_fit_not_pdk_minimum(tmp_path, pdk_root):
+    """Same rationale as `mos_array` (issue #322): `diff_pair`'s `w_um` floor
+    is a generator-side contact-fit constraint, not a target PDK's own
+    diffusion-width DRC minimum."""
+    with pytest.raises(GenError) as excinfo:
+        generate(
+            {
+                "generator": "diff_pair",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"w_um": 0.1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+    message = str(excinfo.value)
+    assert "0.42" in message
+    assert "enclosed contact" in message
+    assert "not the target PDK's own" in message
 
 
 def test_diff_pair_default_flavor_nfet_output_unchanged(tmp_path, pdk_root):

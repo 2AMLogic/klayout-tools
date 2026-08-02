@@ -1947,7 +1947,12 @@ def _resistor_strip_describe(
 
 def _mos_array_validate(params: dict[str, Any]) -> None:
     if params["w_um"] < UNIT_MIN_W_UM:
-        raise GenError(f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM}")
+        raise GenError(
+            f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
+            "(the smallest width that fits an enclosed contact with margin -- "
+            "a generator-side structural floor, not the target PDK's own "
+            "diffusion-width rule)"
+        )
     if params["l_um"] <= 0:
         raise GenError("generator 'mos_array': params.l_um must be > 0")
     if params["fingers"] < 1:
@@ -2253,7 +2258,12 @@ def _guard_ring_describe(
 
 def _diff_pair_validate(params: dict[str, Any]) -> None:
     if params["w_um"] < UNIT_MIN_W_UM:
-        raise GenError(f"generator 'diff_pair': params.w_um must be >= {UNIT_MIN_W_UM}")
+        raise GenError(
+            f"generator 'diff_pair': params.w_um must be >= {UNIT_MIN_W_UM} "
+            "(the smallest width that fits an enclosed contact with margin -- "
+            "a generator-side structural floor, not the target PDK's own "
+            "diffusion-width rule)"
+        )
     if params["l_um"] <= 0:
         raise GenError("generator 'diff_pair': params.l_um must be > 0")
     if params["splits"] < 1:
