@@ -187,52 +187,43 @@ calculate_similarity() {
     local keywords1="$1"
     local keywords2="$2"
 
-    # Convert the newline-delimited keyword lists (one keyword per line, from
-    # extract_keywords' `sort -u`) into arrays. NOTE (#4409): `read -ra arr <<<
-    # "$multiline_str"` looks like it splits on all IFS whitespace, but `read`
-    # only ever consumes a SINGLE LINE of its input -- everything after the
-    # first newline is silently discarded. Since each keyword already sits on
-    # its own line, that made arr1/arr2 collapse to a ONE-ELEMENT array (just
-    # the alphabetically-first keyword) for any multi-keyword input, turning
-    # every comparison into a coin flip on that one token (0% or 100%) instead
-    # of a real set comparison -- this is bash's `read` semantics in every
-    # version, not a bash-3.2-only quirk. `mapfile`/`readarray` would fix it
-    # but require bash 4+, which macOS's shipped `/bin/bash` (3.2) doesn't
-    # have; splitting on IFS=$'\n' via an unquoted array assignment works on
-    # both and keeps this script bash-3.2-safe.
-    # The unquoted array assignments below are the intended word split (one
-    # array element per keyword line) -- `set -f` around them neutralizes the
-    # linter's other concern (accidental pathname/glob expansion) even though
-    # extract_keywords' alnum-only filter already guarantees no keyword can
-    # contain a glob metacharacter.
-    local -a arr1
-    local -a arr2
-    local old_ifs="$IFS"
-    IFS=$'\n'
-    set -f
-    # shellcheck disable=SC2206 # unquoted-intentionally, see comment above
-    arr1=($keywords1)
-    # shellcheck disable=SC2206 # unquoted-intentionally, see comment above
-    arr2=($keywords2)
-    set +f
-    IFS="$old_ifs"
-
-    # Handle empty arrays
-    if [[ ${#arr1[@]} -eq 0 ]] || [[ ${#arr2[@]} -eq 0 ]]; then
+    # keywords1/keywords2 are newline-delimited, already-deduped keyword lists
+    # (one keyword per line, from extract_keywords' `sort -u`). Count sizes
+    # and the intersection via `sort`+`comm` instead of a bash-level nested
+    # `for word1 ... for word2 ...` loop (#237): the nested loop is O(|A|*|B|)
+    # pure-bash string comparisons -- tens of thousands of fork-heavy `[[ ...
+    # == ... ]]` checks for a body-heavy issue against dozens of candidates,
+    # which is what made this script take minutes instead of seconds. `comm
+    # -12` on two sorted streams computes the same set intersection in
+    # O(n log n) via a single external `sort`+`comm` pipeline per side.
+    #
+    # `wc -l` on an empty string still counts 1 (an empty line), so guard
+    # emptiness with `-z` on the raw strings rather than trusting a `wc -l`
+    # count of 0.
+    if [[ -z "$keywords1" ]] || [[ -z "$keywords2" ]]; then
         echo "0"
         return
     fi
 
-    # Count matches
-    local matches=0
-    for word1 in "${arr1[@]}"; do
-        for word2 in "${arr2[@]}"; do
-            if [[ "$word1" == "$word2" ]]; then
-                ((matches++)) || true
-                break
-            fi
-        done
-    done
+    local size1 size2 matches
+    size1=$(echo "$keywords1" | grep -c . || true)
+    size2=$(echo "$keywords2" | grep -c . || true)
+
+    if [[ $size1 -eq 0 ]] || [[ $size2 -eq 0 ]]; then
+        echo "0"
+        return
+    fi
+
+    # Each side is already sorted+deduped by extract_keywords, but re-sort
+    # defensively -- comm requires sorted input and calculate_similarity's
+    # contract doesn't otherwise guarantee its arguments came from
+    # extract_keywords.
+    # `grep -c` exits 1 when it finds zero matching lines (a legitimate "no
+    # overlap" result here) -- under this script's `set -e`, an unguarded
+    # `var=$(... | grep -c .)` with zero matches would abort the whole
+    # script. `|| true` keeps the printed count (0) while swallowing that
+    # exit status.
+    matches=$(comm -12 <(echo "$keywords1" | sort -u) <(echo "$keywords2" | sort -u) | grep -c . || true)
 
     # True Jaccard similarity: matches / |union| = matches / (|A|+|B|-matches).
     # (Previously normalized by the SMALLER set: percent = matches*100/min(|A|,|B|).
@@ -241,7 +232,7 @@ calculate_similarity() {
     # against a short candidate title+body: matches approaches |B| regardless
     # of actual relatedness. True Jaccard is symmetric and bounded by the
     # union, so a large query set dilutes rather than saturates. See #4409.)
-    local union=$(( ${#arr1[@]} + ${#arr2[@]} - matches ))
+    local union=$(( size1 + size2 - matches ))
     if [[ $union -eq 0 ]]; then
         echo "0"
         return
