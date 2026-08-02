@@ -232,6 +232,36 @@ collector layer (the vertical bipolar's collector is the substrate itself),
 so the collector terminal is tied to the deck's global substrate net
 (`vsubs` by default), mirroring the NMOS-body wiring above.
 
+**Base-terminal net resolution — inherits the "PMOS body (gf180mcu only)"
+limitation above.** Because `BipolarDevice.base` reuses the deck's own
+`nwell` layer (the very layer used for PMOS body recognition), the base
+terminal's net is only as resolvable as that `nwell` node is —
+`extract.py` wires `l2n.connect(bipolar_base, nwell)`, so the base
+inherits whatever name `nwell` picks up. Whether that `nwell` node
+resolves through to contact/metals therefore depends entirely on the
+deck's `tap`/`well_label` mechanism (`extract.py` only wires
+`nwell → tap → contact` when `deck.tap is not None`, and names the node
+via `nwell → well_label`):
+
+- **gf180mcu** declares *neither* `tap` *nor* `well_label` (`Comp` is
+  shared with transistor active, and there is no well-label layer), so its
+  `nwell` node — and hence its BJT base terminal — is a floating, anonymous
+  net. This is the **exact same gap** as the "PMOS body (gf180mcu only)"
+  limitation documented under "Coverage" above; the drawn BJT's base can no
+  more be LVS'd or simulated against a schematic base net than gf180mcu's
+  PMOS body can.
+- **sky130** *does* declare `tap` (65/44, distinct from `diff.drawing`) and
+  `well_label` (64/5), so its base terminal resolves correctly through
+  `nwell → tap → contact → metals` and picks up its real pin name via the
+  `nwell` label — sky130's BJT base is **not** floating.
+
+A code fix — adding `base_via`/`base_via_metal` fields to `BipolarDevice`
+(analogous to the `CapacitorDevice.top_plate_via`/`top_plate_via_metal`
+connectivity fix from issue #314) so a gf180mcu base tie could reach the
+metal stack directly — is a **possible follow-up but is out of scope for
+this issue**, pending confirmation that the gf180mcu DRM defines a legal
+base-tie via/metal stack. File it separately if that confirmation lands.
+
 `devices[].nets` for a bipolar device uses `"c"`/`"b"`/`"e"` terminal keys
 (collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"`, and
 `devices[].params` is empty (KLayout's `DeviceClassBJT3Transistor` reports
