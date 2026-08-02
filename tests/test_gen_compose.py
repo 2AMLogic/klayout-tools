@@ -20,10 +20,13 @@ from klayout_tools.gen_compose import (
     _cleanup_points,
     _polyline_midpoint_um,
     _resolve_label_layer,
+    _translate_bbox,
+    _union_bbox,
     compose,
     compute_row_offsets,
     load_generator_report_arg,
     manhattan_backbone,
+    resolve_explicit_offsets,
 )
 
 
@@ -139,6 +142,43 @@ def test_compute_row_offsets_reorders_by_order_not_dict_iteration():
 
 
 # --------------------------------------------------------------------------- #
+# resolve_explicit_offsets() -- pure placement math, no PDK/pya involvement
+# (#321, mirrors the compute_row_offsets() suite above)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_explicit_offsets_single_block_is_degenerate():
+    origins = {"a": {"x": 3.5, "y": -2.0}}
+    offsets = resolve_explicit_offsets(["a"], origins)
+    assert offsets == {"a": {"x": 3.5, "y": -2.0}}
+
+
+def test_resolve_explicit_offsets_multi_block_negative_and_positive_origins():
+    # Unlike compute_row_offsets, a block's own bbox_um plays no role at all
+    # -- origins_um IS offset_um, verbatim, per block id.
+    origins = {
+        "ring": {"x": 0.0, "y": 0.0},
+        "plain": {"x": -10.0, "y": 15.0},
+        "tail": {"x": 60.0, "y": 20.0},
+    }
+    order = ["ring", "plain", "tail"]
+    offsets = resolve_explicit_offsets(order, origins)
+    assert offsets["ring"] == {"x": 0.0, "y": 0.0}
+    assert offsets["plain"] == {"x": -10.0, "y": 15.0}
+    assert offsets["tail"] == {"x": 60.0, "y": 20.0}
+
+
+def test_resolve_explicit_offsets_reorders_by_order_not_dict_iteration():
+    origins = {
+        "a": {"x": 1.0, "y": 2.0},
+        "b": {"x": 3.0, "y": 4.0},
+    }
+    offsets_ba = resolve_explicit_offsets(["b", "a"], origins)
+    assert offsets_ba["b"] == {"x": 3.0, "y": 4.0}
+    assert offsets_ba["a"] == {"x": 1.0, "y": 2.0}
+
+
+# --------------------------------------------------------------------------- #
 # load_generator_report_arg() -- path-or-inline duality
 # --------------------------------------------------------------------------- #
 
@@ -219,6 +259,257 @@ def test_compose_rejects_negative_spacing(tmp_path, pdk_root):
                 "placement": {"strategy": "row", "order": ["r"], "spacing_um": -1.0},
             }
         )
+
+
+# --------------------------------------------------------------------------- #
+# compose() -- "explicit" placement.strategy request-shape validation (#321)
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_explicit_rejects_missing_origin_for_order_id(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    with pytest.raises(GenComposeError, match="origins_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": r1},
+                    {"id": "b2", "generator_report": r2},
+                ],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1", "b2"],
+                    "origins_um": {"b1": {"x": 0.0, "y": 0.0}},
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_rejects_origin_for_id_not_in_order(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="origins_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "origins_um": {
+                        "b1": {"x": 0.0, "y": 0.0},
+                        "unknown": {"x": 1.0, "y": 1.0},
+                    },
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_rejects_non_numeric_origin_fields(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="origins_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "origins_um": {"b1": {"x": "0.0", "y": 0.0}},
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_rejects_missing_origins_um_entirely(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="origins_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {"strategy": "explicit", "order": ["b1"]},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_ignores_spacing_um_when_present(tmp_path, pdk_root):
+    # placement.spacing_um alongside strategy: "explicit" must not error --
+    # it is simply unused (Acceptance Criteria / Test Plan edge case).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "explicit_with_spacing.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": r1}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1"],
+                "origins_um": {"b1": {"x": 5.0, "y": -3.0}},
+                "spacing_um": 999.0,
+            },
+            "options": {"cell_name": "explicit_0", "output": str(output)},
+        }
+    )
+    assert report["blocks"][0]["offset_um"] == {"x": 5.0, "y": -3.0}
+
+
+def test_compose_explicit_allows_overlapping_origins(tmp_path, pdk_root):
+    # Overlapping/abutting explicit origins are not validated by gen-compose
+    # itself -- geometry is advisory, klt drc is the rule-compliance
+    # authority (Acceptance Criteria). Composing two blocks at the identical
+    # origin must succeed, not raise.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    output = tmp_path / "overlap.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": {
+                    "b1": {"x": 0.0, "y": 0.0},
+                    "b2": {"x": 0.0, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "overlap_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["blocks"][0]["offset_um"] == {"x": 0.0, "y": 0.0}
+    assert report["blocks"][1]["offset_um"] == {"x": 0.0, "y": 0.0}
+
+
+def test_compose_explicit_places_three_blocks_at_non_collinear_origins(
+    tmp_path, pdk_root
+):
+    # Integration test: an L-shaped floorplan (non-collinear (x, y) origins)
+    # -- confirms the composed bbox_um is the union of each block's own bbox
+    # translated by its declared origin, not a computed row.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")  # bbox: (0,0)-(~2, w)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    r3 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r3")
+
+    origins = {
+        "a": {"x": 0.0, "y": 0.0},
+        "b": {"x": 0.0, "y": 50.0},
+        "c": {"x": 50.0, "y": 25.0},
+    }
+    output = tmp_path / "l_shape.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "a", "generator_report": r1},
+                {"id": "b", "generator_report": r2},
+                {"id": "c", "generator_report": r3},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["a", "b", "c"],
+                "origins_um": origins,
+            },
+            "options": {"cell_name": "l_shape_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    for block_id in ("a", "b", "c"):
+        entry = next(b for b in report["blocks"] if b["id"] == block_id)
+        assert entry["offset_um"] == origins[block_id]
+
+    expected_bbox = _union_bbox(
+        [
+            _translate_bbox(r["bbox_um"], origins[block_id])
+            for block_id, r in (("a", r1), ("b", r2), ("c", r3))
+        ]
+    )
+    assert report["bbox_um"] == pytest.approx(expected_bbox)
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    assert layout.cell("l_shape_0") is not None
+
+
+def test_compose_explicit_routes_net_with_vertical_jog(tmp_path, pdk_root):
+    # Acceptance Criteria: a connectivity[] net between two blocks placed at
+    # explicit, non-collinear (x, y) positions routes correctly through the
+    # existing manhattan_backbone/route_two_pin path, including a case where
+    # the jog direction is *vertical* rather than horizontal. resistor_strip's
+    # P2 (east-facing, direction_deg=0) and P1 (west-facing, direction_deg=180)
+    # are both x-facing, so placing b2 to b1's east *and* north forces
+    # manhattan_backbone's "both horizontal" branch to draw a vertical jog
+    # (see manhattan_backbone's docstring/test_manhattan_backbone_z_jog_...).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+
+    b1_x1 = r1["bbox_um"]["x1"]
+    # Enough horizontal channel for the routing width (0.17um) plus a large
+    # vertical offset so the jog is unambiguously vertical, not a straight
+    # horizontal span.
+    origins_um = {
+        "b1": {"x": 0.0, "y": 0.0},
+        "b2": {"x": b1_x1 + 3.0, "y": 20.0},
+    }
+    output = tmp_path / "vertical_jog.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": origins_um,
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "b1", "port": "P2"},
+                        {"block": "b2", "port": "P1"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "vjog_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert report["unrouted_nets"] == []
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("vjog_0")
+    li1 = layout.layer(67, 20)
+    paths = [s for s in top.shapes(li1).each() if s.is_path()]
+    assert len(paths) == 1
+    points = [
+        (pt.x * layout.dbu, pt.y * layout.dbu) for pt in paths[0].path.each_point()
+    ]
+    # A vertical jog means at least one interior segment shares an x with its
+    # neighbour but differs in y (as opposed to a purely horizontal span).
+    has_vertical_segment = any(
+        abs(p0[0] - p1[0]) < 1e-6 and abs(p0[1] - p1[1]) > 1e-6
+        for p0, p1 in zip(points, points[1:], strict=False)
+    )
+    assert has_vertical_segment
 
 
 def test_compose_rejects_connectivity_unknown_block(tmp_path, pdk_root):
@@ -1209,6 +1500,42 @@ def test_cli_gen_compose_json(tmp_path, pdk_root, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["schema_version"] == 1
     assert data["cell_name"] == "cli_composed"
+    assert output.is_file()
+
+
+def test_cli_gen_compose_explicit_placement_json(tmp_path, pdk_root, capsys):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2")
+    request_path = tmp_path / "request.json"
+    output = tmp_path / "cli_explicit.gds"
+    request_path.write_text(
+        json.dumps(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "r1", "generator_report": r1},
+                    {"id": "r2", "generator_report": r2},
+                ],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["r1", "r2"],
+                    "origins_um": {
+                        "r1": {"x": 0.0, "y": 0.0},
+                        "r2": {"x": 10.0, "y": 5.0},
+                    },
+                },
+                "options": {"cell_name": "cli_explicit", "output": str(output)},
+            }
+        )
+    )
+
+    exit_code = main(["gen-compose", str(request_path), "--format", "json"])
+    assert exit_code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["schema_version"] == 1
+    assert data["cell_name"] == "cli_explicit"
+    r2_block = next(b for b in data["blocks"] if b["id"] == "r2")
+    assert r2_block["offset_um"] == {"x": 10.0, "y": 5.0}
     assert output.is_file()
 
 

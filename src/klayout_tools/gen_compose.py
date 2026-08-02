@@ -16,13 +16,18 @@ a first implementing epic" settles this phase's scope: ``placement.strategy:
 
 Scope (phase 2, this module's current state):
 
-* **Placement** (from phase 1, unchanged): resolve each ``blocks[]`` entry's
-  own ``generator_report`` (a ``klt gen`` response, given as a file path or
-  inline object -- see :func:`load_generator_report_arg`), compute a single
-  horizontal row placement from each block's own reported ``bbox_um`` plus
-  ``placement.spacing_um`` (see :func:`compute_row_offsets`), and write a
-  composed GDS with each block's own top cell instantiated as a translated
-  sub-cell instance under one new top cell.
+* **Placement**: resolve each ``blocks[]`` entry's own ``generator_report``
+  (a ``klt gen`` response, given as a file path or inline object -- see
+  :func:`load_generator_report_arg`), then compute each block's ``offset_um``
+  per ``placement.strategy`` -- either a single horizontal row placement from
+  each block's own reported ``bbox_um`` plus ``placement.spacing_um``
+  (``"row"``, see :func:`compute_row_offsets`) or a caller-declared
+  ``placement.origins_um`` per block id (``"explicit"``, see
+  :func:`resolve_explicit_offsets`, #321) -- and write a composed GDS with
+  each block's own top cell instantiated as a translated sub-cell instance
+  under one new top cell. ``"explicit"`` placement supports no orientation
+  (rotation) and performs no overlap validation of its own -- see
+  :func:`resolve_explicit_offsets`'s docstring.
 * **Routing** (new this phase): for every 2-pin ``connectivity[]`` net, draw
   a Manhattan metal path (backbone -> corner bends -> straight fill; see
   :func:`manhattan_backbone`) between the two named ports on the resolved
@@ -79,9 +84,13 @@ REQUEST_SCHEMA = "klt.gen_compose.request/1"
 #: response JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: Placement strategies implemented at this phase. ``"grid"`` is spike-scoped
-#: for a later phase (see ``docs/design/gen-composition-spike.md`` section 5).
-SUPPORTED_PLACEMENT_STRATEGIES = {"row"}
+#: Placement strategies implemented at this phase. ``"row"`` computes a
+#: single horizontal row from each block's own ``bbox_um`` plus a shared
+#: ``spacing_um``; ``"explicit"`` instead takes a caller-declared per-block
+#: origin (``placement.origins_um``, #321) -- see :func:`resolve_explicit_offsets`.
+#: ``"grid"`` is spike-scoped for a later phase (see
+#: ``docs/design/gen-composition-spike.md`` section 5).
+SUPPORTED_PLACEMENT_STRATEGIES = {"row", "explicit"}
 
 #: Unit outward vector (dx, dy) for each orthogonal ``direction_deg`` a
 #: ``klt gen`` port reports. Ports only ever face an axis (0/90/180/270 --
@@ -179,6 +188,39 @@ def compute_row_offsets(
         offsets[block_id] = {"x": offset_x, "y": 0.0}
         cursor_x1 = bbox["x1"] + offset_x
     return offsets
+
+
+def resolve_explicit_offsets(
+    order: list[str], origins_um: dict[str, dict[str, float]]
+) -> dict[str, dict[str, float]]:
+    """Compute each block's ``offset_um`` for ``placement.strategy: "explicit"``
+    (#321).
+
+    Unlike :func:`compute_row_offsets`, a block's own ``bbox_um`` plays no
+    role here at all -- ``origins_um[block_id]`` *is* the block's
+    ``offset_um`` directly, applied by :func:`_translate_bbox` exactly the
+    same way a ``"row"`` offset is (added straight to ``bbox_um``'s
+    x0/y0/x1/y1). This mirrors how ``compute_row_offsets`` already treats the
+    first block's ``offset_um`` as ``{0, 0}`` regardless of that block's own
+    ``bbox_um.x0`` (which need not be ``0`` -- e.g. a guard-ringed block's
+    bbox can extend to negative coordinates): an explicit origin translates a
+    block's bbox by exactly that amount, it does not force the bbox's own
+    ``(x0, y0)`` corner to land exactly on the declared origin.
+
+    ``origins_um`` maps every block ``id`` in ``order`` to its own
+    ``{"x": float, "y": float}`` origin (already validated by
+    :func:`_parse_placement` -- every id in ``order`` has exactly one entry,
+    no extras). Returns a dict mapping each ``id`` in ``order`` to its
+    ``offset_um``.
+
+    Orientation (rotation) is out of scope -- an explicit origin is a
+    translation only, exactly like ``"row"``. Overlapping or abutting
+    origins are not validated here either -- consistent with this module's
+    "geometry is advisory" philosophy (see the module docstring): a
+    caller-declared overlap is legal input, and ``klt drc`` remains the
+    rule-compliance authority on the composed output.
+    """
+    return {block_id: dict(origins_um[block_id]) for block_id in order}
 
 
 def _translate_bbox(
@@ -283,9 +325,70 @@ def _parse_blocks(raw_blocks: Any) -> dict[str, dict[str, Any]]:
     return blocks
 
 
+def _parse_explicit_origins(
+    raw_origins: Any, order: list[str]
+) -> dict[str, dict[str, float]]:
+    """Parse and validate ``placement.origins_um`` for ``strategy: "explicit"``
+    (#321).
+
+    ``raw_origins`` must be a JSON object whose key set equals ``order``
+    exactly (same shape of check :func:`_parse_placement` already applies to
+    ``order`` vs. ``blocks[].id`` -- a missing, extra, or unknown id is an
+    application error), each value a ``{"x": number, "y": number}`` pair.
+    Returns a dict mapping each ``id`` in ``order`` to its parsed
+    ``{"x": float, "y": float}`` origin.
+    """
+    if not isinstance(raw_origins, dict):
+        raise GenComposeError(
+            "request.placement.origins_um must be a JSON object mapping "
+            "every placement.order id to a {x, y} origin when strategy is "
+            "'explicit'"
+        )
+
+    order_ids = set(order)
+    if set(raw_origins) != order_ids or len(raw_origins) != len(order_ids):
+        raise GenComposeError(
+            "request.placement.origins_um must have exactly one entry for "
+            "every placement.order id (no missing or extra/unknown ids)"
+        )
+
+    origins: dict[str, dict[str, float]] = {}
+    for block_id in order:
+        raw_origin = raw_origins[block_id]
+        if not isinstance(raw_origin, dict):
+            raise GenComposeError(
+                f"request.placement.origins_um['{block_id}'] must be a JSON "
+                "object with numeric x/y fields"
+            )
+        x = raw_origin.get("x")
+        y = raw_origin.get("y")
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, (int, float))
+            or not isinstance(y, (int, float))
+        ):
+            raise GenComposeError(
+                f"request.placement.origins_um['{block_id}'] must have "
+                "numeric x/y fields"
+            )
+        origins[block_id] = {"x": float(x), "y": float(y)}
+
+    return origins
+
+
 def _parse_placement(
     raw_placement: Any, block_ids: set[str]
-) -> tuple[str, list[str], float]:
+) -> tuple[str, list[str], float, dict[str, dict[str, float]] | None]:
+    """Parse and validate ``request.placement``.
+
+    Returns ``(strategy, order, spacing_um, origins_um)``. ``spacing_um`` is
+    ``0.0`` (unused) and ``origins_um`` is ``None`` for ``strategy: "row"``;
+    conversely ``origins_um`` is a parsed dict and ``spacing_um`` is not read
+    from the request at all for ``strategy: "explicit"`` (#321) --
+    ``placement.spacing_um`` alongside an ``"explicit"`` strategy is simply
+    ignored, not rejected.
+    """
     if not isinstance(raw_placement, dict):
         raise GenComposeError("request.placement must be a JSON object")
 
@@ -312,6 +415,10 @@ def _parse_placement(
             "request.placement.order must contain every blocks[].id exactly once"
         )
 
+    if strategy == "explicit":
+        origins_um = _parse_explicit_origins(raw_placement.get("origins_um"), order)
+        return strategy, order, 0.0, origins_um
+
     spacing_um = raw_placement.get("spacing_um", 0.0)
     if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
         raise GenComposeError("request.placement.spacing_um must be a number")
@@ -319,7 +426,7 @@ def _parse_placement(
     if spacing_um < 0:
         raise GenComposeError("request.placement.spacing_um must be >= 0")
 
-    return strategy, order, spacing_um
+    return strategy, order, spacing_um, None
 
 
 def _validate_block_port(
@@ -1054,7 +1161,7 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         raise GenComposeError(str(exc)) from exc
 
     blocks = _parse_blocks(request.get("blocks"))
-    _strategy, order, spacing_um = _parse_placement(
+    strategy, order, spacing_um, origins_um = _parse_placement(
         request.get("placement"), set(blocks)
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
@@ -1075,7 +1182,11 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
         raise GenComposeError(f"output directory does not exist: {output_dir}")
 
     bboxes_um = {block_id: block["bbox_um"] for block_id, block in blocks.items()}
-    offsets_um = compute_row_offsets(order, bboxes_um, spacing_um)
+    if strategy == "row":
+        offsets_um = compute_row_offsets(order, bboxes_um, spacing_um)
+    else:
+        assert origins_um is not None  # guaranteed by _parse_placement for "explicit"
+        offsets_um = resolve_explicit_offsets(order, origins_um)
 
     placed_bboxes_um = {
         block_id: _translate_bbox(bboxes_um[block_id], offsets_um[block_id])
@@ -1236,11 +1347,14 @@ def compose(request: dict[str, Any]) -> dict[str, Any]:
     matched_groups = _collect_matched_groups(blocks, order)
 
     min_spacing_um: float | None = None
-    if connectivity:
-        # Placement always applies spacing_um between adjacent blocks; routing
-        # adds no spacing tighter than that at this phase (routes run through
-        # the placed channels), so the tightest spacing actually used is the
-        # placement gap. Left null when nothing was routed (phase-1 behaviour).
+    if connectivity and strategy == "row":
+        # "row" placement always applies spacing_um between adjacent blocks;
+        # routing adds no spacing tighter than that at this phase (routes run
+        # through the placed channels), so the tightest spacing actually used
+        # is the placement gap. Left null when nothing was routed (phase-1
+        # behaviour), and also left null for "explicit" placement (#321) --
+        # there is no single shared spacing value to report (per-pair
+        # separation is exactly what a caller-declared origin expresses).
         min_spacing_um = spacing_um
 
     response_blocks = [
