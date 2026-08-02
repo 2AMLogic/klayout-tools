@@ -204,6 +204,16 @@ def run_lvs(request_path: str) -> dict[str, Any]:
 
     logger = _make_compare_logger()
     comparer = kdb.NetlistComparer(logger)
+    # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
+    # `layout_circuit`/`reference_circuit` are each netlist's *sole*
+    # remaining top circuit, so these two are unambiguously the pair the
+    # request declared -- pin that pairing explicitly instead of leaving it
+    # to `NetlistComparer`'s default name-based matching, which silently
+    # degrades to a generic "could not be matched to a counterpart" finding
+    # on both sides whenever `layout.top`/`reference.top` name different
+    # circuits (issue #231). Safe unconditionally: there is no other
+    # circuit either one could be confused with post-pruning.
+    comparer.same_circuits(layout_circuit, reference_circuit)
     _apply_hints(
         comparer, request.get("hints") or {}, layout_circuit, reference_circuit
     )

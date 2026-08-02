@@ -335,6 +335,43 @@ def test_auto_selected_top_matches_explicit_top(tmp_path):
     assert report["top"] == "INV"  # NetlistSpiceReader uppercases circuit names
 
 
+def test_differently_named_tops_still_report_specific_mismatch(tmp_path):
+    """Issue #231: `layout.top`/`reference.top` naming *different* circuits
+    must not degrade the report to two generic ``topology`` "could not be
+    matched to a counterpart" entries -- the request document already
+    declares these two circuits as the pair to compare, so `run_lvs` must
+    pin that pairing (`NetlistComparer.same_circuits`) instead of leaving it
+    to the comparer's own by-name matching. Same deliberate defect as
+    `test_device_width_change_reports_device_property_mismatch` (a width
+    change, no topology change), just with differently-named tops on each
+    side."""
+    layout_spice = _INVERTER_SPICE.replace(".subckt inv ", ".subckt inv_layout ")
+    reference_spice = _INVERTER_SPICE.replace(
+        ".subckt inv ", ".subckt inv_ref "
+    ).replace("W=1.0U", "W=2.0U")
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv_layout"},
+            "reference": {"netlist": reference_path, "top": "inv_ref"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["mismatch_count"] == 1
+    assert report["category_counts"] == {"device.property": 1}
+
+    (entry,) = report["mismatches"]
+    assert entry["category"] == "device.property"
+    for mismatch in report["mismatches"]:
+        assert (
+            mismatch["description"] != "circuit could not be matched to a counterpart"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # device.property (curator negative control #2: width change, no topology change)
 # --------------------------------------------------------------------------- #
