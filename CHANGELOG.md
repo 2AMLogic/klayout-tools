@@ -58,3 +58,17 @@ version. Not an exhaustive commit-by-commit log.
   hierarchy with cross-circuit net-name collisions. Purely additive (no
   `schema_version` bump) — see `docs/cli/lvs.md`'s `net_correspondence[]
   entries` subsection.
+- 2026-08-02 — `klt extract`: the "unmodelled device geometry" diagnostic
+  (#288/#299) no longer flags a recognised drawn resistor's own terminal
+  head (#324) — a poly component abutting a body region `_resolve_resistors`
+  already recognised is now excluded outright, the same way a real MOS gate
+  already was, removing a false positive that previously fired on any
+  resistor whose wide terminal head carries an ordinary (2+) contact array.
+  New top-level `unmodelled_poly[]` response field lists the bounding
+  box + `reason` (`"unmarked"` / `"marked_unrecognised"`) of every shape the
+  diagnostic still flags, alongside the existing prose `warnings[]` strings.
+  Purely additive (no `schema_version` bump) — see `docs/cli/extract.md`'s
+  "Known limitation: unmodelled device geometry" subsection. Ordinary poly
+  routing tracks sharing the same resistor-body signature remain a known,
+  documented false-positive class with a client-side filtering workaround
+  via `unmodelled_poly[]`.

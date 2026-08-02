@@ -265,6 +265,16 @@ def run_extract(
                 },
                 ...
             ],
+            "unmodelled_poly": [
+                {
+                    "bbox_um": {
+                        "left": float, "bottom": float,
+                        "right": float, "top": float,
+                    },
+                    "reason": "unmarked" | "marked_unrecognised",
+                },
+                ...
+            ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -314,6 +324,24 @@ def run_extract(
     Always a list, empty when the layout draws no reserved-layer geometry
     (byte-identical to the response before this field existed, other than
     the field's own presence).
+
+    ``unmodelled_poly`` (issue #324) reports every poly shape the
+    "unmodelled device" diagnostic flagged -- see
+    :func:`_detect_unmodelled_poly_bodies` for the exact signature it looks
+    for (a poly component touching no recognised MOS gate or recognised
+    resistor body, contacted at 2+ geometrically separate points) and
+    ``docs/cli/extract.md``'s "Known limitation: unmodelled device geometry"
+    for the heuristic's documented false-negative/false-positive surface.
+    One entry per flagged component, each ``{"bbox_um": {"left", "bottom",
+    "right", "top"}, "reason": "unmarked" | "marked_unrecognised"}`` --
+    ``reason`` distinguishes the two ``warnings`` cases (#288's "no marker at
+    all" versus #299's "carries a marker but no declared entry claims it")
+    without a consumer having to parse the prose warning string. Sorted by
+    ``(left, bottom)`` for deterministic, diff-clean output. Always a list,
+    empty whenever ``warnings`` carries no unmodelled-device entry (which
+    includes every layout that draws no such geometry at all) -- a consumer
+    can enumerate and triage the exact flagged shapes instead of
+    re-implementing the heuristic against the stream.
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
@@ -368,6 +396,7 @@ def run_extract(
         parasitic_nets,
         black_box_regions,
         dummy_devices_dropped,
+        unmodelled_poly,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -471,6 +500,10 @@ def run_extract(
         # draws no reserved-annotation-layer geometry -- see run_extract's
         # docstring for the field's full meaning.
         "black_box_regions": black_box_regions,
+        # Additive field (issue #324): always a list, empty when `warnings`
+        # carries no unmodelled-device entry -- see run_extract's docstring
+        # and `_detect_unmodelled_poly_bodies` for the field's full meaning.
+        "unmodelled_poly": unmodelled_poly,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -508,11 +541,12 @@ def extract_netlist_from_layout(
     list[dict[str, Any]] | None,
     list[dict[str, Any]],
     int,
+    list[dict[str, Any]],
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
-    black_box_regions, dummy_devices_dropped)``.
+    black_box_regions, dummy_devices_dropped, unmodelled_poly)``.
 
     ``top_cell_pins_only`` (issue #291): when ``True``, only labels drawn
     directly in the top cell are promoted to top-level pins -- a net named
@@ -572,6 +606,7 @@ def extract_netlist_from_layout(
         parasitic_nets,
         black_box_regions,
         dummy_devices_dropped,
+        unmodelled_poly,
     ) = _extract_netlist(
         layout, top_cell, deck, parasitics_deck, top_cell_pins_only=top_cell_pins_only
     )
@@ -583,6 +618,7 @@ def extract_netlist_from_layout(
         parasitic_nets,
         black_box_regions,
         dummy_devices_dropped,
+        unmodelled_poly,
     )
 
 
@@ -950,7 +986,9 @@ def _detect_unmodelled_poly_bodies(
     nfet_gate: kdb.Region,
     pfet_gate: kdb.Region,
     resistor_markers: kdb.Region | None = None,
-) -> list[str]:
+    resistor_bodies: kdb.Region | None = None,
+    dbu: float = 1.0,
+) -> tuple[list[str], list[dict[str, Any]]]:
     """Flag ``poly`` connected components that no MOS gate extractor claims
     and that touch ``contact`` at two or more geometrically separate
     locations -- the resistor-body signature (issue #288).
@@ -982,7 +1020,14 @@ def _detect_unmodelled_poly_bodies(
     legitimate poly-contacted gate strap) or ordinary poly routing between
     two recognised gates (poly needs no via to route on itself, so both
     ends of such a run are one merged polygon together with the gates
-    themselves), never a candidate unmodelled-device body.
+    themselves), never a candidate unmodelled-device body. It is likewise
+    skipped unconditionally if it touches ``resistor_bodies`` (issue #324) --
+    the recognised body regions ``_resolve_resistors`` already cut out of
+    ``poly`` -- since a poly component *abutting* one of those bodies is that
+    resistor's own terminal head, by construction: the head survives as a
+    separate connected component once its body is subtracted, and legitimately
+    carries a normal (2+) contact array with no device-recognition gap behind
+    it at all.
 
     ``resistor_markers`` (issue #299) is the union of every ``ResistorDevice``
     marker layer this deck declares on ``poly`` (regardless of any
@@ -1000,29 +1045,69 @@ def _detect_unmodelled_poly_bodies(
     flagged component as unmarked, matching this function's behaviour before
     #299.
 
-    Returns a list with up to two warning strings (empty when nothing is
-    flagged) -- at most one for unmarked shapes and one for marked-but-
-    unrecognised ones -- each naming how many components were flagged and
-    pointing at the documented limitation rather than guessing a device
-    name.
+    ``resistor_bodies`` (issue #324) is the union of every *recognised*
+    ``ResistorDevice`` body region ``_resolve_resistors`` returned for this
+    layout (already narrowed by each entry's own ``requires``/``excludes``) --
+    distinct from ``resistor_markers`` above, which is the raw, unnarrowed
+    marker geometry. ``None`` (the default) skips no component on this basis,
+    matching this function's behaviour before #324.
+
+    ``dbu`` converts each flagged component's bounding box from database
+    units to micrometres for ``unmodelled_poly[]`` (see below); defaults to
+    ``1.0`` (i.e. no conversion) for callers that only need the warning
+    strings.
+
+    Returns ``(warnings, unmodelled_poly)``. ``warnings`` has up to two
+    strings (empty when nothing is flagged) -- at most one for unmarked
+    shapes and one for marked-but-unrecognised ones -- each naming how many
+    components were flagged and pointing at the documented limitation rather
+    than guessing a device name. ``unmodelled_poly`` (issue #324) is one
+    entry per flagged component -- ``{"bbox_um": {"left", "bottom", "right",
+    "top"}, "reason": "unmarked" | "marked_unrecognised"}`` -- sorted by
+    ``(left, bottom)`` for deterministic output, so a consumer can enumerate
+    and triage the exact flagged shapes instead of re-deriving them by
+    re-implementing this heuristic against the stream. Always a list, empty
+    when ``warnings`` is empty.
     """
     import klayout.db as kdb
 
     gate_regions = nfet_gate + pfet_gate
+    bodies = resistor_bodies if resistor_bodies is not None else kdb.Region()
     markers = resistor_markers if resistor_markers is not None else kdb.Region()
     unmarked = 0
     marked_unrecognised = 0
+    unmodelled_poly: list[dict[str, Any]] = []
     for component in poly.merged().each():
         candidate = kdb.Region(component)
         if not candidate.interacting(gate_regions).is_empty():
+            continue
+        if not candidate.interacting(bodies).is_empty():
             continue
         contact_clusters = (candidate & contact).merged().count()
         if contact_clusters < _UNMODELLED_POLY_MIN_CONTACT_CLUSTERS:
             continue
         if candidate.interacting(markers).is_empty():
             unmarked += 1
+            reason = "unmarked"
         else:
             marked_unrecognised += 1
+            reason = "marked_unrecognised"
+        box = component.bbox()
+        unmodelled_poly.append(
+            {
+                "bbox_um": {
+                    "left": round(box.left * dbu, _PARAM_PRECISION_UM),
+                    "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
+                    "right": round(box.right * dbu, _PARAM_PRECISION_UM),
+                    "top": round(box.top * dbu, _PARAM_PRECISION_UM),
+                },
+                "reason": reason,
+            }
+        )
+
+    unmodelled_poly.sort(
+        key=lambda entry: (entry["bbox_um"]["left"], entry["bbox_um"]["bottom"])
+    )
 
     warnings: list[str] = []
     if unmarked:
@@ -1048,7 +1133,7 @@ def _detect_unmodelled_poly_bodies(
             "interconnect as an unintended short -- see docs/cli/extract.md's "
             "'Known limitation: unmodelled device geometry'."
         )
-    return warnings
+    return warnings, unmodelled_poly
 
 
 def _extract_netlist(
@@ -1063,6 +1148,7 @@ def _extract_netlist(
     list[dict[str, Any]] | None,
     list[dict[str, Any]],
     int,
+    list[dict[str, Any]],
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -1073,7 +1159,7 @@ def _extract_netlist(
     ``drc.py`` uses -- see ``docs/cli/extract.md``'s limitation note.
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
-    dummy_devices_dropped)``.
+    dummy_devices_dropped, unmodelled_poly)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
@@ -1086,6 +1172,10 @@ def _extract_netlist(
     ``dummy_devices_dropped`` is the number of MOS gates suppressed by the
     deck's optional ``dummy`` marker layer (issue #295), ``0`` when no
     ``dummy`` layer is configured or no dummy geometry is drawn.
+    ``unmodelled_poly`` is the JSON response's field (issue #324) -- see
+    :func:`_detect_unmodelled_poly_bodies` -- always a list, one entry per
+    poly component flagged by the unmodelled-device diagnostic, empty when
+    ``warnings`` carries no unmodelled-device entry.
     """
     import klayout.db as kdb
 
@@ -1160,7 +1250,8 @@ def _extract_netlist(
     pfet_sd = pfet_active - poly
 
     # Unmodelled-device diagnostic (issue #288, split by marker presence in
-    # #299): computed against `poly` as it stands right here -- *after*
+    # #299, resistor-body/routing false positives narrowed in #324):
+    # computed against `poly` as it stands right here -- *after*
     # `_resolve_resistors` has already cut out every resistor body this deck
     # *does* recognise, and *before* the blanket `l2n.connect(poly, contact)`
     # (and friends) below absorbs whatever is left into ordinary
@@ -1169,12 +1260,27 @@ def _extract_netlist(
     # own `requires`/`excludes`), letting the heuristic tell a "carries a
     # marker this deck knows about, but requires/excludes ruled it out" gap
     # apart from "carries no marker at all" -- see the function's docstring.
+    # `poly_resistor_bodies` is the union of every *recognised* resistor body
+    # `_resolve_resistors` returned above (already narrowed by
+    # requires/excludes) -- a poly component abutting one of these is that
+    # resistor's own terminal head, by construction, so it must never be
+    # flagged as a candidate unmodelled-device body (issue #324).
     poly_resistor_markers = kdb.Region()
     for spec in deck.resistors:
         if spec.body == deck.poly:
             poly_resistor_markers += _region(layout, top_cell, spec.marker)
-    unmodelled_device_warnings = _detect_unmodelled_poly_bodies(
-        poly, contact, nfet_gate, pfet_gate, poly_resistor_markers
+    poly_resistor_bodies = kdb.Region()
+    for spec, body, _terminal in resistors:
+        if spec.body == deck.poly:
+            poly_resistor_bodies += body
+    unmodelled_device_warnings, unmodelled_poly = _detect_unmodelled_poly_bodies(
+        poly,
+        contact,
+        nfet_gate,
+        pfet_gate,
+        poly_resistor_markers,
+        poly_resistor_bodies,
+        layout.dbu,
     )
 
     # Dummy-device suppression (issue #295): a deck may declare an optional
@@ -1551,6 +1657,7 @@ def _extract_netlist(
         parasitic_nets,
         black_box_regions,
         dummy_devices_dropped,
+        unmodelled_poly,
     )
 
 

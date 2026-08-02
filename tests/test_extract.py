@@ -1558,6 +1558,85 @@ def test_unmarked_poly_bar_triggers_unmodelled_device_warning(tmp_path, deck_nam
     assert "docs/cli/extract.md" in report["warnings"][0]
 
 
+def test_unmodelled_poly_field_reports_bbox_and_reason_when_flagged(tmp_path):
+    """Issue #324: the structured `unmodelled_poly` field lists the exact
+    flagged shape (bbox + which of the two `warnings` cases it fell under)
+    alongside the prose warning, so a consumer can enumerate and triage the
+    flagged set without re-deriving it by re-implementing the heuristic
+    against the stream."""
+    path = _write_gds(
+        _make_poly_resistor_layout("sky130", marked=False),
+        tmp_path / "unmarked_bar.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "unmarked_bar.spice"))
+
+    assert len(report["warnings"]) == 1
+    unmodelled_poly = report["unmodelled_poly"]
+    assert len(unmodelled_poly) == 1
+    entry = unmodelled_poly[0]
+    assert entry["reason"] == "unmarked"
+    # The whole 12 um bar is one merged poly component (no marker to cut a
+    # body out of it), so its bbox is the bar's full extent.
+    assert entry["bbox_um"] == {
+        "left": pytest.approx(0.0),
+        "bottom": pytest.approx(0.0),
+        "right": pytest.approx(12.0),
+        "top": pytest.approx(1.0),
+    }
+
+
+def test_unmodelled_poly_field_empty_when_no_warning_fires(tmp_path):
+    """`unmodelled_poly` is an empty list -- not omitted -- whenever the
+    diagnostic flags nothing, the same additive-field contract
+    `black_box_regions` established (issue #293)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["warnings"] == []
+    assert report["unmodelled_poly"] == []
+
+
+@pytest.mark.parametrize(
+    ("deck_name", "contact_layer", "metal_layer"),
+    [("sky130", (66, 44), (67, 20)), ("gf180mcu", (33, 0), (34, 0))],
+)
+def test_resistor_head_multi_contact_array_does_not_trigger_unmodelled_warning(
+    tmp_path, deck_name, contact_layer, metal_layer
+):
+    """False-positive class 2 from the issue: a *recognised* resistor's own
+    terminal head, contacted at 2+ geometrically separate points (ordinary
+    practice for a wide head), must not be flagged as an unmodelled device
+    body. Once its body is cut out by `_resolve_resistors`, the head is a
+    lone poly component that abuts the recognised body -- that abutment
+    alone identifies it as this resistor's own terminal, not a missing
+    device, no matter how many contacts land on it."""
+    layout = _make_poly_resistor_layout(
+        deck_name,
+        extra=(
+            # A second contact/metal pad on the *same* head as "RB"
+            # (9000..12000), well clear of the existing one at x=10500 --
+            # an ordinary wide-head layout, not a second device.
+            (contact_layer[0], contact_layer[1], kdb.Box(9400, 400, 9600, 600)),
+            (metal_layer[0], metal_layer[1], kdb.Box(9200, 200, 9800, 800)),
+        ),
+    )
+    path = _write_gds(layout, tmp_path / f"{deck_name}_multi_contact_head.gds")
+    report = run_extract(
+        path,
+        deck_name,
+        output=str(tmp_path / f"{deck_name}_multi_contact_head.spice"),
+    )
+
+    # The resistor still extracts correctly -- the extra contact is just a
+    # second landing pad on the same "RB" terminal.
+    assert report["device_count"] == 1
+    (device,) = report["devices"]
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+    # ...and no longer trips the unmodelled-device diagnostic.
+    assert report["warnings"] == []
+    assert report["unmodelled_poly"] == []
+
+
 def _make_mixed_unmodelled_poly_layout() -> kdb.Layout:
     """Two independent resistor-shaped `sky130` poly bars, well clear of
     each other, each contacted at two separate points and touching no MOS
@@ -1610,6 +1689,22 @@ def test_unmodelled_poly_warning_distinguishes_marked_from_unmarked(tmp_path):
     assert "1 poly-layer shape" in unmarked[0]
     assert len(coverage_gap) == 1
     assert "1 poly-layer shape" in coverage_gap[0]
+
+
+def test_unmodelled_poly_field_distinguishes_marked_from_unmarked(tmp_path):
+    """The structured `unmodelled_poly` field (issue #324) carries the same
+    unmarked/marked-but-unrecognised split as `warnings` -- one entry per
+    flagged shape, each tagged with its own `reason`."""
+    path = _write_gds(_make_mixed_unmodelled_poly_layout(), tmp_path / "mixed.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mixed.spice"))
+
+    unmodelled_poly = report["unmodelled_poly"]
+    assert len(unmodelled_poly) == 2
+    reasons = {entry["reason"] for entry in unmodelled_poly}
+    assert reasons == {"unmarked", "marked_unrecognised"}
+    # Sorted by (left, bottom) -- deterministic, diff-clean output.
+    lefts = [entry["bbox_um"]["left"] for entry in unmodelled_poly]
+    assert lefts == sorted(lefts)
 
 
 def _make_poly_gate_strap_layout(top_name: str = "TOP") -> kdb.Layout:

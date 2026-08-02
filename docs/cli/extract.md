@@ -394,7 +394,7 @@ Three consequences worth knowing:
   unmarked geometry; see "Known limitation: unmodelled device geometry"
   below.
 
-### Known limitation: unmodelled device geometry (issue #288)
+### Known limitation: unmodelled device geometry (issue #288, #324)
 
 Every layer this deck reads (`active`, `poly`, `nwell`, `contact`, `metals`,
 ...) is a **connectivity layer**, wired up unconditionally by
@@ -427,7 +427,15 @@ sharing poly + contact that no MOS gate extractor claims. Specifically,
   unconditionally), **and**
 - it touches `contact` at two or more geometrically separate locations (the
   resistor-body signature: a two-terminal segment contacted at each end,
-  distinct from a routing run with a single landing pad).
+  distinct from a routing run with a single landing pad), **and**
+- it does not touch a region this deck's own drawn-resistor recognition
+  (`_resolve_resistors`) already **recognised** as a resistor body on this
+  layout (issue #324). Once a resistor body is recognised, its two heads
+  survive as separate `poly` components with the body cut out from between
+  them — a head with an ordinary (2+) contact array on a wide terminal
+  therefore abuts the very body region the deck just extracted correctly,
+  and is that resistor's own terminal, not a candidate unmodelled-device
+  body, no matter how many contacts land on it.
 
 Since issue #299, a flagged component is further split by whether it
 overlaps *any* of the active deck's declared `ResistorDevice.marker` layers
@@ -469,6 +477,30 @@ yet extract, and track the omission separately, until the device class is
 added to the deck. (The narrower case of a *deliberately non-functional*
 device — a drawn dummy — is now handled directly by the `dummy` marker layer
 described next, rather than left to this heuristic.)
+
+**Enumerating the flagged shapes (issue #324).** Alongside the prose
+`warnings[]` strings, the JSON response's `unmodelled_poly[]` field (see
+"JSON schema" above) lists the exact flagged shapes — one entry per
+component, each `{"bbox_um", "reason"}` — so a consumer can enumerate and
+triage the flagged set once (e.g. "these N are known routing tracks, assert
+the count doesn't grow") instead of re-deriving it by re-implementing this
+heuristic against the stream.
+
+**Remaining known limitation: ordinary poly routing (issue #324).** The
+heuristic still has no signal distinguishing a resistor-shaped **routing
+track** from an actual unmodelled resistor body: on a layout whose signal
+routing is deliberately drawn on `poly` (e.g. a one-metal-level analog cell),
+every track contacted at both ends and touching no gate trips the same
+signature as a real missing device, and the false-positive count can
+dominate the true-positive count. There is no server-side fix for this today
+— tightening the signature (e.g. an aspect-ratio floor, or a "no more than 2
+contact clusters" ceiling to separate a two-terminal body from a track that
+fans out to every device on its net) is deliberately deferred pending
+validation against more than one deck/layout. The interim workaround is
+client-side: use `unmodelled_poly[]`'s bounding boxes to filter out shapes
+already known to be routing (by inspection, by contact-cluster count, or by
+aspect ratio) and assert only on what remains, or track the *change* in the
+filtered count across revisions rather than gating on its absolute value.
 
 ### Dummy devices: the `dummy` marker layer (issue #295)
 
@@ -859,6 +891,7 @@ exit codes).
   "nets": [{ "name": "A", "pin": true, "device_count": 2 }],
   "warnings": [],
   "black_box_regions": [],
+  "unmodelled_poly": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -893,6 +926,7 @@ exit codes).
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
 | `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
+| `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash. |

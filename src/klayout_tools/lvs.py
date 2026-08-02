@@ -536,7 +536,9 @@ def _resolve_layout(
             # return (dummy_devices_dropped, #295) is a report-only count
             # surfaced by `klt extract`; the compare only cares that dummy
             # gates never became devices, which the suppression already
-            # guarantees.
+            # guarantees. The 8th return (unmodelled_poly, #324) is likewise a
+            # report-only structured view of `klt extract`'s own warnings,
+            # not surfaced in `klt lvs`'s response.
             (
                 netlist,
                 top_cell_name,
@@ -545,6 +547,7 @@ def _resolve_layout(
                 _parasitics,
                 _black_box_regions,
                 _dummy,
+                _unmodelled_poly,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,
