@@ -463,6 +463,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             ),
         ),
         "mismatches": mismatches,
+        "net_correspondence": _build_net_correspondence(logger),
     }
 
 
@@ -811,6 +812,48 @@ def _name_or_none(obj: Any) -> str | None:
     return None
 
 
+def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
+    """Turn ``logger.net_matches`` (every successful net pairing the
+    comparer produced -- unambiguous and ambiguous alike) into the
+    documented ``net_correspondence[]`` response field (issue #311).
+
+    Each entry names the layout net and its reference counterpart via
+    :func:`_name_or_none` (``expanded_name()``, the same helper
+    ``mismatches[].net`` already uses -- so a label-merged net's ``A|B``
+    alias join is represented identically here), plus a ``pin`` boolean:
+    whether the *layout* net is one of the circuit's declared pins
+    (``Net.pin_count() > 0``). ``same_circuits`` pins the layout/reference
+    top circuits together before the compare runs (see ``run_lvs``), so a
+    matched pair's declared-pin status agrees on both sides by
+    construction -- reading it off the layout side is not a side/bias
+    choice.
+
+    A net can only be matched once per circuit, but the comparer logs one
+    event per circuit scope; deduplicated on ``(layout name, reference
+    name)`` so a net appearing in a nested circuit does not doubly appear
+    under a same-named net at a different hierarchy level. Sorted by
+    ``(reference, layout)`` so repeated runs against the same inputs diff
+    clean, matching this module's existing determinism guarantee for
+    ``mismatches[]`` (see ``_sort_key``).
+    """
+    seen: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+    for layout_net, reference_net in logger.net_matches:
+        layout_name = _name_or_none(layout_net)
+        reference_name = _name_or_none(reference_net)
+        key = (layout_name, reference_name)
+        if key in seen:
+            continue
+        seen[key] = {
+            "layout": layout_name,
+            "reference": reference_name,
+            "pin": bool(layout_net is not None and layout_net.pin_count() > 0),
+        }
+    return sorted(
+        seen.values(),
+        key=lambda entry: (entry["reference"] or "", entry["layout"] or ""),
+    )
+
+
 def _make_compare_logger() -> Any:
     """Build a ``klayout.db.GenericNetlistCompareLogger`` subclass instance
     that captures every compare event into plain Python records for
@@ -836,6 +879,14 @@ def _make_compare_logger() -> Any:
             self.subcircuit_mismatches: list[tuple[Any, Any]] = []
             self.device_class_mismatches: list[tuple[Any, Any]] = []
             self.ambiguous_net_matches: list[tuple[Any, Any]] = []
+            #: Every successful net pairing (unambiguous *and* ambiguous), as
+            #: the raw ``(layout net, reference net)`` objects the comparer
+            #: handed the logger -- the accumulator issue #311's
+            #: ``net_correspondence`` response field is built from. Kept
+            #: separate from ``matched_net_keys`` (below), which only stores
+            #: the derived ``_NetKey`` identity used for the merge/split and
+            #: issue #282 heuristics, not the objects themselves.
+            self.net_matches: list[tuple[Any, Any]] = []
             # Scope counter: `begin_circuit` opens one compare scope per
             # circuit pair, and every event until `end_circuit` belongs to
             # it. Net/device names are unique within a circuit, so
@@ -868,6 +919,7 @@ def _make_compare_logger() -> Any:
             key_b = self._net_key(b)
             if key_a is not None and key_b is not None:
                 self.matched_net_keys.append((key_a, key_b))
+            self.net_matches.append((a, b))
 
         def match_ambiguous_nets(self, a: Any, b: Any, msg: str) -> None:
             self.matched_nets += 1
@@ -876,6 +928,7 @@ def _make_compare_logger() -> Any:
             if key_a is not None and key_b is not None:
                 self.matched_net_keys.append((key_a, key_b))
             self.ambiguous_net_matches.append((a, b))
+            self.net_matches.append((a, b))
 
         def net_mismatch(self, a: Any, b: Any, msg: str) -> None:
             self.net_mismatches.append((a, b))

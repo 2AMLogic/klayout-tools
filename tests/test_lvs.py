@@ -496,6 +496,124 @@ def test_clean_self_compare_reports_match(tmp_path):
     assert prov["deck"] is None
 
 
+def test_net_correspondence_lists_all_matched_nets_with_pin_flag(tmp_path):
+    """Issue #311: a clean match's ``net_correspondence`` names every
+    matched net pair. All four of `_INVERTER_SPICE`'s nets (`A`, `Y`,
+    `VPWR`, `VGND`) are declared pins of `.subckt inv`, so every entry's
+    `pin` is `True` and, since layout/reference share the same names here,
+    `layout` == `reference` on every entry."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    assert len(correspondence) == 4 == report["counts"]["nets"]["matched"]
+    assert {entry["reference"] for entry in correspondence} == {
+        "A",
+        "Y",
+        "VPWR",
+        "VGND",
+    }
+    for entry in correspondence:
+        assert entry["layout"] == entry["reference"]
+        assert entry["pin"] is True
+    # Sorted by (reference, layout) for determinism.
+    assert [entry["reference"] for entry in correspondence] == sorted(
+        entry["reference"] for entry in correspondence
+    )
+
+
+def test_net_correspondence_partial_on_mismatch(tmp_path):
+    """Issue #311: even on `status: "mismatch"`, `net_correspondence`
+    reports the pairs that *did* match -- here `A`/`B` (both sides keep
+    `R1`), while `C`/`D` never appear (the layout dropped `R2` entirely, so
+    those two nets have no counterpart to pair with)."""
+    reference_spice = """
+.subckt cell A B C D
+R1 A B 1k
+R2 C D 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell A B C D
+R1 A B 1k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "cell"},
+            "reference": {"netlist": reference_path, "top": "cell"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    correspondence = report["net_correspondence"]
+    assert {(e["layout"], e["reference"]) for e in correspondence} == {
+        ("A", "A"),
+        ("B", "B"),
+    }
+    assert all(entry["pin"] is True for entry in correspondence)
+
+
+def test_net_correspondence_includes_ambiguous_matches(tmp_path):
+    """Issue #311: an ambiguously-resolved net pairing (see
+    `test_same_nets_hint_resolves_an_otherwise_ambiguous_match`) is still a
+    real match the comparer made -- it must appear in `net_correspondence`,
+    not just the declared-pin `VDD` net that matched unambiguously."""
+    reference_spice = """
+.subckt cell VDD
+R1 VDD P1 1k
+R2 VDD P2 1k
+.ends
+"""
+    layout_spice = """
+.subckt cell VDD
+R1 VDD $1 1k
+R2 VDD $2 1k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "cell"},
+            "reference": {"netlist": reference_path, "top": "cell"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    assert len(correspondence) == 3 == report["counts"]["nets"]["matched"]
+
+    by_reference = {entry["reference"]: entry for entry in correspondence}
+    assert by_reference["VDD"] == {"layout": "VDD", "reference": "VDD", "pin": True}
+    assert {"P1", "P2"} <= by_reference.keys()
+    # The ambiguous pair's layout side is `$1`/`$2` (unlabelled, neither a
+    # declared pin) -- which reference name each happened to resolve to is
+    # not asserted, since the comparer's own tie-break is not part of this
+    # module's documented contract.
+    assert {by_reference["P1"]["layout"], by_reference["P2"]["layout"]} == {
+        "$1",
+        "$2",
+    }
+    assert by_reference["P1"]["pin"] is False
+    assert by_reference["P2"]["pin"] is False
+
+
 def test_auto_selected_top_matches_explicit_top(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
