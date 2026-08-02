@@ -627,25 +627,30 @@ EXTRACTION_DECK = ExtractionDeck(
 # `klt extract --parasitics` first-order lumped-RC coefficients
 # --------------------------------------------------------------------------- #
 #
-# Representative, uncalibrated starter values drawn from the *public*
-# gf180mcu process documentation (the GlobalFoundries 180nm MCU open PDK /
-# DRM, the same public source family cited at the top of this module; sheet
-# resistances and interconnect area/fringe capacitances from its published
-# per-layer tables). Order-of-magnitude only -- parasitic-extraction accuracy
-# tuning/calibration against silicon is an explicit non-goal of the first cut
-# (issue #216 "Non-goals"). `metals` is index-aligned with EXTRACTION_DECK's
-# `metals` stack: index 0 is Metal1. Values expressed as (sheet ohms/square,
-# area cap fF/um^2, fringe cap fF/um).
+# Sourced, citable values transcribed from the *public* gf180mcu magic
+# technology file `gf180mcu/magic/gf180mcu.tech` in fossi-foundation/open-pdks
+# (GPLv3 -- the same upstream the DRC decks are transcribed from), nominal
+# corner (the `variants ()` block). Sheet resistances come from that file's
+# `resist <layer> <milliohms per square>` entries; area/fringe capacitances
+# from its `defaultareacap` (aF/um^2) and `defaultperimeter` (aF/um) entries.
+# The .tech header credits GlobalFoundries' PDS_035_03; nothing NDA'd. Values
+# remain order-of-magnitude and uncalibrated-to-silicon: calibrating
+# parasitic-extraction accuracy against silicon is an explicit non-goal of
+# this first cut (issue #216 "Non-goals"). `metals` is index-aligned with
+# EXTRACTION_DECK's `metals` stack: index 0 is Metal1. Values expressed as
+# (sheet ohms/square, area cap fF/um^2, fringe cap fF/um).
 PARASITICS = ParasiticsDeck(
-    # Comp (n+/p+ active) source-drain diffusion; area coefficient stands in
-    # for junction-to-bulk capacitance as a fixed approximation.
-    diffusion=LayerRC(
-        sheet_res_ohm_sq=70.0, cap_area_ff_um2=0.45, cap_perim_ff_um=0.25
-    ),
-    # Poly2 gate/interconnect.
-    poly=LayerRC(sheet_res_ohm_sq=12.0, cap_area_ff_um2=0.10, cap_perim_ff_um=0.05),
+    # No diffusion role (issue #226): the M cards' AS/AD/PS/PD already feed the
+    # device model's junction capacitance, so an area/perimeter cap term on the
+    # Comp source/drain diffusion here would double-count it. gf180mcu.tech
+    # comments its own active-layer cap out for the same reason.
+    diffusion=None,
+    # Poly2 gate/interconnect. sheet from `resist (allpolynonres)/active 7300`
+    # (7300 milliohm/sq = 7.3 ohm/sq); area from `defaultareacap` poly2
+    # (110.67 aF/um^2).
+    poly=LayerRC(sheet_res_ohm_sq=7.3, cap_area_ff_um2=0.11067, cap_perim_ff_um=0.05),
     metals=(
-        # Metal1.
-        LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.05),
+        # Metal1. perim from `defaultperimeter` Metal1 (39.431 aF/um).
+        LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.039431),
     ),
 )

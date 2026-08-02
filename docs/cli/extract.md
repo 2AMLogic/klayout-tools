@@ -335,16 +335,34 @@ net --R--> net__par --C--> <substrate_net>
   exact for a single rectangular wire, → 1 for a square). This biases series
   resistance conservatively high for L-shaped or fragmented nets.
 
-Conductor roles map to the deck's geometry layers: `diffusion` (the NMOS+PMOS
-source/drain regions), `poly`, and each `metals[i]` metal-stack layer. The
-coefficients are curated per-PDK-family in each deck module's `PARASITICS`
-table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py`), sourced from each
-PDK's **public** process/DRM data — never NDA'd — the same curation pattern as
-the DRC decks and the SPICE model-binding table (#214).
+Conductor roles map to the deck's geometry layers: `poly` and each
+`metals[i]` metal-stack layer. Two roles are deliberately excluded because
+their capacitance is already captured by the extracted device models, and
+counting them here would double-count it (#226):
 
-The R/C values are **representative, uncalibrated, order-of-magnitude starter
-values**: parasitic-extraction accuracy tuning/calibration against silicon is
-an explicit non-goal of this first cut (#216 "Non-goals"). The model is fixed,
+- **Transistor gate poly** is subtracted from each net's poly shapes before
+  measuring — the gate sits over the channel, not the substrate the
+  coefficients describe, and its capacitance is in the device model. Only the
+  parasitic measurement subtracts it; device connectivity is untouched.
+- **Source/drain diffusion** carries no parasitic role: the extracted `M`
+  cards already emit `AS`/`AD`/`PS`/`PD`, from which the device model derives
+  the junction capacitance. Both PDKs' own magic tech files comment their
+  active-layer parasitic caps out for the same reason.
+
+The coefficients are curated per-PDK-family in each deck module's `PARASITICS`
+table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py`), **transcribed with
+citations from each PDK's public magic technology file** (`sky130.tech` /
+`gf180mcu.tech` in fossi-foundation/open-pdks, GPLv3) — sheet resistances from
+its `resist` entries, area/fringe capacitances from its `defaultareacap` /
+`defaultperimeter` entries — never NDA'd, the same public-source curation
+pattern as the DRC decks and the SPICE model-binding table (#214). Each changed
+coefficient carries an inline citation (source file + field name) in its deck
+comment.
+
+Even so, the R/C values remain **order-of-magnitude and uncalibrated to
+silicon**: while now sourced and re-verifiable against the published process
+data, calibrating parasitic-extraction *accuracy* against silicon is an
+explicit non-goal of this first cut (#216 "Non-goals"). The model is fixed,
 not tunable — there is no `fast`/`accurate` mode selector.
 
 ### What it does *not* do
@@ -544,9 +562,10 @@ above, issue #217). The following remain out of scope:
   lumped-to-ground model does not capture) and is a credible second
   increment. Without `--parasitics`, no interconnect R/C is extracted at all.
 - **Parasitic-extraction accuracy calibration.** The `--parasitics`
-  coefficients are representative, uncalibrated, order-of-magnitude starter
-  values (see "Parasitic (RC) extraction"); calibrating them against silicon
-  is an explicit non-goal (#216 "Non-goals").
+  coefficients are now sourced and cited from each PDK's public magic
+  technology file (see "Parasitic (RC) extraction"), but they remain
+  order-of-magnitude and uncalibrated to silicon; calibrating them against
+  silicon is an explicit non-goal (#216 "Non-goals").
 - **Drawn resistor device class.** Bipolar and MiM-capacitor devices are
   recognised (see "Bipolar (BJT) device recognition" and "MiM capacitor
   device recognition"), but neither deck declares a precision-resistor

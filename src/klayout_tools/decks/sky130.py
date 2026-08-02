@@ -374,31 +374,38 @@ EXTRACTION_DECK = ExtractionDeck(
 # `klt extract --parasitics` first-order lumped-RC coefficients
 # --------------------------------------------------------------------------- #
 #
-# Representative, uncalibrated starter values drawn from the *public* sky130
-# process documentation (SkyWater sky130 open PDK, the same open-PDK source
-# family cited at the top of this module; sheet resistances from the PDK's
-# published per-layer R tables, area/fringe capacitances from its published
-# interconnect parasitic-capacitance tables). Order-of-magnitude only --
-# parasitic-extraction accuracy tuning/calibration against silicon is an
-# explicit non-goal of the first cut (issue #216 "Non-goals"); these exist to
-# give `--parasitics` a plausible, self-consistent RC magnitude per net, not a
-# sign-off-grade extraction. `metals` is index-aligned with EXTRACTION_DECK's
-# `metals` stack: index 0 is li1 (local interconnect -- relatively high sheet
-# R), index 1 is met1 (low sheet R). Values expressed as (sheet ohms/square,
-# area cap fF/um^2, fringe cap fF/um).
+# Sourced, citable values transcribed from the *public* sky130 magic
+# technology file `sky130/magic/sky130.tech` in fossi-foundation/open-pdks
+# (GPLv3 -- the same upstream the DRC decks are transcribed from), nominal
+# corner (the `variants (),(orig),(si)` block). Sheet resistances come from
+# that file's `resist <layer> <milliohms per square>` entries; area/fringe
+# capacitances from its `defaultareacap` (aF/um^2) and `defaultperimeter`
+# (aF/um) entries -- the parallel-plate and fringe capacitance to the plane
+# below. The .tech header credits SkyWater's public PEX/xRC/cap_models;
+# nothing NDA'd. Values remain order-of-magnitude and uncalibrated-to-silicon:
+# calibrating parasitic-extraction accuracy against silicon is an explicit
+# non-goal of this first cut (issue #216 "Non-goals"). `metals` is
+# index-aligned with EXTRACTION_DECK's `metals` stack: index 0 is li1 (local
+# interconnect -- relatively high sheet R), index 1 is met1 (low sheet R).
+# Values expressed as (sheet ohms/square, area cap fF/um^2, fringe cap fF/um).
 PARASITICS = ParasiticsDeck(
-    # n+/p+ source-drain diffusion -- high sheet R; the area coefficient
-    # stands in for the (bias-dependent) junction capacitance to bulk, taken
-    # here as a fixed zero-bias-order approximation.
-    diffusion=LayerRC(
-        sheet_res_ohm_sq=120.0, cap_area_ff_um2=0.40, cap_perim_ff_um=0.30
-    ),
-    # poly gate/interconnect.
-    poly=LayerRC(sheet_res_ohm_sq=48.2, cap_area_ff_um2=0.107, cap_perim_ff_um=0.067),
+    # No diffusion role (issue #226): `klt extract`'s M cards already carry
+    # AS/AD/PS/PD, and the SPICE device model turns those into junction
+    # capacitance, so an area/perimeter cap term on the source/drain diffusion
+    # here would double-count it. sky130.tech comments its own active-layer
+    # cap out for the same reason (`# Rely on device models to capture *ndiff
+    # area cap`).
+    diffusion=None,
+    # poly gate/interconnect. sheet: `resist (allpolynonres)`; perim from
+    # sky130.tech `defaultperimeter` for poly (55.27 aF/um).
+    poly=LayerRC(sheet_res_ohm_sq=48.2, cap_area_ff_um2=0.107, cap_perim_ff_um=0.05527),
     metals=(
-        # li1 local interconnect.
-        LayerRC(sheet_res_ohm_sq=12.8, cap_area_ff_um2=0.037, cap_perim_ff_um=0.078),
-        # met1.
-        LayerRC(sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.036, cap_perim_ff_um=0.082),
+        # li1 local interconnect. perim from `defaultperimeter` li1 (40.7 aF/um).
+        LayerRC(sheet_res_ohm_sq=12.8, cap_area_ff_um2=0.037, cap_perim_ff_um=0.0407),
+        # met1. area/perim from `defaultareacap`/`defaultperimeter` met1
+        # (25.78 aF/um^2, 40.57 aF/um).
+        LayerRC(
+            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.02578, cap_perim_ff_um=0.04057
+        ),
     ),
 )
