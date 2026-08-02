@@ -72,6 +72,12 @@ SCHEMA_VERSION = 1
 #: second one (see this module's docstring and the spike's section 1).
 SUPPORTED_ENGINES = ("klayout",)
 
+#: Accepted ``request.reference.form`` values (issue #280).
+#: ``"plain-element"`` (default) is the schematic-equivalent form ``klt lvs``
+#: has always required; ``"subckt-call"`` opts into converting a PDK
+#: schematic flow's simulation-form netlist first (see ``docs/cli/lvs.md``).
+_REFERENCE_FORMS = ("plain-element", "subckt-call")
+
 #: Stable mismatch-category ids (spike section 2b). Never renumbered/
 #: repurposed once shipped -- the same contract guarantee a DRC rule id
 #: carries.
@@ -261,7 +267,22 @@ def run_lvs(request: str) -> dict[str, Any]:
         reference_spec, "netlist", "reference", request_dir
     )
     reference_echo = reference_spec["netlist"]
-    reference_netlist = _read_reference_netlist(reference_netlist_path)
+    reference_form = reference_spec.get("form", "plain-element")
+    if reference_form not in _REFERENCE_FORMS:
+        raise LvsError(
+            f"request.reference.form must be one of "
+            f"{', '.join(repr(f) for f in _REFERENCE_FORMS)}; got "
+            f"{reference_form!r}"
+        )
+    reference_device_map = reference_spec.get("device_map")
+    if reference_device_map is not None and not isinstance(reference_device_map, dict):
+        raise LvsError("request.reference.device_map must be a JSON object")
+    reference_netlist = _read_reference_netlist(
+        reference_netlist_path,
+        form=reference_form,
+        deck=reference_spec.get("deck"),
+        device_map=reference_device_map,
+    )
 
     layout_circuit = _select_circuit(layout_netlist, layout_spec.get("top"), "layout")
     reference_circuit = _select_circuit(
@@ -502,8 +523,30 @@ def _resolve_layout(
     return netlist, layout_spec["netlist"], layout_netlist_path, None
 
 
-def _read_reference_netlist(path: str) -> kdb.Netlist:
-    """Parse ``path`` via ``NetlistSpiceReader``.
+def _read_reference_netlist(
+    path: str,
+    *,
+    form: str = "plain-element",
+    deck: str | None = None,
+    device_map: dict[str, str] | None = None,
+) -> kdb.Netlist:
+    """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
+    declared ``form`` (issue #280).
+
+    ``form="plain-element"`` (default) reads the file as-is -- the
+    schematic-equivalent form ``klt lvs`` requires (see ``docs/cli/lvs.md``).
+    Before reading, it scans for the *simulation* (subcircuit-call) form and,
+    if a curated PDK device (e.g. ``sky130_fd_pr__nfet_01v8``, ``nfet_03v3``)
+    is instantiated via an undefined ``X`` subcircuit call, raises a specific
+    :class:`LvsError` naming the form mismatch -- instead of letting the
+    reader silently degrade the netlist into the confusing
+    ``net.merged``/``topology`` cascade this issue describes.
+
+    ``form="subckt-call"`` converts the file from the simulation form to the
+    plain-element form first (see
+    :mod:`klayout_tools.netlist_normalize`), resolving device names through the
+    curated :mod:`klayout_tools.pdk_models` table (via ``deck`` and/or
+    ``device_map``), then reads the converted text.
 
     Note: on genuinely malformed input, ``NetlistSpiceReader`` does not raise
     -- it prints a ``"Warning: Line ignored..."`` diagnostic (to the
@@ -515,12 +558,71 @@ def _read_reference_netlist(path: str) -> kdb.Netlist:
     """
     import klayout.db as kdb
 
+    from .netlist_normalize import (
+        NormalizeError,
+        detect_subckt_call_devices,
+        normalize_reference_netlist,
+    )
+
+    try:
+        # `errors="replace"` so a non-SPICE binary reference (a mis-pointed
+        # path) never crashes the detection scan on a decode error -- it flows
+        # through to `NetlistSpiceReader`, which tolerates garbage and yields
+        # an empty netlist that surfaces as the "no top circuit" LvsError, the
+        # pre-existing behaviour this hook preserves.
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise LvsError(f"could not read reference netlist '{path}': {exc}") from exc
+
+    read_path = path
+    tmp_path: str | None = None
+
+    if form == "subckt-call":
+        try:
+            converted = normalize_reference_netlist(
+                text, deck=deck, device_map=device_map
+            )
+        except NormalizeError as exc:
+            raise LvsError(
+                f"could not convert subckt-call reference netlist "
+                f"'{path}' to plain-element form: {exc}"
+            ) from exc
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".spice", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(converted)
+            tmp_path = tmp.name
+        read_path = tmp_path
+    else:
+        offending = detect_subckt_call_devices(text)
+        if offending:
+            raise LvsError(
+                f"reference netlist '{path}' is in the simulation "
+                f"(subcircuit-call) form: it instantiates curated PDK device "
+                f"subcircuit(s) {', '.join(offending)} via undefined 'X' "
+                "cards, which 'klt lvs' cannot compare against extracted "
+                "plain-element devices (it would silently degrade into a "
+                "net.merged/topology mismatch). Set request.reference.form to "
+                '"subckt-call" to convert it automatically, or convert it to '
+                "the plain-element form (M-card) before comparing -- see "
+                'docs/cli/lvs.md, "Netlist form".'
+            )
+
     netlist = kdb.Netlist()
     reader = kdb.NetlistSpiceReader()
     try:
-        netlist.read(path, reader)
+        netlist.read(read_path, reader)
     except Exception as exc:
         raise LvsError(f"could not parse reference netlist '{path}': {exc}") from exc
+    finally:
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
     return netlist
 
 
