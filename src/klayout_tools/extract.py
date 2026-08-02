@@ -1256,6 +1256,15 @@ def _extract_netlist(
         bipolar_emitter_layer = _region(layout, top_cell, bipolar.emitter)
         bipolar_base = bipolar_base_layer & bipolar_marker
         bipolar_emitter = bipolar_emitter_layer & bipolar_base
+        # Narrow the emitter the same requires/excludes idiom the resistor
+        # (`_resolve_resistors`) and capacitor blocks use, so a base-contact
+        # ring drawn on the *same* diffusion layer inside the same marked base
+        # is not misrecognised as a second emitter/device (issue #302). No-op
+        # when the entry declares neither field (both default to `()`).
+        for layer in bipolar.emitter_requires:
+            bipolar_emitter = bipolar_emitter & _region(layout, top_cell, layer)
+        for layer in bipolar.emitter_excludes:
+            bipolar_emitter = bipolar_emitter - _region(layout, top_cell, layer)
         l2n.register(bipolar_base, f"{bipolar.class_name}_base")
         l2n.register(bipolar_emitter, f"{bipolar.class_name}_emitter")
         if bipolar.collector is not None:

@@ -311,6 +311,8 @@ class ExtractionDeck:
             layers.add(bipolar.base)
             layers.add(bipolar.emitter)
             layers.add(bipolar.marker)
+            layers.update(bipolar.emitter_requires)
+            layers.update(bipolar.emitter_excludes)
             if bipolar.collector is not None:
                 layers.add(bipolar.collector)
         for capacitor in self.capacitors:
@@ -368,6 +370,27 @@ class BipolarDevice:
     uses. When a future deck's bipolar has a genuinely distinct drawn
     collector layer (e.g. a lateral device), set this instead.
 
+    ``emitter_requires``/``emitter_excludes`` narrow the recognised emitter
+    region the same requires/excludes idiom :class:`ResistorDevice` (#222)
+    and :class:`CapacitorDevice` (#225) already use: after ``extract.py``
+    scopes the emitter to diffusion inside the marked base
+    (``emitter & base & marker``), every layer in ``emitter_requires`` must
+    *also* cover it (intersected in) and every layer in ``emitter_excludes``
+    is subtracted. This exists to disambiguate a genuine emitter diffusion
+    from a **base-contact ring** drawn on the *same* diffusion layer inside
+    the *same* well and *same* device mark (issue #302): without narrowing,
+    that ring is a second shape on the emitter layer inside the base, so
+    ``DeviceExtractorBJT3Transistor`` recognises it as a second, artefact
+    device sharing the one base net (its "emitter" is really the base tie).
+    A deck that models the implant masks can positively identify the emitter
+    (e.g. gf180mcu's p+ emitter has ``Pplus`` and the n+ base tie has
+    ``Nplus``, so ``emitter_excludes=(Nplus,)`` drops the ring). A deck that
+    models *no* implant layers (e.g. sky130's curated deck) has no such
+    disambiguator for a ring drawn on the literal emitter layer -- a
+    documented residual limitation, see that deck's docstring. Both default
+    to ``()`` (no narrowing), so a deck that declares neither extracts
+    exactly as it did before the fields existed.
+
     ``class_name`` names the extracted ``DeviceClassBJT3Transistor`` device
     class (``devices[].class`` in the JSON response, and one of the values
     :attr:`ExtractionDeck.device_classes` reports for a deck that declares
@@ -378,6 +401,8 @@ class BipolarDevice:
     emitter: tuple[int, int]
     marker: tuple[int, int]
     collector: tuple[int, int] | None = None
+    emitter_requires: tuple[tuple[int, int], ...] = ()
+    emitter_excludes: tuple[tuple[int, int], ...] = ()
     class_name: str = "bjt"
 
 

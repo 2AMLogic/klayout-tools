@@ -488,12 +488,20 @@ def test_written_netlist_has_no_top_level_end_or_control(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def _make_sky130_bjt_layout() -> kdb.Layout:
+def _make_sky130_bjt_layout(*, base_tie_on_diff: bool = False) -> kdb.Layout:
     """A minimal vertical-PNP layout on sky130's curated bipolar layers: an
     nwell (base) marked with `pnp.drawing`, a p+ diffusion (emitter) inside
     it, contacted up through li1 and labelled -- plus a base contact/label so
     both the emitter and base terminals resolve to named nets, and no drawn
-    collector (collector = substrate, per `BipolarDevice`'s docstring)."""
+    collector (collector = substrate, per `BipolarDevice`'s docstring).
+
+    The base tie is drawn on the *distinct* `tap.drawing` (65/44) layer, as
+    the real `sky130_fd_pr__pnp` does -- so it never collides with the
+    `diff.drawing` (65/20) emitter layer. When ``base_tie_on_diff`` is set,
+    an extra base-tie ring is instead drawn on the **same** `diff.drawing`
+    layer as the emitter, exercising the documented residual limitation of a
+    deck that models no implant layers (issue #302): sky130 has no already-
+    modelled layer to tell that same-layer ring apart from the emitter."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -522,14 +530,37 @@ def _make_sky130_bjt_layout() -> kdb.Layout:
     draw(67, 20, kdb.Box(100, 100, 300, 300))  # li1 over the tap
     label(64, 5, "BASE", 200, 200)
 
+    if base_tie_on_diff:
+        # A base tie drawn on the *literal* diff.drawing emitter layer,
+        # around the emitter (outer 400..1600, inner hole 600..1400 clears
+        # the 800..1200 emitter). No implant layer exists in this deck to
+        # distinguish it from the p+ emitter -- see the deck's documented
+        # residual limitation.
+        for lx0, ly0, lx1, ly1 in (
+            (400, 400, 1600, 600),  # bottom strip
+            (400, 1400, 1600, 1600),  # top strip
+            (400, 600, 600, 1400),  # left strip
+            (1400, 600, 1600, 1400),  # right strip
+        ):
+            draw(65, 20, kdb.Box(lx0, ly0, lx1, ly1))  # diff.drawing (base-tie ring)
+
     return layout
 
 
-def _make_gf180mcu_bjt_layout() -> kdb.Layout:
+def _make_gf180mcu_bjt_layout(*, base_contact_ring: bool = False) -> kdb.Layout:
     """A minimal vertical-bipolar layout on gf180mcu's curated bipolar
     layers: an Nwell (base) marked with `DRC_BJT`, a Comp diffusion
     (emitter) inside it, contacted up through Metal1 and labelled -- no
-    drawn collector (collector = substrate)."""
+    drawn collector (collector = substrate).
+
+    When ``base_contact_ring`` is set, an n+ base-tie ring is drawn *around*
+    the emitter on the **same** `Comp` (22/0) diffusion layer, inside the
+    same `DRC_BJT` mark -- the standard vertical-bipolar unit cell's way of
+    contacting the Nwell base (issue #302). It is covered by `Nplus` (32/0)
+    (an n+ tie, versus the p+ emitter), which is exactly what the deck's
+    `emitter_excludes` uses to drop it: without that narrowing this second
+    same-layer diffusion inside the marked base extracts as a spurious
+    second `bjt` sharing the base net."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -549,6 +580,21 @@ def _make_gf180mcu_bjt_layout() -> kdb.Layout:
     draw(33, 0, kdb.Box(900, 900, 1100, 1100))  # Contact over the emitter
     draw(34, 0, kdb.Box(850, 850, 1150, 1150))  # Metal1 over the emitter
     label(34, 10, "EMIT", 1000, 1000)
+
+    if base_contact_ring:
+        # n+ base tie drawn as a Comp ring around the emitter (outer
+        # 400..1600, inner hole 600..1400 clears the 800..1200 emitter), on
+        # the *same* Comp (22/0) layer as the emitter -- reproduces the
+        # double-count. Nplus (32/0) covers only the ring (not the emitter),
+        # marking it n+ so `emitter_excludes=(Nplus,)` drops it.
+        for lx0, ly0, lx1, ly1 in (
+            (400, 400, 1600, 600),  # bottom strip
+            (400, 1400, 1600, 1600),  # top strip
+            (400, 600, 600, 1400),  # left strip
+            (1400, 600, 1600, 1400),  # right strip
+        ):
+            draw(22, 0, kdb.Box(lx0, ly0, lx1, ly1))  # Comp (base-tie ring)
+            draw(32, 0, kdb.Box(lx0, ly0, lx1, ly1))  # Nplus over the ring only
 
     return layout
 
@@ -578,6 +624,26 @@ def test_sky130_synthetic_bjt_extracts_one_pnp_device(tmp_path):
     assert device["nets"] == {"c": "vsubs", "b": "BASE", "e": "EMIT"}
 
 
+def test_sky130_bjt_base_tie_on_diff_is_documented_limitation(tmp_path):
+    """Characterises the residual limitation the sky130 deck documents
+    (issue #302): because this curated deck models no implant layers, a base
+    tie drawn on the *literal* `diff.drawing` emitter layer cannot be told
+    apart from the p+ emitter, so it still double-counts. This pins the
+    documented behaviour -- the realistic layout draws the base tie on the
+    distinct `tap.drawing` layer (see `test_sky130_synthetic_bjt_extracts_
+    one_pnp_device`, which stays at one device). If sky130 ever models its
+    implant masks and resolves this, update this test alongside the deck's
+    docstring."""
+    path = _write_gds(
+        _make_sky130_bjt_layout(base_tie_on_diff=True), tmp_path / "bjt.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "bjt.spice"))
+
+    # Two pnp: the real emitter, plus the base-tie ring on the same diff
+    # layer that no already-modelled layer can exclude. Documented limitation.
+    assert report["device_counts"] == {"pnp": 2}
+
+
 def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
     """The synthetic vertical-bipolar layout extracts exactly one `bjt`
     device (no spurious `nfet`/`pfet` from the emitter's Comp shape, which
@@ -604,6 +670,26 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
     assert device["nets"]["c"] == "vsubs"
     assert device["nets"]["e"] == "EMIT"
     assert device["nets"]["b"].startswith("$")  # anonymous, no base tie drawn
+
+
+def test_gf180mcu_bjt_base_contact_ring_extracts_one_device(tmp_path):
+    """A vertical-bipolar unit cell whose Nwell base is contacted by an n+
+    tie ring drawn on the *same* `Comp` diffusion layer as the p+ emitter,
+    inside the same `DRC_BJT` mark, extracts exactly **one** `bjt` -- not two
+    (issue #302). The ring carries `Nplus` (an n+ tie) rather than the
+    emitter's p+, so the deck's `emitter_excludes=(Nplus,)` narrowing drops
+    it; without that fix the ring is a second shape on the emitter layer
+    inside the marked base and `DeviceExtractorBJT3Transistor` recognises it
+    as a spurious second device sharing the one base net."""
+    path = _write_gds(
+        _make_gf180mcu_bjt_layout(base_contact_ring=True), tmp_path / "bjt.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bjt.spice"))
+
+    assert report["device_counts"] == {"bjt": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "bjt"
+    assert device["nets"]["e"] == "EMIT"  # the p+ emitter, not the base ring
 
 
 # --------------------------------------------------------------------------- #
