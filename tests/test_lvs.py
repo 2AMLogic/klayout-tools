@@ -806,7 +806,7 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
 
     assert report["status"] == "match"
     # sky130 also declares a `pnp` bipolar entry (issue #223); this cell
-    # draws none, so the comparer's one mismatch is the pre-existing
+    # draws none, so the comparer contributes one mismatch, the pre-existing
     # "class declared but zero instances on both sides" warning (#204's own
     # downgrade-to-warning precedent) -- not a real topology defect. sky130's
     # two MiM-capacitor entries (issue #225) do *not* add further mismatches
@@ -814,9 +814,18 @@ def test_inline_extraction_composes_extract_and_compare(tmp_path):
     # capacitor device class on a layout that draws no matching marker at
     # all (see `CapacitorDevice`'s "empty region -> skipped entirely" note),
     # so this cap-free cell's extracted netlist carries no such class for
-    # the comparer to report as unmatched.
-    assert report["mismatch_count"] == 1
-    assert report["mismatches"][0]["severity"] == "warning"
+    # the comparer to report as unmatched. Issue #281 adds a second,
+    # unrelated warning: sky130 draws no distinct NMOS substrate/tap layer,
+    # so every NMOS body terminal lands on the deck's synthetic substrate
+    # net (`device.body_unverified`) -- sky130's own PMOS `tap` layer gives
+    # PMOS bodies a real net, so no PMOS warning fires here.
+    assert report["mismatch_count"] == 2
+    assert all(m["severity"] == "warning" for m in report["mismatches"])
+    body_unverified = [
+        m for m in report["mismatches"] if m["category"] == "device.body_unverified"
+    ]
+    assert len(body_unverified) == 1
+    assert body_unverified[0]["device"]["class"] == "nfet"
     # `layout.file` + `layout.deck` (inline extraction) was given -- echoes
     # the sky130 deck's device-class coverage (issue #221, extended by
     # #223/#225) -- what the deck can *recognise*, independent of what this
@@ -878,6 +887,95 @@ def test_keep_extracted_is_a_noop_for_pre_extracted_layout(tmp_path):
     )
     report = run_lvs(path)
     assert report["environment"]["extracted_netlist"] is None
+
+
+# --------------------------------------------------------------------------- #
+# device.body_unverified warning (issue #281): MOS body terminals extracted
+# onto deck-synthesized nets, not real schematic ones -- see docs/cli/lvs.md
+# and extract.py's `nfet_body`/`connect_global` handling.
+# --------------------------------------------------------------------------- #
+
+
+def test_body_unverified_warns_nmos_only_on_sky130(tmp_path):
+    """sky130 draws no distinct NMOS substrate/tap layer, so every NMOS body
+    lands on the deck's synthetic substrate net -- but sky130's own PMOS
+    `tap` layer (65/44) gives PMOS bodies a real, named net, so no PMOS
+    warning fires here."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "match"
+
+    body_entries = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+    ]
+    assert len(body_entries) == 1
+    entry = body_entries[0]
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "layout"
+    assert entry["device"]["class"] == "nfet"
+
+
+def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
+    """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
+    PMOS well-tap layer either (`Comp` is shared with ordinary active,
+    `ExtractionDeck.tap is None`) -- both polarities warn."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(GF180_CLKINV), "gf180mcu", output=reference_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(GF180_CLKINV), "deck": "gf180mcu"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "match"
+
+    body_entries = {
+        m["device"]["class"]: m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+    }
+    assert set(body_entries) == {"nfet", "pfet"}
+    assert all(entry["severity"] == "warning" for entry in body_entries.values())
+    assert all(entry["side"] == "layout" for entry in body_entries.values())
+
+
+def test_body_unverified_absent_for_pre_extracted_layout_netlist(tmp_path):
+    """No `layout.deck` (the pre-extracted `layout.netlist` form) means no
+    known deck body-net behaviour to warn about -- the warning never fires
+    in this shape, even though the fixture inverter has both an NMOS and a
+    PMOS device."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "match"
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        for m in report["mismatches"]
+    )
+    assert report["device_classes"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -1213,13 +1311,33 @@ def test_corpus_known_good_cell_matches_cleanly(
     )
     report = run_lvs(path)
     assert report["status"] == "match"
+    assert all(m["severity"] == "warning" for m in report["mismatches"])
+
+    # Issue #281: every NMOS body terminal is tied to the deck's synthetic
+    # substrate net (neither curated deck draws a distinct NMOS tap layer),
+    # so the `device.body_unverified` warning always fires for `nfet`; the
+    # `pfet` counterpart additionally fires only when the deck has no
+    # distinct well-tap layer either (gf180mcu today; sky130's `tap` layer
+    # gives PMOS bodies a real net).
+    from klayout_tools.decks import get_extraction_deck
+
+    deck_config = get_extraction_deck(deck)
+    expected_body_classes = {deck_config.nfet_class}
+    if deck_config.tap is None:
+        expected_body_classes.add(deck_config.pfet_class)
+    body_unverified_classes = {
+        m["device"]["class"]
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+    }
+    assert body_unverified_classes == expected_body_classes
+
     # Both decks also declare a bipolar entry (issue #223: sky130's `pnp`,
-    # gf180mcu's `bjt`) that these MOS-only corpus cells draw none of -- the
-    # comparer's one mismatch is the pre-existing "class declared but zero
-    # instances on both sides" warning (#204's downgrade-to-warning
-    # precedent), not a real topology defect.
-    assert report["mismatch_count"] == 1
-    assert report["mismatches"][0]["severity"] == "warning"
+    # gf180mcu's `bjt`) that these MOS-only corpus cells draw none of -- one
+    # more mismatch, the pre-existing "class declared but zero instances on
+    # both sides" warning (#204's downgrade-to-warning precedent), not a
+    # real topology defect.
+    assert report["mismatch_count"] == 1 + len(expected_body_classes)
 
 
 @pytest.mark.parametrize(
@@ -1261,6 +1379,9 @@ def test_corpus_deliberately_broken_reference_reports_mismatches(
             lvs.CATEGORY_NET_SPLIT,
             lvs.CATEGORY_DEVICE_UNMATCHED,
             lvs.CATEGORY_TOPOLOGY,
+            # Issue #281: deck-structural, so still present alongside a real
+            # defect -- not itself part of what this test corrupted.
+            lvs.CATEGORY_DEVICE_BODY_UNVERIFIED,
         }
         for m in report["mismatches"]
     )

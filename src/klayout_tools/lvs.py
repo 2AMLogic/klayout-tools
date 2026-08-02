@@ -87,6 +87,7 @@ CATEGORY_NET_SPLIT = "net.split"
 CATEGORY_DEVICE_UNMATCHED = "device.unmatched"
 CATEGORY_DEVICE_CLASS = "device.class"
 CATEGORY_DEVICE_PROPERTY = "device.property"
+CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 CATEGORY_TOPOLOGY = "topology"
 
@@ -234,6 +235,13 @@ def run_lvs(request: str) -> dict[str, Any]:
     layout-side extraction deck (``null`` for the pre-extracted-netlist form,
     matching ``device_classes``), and ``pdk`` is ``null`` (LVS is topological
     and resolves no PDK).
+
+    Same inline-extraction condition also gates ``device.body_unverified``
+    (issue #281, see :func:`_body_net_warnings`): non-blocking
+    ``severity: "warning"`` ``mismatches[]`` entries noting that some MOS
+    body terminals were compared against a deck-synthesized net rather than
+    a real schematic one -- never emitted for the pre-extracted
+    ``layout.netlist`` form, and never affecting ``status``.
     """
     request, request_dir = load_request_arg(request)
 
@@ -357,14 +365,6 @@ def run_lvs(request: str) -> dict[str, Any]:
             }
         ]
 
-    status = "match" if compare_result else "mismatch"
-
-    category_counts: dict[str, int] = {}
-    for mismatch in mismatches:
-        category_counts[mismatch["category"]] = (
-            category_counts.get(mismatch["category"], 0) + 1
-        )
-
     # What the layout-side deck can structurally recognise
     # (`ExtractionDeck.device_classes`, issue #221) -- `null` when
     # `layout.netlist` (pre-extracted) was given instead of `layout.file` +
@@ -373,11 +373,30 @@ def run_lvs(request: str) -> dict[str, Any]:
     # raised `LvsError` before reaching this point), so re-fetching it here
     # cannot itself raise.
     layout_deck_name = layout_spec.get("deck")
+    layout_deck = get_extraction_deck(layout_deck_name) if layout_deck_name else None
     device_classes = (
-        list(get_extraction_deck(layout_deck_name).device_classes)
-        if layout_deck_name
-        else None
+        list(layout_deck.device_classes) if layout_deck is not None else None
     )
+
+    if layout_deck is not None:
+        # Issue #281: MOS body terminals extracted onto deck-synthesized nets
+        # (never a real schematic net -- see `_body_net_warnings`) are only a
+        # structural property of the *deck* used for inline extraction, not
+        # of this particular compare run. Appended (and the list re-sorted)
+        # rather than folded into `_build_mismatches`, since these entries
+        # never come from a `NetlistComparer` event and do not participate in
+        # the `compare_result`/safety-net invariant above -- they are purely
+        # additive, non-blocking notes.
+        mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
+        mismatches.sort(key=_sort_key)
+
+    status = "match" if compare_result else "mismatch"
+
+    category_counts: dict[str, int] = {}
+    for mismatch in mismatches:
+        category_counts[mismatch["category"]] = (
+            category_counts.get(mismatch["category"], 0) + 1
+        )
 
     counts = {
         "nets": {
@@ -857,6 +876,86 @@ def _count_devices_of_class(netlist: Any, device_class: Any) -> int:
             if device.device_class() is device_class:
                 count += 1
     return count
+
+
+def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
+    """Issue #281: flag, as non-blocking ``severity: "warning"`` entries, the
+    MOS body terminals that ``extract.py``'s inline extraction ties to a
+    deck-synthesized net rather than deriving from real drawn tap/well-label
+    geometry -- so a caller recording a clean ``klt lvs`` verdict can also
+    record that this dimension went structurally unverified (see this
+    module's own docstring reference, ``extract.py``'s ``nfet_body``/
+    ``connect_global`` handling, and ``docs/cli/extract.md`` -> "Coverage").
+
+    Deck-structural, not per-instance: every curated deck ties **every**
+    NMOS body to the deck's global substrate net (``deck.substrate_net``,
+    via ``connect_global`` -- no curated deck draws a distinct NMOS tap
+    layer today), so the NMOS warning always fires when the layout side has
+    one or more NMOS devices. The PMOS warning only fires when the deck also
+    has no distinct well-tap layer (``deck.tap is None``, e.g. gf180mcu's
+    shared ``Comp`` layer) -- a deck that draws a real tap (e.g. sky130's
+    ``tap=(65, 44)``) ties PMOS bodies to a genuine, named net, so no warning
+    is warranted there.
+
+    Neither warning fires at all for the pre-extracted ``layout.netlist``
+    request form -- callers only reach this helper when ``layout.file`` +
+    ``layout.deck`` (inline extraction) was given, mirroring how
+    ``device_classes``/``provenance.deck`` are conditioned on that same
+    distinction in ``run_lvs``.
+
+    Counts only the layout's top circuit's own devices (``each_device()``,
+    not recursive), matching ``run_lvs``'s own ``counts.devices.layout``
+    convention -- curated-deck extraction never nests MOS devices inside a
+    subcircuit.
+    """
+    entries: list[dict[str, Any]] = []
+
+    nfet_count = sum(
+        1
+        for device in layout_circuit.each_device()
+        if device.device_class().name == deck.nfet_class
+    )
+    if nfet_count:
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_BODY_UNVERIFIED,
+                "warning",
+                f"{nfet_count} NMOS device body terminal(s) were compared "
+                f"against the '{deck.substrate_net}' deck-synthesized "
+                "substrate net, not a real schematic net -- this deck draws "
+                "no distinct NMOS substrate/tap layer (see "
+                'docs/cli/extract.md, "Coverage")',
+                "layout",
+                device={"layout": None, "reference": None, "class": deck.nfet_class},
+            )
+        )
+
+    if deck.tap is None:
+        pfet_count = sum(
+            1
+            for device in layout_circuit.each_device()
+            if device.device_class().name == deck.pfet_class
+        )
+        if pfet_count:
+            entries.append(
+                _mismatch(
+                    CATEGORY_DEVICE_BODY_UNVERIFIED,
+                    "warning",
+                    f"{pfet_count} PMOS device body terminal(s) were "
+                    "compared against an anonymous, deck-synthesized well "
+                    "net, not a real schematic net -- this deck has no "
+                    "distinct well-tap layer (see docs/cli/extract.md, "
+                    '"Coverage")',
+                    "layout",
+                    device={
+                        "layout": None,
+                        "reference": None,
+                        "class": deck.pfet_class,
+                    },
+                )
+            )
+
+    return entries
 
 
 def _build_mismatches(

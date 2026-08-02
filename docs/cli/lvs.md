@@ -284,8 +284,8 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `pin.unmatched`, `topology`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), and a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `pin.unmatched`, `topology`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), and every `device.body_unverified` entry (see below). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
@@ -296,6 +296,41 @@ objects involved.
 net.layout, net.reference)` (missing fields sort first) so repeated runs
 against the same inputs produce identical, diff-clean output — the same
 canonical-ordering guarantee `klt drc` makes about `violations`.
+
+#### `device.body_unverified`: MOS body terminals compared against a deck-synthesized net
+
+The curated extraction decks give some MOS body terminals a net that does not
+come from any drawn tap/well-label geometry (`docs/cli/extract.md` →
+"Coverage"): every NMOS body is tied to the deck's global substrate net
+(`connect_global`, e.g. `vsubs`), since no curated deck draws a distinct NMOS
+substrate/tap layer today; gf180mcu additionally has no distinct PMOS
+well-tap layer (`Comp` is shared with ordinary transistor active), so its
+PMOS bodies land on an anonymous, deck-synthesized well net instead of a real
+one. Comparing those against a schematic reference's real ground/rail net
+still produces a genuine `NetlistComparer` finding if they disagree, but a
+*clean* compare on that dimension does not mean the well/substrate tie was
+actually verified against the schematic — it means both sides were forced
+onto the same synthetic net.
+
+`klt lvs` surfaces this as one or two `severity: "warning"` entries
+(`category: "device.body_unverified"`, `side: "layout"`) whenever
+`layout.file` + `layout.deck` (inline extraction) is used — never for the
+pre-extracted `layout.netlist` form, since no deck (and therefore no known
+synthetic-net behaviour) is involved there:
+
+- An NMOS entry fires whenever the layout has one or more NMOS devices
+  (`device.class` is the deck's `nfet_class`, e.g. `"nfet"`).
+- A PMOS entry additionally fires when the layout-side deck has no distinct
+  well-tap layer (`ExtractionDeck.tap is None`, gf180mcu today) **and** the
+  layout has one or more PMOS devices (`device.class` is the deck's
+  `pfet_class`, e.g. `"pfet"`). sky130's `tap` layer gives PMOS bodies a real,
+  named net, so sky130 never emits this entry.
+
+Both entries are deck-structural (a property of which deck ran extraction,
+not of any individual device pairing or `hints`), always `severity:
+"warning"`, and never change `status` or break `mismatch_count`'s error
+semantics — they only make it visible, in-band, that this dimension of the
+compare was not fully verified against the schematic.
 
 #### Net-merge/net-split classification (a documented simplification)
 
