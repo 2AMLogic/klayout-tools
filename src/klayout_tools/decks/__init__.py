@@ -414,6 +414,25 @@ class UnknownExtractionDeckError(Exception):
     """Raised by :func:`get_extraction_deck` for an unknown deck name."""
 
 
+def deck_source_path(name: str) -> str | None:
+    """Absolute path to the Python module source that defines deck ``name``.
+
+    Our decks are declarative Python tables in per-PDK sibling modules
+    (``sky130.py``, ``gf180mcu.py``) rather than standalone rule-deck files,
+    so the "deck file" whose content hash pins a run's rule set (see
+    :func:`klayout_tools._provenance.build_provenance`) is that module's
+    source. Deck names map 1:1 to those sibling module names (see the
+    registries below). Returns ``None`` when the module can't be located.
+    """
+    from importlib import import_module
+
+    try:
+        module = import_module(f"{__package__}.{name}")
+    except ImportError:
+        return None
+    return getattr(module, "__file__", None)
+
+
 def _registry() -> dict[str, list[DrcRule]]:
     from . import gf180mcu, sky130
 

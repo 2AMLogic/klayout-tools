@@ -163,6 +163,12 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "layers_checked": ["22/0", "30/0"],
     "layers_in_stream_without_rules": ["46/0", "75/0"],
     "rules_skipped": ["metal1.width.1", "metal1.space.1"]
+  },
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": null,
+    "deck": { "name": "sky130", "content_hash": "sha256:<hex>" }
   }
 }
 ```
@@ -219,6 +225,7 @@ On a run with findings:
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (`klt drc` resolves no PDK); `deck` pins the selected rule deck by name and `sha256:` content hash. |
 
 ### `violations[]` entries
 

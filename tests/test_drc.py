@@ -259,8 +259,17 @@ def test_json_contract(tmp_path, capsys):
         "rule_counts",
         "violations",
         "coverage",
+        "provenance",
     }
     assert data["schema_version"] == 1
+
+    prov = data["provenance"]
+    assert set(prov.keys()) == {"klt_version", "klayout_version", "pdk", "deck"}
+    assert isinstance(prov["klt_version"], str)
+    # klt drc resolves no PDK.
+    assert prov["pdk"] is None
+    assert prov["deck"]["name"] == "sky130"
+    assert prov["deck"]["content_hash"].startswith("sha256:")
     assert isinstance(data["file"], str)
     assert data["deck"] == "sky130"
     assert isinstance(data["dbu_um"], float)
@@ -1126,15 +1135,20 @@ def test_example_gds_matches_committed_json():
     `docs/cli/drc.md`) still produces exactly the committed
     `examples/drc/example.drc.json`.
 
-    `run_drc`'s output is fully deterministic -- `violations` is sorted and
-    there are no timestamp/environment-dependent fields -- so no
-    normalization is needed. If this fails, either the DRC output shape or
-    the sky130 deck rules changed; regenerate the fixture per the header of
-    `examples/drc/generate.py`.
+    `run_drc`'s output is deterministic apart from the shared `provenance`
+    block, whose `klt_version`/`klayout_version` are environment-dependent by
+    design -- so that additive block is stripped before comparison and the
+    committed fixture stays free of environment-dependent fields (its shape is
+    exercised by `test_json_contract` instead). If this fails, either the DRC
+    output shape or the sky130 deck rules changed; regenerate the fixture per
+    the header of `examples/drc/generate.py`.
     """
     expected = json.loads(EXAMPLE_DRC_JSON.read_text())
     actual = run_drc(EXAMPLE_GDS, "sky130")
 
+    provenance = actual.pop("provenance")
+    assert provenance["deck"]["name"] == "sky130"
+    assert provenance["deck"]["content_hash"].startswith("sha256:")
     assert actual == expected
 
 

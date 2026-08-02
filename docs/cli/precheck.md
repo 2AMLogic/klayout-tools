@@ -155,7 +155,13 @@ exit codes).
     },
     { "name": "layer_whitelist", "status": "skipped", "violation_count": 0, "violations": [], "skip_reason": "no --allowed-layers given" },
     { "name": "pin_labels_over_drawing", "status": "skipped", "violation_count": 0, "violations": [], "skip_reason": "no --deck given" }
-  ]
+  ],
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": null,
+    "deck": null
+  }
 }
 ```
 
@@ -169,6 +175,7 @@ exit codes).
 | `status`         | `"pass"` \| `"fail"` | `"fail"` iff any check's own `status` is `"fail"`. A `"skipped"` check never causes an overall failure. |
 | `check_count`    | integer          | Always `5` today — `len(checks)`.                                            |
 | `checks`         | array\<object\>  | One entry per check, always in the order documented above, see below.       |
+| `provenance`     | object           | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (precheck resolves no PDK); `deck` pins the `--deck` extraction deck by name and `sha256:` content hash when one is given, else `null`. |
 
 ### `checks[]` entries
 

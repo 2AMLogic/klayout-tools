@@ -86,16 +86,17 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 from typing import TYPE_CHECKING, Any
 
+from ._provenance import build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
     ExtractionDeck,
     ParasiticsDeck,
     UnknownExtractionDeckError,
+    deck_source_path,
     get_extraction_deck,
     get_parasitics_deck,
 )
@@ -202,6 +203,13 @@ def run_extract(
             "nets": [{"name": str, "pin": bool, "device_count": int}, ...],
             "warnings": [str, ...],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
+            "parasitics": {...} | None,
+            "provenance": {  # shared reproducibility block, see _provenance.py
+                "klt_version": <str | None>,
+                "klayout_version": <str | None>,
+                "pdk": {"name", "source", "version"} | None,
+                "deck": {"name": <deck name>, "content_hash": "sha256:..."},
+            },
         }
 
     ``devices``/``nets`` are sorted by name for deterministic, diff-clean
@@ -347,7 +355,7 @@ def run_extract(
     except Exception as exc:
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
-    netlist_sha256 = _sha256_file(netlist_path)
+    netlist_sha256 = sha256_file(netlist_path)
 
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -376,6 +384,12 @@ def run_extract(
         }
     else:
         result["pdk"] = None
+
+    result["provenance"] = build_provenance(
+        deck_name=deck_name,
+        deck_path=deck_source_path(deck_name),
+        pdk=pdk_info,
+    )
 
     # Additive, independently-optional field (issue #216 addendum): `null`
     # unless `--parasitics` was given, a `parasitics` summary block otherwise.
@@ -1157,11 +1171,3 @@ def _each_pin_net(circuit: kdb.Circuit) -> list[kdb.Net]:
         if net is not None:
             result.append(net)
     return result
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
