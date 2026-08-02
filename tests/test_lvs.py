@@ -77,6 +77,41 @@ M4 Y MID VPWR VPWR pfet W=1.0U L=0.15U
 .ends
 """
 
+# Folded/multi-finger NMOS: two parallel W=0.325U fingers sharing all four
+# terminals (gate/source/drain/body) -- electrically identical to a single
+# W=0.65U device, the same as `_INVERTER_SPICE`'s NMOS (issue #261).
+_MULTIFINGER_LAYOUT_SPICE = """
+.subckt inv A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+"""
+
+# Split/interleaved matched pair: a single logical NMOS drawn as two
+# segments about a shared axis (same connectivity shape as the multi-finger
+# case above, from `combine_devices()`'s point of view -- both are
+# parallel-connected devices with matching gate/S/D/B nets).
+_SPLIT_LAYOUT_SPICE = """
+.subckt inv A Y VPWR VGND
+M1A Y A VGND VGND nfet W=0.2U L=0.15U
+M1B Y A VGND VGND nfet W=0.45U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+"""
+
+# Negative control: two genuinely-distinct NMOS devices in parallel (a
+# different gate length on each finger) that `combine_devices()` must NOT
+# merge -- and a matching two-device reference, so the compare is expected
+# to match with or without `options.combine_devices`.
+_DISTINCT_PARALLEL_LAYOUT_SPICE = """
+.subckt inv A Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.325U L=0.15U
+M1B Y A VGND VGND nfet W=0.325U L=0.30U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+"""
+
 
 # --------------------------------------------------------------------------- #
 # load_request / request-shape errors
@@ -843,6 +878,129 @@ def test_keep_extracted_is_a_noop_for_pre_extracted_layout(tmp_path):
     )
     report = run_lvs(path)
     assert report["environment"]["extracted_netlist"] is None
+
+
+# --------------------------------------------------------------------------- #
+# options.combine_devices (issue #261): folded/multi-finger and split/
+# interleaved matched devices vs. a lumped schematic device
+# --------------------------------------------------------------------------- #
+
+
+def test_multifinger_device_mismatches_without_combine_devices(tmp_path):
+    """Default behaviour (flag absent) is unchanged: two parallel fingers
+    sharing all four terminals still report as an unmatched device against
+    a lumped schematic device."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"].get("device.unmatched", 0) >= 1
+    assert report["counts"]["devices"]["layout"] == 3
+    assert report["counts"]["devices"]["reference"] == 2
+
+
+def test_multifinger_device_matches_with_combine_devices(tmp_path):
+    """`options.combine_devices: true` merges the two parallel W=0.325U
+    fingers into a single W=0.65U device, matching the lumped reference."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    assert report["counts"]["devices"]["layout"] == 2
+    assert report["counts"]["devices"]["reference"] == 2
+
+
+def test_split_interleaved_device_matches_with_combine_devices(tmp_path):
+    """Split/interleaved matched-pair segments (common-centroid style: two
+    unevenly-sized fingers about a shared axis) combine the same way as the
+    multi-finger case -- `combine_devices()` only cares about connectivity,
+    not finger symmetry."""
+    layout_path = _write(tmp_path / "layout.spice", _SPLIT_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+
+    path_without = _write_request(
+        tmp_path / "request_without.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report_without = run_lvs(path_without)
+    assert report_without["status"] == "mismatch"
+
+    path_with = _write_request(
+        tmp_path / "request_with.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+    report_with = run_lvs(path_with)
+    assert report_with["status"] == "match"
+    assert report_with["mismatch_count"] == 0
+
+
+def test_combine_devices_does_not_merge_genuinely_distinct_parallel_devices(tmp_path):
+    """Edge case from the acceptance criteria: two parallel devices that
+    differ in a device parameter (gate length here) must NOT be merged by
+    `combine_devices()` -- verified against a two-device reference that
+    matches with or without the flag, since nothing should combine either
+    way."""
+    layout_path = _write(tmp_path / "layout.spice", _DISTINCT_PARALLEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _DISTINCT_PARALLEL_LAYOUT_SPICE)
+
+    for combine_devices in (False, True):
+        path = _write_request(
+            tmp_path / f"request_{combine_devices}.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+                "options": {"combine_devices": combine_devices},
+            },
+        )
+        report = run_lvs(path)
+        assert report["status"] == "match"
+        # Three devices on each side throughout -- confirms the two
+        # differently-sized (L) parallel fingers were never collapsed into
+        # one, with the flag either on or off.
+        assert report["counts"]["devices"]["layout"] == 3
+        assert report["counts"]["devices"]["reference"] == 3
+
+
+def test_combine_devices_defaults_false(tmp_path):
+    """`options.combine_devices` absent from the request behaves exactly
+    like `false` -- the multi-finger layout still mismatches."""
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {},
+        },
+    )
+    report = run_lvs(path)
+    assert report["status"] == "mismatch"
 
 
 # --------------------------------------------------------------------------- #
