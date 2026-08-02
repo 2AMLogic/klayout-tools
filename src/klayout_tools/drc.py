@@ -39,6 +39,12 @@ from .layers import layers_report
 _SINGLE_LAYER_CHECKS = {"width", "space", "notch"}
 # Check kinds that compare a region against another region (other_layer required).
 _TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
+# Two-layer check kinds where the "enclosed" layer can lie entirely outside
+# the "enclosing" layer -- a case `Region.enclosing_check`/`enclosed_check`
+# never reports (they only measure *facing edges*, so zero spatial overlap
+# produces zero edge pairs). See #318: this is the strictly worse violation
+# an enclosure rule exists to catch, so it must not read as `status: clean`.
+_OUTSIDE_CHECKS = {"enclosing", "enclosed"}
 
 
 class DrcError(Exception):
@@ -198,7 +204,9 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 else None
             )
 
-            edge_pairs = _run_check(region, other_region, rule, dbu_scale)
+            edge_pairs, outside_region = _run_check(
+                region, other_region, rule, dbu_scale
+            )
 
             for edge_pair in edge_pairs:
                 bbox = edge_pair.bbox()
@@ -225,6 +233,36 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                     }
                 )
                 rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
+
+            # `outside_region` (only set for "enclosing"/"enclosed", see
+            # _OUTSIDE_CHECKS) holds the part of the enclosed layer that
+            # `enclosing_check`/`enclosed_check` structurally cannot report:
+            # area with zero (or partial) spatial overlap with the enclosing
+            # layer, up to and including a shape that lies entirely outside
+            # it -- the worst-case enclosure violation (#318). Reported under
+            # the same rule id, additive to the edge-pair violations above.
+            if outside_region is not None:
+                for polygon in outside_region.each_merged():
+                    bbox = polygon.bbox()
+                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
+
+                    violations.append(
+                        {
+                            "rule": rule.id,
+                            "description": rule.description,
+                            "check": rule.check,
+                            "layer": layer_label,
+                            "cell": cell.name,
+                            "bbox": {
+                                "left": bbox.left,
+                                "bottom": bbox.bottom,
+                                "right": bbox.right,
+                                "top": bbox.top,
+                            },
+                            "polygon": points,
+                        }
+                    )
+                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
 
     violations.sort(
         key=lambda v: (
@@ -270,7 +308,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
 
 def _run_check(
     region: Any, other_region: Any | None, rule: DrcRule, dbu_scale: float
-) -> Any:
+) -> tuple[Any, Any | None]:
     """Dispatch to the matching ``klayout.db.Region.*_check`` primitive.
 
     ``dbu_scale`` (``deck's nominal_dbu_um / layout.dbu``, see
@@ -279,17 +317,67 @@ def _run_check(
     the nearest whole dbu since ``Region.*_check()`` thresholds are integer
     database units.
 
-    Returns an ``EdgePairs`` collection, one entry per violation.
+    Returns a ``(edge_pairs, outside_region)`` pair. ``edge_pairs`` is an
+    ``EdgePairs`` collection, one entry per marginal violation, as returned
+    by the underlying ``Region.*_check()`` primitive. ``outside_region`` is
+    ``None`` for every check kind except ``"enclosing"``/``"enclosed"``
+    (see ``_OUTSIDE_CHECKS``), where it is a ``Region`` holding the part of
+    an already-interacting "enclosed" shape that has zero or partial spatial
+    overlap with the "enclosing" layer -- geometry ``enclosing_check``/
+    ``enclosed_check`` structurally cannot report, since both only measure
+    facing edges of shapes that already face each other, never a shape (or
+    part of a shape) with no facing edge at all (#318). For ``"enclosing"``
+    (``region`` encloses ``other_region``) this is
+    ``other_region.interacting(region) - region``; for ``"enclosed"``
+    (``region`` is enclosed by ``other_region``) it is the symmetric
+    ``region.interacting(other_region) - other_region``.
+
+    The ``.interacting(...)`` pre-filter (rather than a plain
+    ``other_region - region``) is deliberate: it scopes the check to shapes
+    of the enclosed layer that overlap the enclosing layer *somewhere* --
+    catching a shape that is properly enclosed on one side but has a part
+    (e.g. a protruding tab) that escapes entirely, which is this issue's
+    reproducer -- while not flagging a shape of the enclosed layer that has
+    *no* relationship to this rule's enclosing layer anywhere at all. That
+    second case sounds identical to the first at a glance, but isn't: some
+    decks reuse one physical layer as the "enclosed" side of two different
+    enclosing rules for two disjoint sub-populations of that layer (e.g.
+    gf180mcu's Contact layer is checked against both Poly2 -- gate contacts
+    -- and Comp -- diffusion contacts; a real diffusion contact has zero
+    overlap with Poly2 by design, not by defect). Our engine has no compound
+    layer expressions to scope each rule to just its intended sub-population
+    (see the "compound layer expression" approximation note in each deck
+    module), so a plain not-inside check across the *whole* other_layer
+    would flag every ordinary contact/tap against whichever of the two rules
+    doesn't apply to it -- turning every realistic layout permanently
+    `"violations"`. Requiring some interaction with `region` first keeps the
+    fix targeted at genuine escapes of a feature this rule already covers.
     """
     check = rule.check
     d = round(rule.threshold_dbu * dbu_scale)
 
     if check in _SINGLE_LAYER_CHECKS:
-        return getattr(region, f"{check}_check")(d)
+        return getattr(region, f"{check}_check")(d), None
 
     if check in _TWO_LAYER_CHECKS:
         if other_region is None:
             raise DrcError(f"rule '{rule.id}': check '{check}' requires other_layer")
-        return getattr(region, f"{check}_check")(other_region, d)
+        edge_pairs = getattr(region, f"{check}_check")(other_region, d)
+
+        outside_region = None
+        if check in _OUTSIDE_CHECKS:
+            if check == "enclosing":
+                # `region` is the enclosing layer, `other_region` the
+                # enclosed one -- among the `other_region` shapes that do
+                # touch `region` somewhere, flag whatever part of them
+                # escapes `region` entirely (a plain Boolean NOT, no
+                # threshold: any escape at all is worse than a
+                # marginal-distance violation).
+                outside_region = other_region.interacting(region) - region
+            else:  # check == "enclosed"
+                # Symmetric: `region` is the enclosed layer here.
+                outside_region = region.interacting(other_region) - other_region
+
+        return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
