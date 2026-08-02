@@ -1,0 +1,345 @@
+# klt verify — reusable composite Action wrapping `klt` for downstream block repos
+# =================================================================================
+#
+# Runs `klt` verbs (DRC, layout-metrics, render, ...) against a caller-provided
+# GDSII/OASIS layout, exactly as a local user would (this action installs and
+# invokes the *actual* `klt` CLI -- it never reimplements verb logic), then
+# publishes the results three ways: JSON artifacts, `klt render` PNG artifacts,
+# and a `klt report --format github-summary` rendering appended to
+# `$GITHUB_STEP_SUMMARY`. See docs/guides/github-action.md for the full guide.
+#
+# Design choice: this is a single `action.yml` at the repo root (not a
+# separate `klayout-tools/klt-action` repo) -- see issue #268 / the PR that
+# introduced this file for the rationale. Pinning a downstream workflow to a
+# tag of *this* repo (`uses: 2AMLogic/klayout-tools@vX.Y.Z`) version-locks the
+# action to the exact `klt` build it drives, with no second repo to keep in
+# sync on every release.
+#
+# Worked example -- a downstream block repo's minimal workflow:
+#
+#   name: klt checks
+#   on: [push, pull_request]
+#   jobs:
+#     klt:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@v7
+#         - uses: 2AMLogic/klayout-tools@v0.1.0
+#           with:
+#             layout: layout/my_block.gds
+#             verbs: drc,layout-metrics
+#             deck: sky130
+#
+# That's it -- five lines of `with:`. The step's job summary gets a rendered
+# DRC/metrics report, the run's artifacts include the raw JSON and any
+# `klt render` PNGs, and the step (and therefore the job) fails whenever a
+# verb reports violations or errors, so a broken block fails CI the same way
+# it would fail a local `klt drc` invocation.
+
+name: "klt verify"
+description: >-
+  Run klayout-tools (klt) verbs against a layout in CI -- DRC, layout
+  metrics, and more -- and publish JSON outputs, klt render PNGs, and a
+  rendered step summary, exactly as a local `klt` invocation would.
+author: "2AM Logic"
+
+branding:
+  icon: "cpu"
+  color: "blue"
+
+inputs:
+  layout:
+    description: >-
+      Path (relative to the caller's checkout) to the GDSII/OASIS layout
+      file to check, e.g. `layout/my_block.gds`.
+    required: true
+  block:
+    description: >-
+      Path to the block directory the `layout-metrics` verb operates on
+      (see docs/cli/layout-metrics.md's "Block directory layout"). Defaults
+      to the directory containing `layout`.
+    required: false
+    default: ""
+  verbs:
+    description: >-
+      Comma-separated list of `klt` verbs to run against `layout`.
+      Supported: drc, precheck, layers, cells, stats, render,
+      layout-metrics. `klt report --format github-summary` is only run
+      over the drc/layout-metrics (and lvs, when added) outputs, since
+      those are the envelope kinds it understands -- see docs/cli/report.md.
+    required: false
+    default: "drc,layout-metrics"
+  deck:
+    description: >-
+      DRC/precheck rule deck (the `--deck` value passed to `klt drc` /
+      `klt precheck` / `klt layout-metrics`): sky130 or gf180mcu.
+    required: false
+    default: "sky130"
+  fetch-pdk:
+    description: >-
+      Fetch the pinned lambdapdk data set via this action's own
+      scripts/fetch-pdks.sh before running verbs. Off by default: neither
+      `drc` nor `precheck`'s built-in rule decks require it, and it is a
+      multi-hundred-MB download (cache it in the caller workflow with
+      actions/cache keyed on this action's pinned ref if enabling it).
+    required: false
+    default: "false"
+  klt-version:
+    description: >-
+      A released klayout-tools version to install from PyPI (e.g. `0.4.2`)
+      instead of building from this action's own pinned source checkout.
+      Leave empty (default) to install exactly the source this action is
+      pinned to, so the action always runs the exact `klt` build it is
+      version-locked to -- the recommended default.
+    required: false
+    default: ""
+  python-version:
+    description: Python version to set up before installing klt.
+    required: false
+    default: "3.12"
+  output-dir:
+    description: >-
+      Directory (relative to the caller's workspace) to write klt JSON
+      outputs and renders to.
+    required: false
+    default: "klt-action-output"
+  json-artifact-name:
+    description: Name of the uploaded artifact holding every verb's JSON output.
+    required: false
+    default: "klt-json-outputs"
+  render-artifact-name:
+    description: Name of the uploaded artifact holding `klt render` PNGs.
+    required: false
+    default: "klt-render"
+  fail-on-findings:
+    description: >-
+      Fail this action's step (non-zero exit) when any verb reports a
+      non-clean result (DRC violations, precheck failures, ...) or a hard
+      error. Set to "false" to always exit 0 and rely on the `status`
+      output / step summary / JSON artifacts instead.
+    required: false
+    default: "true"
+
+outputs:
+  status:
+    description: >-
+      "success" if every requested verb ran clean, "failure" otherwise
+      (regardless of `fail-on-findings`).
+    value: ${{ steps.evaluate.outputs.status }}
+  summary-markdown-path:
+    description: >-
+      Path (under `output-dir`) to the rendered `klt report --format
+      github-summary` markdown that was appended to $GITHUB_STEP_SUMMARY.
+    value: ${{ steps.report.outputs.summary-path }}
+  lambdapdk-dir:
+    description: >-
+      Absolute path to the fetched lambdapdk tree when `fetch-pdk: true`
+      (empty otherwise). Not on the `klt pdk find`/`list`/`env` resolution
+      path -- see docs/cli/pdk.md's "Scope (v1)" -- so verbs that need it
+      (e.g. `klt stats`/`klt render` against a lambdapdk fixture GDS) must
+      be pointed at it explicitly.
+    value: ${{ steps.fetch-pdk.outputs.lambdapdk-dir }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install klt
+      shell: bash
+      env:
+        KLT_VERSION: ${{ inputs.klt-version }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$KLT_VERSION" ]]; then
+          echo "Installing klayout-tools==$KLT_VERSION from PyPI"
+          pip install "klayout-tools==$KLT_VERSION"
+        else
+          echo "Installing klt from this action's own pinned source checkout ($ACTION_PATH)"
+          pip install "$ACTION_PATH"
+        fi
+        klt --help > /dev/null
+        echo "klt installed: $(python -c 'import klayout_tools; print(klayout_tools.__version__)' 2>/dev/null || echo unknown)"
+
+    - name: Determine pinned lambdapdk version
+      id: pdk-version
+      if: ${{ inputs.fetch-pdk == 'true' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        version="$(grep -m1 '^LAMBDAPDK_VERSION=' "$ACTION_PATH/scripts/fetch-pdks.sh" | cut -d'"' -f2)"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "dir=$ACTION_PATH/pdks/lambdapdk" >> "$GITHUB_OUTPUT"
+
+    - name: Cache lambdapdk
+      if: ${{ inputs.fetch-pdk == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.pdk-version.outputs.dir }}
+        key: lambdapdk-${{ steps.pdk-version.outputs.version }}
+
+    - name: Fetch pinned PDK data (scripts/fetch-pdks.sh)
+      id: fetch-pdk
+      if: ${{ inputs.fetch-pdk == 'true' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # Idempotent: a cache hit above already satisfies the marker check
+        # inside fetch-pdks.sh, so this is a fast no-op on a warm cache.
+        "$ACTION_PATH/scripts/fetch-pdks.sh"
+        echo "lambdapdk-dir=$ACTION_PATH/pdks/lambdapdk" >> "$GITHUB_OUTPUT"
+
+    - name: Run klt verbs
+      id: run-verbs
+      shell: bash
+      env:
+        LAYOUT: ${{ inputs.layout }}
+        BLOCK: ${{ inputs.block }}
+        VERBS: ${{ inputs.verbs }}
+        DECK: ${{ inputs.deck }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: |
+        # GitHub Actions always invokes composite `shell: bash` steps as
+        # `bash --noprofile --norc -e -o pipefail {0}`, so errexit is active
+        # before this script body runs and `set -uo pipefail` alone cannot
+        # turn it back off. We explicitly `set +e` here because a verb's
+        # non-zero exit (e.g. klt drc's exit 3 for "violations found") is
+        # data this step records, not a script bug -- errexit must not abort
+        # the loop before the remaining verbs run and overall-status is
+        # written to $GITHUB_OUTPUT.
+        set -uo pipefail
+        set +e
+
+        mkdir -p "$OUTPUT_DIR"
+        block="$BLOCK"
+        if [[ -z "$block" ]]; then
+          block="$(dirname "$LAYOUT")"
+        fi
+
+        overall_status=0
+        : > "$OUTPUT_DIR/.report-files"
+
+        IFS=',' read -ra verb_list <<< "$VERBS"
+        for raw_verb in "${verb_list[@]}"; do
+          verb="$(echo "$raw_verb" | xargs)"
+          [[ -z "$verb" ]] && continue
+
+          out="$OUTPUT_DIR/$verb.json"
+          echo "::group::klt $verb"
+
+          case "$verb" in
+            drc|precheck)
+              klt "$verb" "$LAYOUT" --deck "$DECK" --format json > "$out"
+              exit_code=$?
+              ;;
+            layout-metrics)
+              klt layout-metrics "$block" --deck "$DECK" --format json > "$out"
+              exit_code=$?
+              ;;
+            render)
+              mkdir -p "$OUTPUT_DIR/renders"
+              klt render "$LAYOUT" -o "$OUTPUT_DIR/renders" --format json > "$out"
+              exit_code=$?
+              ;;
+            layers|cells|stats)
+              klt "$verb" "$LAYOUT" --format json > "$out"
+              exit_code=$?
+              ;;
+            *)
+              echo "klt-action: unsupported verb '$verb' -- see this action's 'verbs' input docs (action.yml)" >&2
+              exit_code=2
+              rm -f "$out"
+              ;;
+          esac
+
+          echo "klt $verb exited $exit_code"
+          echo "::endgroup::"
+
+          if [[ "$exit_code" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          # Only drc/lvs/layout-metrics-shaped envelopes are understood by
+          # `klt report` -- see docs/cli/report.md's "Envelope-kind detection".
+          case "$verb" in
+            drc|lvs|layout-metrics)
+              [[ -f "$out" ]] && echo "$out" >> "$OUTPUT_DIR/.report-files"
+              ;;
+          esac
+        done
+
+        echo "overall-status=$overall_status" >> "$GITHUB_OUTPUT"
+
+    - name: Render klt report (klt report --format github-summary)
+      id: report
+      if: always()
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: |
+        set -uo pipefail
+        summary_path="$OUTPUT_DIR/step-summary.md"
+
+        mapfile -t report_files < "$OUTPUT_DIR/.report-files" 2>/dev/null || true
+        if [[ "${#report_files[@]}" -eq 0 ]]; then
+          echo "_klt-action: no drc/lvs/layout-metrics envelopes were produced to report on._" > "$summary_path"
+        elif ! klt report "${report_files[@]}" --format github-summary > "$summary_path" 2> "$OUTPUT_DIR/.report-error"; then
+          {
+            echo "_klt-action: \`klt report\` failed to render a summary:_"
+            echo
+            echo '```'
+            cat "$OUTPUT_DIR/.report-error"
+            echo '```'
+          } > "$summary_path"
+        fi
+
+        cat "$summary_path" >> "$GITHUB_STEP_SUMMARY"
+        echo "summary-path=$summary_path" >> "$GITHUB_OUTPUT"
+
+    - name: Upload klt JSON outputs
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.json-artifact-name }}
+        path: |
+          ${{ inputs.output-dir }}/*.json
+          ${{ inputs.output-dir }}/step-summary.md
+        if-no-files-found: warn
+
+    - name: Upload klt render PNGs
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.render-artifact-name }}
+        path: ${{ inputs.output-dir }}/renders/**
+        if-no-files-found: ignore
+
+    - name: Evaluate klt results
+      id: evaluate
+      if: always()
+      shell: bash
+      env:
+        OVERALL_STATUS: ${{ steps.run-verbs.outputs.overall-status }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        JSON_ARTIFACT_NAME: ${{ inputs.json-artifact-name }}
+      run: |
+        set -uo pipefail
+        status="success"
+        if [[ "$OVERALL_STATUS" != "0" ]]; then
+          status="failure"
+        fi
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        echo "klt-action: overall status = $status"
+
+        if [[ "$status" == "failure" && "$FAIL_ON_FINDINGS" == "true" ]]; then
+          echo "::error::one or more klt verbs reported findings or failed -- see the job summary and the '$JSON_ARTIFACT_NAME' artifact for details."
+          exit 1
+        fi

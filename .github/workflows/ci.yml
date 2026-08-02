@@ -110,3 +110,69 @@ jobs:
         # `klt kb validate` entry point so a malformed kb/ entry breaks the
         # build the same way a real user invocation would surface it.
         run: uv run --frozen --extra dev klt kb validate --format json
+
+  action-smoke-test:
+    name: klt verify Action smoke test
+    # Dogfoods action.yml (issue #268) against this repo's own fixtures on
+    # every push/PR, so a broken action fails this repo's CI before it
+    # breaks a downstream block repo's workflow -- see docs/guides/github-action.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare fixture block directories
+        # `layout-metrics` expects a block *directory* (docs/cli/layout-metrics.md),
+        # so each fixture GDS gets its own tiny directory named layout.gds.
+        run: |
+          mkdir -p /tmp/klt-fixtures/clean-block /tmp/klt-fixtures/violating-block
+          cp tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds /tmp/klt-fixtures/clean-block/layout.gds
+          cp examples/drc/example.gds /tmp/klt-fixtures/violating-block/layout.gds
+
+      - name: klt verify -- clean layout (expect success)
+        id: clean
+        uses: ./
+        with:
+          layout: /tmp/klt-fixtures/clean-block/layout.gds
+          block: /tmp/klt-fixtures/clean-block
+          verbs: drc,layout-metrics,layers,render
+          deck: sky130
+          output-dir: klt-action-output/clean
+          # Distinct artifact names per invocation: both clean and violating
+          # steps upload in the same workflow run, so sharing the default
+          # names would 409 on the second actions/upload-artifact call.
+          json-artifact-name: klt-json-outputs-clean
+          render-artifact-name: klt-render-clean
+
+      - name: Assert clean-layout status is success
+        run: |
+          test "${{ steps.clean.outputs.status }}" = "success" || {
+            echo "::error::expected status=success for the clean fixture, got '${{ steps.clean.outputs.status }}'"
+            exit 1
+          }
+
+      - name: klt verify -- layout with seeded DRC violations (expect failure surfaced)
+        # fail-on-findings: false so this step itself doesn't red the job --
+        # the *next* step asserts the violation was actually detected and
+        # reported, which is the behavior under test (issue #268's "verb
+        # failure surfaces clearly, not silently" edge case).
+        id: violating
+        uses: ./
+        with:
+          layout: /tmp/klt-fixtures/violating-block/layout.gds
+          verbs: drc
+          deck: sky130
+          output-dir: klt-action-output/violating
+          fail-on-findings: false
+          json-artifact-name: klt-json-outputs-violating
+          render-artifact-name: klt-render-violating
+
+      - name: Assert violating-layout status is failure
+        run: |
+          test "${{ steps.violating.outputs.status }}" = "failure" || {
+            echo "::error::expected status=failure for the seeded-violation fixture, got '${{ steps.violating.outputs.status }}' -- violations were not surfaced"
+            exit 1
+          }
+          grep -q "violations" "${{ steps.violating.outputs.summary-markdown-path }}" || {
+            echo "::error::step summary markdown did not mention violations"
+            exit 1
+          }
