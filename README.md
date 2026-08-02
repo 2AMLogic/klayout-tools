@@ -102,11 +102,32 @@ npm run check:ci                    # lint + tests — the same gate CI runs
 3.10–3.13 for every pull request and every push to `main`, so a red check is
 the signal that a PR is not mergeable.
 
+## GitHub Action
+
+Run `klt` in a downstream block repo's CI with a few lines of workflow YAML
+— `action.yml` at this repo's root installs `klt`, runs the verbs you
+choose against your layout, and publishes a step summary + JSON/render
+artifacts, exactly like a local `klt` invocation:
+
+```yaml
+- uses: 2AMLogic/klayout-tools@v0.1.0
+  with:
+    layout: layout/my_block.gds
+    verbs: drc,layout-metrics
+    deck: sky130
+```
+
+See [`docs/guides/github-action.md`](docs/guides/github-action.md) for the
+full inputs/outputs reference and a complete worked example.
+
 ## Guides
 
 - [Building KLayout from source on macOS](docs/guides/building-klayout-macos.md)
   — full walkthrough (Homebrew Qt6/Python/Ruby, `build4mac.py`, deploy,
   headless verification), tested on Apple Silicon with KLayout v0.30.10.
+- [The `klt verify` GitHub Action](docs/guides/github-action.md) — reusable
+  composite Action wrapping `klt` for downstream block repo CI: inputs,
+  outputs, and a worked example.
 
 ## Agent skills
 

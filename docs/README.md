@@ -32,4 +32,5 @@ docs/
     spice-corner-runner-spike.md
   guides/                # how-to guides
     building-klayout-macos.md
+    github-action.md
 ```
