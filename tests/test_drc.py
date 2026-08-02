@@ -1073,6 +1073,148 @@ def test_run_drc_gf180mcu_mim_enclosing_fusetop_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- #318: enclosing_check/enclosed_check silently pass on zero overlap --
+
+
+def test_run_drc_gf180mcu_mim_enclosing_fusetop_outside_tab(tmp_path):
+    """Issue #318's exact reproducer: a legal 0.6 um `mim.enclosing.fusetop.1`
+    enclosure everywhere *except* a small FuseTop tab that pokes entirely
+    outside Metal4 (0.8 um past its right edge, touching -- not overlapping --
+    the legally-enclosed body). `Region.enclosing_check` alone only measures
+    facing edges of shapes already within striking distance of each other, so
+    it reports nothing for the tab; the fix must additionally flag the part
+    of FuseTop that has escaped Metal4 entirely, under the same rule id."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
+    # Legal 600 dbu (0.6 um) margin on every side of the main body...
+    top.shapes(fusetop).insert(kdb.Box(600, 600, 19400, 19400))
+    # ...plus a tab that touches the main body's right edge (so it merges
+    # into one connected FuseTop shape) but sticks 800 dbu past Metal4's own
+    # right edge (20000) with zero overlap over that stretch.
+    top.shapes(fusetop).insert(kdb.Box(19400, 9000, 20800, 10000))
+    path = tmp_path / "mim_enclosing_outside_tab.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["mim.enclosing.fusetop.1"] >= 1
+    outside_violations = [
+        v
+        for v in report["violations"]
+        if v["rule"] == "mim.enclosing.fusetop.1"
+        and v["bbox"]["right"] > 20000  # only the escaped tab pokes past x=20000
+    ]
+    assert len(outside_violations) == 1
+    (violation,) = outside_violations
+    assert violation["check"] == "enclosing"
+    assert violation["bbox"] == {
+        "left": 20000,
+        "bottom": 9000,
+        "right": 20800,
+        "top": 10000,
+    }
+    assert violation["polygon"] is not None
+
+
+def test_run_drc_gf180mcu_mim_enclosing_fusetop_marginal_plus_outside(tmp_path):
+    """A FuseTop shape that both under-encloses on one edge (a marginal
+    `enclosing_check` edge-pair violation) *and* has a separate tab entirely
+    outside Metal4 on another edge reports two distinct violations for the
+    same rule id -- the pre-existing marginal-distance detection and the new
+    zero-overlap detection are additive, not a replacement, and don't
+    double-count the same geometry."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
+    # Left margin is only 100 dbu (< 600 threshold) -> one edge-pair violation.
+    # Right/top/bottom margins are a legal 600 dbu.
+    top.shapes(fusetop).insert(kdb.Box(100, 600, 19400, 19400))
+    # A second, separate tab poking entirely outside Metal4's right edge.
+    top.shapes(fusetop).insert(kdb.Box(19400, 9000, 20800, 10000))
+    path = tmp_path / "mim_enclosing_marginal_plus_outside.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    fusetop_violations = [
+        v for v in report["violations"] if v["rule"] == "mim.enclosing.fusetop.1"
+    ]
+    # One marginal edge-pair violation (left edge) + one outside-area
+    # violation (the tab) -- not merged, not duplicated.
+    assert report["rule_counts"]["mim.enclosing.fusetop.1"] == len(fusetop_violations)
+    assert len(fusetop_violations) == 2
+    right_edges = sorted(v["bbox"]["right"] for v in fusetop_violations)
+    # The marginal violation's edge pair is bounded within Metal4 (right edge
+    # <= 20000); the outside violation's bbox extends past it (20800).
+    assert right_edges[0] <= 20000
+    assert right_edges[1] == 20800
+
+
+def test_run_drc_synthetic_enclosed_check_flags_zero_overlap(tmp_path, monkeypatch):
+    """Symmetric coverage for `check="enclosed"` (#318): neither shipped deck
+    currently has an `"enclosed"` rule (only `"enclosing"`), so this exercises
+    the dispatch directly against a minimal synthetic one-rule deck via
+    monkeypatch, mirroring the `"enclosing"` reproducer above but with the
+    enclosed/enclosing roles swapped (`layer` is the enclosed side here,
+    `other_layer` the enclosing side)."""
+    from klayout_tools.decks import DrcRule
+
+    synthetic_deck = [
+        DrcRule(
+            id="inner.enclosed.outer.1",
+            description="synthetic: inner must be enclosed by outer by >= 500 dbu",
+            layer=(10, 0),  # inner (the enclosed layer)
+            other_layer=(20, 0),  # outer (the enclosing layer)
+            check="enclosed",
+            threshold_dbu=500,
+        )
+    ]
+    monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: synthetic_deck)
+    monkeypatch.setattr("klayout_tools.drc.get_nominal_dbu", lambda name: 0.001)
+    monkeypatch.setattr("klayout_tools.drc.get_layer_names", lambda name: {})
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    outer = layout.layer(20, 0)
+    inner = layout.layer(10, 0)
+    top.shapes(outer).insert(kdb.Box(0, 0, 20000, 20000))
+    # Legally-enclosed main body...
+    top.shapes(inner).insert(kdb.Box(600, 600, 19400, 19400))
+    # ...plus a tab entirely outside `outer`, touching the main body.
+    top.shapes(inner).insert(kdb.Box(19400, 9000, 20800, 10000))
+    path = tmp_path / "synthetic_enclosed_outside_tab.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["inner.enclosed.outer.1"] >= 1
+    (outside_violation,) = [
+        v for v in report["violations"] if v["bbox"]["right"] > 20000
+    ]
+    assert outside_violation["check"] == "enclosed"
+    assert outside_violation["bbox"] == {
+        "left": 20000,
+        "bottom": 9000,
+        "right": 20800,
+        "top": 10000,
+    }
+
+
 def test_run_drc_gf180mcu_reproducer_from_issue(tmp_path):
     """The exact reproducer geometry from issue #188: illegal MiM-stack and
     upper-metal geometry that used to report `"status": "clean"` (no rule

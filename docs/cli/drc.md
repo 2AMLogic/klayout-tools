@@ -29,6 +29,39 @@ check kind, threshold, optional second layer) that drives those check
 primitives — not the official sky130 `.lydrc` script executed verbatim. See
 "Coverage" below for what that means for rule fidelity.
 
+### `"enclosing"` / `"enclosed"` also catch zero-overlap escapes
+
+`Region.enclosing_check`/`enclosed_check` only measure the *facing edges* of
+shapes that already face each other — a shape (or part of a shape) of the
+"enclosed" layer that has **no** spatial overlap with the "enclosing" layer
+produces no facing edges at all, so the raw primitive reports nothing for it.
+That is the *worst* case an enclosure rule exists to catch (zero enclosure,
+not just insufficient margin), so `klt drc` does not rely on the primitive
+alone: for every `check: "enclosing"`/`"enclosed"` rule, it additionally
+flags whatever part of an otherwise-interacting enclosed shape escapes the
+enclosing layer entirely — under the *same* rule id, alongside the
+`enclosing_check`/`enclosed_check` edge-pair violations (see
+`violations[].check` below; both violation kinds share the same `"check"`
+string).
+
+This is scoped to shapes of the enclosed layer that overlap the enclosing
+layer *somewhere* (i.e. `other_layer.interacting(layer) - layer`, not a
+blanket `other_layer - layer`) rather than every zero-overlap shape
+unconditionally: some rules approximate an official DRM rule that is really
+scoped to one sub-population of a shared layer (e.g. gf180mcu's
+`poly2.enclosing.contact.1` and `comp.enclosing.contact.1` both check the
+*same* `Contact` layer, against Poly2 for gate contacts and Comp for
+diffusion contacts respectively — an ordinary diffusion contact has zero
+overlap with Poly2 by design, not by defect, and a plain not-inside check
+over the whole layer would flag every contact in every real layout against
+whichever rule doesn't apply to it). Scoping to shapes that already interact
+with this rule's enclosing layer keeps the fix targeted at genuine escapes
+of a feature the rule already covers, at the cost of not detecting a shape
+that is 100% disjoint from the enclosing layer everywhere (no part of it
+interacts at all) — a residual gap tracked as a known limitation, since
+closing it fully requires compound/connectivity-scoped layer expressions
+this engine does not evaluate (see "Coverage" below).
+
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
@@ -300,7 +333,7 @@ On a run with findings:
 | ------------- | ------------------- | ----------------------------------------------------------------------------- |
 | `rule`        | string               | Stable rule id (e.g. `"poly.width.1"`) — never renumbered once shipped.       |
 | `description` | string               | Human-readable rule description.                                              |
-| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.).                   |
+| `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under.                          |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |

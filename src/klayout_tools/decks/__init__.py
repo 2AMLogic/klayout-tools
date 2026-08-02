@@ -31,6 +31,15 @@ class DrcRule:
     sky130 and gf180mcu are both authored against ``dbu_um = 0.001``, i.e.
     1 nm per unit).
 
+    For ``"enclosing"`` (``layer`` encloses ``other_layer``) and ``"enclosed"``
+    (``layer`` is enclosed by ``other_layer``), ``run_drc()`` reports more than
+    the raw ``Region.enclosing_check``/``enclosed_check`` edge-pair violations:
+    it additionally flags any part of an interacting enclosed shape that
+    escapes the enclosing layer entirely (zero overlap, not just insufficient
+    margin) under this same rule ``id`` -- see ``docs/cli/drc.md``'s
+    "``\"enclosing\"``/``\"enclosed\"`` also catch zero-overlap escapes"
+    section and ``drc.py``'s ``_run_check`` (#318).
+
     ``threshold_dbu`` is **not** used directly against a layout's shapes:
     ``run_drc()`` scales it by the ratio of the deck's ``NOMINAL_DBU_UM`` to
     the layout's actual ``dbu`` before passing it to the ``Region.*_check()``
