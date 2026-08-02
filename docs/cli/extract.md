@@ -24,7 +24,10 @@ two disagree, this document (and the code) win.
   Currently: `sky130`, `gf180mcu`.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
-  "next to the input" convention `klt render`/`klt sim` already use).
+  "next to the input" convention `klt render`/`klt sim` already use). The
+  output path's parent directory is created automatically if it does not
+  already exist (including any missing intermediate directories), matching
+  `klt render`/`klt lvs`.
 - `--top` — top cell to extract when the stream has more than one (required
   in that case; optional otherwise, and must name the sole top cell if
   given).

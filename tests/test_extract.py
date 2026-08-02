@@ -138,10 +138,57 @@ def test_unresolvable_pdk_is_application_error(tmp_path):
         )
 
 
-def test_output_directory_missing_is_application_error(tmp_path):
+def test_output_directory_missing_is_created(tmp_path):
+    """`-o` may point at a path whose parent directory does not exist yet --
+    it should be created automatically (matching `klt render`/`klt lvs`,
+    issue #233), not raise."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
-    with pytest.raises(ExtractError, match="output directory does not exist"):
-        run_extract(path, "sky130", output=str(tmp_path / "no_such_dir" / "out.spice"))
+    out_path = tmp_path / "no_such_dir" / "out.spice"
+    assert not out_path.parent.exists()
+
+    result = run_extract(path, "sky130", output=str(out_path))
+
+    assert out_path.parent.is_dir()
+    assert out_path.is_file()
+    assert result["netlist_path"] == str(out_path)
+
+
+def test_output_directory_missing_nested_is_created(tmp_path):
+    """Multiple missing levels are all created, per `os.makedirs`'s
+    recursive semantics."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    out_path = tmp_path / "reports" / "sub" / "dir" / "out.spice"
+    assert not out_path.parent.parent.parent.exists()
+
+    run_extract(path, "sky130", output=str(out_path))
+
+    assert out_path.is_file()
+
+
+def test_output_directory_existing_is_unchanged(tmp_path):
+    """Existing behavior for an output path whose directory already exists
+    is unchanged: extraction still succeeds and writes the file."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    out_dir = tmp_path / "already_exists"
+    out_dir.mkdir()
+    out_path = out_dir / "out.spice"
+
+    run_extract(path, "sky130", output=str(out_path))
+
+    assert out_path.is_file()
+
+
+def test_output_parent_is_a_file_is_application_error(tmp_path):
+    """When the parent path exists but is not a directory (e.g. a plain
+    file), the resulting error is a clean `ExtractError`, not an unhandled
+    `OSError`/traceback."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    out_path = blocker / "out.spice"
+
+    with pytest.raises(ExtractError, match="cannot create output directory"):
+        run_extract(path, "sky130", output=str(out_path))
 
 
 def test_multiple_top_cells_without_top_flag_is_application_error(tmp_path):

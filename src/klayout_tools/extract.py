@@ -228,7 +228,10 @@ def run_extract(
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
-    missing/ambiguous, or the output path's directory does not exist.
+    missing/ambiguous, or the output path's parent directory cannot be
+    created (e.g. it exists as a non-directory file). The output path's
+    parent directory is created automatically when missing (matching ``klt
+    render``/``klt lvs``), including any missing intermediate directories.
     """
     pdk_info: dict[str, Any] | None = None
     # Populated only when a PDK resolves: `{<deck's device class name>:
@@ -278,8 +281,10 @@ def run_extract(
 
     netlist_path = output if output is not None else _default_output_path(path)
     out_dir = os.path.dirname(os.path.abspath(netlist_path))
-    if not os.path.isdir(out_dir):
-        raise ExtractError(f"output directory does not exist: {out_dir}")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
 
     # `netlist.purge()` (in `_extract_netlist`) drops a circuit entirely when
     # it has no devices, no pins, and no subcircuits -- e.g. a layout with no
