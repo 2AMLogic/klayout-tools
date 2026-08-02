@@ -72,6 +72,13 @@ def _print_text(report: dict) -> None:
         for class_name in sorted(device_counts):
             print(f"  {class_name}: {device_counts[class_name]}")
 
+    ignored_layers = report.get("ignored_layers", [])
+    if ignored_layers:
+        print()
+        print("ignored_layers (shapes not read by this deck's connectivity):")
+        for entry in ignored_layers:
+            print(f"  {entry['layer']}/{entry['datatype']}: {entry['shapes']} shape(s)")
+
     warnings = report["warnings"]
     if warnings:
         print()
