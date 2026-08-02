@@ -302,6 +302,17 @@ Two consequences worth knowing:
   something a drawn layout's own geometry can distinguish; this deck models
   only the LVS runset's own default (2.0 fF/µm²) — see
   `decks/gf180mcu.py`'s provenance note.
+- **gf180mcu models only Option B, not Option A, of the DRM's two
+  mutually-exclusive MiM stacks.** The DRM's "10.4 MIM Capacitor" section
+  defines Option A (`MIM.*`, bottom plate `Metal2`, for a 3-metal-layer
+  process variant) and Option B (`MIMTM.*`, bottom plate `Metal(n-1)` of an
+  n-metal stack — `Metal4` on the 5-metal-layer variant this deck models);
+  a PDK is wired for one or the other, never both. This deck's `capacitors`
+  entry transcribes only Option B, mirroring the fixed 5-metal-layer
+  `metals`/`vias` connectivity this whole deck models throughout — not an
+  oversight — so Option A is out of scope here for the same reason as the
+  rest of this deck's DRC/connectivity coverage; see `decks/gf180mcu.py`'s
+  module docstring (its "10.4 MIM Capacitor" note) for the full derivation.
 
 **sky130 gap**: neither MoM (Metal-on-Metal, interdigitated-finger)
 capacitors nor any voltage-flavor/size variant beyond the two curated
