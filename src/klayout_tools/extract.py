@@ -52,10 +52,15 @@ NMOS (``active - nwell``) and PMOS (``active & nwell``) via KLayout's native
 ``DeviceExtractorMOS4Transistor`` -- one generic ``nfet``/``pfet`` device
 class per deck (no voltage-flavor distinction, e.g. no ``nfet_01v8`` vs.
 ``nfet_g5v0`` split), the same "curated starter subset, not the full device
-zoo" scope guard ``docs/cli/drc.md`` documents for the DRC decks. See
-``klayout_tools.decks.sky130``/``gf180mcu`` for the exact per-family layer
-roles and their known connectivity-fidelity limitations (well-tie handling
-in particular).
+zoo" scope guard ``docs/cli/drc.md`` documents for the DRC decks. A deck may
+additionally declare *drawn* precision resistors (issue #222,
+``klayout_tools.decks.ResistorDevice``): a conductor segment covered by the
+PDK's resistor-ID layer is cut out of that conductor's connectivity region
+and extracted through KLayout's native ``DeviceExtractorResistor`` /
+``DeviceExtractorResistorWithBulk`` instead of being left as a short between
+its two heads. See ``klayout_tools.decks.sky130``/``gf180mcu`` for the exact
+per-family layer roles, the resistor sheet-resistance provenance, and their
+known connectivity-fidelity limitations (well-tie handling in particular).
 
 A deck may additionally declare one or more vertical-BJT device-recognition
 entries (``ExtractionDeck.bipolars``, issue #223): the deck's ``nwell``/
@@ -95,6 +100,7 @@ from .decks import (
     BipolarDevice,
     ExtractionDeck,
     ParasiticsDeck,
+    ResistorDevice,
     UnknownExtractionDeckError,
     deck_source_path,
     get_extraction_deck,
@@ -129,6 +135,11 @@ _PARAM_PRECISION_UM = 6
 #: absolute scale instead (still far more precision than any real dbu-grid
 #: geometry needs).
 _PARAM_PRECISION_FARAD = 21
+
+#: Decimal places a drawn resistor's `devices[].params.r_ohm` is rounded to
+#: -- same floating-point-noise cleanup as `_PARAM_PRECISION_UM`, applied to
+#: an ohms-valued parameter rather than a micrometre-valued one.
+_PARAM_PRECISION_OHM = 6
 
 #: Lower bound (ohms) clamped onto an emitted parasitic series resistor so a
 #: net whose interconnect resistance rounds to ~0 still writes a well-formed,
@@ -195,8 +206,11 @@ def run_extract(
             "devices": [
                 {
                     "name": str, "class": str,
-                    "nets": {"s": str, "g": str, "d": str, "b": str | None},
-                    "params": {"w_um": float, "l_um": float},
+                    # MOS: {"s", "g", "d", "b"}; drawn resistor: {"a", "b"}
+                    # (plus "w" for a bulk-terminal resistor).
+                    "nets": {<terminal>: str | None, ...},
+                    # MOS: {"w_um", "l_um"}; drawn resistor adds "r_ohm".
+                    "params": {<name>: float, ...},
                 },
                 ...
             ],
@@ -518,6 +532,88 @@ def _texts(
     return kdb.Texts(cell.begin_shapes_rec(layer_index))
 
 
+def _resolve_resistors(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    poly: kdb.Region,
+    active: kdb.Region,
+    metals: list[kdb.Region],
+) -> tuple[
+    list[tuple[ResistorDevice, kdb.Region, kdb.Region]],
+    kdb.Region,
+    kdb.Region,
+    list[kdb.Region],
+]:
+    """Resolve the deck's drawn-resistor declarations against this layout.
+
+    Returns ``(resistors, poly, active, metals)`` where ``resistors`` is one
+    ``(spec, body_region, terminal_region)`` triple per *recognised* device
+    class and the three conductor regions are the deck's originals with
+    every recognised resistor body **subtracted** -- so the caller's
+    connectivity graph (and its MOS gate/source-drain split) sees the
+    resistor's heads as ordinary conductor and the resistive segment as a
+    hole, instead of one continuous short (see
+    :class:`~klayout_tools.decks.ResistorDevice`).
+
+    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``.
+    A spec whose body region comes out empty on this layout (the common case
+    -- no PDK resistor marker drawn anywhere) is dropped entirely and
+    subtracts nothing, so extraction of a resistor-free layout is bit-for-bit
+    what it was before this feature existed.
+
+    Raises :class:`ExtractError` for a deck-authoring mistake (a ``body``/
+    ``terminal`` layer that is not one of the deck's own conductor layers),
+    since the terminal region must be a layer the connectivity graph already
+    carries.
+    """
+    if not deck.resistors:
+        return [], poly, active, metals
+
+    # Keyed by drawn conductor layer so a resistor declared on `poly` is cut
+    # out of the very same Region the connectivity graph uses.
+    bases: dict[tuple[int, int], kdb.Region] = {deck.poly: poly, deck.active: active}
+    for index, layer in enumerate(deck.metals):
+        bases.setdefault(layer, metals[index])
+
+    def _conductor(layer: tuple[int, int], field: str, name: str) -> kdb.Region:
+        try:
+            return bases[layer]
+        except KeyError:
+            raise ExtractError(
+                f"resistor '{name}': {field} layer {layer[0]}/{layer[1]} is not one "
+                "of the deck's conductor layers (active/poly/metals)"
+            ) from None
+
+    recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]] = []
+    for spec in deck.resistors:
+        base = _conductor(spec.body, "body", spec.name)
+        terminal_layer = spec.terminal if spec.terminal is not None else spec.body
+        _conductor(terminal_layer, "terminal", spec.name)
+
+        body = base & _region(layout, top_cell, spec.marker)
+        for layer in spec.requires:
+            body = body & _region(layout, top_cell, layer)
+        for layer in spec.excludes:
+            body = body - _region(layout, top_cell, layer)
+        if body.is_empty():
+            continue
+        recognised.append((spec, body, terminal_layer))
+
+    for spec, body, _terminal_layer in recognised:
+        bases[spec.body] = bases[spec.body] - body
+
+    resistors = [
+        (spec, body, bases[terminal_layer]) for spec, body, terminal_layer in recognised
+    ]
+    return (
+        resistors,
+        bases[deck.poly],
+        bases[deck.active],
+        [bases[layer] for layer in deck.metals],
+    )
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -552,6 +648,16 @@ def _extract_netlist(
     metals = [_region(layout, top_cell, layer) for layer in deck.metals]
     metal_labels = [_texts(layout, top_cell, layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+
+    # Drawn precision resistors (#222), resolved *before* the MOS split
+    # below: a recognised resistor body is cut out of its own conductor
+    # layer, so (a) the two heads are no longer shorted through it, and (b)
+    # a poly resistor crossing diffusion cannot also be mistaken for a gate
+    # -- the same ordering both PDKs' own KLayout LVS decks use (sky130's
+    # `tgate = poly.and(diff).not(poly_res)...`).
+    resistors, poly, active, metals = _resolve_resistors(
+        layout, top_cell, deck, poly, active, metals
+    )
 
     # NMOS is active outside the well; PMOS is active inside it -- KLayout's
     # standard "well marks the flip side" MOS-splitting idiom (see
@@ -595,7 +701,9 @@ def _extract_netlist(
 
     # NMOS body has no drawn substrate-tap geometry in this curated deck (see
     # the family deck's docstring); tie it to the deck's global substrate
-    # net instead of leaving it floating.
+    # net instead of leaving it floating. The same empty, globally-connected
+    # region doubles as the bulk terminal of any declared resistor with
+    # `bulk_to_substrate` (#222), which carries the identical approximation.
     nfet_body = kdb.Region()
     l2n.register(nfet_body, "nfet_body")
 
@@ -703,6 +811,25 @@ def _extract_netlist(
             kdb.DeviceExtractorCapacitor(capacitor.name, capacitor.area_cap_f_um2),
             {"P1": bottom_region, "P2": top_region},
         )
+
+    # Drawn resistors: `R` is the recognised resistive segment, `C` the
+    # terminal (contacted head) region -- the same conductor layer the
+    # segment was cut out of, already part of the connectivity graph below,
+    # so the heads pick up their nets from ordinary contact/metal routing.
+    # The body itself is deliberately never `connect`ed to anything: that is
+    # precisely what stops it being a short.
+    for index, (spec, body, terminal) in enumerate(resistors):
+        l2n.register(body, f"res{index}_body")
+        if spec.bulk_to_substrate:
+            l2n.extract_devices(
+                kdb.DeviceExtractorResistorWithBulk(spec.name, spec.sheet_rho_ohm_sq),
+                {"R": body, "C": terminal, "W": nfet_body},
+            )
+        else:
+            l2n.extract_devices(
+                kdb.DeviceExtractorResistor(spec.name, spec.sheet_rho_ohm_sq),
+                {"R": body, "C": terminal},
+            )
 
     warnings = [str(entry.message) for entry in l2n.each_log_entry()]
 
@@ -1105,6 +1232,13 @@ def _describe_devices(
                 # never fires for a bipolar device.
                 params["area_um2"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
+                )
+            elif param.name == "R":
+                # Drawn-resistor device classes only (#222): KLayout's
+                # `R = L / W * sheet_rho`, in ohms. MOS classes have no `R`
+                # parameter, so this branch never fires for them.
+                params["r_ohm"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_OHM
                 )
 
         devices.append(

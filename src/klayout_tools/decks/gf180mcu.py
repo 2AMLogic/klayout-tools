@@ -223,6 +223,7 @@ from . import (
     ExtractionDeck,
     LayerRC,
     ParasiticsDeck,
+    ResistorDevice,
 )
 
 # This deck's rule thresholds below are authored assuming database units are
@@ -596,6 +597,68 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # (117/5) and `MIM_L_MK` (117/10) are both required on the top plate,
 # matching `fuse_cap`'s double `.interacting(...)` above; `efuse_mk` (80/5)
 # and `plfuse` (125/5) are excluded, matching `mimcap_exclude`.
+#
+# Drawn resistors (#222). Additional layer numbers, from the same
+# `google/globalfoundries-pdk-libs-gf180mcu_fd_pv` source cited at the top of
+# this module -- specifically its KLayout **LVS** deck's own layer table,
+# `klayout/lvs/rule_decks/layers_definitions.lvs` (as installed by volare
+# under `libs.tech/klayout/lvs/`):
+#
+#     DNWELL      12/0    (`dnwell   = get_polygons(12, 0)`)
+#     Pplus       31/0    (`pplus    = get_polygons(31, 0)`)
+#     Nplus       32/0    (`nplus    = get_polygons(32, 0)`)
+#     SAB         49/0    (`sab      = get_polygons(49, 0)`  -- salicide block)
+#     RES_MK     110/5    (`res_mk   = get_polygons(110, 5)` -- resistor mark)
+#     Resistor    62/0    (`resistor = get_polygons(62, 0)`  -- the high-sheet-rho
+#                          poly mark; this is the layer the DRC deck's own
+#                          `hres.drc` rule file keys off)
+#
+# The one resistor device modelled below is `ppolyf_u` -- the DRM's "P+ poly,
+# unsalicided" precision resistor (DRM chapter "10.0 Analog Device Related
+# Rules", and `magic/gf180mcuD.tech`'s device list comment
+# "#  ppolyf_u  resistor (P+ poly, unsalicided)"). The official KLayout LVS
+# deck derives and extracts it (`lvs/rule_decks/res_derivations.lvs` +
+# `res_extraction.lvs`) as:
+#
+#     ppoly_exclude   = comp.join(res_exclude).join(nplus)
+#     ppolyf_u_layer  = pplus.and(poly2).and(sab).and(res_mk)
+#                            .not_interacting(resistor).not(dnwell)
+#                            .not(ppoly_exclude)
+#     poly2_con       = poly2.not(res_mk).not(plfuse)
+#     extract_devices(resistor_with_bulk('ppolyf_u', 350, BResistor),
+#                     { 'R' => ppolyf_u_layer, 'C' => poly2_con, 'W' => sub })
+#
+# i.e. sheet resistance **350 ohm/square**, with a bulk terminal tied to the
+# substrate (hence `bulk_to_substrate=True` below, which carries this deck's
+# same documented substrate-global approximation). Cross-checked against a
+# second, independent source in the same PDK install: open_pdks' magic
+# technology file `libs.tech/magic/gf180mcuD.tech`, whose extract section
+# reads `resist (rpp)/active 350000` (milliohms per square = 350 ohm/sq) for
+# the same `rpp` device type (`device rsubcircuit ppolyf_u rpp *poly ...`).
+#
+# Approximations relative to that official derivation, all conservative:
+#
+# - `SAB` (salicide block) is a *required* marker, not an optional one. It is
+#   exactly what separates this 350 ohm/sq unsalicided device from the
+#   salicided `ppolyf_s` (7.3 ohm/sq, `resist (allpolynonres)/active 7300` in
+#   the same magic tech file) -- a ~48x difference. A salicided p+ poly
+#   resistor therefore stays ordinary connected poly here (today's behaviour
+#   -- a short) rather than being reported with a 48x-too-large resistance.
+# - `Resistor` (62/0) is an exclusion for the same reason: it marks the
+#   high-sheet-rho `ppolyf_u_1k`/`_2k`/`_3k` flavours (1000/2000/3000 ohm/sq,
+#   selected upstream by a `POLY_RES` deck option this curated deck has no
+#   equivalent of). Upstream drops the whole shape (`not_interacting`); this
+#   deck subtracts it (`not`), which differs only for a marked segment the
+#   `Resistor` layer partially covers.
+# - `res_exclude` (esd, fusewindow_d, polyfuse, diode_mk, drc_bjt, nat,
+#   mos_cap_mk, esd_mk, lvs_source, efuse_mk, plfuse, mvsd, mvpsd,
+#   ldmos_xtor, schottky_diode) is **not** modelled -- none of those layers
+#   are in this curated starter subset. A resistor-marked poly segment also
+#   carrying one of them extracts as `ppolyf_u` rather than being excluded.
+# - The terminal ("C") region is `Poly2` minus the recognised body rather
+#   than upstream's `poly2.not(res_mk).not(plfuse)`; the two agree except on
+#   marked poly this deck does not recognise as a resistor, which stays
+#   ordinary connected poly here rather than being cut out of connectivity.
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -659,6 +722,25 @@ EXTRACTION_DECK = ExtractionDeck(
             # DRM 10.4.2 footnote 1 / MIMTM.1's "virtual bottom plate":
             bottom_plate_oversize_um=1.06,
             area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+        ),
+    ),
+    resistors=(
+        ResistorDevice(
+            name="ppolyf_u",  # gf180mcu_fd_pr__ppolyf_u
+            body=(30, 0),  # Poly2
+            marker=(110, 5),  # RES_MK
+            sheet_rho_ohm_sq=350.0,  # res_extraction.lvs / magic tech, see above
+            requires=(
+                (31, 0),  # Pplus -- p+ doped poly (vs. Nplus's npolyf_*)
+                (49, 0),  # SAB   -- unsalicided (vs. ppolyf_s, 7.3 ohm/sq)
+            ),
+            excludes=(
+                (22, 0),  # Comp   -- a marked gate is a transistor
+                (32, 0),  # Nplus  -> npolyf_* devices, not this one
+                (62, 0),  # Resistor -> ppolyf_u_{1k,2k,3k} high-sheet-rho poly
+                (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
+            ),
+            bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
         ),
     ),
 )
