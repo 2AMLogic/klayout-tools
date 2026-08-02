@@ -1,0 +1,43 @@
+{
+  "$comment": "Golden metrics for the sky130 5T OTA klt gen-compose -> klt extract -> klt drc pipeline (issue #248). Regenerate with `python tests/golden_metrics/generate_golden_metrics.py` -- see tests/golden_metrics/README.md for the update policy.",
+  "metrics": {
+    "drc.coverage.deck_layers_count": 6,
+    "drc.coverage.layers_checked_count": 4,
+    "drc.coverage.layers_in_stream_without_rules_count": 1,
+    "drc.coverage.rules_skipped_count": 4,
+    "drc.dbu_um": 0.001,
+    "drc.schema_version": 1,
+    "drc.violation_count": 0,
+    "drc.violations_count": 0,
+    "extract.dbu_um": 0.001,
+    "extract.device_classes_count": 5,
+    "extract.device_count": 11,
+    "extract.device_counts.nfet": 11,
+    "extract.devices_count": 11,
+    "extract.ignored_layers_count": 0,
+    "extract.net_count": 31,
+    "extract.nets_count": 31,
+    "extract.pin_count": 2,
+    "extract.schema_version": 1,
+    "extract.warnings_count": 0,
+    "gen_compose.bbox_um.x0": 0.0,
+    "gen_compose.bbox_um.x1": {
+      "value": 13.440000000000001,
+      "tol_pct": 2
+    },
+    "gen_compose.bbox_um.y0": 0.0,
+    "gen_compose.bbox_um.y1": {
+      "value": 1.24,
+      "tol_pct": 2
+    },
+    "gen_compose.blocks_count": 3,
+    "gen_compose.drc_hints.matched_groups_count": 3,
+    "gen_compose.drc_hints.min_spacing_um": 2.0,
+    "gen_compose.drc_hints.notes_count": 0,
+    "gen_compose.nets_count": 1,
+    "gen_compose.pins_count": 0,
+    "gen_compose.schema_version": 1,
+    "gen_compose.unrouted_nets_count": 0,
+    "gen_compose.warnings_count": 0
+  }
+}

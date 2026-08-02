@@ -85,3 +85,12 @@ python tests/corpus/generate_golden.py
    fixture.
 4. `tests/test_corpus.py` picks up new corpus files automatically (it
    globs `tests/corpus/<pdk>/*.gds` / `*.oas`).
+
+## Related: golden-metrics fixtures
+
+The golden fixtures here pin a `klt` verb's **full** JSON response
+byte-for-byte. For a narrower, **tolerance-banded scalar-metric** regression
+net (device counts, cell/instance counts, DRC violation counts, ...) — the
+right bar for a metric drifting slightly without the underlying geometry
+becoming byte-different — see [`tests/golden_metrics/README.md`](../golden_metrics/README.md)
+(issue #248).
