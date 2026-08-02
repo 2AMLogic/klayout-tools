@@ -312,7 +312,13 @@ def create_parser() -> argparse.ArgumentParser:
             "positional netlist file args."
         ),
     )
-    lvs_parser.add_argument("request", help="path to a klt lvs request JSON file")
+    lvs_parser.add_argument(
+        "request",
+        help=(
+            "klt lvs request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string"
+        ),
+    )
     lvs_parser.add_argument(
         "--format",
         choices=["text", "json"],

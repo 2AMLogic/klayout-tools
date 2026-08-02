@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from typing import TYPE_CHECKING, Any
 
 from .decks import get_extraction_deck
@@ -132,18 +133,80 @@ def load_request(request_path: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise LvsError(f"request file is not valid JSON: {exc}") from exc
 
-    if not isinstance(request, dict):
-        raise LvsError("request file must contain a JSON object")
+    return _validate_request_shape(request, "request file")
+
+
+def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
+    """Shared ``layout``/``reference`` shape check for a JSON-decoded
+    request, however it was sourced (file, inline JSON, stdin). ``source``
+    is folded into the "must be a JSON object" error for context.
+    """
+    if not isinstance(data, dict):
+        raise LvsError(f"{source} must contain a JSON object")
 
     for field in ("layout", "reference"):
-        if field not in request:
+        if field not in data:
             raise LvsError(f"request is missing required field: {field}")
 
-    return request
+    return data
 
 
-def run_lvs(request_path: str) -> dict[str, Any]:
-    """Run the netlist compare declared by the request at ``request_path``.
+def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+    """Resolve the ``klt lvs`` CLI ``request`` argument into a request dict
+    plus the directory relative paths inside it should resolve against.
+
+    ``value`` is one of three forms (see docs/cli/lvs.md):
+
+    - ``"-"`` -- read the request JSON document from stdin. Relative paths
+      inside it resolve against the current working directory, since there
+      is no request *file* to anchor them to.
+    - a path to an existing, readable file -- read and parse that file
+      (delegates to :func:`load_request`, unchanged). Relative paths
+      resolve against the file's own directory, exactly as before.
+    - anything else -- parsed as an inline JSON object string. This mirrors
+      ``klt gen --params``'s ``load_params_arg`` (``gen.py``): an existing
+      file always wins first, so this only applies once ``os.path.isfile``
+      has already said no. Relative paths resolve against the current
+      working directory, same as the stdin form.
+
+    Raises :class:`LvsError` for any read/parse/shape failure -- the same
+    exception type :func:`load_request` raises, so callers (``run_lvs``,
+    ``cli/lvs_cmd.py``) do not need to distinguish the three forms.
+    """
+    if value == "-":
+        try:
+            data = json.load(sys.stdin)
+        except json.JSONDecodeError as exc:
+            raise LvsError(f"stdin request is not valid JSON: {exc}") from exc
+        return _validate_request_shape(data, "stdin request"), os.getcwd()
+
+    if os.path.isfile(value):
+        return load_request(value), os.path.dirname(os.path.abspath(value))
+
+    if os.path.isdir(value):
+        raise LvsError(f"not a file: {value}")
+
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise LvsError(
+            f"request '{value}' is neither an existing file (file not "
+            f"found) nor valid inline JSON: {exc}"
+        ) from exc
+    return _validate_request_shape(data, "inline request"), os.getcwd()
+
+
+def run_lvs(request: str) -> dict[str, Any]:
+    """Run the netlist compare declared by ``request``.
+
+    ``request`` accepts the same three forms every ``klt lvs`` request
+    argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
+    to a request JSON file, ``"-"`` to read the request from stdin, or an
+    inline JSON object string. Relative paths *inside* the request document
+    (``layout.file``, ``reference.netlist``, etc.) resolve against the
+    request file's own directory for the file form, or against the current
+    working directory for the stdin/inline forms -- there is no request
+    file to anchor them to in that case.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/lvs.md`` / ``docs/design/lvs-extraction-spike.md`` section
@@ -160,8 +223,7 @@ def run_lvs(request_path: str) -> dict[str, Any]:
     ``null`` when ``layout.netlist`` (pre-extracted, no deck involved) was
     given instead.
     """
-    request = load_request(request_path)
-    request_dir = os.path.dirname(os.path.abspath(request_path))
+    request, request_dir = load_request_arg(request)
 
     engine = request.get("engine", "klayout")
     if engine not in SUPPORTED_ENGINES:

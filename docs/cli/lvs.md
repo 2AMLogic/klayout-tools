@@ -6,7 +6,7 @@ Epic #153, following the layout-vs-schematic pattern
 [`klt extract`](extract.md) established for extraction.
 
 ```
-klt lvs <request.json> [--format text|json]
+klt lvs <request> [--format text|json]
 ```
 
 This is phase 3 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -21,8 +21,21 @@ Unlike `klt extract`/`klt drc`, `klt lvs` takes a **request document** (like
 netlist inputs plus optional matching hints, richer than a flag line carries
 cleanly.
 
-- `<request.json>` — path to a request document (see "Request" below). A
-  *reference*, not inline JSON on the command line.
+- `<request>` — a request document (see "Request" below), in any of three
+  forms, mirroring `klt gen --params`'s path-or-inline convention:
+  - a **path** to a request JSON file, e.g. `klt lvs request.json`.
+  - `-` to read the request JSON document from **stdin**, e.g.
+    `cat request.json | klt lvs -`.
+  - an **inline JSON object** string, e.g.
+    `klt lvs '{"layout": {...}, "reference": {...}}'`. An existing file
+    always wins first — a value that both names a readable file *and*
+    happens to parse as JSON is read as that file, not decoded inline.
+  - **Relative paths inside the request** (`layout.file`, `reference.netlist`,
+    etc.) resolve against the **request file's own directory** for the path
+    form, but against the **current working directory** for the stdin and
+    inline-JSON forms — there is no request file to anchor them to in that
+    case. Prefer absolute paths (or paths relative to your invocation's
+    `cwd`) when using `-` or inline JSON.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -110,6 +123,10 @@ directly) has to check pin order.
 
 ## Request
 
+Accepted as a file path, `-` (stdin), or an inline JSON object string on the
+command line — see the `<request>` bullet above for the three forms and how
+each resolves relative paths inside the document.
+
 ```json
 {
   "schema": "klt.lvs.request/1",
@@ -129,11 +146,11 @@ directly) has to check pin order.
 | `schema` | string | Request contract identifier (not required — `load_request` does not validate it, matching `klt sim`'s convention for user-authored input). |
 | `engine` | string | Engine selector. Only `"klayout"` is supported; omit to use the default. |
 | `layout` | object | The layout side — see "`layout` shapes" below. Exactly one of `file`/`netlist` is required. |
-| `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory. |
+| `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory (or the current working directory for the `-`/inline-JSON request forms — see the `<request>` bullet above). |
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. |
 | `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |
-| `options.keep_extracted` | boolean | When `layout.file` is given (inline extraction), retain the intermediate extracted netlist on disk at `<request-dir>/.klt/lvs/<top>.spice` and echo its path in `environment.extracted_netlist`. Default `false` (nothing is written to disk). |
+| `options.keep_extracted` | boolean | When `layout.file` is given (inline extraction), retain the intermediate extracted netlist on disk at `<request-dir>/.klt/lvs/<top>.spice` and echo its path in `environment.extracted_netlist`, where `<request-dir>` is the request file's directory (or the current working directory for the `-`/inline-JSON forms). Default `false` (nothing is written to disk). |
 
 ### `layout` shapes
 
