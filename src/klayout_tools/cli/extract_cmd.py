@@ -30,6 +30,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             parasitics=args.parasitics,
+            top_cell_pins_only=args.top_cell_pins,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)

@@ -176,6 +176,7 @@ def run_extract(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     parasitics: bool = False,
+    top_cell_pins_only: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -186,6 +187,20 @@ def run_extract(
     ``klt render``/``klt sim`` already use). ``top`` selects the top cell
     when the stream has more than one (required in that case; otherwise
     optional and must name the sole top cell if given).
+
+    ``top_cell_pins_only`` (the ``--top-cell-pins`` flag) controls how
+    labelled nets become top-level pins (issue #291). Extraction is flat, so
+    ``make_top_level_pins()`` would otherwise promote *every* named net --
+    including nets that are only named because a label sits inside an
+    instanced sub-cell, which are ordinary internal nodes once instanced.
+    When ``True``, only labels drawn directly in the top cell are promoted to
+    pins; a net named solely by a label found below an instance boundary
+    keeps its name but stays internal. Independent of the flag, a
+    ``warnings`` entry is emitted whenever such a below-top label was
+    promoted (default) or kept internal (flag set), so the promotion is
+    always visible rather than silently inferred from an unexpected pin
+    count. Off by default, so a flat layout (or any layout whose pin labels
+    all live in the top cell) is byte-for-byte unchanged.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags) are
     optional: when either is given, the PDK is resolved via
@@ -306,7 +321,11 @@ def run_extract(
 
     netlist, top_cell_name, dbu_um, warnings, parasitic_nets = (
         extract_netlist_from_layout(
-            path, deck_name, top=top, parasitics_deck=parasitics_deck
+            path,
+            deck_name,
+            top=top,
+            parasitics_deck=parasitics_deck,
+            top_cell_pins_only=top_cell_pins_only,
         )
     )
 
@@ -428,10 +447,18 @@ def extract_netlist_from_layout(
     deck_name: str,
     top: str | None = None,
     parasitics_deck: ParasiticsDeck | None = None,
+    top_cell_pins_only: bool = False,
 ) -> tuple[kdb.Netlist, str, float, list[str], list[dict[str, Any]] | None]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets)``.
+
+    ``top_cell_pins_only`` (issue #291): when ``True``, only labels drawn
+    directly in the top cell are promoted to top-level pins -- a net named
+    solely by a label found below an instance boundary keeps its name but
+    stays internal. Independent of the flag, ``warnings`` gains an entry
+    whenever a below-top label named a promoted pin. See :func:`run_extract`
+    for the full rationale.
 
     ``parasitics_deck`` is optional: when ``None`` (the default, and what
     ``klt lvs``'s inline-extraction path always passes -- LVS is topological
@@ -479,7 +506,7 @@ def extract_netlist_from_layout(
 
     top_cell = _resolve_top_cell(layout, top, path)
     netlist, warnings, parasitic_nets = _extract_netlist(
-        layout, top_cell, deck, parasitics_deck
+        layout, top_cell, deck, parasitics_deck, top_cell_pins_only=top_cell_pins_only
     )
     return netlist, top_cell.name, layout.dbu, warnings, parasitic_nets
 
@@ -541,6 +568,87 @@ def _texts(
     if layer_index is None:
         return kdb.Texts()
     return kdb.Texts(cell.begin_shapes_rec(layer_index))
+
+
+def _label_layer_strings(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    layers: list[tuple[int, int] | None],
+    *,
+    recursive: bool,
+) -> set[str]:
+    """The set of text strings on ``layers`` under ``cell`` (issue #291).
+
+    ``recursive=False`` reads only shapes drawn *directly* in ``cell``
+    (``cell.shapes``); ``recursive=True`` reads the whole sub-tree
+    (``begin_shapes_rec``, the same flatten :func:`_texts` uses). The
+    difference -- strings that appear recursively but not directly in the top
+    cell -- is exactly the set of labels that live below an instance boundary,
+    i.e. sub-cell port names that are internal nodes once instanced.
+
+    ``None`` layers (a deck that declares no such label layer) and layers
+    absent from the stream contribute nothing.
+    """
+    import klayout.db as kdb
+
+    strings: set[str] = set()
+    for layer in layers:
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        shapes = (
+            cell.begin_shapes_rec(layer_index)
+            if recursive
+            else cell.shapes(layer_index)
+        )
+        for text in kdb.Texts(shapes).each():
+            strings.add(text.string)
+    return strings
+
+
+def _reconcile_top_pins(
+    netlist: kdb.Netlist,
+    top_name: str,
+    below_top_labels: set[str],
+    *,
+    demote: bool,
+) -> list[str]:
+    """Reconcile the top circuit's pins against ``below_top_labels`` (issue
+    #291), the label strings that name a net only from below an instance
+    boundary.
+
+    ``make_top_level_pins()`` has already promoted every named net. This finds
+    the promoted pins whose net name is a below-top label and, when
+    ``demote`` is set, removes those pins (the net keeps its name and stays an
+    internal node). Returns the sorted, de-duplicated net names affected --
+    the input to the caller's ``warnings`` entry, whether or not they were
+    actually demoted.
+
+    Global/substrate nets (named by ``connect_global``, not by any drawn text)
+    are never in ``below_top_labels``, so a substrate pin is left untouched.
+    """
+    circuit = netlist.circuit_by_name(top_name)
+    if circuit is None or not below_top_labels:
+        return []
+
+    affected: set[str] = set()
+    to_remove: list[int] = []
+    for pin in circuit.each_pin():
+        net = circuit.net_for_pin(pin.id())
+        if net is None:
+            continue
+        name = net.name
+        if name and name in below_top_labels:
+            affected.add(name)
+            if demote:
+                to_remove.append(pin.id())
+
+    for pin_id in to_remove:
+        circuit.remove_pin(pin_id)
+
+    return sorted(affected)
 
 
 def _resolve_resistors(
@@ -705,6 +813,7 @@ def _extract_netlist(
     top_cell: kdb.Cell,
     deck: ExtractionDeck,
     parasitics_deck: ParasiticsDeck | None = None,
+    top_cell_pins_only: bool = False,
 ) -> tuple[kdb.Netlist, list[str], list[dict[str, Any]] | None]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -991,7 +1100,43 @@ def _extract_netlist(
 
     l2n.extract_netlist()
     netlist = l2n.netlist()
+
+    # Flat extraction (`begin_shapes_rec`) means `make_top_level_pins()` would
+    # promote *every* named net to a top-level pin -- including nets that are
+    # only named because a label sits inside an instanced sub-cell, which are
+    # ordinary internal nodes once instanced (issue #291). Identify those
+    # below-top labels *before* promotion: strings present in the recursive
+    # flatten of a label layer but never drawn directly in the top cell.
+    label_layers = [deck.well_label, deck.poly_label, *deck.metal_labels]
+    top_label_strings = _label_layer_strings(
+        layout, top_cell, label_layers, recursive=False
+    )
+    all_label_strings = _label_layer_strings(
+        layout, top_cell, label_layers, recursive=True
+    )
+    below_top_labels = all_label_strings - top_label_strings
+
     netlist.make_top_level_pins()
+    demoted = _reconcile_top_pins(
+        netlist, top_cell.name, below_top_labels, demote=top_cell_pins_only
+    )
+    if demoted:
+        joined = ", ".join(demoted)
+        if top_cell_pins_only:
+            warnings.append(
+                f"kept {len(demoted)} label-named net(s) internal: their naming "
+                f"label(s) are drawn below the top cell (inside instanced "
+                f"sub-cells), not in the top cell itself ({joined})"
+            )
+        else:
+            warnings.append(
+                f"promoted {len(demoted)} net(s) to top-level pins from label(s) "
+                f"found only below the top cell (inside instanced sub-cells): "
+                f"{joined} -- these are internal nodes once instanced; pass "
+                f"top_cell_pins_only (--top-cell-pins) to keep them internal "
+                f"(issue #291)"
+            )
+
     netlist.purge()
 
     # Parasitics geometry must be read *before* `l2n` (which owns the shape

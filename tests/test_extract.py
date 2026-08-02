@@ -43,11 +43,20 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 
 
-def _make_inverter_layout(top_name: str = "TOP") -> kdb.Layout:
+def _make_inverter_layout(
+    top_name: str = "TOP", a_label_in_subcell: bool = False
+) -> kdb.Layout:
     """A minimal inverter: one NMOS (active outside nwell) and one PMOS
     (active inside nwell) sharing a poly gate, contacted up through li1 to
     met1, with li1/met1 pin labels naming every net -- shaped to exercise
-    every layer role in `decks.sky130.EXTRACTION_DECK`."""
+    every layer role in `decks.sky130.EXTRACTION_DECK`.
+
+    When ``a_label_in_subcell`` is set, the gate's ``A`` label is drawn inside
+    a separate sub-cell instanced into the top cell (identity transform, same
+    coordinates) rather than directly in the top cell. Extraction is flat, so
+    ``A`` still names the gate net -- but its naming label now lives *below* an
+    instance boundary, exercising issue #291's below-top-label pin promotion.
+    """
     layout = kdb.Layout()
     top = layout.create_cell(top_name)
 
@@ -88,7 +97,12 @@ def _make_inverter_layout(top_name: str = "TOP") -> kdb.Layout:
     label(67, 5, "Y", 1800, 500)
     label(67, 5, "VPWR", 200, 2500)
     label(67, 5, "Y", 1800, 2500)
-    label(67, 5, "A", 1000, 1500)
+    if a_label_in_subcell:
+        sub = layout.create_cell("A_LABEL")
+        sub.shapes(layout.layer(67, 5)).insert(kdb.Text("A", kdb.Trans(1000, 1500)))
+        top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(0, 0)))
+    else:
+        label(67, 5, "A", 1000, 1500)
 
     # NMOS body: no drawn tap in this synthetic fixture -- exercises the
     # substrate-global fallback. PMOS body: an nwell tap (tap.drawing inside
@@ -374,6 +388,75 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert report["pin_count"] == len(
         nets
     )  # make_top_level_pins() promotes every named net
+
+
+# --------------------------------------------------------------------------- #
+# Top-cell-only pin promotion (issue #291)
+# --------------------------------------------------------------------------- #
+
+
+def test_flat_layout_unaffected_by_top_cell_pins(tmp_path):
+    """A layout with no instances: every pin label is in the top cell, so
+    `--top-cell-pins` is a no-op -- same pins, and no below-top warning."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    scoped = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "scoped.spice"),
+        top_cell_pins_only=True,
+    )
+
+    base_pins = {n["name"] for n in base["nets"] if n["pin"]}
+    scoped_pins = {n["name"] for n in scoped["nets"] if n["pin"]}
+    assert base_pins == scoped_pins
+    assert base["pin_count"] == scoped["pin_count"]
+    assert not any("below the top cell" in w for w in scoped["warnings"])
+    assert not any("below the top cell" in w for w in base["warnings"])
+
+
+def test_subcell_label_promotes_to_parent_pin_by_default(tmp_path):
+    """The core regression (issue #291): a net named only by a label inside an
+    instanced sub-cell is still promoted to a parent pin by default -- but the
+    promotion now surfaces a warning naming it, rather than being silent."""
+    path = _write_gds(
+        _make_inverter_layout(a_label_in_subcell=True), tmp_path / "hier.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "hier.spice"))
+
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    # Default behaviour is unchanged: A is still promoted to a pin.
+    assert "A" in pins
+    # ...but the below-top promotion is now visible in warnings.
+    warning = next((w for w in report["warnings"] if "below the top cell" in w), None)
+    assert warning is not None
+    assert "A" in warning
+
+
+def test_subcell_label_kept_internal_with_top_cell_pins(tmp_path):
+    """With `--top-cell-pins`, a sub-cell-origin label keeps its net name but
+    is NOT promoted to a parent pin; the genuine top-cell interface is intact."""
+    path = _write_gds(
+        _make_inverter_layout(a_label_in_subcell=True), tmp_path / "hier.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "hier.spice"),
+        top_cell_pins_only=True,
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    # The name is preserved (the net still exists as an internal node)...
+    assert "A" in net_names
+    # ...but it is no longer a top-level pin.
+    assert "A" not in pins
+    # The real, top-cell-drawn interface is untouched (including the
+    # substrate global net, which is not a drawn label).
+    assert {"VGND", "VPWR", "Y", "VPB", "vsubs"}.issubset(pins)
+    assert any("A" in w for w in report["warnings"])
 
 
 def test_default_output_path_replaces_extension(tmp_path):
@@ -858,6 +941,22 @@ def test_cli_json_exit_zero(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "extracted"
     assert out["device_count"] == 2
+
+
+def test_cli_top_cell_pins_flag_demotes_subcell_label(tmp_path, capsys):
+    """The `--top-cell-pins` flag wires through the CLI: a sub-cell-origin
+    gate label (`A`) is not promoted to a top-level pin (issue #291)."""
+    path = str(
+        _write_gds(_make_inverter_layout(a_label_in_subcell=True), tmp_path / "h.gds")
+    )
+    exit_code = main(
+        ["extract", path, "--deck", "sky130", "--top-cell-pins", "--format", "json"]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    pins = {n["name"] for n in out["nets"] if n["pin"]}
+    assert "A" not in pins
+    assert "A" in {n["name"] for n in out["nets"]}  # name kept
 
 
 def test_cli_text_default_format(tmp_path, capsys):

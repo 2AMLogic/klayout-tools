@@ -387,6 +387,20 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--top-cell-pins",
+        dest="top_cell_pins",
+        action="store_true",
+        help=(
+            "promote only labels drawn directly in the top cell to top-level "
+            "pins. Extraction is flat, so by default every named net becomes a "
+            "pin -- including nets named only by a label inside an instanced "
+            "sub-cell, which are internal nodes once instanced (issue #291). "
+            "With this flag such below-top labels keep their net name but stay "
+            "internal. A warning naming any below-top label promotion is "
+            "emitted either way. See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

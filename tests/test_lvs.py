@@ -1102,6 +1102,77 @@ def test_body_unverified_warns_nmos_only_on_sky130(tmp_path):
     assert entry["device"]["class"] == "nfet"
 
 
+def _write_hier_inverter_gds(path: Path) -> str:
+    """A minimal sky130 inverter whose gate ``A`` label lives inside an
+    instanced sub-cell (issue #291), so flat extraction names the gate net
+    ``A`` from below an instance boundary. Written to ``path`` and returned."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff (nmos active)
+    draw(65, 20, kdb.Box(0, 2000, 2000, 3000))  # diff (pmos active)
+    draw(64, 20, kdb.Box(-500, 1500, 2500, 3500))  # nwell
+    draw(66, 20, kdb.Box(800, -200, 1200, 3200))  # poly (shared gate bar)
+    for y0 in (0, 2000):
+        draw(66, 44, kdb.Box(100, y0 + 300, 300, y0 + 700))  # licon (S)
+        draw(66, 44, kdb.Box(1700, y0 + 300, 1900, y0 + 700))  # licon (D)
+        draw(67, 20, kdb.Box(0, y0 + 200, 400, y0 + 800))  # li1 (S)
+        draw(67, 20, kdb.Box(1600, y0 + 200, 2000, y0 + 800))  # li1 (D)
+    draw(66, 44, kdb.Box(900, 1400, 1100, 1600))  # gate licon
+    draw(67, 20, kdb.Box(850, 1350, 1150, 1650))  # gate li1
+
+    label(67, 5, "VGND", 200, 500)
+    label(67, 5, "Y", 1800, 500)
+    label(67, 5, "VPWR", 200, 2500)
+    label(67, 5, "Y", 1800, 2500)
+
+    draw(65, 44, kdb.Box(-400, 2400, -200, 2600))  # tap (nwell tap)
+    draw(66, 44, kdb.Box(-380, 2450, -220, 2550))  # licon over tap
+    draw(67, 20, kdb.Box(-450, 2400, -150, 2600))  # li1 over tap
+    label(64, 5, "VPB", -300, 2500)
+
+    # Gate `A` label inside an instanced sub-cell (below the top cell).
+    sub = layout.create_cell("A_LABEL")
+    sub.shapes(layout.layer(67, 5)).insert(kdb.Text("A", kdb.Trans(1000, 1500)))
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(0, 0)))
+
+    layout.write(str(path))
+    return str(path)
+
+
+def test_top_cell_pins_request_field_keeps_subcell_label_internal(tmp_path):
+    """Issue #291: `layout.top_cell_pins` threads through inline extraction so
+    a net named only by a sub-cell label is not promoted to a layout-side pin
+    the reference then has to declare. The layout-side pin count drops by
+    exactly the one demoted gate pin (`A`)."""
+    gds = _write_hier_inverter_gds(tmp_path / "hier.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+
+    def _run(top_cell_pins: bool) -> dict:
+        request = {
+            "layout": {"file": gds, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        }
+        if top_cell_pins:
+            request["layout"]["top_cell_pins"] = True
+        return run_lvs(_write_request(tmp_path / "request.json", request))
+
+    default = _run(False)
+    scoped = _run(True)
+
+    assert scoped["counts"]["pins"]["layout"] == default["counts"]["pins"]["layout"] - 1
+
+
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
     PMOS well-tap layer either (`Comp` is shared with ordinary active,
