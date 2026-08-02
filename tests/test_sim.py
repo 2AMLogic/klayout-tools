@@ -23,8 +23,10 @@ Two tiers, per the issue's testing requirement (#91):
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -847,6 +849,207 @@ def test_run_sim_local_backend_is_byte_identical_to_default(tmp_path, monkeypatc
         "ss/novdd/-40C",
         "ss/novdd/125C",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# local-parallel backend (#255)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_sim_local_parallel_backend_is_order_identical_to_local(
+    tmp_path, monkeypatch
+):
+    # Corners share nothing, so `local-parallel` must reassemble results in
+    # the same odometer order `local` produces, regardless of which corner's
+    # subprocess happens to finish first. Sleep inversely with temperature
+    # so corners complete in *reverse* submission order under the pool,
+    # actually exercising reassembly rather than accidentally passing
+    # because completion order matched submission order.
+    _write_body(tmp_path)
+    base = {
+        "netlist": "body.spice",
+        "corners": {"temperature_c": [10, 20, 30, 40]},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=1u",
+                "limits": {"min": 0.5},
+            }
+        ],
+        "options": {"max_workers": 4},
+    }
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[2]
+        log_path = cmd[cmd.index("-o") + 1]
+        deck_text = Path(deck_path).read_text()
+        temp = float(re.search(r"\.temp\s+(-?[\d.]+)", deck_text).group(1))
+        time.sleep(max(0.0, 40.0 - temp) * 0.005)
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "  Measurements for Transient Analysis\n\n"
+                "vout                =  1.00000e+00\n"
+            )
+        return _FakeCompleted("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    parallel_req = _write_request(
+        tmp_path, {**base, "backend": "local-parallel"}, name="parallel.json"
+    )
+    local_req = _write_request(tmp_path, base, name="local.json")
+
+    parallel_report = sim.run_sim(str(parallel_req))
+    local_report = sim.run_sim(str(local_req))
+
+    assert [c["corner_id"] for c in parallel_report["corners"]] == [
+        "default/novdd/10C",
+        "default/novdd/20C",
+        "default/novdd/30C",
+        "default/novdd/40C",
+    ]
+    assert [c["corner_id"] for c in parallel_report["corners"]] == [
+        c["corner_id"] for c in local_report["corners"]
+    ]
+    assert _stripped_report(parallel_report) == _stripped_report(local_report)
+
+
+def test_run_sim_local_parallel_failing_corner_does_not_abort_siblings(
+    tmp_path, monkeypatch
+):
+    # A corner that times out (or otherwise errors) is reported exactly as
+    # `local` reports it, and the other corners in the same pool still
+    # complete and report their own real status.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "corners": {"temperature_c": [10, 20, 30]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+            "options": {"max_workers": 3},
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[2]
+        log_path = cmd[cmd.index("-o") + 1]
+        deck_text = Path(deck_path).read_text()
+        temp = float(re.search(r"\.temp\s+(-?[\d.]+)", deck_text).group(1))
+        if temp == 20:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "  Measurements for Transient Analysis\n\n"
+                "vout                =  1.00000e+00\n"
+            )
+        return _FakeCompleted("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "error"
+    assert report["passed"] == 2
+    assert report["errored"] == 1
+    statuses = {c["corner_id"]: c["status"] for c in report["corners"]}
+    assert statuses == {
+        "default/novdd/10C": "pass",
+        "default/novdd/20C": "error",
+        "default/novdd/30C": "pass",
+    }
+    (errored_corner,) = [c for c in report["corners"] if c["status"] == "error"]
+    assert any(d["code"] == "timeout" for d in errored_corner["diagnostics"])
+
+
+def test_run_sim_local_parallel_default_max_workers_is_used(tmp_path, monkeypatch):
+    # No explicit `max_workers` (request field or --flag) -> the backend
+    # falls back to `_default_max_workers()`, never an unbounded pool.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_workers = {}
+    real_pool = sim.ThreadPoolExecutor
+
+    class _RecordingPool(real_pool):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            seen_workers["max_workers"] = max_workers
+            super().__init__(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", _RecordingPool)
+    monkeypatch.setattr(sim, "_default_max_workers", lambda: 2)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 2
+
+
+def test_run_sim_max_workers_flag_overrides_request_field(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"max_workers": 5},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_workers = {}
+    real_pool = sim.ThreadPoolExecutor
+
+    class _RecordingPool(real_pool):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            seen_workers["max_workers"] = max_workers
+            super().__init__(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", _RecordingPool)
+
+    sim.run_sim(str(request), max_workers=1)
+
+    assert seen_workers["max_workers"] == 1
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 1.5, "3"])
+def test_run_sim_invalid_max_workers_raises(tmp_path, bad_value):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"max_workers": bad_value},
+        },
+    )
+    with pytest.raises(sim.SimError, match="max_workers"):
+        sim.run_sim(str(request))
+
+
+def test_default_max_workers_derives_from_cpu_count(monkeypatch):
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+    assert sim._default_max_workers() == 4
+
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 1)
+    assert sim._default_max_workers() == 1
+
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: None)
+    assert sim._default_max_workers() == 1
 
 
 def test_run_sim_stubbed_fail(tmp_path, monkeypatch):

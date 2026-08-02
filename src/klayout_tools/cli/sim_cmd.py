@@ -29,7 +29,12 @@ EXIT_CORNER_ERRORED = 4
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_sim(args.request, artifacts_dir=args.outdir, backend=args.backend)
+        report = run_sim(
+            args.request,
+            artifacts_dir=args.outdir,
+            backend=args.backend,
+            max_workers=args.max_workers,
+        )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)
 
