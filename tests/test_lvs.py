@@ -33,6 +33,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -116,6 +117,126 @@ def test_missing_reference_field_raises(tmp_path):
     path = _write_request(tmp_path / "request.json", {"layout": {"netlist": "x"}})
     with pytest.raises(LvsError, match="missing required field: reference"):
         run_lvs(path)
+
+
+# --------------------------------------------------------------------------- #
+# `request` argument forms: path / inline JSON / stdin (issue #232)
+# --------------------------------------------------------------------------- #
+
+
+def test_load_request_arg_inline_json_matches_file_form(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    path = _write_request(tmp_path / "request.json", request)
+
+    from_file = run_lvs(path)
+    from_inline = run_lvs(json.dumps(request))
+
+    assert from_inline["status"] == from_file["status"] == "match"
+    assert from_inline["mismatch_count"] == from_file["mismatch_count"] == 0
+
+
+def test_load_request_arg_stdin_matches_file_form(tmp_path, monkeypatch):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    path = _write_request(tmp_path / "request.json", request)
+    from_file = run_lvs(path)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request)))
+    from_stdin = run_lvs("-")
+
+    assert from_stdin["status"] == from_file["status"] == "match"
+    assert from_stdin["mismatch_count"] == from_file["mismatch_count"] == 0
+
+
+def test_load_request_arg_inline_relative_paths_resolve_against_cwd(
+    tmp_path, monkeypatch
+):
+    _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    monkeypatch.chdir(tmp_path)
+
+    request = {
+        "layout": {"netlist": "layout.spice", "top": "inv"},
+        "reference": {"netlist": "ref.spice", "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_load_request_arg_stdin_relative_paths_resolve_against_cwd(
+    tmp_path, monkeypatch
+):
+    _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    monkeypatch.chdir(tmp_path)
+
+    request = {
+        "layout": {"netlist": "layout.spice", "top": "inv"},
+        "reference": {"netlist": "ref.spice", "top": "inv"},
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request)))
+    report = run_lvs("-")
+    assert report["status"] == "match"
+
+
+def test_load_request_arg_file_relative_paths_resolve_against_request_dir_not_cwd(
+    tmp_path, monkeypatch
+):
+    """Contrast case for the two tests above: the *file* form still
+    resolves relative paths against the request file's own directory, even
+    when the current working directory is somewhere else entirely -- only
+    the inline/stdin forms (no request file to anchor to) fall back to the
+    CWD."""
+    request_dir = tmp_path / "req_dir"
+    request_dir.mkdir()
+    _write(request_dir / "layout.spice", _INVERTER_SPICE)
+    _write(request_dir / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        request_dir / "request.json",
+        {
+            "layout": {"netlist": "layout.spice", "top": "inv"},
+            "reference": {"netlist": "ref.spice", "top": "inv"},
+        },
+    )
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    report = run_lvs(request_path)
+    assert report["status"] == "match"
+
+
+def test_load_request_arg_malformed_inline_json_raises(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(LvsError, match="valid inline JSON"):
+        run_lvs("{not valid json")
+
+
+def test_load_request_arg_malformed_stdin_json_raises(monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not valid json"))
+    with pytest.raises(LvsError, match="stdin request is not valid JSON"):
+        run_lvs("-")
+
+
+def test_load_request_arg_inline_non_object_raises():
+    with pytest.raises(LvsError, match="inline request must contain a JSON object"):
+        run_lvs("[1, 2, 3]")
+
+
+def test_load_request_arg_stdin_non_object_raises(monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("[1, 2, 3]"))
+    with pytest.raises(LvsError, match="stdin request must contain a JSON object"):
+        run_lvs("-")
 
 
 def test_unsupported_engine_raises(tmp_path):
@@ -1124,3 +1245,30 @@ def test_cli_missing_request_arg_is_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["lvs"])
     assert exc_info.value.code == 2
+
+
+def test_cli_inline_json_request(tmp_path, capsys):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    exit_code = main(["lvs", json.dumps(request), "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "match"
+
+
+def test_cli_stdin_request(tmp_path, capsys, monkeypatch):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request)))
+    exit_code = main(["lvs", "-", "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "match"
