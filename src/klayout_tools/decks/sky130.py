@@ -431,6 +431,21 @@ EXTRACTION_DECK = ExtractionDeck(
     # not every PMOS's nwell. No drawn collector layer -- the collector is
     # the native P-substrate, tied to `substrate_net` like the NMOS body
     # above (see `BipolarDevice`'s docstring).
+    #
+    # No `emitter_excludes`/`emitter_requires` narrowing (issue #302):
+    # unlike gf180mcu (whose p+ emitter carries `Pplus` and whose n+ base
+    # tie carries `Nplus`, so an `emitter_excludes=(Nplus,)` cleanly drops
+    # the base-contact ring), this curated deck models **no implant layers**
+    # (see this module's docstring, the #183/#223 negative finding). The real
+    # `sky130_fd_pr__pnp` draws its base tie on the *distinct* `tap.drawing`
+    # (65/44) layer, not the `diff.drawing` (65/20) emitter layer, so no
+    # same-layer collision occurs in practice -- a base tie on `tap.drawing`
+    # is already outside the `emitter & base` region. Residual limitation:
+    # were a base tie drawn on the *literal* `diff.drawing` emitter layer,
+    # no already-modelled layer could distinguish it from the emitter, so it
+    # would still double-count. Resolving that would require modelling
+    # sky130's implant (`nsdm`/`psdm`) masks, which this starter deck does
+    # not -- documented rather than partially/incorrectly worked around.
     bipolars=(
         BipolarDevice(
             base=(64, 20),  # nwell.drawing

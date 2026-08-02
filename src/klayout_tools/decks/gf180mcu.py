@@ -749,6 +749,16 @@ EXTRACTION_DECK = ExtractionDeck(
             base=(21, 0),  # Nwell
             emitter=(22, 0),  # Comp
             marker=(127, 5),  # DRC_BJT
+            # The base (Nwell) is contacted by an n+ tie ring drawn on the
+            # same Comp diffusion layer as the p+ emitter, inside the same
+            # DRC_BJT mark -- without narrowing, that ring extracts as a
+            # second, artefact `bjt` sharing the base net (issue #302).
+            # Excluding Nplus drops it: a real p+ emitter carries Pplus, not
+            # Nplus, so this leaves the emitter untouched while removing the
+            # n+ base tie. Mirrors the resistor deck's own `(32, 0)` exclude.
+            emitter_excludes=(
+                (32, 0),
+            ),  # Nplus -- an n+ base tie is not the p+ emitter
             class_name="bjt",
         ),
     ),
