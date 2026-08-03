@@ -639,51 +639,83 @@ sky130 and gf180mcu both ship their primitive MOS device as a SPICE
 built-in `nmos`/`pmos` model — so this `M` card cannot bind a real PDK model
 library at all.
 
-**When a PDK resolves now**, each extracted MOS device is written as an `X`
+**When a PDK resolves now**, each extracted device is written as an `X`
 subcircuit call against the resolved PDK's real device library instead:
 
 ```
 X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U
+X$7 RA RB sky130_fd_pr__res_generic_po l=6U w=1U
+X$8 net1 net2 sky130_fd_pr__cap_mim_m3_1 l=10U w=5U
+X$9 vsubs BASE EMIT vsubs sky130_fd_pr__pnp_05v5_W0p68L0p68
 ```
 
-The device is bound via a small curated
-`(deck_name, pdk_variant_family) -> {"nfet": <subckt>, "pfet": <subckt>}`
-table (`src/klayout_tools/pdk_models.py`; see that module's docstring for
-the exact provenance of each bound subcircuit name, verified against a real
-fetched PDK install rather than assumed) and a
+The device is bound via small curated per-class tables in
+`src/klayout_tools/pdk_models.py` (see that module's docstring for the exact
+provenance of every bound subcircuit name and parameter spelling, each read
+off a real fetched PDK install rather than assumed) and a
 `kdb.NetlistSpiceWriterDelegate` subclass that overrides KLayout's default
-`M`-card device writer only for classes present in the resolved table.
+primitive-card writer only for classes present in the resolved tables.
+
+**Coverage** (issue #339 extended #209's MOS-only binding to the other
+recognised analog device classes):
+
+| Device class | sky130 | gf180mcu | Geometry on the `X` card |
+|---|---|---|---|
+| MOS (`nfet`/`pfet`) | ✅ | ✅ | `L`/`W`, read off the device |
+| Resistor | ✅ | ✅ | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
+| Capacitor (MiM) | ✅ | ✅ | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
+| Bipolar | ✅ (`pnp`) | ❌ (carve-out) | none — a geometry-named variant selected by emitter area |
+
+Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
+(`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer
+selects the variant whose nominal emitter area is nearest the device's
+measured `AE` and emits its four `c b e s` terminals (the collector net,
+tied by extraction to the substrate, is repeated for the substrate pin).
 
 **Scope limits** (deliberately narrower than the general PDK-device-metadata
 resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
 future epic):
 
-- **MOS family only**, one voltage flavor per PDK family — the only flavor
-  the curated extraction decks distinguish (see this module's own docstring):
-  sky130's `01v8` core devices (`sky130_fd_pr__nfet_01v8` /
-  `sky130_fd_pr__pfet_01v8`) and gf180mcu's `03v3` core devices (`nfet_03v3`
-  / `pfet_03v3` — gf180mcu has no `gf180mcu_fd_pr__`-prefixed naming
-  convention the way sky130 does).
+- **One voltage/flavor per class**, the only flavor the curated extraction
+  decks distinguish (see the module docstring): e.g. sky130's `01v8` MOS core
+  devices and gf180mcu's `03v3` MOS core devices (gf180mcu has no
+  `gf180mcu_fd_pr__`-prefixed naming convention the way sky130 does), and the
+  specific resistor/capacitor device names each deck already declares.
+- **gf180mcu bipolar is deliberately left unbound** — its recognised `bjt`
+  device stays a bare `Q` card under `--pdk`, **not** a subcircuit call. This
+  is a *documented carve-out*, not an oversight: the gf180mcu deck itself has
+  no positively-identified single device-cell name to bind against — an
+  existing, already-documented data gap in that deck
+  (`src/klayout_tools/decks/gf180mcu.py:557-559`), which this binding cannot
+  resolve without guessing a subcircuit name and polarity. sky130's `pnp` has
+  a positively-identified cell family, so it *is* bound. This is the design
+  choice for an un-bindable combination: a **documented bare-primitive
+  carve-out** rather than a hard error, so a gf180mcu layout containing a
+  bipolar still extracts under `--pdk` (its MOS/resistor/capacitor devices
+  bind; only the `bjt` stays a bare card). Any other recognised device class
+  with no curated binding entry is likewise written as its bare primitive card
+  rather than a guessed subcircuit call.
 - **Two curated decks only** (`sky130`, `gf180mcu`); a resolved PDK whose
-  family has no curated table entry for the requesting `--deck` (e.g. the
+  family has no curated MOS table entry for the requesting `--deck` (e.g. the
   `sky130` deck against a resolved `gf180mcuA` install, or a variant name
   matching no known PDK family at all) is an application error (exit 1)
-  naming what was tried — **never** a silent fallback to the bare `M`-card
-  form.
-- The written `X` card carries only `L`/`W` (both with an explicit
-  micrometre unit suffix, e.g. `L=0.15U` — the same convention `klt
-  extract`'s `M`-card form already uses, unambiguous regardless of any
-  `.option scale` a caller's testbench may or may not set) and relies on
-  the resolved subcircuit's own defaults for everything else (`nf`/`mult`/
-  `par`, all confirmed `1`-equivalent in the fetched real installs this
-  table was verified against — this deck's device extractor never models
-  multi-finger/multiplied devices either). Source/drain area+perimeter
-  (`AS`/`AD`/`PS`/`PD`, present on the bare `M`-card form) are **not**
-  carried onto the `X` card — consistent with this command's documented
-  schematic-equivalent, no-parasitics scope (see "Out of scope" below).
+  naming what was tried — **never** a silent fallback to the bare primitive
+  form. (This up-front deck/PDK-mismatch guard keys off the MOS table, which
+  every deck has; it is distinct from the per-class carve-out above.)
+- Geometry values on every `X` card use an explicit micrometre unit suffix
+  (e.g. `L=0.15U`, `l=6U`, `r_length=6U` — the same convention `klt extract`'s
+  `M`-card form already uses, unambiguous regardless of any `.option scale` a
+  caller's testbench may or may not set) and rely on the resolved
+  subcircuit's own defaults for everything else (`nf`/`mult`/`par`/`m`, all
+  confirmed `1`-equivalent in the fetched real installs each table was
+  verified against). MOS source/drain area+perimeter (`AS`/`AD`/`PS`/`PD`,
+  present on the bare `M`-card form) are **not** carried onto the `X` card —
+  consistent with this command's documented schematic-equivalent,
+  no-parasitics scope (see "Out of scope" below).
 - **The JSON response is unaffected**: `device_counts`/`devices[].class`
-  always report the deck's own class label (`nfet`/`pfet`), regardless of
-  `--pdk`. Model binding is a SPICE-serialization concern only.
+  always report the deck's own class label (`nfet`/`pfet`/`res_generic_po`/
+  `cap_mim_2f0_m4m5_noshield`/`pnp`/`bjt`/…), regardless of `--pdk`. Model
+  binding is a SPICE-serialization concern only.
 
 ## Parasitic (RC) extraction (`--parasitics`)
 

@@ -20,13 +20,33 @@ per bound device instead of KLayout's default ``M`` card.
 
 **Scope** (deliberately narrower than the general PDK-device-metadata
 resolver ``docs/design/pdk-device-corner-metadata-spike.md`` proposes as a
-follow-up epic -- see issue #209's Curator enhancement): MOS family only, one
-voltage flavor per PDK family (the only flavor the curated extraction decks'
-device recognition distinguishes -- see ``klayout_tools.extract``'s module
-docstring), two PDK families (``sky130``, ``gf180mcu``). This table is
-intentionally a single small module, not scattered inline literals, so a
-future ``klt pdk device`` resolver can absorb/replace it without touching the
-delegate/writer plumbing.
+follow-up epic -- see issue #209's Curator enhancement). As of issue #339 the
+binding covers, per PDK family (``sky130``, ``gf180mcu``):
+
+- **MOS** (both decks) -- one voltage flavor per family (the only flavor the
+  curated extraction decks' device recognition distinguishes; see
+  ``klayout_tools.extract``'s module docstring).
+- **Resistor** (both decks) -- every ``ResistorDevice`` class each deck
+  declares (:func:`resolve_device_bindings` reads the deck's own list).
+- **Capacitor** (both decks) -- every ``CapacitorDevice`` class each deck
+  declares, with plate ``L``/``W`` derived from the extracted plate area and
+  perimeter via :func:`equivalent_rectangle_um`.
+- **Bipolar** -- **sky130 only** (``sky130_fd_pr__pnp_05v5``). gf180mcu's
+  bipolar is deliberately left **unbound** (its recognised ``bjt`` device
+  keeps KLayout's bare ``Q``-card form), because the gf180mcu deck itself has
+  no positively-identified single device-cell name to bind against -- an
+  existing, already-documented data gap in that deck
+  (``decks/gf180mcu.py:557-559``), not something this binding can resolve by
+  guessing a subcircuit name. See ``docs/cli/extract.md`` -> "SPICE model
+  binding" -> "Scope limits".
+
+Any recognised device class with no curated binding entry is written as its
+bare primitive card (the pre-``--pdk`` form), never a guessed subcircuit call
+-- the gf180mcu-bipolar carve-out above is the only such case today.
+
+This table is intentionally a single small module, not scattered inline
+literals, so a future ``klt pdk device`` resolver can absorb/replace it
+without touching the delegate/writer plumbing.
 
 **Card shape**: sky130 and gf180mcu both ship their primitive MOS device as a
 SPICE ``.subckt`` (taking ``d g s b`` terminals plus ``l``/``w`` geometry
@@ -93,11 +113,82 @@ Source/drain area+perimeter (``AS``/``AD``/``PS``/``PD``, present on the bare
 onto the ``X`` card -- consistent with `klt extract`'s documented
 schematic-equivalent, no-parasitics scope (``klayout_tools.extract``'s module
 docstring).
+
+**Resistor / capacitor / bipolar subcircuit names + parameter conventions,
+verified against the same real fetched PDK installs** (issue #339; every name
+and parameter spelling below was read off a real install's own ``.subckt``
+definition and a real in-the-wild instantiation, not transcribed from a deck
+comment):
+
+- **sky130 resistors** -- ``sky130_fd_pr__res_generic_po`` (two terminals
+  ``r0 r1``), ``sky130_fd_pr__res_high_po`` / ``sky130_fd_pr__res_xhigh_po``
+  (three terminals ``r0 r1 b``, the bulk tie), all geometry-parameterized by
+  ``l``/``w`` in micrometres. Confirmed in
+  ``~/.volare/sky130A/libs.tech/combined/continuous/models_resistors.spice``
+  (``.subckt  sky130_fd_pr__res_high_po r0 r1 b mult=1`` + ``w=1 l=1``) and a
+  real device-model instantiation
+  (``sky130_fd_pr__res_high_po_2p85.model.spice``:
+  ``x0 r0 r1 sub sky130_fd_pr__res_high_po l=l w=2.85 mult=mult``). The deck's
+  ``bulk_to_substrate`` flag matches the two-vs-three-terminal split exactly
+  (``res_generic_po`` is two-terminal, the ``rpm``/``urpm`` flavours carry the
+  bulk tie).
+- **gf180mcu resistors** -- ``ppolyf_u`` / ``ppolyf_u_1k`` (three terminals),
+  geometry-parameterized by ``r_length``/``r_width`` (**not** ``l``/``w``) in
+  metres, no ``gf180mcu_fd_pr__`` name prefix (same no-prefix convention the
+  MOS table's ``nfet_03v3`` uses). Confirmed in
+  ``~/.volare/gf180mcuA/libs.tech/ngspice/sm141064.ngspice``
+  (``.subckt ppolyf_u 1 2 3 r_length=l r_width=w dtemp=0 par=1 s=1``) and a
+  real analog-IP instantiation
+  (``... ppolyf_u r_width=800e-9 r_length=1.6e-6 m=1.0 r=907.859 par=1``). The
+  per-family parameter-name difference (``l``/``w`` vs ``r_length``/
+  ``r_width``) is why the binding carries the subcircuit's own length/width
+  parameter names per family rather than assuming one convention.
+- **sky130 capacitors** -- the deck's LVS device names
+  (``sky130_fd_pr__model__cap_mim`` on ``capm``/met3,
+  ``sky130_fd_pr__model__cap_mim_m4`` on ``capm2``/met4) map to the
+  *simulation* subcircuits ``sky130_fd_pr__cap_mim_m3_1`` and
+  ``sky130_fd_pr__cap_mim_m3_2`` respectively (the ``_1``/``_2`` suffix is the
+  lower/upper MiM stack), geometry-parameterized by ``w``/``l`` in
+  micrometres. Confirmed in
+  ``~/.volare/sky130A/libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice``
+  (``.subckt  sky130_fd_pr__cap_mim_m3_1 c0 c1 w=1 l=1 mf=1``).
+- **gf180mcu capacitor** -- ``cap_mim_2f0_m4m5_noshield`` (the deck name is
+  already the real subcircuit name), geometry-parameterized by
+  ``c_length``/``c_width`` in metres. Confirmed in
+  ``~/.volare/gf180mcuA/libs.tech/ngspice/sm141064_mim.ngspice``
+  (``.subckt cap_mim_2f0_m4m5_noshield  1 2  c_length=l  c_width=w dtemp=0
+  par=1``). KLayout's capacitor extractor exposes the plate ``A``/``P``
+  (area/perimeter) but not ``L``/``W``, so the writer solves the same
+  equivalent-rectangle quadratic ``extract.py``'s ``_n_squares`` already uses
+  (factored into :func:`equivalent_rectangle_um`) to recover ``l``/``w`` for
+  these geometry-parameterized subcircuits.
+- **sky130 bipolar** -- ``sky130_fd_pr__pnp_05v5`` ships as a **geometry-named
+  family**, not one parameterized cell: only two discrete emitter sizes exist,
+  ``sky130_fd_pr__pnp_05v5_W0p68L0p68`` (emitter 0.68x0.68um, AE=0.4624um^2)
+  and ``sky130_fd_pr__pnp_05v5_W3p40L3p40`` (3.40x3.40um, AE=11.56um^2), each a
+  four-terminal ``c b e s`` subcircuit. Confirmed in
+  ``~/.volare/sky130A/libs.tech/combined/continuous/models_bjt.spice``
+  (``.subckt  sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e s mult=1``). The writer
+  selects the variant whose nominal emitter area is nearest the device's
+  measured ``AE`` (there is no continuously-parameterized cell to pass a
+  geometry to), and emits the collector net a second time for the substrate
+  (``s``) pin -- for this vertical PNP the collector *is* the substrate, and
+  the extraction deck already ties the collector to ``substrate_net``.
+
+Geometry values on every new ``X`` card use the same explicit
+micrometre-unit-suffixed literal (``...U``) the MOS path uses (see the
+``L=0.5U W=8U`` note above): ``8U`` is ``8e-6`` in absolute SI regardless of a
+downstream ``.option scale``, so it is correct against both the sky130
+subcircuits (whose bare ``w``/``l`` are micrometre-convention) and the
+gf180mcu subcircuits (whose ``r_length``/``c_length`` etc. are raw-metre
+convention) without special-casing either.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import math
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -243,14 +334,203 @@ def _format_um(value: float) -> str:
     return f"{text or '0'}U"
 
 
+def equivalent_rectangle_um(
+    area_um2: float, perimeter_um: float
+) -> tuple[float, float] | None:
+    """The ``(length, width)`` of the single rectangle with the given ``area``
+    and ``perimeter`` (``length >= width``), or ``None`` when no real rectangle
+    has both (the shapes are "rounder" than any rectangle -- a negative
+    discriminant, e.g. a single square-ish pad seen through a fragmented
+    outline, or non-positive inputs).
+
+    The side lengths are the roots of ``t^2 - (P/2) t + A = 0``; this is the
+    same first-order equivalent-rectangle model ``extract.py``'s
+    :func:`~klayout_tools.extract._n_squares` uses to estimate a net's square
+    count (that helper delegates here, then takes ``length / width``), factored
+    out so the ``--pdk`` capacitor-binding path can recover a geometry-
+    parameterized MiM subcircuit's ``l``/``w`` from the extracted plate
+    area+perimeter without duplicating the quadratic (issue #339).
+    """
+    if area_um2 <= 0.0 or perimeter_um <= 0.0:
+        return None
+    half_p = perimeter_um / 2.0
+    disc = half_p * half_p - 4.0 * area_um2
+    if disc < 0.0:
+        return None
+    length = (half_p + math.sqrt(disc)) / 2.0
+    width = area_um2 / length
+    if width <= 0.0:
+        return None
+    return (length, width)
+
+
+@dataclass(frozen=True)
+class DeviceBinding:
+    """How :func:`create_model_binding_delegate` rewrites one extracted device
+    class onto a real PDK subcircuit call (issue #339).
+
+    ``kind`` selects the writer strategy:
+
+    - ``"mos"`` -- four terminals ``D G S B``, ``L``/``W`` read straight off
+      the device (the original #209 behavior, now expressed through this
+      shared structure so its output stays byte-identical).
+    - ``"resistor"`` -- terminals ``A B`` (plus ``W`` bulk tie for a
+      ``DeviceExtractorResistorWithBulk`` device), ``L``/``W`` read off the
+      device (KLayout's resistor extractor natively carries them).
+    - ``"capacitor"`` -- terminals ``A B``, plate ``L``/``W`` derived from the
+      device's ``A``/``P`` via :func:`equivalent_rectangle_um` (the extractor
+      exposes area/perimeter, not ``L``/``W``).
+    - ``"bipolar"`` -- terminals ``C B E`` plus the collector net repeated for
+      the four-terminal subcircuit's substrate pin; no ``L``/``W`` params (the
+      geometry is encoded by :attr:`variants`, selected by measured ``AE``).
+
+    ``length_param``/``width_param`` are the subcircuit's own spellings of its
+    length/width parameters (``l``/``w`` for sky130, ``r_length``/``r_width``
+    or ``c_length``/``c_width`` for gf180mcu -- see the module docstring's
+    verified-provenance section). ``variants`` is the ``(nominal AE in um^2,
+    subcircuit name)`` selection table for a geometry-named bipolar family.
+    """
+
+    kind: str
+    subckt: str
+    terminals: tuple[str, ...]
+    length_param: str = "L"
+    width_param: str = "W"
+    variants: tuple[tuple[float, str], ...] = field(default_factory=tuple)
+
+
+#: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> subckt name}.
+#: See the module docstring's verified-provenance section for the real fetched
+#: install each subcircuit name and parameter convention was read from.
+_RESISTOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
+    ("sky130", "sky130"): {
+        "res_generic_po": "sky130_fd_pr__res_generic_po",
+        "res_high_po": "sky130_fd_pr__res_high_po",
+        "res_xhigh_po": "sky130_fd_pr__res_xhigh_po",
+    },
+    ("gf180mcu", "gf180mcu"): {
+        "ppolyf_u": "ppolyf_u",
+        "ppolyf_u_1k": "ppolyf_u_1k",
+    },
+}
+
+#: (deck_name, pdk_variant_family) -> {deck CapacitorDevice.name -> subckt name}.
+_CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
+    ("sky130", "sky130"): {
+        "sky130_fd_pr__model__cap_mim": "sky130_fd_pr__cap_mim_m3_1",
+        "sky130_fd_pr__model__cap_mim_m4": "sky130_fd_pr__cap_mim_m3_2",
+    },
+    ("gf180mcu", "gf180mcu"): {
+        "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
+    },
+}
+
+#: (deck_name, pdk_variant_family) -> {deck BipolarDevice.class_name ->
+#: ((nominal AE in um^2, subckt name), ...)}. gf180mcu is intentionally absent
+#: -- its recognised ``bjt`` stays a bare ``Q`` card (documented carve-out,
+#: see ``decks/gf180mcu.py:557-559`` and ``docs/cli/extract.md``).
+_BIPOLAR_MODEL_TABLE: dict[
+    tuple[str, str], dict[str, tuple[tuple[float, str], ...]]
+] = {
+    ("sky130", "sky130"): {
+        "pnp": (
+            (0.4624, "sky130_fd_pr__pnp_05v5_W0p68L0p68"),
+            (11.56, "sky130_fd_pr__pnp_05v5_W3p40L3p40"),
+        ),
+    },
+}
+
+#: Per-PDK-family subcircuit length/width parameter spellings (see the module
+#: docstring): sky130 uses ``l``/``w``; gf180mcu's resistor/capacitor cells use
+#: distinct ``r_``/``c_`` prefixes.
+_RESISTOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
+    "sky130": ("l", "w"),
+    "gf180mcu": ("r_length", "r_width"),
+}
+_CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
+    "sky130": ("l", "w"),
+    "gf180mcu": ("c_length", "c_width"),
+}
+
+
+def resolve_device_bindings(
+    deck_name: str, pdk_variant: str, deck: Any
+) -> dict[str, DeviceBinding]:
+    """Resolve the full ``{device-class-name -> DeviceBinding}`` map for
+    ``deck`` against ``pdk_variant`` (issue #339): MOS, plus every resistor and
+    capacitor class the deck declares, plus a bindable bipolar class.
+
+    ``deck`` is the deck object (duck-typed: its ``nfet_class``/``pfet_class``,
+    ``resistors``, ``capacitors`` and ``bipolars`` attributes are read) -- kept
+    a parameter rather than an import so this module stays free of a
+    ``decks`` dependency.
+
+    Raises :class:`ModelBindingError` (via :func:`resolve_mos_model_table`)
+    when ``pdk_variant``'s family has no curated MOS entry for ``deck_name`` --
+    the same up-front deck/PDK-mismatch guard #209 already had. A *recognised*
+    device class with no curated binding of its own (today: only gf180mcu's
+    ``bjt``) is left out of the map, so the writer keeps its bare primitive
+    card -- a documented carve-out, never a silent wrong subcircuit call.
+    """
+    family = _pdk_variant_family(pdk_variant)
+    mos = resolve_mos_model_table(deck_name, pdk_variant)
+    bindings: dict[str, DeviceBinding] = {
+        deck.nfet_class: DeviceBinding("mos", mos["nfet"], ("D", "G", "S", "B")),
+        deck.pfet_class: DeviceBinding("mos", mos["pfet"], ("D", "G", "S", "B")),
+    }
+
+    res_table = _RESISTOR_MODEL_TABLE.get((deck_name, family), {})
+    res_len, res_wid = _RESISTOR_PARAM_STYLE.get(family, ("L", "W"))
+    for resistor in getattr(deck, "resistors", ()):
+        subckt = res_table.get(resistor.name)
+        if subckt is None:
+            continue
+        terminals = ("A", "B", "W") if resistor.bulk_to_substrate else ("A", "B")
+        bindings[resistor.name] = DeviceBinding(
+            "resistor", subckt, terminals, res_len, res_wid
+        )
+
+    cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family), {})
+    cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("L", "W"))
+    for capacitor in getattr(deck, "capacitors", ()):
+        subckt = cap_table.get(capacitor.name)
+        if subckt is None:
+            continue
+        bindings[capacitor.name] = DeviceBinding(
+            "capacitor", subckt, ("A", "B"), cap_len, cap_wid
+        )
+
+    bjt_table = _BIPOLAR_MODEL_TABLE.get((deck_name, family), {})
+    for bipolar in getattr(deck, "bipolars", ()):
+        variants = bjt_table.get(bipolar.class_name)
+        if variants is None:
+            # gf180mcu carve-out: no curated variant table -> stays a bare Q
+            # card (see `decks/gf180mcu.py:557-559` and `docs/cli/extract.md`).
+            continue
+        bindings[bipolar.class_name] = DeviceBinding(
+            "bipolar", "", ("C", "B", "E", "C"), variants=variants
+        )
+
+    return bindings
+
+
+def _select_bipolar_variant(
+    emitter_area_um2: float, variants: tuple[tuple[float, str], ...]
+) -> str:
+    """The subcircuit whose nominal emitter area is nearest ``emitter_area_um2``
+    (sky130's ``pnp_05v5`` ships as discrete geometry-named cells, not a
+    continuously-parameterized one -- see the module docstring)."""
+    return min(variants, key=lambda entry: abs(entry[0] - emitter_area_um2))[1]
+
+
 def create_model_binding_delegate(
-    class_to_subckt: dict[str, str],
+    bindings: dict[str, DeviceBinding],
 ) -> kdb.NetlistSpiceWriterDelegate:
-    """Build a ``kdb.NetlistSpiceWriterDelegate`` instance that writes any
-    device whose class name is a key of ``class_to_subckt`` as an ``X``
-    subcircuit call against the mapped subcircuit name, and defers every
-    other device (there is currently no other extracted device class, but a
-    future deck could add one) to KLayout's default ``M``-card behavior.
+    """Build a ``kdb.NetlistSpiceWriterDelegate`` that writes any device whose
+    class name is a key of ``bindings`` as an ``X`` subcircuit call per its
+    :class:`DeviceBinding`, and defers every other device (an unbound
+    recognised class, e.g. gf180mcu's ``bjt``, or a future deck's new class) to
+    KLayout's default primitive-card behavior.
 
     ``import klayout.db`` is deferred to call time (mirrors every other
     KLayout import in ``extract.py``) so importing this module never pays
@@ -259,14 +539,20 @@ def create_model_binding_delegate(
     import klayout.db as kdb
 
     class _ModelBindingSpiceWriterDelegate(kdb.NetlistSpiceWriterDelegate):
-        def __init__(self, mapping: dict[str, str]) -> None:
+        def __init__(self, mapping: dict[str, DeviceBinding]) -> None:
             super().__init__()
-            self._class_to_subckt = mapping
+            self._bindings = mapping
+
+        def _device_param(self, device: kdb.Device, name: str) -> float | None:
+            for param in device.device_class().parameter_definitions():
+                if param.name == name:
+                    return device.parameter(param.id())
+            return None
 
         def write_device(self, device: kdb.Device) -> None:
             device_class = device.device_class()
-            subckt = self._class_to_subckt.get(device_class.name)
-            if subckt is None:
+            binding = self._bindings.get(device_class.name)
+            if binding is None:
                 super().write_device(device)
                 return
 
@@ -279,19 +565,35 @@ def create_model_binding_delegate(
                 net = device.net_for_terminal(terminal_ids[terminal_name])
                 return self.net_to_string(net)
 
-            l_um: float | None = None
-            w_um: float | None = None
-            for param in device_class.parameter_definitions():
-                if param.name == "L":
-                    l_um = device.parameter(param.id())
-                elif param.name == "W":
-                    w_um = device.parameter(param.id())
-
+            pins = " ".join(net_str(terminal) for terminal in binding.terminals)
             name = self.format_name(device.expanded_name())
+
+            if binding.kind == "bipolar":
+                subckt = _select_bipolar_variant(
+                    self._device_param(device, "AE") or 0.0, binding.variants
+                )
+                self.emit_line(f"X{name} {pins} {subckt}")
+                return
+
+            if binding.kind == "capacitor":
+                dims = equivalent_rectangle_um(
+                    self._device_param(device, "A") or 0.0,
+                    self._device_param(device, "P") or 0.0,
+                )
+                if dims is None:
+                    area = self._device_param(device, "A") or 0.0
+                    side = math.sqrt(area) if area > 0.0 else 0.0
+                    length_um, width_um = side, side
+                else:
+                    length_um, width_um = dims
+            else:
+                length_um = self._device_param(device, "L") or 0.0
+                width_um = self._device_param(device, "W") or 0.0
+
             self.emit_line(
-                f"X{name} {net_str('D')} {net_str('G')} {net_str('S')} "
-                f"{net_str('B')} {subckt} "
-                f"L={_format_um(l_um or 0.0)} W={_format_um(w_um or 0.0)}"
+                f"X{name} {pins} {binding.subckt} "
+                f"{binding.length_param}={_format_um(length_um)} "
+                f"{binding.width_param}={_format_um(width_um)}"
             )
 
-    return _ModelBindingSpiceWriterDelegate(class_to_subckt)
+    return _ModelBindingSpiceWriterDelegate(bindings)

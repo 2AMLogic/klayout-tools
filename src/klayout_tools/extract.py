@@ -113,7 +113,6 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from typing import TYPE_CHECKING, Any
@@ -132,9 +131,11 @@ from .decks import (
 )
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
+    DeviceBinding,
     ModelBindingError,
     create_model_binding_delegate,
-    resolve_mos_model_table,
+    equivalent_rectangle_um,
+    resolve_device_bindings,
 )
 
 if TYPE_CHECKING:
@@ -352,11 +353,12 @@ def run_extract(
     """
     pdk_info: dict[str, Any] | None = None
     # Populated only when a PDK resolves: `{<deck's device class name>:
-    # <resolved PDK subckt name>}` for the MOS classes this deck extracts,
-    # e.g. `{"nfet": "sky130_fd_pr__nfet_01v8", "pfet": ...}`. Drives the
-    # `X`-card model-binding writer below -- see the module docstring's
-    # "--pdk-triggered model binding" note and `klayout_tools.pdk_models`.
-    model_class_to_subckt: dict[str, str] | None = None
+    # DeviceBinding}` for every device class this deck extracts that has a
+    # curated binding (MOS + resistor + capacitor on both decks, plus sky130's
+    # bipolar; gf180mcu's bipolar is a documented carve-out and stays absent --
+    # see `klayout_tools.pdk_models`). Drives the `X`-card model-binding writer
+    # below -- see the module docstring's "--pdk-triggered model binding" note.
+    model_bindings: dict[str, DeviceBinding] | None = None
     if pdk_variant is not None or pdk_root is not None:
         try:
             pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
@@ -368,13 +370,11 @@ def run_extract(
         except UnknownExtractionDeckError as exc:
             raise ExtractError(str(exc)) from exc
         try:
-            subckt_names = resolve_mos_model_table(deck_name, pdk_info["variant"])
+            model_bindings = resolve_device_bindings(
+                deck_name, pdk_info["variant"], deck_for_models
+            )
         except ModelBindingError as exc:
             raise ExtractError(str(exc)) from exc
-        model_class_to_subckt = {
-            deck_for_models.nfet_class: subckt_names["nfet"],
-            deck_for_models.pfet_class: subckt_names["pfet"],
-        }
 
     # `--parasitics` resolves the curated per-PDK RC coefficient table for
     # this deck (see `klayout_tools.decks.ParasiticsDeck`); when the flag is
@@ -463,8 +463,8 @@ def run_extract(
             }
 
     writer = (
-        kdb.NetlistSpiceWriter(create_model_binding_delegate(model_class_to_subckt))
-        if model_class_to_subckt is not None
+        kdb.NetlistSpiceWriter(create_model_binding_delegate(model_bindings))
+        if model_bindings is not None
         else kdb.NetlistSpiceWriter()
     )
     writer.use_net_names = True
@@ -1681,14 +1681,12 @@ def _n_squares(area_um2: float, perimeter_um: float) -> float:
     """
     if area_um2 <= 0.0 or perimeter_um <= 0.0:
         return 0.0
-    half_p = perimeter_um / 2.0
-    disc = half_p * half_p - 4.0 * area_um2
-    if disc <= 0.0:
+    dims = equivalent_rectangle_um(area_um2, perimeter_um)
+    if dims is None:
+        # "Rounder" than any rectangle allows (negative discriminant -- e.g. a
+        # single square-ish pad, or fragmented geometry): clamp to one square.
         return 1.0
-    length = (half_p + math.sqrt(disc)) / 2.0
-    width = area_um2 / length
-    if width <= 0.0:
-        return 1.0
+    length, width = dims
     return max(1.0, length / width)
 
 
