@@ -38,11 +38,25 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
-- Since 0.1.0 the CLI has grown from 5 verbs to 19: `layout-metrics`,
+- Since 0.1.0 the CLI has grown from 5 verbs to 20: `layout-metrics`,
   `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
-  `precheck`, `socket-check`, `ring-check`, `report`, and `trajectory` were
-  added on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
-  release will carry them collectively.
+  `precheck`, `socket-check`, `ring-check`, `report`, `trajectory`, and
+  `synthesize` were added on `main`. Each is documented in
+  [`docs/cli/`](docs/cli/); the next release will carry them collectively.
+- 2026-08-03 — `klt synthesize`: new verb (#416, Phase 2 of Epic #391).
+  Synthesizes RTL sources against a resolved sky130 standard-cell liberty
+  via Yosys + bundled ABC (`read_verilog` -> `hierarchy` -> `synth` ->
+  `dfflibmap` -> `abc -liberty` -> `clean` -> `stat`/`write_verilog`,
+  generated into a debuggable `.ys` script kept alongside the mapped
+  netlist), reporting `instance_count`/`area_um2`/`sequential_area_um2`/
+  `instance_counts_by_type` parsed from Yosys's own `stat -liberty ...
+  -json` output. `pdk.cell_library`/`corner` resolve to a liberty file via
+  the same `find_pdk()`/`libs_ref` discovery `klt pdk`/`klt cells` already
+  use — no new PDK-fetch mechanism. `timing` is always `null` in this
+  contract, deferred to a future OpenROAD/OpenSTA place-and-route phase.
+  See `docs/cli/synthesize.md` and
+  `docs/design/digital-flow-contracts-spike.md` section 4 for the full
+  contract.
 - 2026-08-03 — `klt trajectory`: new verb (#388). Renders an append-only
   JSONL optimization-trajectory log (one record per evaluation: `turn`,
   `candidate_ref`, `objective` `{name, value, polarity}`, optional

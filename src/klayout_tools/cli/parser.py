@@ -30,6 +30,7 @@ from . import (
     sim_cmd,
     socket_check_cmd,
     stats_cmd,
+    synthesize_cmd,
     trajectory_cmd,
 )
 
@@ -497,6 +498,38 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     lvs_parser.set_defaults(func=lvs_cmd.run)
+
+    synthesize_parser = subparsers.add_parser(
+        "synthesize",
+        help="synthesize RTL against a standard-cell liberty via Yosys",
+        description=(
+            "Synthesize RTL sources against a resolved sky130 standard-cell "
+            "liberty via Yosys + bundled ABC (`read_verilog` -> `hierarchy` "
+            "-> `synth` -> `dfflibmap` -> `abc -liberty` -> `clean` -> "
+            "`stat`/`write_verilog`), reporting instance count, area, and "
+            "cell-type breakdown -- see "
+            "docs/design/digital-flow-contracts-spike.md section 4 for the "
+            "request/response contract and docs/cli/synthesize.md for the "
+            "CLI surface. Phase 2 of Epic #391. `pdk.cell_library`/`corner` "
+            "are resolved to a liberty file via the same `find_pdk()`/ "
+            "`libs_ref` discovery `klt pdk`/`klt cells` already use -- no "
+            "new PDK-fetch mechanism. `timing` is always `null` in this "
+            "contract, deferred to a future OpenROAD/OpenSTA step. Runs "
+            "Yosys as a subprocess -- requires a `yosys` binary on `$PATH`. "
+            "Takes a request-document path (like `klt lvs`/`klt sim`), not "
+            "positional RTL file args."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "request", help="path to a klt synthesize request JSON file"
+    )
+    synthesize_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
     eval_parser = subparsers.add_parser(
         "eval",

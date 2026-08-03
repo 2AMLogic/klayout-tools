@@ -89,6 +89,7 @@ klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headles
 klt draw --params shapes.json -o out.gds # write a primitive stream (no rule checking)
 klt extract design.gds --deck sky130     # layout -> schematic-equivalent netlist
 klt lvs request.json                     # compare extracted vs reference netlist
+klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
