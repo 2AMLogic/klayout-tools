@@ -914,6 +914,91 @@ def test_res_array_invalid_params_rejected(tmp_path, pdk_root, params):
         )
 
 
+# --- res_array resistor-ID marker layer (issue #369) -------------------------- #
+
+_SKY130_RES_MARK_LAYER = (66, 13)  # poly.res
+_GF180_RES_MARK_LAYER = (110, 5)  # RES_MK
+_GF180_RES_IMPLANT_LAYER = (31, 0)  # Pplus
+_GF180_RES_BLOCK_LAYER = (49, 0)  # SAB (salicide block)
+
+
+def test_res_array_sky130_draws_poly_res_marker(tmp_path, pdk_root):
+    """The generator must draw sky130's `poly.res` resistor-ID marker over
+    each unit's body segment -- without it `klt extract` cannot recognise
+    the drawn poly as a resistor device and the two terminals come out
+    shorted together (issue #369)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "res_array_mark.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_RES_MARK_LAYER in present
+
+
+def test_res_array_gf180_draws_res_mk_marker_and_requires_layers(
+    tmp_path, both_pdk_root
+):
+    """gf180mcu's `ppolyf_u` device additionally *requires* the Pplus implant
+    and SAB salicide-block layers to cover the same segment as the RES_MK
+    marker -- the marker alone recognises nothing there (issue #369)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "res_array_gf180_mark.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_RES_MARK_LAYER in present
+    assert _GF180_RES_IMPLANT_LAYER in present
+    assert _GF180_RES_BLOCK_LAYER in present
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "device_class"),
+    [("sky130A", "sky130", "res_generic_po"), ("gf180mcuD", "gf180mcu", "ppolyf_u")],
+)
+def test_res_array_extracts_as_resistor_not_a_short(
+    tmp_path, both_pdk_root, variant, deck, device_class
+):
+    """The end-to-end acceptance bar from the issue: `res_array`'s own
+    output, run through (unmodified) `klt extract`, must recognise a
+    resistor device -- not absorb the poly body into ordinary interconnect
+    and short the two terminals together (issue #369)."""
+    gds_path = tmp_path / f"res_array_{deck}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"num": 3, "dummy": 1},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), deck)
+
+    assert report["device_counts"].get(device_class, 0) > 0
+
+
 # --- guard_ring --------------------------------------------------------------- #
 
 

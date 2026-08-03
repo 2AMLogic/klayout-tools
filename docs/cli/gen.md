@@ -131,6 +131,16 @@ layers, so the footprint — not the layer stack — is what's shared). Each
 real (non-dummy) unit gets two ports, `R<i>_A`/`R<i>_B`. `device_count` is
 `num` (dummies excluded). `drc_hints.matched_group_id` is `"res_array:<num>"`.
 
+Every unit (dummies included) has its resistive *body segment* — the middle
+span between the two contacted end pads — covered by the target PDK's own
+resistor-ID marker layer (sky130's `poly.res` `(66, 13)`; gf180mcu's
+`RES_MK` `(110, 5)`, plus the `Pplus`/`SAB` layers its own `ppolyf_u`
+device additionally requires), so `klt gen res_array`'s output is directly
+recognised as a resistor device by `klt extract --deck <pdk>` rather than
+being absorbed into ordinary poly interconnect as a short (issue #369).
+Neither curated *DRC* deck checks any of these layers, so drawing them never
+affects `klt drc` status.
+
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
 | `length_um`    | double | `2.0`   | Unit resistor body length (µm). Must be `> 0`. |

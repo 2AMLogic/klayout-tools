@@ -93,6 +93,12 @@ _HIDDEN_PARAMS = {
     "well_present",
     "bjt_mark_layer",
     "bjt_mark_present",
+    "res_mark_layer",
+    "res_mark_present",
+    "res_implant_layer",
+    "res_implant_present",
+    "res_block_layer",
+    "res_block_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -175,6 +181,14 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # rule checks this layer, but it is real and extraction already
         # trusts it to split nfet/pfet active regions (see `extract.py`).
         "bjt_mark": None,  # curated deck has no bipolar device mark-layer rule
+        "res_mark": (66, 13),  # poly.res -- the resistor-ID marker
+        # `klayout_tools.decks.sky130.EXTRACTION_DECK.resistors`'s
+        # `res_generic_po` keys off (issue #369): without it, a drawn poly
+        # body extracts as plain interconnect (a short) instead of a
+        # resistor. No curated DRC rule checks this layer either, matching
+        # `bjt_mark` above.
+        "res_implant": None,  # `res_generic_po` requires no implant layer
+        "res_block": None,  # ...nor a salicide-block layer (contrast gf180mcu)
     },
     "gf180mcu": {
         "active": (22, 0),  # Comp
@@ -186,6 +200,13 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "bjt_mark": (127, 5),  # DRC_BJT -- the vertical-bipolar device mark
         # layer the curated deck's `bjt.separation.comp.1` (`BJT.3`) rule keys
         # off (see klayout_tools.decks.gf180mcu).
+        "res_mark": (110, 5),  # RES_MK -- the resistor-ID marker
+        # `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.resistors`'s
+        # `ppolyf_u` keys off (issue #369). Unlike sky130, gf180mcu's
+        # `ppolyf_u` also *requires* the two roles below to cover the same
+        # segment -- the marker alone recognises nothing there.
+        "res_implant": (31, 0),  # Pplus -- p+ doped poly (vs. Nplus's npolyf_*)
+        "res_block": (49, 0),  # SAB -- salicide block (unsalicided resistor)
     },
 }
 
@@ -249,12 +270,35 @@ def _device_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
 
 def _resistor_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     """Hidden layer params for ``res_array`` (a poly-body unit resistor/cap
-    array -- no separate active-layer role)."""
+    array -- no separate active-layer role).
+
+    Also resolves the PDK's resistor-ID ("marker") layer covering each unit's
+    resistive body segment -- without it, `klt extract` cannot recognise the
+    drawn poly body as a resistor device: it is absorbed into ordinary poly
+    interconnect and the two terminals come out shorted together (issue
+    #369). On gf180mcu the marker alone is not enough: its own curated
+    deck's `ppolyf_u` device additionally *requires* the Pplus implant and
+    SAB (salicide-block) layers to cover the same segment (see
+    :data:`_PDK_ROLE_LAYERS`'s `res_mark`/`res_implant`/`res_block` roles and
+    ``klayout_tools.decks.gf180mcu``'s `ppolyf_u` declaration); sky130's
+    `res_generic_po` requires neither, so both roles resolve to `None`
+    there, following the `well_present`/`bjt_mark_present` precedent."""
+    import klayout.db as kdb
+
     family = _pdk_family(pdk_info["variant"])
+    mark = _role_layer_info(family, "res_mark")
+    implant = _role_layer_info(family, "res_implant")
+    block = _role_layer_info(family, "res_block")
     return {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
         "metal_layer": _role_layer_info(family, "metal"),
+        "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
+        "res_mark_present": mark is not None,
+        "res_implant_layer": implant if implant is not None else kdb.LayerInfo(0, 0),
+        "res_implant_present": implant is not None,
+        "res_block_layer": block if block is not None else kdb.LayerInfo(0, 0),
+        "res_block_present": block is not None,
     }
 
 
@@ -486,7 +530,18 @@ def _mos_array_layout(
 
 def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
-    of ``length_um`` between two contact+local-metal end pads."""
+    of ``length_um`` between two contact+local-metal end pads.
+
+    ``boxes_um["marker"]`` is the recognised resistive *body segment* -- the
+    middle ``length_um``-wide span between the two ``contact_region_um`` end
+    pads, deliberately excluding them. This is where the PDK's resistor-ID
+    layer (and, on gf180mcu, its implant/salicide-block requires-layers) get
+    drawn (issue #369): covering the whole unit (heads included) would
+    consume the contacted end pads into the recognised body too, leaving no
+    poly behind for the contacts to land on -- see
+    ``klayout_tools.extract._resolve_resistors``, which subtracts the
+    recognised body from the conductor region to derive the terminal poly.
+    """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     total_len_um = 2 * contact_region_um + length_um
     seg_positions = [
@@ -498,6 +553,7 @@ def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
         "poly": [(0.0, 0.0, total_len_um, width_um)],
         "contact": [],
         "metal": [],
+        "marker": [(contact_region_um, 0.0, contact_region_um + length_um, width_um)],
     }
     contact_half = CONTACT_SIZE_UM / 2.0
     for sx0, sx1 in seg_positions:
@@ -1400,6 +1456,50 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Local routing metal drawing layer",
                 default=kdb.LayerInfo(0, 0),
             )
+            self.param(
+                "res_mark_layer",
+                self.TypeLayer,
+                "Resistor-ID (device-mark) drawing layer covering each unit's "
+                "body segment (only used when res_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "res_mark_present",
+                self.TypeBoolean,
+                "Whether res_mark_layer is a real, DRC-checked layer for the "
+                "resolved PDK",
+                default=False,
+            )
+            self.param(
+                "res_implant_layer",
+                self.TypeLayer,
+                "Resistor implant drawing layer (e.g. gf180mcu's Pplus) "
+                "required over the body segment for device recognition "
+                "(only used when res_implant_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "res_implant_present",
+                self.TypeBoolean,
+                "Whether res_implant_layer is a real, DRC-checked layer for "
+                "the resolved PDK",
+                default=False,
+            )
+            self.param(
+                "res_block_layer",
+                self.TypeLayer,
+                "Resistor salicide-block drawing layer (e.g. gf180mcu's SAB) "
+                "required over the body segment for device recognition "
+                "(only used when res_block_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "res_block_present",
+                self.TypeBoolean,
+                "Whether res_block_layer is a real, DRC-checked layer for "
+                "the resolved PDK",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"res_array(l={self.length_um},w={self.width_um},n={self.num})"
@@ -1413,7 +1513,8 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.length_um, self.width_um, self.spacing_um, self.num, self.dummy
             )
             unit_boxes = info["unit"]["boxes_um"]
-            for c in info["cells"] + info["dummy_cells"]:
+            all_cells = info["cells"] + info["dummy_cells"]
+            for c in all_cells:
                 for role, li in (
                     ("poly", li_poly),
                     ("contact", li_contact),
@@ -1421,6 +1522,26 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 ):
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
+                    )
+
+            # Draw the PDK resistor-ID marker (and, on gf180mcu, the implant/
+            # salicide-block requires-layers) over every unit's body segment
+            # -- dummies included, since they are structurally real unit
+            # resistors too (mirrors `mos_array`'s dummy gates, which are
+            # drawn identically to real ones) -- see :func:`_res_unit_layout`
+            # for why the marker box excludes the contacted end pads.
+            marker_boxes = unit_boxes["marker"]
+            for present, layer_param in (
+                (self.res_mark_present, self.res_mark_layer),
+                (self.res_implant_present, self.res_implant_layer),
+                (self.res_block_present, self.res_block_layer),
+            ):
+                if not present:
+                    continue
+                li_mark = self.layout.layer(layer_param)
+                for c in all_cells:
+                    _insert_boxes(
+                        self.cell, li_mark, dbu, marker_boxes, c["x0_um"], c["y0_um"]
                     )
 
     class _GuardRingPCell(kdb.PCellDeclarationHelper):
