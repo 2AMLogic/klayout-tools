@@ -555,7 +555,16 @@ class CapacitorDevice:
       track (e.g. sky130's MiM stacks, whose real ``via3``/``via4`` land on
       ``met4``/``met5`` -- neither tracked by this curated deck's ``li1``/
       ``met1``-only ``metals`` stack) -- documented, not silently claimed as
-      fixed.
+      fixed. When ``top_plate_via`` *is* one of the owning deck's own
+      ``vias`` layers, ``extract.py`` also excludes the geometric overlap
+      between the via and this capacitor's recognised ``bottom_plate``
+      region from that ``vias[]`` layer before the deck's generic per-layer
+      connectivity loop runs (#364) -- otherwise a via placed per the PDK's
+      own minimum-overlap rule for it (which requires the bottom plate to
+      enclose/overlap the via, not clear it) would be read by that generic
+      loop as an ordinary via shorting the two plates together, even though
+      the plate wiring above already connects the via to the top plate
+      correctly.
 
     ``area_cap_f_um2`` is the device's capacitance per square micrometre of
     plate *overlap* area, in **Farads**. KLayout's

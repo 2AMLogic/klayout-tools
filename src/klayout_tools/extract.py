@@ -88,7 +88,12 @@ the device and its capacitance are still extracted correctly, only that
 plate's net connectivity carries the documented approximation. See
 :class:`klayout_tools.decks.CapacitorDevice` for the layer-role contract, the
 capacitance-per-area provenance each deck must cite, and the exact scope of
-that per-plate limitation.
+that per-plate limitation. A ``top_plate_via`` placed per the PDK's own
+minimum-overlap rule for that via necessarily overlaps the bottom plate in
+plan view; :func:`_exclude_capacitor_top_via_overlap` (issue #364) excludes
+that overlap from the deck's generic ``vias[]`` layers before the generic
+per-layer connectivity loop runs, so the DRM-legal via wires the top plate
+to ``top_plate_via_metal`` without also shorting it to the bottom plate.
 
 Every connectivity layer above (``poly``, ``contact``, ``metals``, ...) is
 wired up unconditionally, regardless of whether any device extractor above
@@ -121,6 +126,7 @@ from ._annotation import is_reserved_annotation_layer
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
+    CapacitorDevice,
     ExtractionDeck,
     ParasiticsDeck,
     ResistorDevice,
@@ -974,6 +980,127 @@ def _resolve_resistors(
     )
 
 
+def _capacitor_plate_regions(
+    layout: kdb.Layout, top_cell: kdb.Cell, capacitor: CapacitorDevice
+) -> tuple[kdb.Region, kdb.Region]:
+    """The recognised ``(top_region, bottom_region)`` pair for one
+    :class:`CapacitorDevice` entry against this layout.
+
+    Shared between the main capacitor-recognition loop in
+    ``_extract_netlist`` and :func:`_exclude_capacitor_top_via_overlap`
+    below (issue #364), so the two never drift apart on what counts as
+    "this capacitor's bottom plate" -- the overlap exclusion must be
+    computed against exactly the same (possibly virtual-bottom-plate-
+    clipped, requires/excludes-narrowed) region the capacitor device itself
+    is later registered and extracted against.
+
+    Either region comes back empty when the capacitor's markers are not
+    drawn anywhere on this layout (the common case -- no PDK cap marker
+    drawn at all).
+    """
+    top_region = _region(layout, top_cell, capacitor.top_plate)
+    for layer in capacitor.top_plate_requires:
+        top_region = top_region & _region(layout, top_cell, layer)
+    for layer in capacitor.top_plate_excludes:
+        top_region = top_region - _region(layout, top_cell, layer)
+
+    bottom_conductor = _region(layout, top_cell, capacitor.bottom_plate)
+    for layer in capacitor.bottom_plate_requires:
+        bottom_conductor = bottom_conductor & _region(layout, top_cell, layer)
+    for layer in capacitor.bottom_plate_excludes:
+        bottom_conductor = bottom_conductor - _region(layout, top_cell, layer)
+
+    if capacitor.bottom_plate_oversize_um:
+        # "Virtual bottom plate" derivation (e.g. gf180mcu's MiM stack): only
+        # bottom-conductor shapes that already touch the *unsized* top plate
+        # count (`interacting`), then clipped to the top plate's oversized
+        # outline for the exact overlap area -- the same two-step derivation
+        # the PDK's own official KLayout LVS deck uses (see
+        # `CapacitorDevice`'s docstring).
+        oversize_dbu = int(round(capacitor.bottom_plate_oversize_um / layout.dbu))
+        bottom_region = bottom_conductor.interacting(top_region) & (
+            top_region.sized(oversize_dbu)
+        )
+    else:
+        bottom_region = bottom_conductor
+
+    return top_region, bottom_region
+
+
+def _exclude_capacitor_top_via_overlap(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    vias: list[kdb.Region],
+) -> list[kdb.Region]:
+    """Exclude each capacitor's own ``top_plate_via ∩ bottom_plate`` overlap
+    from the deck's generic ``vias[]`` layers (issue #364), before those
+    layers are registered into the connectivity graph and consumed by
+    ``_extract_netlist``'s generic per-layer ``metals[i]``/``vias[i]`` loop.
+
+    A capacitor's ``top_plate_via`` (#314) is wired directly to the
+    recognised top-plate region and on to ``top_plate_via_metal`` -- but
+    without this exclusion, that *same* via shape also reaches the deck's
+    generic per-layer connectivity loop, which connects every ``vias[i]``
+    shape to whichever ``metals[i]``/``metals[i + 1]`` conductor it
+    geometrically touches. A top-plate via placed per the PDK's own
+    minimum-overlap rule for that via (which *requires* the bottom plate to
+    enclose/overlap it, not clear it) inevitably touches the bottom-plate
+    conductor beneath it in plan view, so the generic loop reads that
+    DRM-legal overlap as an ordinary via shorting the two plates together --
+    a false short (the extraction engine has no notion of the dielectric
+    that keeps the via from actually reaching the bottom plate in real
+    silicon).
+
+    Only the *geometric intersection* of the via footprint with the
+    capacitor's own recognised bottom-plate region is cut, not the whole via
+    shape/component: a via landing pad that only partially overlaps the
+    bottom plate keeps the rest of its footprint in the generic connectivity
+    graph, and any *other* via shape drawn on the same physical via layer
+    elsewhere in the layout -- ordinary routing unrelated to this capacitor
+    -- is left untouched.
+
+    Returns a new ``vias`` list (the input list/regions are not mutated); a
+    deck with no capacitor declaring ``top_plate_via``, or whose declared
+    ``top_plate_via`` is not one of the deck's own ``vias`` layers (so it
+    never reaches the generic loop in the first place), returns the input
+    list unchanged.
+    """
+    import klayout.db as kdb
+
+    exclusions: dict[int, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        if capacitor.top_plate_via is None:
+            continue
+        if capacitor.top_plate_via not in deck.vias:
+            # Not one of this deck's tracked via layers -- the generic loop
+            # below never touches it, so there is nothing to exclude (the
+            # deck-authoring validation for a mismatched
+            # `top_plate_via`/`top_plate_via_metal` pair is the main
+            # capacitor loop's job, not this helper's).
+            continue
+        via_index = deck.vias.index(capacitor.top_plate_via)
+        top_via_region = _region(layout, top_cell, capacitor.top_plate_via)
+        if top_via_region.is_empty():
+            continue
+        _top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if bottom_region.is_empty():
+            continue
+        overlap = top_via_region & bottom_region
+        if overlap.is_empty():
+            continue
+        exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap
+
+    if not exclusions:
+        return vias
+    return [
+        region - exclusions[index] if index in exclusions else region
+        for index, region in enumerate(vias)
+    ]
+
+
 #: Minimum number of geometrically separate `contact` clusters a candidate
 #: poly component must touch to be flagged by `_detect_unmodelled_poly_bodies`
 #: -- the "resistor-body signature": a two-terminal conductor segment
@@ -1236,6 +1363,16 @@ def _extract_netlist(
         layout, top_cell, deck, poly, active, metals
     )
 
+    # MiM top-plate-via / bottom-plate overlap exclusion (issue #364): must
+    # run before `vias` is registered into the netlist graph below and
+    # before the generic per-layer `metals[i]`/`vias[i]` connectivity loop
+    # consumes it -- see `_exclude_capacitor_top_via_overlap`'s docstring.
+    # Without this, a capacitor's own `top_plate_via` (#314), placed per the
+    # PDK's DRM-legal minimum-overlap requirement against its bottom plate,
+    # is read by that generic loop as an ordinary via shorting the two
+    # plates together.
+    vias = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
+
     # NMOS is active outside the well; PMOS is active inside it -- KLayout's
     # standard "well marks the flip side" MOS-splitting idiom (see
     # `ExtractionDeck`'s docstring). Splitting SD from the gate polygon
@@ -1437,31 +1574,13 @@ def _extract_netlist(
                 f"{layer}/{datatype} is not one of the deck's metals[] layers"
             )
 
-        top_region = _region(layout, top_cell, capacitor.top_plate)
-        for layer in capacitor.top_plate_requires:
-            top_region = top_region & _region(layout, top_cell, layer)
-        for layer in capacitor.top_plate_excludes:
-            top_region = top_region - _region(layout, top_cell, layer)
-
-        bottom_conductor = _region(layout, top_cell, capacitor.bottom_plate)
-        for layer in capacitor.bottom_plate_requires:
-            bottom_conductor = bottom_conductor & _region(layout, top_cell, layer)
-        for layer in capacitor.bottom_plate_excludes:
-            bottom_conductor = bottom_conductor - _region(layout, top_cell, layer)
-
-        if capacitor.bottom_plate_oversize_um:
-            # "Virtual bottom plate" derivation (e.g. gf180mcu's MiM stack):
-            # only bottom-conductor shapes that already touch the *unsized*
-            # top plate count (`interacting`), then clipped to the top
-            # plate's oversized outline for the exact overlap area -- the
-            # same two-step derivation the PDK's own official KLayout LVS
-            # deck uses (see `CapacitorDevice`'s docstring).
-            oversize_dbu = int(round(capacitor.bottom_plate_oversize_um / layout.dbu))
-            bottom_region = bottom_conductor.interacting(top_region) & (
-                top_region.sized(oversize_dbu)
-            )
-        else:
-            bottom_region = bottom_conductor
+        # Plate geometry derivation shared with the top-plate-via/bottom-
+        # plate overlap exclusion above (#364) -- see
+        # `_capacitor_plate_regions`'s docstring for why the two must never
+        # drift apart on what counts as "this capacitor's bottom plate".
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
 
         if top_region.is_empty() or bottom_region.is_empty():
             # No PDK cap marker drawn anywhere on this layout -- the common
