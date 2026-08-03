@@ -93,8 +93,8 @@ version. Not an exhaustive commit-by-commit log.
   injecting or dropping variation. Purely additive (no `schema_version`
   bump), reuses the existing `local`/`local-parallel`/`remote` backends
   unchanged — see `docs/cli/sim.md`'s "Monte Carlo sampling" section.
-  Statistics rollup and limit-window evaluation across a sample set are
-  out of scope here (phase 2, a separate sub-issue).
+  Statistics rollup and limit-window evaluation across a sample set landed
+  separately as phase 2 (#349, below).
 - 2026-08-02 — `klt lvs`: new accepted `request.engine` value `"netgen"`
   (#343) — a second, independent comparator behind the same request/response
   contract, wrapping the open-flow standard
@@ -117,3 +117,20 @@ version. Not an exhaustive commit-by-commit log.
   the new `null` `details` key. Findings (netgen invocation quirks, report-
   format stability) are written up in
   `docs/design/lvs-extraction-spike.md`'s 2026-08-02 addendum.
+- 2026-08-02 — `klt sim`: Monte Carlo statistics rollup (#349, phase 2 of
+  #344's decomposition). A measurement that ran under `monte_carlo` now
+  carries an additive `measurements[].monte_carlo` block —
+  `{n, errored, mean, stddev, min, max, quantiles, sigma_window,
+  by_corner}` — so callers no longer reduce the raw per-sample corner list
+  themselves. `stddev` is the sample (n-1) standard deviation and is `null`
+  for `n < 2` rather than a fabricated `0.0`; `quantiles` defaults to
+  `[5, 50, 95]` and is configurable via the new `monte_carlo.quantiles`
+  request field. The new `monte_carlo.k_sigma` (overridable per measurement
+  with `measurements[].k_sigma`) opts into a `mean ± k*stddev`
+  limit-window check evaluated through the same `_evaluate_limits` path,
+  and margin sign convention, a single deterministic value goes through —
+  **a failing window makes the run `fail` (exit `3`) even when every
+  individual sample passed its limits**. Without a declared `k_sigma`,
+  pass/fail behavior is unchanged; without `monte_carlo`, the response
+  shape is unchanged (no `schema_version` bump) — see `docs/cli/sim.md`'s
+  "Monte Carlo statistics" section.

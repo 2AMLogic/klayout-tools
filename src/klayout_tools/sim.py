@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 import re
+import statistics
 import subprocess
 import time
 import uuid
@@ -309,6 +310,15 @@ def _mismatch_family_report(
     return report
 
 
+#: Quantiles (percentiles, ``0``-``100``) reported per measurement for a
+#: Monte Carlo sample set when ``request.monte_carlo.quantiles`` is omitted:
+#: the median plus the symmetric 5%/95% tails, which is what both canary
+#: repos' hand-rolled rollups report today. Percentiles rather than
+#: ``0``-``1`` fractions so the response keys read as ``p5``/``p50``/``p95``
+#: -- see :func:`_sample_statistics` and docs/cli/sim.md's "Monte Carlo
+#: statistics" section.
+DEFAULT_MC_QUANTILES = (5.0, 50.0, 95.0)
+
 #: Assumed ngspice worker-thread count used to derive the ``local-parallel``
 #: backend's conservative default ``max_workers`` -- see :func:`_default_max_workers`.
 #: Each ``ngspice -b`` process is itself internally multi-threaded (BLAS/matrix
@@ -557,6 +567,10 @@ def run_sim(
                 "each request.measurements[] entry requires 'name' and 'spice'"
             )
         _validate_meas_card(spec["name"], spec["spice"])
+        if spec.get("k_sigma") is not None:
+            _validate_k_sigma(
+                spec["k_sigma"], f"request.measurements[{spec['name']!r}].k_sigma"
+            )
 
     options = request.get("options") or {}
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
@@ -579,6 +593,7 @@ def run_sim(
 
     monte_carlo_spec = request.get("monte_carlo")
     monte_carlo_info: dict[str, Any] | None = None
+    monte_carlo_stats: dict[str, Any] | None = None
     if monte_carlo_spec is not None:
         corner_points, monte_carlo_info = _expand_monte_carlo(
             corner_points, monte_carlo_spec
@@ -595,6 +610,16 @@ def run_sim(
                     netlist_path, models.get("pdk")
                 ),
             }
+        quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
+        monte_carlo_stats = {"quantiles": quantiles, "k_sigma": k_sigma}
+        # Echo only what the request actually declared, so a sampling-only
+        # request's `environment.monte_carlo` keeps its `{n, seed, vary}`
+        # shape unchanged (plus `family_mismatch` above, which is gated on
+        # `vary` rather than on this block -- see docs/cli/sim.md).
+        if monte_carlo_spec.get("quantiles") is not None:
+            monte_carlo_info["quantiles"] = list(quantiles)
+        if k_sigma is not None:
+            monte_carlo_info["k_sigma"] = k_sigma
 
     corners, engine_version, remote_environment = _BACKENDS[backend](
         corner_points=corner_points,
@@ -610,7 +635,9 @@ def run_sim(
         request=request,
     )
 
-    measurements_rollup = _rollup_measurements(measurements_spec, corners)
+    measurements_rollup = _rollup_measurements(
+        measurements_spec, corners, monte_carlo_stats
+    )
 
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
@@ -618,6 +645,13 @@ def run_sim(
     if errored:
         status = "error"
     elif failed:
+        status = "fail"
+    elif any(m["status"] == "fail" for m in measurements_rollup):
+        # Only reachable via a declared Monte Carlo sigma window: every other
+        # rollup `fail` is inherited from a corner that already failed above.
+        # A `mean +/- k*sigma` window outside the limits is a real design
+        # failure even when every individual sample passed, so it makes the
+        # run `fail` (exit 3) rather than being reported and ignored.
         status = "fail"
     else:
         status = "pass"
@@ -941,11 +975,15 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
 # Monte Carlo sampling
 # --------------------------------------------------------------------------- #
 #
-# Phase 1 of #344's decomposition: the sampling *orchestration* core --
-# request schema, seed handling, fan-out mechanics. Statistics rollup
-# (mean/sigma/quantiles) and limit-window pass/fail evaluation are phase 2
-# (a separate sub-issue) -- this module only produces N reproducibly-seeded
-# samples per corner point; it never aggregates them.
+# Two halves of #344's decomposition live in this module. *Sampling* (phase
+# 1, #348) is here: request schema, seed handling, fan-out mechanics --
+# N reproducibly-seeded samples per corner point. *Statistics* (phase 2,
+# #349) reduce those samples to a verdict and live with the rest of the
+# aggregation code, next to `_rollup_measurements`: see
+# :func:`_sample_statistics` (mean/sigma/quantiles) and
+# :func:`_evaluate_sigma_window` (the optional `mean +/- k*sigma` inside
+# `measurements[].limits` check), both reached from
+# :func:`_monte_carlo_rollup`.
 #
 # ``request.monte_carlo`` is additive and orthogonal to `corners.*`: the PVT
 # axes still select *which* process/supply/temperature points are simulated
@@ -985,6 +1023,76 @@ def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
         )
 
     return n, seed, vary
+
+
+def _validate_k_sigma(value: Any, field: str) -> float:
+    """Validate a sigma-multiple (``k``) field and return it as a float.
+
+    Shared by ``request.monte_carlo.k_sigma`` (the run-wide default) and
+    ``request.measurements[].k_sigma`` (the per-measurement override) so both
+    reject the same shapes with the same message style. Zero is allowed --
+    ``k=0`` degenerates the limit window to the mean itself, a legitimate
+    "is the *typical* part inside the window?" question.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SimError(f"{field} must be a non-negative number (got {value!r})")
+    if value < 0:
+        raise SimError(f"{field} must be a non-negative number (got {value!r})")
+    return float(value)
+
+
+def _validate_mc_statistics_spec(
+    mc_spec: dict[str, Any],
+) -> tuple[tuple[float, ...], float | None]:
+    """Validate the *statistics* half of ``request.monte_carlo`` and return
+    its ``(quantiles, k_sigma)``.
+
+    Kept separate from :func:`_validate_monte_carlo_spec` (which validates
+    the *sampling* half -- ``n``/``seed``/``vary``) because the two are
+    consumed at different points: sampling drives corner fan-out before any
+    run, statistics drive the rollup after every run. Both are still
+    validated up front by :func:`run_sim`, so a malformed field is the same
+    "the sweep never started" class of error as a bad ``vary``.
+
+    ``quantiles`` are percentiles in ``[0, 100]``, defaulting to
+    :data:`DEFAULT_MC_QUANTILES`; duplicates are dropped, declaration order
+    is preserved. ``k_sigma`` is ``None`` when the request declares no
+    run-wide sigma multiple (individual measurements may still declare their
+    own).
+    """
+    raw_quantiles = mc_spec.get("quantiles")
+    if raw_quantiles is None:
+        quantiles: tuple[float, ...] = DEFAULT_MC_QUANTILES
+    else:
+        if not isinstance(raw_quantiles, (list, tuple)) or not raw_quantiles:
+            raise SimError(
+                "request.monte_carlo.quantiles must be a non-empty array of "
+                "percentiles in [0, 100]"
+            )
+        ordered: list[float] = []
+        for entry in raw_quantiles:
+            if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+                raise SimError(
+                    "request.monte_carlo.quantiles entries must be numbers in "
+                    f"[0, 100] (got {entry!r})"
+                )
+            if not 0 <= entry <= 100:
+                raise SimError(
+                    "request.monte_carlo.quantiles entries must be numbers in "
+                    f"[0, 100] (got {entry!r})"
+                )
+            value = float(entry)
+            if value not in ordered:
+                ordered.append(value)
+        quantiles = tuple(ordered)
+
+    raw_k = mc_spec.get("k_sigma")
+    k_sigma = (
+        None
+        if raw_k is None
+        else _validate_k_sigma(raw_k, "request.monte_carlo.k_sigma")
+    )
+    return quantiles, k_sigma
 
 
 #: Modulus applied to every derived Monte Carlo seed component -- the
@@ -1945,12 +2053,195 @@ def _evaluate_limits(
     return "pass", margin
 
 
+def _quantile_key(percentile: float) -> str:
+    """Response key for a percentile: ``5 -> "p5"``, ``2.5 -> "p2.5"``."""
+    return f"p{percentile:g}"
+
+
+def _percentile(sorted_values: list[float], percentile: float) -> float:
+    """Linearly-interpolated percentile of ``sorted_values`` (ascending).
+
+    The "inclusive"/linear method (numpy's default, and
+    :func:`statistics.quantiles`' ``method="inclusive"``): the requested
+    percentile indexes ``(n - 1) * p / 100`` into the sorted sample and
+    interpolates between the two neighbouring order statistics. Hand-rolled
+    rather than routed through :func:`statistics.quantiles` because that API
+    returns a fixed set of equally-spaced cut points, not an arbitrary
+    caller-declared percentile list (``request.monte_carlo.quantiles``).
+    ``p0``/``p100`` degenerate to the sample min/max.
+    """
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * (percentile / 100.0)
+    lower = int(position)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    weight = position - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
+def _evaluate_sigma_window(
+    mean: float,
+    stddev: float,
+    k_sigma: float,
+    limits: dict[str, float] | None,
+) -> dict[str, Any]:
+    """Evaluate whether the ``mean +/- k_sigma * stddev`` window stays inside
+    ``limits``, returning ``{k, low, high, status, margin}``.
+
+    Both window endpoints are scored with :func:`_evaluate_limits` -- the
+    same function (and therefore the same ``min``/``max`` handling and
+    ``margin`` sign convention) a single deterministic value goes through --
+    rather than a parallel comparison path. The window is inside the limits
+    iff *both* endpoints are, so the endpoint statuses combine as
+    ``fail`` > ``pass`` and ``margin`` is the worse (smaller) of the two: the
+    nearest binding limit when passing, the worst violation when failing. No
+    ``limits`` -> ``pass`` with a ``null`` margin, exactly as for a single
+    value.
+    """
+    low = mean - k_sigma * stddev
+    high = mean + k_sigma * stddev
+    low_status, low_margin = _evaluate_limits(low, limits)
+    high_status, high_margin = _evaluate_limits(high, limits)
+    margins = [m for m in (low_margin, high_margin) if m is not None]
+    return {
+        "k": k_sigma,
+        "low": low,
+        "high": high,
+        "status": "fail" if "fail" in (low_status, high_status) else "pass",
+        "margin": min(margins) if margins else None,
+    }
+
+
+def _sample_statistics(
+    values: list[float],
+    *,
+    errored: int,
+    quantiles: tuple[float, ...],
+    k_sigma: float | None,
+    limits: dict[str, float] | None,
+) -> dict[str, Any]:
+    """Reduce one measurement's Monte Carlo sample ``values`` to the reported
+    statistics block: ``{n, errored, mean, stddev, min, max, quantiles,
+    sigma_window}``.
+
+    ``n`` counts only samples that produced a number; ``errored`` counts the
+    samples whose value was unextractable (``null``) and were therefore
+    excluded from every statistic -- a sample set is never silently
+    reduced without saying so.
+
+    ``stddev`` is the **sample** standard deviation (Bessel-corrected,
+    ``n - 1``), the estimator appropriate for a finite Monte Carlo draw from
+    a population, and is ``null`` for ``n < 2`` (undefined, never faked as
+    ``0.0`` -- a fabricated zero sigma would read as "no variation" and
+    silently pass any window check). ``sigma_window`` is ``null`` unless a
+    sigma multiple was declared *and* ``mean``/``stddev`` both exist.
+    """
+    ordered = sorted(values)
+    n = len(ordered)
+    mean = statistics.fmean(ordered) if n else None
+    stddev = statistics.stdev(ordered) if n >= 2 else None
+
+    sigma_window: dict[str, Any] | None = None
+    if k_sigma is not None and mean is not None and stddev is not None:
+        sigma_window = _evaluate_sigma_window(mean, stddev, k_sigma, limits)
+
+    return {
+        "n": n,
+        "errored": errored,
+        "mean": mean,
+        "stddev": stddev,
+        "min": ordered[0] if n else None,
+        "max": ordered[-1] if n else None,
+        "quantiles": {
+            _quantile_key(q): (_percentile(ordered, q) if n else None)
+            for q in quantiles
+        },
+        "sigma_window": sigma_window,
+    }
+
+
+def _base_corner_id(corner: dict[str, Any]) -> str:
+    """The corner a Monte Carlo sample was drawn from: its ``corner_id`` with
+    the ``/mc<sample_index>`` suffix removed (see :attr:`CornerPoint.corner_id`).
+
+    Derived from the sample's own ``monte_carlo.sample_index`` rather than by
+    pattern-matching the id, so a process/supply label that happens to
+    contain ``/mc`` can never be mis-split.
+    """
+    corner_id = corner["corner_id"]
+    suffix = f"/mc{corner['monte_carlo']['sample_index']}"
+    if corner_id.endswith(suffix):
+        return corner_id[: -len(suffix)]
+    return corner_id
+
+
+def _monte_carlo_rollup(
+    entries: list[tuple[dict[str, Any], dict[str, Any]]],
+    spec: dict[str, Any],
+    quantiles: tuple[float, ...],
+    default_k_sigma: float | None,
+) -> dict[str, Any] | None:
+    """Monte Carlo statistics for one measurement, or ``None`` when no
+    sampled corner contributed to it.
+
+    Top-level statistics pool **every** sample of every corner; ``by_corner``
+    breaks the same samples down per originating (pre-sampling) corner, in
+    corner order. For the common single-corner Monte Carlo request the two
+    describe the same draw; for a request that combines a PVT matrix *with*
+    ``monte_carlo``, ``by_corner`` is the statistically meaningful view (each
+    corner is its own population) and the pooled block is the union across
+    corners -- see docs/cli/sim.md.
+    """
+    sampled = [(c, m) for c, m in entries if c.get("monte_carlo") is not None]
+    if not sampled:
+        return None
+
+    limits = spec.get("limits")
+    # An explicit `null` reads as "not declared" (the house convention for
+    # optional fields), so it falls back to the run-wide default.
+    override = spec.get("k_sigma")
+    k_sigma = default_k_sigma if override is None else float(override)
+
+    def _stats(pairs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
+        values = [m["value"] for _, m in pairs if m["value"] is not None]
+        return _sample_statistics(
+            values,
+            errored=len(pairs) - len(values),
+            quantiles=quantiles,
+            k_sigma=k_sigma,
+            limits=limits,
+        )
+
+    grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for corner, m in sampled:
+        grouped.setdefault(_base_corner_id(corner), []).append((corner, m))
+
+    rollup = _stats(sampled)
+    rollup["by_corner"] = [
+        {"corner_id": corner_id, **_stats(pairs)}
+        for corner_id, pairs in grouped.items()
+    ]
+    return rollup
+
+
 def _rollup_measurements(
-    measurements_spec: list[dict[str, Any]], corners: list[dict[str, Any]]
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+    monte_carlo: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-measurement rollup across all corners: aggregate status and the
     worst-case corner (smallest/most-negative margin; ``None`` margins --
-    unextractable values -- are treated as worst of all)."""
+    unextractable values -- are treated as worst of all).
+
+    ``monte_carlo`` (the validated ``{quantiles, k_sigma}`` statistics config,
+    ``None`` when the request declared no ``monte_carlo`` block) additively
+    attaches a ``monte_carlo`` statistics block to each entry that had
+    sampled corners -- see :func:`_monte_carlo_rollup`. A declared sigma
+    window that the sample set violates makes the entry's aggregate
+    ``status`` ``"fail"``, exactly as a single corner missing its limits
+    does; without a declared ``k_sigma`` nothing about the existing rollup
+    changes.
+    """
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
         name = spec["name"]
@@ -1982,15 +2273,34 @@ def _rollup_measurements(
                     "margin": margin,
                 }
 
-        rollup.append(
-            {
-                "name": name,
-                "unit": spec.get("unit"),
-                "limits": spec.get("limits"),
-                "status": agg_status,
-                "worst_case": worst_case,
-            }
-        )
+        entry: dict[str, Any] = {
+            "name": name,
+            "unit": spec.get("unit"),
+            "limits": spec.get("limits"),
+            "status": agg_status,
+            "worst_case": worst_case,
+        }
+
+        if monte_carlo is not None:
+            mc_stats = _monte_carlo_rollup(
+                entries,
+                spec,
+                monte_carlo["quantiles"],
+                monte_carlo["k_sigma"],
+            )
+            if mc_stats is not None:
+                # Additive: the key only exists for a measurement that
+                # actually ran under `request.monte_carlo`, so a plain corner
+                # matrix keeps today's exact entry shape.
+                entry["monte_carlo"] = mc_stats
+                window = mc_stats["sigma_window"]
+                if window is not None and window["status"] == "fail":
+                    # `error` still outranks a limit violation, per the
+                    # response's aggregate precedence.
+                    if entry["status"] != "error":
+                        entry["status"] = "fail"
+
+        rollup.append(entry)
     return rollup
 
 

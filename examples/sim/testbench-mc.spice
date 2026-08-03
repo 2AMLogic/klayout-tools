@@ -1,0 +1,9 @@
+* klt sim worked example: Monte Carlo divider testbench body
+* R1 is drawn from N(1k, 5%) per sample, seeded by the
+* `.options seed=` card klt sim writes (see docs/cli/sim.md).
+.param vdd=1.8
+.param r1_scale=agauss(1, 0.05, 1)
+Vdd vdd 0 DC {vdd}
+R1 vdd out {1k*corner_scale*r1_scale}
+R2 out 0 1k
+C1 out 0 1n

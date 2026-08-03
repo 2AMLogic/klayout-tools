@@ -92,18 +92,59 @@ def write_request() -> None:
     print(f"wrote {path}")
 
 
+def write_monte_carlo_testbench() -> None:
+    """The Monte Carlo variant of the divider: `R1`'s value is drawn from a
+    Gaussian rather than fixed, so the sampled runs actually *spread*.
+
+    ngspice's ``agauss`` is seeded by the ``.options seed=`` card ``klt sim``
+    writes ahead of the ``.include`` (see docs/cli/sim.md's "Monte Carlo
+    sampling" section), which is the same mechanism a mismatch-aware PDK
+    model library's own ``AGAUSS``/``GAUSS`` device parameters go through --
+    so a five-line synthetic netlist exercises the full sample -> statistics
+    path (spread, sigma, quantiles, the ``mean +/- k*sigma`` window) with no
+    PDK dependency at all. Kept separate from ``testbench.spice`` so the
+    deterministic PVT example stays deterministic.
+    """
+    path = os.path.join(_DIR, "testbench-mc.spice")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "* klt sim worked example: Monte Carlo divider testbench body\n"
+            "* R1 is drawn from N(1k, 5%) per sample, seeded by the\n"
+            "* `.options seed=` card klt sim writes (see docs/cli/sim.md).\n"
+            ".param vdd=1.8\n"
+            ".param r1_scale=agauss(1, 0.05, 1)\n"
+            "Vdd vdd 0 DC {vdd}\n"
+            "R1 vdd out {1k*corner_scale*r1_scale}\n"
+            "R2 out 0 1k\n"
+            "C1 out 0 1n\n"
+        )
+    print(f"wrote {path}")
+
+
 def write_monte_carlo_request() -> None:
     """A Monte Carlo variant of `request.json`: a single `tt` corner
-    re-sampled `n=5` times instead of the PVT cross product, exercising
-    `monte_carlo` (see docs/cli/sim.md's "Monte Carlo sampling" section)
-    against the same synthetic fixtures -- no PDK mismatch model needed to
-    demonstrate the sampling/seed-reproducibility contract itself."""
+    re-sampled `n=20` times instead of the PVT cross product, exercising both
+    halves of `monte_carlo` (see docs/cli/sim.md's "Monte Carlo sampling"
+    section) against synthetic fixtures -- the seeded sampling/fan-out
+    contract, and the statistics rollup those samples reduce to.
+
+    `quantiles` is declared explicitly here even though `[5, 50, 95]` is the
+    default, so the example shows the field (and its `environment` echo);
+    `k_sigma: 3` asks the classic signoff question -- does `mean +/- 3*sigma`
+    still fit inside the measurement's limit window?
+    """
     request = {
-        "netlist": "testbench.spice",
+        "netlist": "testbench-mc.spice",
         "engine": "ngspice",
         "models": {"lib": "corner.lib"},
         "corners": {"process": ["tt"]},
-        "monte_carlo": {"n": 5, "seed": 20260801, "vary": "mismatch"},
+        "monte_carlo": {
+            "n": 20,
+            "seed": 20260801,
+            "vary": "mismatch",
+            "quantiles": [5, 50, 95],
+            "k_sigma": 3,
+        },
         "analysis": {"kind": "tran", "args": "1n 5u"},
         "measurements": [
             {
@@ -126,6 +167,7 @@ def main() -> None:
     write_testbench()
     write_corner_lib()
     write_request()
+    write_monte_carlo_testbench()
     write_monte_carlo_request()
 
 

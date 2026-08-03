@@ -75,6 +75,20 @@ def _print_text(report: dict) -> None:
             else:
                 worst_desc = "worst=-"
             print(f"  {m['name']} [{m['status']}]  {worst_desc}")
+            mc = m.get("monte_carlo")
+            if mc is not None:
+                stats = f"n={mc['n']} mean={mc['mean']!r} sigma={mc['stddev']!r}"
+                quantiles = "  ".join(
+                    f"{key}={value!r}" for key, value in mc["quantiles"].items()
+                )
+                print(f"    mc: {stats}  {quantiles}".rstrip())
+                window = mc["sigma_window"]
+                if window is not None:
+                    print(
+                        f"    mc: mean+/-{window['k']:g}sigma = "
+                        f"[{window['low']!r}, {window['high']!r}] "
+                        f"[{window['status']}] (margin={window['margin']!r})"
+                    )
 
     corners = report["corners"]
     if not corners:

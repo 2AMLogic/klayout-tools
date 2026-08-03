@@ -1510,6 +1510,605 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     assert by_family["capacitor"] is None
 
 
+# --------------------------------------------------------------------------- #
+# Monte Carlo statistics rollup (#349)
+# --------------------------------------------------------------------------- #
+
+#: A deliberately hand-checkable sample set: mean 3.0, sample (n-1) sigma
+#: sqrt(2.5), min 1.0, max 5.0, p5 1.2, p50 3.0, p95 4.8.
+_KNOWN_SAMPLES = [3.0, 1.0, 5.0, 2.0, 4.0]
+_KNOWN_SIGMA = 2.5**0.5
+
+
+@pytest.mark.parametrize(
+    ("percentile", "expected"),
+    [
+        (0, 1.0),
+        (5, 1.2),
+        (25, 2.0),
+        (50, 3.0),
+        (95, 4.8),
+        (100, 5.0),
+    ],
+)
+def test_percentile_linear_interpolation(percentile, expected):
+    assert sim._percentile(sorted(_KNOWN_SAMPLES), percentile) == pytest.approx(
+        expected
+    )
+
+
+def test_percentile_single_sample_is_that_sample():
+    assert sim._percentile([1.25], 5) == 1.25
+    assert sim._percentile([1.25], 95) == 1.25
+
+
+@pytest.mark.parametrize(
+    ("percentile", "key"), [(5, "p5"), (50, "p50"), (2.5, "p2.5"), (97.5, "p97.5")]
+)
+def test_quantile_key_formatting(percentile, key):
+    assert sim._quantile_key(percentile) == key
+
+
+def test_sample_statistics_known_sample_set():
+    stats = sim._sample_statistics(
+        _KNOWN_SAMPLES,
+        errored=0,
+        quantiles=sim.DEFAULT_MC_QUANTILES,
+        k_sigma=None,
+        limits=None,
+    )
+
+    assert stats["n"] == 5
+    assert stats["errored"] == 0
+    assert stats["mean"] == pytest.approx(3.0)
+    assert stats["stddev"] == pytest.approx(_KNOWN_SIGMA)
+    assert stats["min"] == 1.0
+    assert stats["max"] == 5.0
+    assert stats["quantiles"]["p5"] == pytest.approx(1.2)
+    assert stats["quantiles"]["p50"] == pytest.approx(3.0)
+    assert stats["quantiles"]["p95"] == pytest.approx(4.8)
+    assert stats["sigma_window"] is None  # no k_sigma declared
+
+
+def test_sample_statistics_honours_configured_quantiles():
+    stats = sim._sample_statistics(
+        _KNOWN_SAMPLES,
+        errored=0,
+        quantiles=(2.5, 97.5),
+        k_sigma=None,
+        limits=None,
+    )
+
+    assert list(stats["quantiles"]) == ["p2.5", "p97.5"]
+    assert stats["quantiles"]["p2.5"] == pytest.approx(1.1)
+
+
+def test_sample_statistics_single_sample_has_no_stddev():
+    stats = sim._sample_statistics(
+        [1.2],
+        errored=0,
+        quantiles=sim.DEFAULT_MC_QUANTILES,
+        k_sigma=3.0,
+        limits={"min": 1.0, "max": 1.4},
+    )
+
+    assert stats["n"] == 1
+    assert stats["mean"] == 1.2
+    # Never faked as 0.0 -- a fabricated zero sigma would silently pass any
+    # window check.
+    assert stats["stddev"] is None
+    assert stats["sigma_window"] is None
+
+
+def test_sample_statistics_no_usable_values_is_all_null():
+    stats = sim._sample_statistics(
+        [],
+        errored=3,
+        quantiles=sim.DEFAULT_MC_QUANTILES,
+        k_sigma=3.0,
+        limits={"max": 1.0},
+    )
+
+    assert stats["n"] == 0
+    assert stats["errored"] == 3
+    assert stats["mean"] is None
+    assert stats["stddev"] is None
+    assert stats["min"] is None and stats["max"] is None
+    assert stats["quantiles"] == {"p5": None, "p50": None, "p95": None}
+    assert stats["sigma_window"] is None
+
+
+def test_evaluate_sigma_window_pass_exactly_at_the_limits():
+    # mean 1.0, sigma 0.25, k 2 -> window is exactly [0.5, 1.5] (all values
+    # binary-exact), and a value *equal* to a bound passes, as for a single
+    # deterministic value.
+    window = sim._evaluate_sigma_window(1.0, 0.25, 2.0, {"min": 0.5, "max": 1.5})
+
+    assert window == {
+        "k": 2.0,
+        "low": 0.5,
+        "high": 1.5,
+        "status": "pass",
+        "margin": 0.0,
+    }
+
+
+def test_evaluate_sigma_window_fails_just_outside_the_lower_bound():
+    window = sim._evaluate_sigma_window(1.0, 0.25, 2.0, {"min": 0.5625, "max": 1.5})
+
+    assert window["status"] == "fail"
+    assert window["margin"] == pytest.approx(-0.0625)
+
+
+def test_evaluate_sigma_window_fails_just_outside_the_upper_bound():
+    window = sim._evaluate_sigma_window(1.0, 0.25, 2.0, {"min": 0.5, "max": 1.4375})
+
+    assert window["status"] == "fail"
+    assert window["margin"] == pytest.approx(-0.0625)
+
+
+def test_evaluate_sigma_window_without_limits_never_fails():
+    window = sim._evaluate_sigma_window(1.0, 0.25, 3.0, None)
+
+    assert window["status"] == "pass"
+    assert window["margin"] is None
+
+
+def test_evaluate_sigma_window_k_zero_is_the_mean_itself():
+    window = sim._evaluate_sigma_window(1.0, 0.25, 0.0, {"min": 0.9, "max": 1.1})
+
+    assert (window["low"], window["high"]) == (1.0, 1.0)
+    assert window["status"] == "pass"
+
+
+def test_rollup_measurements_without_monte_carlo_config_is_unchanged():
+    """A plain corner matrix keeps today's exact per-measurement shape."""
+    corners = [
+        {
+            "corner_id": "a",
+            "monte_carlo": None,
+            "measurements": [
+                {"name": "vref", "value": 1.20, "margin": 0.01, "status": "pass"}
+            ],
+        }
+    ]
+
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref", "unit": "V", "limits": {"max": 1.21}}], corners
+    )
+
+    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+
+
+def test_rollup_measurements_monte_carlo_config_but_no_sampled_corners():
+    """`monte_carlo` config with only unsampled corners adds no statistics."""
+    corners = [
+        {
+            "corner_id": "a",
+            "monte_carlo": None,
+            "measurements": [
+                {"name": "vref", "value": 1.20, "margin": 0.01, "status": "pass"}
+            ],
+        }
+    ]
+
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref", "unit": "V", "limits": {"max": 1.21}}],
+        corners,
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": 3.0},
+    )
+
+    assert "monte_carlo" not in entry
+
+
+def _sampled_corner(base: str, sample_index: int, value: float | None) -> dict:
+    return {
+        "corner_id": f"{base}/mc{sample_index}",
+        "monte_carlo": {"sample_index": sample_index, "seed": 1},
+        "measurements": [
+            {
+                "name": "vref",
+                "value": value,
+                "margin": None,
+                "status": "error" if value is None else "pass",
+            }
+        ],
+    }
+
+
+def test_rollup_measurements_counts_unextractable_samples_separately():
+    corners = [
+        _sampled_corner("tt/1.800V/27C", 0, 1.0),
+        _sampled_corner("tt/1.800V/27C", 1, None),
+        _sampled_corner("tt/1.800V/27C", 2, 3.0),
+    ]
+
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref"}],
+        corners,
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": None},
+    )
+
+    assert entry["monte_carlo"]["n"] == 2  # only the samples that produced a number
+    assert entry["monte_carlo"]["errored"] == 1
+    assert entry["monte_carlo"]["mean"] == pytest.approx(2.0)
+
+
+def test_rollup_measurements_by_corner_splits_per_originating_corner():
+    corners = [
+        _sampled_corner("tt/1.800V/27C", 0, 1.0),
+        _sampled_corner("tt/1.800V/27C", 1, 3.0),
+        _sampled_corner("ss/1.800V/27C", 0, 10.0),
+        _sampled_corner("ss/1.800V/27C", 1, 20.0),
+    ]
+
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref"}],
+        corners,
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": None},
+    )
+
+    mc = entry["monte_carlo"]
+    assert mc["n"] == 4  # pooled across every corner
+    by_corner = {c["corner_id"]: c for c in mc["by_corner"]}
+    assert list(by_corner) == ["tt/1.800V/27C", "ss/1.800V/27C"]  # corner order
+    assert by_corner["tt/1.800V/27C"]["mean"] == pytest.approx(2.0)
+    assert by_corner["ss/1.800V/27C"]["mean"] == pytest.approx(15.0)
+
+
+def _stub_subprocess_values(monkeypatch, name: str, values: list[float | None]) -> None:
+    """Stub ngspice so successive corner runs report ``name = values[i]``.
+
+    The `local` backend runs the expanded corner list sequentially in the
+    deterministic sample order (`_expand_monte_carlo`), so call index maps
+    1:1 onto sample index. A ``None`` entry stands in for an unextractable
+    measurement (ngspice's own ``failed!`` line).
+    """
+    state = {"index": 0}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        log_path = cmd[cmd.index("-o") + 1]
+        value = values[state["index"]]
+        state["index"] += 1
+        with open(log_path, "w", encoding="utf-8") as handle:
+            if value is None:
+                handle.write(f".meas tran {name} find v(out) at=1u failed!\n")
+            else:
+                handle.write(f"{name} = {value!r}\n")
+        return _FakeCompleted("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+_VOUT_MEAS = {
+    "name": "vout",
+    "spice": ".meas tran vout FIND v(out) AT=1u",
+    "unit": "V",
+}
+
+
+def test_run_sim_monte_carlo_statistics_match_hand_computed_values(
+    tmp_path, monkeypatch
+):
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch"},
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    (entry,) = report["measurements"]
+    mc = entry["monte_carlo"]
+    assert mc["n"] == 5
+    assert mc["errored"] == 0
+    assert mc["mean"] == pytest.approx(3.0)
+    assert mc["stddev"] == pytest.approx(_KNOWN_SIGMA)
+    assert mc["min"] == 1.0
+    assert mc["max"] == 5.0
+    assert mc["quantiles"]["p5"] == pytest.approx(1.2)
+    assert mc["quantiles"]["p50"] == pytest.approx(3.0)
+    assert mc["quantiles"]["p95"] == pytest.approx(4.8)
+    assert mc["sigma_window"] is None
+    assert [c["corner_id"] for c in mc["by_corner"]] == ["default/novdd/27C"]
+
+
+def test_run_sim_without_monte_carlo_has_no_statistics_block(tmp_path, monkeypatch):
+    """A plain corner matrix response is byte-identical in shape to today's."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [_VOUT_MEAS],
+        },
+    )
+    _stub_subprocess_values(monkeypatch, "vout", [1.0])
+
+    report = sim.run_sim(str(request))
+
+    (entry,) = report["measurements"]
+    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+
+
+def test_run_sim_monte_carlo_sigma_window_pass_keeps_run_passing(tmp_path, monkeypatch):
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 1.0},
+        measurements=[{**_VOUT_MEAS, "limits": {"min": 1.0, "max": 5.0}}],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    window = report["measurements"][0]["monte_carlo"]["sigma_window"]
+    assert window["k"] == 1.0
+    assert window["low"] == pytest.approx(3.0 - _KNOWN_SIGMA)
+    assert window["high"] == pytest.approx(3.0 + _KNOWN_SIGMA)
+    assert window["status"] == "pass"
+    assert report["measurements"][0]["status"] == "pass"
+    assert report["status"] == "pass"
+
+
+def test_run_sim_monte_carlo_sigma_window_fail_fails_the_run(tmp_path, monkeypatch):
+    """Every individual sample passes its limits, but mean +/- 3*sigma does
+    not fit inside the window -- a real design failure, so the run fails."""
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 3.0},
+        measurements=[{**_VOUT_MEAS, "limits": {"min": 0.5, "max": 5.5}}],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    # Every corner still passes -- nothing about per-sample evaluation moved.
+    assert all(c["status"] == "pass" for c in report["corners"])
+    assert report["failed"] == 0
+    window = report["measurements"][0]["monte_carlo"]["sigma_window"]
+    assert window["status"] == "fail"
+    assert window["margin"] < 0
+    assert report["measurements"][0]["status"] == "fail"
+    assert report["status"] == "fail"
+
+
+def test_run_sim_monte_carlo_sigma_window_needs_limits_to_fail(tmp_path, monkeypatch):
+    """No `limits` -> reported but never fails, exactly as for a single value."""
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 3.0},
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    window = report["measurements"][0]["monte_carlo"]["sigma_window"]
+    assert window["status"] == "pass"
+    assert window["margin"] is None
+    assert report["status"] == "pass"
+
+
+def test_run_sim_monte_carlo_per_measurement_k_sigma_overrides_the_default(
+    tmp_path, monkeypatch
+):
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 3.0},
+        measurements=[{**_VOUT_MEAS, "k_sigma": 1.0, "limits": {"min": 1.0}}],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    window = report["measurements"][0]["monte_carlo"]["sigma_window"]
+    assert window["k"] == 1.0  # per-measurement override, not the run-wide 3.0
+    assert window["status"] == "pass"  # would fail at k=3
+
+
+def test_run_sim_monte_carlo_errored_sample_excluded_from_statistics(
+    tmp_path, monkeypatch
+):
+    request = _mc_request(
+        tmp_path,
+        {"n": 3, "seed": 1, "vary": "mismatch"},
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", [1.0, None, 3.0])
+
+    report = sim.run_sim(str(request))
+
+    mc = report["measurements"][0]["monte_carlo"]
+    assert mc["n"] == 2
+    assert mc["errored"] == 1
+    assert mc["mean"] == pytest.approx(2.0)
+    assert report["status"] == "error"  # the unextractable sample still errors
+
+
+def test_run_sim_monte_carlo_statistics_pool_and_split_across_corners(
+    tmp_path, monkeypatch
+):
+    request = _mc_request(
+        tmp_path,
+        {"n": 2, "seed": 1, "vary": "mismatch"},
+        two_corners=True,
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", [1.0, 3.0, 10.0, 20.0])
+
+    report = sim.run_sim(str(request))
+
+    mc = report["measurements"][0]["monte_carlo"]
+    assert mc["n"] == 4
+    assert mc["mean"] == pytest.approx(8.5)
+    by_corner = {c["corner_id"]: c["mean"] for c in mc["by_corner"]}
+    assert by_corner == {
+        "tt/novdd/27C": pytest.approx(2.0),
+        "ss/novdd/27C": pytest.approx(15.0),
+    }
+
+
+def test_run_sim_monte_carlo_configured_quantiles_are_echoed(tmp_path, monkeypatch):
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "quantiles": [1, 50, 99], "k_sigma": 3},
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    echo = dict(report["environment"]["monte_carlo"])
+    # `family_mismatch` (#355) is an independent additive field a
+    # mismatch-varying run always carries -- not part of the statistics
+    # echo this test pins.
+    echo.pop("family_mismatch", None)
+    assert echo == {
+        "n": 5,
+        "seed": 1,
+        "vary": "mismatch",
+        "quantiles": [1.0, 50.0, 99.0],
+        "k_sigma": 3.0,
+    }
+    assert list(report["measurements"][0]["monte_carlo"]["quantiles"]) == [
+        "p1",
+        "p50",
+        "p99",
+    ]
+
+
+def test_run_sim_monte_carlo_sampling_only_request_echo_is_unchanged(
+    tmp_path, monkeypatch
+):
+    request = _mc_request(
+        tmp_path, {"n": 2, "seed": 1, "vary": "mismatch"}, measurements=[_VOUT_MEAS]
+    )
+    _stub_subprocess_values(monkeypatch, "vout", [1.0, 2.0])
+
+    report = sim.run_sim(str(request))
+
+    echo = dict(report["environment"]["monte_carlo"])
+    # As above: `family_mismatch` (#355) is orthogonal to the statistics
+    # echo -- a request declaring neither `quantiles` nor `k_sigma` must add
+    # neither key.
+    echo.pop("family_mismatch", None)
+    assert echo == {
+        "n": 2,
+        "seed": 1,
+        "vary": "mismatch",
+    }
+
+
+def test_run_sim_monte_carlo_statistics_and_family_mismatch_coexist(
+    tmp_path, monkeypatch
+):
+    """The statistics echo (#349) and the per-family mismatch-activity
+    report (#355) are independent additive fields on the *same*
+    `environment.monte_carlo` block -- a mismatch-varying request that also
+    declares `k_sigma` must carry both, and still get its per-measurement
+    statistics rollup."""
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 3},
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    echo = report["environment"]["monte_carlo"]
+    assert echo["k_sigma"] == 3.0
+    assert [entry["family"] for entry in echo["family_mismatch"]] == [
+        "resistor",
+        "capacitor",
+    ]
+    mc = report["measurements"][0]["monte_carlo"]
+    assert mc["n"] == 5
+    assert mc["stddev"] == pytest.approx(_KNOWN_SIGMA)
+    assert mc["sigma_window"]["k"] == 3.0
+
+
+@pytest.mark.parametrize(
+    "quantiles",
+    [[], "p50", [101], [-1], ["p50"], [True]],
+)
+def test_run_sim_monte_carlo_bad_quantiles_raises(tmp_path, quantiles):
+    request = _mc_request(
+        tmp_path, {"n": 2, "seed": 1, "vary": "mismatch", "quantiles": quantiles}
+    )
+
+    with pytest.raises(sim.SimError, match="monte_carlo.quantiles"):
+        sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize("k_sigma", [-1, "3", True])
+def test_run_sim_monte_carlo_bad_k_sigma_raises(tmp_path, k_sigma):
+    request = _mc_request(
+        tmp_path, {"n": 2, "seed": 1, "vary": "mismatch", "k_sigma": k_sigma}
+    )
+
+    with pytest.raises(sim.SimError, match="monte_carlo.k_sigma"):
+        sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize("k_sigma", [-1, "3", True])
+def test_run_sim_measurement_bad_k_sigma_raises(tmp_path, k_sigma):
+    request = _mc_request(
+        tmp_path,
+        {"n": 2, "seed": 1, "vary": "mismatch"},
+        measurements=[{**_VOUT_MEAS, "k_sigma": k_sigma}],
+    )
+
+    with pytest.raises(sim.SimError, match="k_sigma"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_monte_carlo_quantiles_deduped_preserving_order(tmp_path, monkeypatch):
+    request = _mc_request(
+        tmp_path,
+        {"n": 2, "seed": 1, "vary": "mismatch", "quantiles": [50, 5, 50]},
+        measurements=[_VOUT_MEAS],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", [1.0, 3.0])
+
+    report = sim.run_sim(str(request))
+
+    assert list(report["measurements"][0]["monte_carlo"]["quantiles"]) == ["p50", "p5"]
+
+
+def test_cli_sim_sigma_window_failure_exits_3(tmp_path, monkeypatch, capsys):
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 3.0},
+        measurements=[{**_VOUT_MEAS, "limits": {"min": 0.5, "max": 5.5}}],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    assert main(["sim", str(request), "--format", "json"]) == 3
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["measurements"][0]["monte_carlo"]["sigma_window"]["status"] == "fail"
+
+
+def test_cli_sim_text_output_reports_monte_carlo_statistics(
+    tmp_path, monkeypatch, capsys
+):
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 1.0},
+        measurements=[{**_VOUT_MEAS, "limits": {"min": 1.0, "max": 5.0}}],
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    assert main(["sim", str(request)]) == 0
+
+    out = capsys.readouterr().out
+    assert "mc: n=5 mean=3.0" in out
+    assert "mean+/-1sigma" in out
+
+
 def _stripped_report(report: dict) -> dict:
     """Drop the two fields the docs flag as legitimately varying between
     runs (`runtime_s`, `engine_version`) so the rest of the report can be
@@ -2815,6 +3414,45 @@ def test_examples_sim_worked_example_passes():
     assert report["status"] == "pass"
     assert report["corner_count"] == 8
     assert report["measurements"][0]["name"] == "vout"
+
+
+@_SKIP_NO_NGSPICE
+@pytest.mark.skipif(
+    not EXAMPLES_DIR.exists(), reason="examples/sim/ fixtures not generated"
+)
+def test_examples_sim_monte_carlo_statistics_shape():
+    """The Monte Carlo worked example, run live: `testbench-mc.spice`'s
+    `agauss`-drawn `R1` must actually spread under the seed `klt sim` writes,
+    and the sample set must reduce to the statistics block documented in
+    docs/cli/sim.md. Stands in for the byte-exact golden fixture this example
+    deliberately doesn't have (`runtime_s`/`engine_version` vary)."""
+    request_path = EXAMPLES_DIR / "request-monte-carlo.json"
+    if not request_path.exists():
+        pytest.skip(
+            "examples/sim/request-monte-carlo.json not generated -- "
+            "run examples/sim/generate.py"
+        )
+
+    report = sim.run_sim(str(request_path))
+
+    assert report["status"] == "pass"
+    assert report["corner_count"] == 20
+    assert report["environment"]["monte_carlo"]["quantiles"] == [5.0, 50.0, 95.0]
+
+    mc = report["measurements"][0]["monte_carlo"]
+    assert mc["n"] == 20
+    assert mc["errored"] == 0
+    # The seeded `agauss` draw actually varies -- not a pinned constant.
+    assert mc["stddev"] > 0
+    assert mc["min"] < mc["mean"] < mc["max"]
+    assert mc["min"] <= mc["quantiles"]["p5"] <= mc["quantiles"]["p50"]
+    assert mc["quantiles"]["p50"] <= mc["quantiles"]["p95"] <= mc["max"]
+    window = mc["sigma_window"]
+    assert window["k"] == 3.0
+    assert window["low"] == pytest.approx(mc["mean"] - 3 * mc["stddev"])
+    assert window["high"] == pytest.approx(mc["mean"] + 3 * mc["stddev"])
+    assert window["status"] == "pass"
+    assert [c["corner_id"] for c in mc["by_corner"]] == ["tt/novdd/27C"]
 
 
 def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
