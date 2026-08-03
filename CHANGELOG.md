@@ -38,11 +38,33 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
-- Since 0.1.0 the CLI has grown from 5 verbs to 20: `layout-metrics`,
+- Since 0.1.0 the CLI has grown from 5 verbs to 21: `layout-metrics`,
   `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
-  `precheck`, `socket-check`, `ring-check`, `report`, `trajectory`, and
-  `synthesize` were added on `main`. Each is documented in
-  [`docs/cli/`](docs/cli/); the next release will carry them collectively.
+  `precheck`, `socket-check`, `ring-check`, `report`, `trajectory`,
+  `synthesize`, and `functional-verification` were added on `main`. Each is
+  documented in [`docs/cli/`](docs/cli/); the next release will carry them
+  collectively.
+- 2026-08-03 — `klt functional-verification`: new verb (#422, Phase 3 of
+  Epic #391). Runs a cocotb testbench against RTL sources through Icarus
+  Verilog (default) or Verilator, reporting `status`
+  (`"pass"`/`"fail"`), `test_count`/`passed_count`/`failed_count`/
+  `skipped_count`, a per-test `tests[]` array (with `error_type`/
+  `error_message` on failures), optional Verilator `coverage`
+  (`line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` plus an lcov `info_path`),
+  and an `environment` reproducibility block. Invoked exclusively through
+  cocotb 2.0's first-party Python `Runner` API — never a generated
+  Makefile — and the verdict is always derived from the run's own
+  `results.xml`, never from a simulator's exit code (which the Phase 1
+  survey observed varying between `0`, `1`, and `2` for the *same* failing
+  regression). Exit codes reuse `klt lvs`'s `0`/`1`/`2`/`3` trichotomy, so
+  `status: "pass"` → `valid: true` and `status: "fail"` → `valid: false` at
+  the `klt eval` boundary; `functional-verification` is also now a
+  first-class `klt eval` gate `check`. cocotb is an optional runtime
+  dependency (not pinned in `pyproject.toml` — cocotb 2.0 caps at Python
+  3.13 while `klt` supports 3.10+). See
+  `docs/cli/functional-verification.md` and
+  `docs/design/cocotb-verification-spike.md` section 7 for the full
+  contract.
 - 2026-08-03 — `klt synthesize`: new verb (#416, Phase 2 of Epic #391).
   Synthesizes RTL sources against a resolved sky130 standard-cell liberty
   via Yosys + bundled ABC (`read_verilog` -> `hierarchy` -> `synth` ->
