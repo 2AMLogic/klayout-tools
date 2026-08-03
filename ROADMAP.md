@@ -30,21 +30,21 @@ starts with open PDK example layouts (sky130).
 output; deck adapters for open PDKs first. This is the ERC/DRC moment from
 kicad-tools: the step that lets an agent know whether it is wrong.
 
-## Phase 3 — write
+## Phase 3 — write (shipped — `klt gen` / `gen-compose` / `draw`)
 
 Programmatic layout modification: cell instantiation, geometry ops,
 parametric cells. Reusable blocks the way kicad-tools ships circuit blocks.
 
-This phase has been spiked:
+This phase was spiked in
 [docs/design/layout-generator-spike.md](docs/design/layout-generator-spike.md)
-surveys BAG-class layout-generator frameworks (BAG3/xbase, laygo2,
-gdsfactory, ALIGN, MAGICAL, KLayout PCells), proposes the JSON contract for
-a generator capability, and recommends a Python/pya reference
-implementation first, per the rewrite rule, with a `pyo3`-backed Rust core
-only later and only where measured to hold. It is a proposal, not a
-commitment — no implementation epic is scheduled by it alone.
+(survey of BAG3/xbase, laygo2, gdsfactory, ALIGN, MAGICAL, KLayout PCells)
+and implemented per its recommendation as a Python/pya reference
+implementation: `klt gen` (single-cell primitive generators), `klt
+gen-compose` (place + wire generated blocks), and `klt draw` (primitive
+stream writing). A `pyo3`-backed Rust core remains later-and-only-where-
+measured, per the rewrite rule.
 
-## Phase 4 — extract & verify
+## Phase 4 — extract & verify (shipped — `klt extract` / `klt lvs`; RC parasitics open, #217)
 
 `klt lvs` and netlist/parasitic extraction, headless with structured
 output — KLayout's LVS engine first, open-PDK decks (sky130). This is the
@@ -52,12 +52,14 @@ bridge from layout back to the electrical world: without an extracted
 netlist there is nothing to simulate, so this phase gates the
 simulation-verified end of the loop.
 
-## Phase 5 — agent surface
+## Phase 5 — agent surface (partial — gallery live; MCP + reasoning module outstanding)
 
 MCP server exposing the toolkit; LLM reasoning module for layout decisions
 (strategy in the model, geometry in the tools); worked examples designed
 end-to-end by agents, published in a gallery at klayout-tools.org — the
-kicad-tools.org pattern, one layer down.
+kicad-tools.org pattern, one layer down. The gallery half is live
+(`blocks/` → klayout-tools.org); the MCP server and reasoning module are
+not yet started.
 
 ## How progress is driven
 
@@ -80,8 +82,8 @@ The SPICE side has been spiked:
 [docs/design/spice-corner-runner-spike.md](docs/design/spice-corner-runner-spike.md)
 surveys ngspice against Xyce, proposes the JSON contract for running a
 netlist across a PVT corner matrix, and recommends wrapping the engine
-while building the corner orchestration ourselves. It is a proposal, not a
-commitment — no phase is scheduled by it.
+while building the corner orchestration ourselves. Implemented as
+`klt sim` (ngspice, local and remote AWS backends).
 
 The E&M side has also been spiked:
 [docs/design/em-field-sim-spike.md](docs/design/em-field-sim-spike.md)

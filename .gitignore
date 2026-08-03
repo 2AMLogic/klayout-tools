@@ -5,6 +5,10 @@ dist/
 site/node_modules/
 site/dist/
 .pytest_cache/
+.ruff_cache/
+
+# Wrangler local state (Cloudflare Pages deploys, scripts/deploy-site.sh)
+.wrangler/
 
 # Fetched open PDK data (scripts/fetch-pdks.sh) — tracked: pdks/README.md only
 pdks/*

@@ -33,7 +33,8 @@ an agent needs instead:
 
 - **Structured data access** — layouts parsed into clean Python objects
 - **Machine-readable output** — every CLI command supports `--format json`
-- **Programmatic modification** (planned) — edit layouts without a GUI
+- **Programmatic layout writing** — generate and edit layouts without a GUI
+  (`klt gen`, `klt gen-compose`, `klt draw`)
 - **MCP server** (planned) — expose the toolkit directly to agent frameworks
 - **LLM reasoning interface** (planned) — purpose-built module for layout
   decisions, with geometric execution handled by tools, not tokens
@@ -41,7 +42,8 @@ an agent needs instead:
 ## Status
 
 Early alpha — [v0.1.0 is on PyPI](https://pypi.org/project/klayout-tools/)
-with the first five verbs (`layers`, `stats`, `cells`, `drc`, `pdk`). The
+with the first five verbs (`layers`, `stats`, `cells`, `drc`, `pdk`);
+`main` has since grown to 18 verbs — see [`docs/cli/`](docs/cli/). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
 See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
@@ -83,7 +85,13 @@ klt kb search bandgap                    # query the circuit-design knowledge ba
 klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)
 klt draw --params shapes.json -o out.gds # write a primitive stream (no rule checking)
 klt extract design.gds --deck sky130     # layout -> schematic-equivalent netlist
+klt lvs request.json                     # compare extracted vs reference netlist
+klt gen-compose plan.json                # place + wire generated blocks into one circuit
+klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
+klt report result.json                   # render a klt JSON report as markdown summary
 ```
+
+Every verb is documented in [`docs/cli/`](docs/cli/), one page per verb.
 
 ## Development
 

@@ -86,12 +86,12 @@ A socket descriptor is a JSON document validated against
   `0`, exact match) and `width_um`/`height_um`.
 
   **`width_um`/`height_um` are descriptive metadata only in this version** --
-  they are not checked against drawn geometry (see [Scope](#scope) below).
+  they are not checked against drawn geometry (see [Scope](#scope-what-is-and-isnt-mechanically-checked) below).
 - `reserved_layers` -- optional (default `[]`). A list of `[layer,
   datatype]` pairs forbidden to this block.
 - `budgets` -- optional (default `[]`). Arbitrary named numeric interface
   budgets: `{name, value, unit, notes?}`. **Never mechanically verified** --
-  see [Scope](#scope).
+  see [Scope](#scope-what-is-and-isnt-mechanically-checked).
 
 ## Scope: what is (and isn't) mechanically checked
 
@@ -239,7 +239,7 @@ units), `klt socket-check` reports positions/bounding boxes in
 | `value`  | number          | The descriptor's declared numeric value.                         |
 | `unit`   | string          | The descriptor's declared unit string.                           |
 | `notes`  | string \| null  | The descriptor's declared notes, or `null`.                       |
-| `status` | string          | Always `"declared_unverified"` -- see [Scope](#scope) above.     |
+| `status` | string          | Always `"declared_unverified"` -- see [Scope](#scope-what-is-and-isnt-mechanically-checked) above.     |
 
 ## Exit codes
 

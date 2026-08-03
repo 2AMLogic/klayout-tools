@@ -38,6 +38,11 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
+- Since 0.1.0 the CLI has grown from 5 verbs to 18: `layout-metrics`,
+  `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
+  `precheck`, `socket-check`, `ring-check`, and `report` were added on
+  `main`. Each is documented in [`docs/cli/`](docs/cli/); the next release
+  will carry them collectively.
 - 2026-08-02 — `klt lvs`: new `device.body_unverified` mismatch category
   (`a483ed0`, #281/#285). Warns (`severity: "warning"`, never changes
   `status`) when a MOS body terminal was extracted onto a deck-synthesized

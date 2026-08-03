@@ -6,7 +6,8 @@ defines the layers, the contract-first rule, and when engines get wrapped vs.
 rewritten; [`json-contract.md`](json-contract.md) specifies the shared output
 envelope (`schema_version`, error shape, exit codes) every `klt` verb emits
 through. Per-verb CLI references live under `cli/`, design notes and surveys
-under `design/`, and how-to guides under `guides/`.
+under `design/`, published JSON Schemas under `schemas/`, and how-to guides
+under `guides/`.
 
 ## Layout
 
@@ -17,19 +18,43 @@ docs/
   json-contract.md       # shared JSON output envelope: schema_version, errors, exit codes
   cli/                   # per-verb CLI reference
     cells.md
+    draw.md
     drc.md
+    extract.md
+    gen-compose.md
+    gen.md
+    kb.md
     layers.md
     layout-metrics.md
+    lvs.md
     pdk.md
+    precheck.md
     render.md
+    report.md
+    ring-check.md
+    sim.md
+    socket-check.md
     stats.md
   design/                # design notes, spikes, and upstream surveys
     design-pipeline.md
+    em-field-sim-spike.md
+    gen-bjt-array-spike.md
+    gen-canary-bringup-phase3.md
+    gen-composition-spike.md
     lambdalib-survey.md
+    layout-generator-spike.md
+    lvs-extraction-spike.md
+    pdk-device-corner-metadata-spike.md
+    remote-job-description.md
+    remote-sim-backend-spike.md
     sc-leflib-evaluation.md
     scgallery-zerosoc-survey.md
     siliconcompiler-core-survey.md
     spice-corner-runner-spike.md
+    wasm-spice-playground-spike.md
+  schemas/               # published JSON Schemas
+    remote-sim-ami-manifest.schema.json
+    socket.schema.json
   guides/                # how-to guides
     building-klayout-macos.md
     github-action.md
