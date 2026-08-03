@@ -95,3 +95,25 @@ version. Not an exhaustive commit-by-commit log.
   unchanged — see `docs/cli/sim.md`'s "Monte Carlo sampling" section.
   Statistics rollup and limit-window evaluation across a sample set are
   out of scope here (phase 2, a separate sub-issue).
+- 2026-08-02 — `klt lvs`: new accepted `request.engine` value `"netgen"`
+  (#343) — a second, independent comparator behind the same request/response
+  contract, wrapping the open-flow standard
+  [`netgen`](https://github.com/RTimothyEdwards/netgen) as a subprocess
+  (`netgen -batch lvs`). **Netlist-vs-netlist only** — no `magic` extraction
+  backend; it compares the same layout/reference SPICE netlists the
+  `"klayout"` engine already resolves, so it validates comparator/contract
+  independence, not extraction independence (see `docs/cli/lvs.md` →
+  "Engine"). Adds a new `mismatches[].details` field (object | `null`) for
+  engine-specific data that does not map onto
+  `category`/`net`/`device`/`property` — present and `null`-valued on every
+  `"klayout"`-engine entry too, so no entry shape changed — plus two
+  netgen-only request options (`options.netgen_setup`,
+  `options.netgen_timeout_s`). `environment.engine_version` is netgen's own
+  banner-reported version for this engine. Known, documented gap:
+  `counts.*.matched` is exact on a `"match"` verdict and `0` on a
+  `"mismatch"` verdict, and `net_correspondence` is always `[]`, for
+  `"engine": "netgen"` only. Purely additive (no `schema_version` bump); the
+  default engine is still `"klayout"` and its output is unchanged apart from
+  the new `null` `details` key. Findings (netgen invocation quirks, report-
+  format stability) are written up in
+  `docs/design/lvs-extraction-spike.md`'s 2026-08-02 addendum.
