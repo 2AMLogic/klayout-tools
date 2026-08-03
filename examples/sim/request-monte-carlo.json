@@ -1,5 +1,5 @@
 {
-  "netlist": "testbench.spice",
+  "netlist": "testbench-mc.spice",
   "engine": "ngspice",
   "models": {
     "lib": "corner.lib"
@@ -10,9 +10,15 @@
     ]
   },
   "monte_carlo": {
-    "n": 5,
+    "n": 20,
     "seed": 20260801,
-    "vary": "mismatch"
+    "vary": "mismatch",
+    "quantiles": [
+      5,
+      50,
+      95
+    ],
+    "k_sigma": 3
   },
   "analysis": {
     "kind": "tran",

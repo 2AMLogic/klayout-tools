@@ -357,15 +357,12 @@ parameters (`AGAUSS`/`GAUSS` calls, e.g. sky130's `mc_mm_switch`/
 `mc_pr_switch`-gated device parameters) draw on:
 
 ```json
-{ "monte_carlo": { "n": 300, "seed": 20260801, "vary": "mismatch" } }
+{ "monte_carlo": { "n": 300, "seed": 20260801, "vary": "mismatch", "k_sigma": 3 } }
 ```
 
-This is **phase 1** of Monte Carlo support (issue #348, part of #344's
-decomposition) — the sampling *orchestration* core: request schema, seed
-handling, and fan-out mechanics. Statistics rollup (mean/sigma/quantiles)
-and limit-window pass/fail evaluation across a sample set are phase 2 (a
-separate sub-issue) — `klt sim` reports each sample as its own corner entry
-and does not aggregate them.
+Each sample is reported as its own `corners[]` entry (raw, per-sample
+values), *and* reduced to a per-measurement statistical verdict under
+`measurements[].monte_carlo` — see "Monte Carlo statistics" below.
 
 - **`monte_carlo.n`** (integer, required) — number of samples per expanded
   corner point. Must be a positive integer.
@@ -373,6 +370,14 @@ and does not aggregate them.
   sample sequence derives from (see "Seed contract" below).
 - **`monte_carlo.vary`** (string, required) — which axis of variation this
   sample sequence exercises: `"mismatch"`, `"process"`, or `"both"`.
+- **`monte_carlo.quantiles`** (array\<number\>, optional) — percentiles in
+  `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]` (the
+  median plus the symmetric tails). Duplicates are dropped; declaration
+  order is preserved and becomes the response key order.
+- **`monte_carlo.k_sigma`** (number, optional) — the sigma multiple `k` for
+  the run-wide limit-window check (see "Monte Carlo statistics"). Omit for
+  no window check. Overridable per measurement with
+  `measurements[].k_sigma`.
 
 `monte_carlo` is orthogonal to `corners.*`: the PVT axes still select
 *which* process/supply/temperature points are simulated — including an
@@ -392,7 +397,8 @@ seeding `AGAUSS`/`GAUSS`/`random()`, which must appear before the netlist's
 `.lib`/`.include` cards). `mc_process_seed`/`mc_mismatch_seed` are also
 exposed as plain `.param`s in the deck, for a netlist body that wants to
 reference a per-axis seed directly. `monte_carlo.seed`, `n`, and `vary` are
-echoed back in the response's `environment.monte_carlo`; each sample's own
+echoed back in the response's `environment.monte_carlo` (plus `quantiles`
+and `k_sigma`, each only when the request declared it); each sample's own
 derived values are on that sample's `corners[]` entry, under
 `monte_carlo: {sample_index, seed, process_seed, mismatch_seed}` — see
 "JSON schema" below.
@@ -463,12 +469,92 @@ The PDK is resolved from `models.pdk` (e.g. `"gf180mcuC"` → PDK family
 device-model binding already uses); the curated table currently covers
 gf180mcu (MOS/BJT active, resistor structurally disabled — see above) and
 sky130 (MOS/BJT active under an `_mm`-suffixed section). Every other family
-and every unrecognised/omitted PDK reports `active: null`. This is
-informational only — `klt sim` does not gate `status` on it and does not
-compute a statistics rollup across samples (that remains out of scope, per
-"phase 2" above); it exists so a caller (or a human) reading the response
+and every unrecognised/omitted PDK reports `active: null`. This report is
+informational only — `klt sim` does not gate `status` on it, and it is
+independent of the per-measurement statistics rollup described in "Monte
+Carlo statistics" below: the rollup reduces whatever spread the samples
+*did* produce, while this report says whether a given family could have
+contributed any spread at all. Read them together — a family reported
+`active: false` explains a near-zero `stddev` that the rollup alone would
+leave ambiguous. It exists so a caller (or a human) reading the response
 can tell a genuinely-sampled family from a structurally-excluded one without
 reading the vendored model deck line by line.
+
+## Monte Carlo statistics
+
+A `monte_carlo` request additionally reduces its samples to a **statistical
+verdict** per measurement, so a caller never has to re-derive one from the
+raw `corners[]` list. The statistics attach to the *existing*
+per-measurement rollup (`measurements[]`), as an additive `monte_carlo`
+block — the block is present only for a measurement that actually ran under
+`monte_carlo`, so a plain corner matrix keeps today's exact response shape:
+
+```json
+{
+  "name": "vref",
+  "unit": "V",
+  "limits": { "min": 1.15, "max": 1.25 },
+  "status": "pass",
+  "worst_case": { "corner_id": "tt/1.800V/27C/mc17", "value": 1.2418, "margin": 0.0082 },
+  "monte_carlo": {
+    "n": 300,
+    "errored": 0,
+    "mean": 1.20117,
+    "stddev": 0.01342,
+    "min": 1.16204,
+    "max": 1.24180,
+    "quantiles": { "p5": 1.17925, "p50": 1.20106, "p95": 1.22341 },
+    "sigma_window": {
+      "k": 3.0,
+      "low": 1.16091,
+      "high": 1.24143,
+      "status": "pass",
+      "margin": 0.00857
+    },
+    "by_corner": [
+      { "corner_id": "tt/1.800V/27C", "n": 300, "errored": 0, "mean": 1.20117, "...": "..." }
+    ]
+  }
+}
+```
+
+| Field           | Type                | Description                                                                                                                          |
+| --------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `n`             | integer             | Samples that produced a usable number — the population every statistic below is computed over.                                        |
+| `errored`       | integer             | Samples whose value was unextractable (`null`) and were therefore excluded. `n + errored` is the total sample count for this measurement. |
+| `mean`          | number \| null      | Arithmetic mean. `null` when `n == 0`.                                                                                                |
+| `stddev`        | number \| null      | **Sample** standard deviation (Bessel-corrected, `n - 1`) — the estimator for a finite draw from a population. `null` when `n < 2` (undefined, never faked as `0.0`). |
+| `min`/`max`     | number \| null      | Extremes of the sample set. `null` when `n == 0`.                                                                                     |
+| `quantiles`     | object              | One key per requested percentile, `p<percentile>` (`p5`, `p50`, `p2.5`, …), in `monte_carlo.quantiles` order. Values are linearly interpolated between order statistics (numpy's default / `statistics.quantiles(method="inclusive")`); `p0`/`p100` degenerate to `min`/`max`. Each value is `null` when `n == 0`. |
+| `sigma_window`  | object \| null      | The `mean ± k*stddev` limit-window check — `null` unless a `k_sigma` was declared *and* `mean`/`stddev` both exist. See below.        |
+| `by_corner`     | array\<object\>     | The same statistics recomputed per originating (pre-sampling) corner, in corner order, each with its own `corner_id`. One entry for the common single-corner request. |
+
+**The limit window.** With a `k_sigma` declared (run-wide on `monte_carlo`,
+or per measurement — the per-measurement value wins), `sigma_window` reports
+whether `mean ± k*stddev` fits inside that measurement's `limits`:
+
+- `low`/`high` are the window endpoints; `k` echoes the multiple used.
+- `status`/`margin` come from the **same** `min`/`max` evaluation and
+  `margin` sign convention a single deterministic value goes through: both
+  endpoints are scored, the window passes only if both do, and `margin` is
+  the worse (smaller) of the two — positive is headroom to the nearest
+  binding limit, negative is the worst violation. A measurement with no
+  `limits` is reported but never fails (`margin: null`), exactly as for a
+  single value.
+- A **failing window makes the run fail** (`measurements[].status: "fail"`,
+  aggregate `status: "fail"`, exit `3`) even when every individual sample
+  passed its limits — that is the whole point of asking the question. This
+  is opt-in: without a declared `k_sigma`, nothing about pass/fail changes.
+- `k: 0` is legal and degenerates the window to the mean itself.
+
+**Pooled vs. per corner.** The top-level statistics pool every sample of
+every corner; `by_corner` splits the same samples by the corner they were
+drawn from. For a single-corner Monte Carlo request (the common shape) the
+two describe the same draw. For a request that combines a PVT matrix *with*
+`monte_carlo`, `by_corner` is the statistically meaningful view — each
+corner is its own population, and the pooled block is the union across
+populations, which is a useful worst-case envelope but not a distribution
+anyone sampled.
 
 ## Model library resolution (via `klt pdk`)
 
@@ -664,8 +750,10 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
 | `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
+| `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
+| `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit` and `limits` (`min`/`max`, either optional). No `limits` -> reported, never fails. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit`, `limits` (`min`/`max`, either optional), and `k_sigma` (per-measurement override of `monte_carlo.k_sigma`). No `limits` -> reported, never fails. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
@@ -767,9 +855,9 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}`, echoed from the request, plus `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above). |
+| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above). |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
-| `measurements`  | array\<object\> | Per-measurement rollup across all corners, including the worst case and which corner produced it.                |
+| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 
 #### `corners[]` entries
@@ -799,6 +887,10 @@ the full reasoning):
 - **Aggregate precedence: `error` > `fail` > `pass`**, at both the corner
   level (any diagnostic forces `error`, regardless of measurement outcomes)
   and the response level (any errored corner makes the whole run `error`).
+  A declared Monte Carlo sigma window that falls outside the limits is the
+  one way the response can be `fail` with every *corner* passing — it is a
+  statement about the sampled population, not about any single run (see
+  "Monte Carlo statistics" above). It never overrides `error`.
 - **Deterministic expansion and ordering** — `corners` is the full cross
   product of the declared axes minus `exclude`, in axis-declaration order
   (process outermost, temperature innermost), so output is byte-stable
@@ -826,7 +918,7 @@ the full reasoning):
 | `0`  | Every corner passed.                                                         |
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
-| `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. |
+| `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
 | `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. |
 
 This resolves the open question the spike flagged (a pass/fail/error
@@ -864,3 +956,20 @@ klt sim examples/sim/request.json --format json
 reproduces the illustrative response above (deterministic `vout` values,
 since the fixture's resistor divider has no engine-version-dependent
 behavior).
+
+`request-monte-carlo.json` is the Monte Carlo variant: one `tt` corner
+sampled `n=20` times against `testbench-mc.spice`, whose `R1` is drawn from
+`agauss(1, 0.05, 1)` — seeded by the `.options seed=` card `klt sim` writes,
+the same mechanism a mismatch-aware PDK model library's own `AGAUSS`/`GAUSS`
+device parameters go through, so the sample→statistics path is exercised end
+to end with no PDK dependency. It declares `quantiles: [5, 50, 95]` and
+`k_sigma: 3`, so
+
+```
+klt sim examples/sim/request-monte-carlo.json --format json
+```
+
+emits 20 sample corners plus the `measurements[].monte_carlo` block
+documented above (mean ≈ 0.905 V, sigma ≈ 0.020 V, a `mean ± 3*sigma` window
+of roughly `[0.844, 0.967]` — comfortably inside the measurement's
+`[0.75, 1.05]` limits, so `sigma_window.status` is `"pass"`).
