@@ -74,6 +74,12 @@ per-node metrics and a manifest is a reasonable shape for a *future*
 same "don't trust exit code alone" lesson the SPICE corner-runner spike
 independently reached for ngspice. Neither idea requires the dependency.
 
+This verdict still stands after #391 adopted the digital engine class: it
+was about not taking siliconcompiler itself as a dependency, not about
+digital tooling generally — wrapping Yosys/OpenROAD directly, behind our
+own JSON contracts, is the architecture's ordinary "wrap the proven
+engine" move, a different decision that does not reopen this one.
+
 ## 2. KLayout tool driver (`siliconcompiler.tools.klayout`)
 
 Read `KLayoutPDK`/`KLayoutLibrary`/`KLayoutTask` in

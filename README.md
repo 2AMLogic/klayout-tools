@@ -17,10 +17,13 @@ machine-readable JSON everywhere. Built on [KLayout](https://www.klayout.de)'s
 Python API the way kicad-tools builds on KiCad's file formats: the heavy
 lifting stays in the proven engine; the agent-native surface is ours.
 
-The target capability: **an agent can take a spec → schematic/generator →
-sized circuit → layout → DRC/LVS clean → extracted netlist →
-simulation-verified, on an open PDK, unaided — with every step headless
-and JSON-contracted.** [ROADMAP.md](ROADMAP.md) holds the build order,
+The target capability: **an agent can take a spec through one of three
+peer paths on an open PDK, unaided, with every step headless and
+JSON-contracted — analog (spec → schematic/generator → sized circuit →
+layout → DRC/LVS clean → extracted netlist → simulation-verified),
+digital (spec → RTL → synthesis → place-and-route → DRC/LVS clean →
+timing-closed), and mixed-signal (both paths plus the signoff seam
+between them).** [ROADMAP.md](ROADMAP.md) holds the build order,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) how the pieces fit; the
 work itself is tracked in GitHub issues.
 
