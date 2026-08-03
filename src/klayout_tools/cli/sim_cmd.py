@@ -34,6 +34,7 @@ def run(args: argparse.Namespace) -> int:
             artifacts_dir=args.outdir,
             backend=args.backend,
             max_workers=args.max_workers,
+            hosts=args.hosts,
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)

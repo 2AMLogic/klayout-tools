@@ -680,6 +680,19 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     sim_parser.add_argument(
+        "--hosts",
+        dest="hosts",
+        type=int,
+        default=None,
+        help=(
+            "shard the expanded corner/Monte-Carlo unit list across this "
+            "many hosts and merge the per-shard reports (default: 1, or "
+            "the request's `remote.hosts` field); overrides the request "
+            "field when given. Currently implemented for `local`/"
+            "`local-parallel` only -- see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

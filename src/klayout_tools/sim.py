@@ -58,6 +58,7 @@ import statistics
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -474,6 +475,7 @@ def run_sim(
     artifacts_dir: str | None = None,
     backend: str | None = None,
     max_workers: int | None = None,
+    hosts: int | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -499,6 +501,22 @@ def run_sim(
     oversubscribes a small box immediately. Must be a positive integer when
     given explicitly; a non-positive value raises :class:`SimError`.
 
+    ``hosts`` shards the expanded unit list (corners x Monte Carlo samples)
+    into that many contiguous slices and merges the per-shard reports back
+    into one report in global unit order, overriding the request's own
+    ``request.remote.hosts`` field when given (the ``--hosts`` CLI flag
+    path, same precedence rule as ``backend``/``--backend`` -- Epic #375
+    decision 4). Defaults to ``1`` when both are omitted, which is exactly
+    today's single-host behaviour -- byte-identical, not just
+    "equivalent" -- so every existing request/response is unaffected. Must
+    be a positive integer when given explicitly. ``hosts > 1`` is currently
+    only implemented for the ``local``/``local-parallel`` backends (see
+    :func:`_run_sharded`); pairing it with backend ``remote`` raises
+    :class:`SimError` today -- the fleet launch lifecycle that shards a
+    *remote* run across real hosts is Epic #375 Phase 1B (#377), which
+    plugs its own per-shard runner into the same merge engine this
+    implements.
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
     the sweep from starting at all (bad request, unresolvable netlist/model
@@ -519,6 +537,19 @@ def run_sim(
         raise SimError(
             f"unsupported backend '{backend}' "
             f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+
+    hosts = (
+        hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)
+    )
+    if not isinstance(hosts, int) or isinstance(hosts, bool) or hosts < 1:
+        raise SimError("remote.hosts must be a positive integer")
+    if hosts > 1 and backend == "remote":
+        raise SimError(
+            "remote.hosts > 1 is not yet supported for backend 'remote' -- "
+            "sharding a live remote fleet is Epic #375 Phase 1B (#377); "
+            "use hosts=1 (the default) with backend 'remote', or hosts>1 "
+            "with 'local'/'local-parallel'"
         )
 
     netlist_ref = request["netlist"]
@@ -621,19 +652,47 @@ def run_sim(
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
 
-    corners, engine_version, remote_environment = _BACKENDS[backend](
-        corner_points=corner_points,
-        netlist_path=netlist_path,
-        models_lib=models_lib,
-        analysis=analysis,
-        measurements_spec=measurements_spec,
-        timeout_s=timeout_s,
-        keep_artifacts=keep_artifacts,
-        want_waveforms=want_waveforms,
-        artifacts_dir=artifacts_dir,
-        max_workers=max_workers,
-        request=request,
-    )
+    if hosts == 1:
+        # The exact pre-#376 call -- untouched so this path stays
+        # byte-identical for every existing request/response.
+        corners, engine_version, remote_environment = _BACKENDS[backend](
+            corner_points=corner_points,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=artifacts_dir,
+            max_workers=max_workers,
+            request=request,
+        )
+    else:
+
+        def _shard_runner(
+            shard_points: list[CornerPoint],
+        ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+            return _BACKENDS[backend](
+                corner_points=shard_points,
+                netlist_path=netlist_path,
+                models_lib=models_lib,
+                analysis=analysis,
+                measurements_spec=measurements_spec,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+                max_workers=max_workers,
+                request=request,
+            )
+
+        corners, engine_version, remote_environment = _run_sharded(
+            shard_runner=_shard_runner,
+            corner_points=corner_points,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
+        )
 
     measurements_rollup = _rollup_measurements(
         measurements_spec, corners, monte_carlo_stats
@@ -1335,6 +1394,198 @@ def _run_local_parallel(
         if version is not None:
             engine_version = version
     return corners, engine_version, None
+
+
+# --------------------------------------------------------------------------- #
+# Fleet shard/merge engine (Epic #375 Phase 1A, #376) -- pure logic, no AWS
+# --------------------------------------------------------------------------- #
+
+#: The callable a shard's slice of the expanded unit list is handed to,
+#: returning that shard's own ``(corners, engine_version,
+#: remote_environment)`` triple -- exactly the shape a :data:`_BACKENDS`
+#: entry returns for the *whole* matrix, just scoped to one shard. This is
+#: the seam Epic #375 Phase 1B (#377) plugs a real fleet member into (a
+#: callable that provisions one host per shard and runs it there); this
+#: module's own caller (:func:`run_sim`) passes one that simply re-invokes
+#: the already-selected backend on the shard, which is exactly correct for
+#: `local`/`local-parallel` (they consume ``corner_points`` directly, with
+#: no separate "request document" to slice) and is why `hosts > 1` already
+#: works end to end for those two backends without any new AWS-facing code.
+ShardRunner = Callable[
+    [list["CornerPoint"]],
+    tuple[list[dict[str, Any]], str | None, dict[str, Any] | None],
+]
+
+
+def _shard_corner_points(
+    corner_points: list[CornerPoint], hosts: int
+) -> list[list[CornerPoint]]:
+    """Slice the expanded unit list into ``hosts`` contiguous shards.
+
+    Shards are balanced as evenly as possible -- ``len(corner_points) //
+    hosts`` units each, with the first ``len(corner_points) % hosts`` shards
+    getting one extra -- and are always **contiguous slices** of the
+    original list in its original order, so concatenating every shard back
+    together reproduces ``corner_points`` exactly for any ``hosts`` from
+    ``1`` to ``len(corner_points)`` (and beyond -- see below). Per-sample
+    Monte Carlo seeds are already absolute (``sample_index``-derived, see
+    :func:`_expand_monte_carlo` and #348), so slicing never changes any
+    point's own value, only which shard runs it.
+
+    ``hosts`` exceeding ``len(corner_points)`` is not an error -- the
+    trailing shards are simply empty lists; :func:`_run_sharded` never calls
+    the shard runner for an empty shard.
+    """
+    if hosts < 1:
+        raise SimError("remote.hosts must be a positive integer")
+    total = len(corner_points)
+    base, remainder = divmod(total, hosts)
+    shards: list[list[CornerPoint]] = []
+    start = 0
+    for index in range(hosts):
+        size = base + (1 if index < remainder else 0)
+        shards.append(corner_points[start : start + size])
+        start += size
+    return shards
+
+
+def _lost_shard_corner(
+    point: CornerPoint, measurements_spec: list[dict[str, Any]], reason: str
+) -> dict[str, Any]:
+    """Synthesize an ``error`` corner report for one unit of a shard that
+    never returned (Epic #375 decision 2's *merge* half -- the automatic
+    retry that avoids this in the common case is Phase 1B, #377).
+
+    Mirrors :func:`_run_corner`'s own ``error``-status shape field-for-field,
+    so a lost-shard unit is indistinguishable, downstream, from a corner
+    that ran and errored on its own -- ``_rollup_measurements``, the CLI's
+    text/JSON renderers, and the ``errored`` count all need no lost-shard
+    special case.
+    """
+    measurements = [
+        {
+            "name": spec["name"],
+            "value": None,
+            "unit": spec.get("unit"),
+            "status": "error",
+            "margin": None,
+        }
+        for spec in measurements_spec
+    ]
+    monte_carlo: dict[str, Any] | None = None
+    if point.sample_index is not None:
+        assert point.mc_seed is not None  # every sampled point carries one
+        monte_carlo = {
+            "sample_index": point.sample_index,
+            "seed": point.mc_seed["rndseed"],
+            "process_seed": point.mc_seed["process_seed"],
+            "mismatch_seed": point.mc_seed["mismatch_seed"],
+        }
+    return {
+        "corner_id": point.corner_id,
+        "process": point.process,
+        "supply_v": point.supply_v,
+        "temperature_c": point.temperature_c,
+        "status": "error",
+        "runtime_s": 0.0,
+        "measurements": measurements,
+        "diagnostics": [{"severity": "error", "code": "lost_shard", "message": reason}],
+        "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
+        "monte_carlo": monte_carlo,
+    }
+
+
+def _run_sharded(
+    *,
+    shard_runner: ShardRunner,
+    corner_points: list[CornerPoint],
+    hosts: int,
+    measurements_spec: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
+    contiguous shards (:func:`_shard_corner_points`), run each shard through
+    ``shard_runner`` -- concurrently, one shard meant to be one host -- and
+    deterministically merge the per-shard reports back into **global unit
+    order**, independent of which shard finishes first. This is the same
+    ordering contract ``local-parallel`` already honors for individual
+    corners (:func:`_run_local_parallel`), one level up: shards are
+    dispatched to a thread pool and reassembled by shard index once every
+    future completes, never by completion order.
+
+    A shard whose ``shard_runner`` call raises is a **lost shard**: every
+    unit in that shard is reported with ``status: "error"`` and a
+    ``lost_shard`` diagnostic carrying the exception text
+    (:func:`_lost_shard_corner`), and the run continues -- a lost shard
+    never aborts a sibling shard, mirroring `local-parallel`'s per-corner
+    failure isolation one level up. An empty shard (``hosts`` exceeds the
+    unit count) is never handed to ``shard_runner`` at all.
+
+    ``engine_version`` is derived the same "last non-``None`` wins, in
+    corner-list order" way every backend already computes it -- shards are
+    visited in shard order (itself global-unit order, since shards are
+    contiguous), so the result is deterministic given a deterministic unit
+    list, independent of completion order.
+
+    ``environment.remote`` becomes a ``fleet[]`` array -- one entry per
+    host, ``None`` for a lost shard -- only when at least one shard produced
+    a non-``None`` ``remote_environment``; otherwise it stays ``None`` (the
+    pre-fleet single-block shape), so a fleet of `local`/`local-parallel`
+    shards (which never populate ``remote_environment``) reports no
+    ``environment.remote`` at all -- exactly like an unsharded `local`/
+    `local-parallel` run today.
+    """
+    shards = _shard_corner_points(corner_points, hosts)
+
+    def _run_one(
+        shard_points: list[CornerPoint],
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+        if not shard_points:
+            return [], None, None
+        return shard_runner(shard_points)
+
+    results: list[
+        tuple[list[dict[str, Any]], str | None, dict[str, Any] | None] | None
+    ] = [None] * len(shards)
+    lost_reasons: list[str | None] = [None] * len(shards)
+
+    with ThreadPoolExecutor(max_workers=max(1, hosts)) as pool:
+        future_to_index = {
+            pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:  # noqa: BLE001 - "shard never returned"
+                lost_reasons[index] = str(exc)
+
+    corners: list[dict[str, Any]] = []
+    engine_version: str | None = None
+    fleet: list[dict[str, Any] | None] = []
+    any_remote = False
+    for shard_points, result, lost_reason in zip(
+        shards, results, lost_reasons, strict=True
+    ):
+        if lost_reason is not None:
+            corners.extend(
+                _lost_shard_corner(
+                    point, measurements_spec, f"shard lost: {lost_reason}"
+                )
+                for point in shard_points
+            )
+            fleet.append(None)
+            continue
+        assert result is not None  # every non-lost shard was submitted+awaited
+        shard_corners, shard_engine_version, shard_remote_environment = result
+        corners.extend(shard_corners)
+        if shard_engine_version is not None:
+            engine_version = shard_engine_version
+        fleet.append(shard_remote_environment)
+        if shard_remote_environment is not None:
+            any_remote = True
+
+    remote_environment = {"fleet": fleet} if any_remote else None
+    return corners, engine_version, remote_environment
 
 
 #: Default idle-poll interval for :func:`remote_transport.wait_for_ssh` when

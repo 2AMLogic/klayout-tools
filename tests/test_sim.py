@@ -2375,6 +2375,472 @@ def test_default_max_workers_derives_from_cpu_count(monkeypatch):
     assert sim._default_max_workers() == 1
 
 
+# --------------------------------------------------------------------------- #
+# Fleet shard/merge engine (Epic #375 Phase 1A, #376) -- pure logic, no AWS
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("hosts", range(1, 8))
+def test_shard_corner_points_round_trips_for_every_host_count(hosts):
+    points = [sim.CornerPoint(None, {}, float(i)) for i in range(7)]
+
+    shards = sim._shard_corner_points(points, hosts)
+
+    assert len(shards) == hosts
+    # Concatenating every shard, in shard order, reproduces the original
+    # list exactly -- the round-trip every merge in this module depends on.
+    assert [p for shard in shards for p in shard] == points
+    sizes = [len(shard) for shard in shards]
+    assert max(sizes) - min(sizes) <= 1
+
+
+def test_shard_corner_points_hosts_exceeding_units_leaves_trailing_shards_empty():
+    points = [sim.CornerPoint(None, {}, 1.0), sim.CornerPoint(None, {}, 2.0)]
+
+    shards = sim._shard_corner_points(points, 5)
+
+    assert len(shards) == 5
+    assert [p for shard in shards for p in shard] == points
+    assert sum(1 for shard in shards if shard) == 2
+
+
+@pytest.mark.parametrize("bad_hosts", [0, -1])
+def test_shard_corner_points_rejects_non_positive_hosts(bad_hosts):
+    with pytest.raises(sim.SimError, match="hosts"):
+        sim._shard_corner_points([], bad_hosts)
+
+
+def test_lost_shard_corner_shape_matches_run_corner_error_shape():
+    point = sim.CornerPoint("tt", {"vdd": 1.8}, 25.0)
+
+    corner = sim._lost_shard_corner(
+        point,
+        [
+            {"name": "vout", "unit": "V"},
+            {"name": "iq"},
+        ],
+        "shard lost: boom",
+    )
+
+    assert corner["corner_id"] == point.corner_id
+    assert corner["process"] == "tt"
+    assert corner["supply_v"] == {"vdd": 1.8}
+    assert corner["temperature_c"] == 25.0
+    assert corner["status"] == "error"
+    assert corner["monte_carlo"] is None
+    assert corner["diagnostics"] == [
+        {"severity": "error", "code": "lost_shard", "message": "shard lost: boom"}
+    ]
+    assert corner["measurements"] == [
+        {"name": "vout", "value": None, "unit": "V", "status": "error", "margin": None},
+        {"name": "iq", "value": None, "unit": None, "status": "error", "margin": None},
+    ]
+    assert corner["artifacts"] == {
+        "log": None,
+        "raw": None,
+        "waveform": None,
+        "deck": None,
+    }
+
+
+def test_lost_shard_corner_carries_monte_carlo_block_for_a_sampled_point():
+    point = sim.CornerPoint(
+        "tt",
+        {},
+        25.0,
+        sample_index=3,
+        mc_seed={"rndseed": 111, "process_seed": 222, "mismatch_seed": 333},
+    )
+
+    corner = sim._lost_shard_corner(point, [], "shard lost: boom")
+
+    assert corner["corner_id"].endswith("/mc3")
+    assert corner["monte_carlo"] == {
+        "sample_index": 3,
+        "seed": 111,
+        "process_seed": 222,
+        "mismatch_seed": 333,
+    }
+
+
+def test_run_sharded_merges_in_global_order_regardless_of_completion_order():
+    # Sleep inversely with each shard's own marker so shards complete in
+    # *reverse* submission order under the pool -- actually exercising
+    # index-based reassembly rather than accidentally passing because
+    # completion order happened to match shard order.
+    points = [sim.CornerPoint(None, {}, float(i)) for i in range(6)]
+
+    def shard_runner(shard_points):
+        time.sleep(0.01 * (10 - shard_points[0].temperature_c))
+        corners = [
+            {"corner_id": p.corner_id, "marker": p.temperature_c} for p in shard_points
+        ]
+        return corners, None, None
+
+    corners, engine_version, remote_environment = sim._run_sharded(
+        shard_runner=shard_runner,
+        corner_points=points,
+        hosts=3,
+        measurements_spec=[],
+    )
+
+    assert [c["marker"] for c in corners] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert engine_version is None
+    assert remote_environment is None
+
+
+def test_run_sharded_lost_shard_produces_per_unit_errors_and_correct_counts():
+    points = [sim.CornerPoint(None, {}, float(i)) for i in range(6)]
+
+    def shard_runner(shard_points):
+        if shard_points[0].temperature_c == 2.0:
+            raise RuntimeError("boom")
+        corners = [
+            {
+                "corner_id": p.corner_id,
+                "status": "pass",
+                "measurements": [],
+                "diagnostics": [],
+                "artifacts": {},
+                "monte_carlo": None,
+            }
+            for p in shard_points
+        ]
+        return corners, "46", None
+
+    corners, engine_version, remote_environment = sim._run_sharded(
+        shard_runner=shard_runner,
+        corner_points=points,
+        hosts=3,
+        measurements_spec=[{"name": "vout", "unit": "V"}],
+    )
+
+    assert len(corners) == 6
+    assert [c["status"] for c in corners] == [
+        "pass",
+        "pass",
+        "error",
+        "error",
+        "pass",
+        "pass",
+    ]
+    errored = [c for c in corners if c["status"] == "error"]
+    assert len(errored) == 2
+    for corner in errored:
+        assert corner["diagnostics"] == [
+            {
+                "severity": "error",
+                "code": "lost_shard",
+                "message": "shard lost: boom",
+            }
+        ]
+        assert corner["measurements"] == [
+            {
+                "name": "vout",
+                "value": None,
+                "unit": "V",
+                "status": "error",
+                "margin": None,
+            }
+        ]
+    # `engine_version` -- last non-None wins, in shard (global unit) order --
+    # is unaffected by the lost shard in the middle.
+    assert engine_version == "46"
+    assert remote_environment is None
+
+
+def test_run_sharded_builds_fleet_array_when_any_shard_has_remote_environment():
+    points = [sim.CornerPoint(None, {}, float(i)) for i in range(4)]
+
+    def shard_runner(shard_points):
+        remote_env = {"instance_id": f"i-{int(shard_points[0].temperature_c)}"}
+        corners = [{"corner_id": p.corner_id} for p in shard_points]
+        return corners, None, remote_env
+
+    _, _, remote_environment = sim._run_sharded(
+        shard_runner=shard_runner, corner_points=points, hosts=2, measurements_spec=[]
+    )
+
+    assert remote_environment == {
+        "fleet": [{"instance_id": "i-0"}, {"instance_id": "i-2"}]
+    }
+
+
+def test_run_sharded_fleet_array_has_null_entry_for_lost_shard():
+    points = [sim.CornerPoint(None, {}, float(i)) for i in range(4)]
+
+    def shard_runner(shard_points):
+        if shard_points[0].temperature_c == 2.0:
+            raise RuntimeError("provisioning failed")
+        corners = [{"corner_id": p.corner_id} for p in shard_points]
+        return corners, None, {"instance_id": "i-0"}
+
+    _, _, remote_environment = sim._run_sharded(
+        shard_runner=shard_runner, corner_points=points, hosts=2, measurements_spec=[]
+    )
+
+    assert remote_environment == {"fleet": [{"instance_id": "i-0"}, None]}
+
+
+def test_run_sharded_never_calls_shard_runner_for_an_empty_shard():
+    points = [sim.CornerPoint(None, {}, 1.0)]
+    calls = []
+
+    def shard_runner(shard_points):
+        calls.append(list(shard_points))
+        return [{"corner_id": p.corner_id} for p in shard_points], None, None
+
+    corners, _, _ = sim._run_sharded(
+        shard_runner=shard_runner, corner_points=points, hosts=3, measurements_spec=[]
+    )
+
+    assert len(calls) == 1  # only the one non-empty shard was ever run
+    assert len(corners) == 1
+
+
+def test_run_sim_hosts_one_is_byte_identical_to_hosts_absent(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    base = {
+        "netlist": "body.spice",
+        "corners": {"temperature_c": [10, 20, 30]},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=1u",
+                "limits": {"min": 0.5},
+            }
+        ],
+    }
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+    request = _write_request(tmp_path, base)
+
+    default_report = sim.run_sim(str(request))
+    explicit_hosts_report = sim.run_sim(str(request), hosts=1)
+
+    assert _stripped_report(default_report) == _stripped_report(explicit_hosts_report)
+
+
+def test_run_sim_local_parallel_hosts_shards_match_unsharded_report(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    base = {
+        "netlist": "body.spice",
+        "backend": "local-parallel",
+        "corners": {"temperature_c": [10, 20, 30, 40, 50, 60, 70]},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=1u",
+                "limits": {"min": 0.5},
+            }
+        ],
+        "options": {"max_workers": 4},
+    }
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+    unsharded_req = _write_request(tmp_path, base, name="unsharded.json")
+    sharded_req = _write_request(tmp_path, base, name="sharded.json")
+
+    unsharded_report = sim.run_sim(str(unsharded_req))
+    sharded_report = sim.run_sim(str(sharded_req), hosts=3)
+
+    assert [c["corner_id"] for c in sharded_report["corners"]] == [
+        c["corner_id"] for c in unsharded_report["corners"]
+    ]
+    assert _stripped_report(sharded_report) == _stripped_report(unsharded_report)
+    assert "remote" not in sharded_report["environment"]
+
+
+def test_run_sim_monte_carlo_statistics_over_sharded_run_equal_unsharded(
+    tmp_path, monkeypatch
+):
+    # `hosts > 1` must not change a single sampled value -- MC seeds are
+    # already absolute (`sample_index`-derived, #348) -- so the merged
+    # report's Monte Carlo statistics must equal the unsharded run's,
+    # regardless of which shard/thread actually produced which sample.
+    _write_body(tmp_path)
+    base = {
+        "netlist": "body.spice",
+        "backend": "local-parallel",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+        "monte_carlo": {"n": 12, "seed": 42, "vary": "mismatch"},
+        "options": {"max_workers": 4},
+    }
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[2]
+        log_path = cmd[cmd.index("-o") + 1]
+        deck_text = Path(deck_path).read_text()
+        sample_index = int(re.search(r"mc_sample_index=(\d+)", deck_text).group(1))
+        value = 1.0 + 0.01 * sample_index
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "  Measurements for Transient Analysis\n\n"
+                f"vout                =  {value:.5e}\n"
+            )
+        return _FakeCompleted("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    unsharded_req = _write_request(tmp_path, base, name="unsharded.json")
+    sharded_req = _write_request(tmp_path, base, name="sharded.json")
+
+    unsharded_report = sim.run_sim(str(unsharded_req))
+    sharded_report = sim.run_sim(str(sharded_req), hosts=4)
+
+    assert [c["corner_id"] for c in sharded_report["corners"]] == [
+        c["corner_id"] for c in unsharded_report["corners"]
+    ]
+    assert sharded_report["measurements"] == unsharded_report["measurements"]
+    assert sharded_report["corner_count"] == unsharded_report["corner_count"]
+    assert sharded_report["passed"] == unsharded_report["passed"]
+
+
+def test_run_sim_hosts_flag_overrides_request_field(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "corners": {"temperature_c": [10, 20, 30, 40]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "remote": {"hosts": 4},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_hosts = []
+    real_shard = sim._shard_corner_points
+
+    def spy(points, hosts):
+        seen_hosts.append(hosts)
+        return real_shard(points, hosts)
+
+    monkeypatch.setattr(sim, "_shard_corner_points", spy)
+
+    sim.run_sim(str(request), hosts=2)
+
+    assert seen_hosts == [2]
+
+
+def test_run_sim_hosts_request_field_used_when_flag_omitted(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "corners": {"temperature_c": [10, 20, 30, 40]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "remote": {"hosts": 4},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_hosts = []
+    real_shard = sim._shard_corner_points
+
+    def spy(points, hosts):
+        seen_hosts.append(hosts)
+        return real_shard(points, hosts)
+
+    monkeypatch.setattr(sim, "_shard_corner_points", spy)
+
+    sim.run_sim(str(request))
+
+    assert seen_hosts == [4]
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 1.5, "3"])
+def test_run_sim_invalid_hosts_raises(tmp_path, bad_value):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "remote": {"hosts": bad_value},
+        },
+    )
+    with pytest.raises(sim.SimError, match="hosts"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_hosts_greater_than_one_with_remote_backend_raises_before_any_aws_call(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "remote",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "models": {"pdk": "sky130A"},
+            "remote": {
+                "region": "us-east-1",
+                "ssh_key_path": "/tmp/key.pem",
+                "hosts": 2,
+            },
+        },
+    )
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError(
+            "hosts>1 + backend='remote' must not touch AWS in this issue"
+        )
+
+    monkeypatch.setattr(sim, "RemoteLauncher", _unexpected)
+
+    with pytest.raises(sim.SimError, match="not yet supported"):
+        sim.run_sim(str(request))
+
+
+def test_cli_hosts_flag_shards_the_run(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "corners": {"temperature_c": [10, 20, 30, 40]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_hosts = []
+    real_shard = sim._shard_corner_points
+
+    def spy(points, hosts):
+        seen_hosts.append(hosts)
+        return real_shard(points, hosts)
+
+    monkeypatch.setattr(sim, "_shard_corner_points", spy)
+
+    main(["sim", str(request), "--hosts", "2", "--format", "json"])
+
+    assert seen_hosts == [2]
+
+
 def test_run_sim_stubbed_fail(tmp_path, monkeypatch):
     _write_body(tmp_path)
     request = _write_request(
