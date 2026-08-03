@@ -345,6 +345,15 @@ Two consequences worth knowing:
   bit-for-bit as it did before this feature existed — the capacitor
   extractor is never even invoked for an entry whose plate regions come out
   empty.
+  - **A DRM-legal `top_plate_via` does not short the two plates (issue
+    #364).** gf180mcu's top-plate-via minimum-overlap rule *requires* the
+    bottom plate to enclose/overlap the via — the via and the bottom plate's
+    conductor necessarily touch in plan view for a correctly-drawn cap. That
+    overlap is excluded from the deck's generic `vias[]` layer before its
+    generic per-layer `metals[i]`/`vias[i]` connectivity loop runs, so the
+    via still ties the top plate to `top_plate_via_metal` as described above
+    without also being read as an ordinary via onto the bottom plate
+    beneath it.
 - **gf180mcu's stack models only the default of three selectable
   densities.** The DRM/LVS deck's MiM cap supports 1.0/1.5/2.0 fF/µm²
   dielectric-thickness options selected as a foundry-side runset option, not

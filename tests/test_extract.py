@@ -27,7 +27,13 @@ import pytest
 from klayout_tools import pdk
 from klayout_tools.cli import main
 from klayout_tools.decks import ExtractionDeck, get_extraction_deck
-from klayout_tools.extract import ExtractError, _n_squares, run_extract
+from klayout_tools.extract import (
+    ExtractError,
+    _exclude_capacitor_top_via_overlap,
+    _n_squares,
+    _region,
+    run_extract,
+)
 from klayout_tools.pdk_models import _select_bipolar_variant, equivalent_rectangle_um
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -956,6 +962,121 @@ def test_gf180mcu_capacitor_top_plate_connects_to_routed_metal_net(tmp_path):
     assert device["params"]["area_um2"] == pytest.approx(100.0)
     assert device["nets"]["b"] == "VTOP"
     assert device["nets"]["a"].startswith("$")
+
+
+def _make_gf180mcu_mim_layout_with_drm_legal_top_via() -> kdb.Layout:
+    """Issue #364's minimal repro: a bottom-plate `Metal4` box, an inset
+    `FuseTop` top plate (marked `CAP_MK`/`MIM_L_MK`), and *only* a `Via4`
+    landing inside both plates' footprints -- the DRM-legal position the
+    PDK's own top-plate-via minimum-overlap rule requires (the bottom plate
+    must enclose the via by some margin, not clear it) -- plus a small
+    `Metal5` pad directly above the via, touching nothing else. No other
+    routing anywhere in the layout, so the only way the two plates could end
+    up on the same net is the false short this issue reports."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, _box_um(-20, -20, 20, 20))  # Metal4 (bottom plate conductor)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate)
+    draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+
+    # Via4, entirely inside both FuseTop's own footprint and the (virtual)
+    # bottom-plate outline beneath it -- before the #364 fix, this overlap
+    # was read by the deck's generic Metal4<->Via4<->Metal5 connectivity
+    # loop as an ordinary via shorting the bottom and top plates together.
+    draw(41, 0, _box_um(4, 4, 6, 6))  # Via4
+    draw(81, 0, _box_um(3, 3, 7, 7))  # Metal5 pad, touches only the via
+
+    return layout
+
+
+def test_gf180mcu_capacitor_drm_legal_top_via_does_not_short_plates(tmp_path):
+    """Issue #364: a `top_plate_via` (`Via4`) placed exactly per the PDK's
+    own minimum-overlap rule for that via -- landing *inside* the bottom
+    plate's `Metal4` footprint, as the rule requires -- must not merge the
+    capacitor's two plates into one net through the deck's generic
+    `Metal4`<->`Via4`<->`Metal5` connectivity loop. Before the fix this
+    DRM-legal position produced `net_count == 1` (a false short between P1
+    and P2); the fix keeps the two plate terminals on distinct nets while
+    still wiring the top plate up to the touching `Metal5` pad through the
+    same via (the #314 behaviour this fix must not regress)."""
+    path = _write_gds(
+        _make_gf180mcu_mim_layout_with_drm_legal_top_via(),
+        tmp_path / "mim_drm_legal_top_via.gds",
+    )
+    report = run_extract(
+        path, "gf180mcu", output=str(tmp_path / "mim_drm_legal_top_via.spice")
+    )
+
+    assert report["device_count"] == 1
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    assert report["net_count"] == 2
+
+    (device,) = report["devices"]
+    assert device["class"] == "cap_mim_2f0_m4m5_noshield"
+    assert device["nets"]["a"] != device["nets"]["b"]
+
+
+def test_exclude_capacitor_top_via_overlap_only_cuts_the_overlapping_area():
+    """Issue #364, edge case named in the acceptance criteria: a
+    `top_plate_via` landing pad that only *partially* overlaps the
+    recognised bottom plate (a landing pad extending past the plate's own
+    edge) has only the overlapping sub-region excluded from `vias[]` -- not
+    the whole via shape/component -- and an unrelated `Via4` shape drawn
+    elsewhere in the layout (ordinary routing, nothing to do with this
+    capacitor) is left completely untouched."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, _box_um(0, 0, 10, 10))  # Metal4 bottom plate conductor
+    draw(75, 0, _box_um(0, 0, 15, 10))  # FuseTop top plate, wider than Metal4
+    draw(117, 5, _box_um(-5, -5, 20, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 20, 15))  # MIM_L_MK
+
+    # Via4 landing pad straddling the bottom plate's right edge (x=10um):
+    # half overlaps Metal4 (the false-short path), half extends past it
+    # into FuseTop's own overhang where there is no bottom-plate conductor.
+    draw(41, 0, _box_um(8, 4, 12, 6))  # Via4, straddles the Metal4 edge
+
+    # An unrelated Via4 shape elsewhere in the layout -- ordinary routing
+    # this capacitor's exclusion must never touch.
+    draw(41, 0, _box_um(-10, -10, -8, -8))  # unrelated Via4 routing
+
+    deck = get_extraction_deck("gf180mcu")
+    top_cell = layout.top_cell()
+    vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+    via4_index = deck.vias.index((41, 0))
+    original_via4 = vias[via4_index]
+
+    excluded = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
+    excluded_via4 = excluded[via4_index]
+
+    overlap = kdb.Region(_box_um(8, 4, 10, 6))  # the straddling via's Metal4 half
+    remainder = kdb.Region(_box_um(10, 4, 12, 6))  # the half clear of Metal4
+    unrelated = kdb.Region(_box_um(-10, -10, -8, -8))
+
+    # Only the overlapping half is cut -- the via keeps its other half...
+    assert not excluded_via4.is_empty()
+    assert (excluded_via4 & overlap).is_empty()
+    assert (excluded_via4 & remainder).area() == pytest.approx(remainder.area())
+    # ... and the unrelated via shape elsewhere is untouched.
+    assert (excluded_via4 & unrelated).area() == pytest.approx(unrelated.area())
+    assert excluded_via4.area() == pytest.approx(original_via4.area() - overlap.area())
+
+    # A deck with no capacitor declaring `top_plate_via` (or none of whose
+    # capacitors' `top_plate_via` overlaps anything) is a no-op: the same
+    # list object comes back unchanged.
+    empty_deck = dataclasses.replace(deck, capacitors=())
+    assert (
+        _exclude_capacitor_top_via_overlap(layout, top_cell, empty_deck, vias) is vias
+    )
 
 
 @pytest.mark.parametrize(
