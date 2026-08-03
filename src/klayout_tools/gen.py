@@ -576,16 +576,94 @@ def _res_unit_layout(length_um: float, width_um: float) -> dict[str, Any]:
 
 
 def _res_array_layout(
-    length_um: float, width_um: float, spacing_um: float, num: int, dummy: int
+    length_um: float,
+    width_um: float,
+    spacing_um: float,
+    num: int,
+    dummy: int,
+    rows: int = 1,
 ) -> dict[str, Any]:
+    """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
+    into ``rows`` parallel rows in boustrophedon ("snake") order once
+    ``rows > 1`` -- row 0 runs left to right, row 1 right to left, and so on
+    -- so consecutive unit indices ``i``/``i + 1`` (the series-chain order
+    implied by the ``R<i>_A``/``R<i>_B`` port-naming convention) stay
+    physically adjacent across a row transition, the same way a real
+    interdigitated resistor ladder folds a long string into a compact,
+    roughly-square footprint instead of one long strip (issue #415).
+    ``rows=1`` (the default) reproduces the original single-row layout
+    exactly, byte-for-byte in cell placement.
+
+    Row-to-row pitch mirrors :func:`_mos_array_layout`'s own row pitch (unit
+    height plus the fixed :data:`MIN_SAME_LAYER_SPACING_UM` margin) rather
+    than the caller-supplied ``spacing_um``, which stays scoped to
+    within-row (horizontal) unit spacing only, per its documented meaning.
+
+    Dummy elements (``dummy`` per end) extend the row that the real chain's
+    first/last unit sits in, continuing in that row's own fold direction --
+    for ``rows=1`` this is exactly the original "before index 0 / after
+    index num - 1" placement.
+
+    Each real cell carries a ``direction`` (+1/-1): a unit's own poly body
+    is drawn identically regardless of row direction (never mirrored), so
+    on a right-to-left row the physically-adjacent pad pair for a short
+    row-transition jumper is the *reverse* of the left-to-right case --
+    ``direction`` lets :func:`_res_array_describe`'s port-naming swap which
+    physical pad (``a_xy``/``b_xy``) reports as ``_A``/``_B`` so ``R<i>_B``
+    stays physically next to ``R<i + 1>_A`` in every row, not just even
+    ones.
+    """
     unit = _res_unit_layout(length_um, width_um)
     pitch = unit["total_len_um"] + spacing_um
-    cells = [{"idx": i, "x0_um": i * pitch, "y0_um": 0.0} for i in range(num)]
+    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    cols_per_row = -(-num // rows) if rows > 0 else num  # ceil(num / rows)
+
+    def _row_and_column(i: int) -> tuple[int, int, int]:
+        """(row, column, direction) for unit index ``i`` under the
+        boustrophedon fold -- ``direction`` is +1 for a left-to-right row,
+        -1 for a right-to-left one."""
+        row = i // cols_per_row
+        local_j = i % cols_per_row
+        direction = 1 if row % 2 == 0 else -1
+        column = local_j if direction == 1 else cols_per_row - 1 - local_j
+        return row, column, direction
+
+    cells = []
+    for i in range(num):
+        row, column, direction = _row_and_column(i)
+        cells.append(
+            {
+                "idx": i,
+                "x0_um": column * pitch,
+                "y0_um": row * row_pitch,
+                "direction": direction,
+            }
+        )
+
     dummy_cells = []
+    first_row, first_column, first_direction = _row_and_column(0)
+    last_row, last_column, last_direction = _row_and_column(num - 1)
     for dc in range(1, dummy + 1):
-        dummy_cells.append({"x0_um": -dc * pitch, "y0_um": 0.0})
-        dummy_cells.append({"x0_um": (num - 1 + dc) * pitch, "y0_um": 0.0})
-    return {"unit": unit, "pitch_um": pitch, "cells": cells, "dummy_cells": dummy_cells}
+        dummy_cells.append(
+            {
+                "x0_um": (first_column - first_direction * dc) * pitch,
+                "y0_um": first_row * row_pitch,
+            }
+        )
+        dummy_cells.append(
+            {
+                "x0_um": (last_column + last_direction * dc) * pitch,
+                "y0_um": last_row * row_pitch,
+            }
+        )
+    return {
+        "unit": unit,
+        "pitch_um": pitch,
+        "row_pitch_um": row_pitch,
+        "cols_per_row": cols_per_row,
+        "cells": cells,
+        "dummy_cells": dummy_cells,
+    }
 
 
 def _ring_layout(
@@ -1439,6 +1517,16 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=1,
             )
             self.param(
+                "rows",
+                self.TypeInt,
+                "Fold the num unit resistors into this many parallel rows "
+                "(boustrophedon order) instead of one long row -- keeps a "
+                "long resistor string's bounding box roughly square. Must "
+                "be >= 1; default 1 reproduces the original single-row "
+                "layout.",
+                default=1,
+            )
+            self.param(
                 "poly_layer",
                 self.TypeLayer,
                 "Resistor body drawing layer",
@@ -1502,7 +1590,10 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
 
         def display_text_impl(self) -> str:
-            return f"res_array(l={self.length_um},w={self.width_um},n={self.num})"
+            return (
+                f"res_array(l={self.length_um},w={self.width_um},"
+                f"n={self.num},rows={self.rows})"
+            )
 
         def produce_impl(self) -> None:
             dbu = self.layout.dbu
@@ -1510,7 +1601,12 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
             info = _res_array_layout(
-                self.length_um, self.width_um, self.spacing_um, self.num, self.dummy
+                self.length_um,
+                self.width_um,
+                self.spacing_um,
+                self.num,
+                self.dummy,
+                self.rows,
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -2202,6 +2298,8 @@ def _res_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'res_array': params.num must be >= 1")
     if params["dummy"] < 0:
         raise GenError("generator 'res_array': params.dummy must be >= 0")
+    if params["rows"] < 1:
+        raise GenError("generator 'res_array': params.rows must be >= 1")
 
 
 def _res_array_describe(
@@ -2214,25 +2312,40 @@ def _res_array_describe(
         params["spacing_um"],
         params["num"],
         params["dummy"],
+        params["rows"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
 
     ports = []
-    ax, ay = unit["a_xy"]
-    bx, by = unit["b_xy"]
+    left_xy = unit["a_xy"]  # physically local-left pad -- always points 180deg
+    right_xy = unit["b_xy"]  # physically local-right pad -- always points 0deg
     for c in info["cells"]:
         idx = c["idx"]
+        # A unit's poly body is drawn identically regardless of row
+        # direction (never mirrored) -- on a right-to-left (odd) row the
+        # physically-adjacent pad for a short row-transition jumper is the
+        # *entry* pad on that unit's physical right, not its left. Swapping
+        # which physical pad reports as `_A` (entry, from the previous unit
+        # in the chain) vs `_B` (exit, toward the next) keeps `R<i>_B`
+        # physically next to `R<i + 1>_A` in every row, per
+        # :func:`_res_array_layout`'s docstring.
+        if c.get("direction", 1) >= 0:
+            entry_xy, entry_deg = left_xy, 180
+            exit_xy, exit_deg = right_xy, 0
+        else:
+            entry_xy, entry_deg = right_xy, 0
+            exit_xy, exit_deg = left_xy, 180
         ports.append(
             {
                 "name": f"R{idx}_A",
                 "net": None,
                 "layer": metal_layer,
-                "x_um": c["x0_um"] + ax,
-                "y_um": c["y0_um"] + ay,
+                "x_um": c["x0_um"] + entry_xy[0],
+                "y_um": c["y0_um"] + entry_xy[1],
                 "width_um": unit["height_um"],
-                "direction_deg": 180,
+                "direction_deg": entry_deg,
             }
         )
         ports.append(
@@ -2240,10 +2353,10 @@ def _res_array_describe(
                 "name": f"R{idx}_B",
                 "net": None,
                 "layer": metal_layer,
-                "x_um": c["x0_um"] + bx,
-                "y_um": c["y0_um"] + by,
+                "x_um": c["x0_um"] + exit_xy[0],
+                "y_um": c["y0_um"] + exit_xy[1],
                 "width_um": unit["height_um"],
-                "direction_deg": 0,
+                "direction_deg": exit_deg,
             }
         )
 
