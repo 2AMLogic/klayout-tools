@@ -1,0 +1,275 @@
+{
+  "schema_version": 1,
+  "netlist": "ring_tb.spice",
+  "status": "pass",
+  "corner_count": 5,
+  "passed": 5,
+  "failed": 0,
+  "errored": 0,
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "46",
+    "models_lib": "/Users/rwalters/.volare/sky130A/libs.tech/ngspice/sky130.lib.spice",
+    "models_lib_sha256": "5efa041a988893c1a3580d0ecd57870ea3146b27741c7d42b56baaa336b9549e",
+    "netlist_sha256": "5d94bcbf689f88bf4f302965099b74aca1f54984626a8355d1c82b820db849f6"
+  },
+  "provenance": {
+    "klt_version": "0.1.0",
+    "klayout_version": "0.30.10",
+    "pdk": {
+      "name": "sky130A",
+      "source": "search root: ~/.volare",
+      "version": "open_pdks bdc9412b3e468c102d01b7cf6337be06ec6e9c9a"
+    },
+    "deck": {
+      "name": "sky130.lib.spice",
+      "content_hash": "sha256:5efa041a988893c1a3580d0ecd57870ea3146b27741c7d42b56baaa336b9549e"
+    },
+    "input": null
+  },
+  "measurements": [
+    {
+      "name": "t_rise_400",
+      "unit": "s",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "tt/1.800V/27C",
+        "value": 2.35799e-06,
+        "margin": null
+      }
+    },
+    {
+      "name": "t_rise_500",
+      "unit": "s",
+      "limits": null,
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "tt/1.800V/27C",
+        "value": 2.94895e-06,
+        "margin": null
+      }
+    },
+    {
+      "name": "ring_freq_hz",
+      "unit": "Hz",
+      "limits": {
+        "min": 1000000.0,
+        "max": 2000000000.0
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "ss/1.800V/27C",
+        "value": 123498000.0,
+        "margin": 122498000.0
+      }
+    }
+  ],
+  "corners": [
+    {
+      "corner_id": "tt/1.800V/27C",
+      "process": "tt",
+      "supply_v": {
+        "vdd": 1.8
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 507.93,
+      "measurements": [
+        {
+          "name": "t_rise_400",
+          "value": 2.35799e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "t_rise_500",
+          "value": 2.94895e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "ring_freq_hz",
+          "value": 169217000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 168217000.0
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "ss/1.800V/27C",
+      "process": "ss",
+      "supply_v": {
+        "vdd": 1.8
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 328.727,
+      "measurements": [
+        {
+          "name": "t_rise_400",
+          "value": 3.23092e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "t_rise_500",
+          "value": 4.04065e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "ring_freq_hz",
+          "value": 123498000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 122498000.0
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "ff/1.800V/27C",
+      "process": "ff",
+      "supply_v": {
+        "vdd": 1.8
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 511.331,
+      "measurements": [
+        {
+          "name": "t_rise_400",
+          "value": 1.82859e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "t_rise_500",
+          "value": 2.28687e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "ring_freq_hz",
+          "value": 218207000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 217207000.0
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "sf/1.800V/27C",
+      "process": "sf",
+      "supply_v": {
+        "vdd": 1.8
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 410.031,
+      "measurements": [
+        {
+          "name": "t_rise_400",
+          "value": 2.70564e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "t_rise_500",
+          "value": 3.38371e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "ring_freq_hz",
+          "value": 147476000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 146476000.0
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "fs/1.800V/27C",
+      "process": "fs",
+      "supply_v": {
+        "vdd": 1.8
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 402.033,
+      "measurements": [
+        {
+          "name": "t_rise_400",
+          "value": 2.22452e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "t_rise_500",
+          "value": 2.78203e-06,
+          "unit": "s",
+          "status": "pass",
+          "margin": null
+        },
+        {
+          "name": "ring_freq_hz",
+          "value": 179369000.0,
+          "unit": "Hz",
+          "status": "pass",
+          "margin": 178369000.0
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    }
+  ]
+}

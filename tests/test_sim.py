@@ -42,6 +42,17 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 )
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "sim"
+EXAMPLES_REMOTE_DIR = Path(__file__).parent.parent / "examples" / "sim-remote"
+
+try:
+    pdk.find_pdk(variant="sky130A")
+    HAVE_SKY130A = True
+except pdk.PdkNotFoundError:
+    HAVE_SKY130A = False
+_SKIP_NO_SKY130A = pytest.mark.skipif(
+    not HAVE_SKY130A,
+    reason="sky130A PDK is not resolvable on this machine (see docs/cli/pdk.md)",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -3960,6 +3971,74 @@ def test_examples_sim_monte_carlo_statistics_shape():
     assert window["high"] == pytest.approx(mc["mean"] + 3 * mc["stddev"])
     assert window["status"] == "pass"
     assert [c["corner_id"] for c in mc["by_corner"]] == ["tt/novdd/27C"]
+
+
+# --------------------------------------------------------------------------- #
+# Worked example (examples/sim-remote/): Epic #253's closing validation --
+# a 31-stage sky130 ring oscillator run across a 5-process-corner matrix
+# through the `local` backend. Requires a real sky130A PDK install (unlike
+# examples/sim/'s synthetic fixtures), so this skips -- with a clear reason,
+# never silently -- on a machine without one (CI does not install a PDK
+# today; see examples/sim-remote/README.md).
+# --------------------------------------------------------------------------- #
+
+
+@_SKIP_NO_NGSPICE
+@_SKIP_NO_SKY130A
+@pytest.mark.skipif(
+    not EXAMPLES_REMOTE_DIR.exists(),
+    reason="examples/sim-remote/ fixtures not committed",
+)
+def test_examples_sim_remote_local_matrix_passes():
+    """The committed `matrix-local.request.json`, run live: same shape as
+    `matrix-local.report.json` (schema_version, 5 corners, three
+    measurements, all passing) -- the runtime-dependent fields
+    (`runtime_s`/`engine_version`) are not asserted, matching
+    `test_examples_sim_worked_example_passes`'s approach for examples/sim/."""
+    request_path = EXAMPLES_REMOTE_DIR / "matrix-local.request.json"
+    report = sim.run_sim(str(request_path))
+
+    assert report["schema_version"] == 1
+    assert report["status"] == "pass"
+    assert report["corner_count"] == 5
+    measurement_names = {m["name"] for m in report["measurements"]}
+    assert measurement_names == {"t_rise_400", "t_rise_500", "ring_freq_hz"}
+    assert {c["process"] for c in report["corners"]} == {
+        "tt",
+        "ss",
+        "ff",
+        "sf",
+        "fs",
+    }
+    assert all(c["status"] == "pass" for c in report["corners"])
+
+
+@pytest.mark.skipif(
+    not EXAMPLES_REMOTE_DIR.exists(),
+    reason="examples/sim-remote/ fixtures not committed",
+)
+def test_examples_sim_remote_requests_load():
+    """Both request documents parse via `sim.load_request()` -- the
+    load-only check the shipped schema gets (no standalone JSON Schema file;
+    see `sim.load_request`'s docstring). `matrix-remote.request.json`
+    exercises this without any AWS credentials -- only *running* it does."""
+    local_request = sim.load_request(
+        str(EXAMPLES_REMOTE_DIR / "matrix-local.request.json")
+    )
+    assert local_request["backend"] == "local"
+    assert local_request["corners"]["process"] == ["tt", "ss", "ff", "sf", "fs"]
+
+    remote_request = sim.load_request(
+        str(EXAMPLES_REMOTE_DIR / "matrix-remote.request.json")
+    )
+    assert remote_request["backend"] == "remote"
+    assert remote_request["corners"] == local_request["corners"]
+    assert remote_request["remote"]["region"] == "us-west-2"
+    # The committed request must not carry a real key/security-group value --
+    # only documented placeholders (see README's #371-adjacent caveat).
+    assert remote_request["remote"]["key_name"].startswith("<")
+    assert remote_request["remote"]["ssh_key_path"].startswith("~/.ssh/<")
+    assert remote_request["remote"]["security_group_id"].startswith("<")
 
 
 def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):

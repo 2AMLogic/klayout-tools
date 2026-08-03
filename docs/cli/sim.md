@@ -108,6 +108,12 @@ remote command, and what gets collected back as a
 for the generic contract a future `extract`/`lvs`/DRC remote backend
 implements against.
 
+See [`examples/sim-remote/`](../../examples/sim-remote/) for a worked
+example: a 31-stage sky130 ring oscillator run across a 5-process-corner
+matrix through both `local` and `remote`, with side-by-side reference
+reports showing the additive `environment.remote` block and bit-identical
+corner measurements (Epic #253's closing validation).
+
 ```json
 {
   "backend": "remote",
