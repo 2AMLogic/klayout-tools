@@ -228,6 +228,19 @@ matrix's uncontended wall-clock would run several minutes or more, or
 whenever the caller's own host is already contended; prefer
 `local`/`local-parallel` for a single-corner smoke check.
 
+**Worked example: [`examples/sim-remote/`](../../examples/sim-remote/README.md).**
+Epic #253's own closing validation, committed end to end — a 31-stage sky130
+ring oscillator (`ring_tb.spice`, ~2.3 minutes of ngspice per corner) plus
+two requests, `matrix-local.request.json` and `matrix-remote.request.json`,
+that declare the *same* 5-process-corner matrix and differ only in `backend`
+(and the `remote` block above). Both runs' reports are committed alongside
+them, so the additive `environment.remote` block and the corner-for-corner
+equality of the two backends are readable without provisioning anything;
+*running* the remote one needs AWS credentials plus the placeholder
+`remote.key_name`/`ssh_key_path`/`security_group_id` fields filled in from
+the field table above. The example's README carries the measured wall-clock
+comparison and the run's cost.
+
 ## Fleet sharding (`remote.hosts`)
 
 `request.remote.hosts` (overridable with `--hosts`, same precedence rule as
@@ -1069,3 +1082,10 @@ emits 20 sample corners plus the `measurements[].monte_carlo` block
 documented above (mean ≈ 0.905 V, sigma ≈ 0.020 V, a `mean ± 3*sigma` window
 of roughly `[0.844, 0.967]` — comfortably inside the measurement's
 `[0.75, 1.05]` limits, so `sigma_window.status` is `"pass"`).
+
+`examples/sim-remote/` is the backend-comparison companion to this example:
+a real sky130 workload (31-stage ring oscillator, minutes of ngspice per
+corner) run as the same 5-corner matrix on `local` and on `remote`, with
+both reference reports committed — see
+[the "Remote backend" section above](#remote-backend) and
+[`examples/sim-remote/README.md`](../../examples/sim-remote/README.md).

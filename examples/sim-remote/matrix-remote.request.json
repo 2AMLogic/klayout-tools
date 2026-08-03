@@ -1,0 +1,64 @@
+{
+  "netlist": "ring_tb.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff",
+      "sf",
+      "fs"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.8
+      ]
+    },
+    "temperature_c": [
+      27
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "50p 12u"
+  },
+  "measurements": [
+    {
+      "name": "t_rise_400",
+      "spice": ".meas tran t_rise_400 WHEN v(n0)=0.9 RISE=400",
+      "unit": "s"
+    },
+    {
+      "name": "t_rise_500",
+      "spice": ".meas tran t_rise_500 WHEN v(n0)=0.9 RISE=500",
+      "unit": "s"
+    },
+    {
+      "name": "ring_freq_hz",
+      "spice": ".meas tran ring_freq_hz PARAM='100/(t_rise_500-t_rise_400)'",
+      "unit": "Hz",
+      "limits": {
+        "min": 1000000.0,
+        "max": 2000000000.0
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 3600,
+    "keep_artifacts": false
+  },
+  "backend": "remote",
+  "remote": {
+    "region": "us-west-2",
+    "key_name": "<your-ec2-keypair-name>",
+    "ssh_key_path": "~/.ssh/<your-ec2-keypair-name>.pem",
+    "security_group_id": "<your-security-group-id>",
+    "spot": false,
+    "max_hourly_cost_usd": 5.0,
+    "ssh_ready_timeout_s": 600
+  }
+}
