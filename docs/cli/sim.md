@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -25,6 +25,10 @@ this document (and the code) win.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
   overriding the request's own `options.max_workers` when given. Ignored by
   `local`. See "Execution backends" below.
+- `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
+  many hosts and merge the per-shard reports, overriding the request's own
+  `remote.hosts` field when given. Defaults to `1` (today's single-host
+  behaviour, byte-identical). See "Fleet sharding" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -209,6 +213,83 @@ measured — see the design note's decision 3), so `remote` pays off once a
 matrix's uncontended wall-clock would run several minutes or more, or
 whenever the caller's own host is already contended; prefer
 `local`/`local-parallel` for a single-corner smoke check.
+
+## Fleet sharding (`remote.hosts`)
+
+`request.remote.hosts` (overridable with `--hosts`, same precedence rule as
+`backend`/`--backend`: the CLI flag wins when given, otherwise the request
+field, otherwise `1`) shards the **expanded unit list** — corners × Monte
+Carlo samples, the same list `corners.*`/`monte_carlo` expansion already
+produces — into that many contiguous slices and merges the per-shard
+reports back into one report, in the exact single-host shape (Epic #375
+Phase 1A, [#376](https://github.com/2AMLogic/klayout-tools/issues/376)).
+`hosts` absent or `1` is the exact pre-existing code path — byte-identical,
+not just equivalent.
+
+- **Contiguous, order-preserving shards.** Shard `i` gets
+  `len(units) // hosts` units (the first `len(units) % hosts` shards get one
+  extra), always a contiguous slice of the expanded list in its original
+  order — concatenating every shard reproduces the unsharded unit list
+  exactly, for any `hosts` from `1` to `len(units)` (and beyond: a `hosts`
+  greater than the unit count simply leaves the trailing shards empty).
+  Per-sample Monte Carlo seeds are already absolute (`sample_index`-derived,
+  see "Monte Carlo sampling" above and #348), so slicing never changes any
+  unit's own value, only which shard runs it.
+- **Deterministic merge, any completion order.** Shards run concurrently —
+  one shard is meant to be one host — and are reassembled by shard index
+  once every shard completes, **never** by completion order, so the merged
+  `corners[]` is always in the same global unit order `hosts: 1` would
+  produce. This is the same ordering contract `local-parallel` already
+  honors for individual corners, one level up.
+- **Lost-shard semantics.** A shard that never returns is reported as a
+  per-unit `status: "error"` for every unit it owned, with a `lost_shard`
+  diagnostic — the merged report's `errored` count reflects them, and a
+  lost shard never aborts a sibling shard. (The automatic retry that avoids
+  this in the common case — one retry before giving up on a shard — is
+  Epic #375 Phase 1B, [#377](https://github.com/2AMLogic/klayout-tools/issues/377);
+  this contract is what a retry falls back to if it is still exhausted.)
+- **`environment.remote` becomes `fleet[]`.** With `hosts > 1`, a run whose
+  backend actually populates `environment.remote` (see "Remote backend"
+  above) reports one `fleet[]` entry per host instead of a single block —
+  each entry has the exact same fields as today's single-host block, or
+  `null` for a lost shard:
+
+  ```json
+  {
+    "environment": {
+      "remote": {
+        "fleet": [
+          {
+            "provider": "aws",
+            "region": "us-east-1",
+            "instance_type": "c7i.12xlarge",
+            "instance_id": "i-0123456789abcdef0",
+            "spot": true,
+            "estimated_hourly_cost_usd": 0.9639,
+            "ami_id": "ami-0123456789abcdef0",
+            "pdk_snapshot": "sky130A-2026.06.01",
+            "spin_up_s": 118.4
+          },
+          null
+        ]
+      }
+    }
+  }
+  ```
+
+  A `hosts: 1` run (or any backend that never populates
+  `environment.remote`, e.g. `local`/`local-parallel`) keeps the existing
+  non-array shape — `fleet[]` never appears there, for compatibility.
+- **Currently implemented for `local`/`local-parallel` only.** `local` and
+  `local-parallel` consume the expanded unit list directly (no separate
+  "request document" to slice), so `hosts > 1` already works end to end for
+  both with no AWS-facing code at all. Pairing `hosts > 1` with
+  `backend: "remote"` raises a clear application error today (exit 1) —
+  actually sharding a *live* remote fleet across real hosts, with
+  fleet-level cost/quota guardrails and the automatic shard retry above, is
+  Epic #375 Phase 1B ([#377](https://github.com/2AMLogic/klayout-tools/issues/377)),
+  which plugs its own per-shard runner into the same merge engine this
+  section describes.
 
 ## Deviation from the spike
 
@@ -741,6 +822,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
 | `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there (see "Execution backends" and "Remote backend" above). Overridable with the `--backend` CLI flag. |
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
+| `remote.hosts`           | integer           | Shard the expanded unit list across this many hosts and merge the per-shard reports. Defaults to `1` (today's single-host behaviour, byte-identical). Must be a positive integer. Currently implemented for `local`/`local-parallel` only — pairing `hosts > 1` with `backend: "remote"` is an application error (exit 1). Overridable with the `--hosts` CLI flag, same precedence rule as `backend`/`--backend`. See "Fleet sharding" above. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
 | `corners.process`        | array\<string \| {name, sections}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": list[str]}` (one `.lib` card per section, in order) — see "Corner axes" above. |
