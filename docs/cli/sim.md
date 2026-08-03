@@ -646,7 +646,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
         { "name": "vout", "value": 0.81, "unit": "V", "status": "pass", "margin": 0.06 }
       ],
       "diagnostics": [],
-      "artifacts": { "log": null, "raw": null, "waveform": null },
+      "artifacts": { "log": null, "raw": null, "waveform": null, "deck": null },
       "monte_carlo": null
     }
   ]
@@ -667,7 +667,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
   "runtime_s": 0.079,
   "measurements": [ /* ... */ ],
   "diagnostics": [],
-  "artifacts": { "log": null, "raw": null, "waveform": null },
+  "artifacts": { "log": null, "raw": null, "waveform": null, "deck": null },
   "monte_carlo": {
     "sample_index": 0,
     "seed": 1732958821,
@@ -703,7 +703,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`), `margin`.               |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` only occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`); every other code is always `"error"`. Empty for a clean run.       |
-| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. Raw log text is **never** inlined into the JSON. |
+| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact ngspice deck written for this corner (`.lib`/`.temp`/`alter` lines and all) and needs only `options.keep_artifacts`. Raw log text is **never** inlined into the JSON. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 
 ### Semantics and guarantees

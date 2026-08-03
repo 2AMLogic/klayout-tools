@@ -1849,7 +1849,46 @@ def test_run_sim_without_keep_artifacts_cleans_up(tmp_path, monkeypatch):
         "log": None,
         "raw": None,
         "waveform": None,
+        "deck": None,
     }
+
+
+def test_run_sim_keep_artifacts_populates_deck_matching_on_disk_file(
+    tmp_path, monkeypatch
+):
+    """`artifacts.deck` references the exact ngspice deck `_write_corner_deck`
+    already wrote to `<corner_dir>/corner.cir` -- absolute path, content
+    matching the on-disk file, populated whenever `keep_artifacts` is true
+    (no additional `options.waveforms` gate, unlike `raw`/`waveform`; see
+    issue #356)."""
+    _write_body(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts_dir))
+
+    corner = report["corners"][0]
+    deck_path = corner["artifacts"]["deck"]
+    log_path = corner["artifacts"]["log"]
+    assert deck_path is not None
+    assert os.path.isabs(deck_path)
+    assert Path(deck_path).is_relative_to(artifacts_dir)
+    assert os.path.basename(deck_path) == "corner.cir"
+    # `deck` and `log` are siblings in the same per-corner artifacts dir.
+    assert deck_path == os.path.join(os.path.dirname(log_path), "corner.cir")
+    # Content on disk is the actual deck `_write_corner_deck` wrote --
+    # includes the analysis line and a reference to the netlist body.
+    deck_text = Path(deck_path).read_text()
+    assert "tran 1n 1u" in deck_text
+    assert "body.spice" in deck_text
 
 
 # --------------------------------------------------------------------------- #

@@ -1486,8 +1486,15 @@ def _run_corner(
     else:
         status = "pass"
 
-    artifacts: dict[str, str | None] = {"log": None, "raw": None, "waveform": None}
+    artifacts: dict[str, str | None] = {
+        "log": None,
+        "raw": None,
+        "waveform": None,
+        "deck": None,
+    }
     if keep_artifacts:
+        if os.path.isfile(deck_path):
+            artifacts["deck"] = deck_path
         if os.path.isfile(log_path):
             artifacts["log"] = log_path
         if raw_path is not None and os.path.isfile(raw_path):
