@@ -129,6 +129,12 @@
 #                          forwarded to provision-daemon.sh.
 #   LOOM_SKIP_STALE_ENTRY_POINT_CHECK  1/true/yes suppresses the advisory
 #                          stale-`loom-*`-entry-point warning described below.
+#   LOOM_SKIP_IDLE_SHUTDOWN_NOTICE  1/true/yes suppresses the advisory
+#                          post-update idle-shutdown cron-guard notice (#4697):
+#                          "this host will power itself off after N idle
+#                          minutes" when a `fleet add-worker
+#                          --idle-shutdown-minutes` guard is installed. Silent
+#                          (no notice at all) when no such guard exists.
 #   LOOM_DAEMON_LAUNCHD    macOS only: 0/false/no disables ALL launchd interaction
 #                          (ownership detection + launchd restart), symmetric with
 #                          loom-daemon-start.sh / loom-daemon-stop.sh. A daemon
@@ -263,25 +269,22 @@ find_repo_root() {
     echo ""
 }
 
-# ---------- locate the daemon binary (mirrors loom-daemon-start.sh) ----------
-locate_daemon_bin() {
-    local root="$1"
-    if [[ -n "${LOOM_DAEMON_BIN:-}" && -x "${LOOM_DAEMON_BIN}" ]]; then
-        echo "${LOOM_DAEMON_BIN}"; return 0
-    fi
-    if command -v loom-daemon >/dev/null 2>&1; then
-        command -v loom-daemon; return 0
-    fi
-    local candidate
-    for candidate in \
-        "$root/loom-daemon/target/release/loom-daemon" \
-        "$root/loom-daemon/target/debug/loom-daemon" \
-        "$root/target/release/loom-daemon" \
-        "$root/target/debug/loom-daemon"; do
-        if [[ -x "$candidate" ]]; then echo "$candidate"; return 0; fi
-    done
-    echo ""
-}
+# ---------- locate the daemon binary ----------
+# Shared with loom-daemon-start.sh / loom-daemon-watchdog.sh / loom-status.sh
+# / `.loom/bin/loom health` via lib/locate-daemon-bin.sh (#4875) — includes
+# the machine-level $LOOM_DAEMON_BIN_DIR (default ~/.local/bin) fallback,
+# reusing the SAME variable this script's own --provision path already
+# writes to (see DEST_DIR below), so discovery and provisioning can never
+# point at different directories.
+_LOOM_LOCATE_BIN_LIB="$SCRIPT_DIR/../lib/locate-daemon-bin.sh"
+if [[ -r "$_LOOM_LOCATE_BIN_LIB" ]]; then
+    # shellcheck source=../lib/locate-daemon-bin.sh
+    source "$_LOOM_LOCATE_BIN_LIB"
+else
+    err "locate-daemon-bin.sh not found at $_LOOM_LOCATE_BIN_LIB — this checkout is missing an expected lib file."
+    exit 1
+fi
+locate_daemon_bin() { loom_locate_daemon_bin "$1"; }
 
 # Extract the short commit from `loom-daemon --version` output, e.g.
 # "loom-daemon 0.15.0 (commit ab12cd3, built 2026-07-26T12:00:00Z)" -> ab12cd3
@@ -699,7 +702,8 @@ fi
 
 UPDATE_NEEDED=false
 if [[ -z "$DAEMON_BIN" ]]; then
-    echo "No loom-daemon binary currently resolvable (LOOM_DAEMON_BIN / PATH / loom-daemon/target/release) — a build is needed."
+    echo "No loom-daemon binary currently resolvable — a build is needed. Checked:"
+    loom_daemon_bin_search_paths "$REPO_ROOT" | sed 's/^/  - /'
     UPDATE_NEEDED=true
 elif [[ "$INSTALLED_COMMIT" == "unknown" || "$SOURCE_COMMIT" == "unknown" ]]; then
     warn "Could not determine one or both commits (installed=$INSTALLED_COMMIT, source=$SOURCE_COMMIT) — staleness unknown; treating as needing a rebuild to be safe."
@@ -713,12 +717,55 @@ fi
 # entry point is invisible precisely when the daemon looks healthy (#4079).
 warn_stale_entry_points "$DAEMON_BIN"
 
+# ---------- idle-shutdown cron-guard post-update notice (#4697) ----------
+#
+# THE INCIDENT THIS EXISTS FOR: a remote worker was updated via this script —
+# the rebuild + supervised restart succeeded onto the new binary — and ~15
+# minutes later the host powered itself off. Nothing in the update flow
+# warned that the "successful" update was landing on a host about to
+# evaporate: the STAGE-2 cron guard `fleet add-worker --idle-shutdown-minutes`
+# installs (`render_idle_shutdown()` in loom-daemon/src/fleet/add_worker.rs,
+# NOT `autonomous.idleExit` stage 1 — that daemon-level exit is self-defeating
+# under `Restart=on-success` systemd/launchd supervision, since the supervisor
+# immediately relaunches it) fired once the freshly-relaunched, idle daemon
+# crossed the configured window, and powered the WHOLE HOST off — SSH,
+# tailnet, everything.
+#
+# This is purely advisory: it never disables/touches the guard, never changes
+# this script's exit code, and is silent when no guard is installed
+# (LOOM_SKIP_IDLE_SHUTDOWN_NOTICE=1 also suppresses it for scripted/quiet
+# use). The idle-shutdown guard's own design (#3998/#4477) is correct and out
+# of scope here — the gap this closes is purely operator awareness at the
+# moment a "successful" update is reported.
+IDLE_SHUTDOWN_GUARD_SCRIPT="$HOME/.local/bin/loom-idle-shutdown.sh"
+
+idle_shutdown_notice() {
+    [[ "${LOOM_SKIP_IDLE_SHUTDOWN_NOTICE:-0}" =~ ^(1|true|yes)$ ]] && return 0
+    command -v crontab >/dev/null 2>&1 || return 0
+    crontab -l 2>/dev/null | grep -q 'loom-idle-shutdown' || return 0
+
+    local minutes=""
+    if [[ -r "$IDLE_SHUTDOWN_GUARD_SCRIPT" ]]; then
+        minutes="$(grep -oE 'LIMIT=[0-9]+' "$IDLE_SHUTDOWN_GUARD_SCRIPT" 2>/dev/null \
+            | head -n1 | cut -d= -f2)"
+    fi
+
+    if [[ -n "$minutes" ]]; then
+        warn "Heads up: this host has an idle-shutdown cron guard installed (fleet add-worker --idle-shutdown-minutes ${minutes}) — after ~${minutes} idle minute(s) it POWERS THE WHOLE HOST OFF (SSH/tailnet included), not just this daemon. This is expected/by-design (#3998/#4477), not a fault in this update. Wake path (provider console/CLI restart; Loom never calls a cloud CLI itself) and tailnet-identity/re-registration notes: daemon-reference.md, 'fleet add-worker' step 9 (idle-shutdown)."
+    else
+        warn "Heads up: this host has an idle-shutdown cron guard installed (crontab holds a loom-idle-shutdown entry, but the configured window could not be read from $IDLE_SHUTDOWN_GUARD_SCRIPT) — it WILL power the whole host off after some idle window. This is expected/by-design (#3998/#4477), not a fault in this update. See daemon-reference.md, 'fleet add-worker' step 9 (idle-shutdown), for the wake path."
+    fi
+}
+
 # print_final_installed_line <commit> — the AC4 "final installed line": states
 # the built/installed commit AND whether it matches origin/<default-branch> at
 # build time. Uses ORIGIN_COMMIT resolved by sync_with_origin above (no
 # re-fetch). Prints an honest "unknown" comparison when the default branch or
 # origin commit could not be resolved (offline, no origin remote, etc.) rather
-# than silently omitting the currency claim.
+# than silently omitting the currency claim. Also where the #4697 idle-shutdown
+# notice fires — every successful/"already up to date" exit path funnels
+# through this one function, so the notice is reported consistently without
+# duplicating the call at each of this script's several exit points.
 print_final_installed_line() {
     local commit="$1"
     if [[ -z "$DEFAULT_BRANCH" || "$ORIGIN_COMMIT" == "unknown" ]]; then
@@ -728,6 +775,7 @@ print_final_installed_line() {
     else
         echo "Installed: ${commit} (origin/${DEFAULT_BRANCH} is at ${ORIGIN_COMMIT} — does NOT match; built from a checkout that was behind or diverged, e.g. --allow-stale)"
     fi
+    idle_shutdown_notice
 }
 
 # ---------- launchd ownership detection (macOS, mirrors loom-daemon-stop.sh #4042) ----------
@@ -1045,6 +1093,16 @@ if [[ "$FORCE" == "true" && "$UPDATE_NEEDED" == "false" ]]; then
 fi
 
 if [[ "$UPDATE_NEEDED" == "false" ]]; then
+    # UPDATE_NEEDED compares the installed binary against the CURRENT HEAD. When
+    # the checkout is behind origin, a real run fast-forwards first, so HEAD --
+    # and therefore that comparison -- would change before anything is built.
+    # Reporting a bare "Nothing to do" here would hide the pending ff-sync from
+    # exactly the mode whose job is to print the plan, so --dry-run surfaces it
+    # before exiting.
+    if [[ "$DRY_RUN" == "true" && "$ALLOW_STALE" != "true" \
+          && -n "$DEFAULT_BRANCH" && "$ORIGIN_BEHIND_COUNT" -gt 0 ]]; then
+        echo "[dry-run] Plan includes fast-forwarding local ${DEFAULT_BRANCH} to origin/${DEFAULT_BRANCH} (${ORIGIN_BEHIND_COUNT} commit(s) behind) before building; the up-to-date check below is against the CURRENT HEAD and may change once that ff-merge applies."
+    fi
     ok "loom-daemon binary is already up to date with source HEAD (${SOURCE_COMMIT}). Nothing to do."
     print_final_installed_line "$SOURCE_COMMIT"
     exit 0
@@ -1091,8 +1149,39 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 # ---------- rebuild ----------
+# Non-interactive SSH sessions (the fleet remote-update path, #4695) don't
+# source a login shell's profile, so a rustup-installed cargo living at the
+# default `~/.cargo/bin` is invisible to `command -v cargo` even though it IS
+# installed. Fall back the same way loom-daemon-start.sh's resolve_plist_path()
+# already does for launchd/systemd's non-login-shell PATH: prefer sourcing
+# rustup's own `~/.cargo/env` (the canonical PATH-setup snippet rustup
+# writes), then fall back to prepending `~/.cargo/bin` directly if that
+# script isn't present but the binary still is (e.g. a non-rustup or
+# partially-cleaned install), then finally fall back to the FULL shared
+# canonical PATH superset (lib/canonical-daemon-path.sh, #4831 — the same set
+# resolve_plist_path() renders and fleet add-worker's provisioning uses) in
+# case `cargo` was installed via Homebrew or another non-rustup path this
+# script doesn't special-case.
 if ! command -v cargo >/dev/null 2>&1; then
-    err "cargo not found on PATH — cannot rebuild loom-daemon."
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    elif [[ -x "$HOME/.cargo/bin/cargo" ]]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+    _LOOM_CANONICAL_PATH_LIB="$SCRIPT_DIR/../lib/canonical-daemon-path.sh"
+    if [[ -r "$_LOOM_CANONICAL_PATH_LIB" ]]; then
+        # shellcheck source=../lib/canonical-daemon-path.sh
+        source "$_LOOM_CANONICAL_PATH_LIB"
+        if declare -F canonical_daemon_path >/dev/null 2>&1; then
+            export PATH="$(canonical_daemon_path):$PATH"
+        fi
+    fi
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+    err "cargo not found on PATH (checked \$HOME/.cargo/bin and the shared canonical PATH too, see lib/canonical-daemon-path.sh) — cannot rebuild loom-daemon. Install Rust via rustup: https://rustup.rs"
     exit 1
 fi
 

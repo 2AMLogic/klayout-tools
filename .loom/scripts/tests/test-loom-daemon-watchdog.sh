@@ -24,6 +24,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHDOG="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-daemon-watchdog.sh"
 
+# Background-PID bookkeeping (#4773): every `sleeper` (line ~113) and the
+# `sleep 60` kickstart decoy (below) is tracked here so the EXIT/INT/TERM trap
+# can reap it even if this suite is interrupted before its own inline `kill`.
+# shellcheck source=lib/bg-proc-trap.sh
+source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -40,7 +46,15 @@ assert_rc() { # <expected> <actual> <msg>
 }
 
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+# bg_proc_reap kills every sleeper()/decoy PID tracked via bg_proc_track;
+# EXIT/INT/TERM (not just EXIT, #4773) so a hard interruption of this suite
+# still reaps them, not only the individual tests' own inline `kill` calls.
+# NOTE: a bare `trap CMD EXIT INT TERM` runs CMD on INT/TERM but does NOT stop
+# the script (only an EXIT-trap firing auto-exits) -- the explicit `exit`
+# below is required, else a SIGTERM'd suite would clean up once and then keep
+# running every remaining test case.
+trap 'bg_proc_reap; rm -rf "$WORKDIR"' EXIT
+trap 'bg_proc_reap; rm -rf "$WORKDIR"; exit 1' INT TERM
 
 MARKER="$WORKDIR/autonomy-desired"
 HEARTBEAT="$WORKDIR/daemon.heartbeat"
@@ -186,6 +200,7 @@ LIVE_PID=""
 start_alive_and_fresh() { # <pid_file_suffix>
     PS_STUB_DIR="$(make_ps_stub "02:00:00")"
     LIVE_PID=$(sleeper)
+    bg_proc_track "$LIVE_PID"
     echo "$LIVE_PID" > "$WORKDIR/pid$1"
     write_marker "$WORKDIR/pid$1" 60
     printf '%s pid=%s ts=now\n' "$(date +%s)" "$LIVE_PID" > "$HEARTBEAT"
@@ -211,6 +226,7 @@ if log_has DIVERGENCE || log_hasi "mismatch"; then fail "marker absent + nothing
 # ===================================================================
 rm -f "$MARKER" "$HEARTBEAT" "$WDLOG"
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/.daemon.pid"
 run_watchdog
 kill "$live_pid" 2>/dev/null || true
@@ -231,6 +247,7 @@ rm -f "$WORKDIR/.daemon.pid"
 # 2. Intent present, daemon ALIVE, heartbeat FRESH ⇒ silent OK.
 # ===================================================================
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/pidA"
 write_marker "$WORKDIR/pidA" 60
 printf '%s pid=%s ts=now\n' "$(date +%s)" "$live_pid" > "$HEARTBEAT"
@@ -250,6 +267,7 @@ assert_rc 0 "$RC" "alive + fresh heartbeat: exits 0"
 # ===================================================================
 PS_STUB3="$(make_ps_stub "02:00:00")"
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/pidB"
 write_marker "$WORKDIR/pidB" 60
 printf 'old\n' > "$HEARTBEAT"
@@ -270,6 +288,7 @@ rm -rf "$PS_STUB3"
 # ===================================================================
 PS_STUB3B="$(make_ps_stub "00:00:05")"
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/pidB2"
 write_marker "$WORKDIR/pidB2" 60
 printf 'old\n' > "$HEARTBEAT"
@@ -294,7 +313,7 @@ rm -rf "$PS_STUB3B"
 # 4. Intent present, daemon DEAD ⇒ DIVERGENCE (expected but not running).
 #    This IS the #4011 outage, reproduced.
 # ===================================================================
-dead_pid=$(sleeper); kill "$dead_pid" 2>/dev/null; wait "$dead_pid" 2>/dev/null
+dead_pid=$(sleeper); bg_proc_track "$dead_pid"; kill "$dead_pid" 2>/dev/null; wait "$dead_pid" 2>/dev/null
 echo "$dead_pid" > "$WORKDIR/pidC"
 write_marker "$WORKDIR/pidC" 60
 printf 'x\n' > "$HEARTBEAT"
@@ -312,6 +331,7 @@ fi
 #    (heartbeat disabled or not yet written — do NOT false-report.)
 # ===================================================================
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/pidD"
 write_marker "$WORKDIR/pidD" 60
 rm -f "$HEARTBEAT"
@@ -325,6 +345,7 @@ assert_rc 0 "$RC" "alive + no heartbeat file: exits 0 (liveness-only, no false p
 #    just under the default 300s threshold is NOT reported (no flapping).
 # ===================================================================
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/pidE"
 write_marker "$WORKDIR/pidE" 60
 printf 'x\n' > "$HEARTBEAT"
@@ -341,6 +362,7 @@ assert_rc 0 "$RC" "heartbeat 120s old < 300s threshold: not flagged (no flapping
 # ===================================================================
 PS_STUB7="$(make_ps_stub "00:01:00")"
 live_pid=$(sleeper)
+bg_proc_track "$live_pid"
 echo "$live_pid" > "$WORKDIR/pidF"
 write_marker "$WORKDIR/pidF" 60
 printf 'x\n' > "$HEARTBEAT"
@@ -400,6 +422,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     : > "$STATE9"   # empty -> "not running" at check time
     sleep 60 >/dev/null 2>&1 &
     NEW_PID9=$!
+    bg_proc_track "$NEW_PID9"
     LOG9="$WORKDIR/launchctl9.log"
     : > "$LOG9"
     cat > "$STUB9/launchctl" <<EOF
@@ -517,6 +540,128 @@ EOF
     fi
 else
     pass "exit-143-and-down report-only test skipped (non-Darwin host)"
+fi
+
+# ===================================================================
+# 10a/10b. systemd mirror of tests 9/10 (#4862): a stubbed `systemctl` (not a
+# real systemd --user manager — deterministic and portable to a Darwin
+# runner, same technique as the launchctl stubs above) proves the auto-
+# remediation gate fires for the EXACT #4862 signature (unit LOADED + NOT
+# running + ExecMainCode=exited + ExecMainStatus=0) and stays report-only for
+# a genuine crash (ExecMainStatus=1).
+# ===================================================================
+STUB10A="$WORKDIR/stub10a"
+mkdir -p "$STUB10A"
+STATE10A="$WORKDIR/state10a"   # empty -> "not running"; a pid -> "running"
+LOG10A="$WORKDIR/systemctl10a.log"
+: > "$STATE10A" "$LOG10A"
+UNIT10A="loom-daemon-test-remediate-$$.service"
+sleep 60 >/dev/null 2>&1 &
+NEW_PID10A=$!
+bg_proc_track "$NEW_PID10A"
+cat > "$STUB10A/systemctl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$LOG10A"
+if [[ "\${1:-}" == "--user" ]]; then shift; fi
+case "\${1:-}" in
+  show)
+    case "\$*" in
+      *"-p MainPID"*)         pid="\$(cat "$STATE10A" 2>/dev/null)"; echo "\${pid:-0}" ;;
+      *"-p LoadState"*)       echo "loaded" ;;
+      *"-p ExecMainCode"*)    echo "exited" ;;
+      *"-p ExecMainStatus"*)  echo "0" ;;
+      *)                      echo "" ;;
+    esac
+    ;;
+  reset-failed) exit 0 ;;
+  start)
+    echo "$NEW_PID10A" > "$STATE10A"
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$STUB10A/systemctl"
+cat > "$MARKER" <<EOF
+started_at=2026-07-27T00:00:00Z
+heartbeat_file=$HEARTBEAT
+heartbeat_interval_secs=60
+use_launchd=false
+use_systemd=true
+systemd_unit=$UNIT10A
+socket_path=$WORKDIR/loom-daemon.sock
+EOF
+: > "$WDLOG" "$OUT"
+env PATH="$STUB10A:$PATH" LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
+    LOOM_WATCHDOG_KICKSTART_RECHECK_ATTEMPTS=5 LOOM_WATCHDOG_KICKSTART_RECHECK_INTERVAL=0.2 \
+    bash "$WATCHDOG" > "$OUT" 2>&1
+rc10a=$?
+kill "$NEW_PID10A" 2>/dev/null || true
+assert_rc 0 "$rc10a" "systemd exit-0-and-down (#4862): auto-remediation relaunches the unit -> exits 0"
+if grep -q -- '--user start ' "$LOG10A"; then
+    pass "systemd exit-0-and-down: auto-remediation invokes 'systemctl --user start'"
+else
+    fail "systemd exit-0-and-down: auto-remediation invokes 'systemctl --user start' (log: $(cat "$LOG10A" 2>/dev/null))"
+fi
+if grep -q -- '--user reset-failed ' "$LOG10A"; then
+    pass "systemd exit-0-and-down: auto-remediation clears the failed state first ('reset-failed')"
+else
+    fail "systemd exit-0-and-down: auto-remediation clears the failed state first"
+fi
+if log_hasi 'remediat'; then
+    pass "systemd exit-0-and-down: watchdog log records the remediation"
+else
+    fail "systemd exit-0-and-down: watchdog log records the remediation"
+fi
+
+# 10b. ExecMainStatus=1 (crash) — the auto-remediation gate must NEVER fire.
+STUB10B="$WORKDIR/stub10b"
+mkdir -p "$STUB10B"
+LOG10B="$WORKDIR/systemctl10b.log"
+: > "$LOG10B"
+UNIT10B="loom-daemon-test-noremediate-$$.service"
+cat > "$STUB10B/systemctl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$LOG10B"
+if [[ "\${1:-}" == "--user" ]]; then shift; fi
+case "\${1:-}" in
+  show)
+    case "\$*" in
+      *"-p MainPID"*)         echo "0" ;;
+      *"-p LoadState"*)       echo "loaded" ;;
+      *"-p ExecMainCode"*)    echo "exited" ;;
+      *"-p ExecMainStatus"*)  echo "1" ;;
+      *)                      echo "" ;;
+    esac
+    ;;
+  reset-failed) exit 0 ;;
+  start)
+    # If this were ever wrongly invoked it would show up in the log below —
+    # the assertion is that 'start' never appears at all.
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$STUB10B/systemctl"
+cat > "$MARKER" <<EOF
+started_at=2026-07-27T00:00:00Z
+heartbeat_file=$HEARTBEAT
+heartbeat_interval_secs=60
+use_launchd=false
+use_systemd=true
+systemd_unit=$UNIT10B
+socket_path=$WORKDIR/loom-daemon.sock
+EOF
+: > "$WDLOG" "$OUT"
+env PATH="$STUB10B:$PATH" LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
+    bash "$WATCHDOG" > "$OUT" 2>&1
+rc10b=$?
+assert_rc 1 "$rc10b" "systemd exit-1-and-down: stays report-only (no auto-remediation) -> exits 1 (#4054 no-crash-loop preserved)"
+if grep -q -- '--user start ' "$LOG10B"; then
+    fail "systemd exit-1-and-down: 'systemctl --user start' is NEVER invoked (no crash-loop revival)"
+else
+    pass "systemd exit-1-and-down: 'systemctl --user start' is NEVER invoked (no crash-loop revival)"
 fi
 
 # ===================================================================
@@ -667,12 +812,20 @@ rm -rf "$PS_STUB_DIR" "$STUB15"
 #     is skipped, NOT reported. The watchdog must never page because its own
 #     optional helper is missing. PATH is narrowed to the base system dirs so
 #     the host's real installed loom-daemon is not picked up, and the marker's
-#     repo_root ($WORKDIR) holds no cargo target either.
+#     repo_root ($WORKDIR) holds no cargo target either. HOME is also
+#     sandboxed to a directory with no .local/bin (#4875's machine-level
+#     install fallback in lib/locate-daemon-bin.sh checks
+#     $LOOM_DAEMON_BIN_DIR/loom-daemon, default $HOME/.local/bin/loom-daemon —
+#     without this override the suite would pick up this host's own real
+#     ~/.local/bin/loom-daemon instead of exercising the "nothing resolvable"
+#     path this test targets).
 # ===================================================================
 STUB16_PS="$(make_ps_stub "02:00:00")"
 start_alive_and_fresh 16
 rm -rf "$PS_STUB_DIR"
-run_watchdog_verbose PATH="$STUB16_PS:/usr/bin:/bin" LOOM_WATCHDOG_IPC_PROBE=1 \
+NO_HOME_16="$WORKDIR/no-home-16"
+mkdir -p "$NO_HOME_16"
+run_watchdog_verbose PATH="$STUB16_PS:/usr/bin:/bin" HOME="$NO_HOME_16" LOOM_WATCHDOG_IPC_PROBE=1 \
     LOOM_DAEMON_BIN="$WORKDIR/definitely-not-a-binary"
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "no loom-daemon binary resolvable: exits 0 (graceful degrade)"
@@ -799,14 +952,16 @@ rm -rf "$PS_STUB_DIR" "$STUB20"
 
 # ===================================================================
 # 21. The bound holds with NO `timeout(1)` on the host (the default macOS
-#     shape): LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT=1 exercises the built-in
-#     bounded runner against a never-returning binary.
+#     shape): LOOM_FORCE_PORTABLE_TIMEOUT=1 (the shared lib/bounded-run.sh
+#     seam, #4832 -- previously the watchdog-local
+#     LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT) exercises the built-in bounded
+#     runner against a never-returning binary.
 # ===================================================================
 STUB21="$(make_daemon_stub hang)"
 start_alive_and_fresh 21
 t0=$(date +%s)
 run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_WATCHDOG_FORCE_PORTABLE_TIMEOUT=1 \
+    LOOM_FORCE_PORTABLE_TIMEOUT=1 \
     LOOM_DAEMON_BIN="$STUB21/loom-daemon" \
     LOOM_WATCHDOG_STATUS_PROBE_TIMEOUT_SECS=2 \
     LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD=3
@@ -819,6 +974,40 @@ else
     fail "no timeout(1) available: watchdog took ${elapsed}s — the portable bound did not hold"
 fi
 rm -rf "$PS_STUB_DIR" "$STUB21"
+
+# ===================================================================
+# 22. #4832: a missing/unreadable lib/bounded-run.sh must degrade to a
+#     clearly-diagnosed skip, never a raw "command not found" (rc 127) on a
+#     scheduled tick. Simulate by temporarily renaming the shared lib file
+#     the watchdog sources bounded_run() from.
+# ===================================================================
+# NOTE: deliberately does NOT register its own EXIT trap for the restore —
+# the suite already owns a single combined EXIT trap (line ~56, `bg_proc_reap;
+# rm -rf "$WORKDIR"`), and `trap ... EXIT` REPLACES rather than stacks, so
+# adding a second one here would silently disable that cleanup for every test
+# after this one. Restore inline instead, immediately after the probing run.
+BOUNDED_RUN_LIB="$(cd "$SCRIPT_DIR/../lib" && pwd)/bounded-run.sh"
+BOUNDED_RUN_LIB_BAK="${BOUNDED_RUN_LIB}.test-disabled-4832"
+mv "$BOUNDED_RUN_LIB" "$BOUNDED_RUN_LIB_BAK"
+
+STUB22="$(make_daemon_stub unreachable)"
+start_alive_and_fresh 22
+run_watchdog_verbose PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
+    LOOM_DAEMON_BIN="$STUB22/loom-daemon"
+kill "$LIVE_PID" 2>/dev/null || true
+mv "$BOUNDED_RUN_LIB_BAK" "$BOUNDED_RUN_LIB"
+assert_rc 0 "$RC" "missing lib/bounded-run.sh: degrades to a skip, not a hard failure (exit 0)"
+if log_hasi 'bounded_run is undefined'; then
+    pass "missing lib/bounded-run.sh: clearly-diagnosed skip in the log"
+else
+    fail "missing lib/bounded-run.sh: expected a clear diagnostic ($(cat "$WDLOG" 2>/dev/null))"
+fi
+if grep -qi 'command not found' "$OUT" "$WDLOG" 2>/dev/null; then
+    fail "missing lib/bounded-run.sh: raw 'command not found' leaked instead of the diagnosed skip"
+else
+    pass "missing lib/bounded-run.sh: no raw 'command not found' surfaced"
+fi
+rm -rf "$PS_STUB_DIR" "$STUB22"
 
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"

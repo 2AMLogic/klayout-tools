@@ -62,6 +62,36 @@ _PROD_DAEMON_CHECKSUM_BEFORE="$(_prod_daemon_checksum)"
 # com.rjwalters.loom-daemon LaunchAgent under the exact same default label.
 export LOOM_DAEMON_LAUNCHD=0
 
+# Force the legacy nohup path on LINUX too (#4799 CI hang). The launchd knob
+# above only sandboxes Darwin; on a Linux runner `MINIMAL_PATH` below still
+# reaches the REAL /usr/bin/systemctl and `is_linux_systemd` (lib/systemd-user.sh)
+# returns true whenever the runner has a reachable `systemctl --user` manager.
+# That made the suite non-hermetic AND non-terminating in CI:
+#
+#   1. scenario 5's real loom-daemon-start.sh took the systemd branch and ran
+#      `systemctl --user enable --now loom-daemon.service` -- the DEFAULT unit
+#      name, i.e. the operator's/runner's real user unit, plus a real
+#      `loom-daemon-watchdog.timer` (provision_watchdog_job_systemd derives its
+#      name from the daemon unit, NOT from the sandboxed LOOM_WATCHDOG_LABEL).
+#   2. every LATER scenario then saw `systemd_unit_loaded` == true, so
+#      loom-daemon-update.sh resolved DAEMON_MANAGER=systemd and took the
+#      supervised-restart branch: `"$PROVISION_TARGET" restart`.
+#   3. PROVISION_TARGET is the fake-daemon fixture, which has no `restart`
+#      handler -- so it fell straight into its `while true; do sleep 1; done`
+#      daemon body IN THE FOREGROUND and never returned. Scenario 5b wedged
+#      there for the full 1200s per-suite CI budget (exit 124).
+#
+# A macOS dev run never exercises any of this (no systemctl), which is exactly
+# why the suite passed locally in ~4m and hung in CI. The systemd-specific
+# scenarios (26-34) opt back in explicitly with LOOM_DAEMON_SYSTEMD=1 alongside
+# their LOOM_SYSTEMD_FORCE=1 seam and their own stub `systemctl` on PATH.
+export LOOM_DAEMON_SYSTEMD=0
+# Belt-and-braces on top of the knob, mirroring LOOM_LAUNCHD_LABEL below: even
+# if a future regression re-opens a systemd path, the unit it would resolve is a
+# per-run scratch name, never the real `loom-daemon.service`. The scenarios that
+# drive systemd deliberately pin their own LOOM_SYSTEMD_UNIT per invocation.
+export LOOM_SYSTEMD_UNIT="loom-daemon-update-test-$$.service"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(cd "$SCRIPT_DIR/../cli" && pwd)"
 UPDATE_SCRIPT="$CLI_DIR/loom-daemon-update.sh"
@@ -79,8 +109,16 @@ UPDATE_SCRIPT="$CLI_DIR/loom-daemon-update.sh"
 source "$SCRIPT_DIR/lib/launchd-sandbox.sh"
 export LOOM_LAUNCHD_LABEL="$(launchd_sandbox_new_label)"
 
+# Background-PID bookkeeping (#4773): every fake-daemon/decoy process this
+# suite backgrounds is tracked here so the EXIT/INT/TERM trap below can reap
+# it even if the parent test process is interrupted before its own inline
+# cleanup runs.
+# shellcheck source=lib/bg-proc-trap.sh
+source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -142,6 +180,19 @@ new_fixture() {
     # #4260 sub-issue C) sources it relative to ITS OWN location, so it must exist
     # alongside the fixture copy too, not just in the real repo tree.
     cp "$CLI_DIR/../lib/systemd-user.sh" "$root/.loom/scripts/lib/systemd-user.sh"
+    # Same for lib/bounded-run.sh (#4799): the fixture start script's
+    # print_calibrate_hint() sources it relative to ITS OWN location to bound
+    # its `calibrate` command substitution, so it must exist alongside the
+    # fixture copy too.
+    cp "$CLI_DIR/../lib/bounded-run.sh" "$root/.loom/scripts/lib/bounded-run.sh"
+    # Same for lib/locate-daemon-bin.sh (#4875): the fixture start script
+    # sources it relative to ITS OWN location to resolve the daemon binary
+    # under a minimal PATH, so every fixture flow that execs the copied
+    # loom-daemon-start.sh (restart, --relaunch, the full update run) needs it
+    # in the throwaway tree. Without it those flows abort with
+    # "locate-daemon-bin.sh not found at <fixture>/.loom/scripts/lib" before
+    # reaching the behaviour under test.
+    cp "$CLI_DIR/../lib/locate-daemon-bin.sh" "$root/.loom/scripts/lib/locate-daemon-bin.sh"
     cp "$LOOM_REPO_ROOT/scripts/install/provision-daemon.sh" "$root/scripts/install/provision-daemon.sh"
     cat > "$root/loom-daemon/Cargo.toml" <<'EOF'
 [package]
@@ -192,6 +243,29 @@ push_extra_commits_to_origin() {
 # Writes a fake daemon binary at $1 that reports commit $2 on --version and,
 # on a normal run, appends its inherited LOOM_WORK_FINDER / LOOM_MAIN_HEALTH_GATE
 # to marker file $3 before looping forever (so it stays alive for kill -0).
+#
+# `calibrate` is handled explicitly (#4799) and exits immediately with no
+# output: this fixture has no real calibrate implementation, and every
+# successful loom-daemon-start.sh run (nohup/launchd/systemd, all three
+# reached by this suite's restart scenarios) calls `$DAEMON_BIN calibrate
+# --workspace ... --json` via print_calibrate_hint(). Before this fix, that
+# call fell through to the `while true` loop below and hung forever inside
+# print_calibrate_hint()'s blocking `$(...)` -- the exact hang
+# ci-excluded.txt documented. print_calibrate_hint() is bounded independently
+# now (lib/bounded-run.sh), but this fixture also short-circuits so the suite
+# stays fast rather than eating that timeout on every restart.
+#
+# GENERALIZED (#4799 CI hang): `calibrate` was only one instance of a whole
+# CLASS of wedge. ANY *subcommand* the lifecycle scripts dispatch that this
+# fixture does not recognize used to fall through to the `while true` daemon
+# body IN THE FOREGROUND and block its caller forever -- which is precisely how
+# the CI run hung: with a real `systemctl --user` reachable, the update script
+# resolved DAEMON_MANAGER=systemd and ran `"$PROVISION_TARGET" restart`, and
+# this fixture (no `restart` handler) looped instead of answering. So the
+# catch-all below exits non-zero for any unrecognized NON-FLAG first argument
+# (a real daemon rejects an unknown subcommand; it does not daemonize). A
+# leading `-`/`--` still falls through to the daemon body, because the
+# supervisors DO launch the daemon proper with flags.
 write_fake_daemon() {
     local path="$1" commit="$2" marker="$3"
     cat > "$path" <<EOF
@@ -199,6 +273,13 @@ write_fake_daemon() {
 if [[ "\${1:-}" == "--version" ]]; then
     echo "loom-daemon 0.15.0 (commit ${commit}, built 2026-07-26T00:00:00Z)"
     exit 0
+fi
+if [[ "\${1:-}" == "calibrate" ]]; then
+    exit 1
+fi
+if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
+    echo "fake loom-daemon: unsupported subcommand: \$*" >&2
+    exit 1
 fi
 echo "FAKE_DAEMON WF=[\${LOOM_WORK_FINDER:-}] HG=[\${LOOM_MAIN_HEALTH_GATE:-}]" > "${marker}"
 while true; do sleep 1; done
@@ -223,6 +304,18 @@ fi
 if [[ "\${1:-}" == "restart" ]]; then
     echo "restart" >> "${restart_marker}"
     exit ${restart_rc}
+fi
+# See write_fake_daemon's comment (#4799): no real calibrate implementation,
+# exit fast instead of falling into the daemon-body loop below.
+if [[ "\${1:-}" == "calibrate" ]]; then
+    exit 1
+fi
+# Same catch-all as write_fake_daemon (#4799): an unrecognized NON-FLAG
+# subcommand must never fall into the foreground daemon loop and wedge its
+# caller. Flags still reach the daemon body.
+if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
+    echo "fake loom-daemon: unsupported subcommand: \$*" >&2
+    exit 1
 fi
 while true; do sleep 1; done
 EOF
@@ -439,6 +532,32 @@ EOF
     chmod +x "$path"
 }
 
+# Fake `crontab` (#4697): the update script's idle-shutdown-notice check runs
+# `crontab -l` unconditionally on every invocation, so without this stub every
+# test in this suite would shell out to the REAL system `crontab` for
+# whichever account runs the suite — reading (never writing, but still a real
+# information leak/hang risk on a host with no cron daemon configured) actual
+# operator state, exactly the class of hazard the launchd/systemd sandboxing
+# above exists to prevent. `-l` echoes the contents of
+# $FAKE_CRONTAB_CONTENTS_FILE when set+readable, else exits 1 with no output
+# (mirrors the common "no crontab for this user" case — silence, not an
+# error the caller need alarm on). Any other invocation is a no-op success.
+write_fake_crontab() {
+    local path="$1"
+    cat > "$path" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-l" ]]; then
+    if [[ -n "${FAKE_CRONTAB_CONTENTS_FILE:-}" && -r "${FAKE_CRONTAB_CONTENTS_FILE:-}" ]]; then
+        cat "$FAKE_CRONTAB_CONTENTS_FILE"
+        exit 0
+    fi
+    exit 1
+fi
+exit 0
+EOF
+    chmod +x "$path"
+}
+
 MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 BASE_WORKDIR="$(mktemp -d)"
@@ -463,7 +582,17 @@ export LOOM_WATCHDOG_LABEL="${LOOM_LAUNCHD_LABEL}-watchdog"
 # current call site AND any future one that forgets to set LOOM_DAEMON_BIN —
 # belt-and-braces with the checksum guard at both the top and bottom of this
 # file, which would otherwise be the only thing catching a regression.
+#
+# `unset LOOM_DAEMON_BIN` closes the other half of the hole (#4902): every
+# live Loom agent session (Builder/Judge/Doctor, ...) inherits an ambient
+# LOOM_DAEMON_BIN pointing at the real production binary, and
+# loom-daemon-update.sh's `PROVISION_TARGET="${LOOM_DAEMON_BIN:-$DEST_DIR/...}"`
+# lets that ambient value win over the LOOM_DAEMON_BIN_DIR sandbox above,
+# silently defeating it. Tests below that need LOOM_DAEMON_BIN pin it inline
+# on their own invocation (e.g. `LOOM_DAEMON_BIN="$W1/..." bash ...`), which
+# still applies regardless of this ambient unset.
 export LOOM_DAEMON_BIN_DIR="$BASE_WORKDIR/machine-level-bin-sandbox"
+unset LOOM_DAEMON_BIN
 
 # Binary-format sanity gate bypass (#4397, deferred from #4381's incident
 # review): provision_machine_daemon now refuses to install anything that
@@ -495,16 +624,31 @@ chmod +x "$DECOY_DIR/loom-daemon"
 # output — the same command-substitution gotcha the sandbox spawner avoids).
 "$DECOY_DIR/loom-daemon" >/dev/null 2>&1 &
 DECOY_PID=$!
+bg_proc_track "$DECOY_PID"
 
 # Best-effort cleanup of any fake-daemon processes left running (matched by
 # their script path under $BASE_WORKDIR, which appears in `ps`'s command
 # line) — individual tests also kill their own PIDs explicitly, this is a
-# backstop for anything a failed assertion left behind.
-trap 'kill "$DECOY_PID" 2>/dev/null; pkill -f "$BASE_WORKDIR" >/dev/null 2>&1; rm -rf "$BASE_WORKDIR" "$DECOY_DIR"' EXIT
+# backstop for anything a failed assertion left behind. bg_proc_reap kills
+# every PID tracked via bg_proc_track (the W5/W15/W26-style sandbox fixtures
+# below track their own spawned PIDs directly rather than relying solely on
+# the pkill pattern-match); EXIT/INT/TERM (not just EXIT, #4773) so a hard
+# interruption of this suite still reaps every tracked/backstopped process.
+# NOTE: a bare `trap CMD EXIT INT TERM` runs CMD on INT/TERM but does NOT stop
+# the script (only an EXIT-trap firing auto-exits) -- the explicit `exit`
+# below is required, else a SIGTERM'd suite would clean up once and then keep
+# running every remaining (numbered W*) test case, re-populating
+# $BASE_WORKDIR as it goes (observed directly while verifying this fix: an
+# untrapped-exit version of this trap let a SIGTERM'd run limp all the way to
+# a later scenario, which then hit a real, un-stubbed `cargo build --release`
+# once its own fixture dir had already been rm -rf'd out from under it).
+trap 'bg_proc_reap; [ -n "$BASE_WORKDIR" ] && pkill -f "$BASE_WORKDIR" >/dev/null 2>&1; rm -rf "$BASE_WORKDIR" "$DECOY_DIR"' EXIT
+trap 'bg_proc_reap; [ -n "$BASE_WORKDIR" ] && pkill -f "$BASE_WORKDIR" >/dev/null 2>&1; rm -rf "$BASE_WORKDIR" "$DECOY_DIR"; exit 1' INT TERM
 
 FAKE_BIN_DIR="$BASE_WORKDIR/fakebin"
 mkdir -p "$FAKE_BIN_DIR"
 write_fake_cargo "$FAKE_BIN_DIR/cargo"
+write_fake_crontab "$FAKE_BIN_DIR/crontab"
 # Stub launchctl/pgrep onto the front of every test PATH (FAKE_BIN_DIR is the
 # first entry of TEST_PATH and TEST_PATH_NO_CODESIGN), recording invocations to
 # $SANDBOX_LOG_DIR so the suite can assert no production label was ever named.
@@ -605,6 +749,7 @@ echo "--work-finder" > "$W5/.loom/.daemon.flags"
 # record its PID, exactly like loom-daemon-start.sh would have.
 "$INSTALLED5" >/dev/null 2>&1 &
 old_pid=$!
+bg_proc_track "$old_pid"
 sleep 0.3
 echo "$old_pid" > "$W5/.loom/.daemon.pid"
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -685,13 +830,20 @@ write_fake_daemon "$NEW_FAKE5B" "$HEAD5B" "$W5B/new-marker"
 
 "$INSTALLED5B" >/dev/null 2>&1 &
 old_pid5b=$!
+bg_proc_track "$old_pid5b"
 sleep 0.3
 echo "$old_pid5b" > "$W5B/.loom/.daemon.pid"
 
+# Capture to a log rather than /dev/null (#4799): when this scenario wedged in
+# CI the tail of the suite output was undiagnostic precisely because its update
+# run wrote nowhere, so the failure surfaced as silence. Mirror scenario 5.
 ( cd "$W5B" && PATH="$TEST_PATH" LOOM_DAEMON_BIN="$INSTALLED5B" NEW_FAKE_BIN_SRC="$NEW_FAKE5B" \
     env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-    bash "$UPDATE_SCRIPT" >/dev/null 2>&1 )
+    bash "$UPDATE_SCRIPT" >"$W5B/update.log" 2>&1 )
 update5b_rc=$?
+if [[ "$update5b_rc" != "0" ]]; then
+    echo "  update.log (5b): $(tail -n 20 "$W5B/update.log" 2>/dev/null)"
+fi
 assert_eq "0" "$update5b_rc" "restart with an EMPTY persisted-flags file exits 0 (#3968 regression)"
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -706,6 +858,83 @@ assert_eq "FAKE_DAEMON WF=[0] HG=[0]" "$new5b_marker_content" \
 
 if [[ -f "$W5B/.loom/.daemon.pid" ]]; then
     kill "$(cat "$W5B/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
+fi
+
+# ============================================================
+# 5c. Non-interactive-SSH cargo fallback (#4695): cargo is absent from PATH
+#     entirely (the exact non-login-shell-SSH symptom), but present at
+#     rustup's default $HOME/.cargo/bin -- the update must still find it via
+#     the fallback and rebuild successfully.
+# ============================================================
+W5C="$BASE_WORKDIR/w5c"
+new_fixture "$W5C"
+HEAD5C="$(cd "$W5C" && git rev-parse --short HEAD)"
+INSTALLED5C="$W5C/installed/loom-daemon"
+mkdir -p "$W5C/installed"
+write_fake_daemon "$INSTALLED5C" "deadbee" "$W5C/old-marker"
+NEW_FAKE5C="$W5C/new-fake-daemon"
+write_fake_daemon "$NEW_FAKE5C" "$HEAD5C" "$W5C/new-marker"
+# No .loom/.daemon.pid -> WAS_RUNNING resolves false, so this test exercises
+# only the rebuild+provision path (the cargo-fallback code under test)
+# without needing a background process to restart.
+
+# A PATH carrying the same launchd-sandbox stubs (launchctl/pgrep) as every
+# other test, but deliberately WITHOUT cargo anywhere on it.
+NO_CARGO_BIN_DIR5C="$BASE_WORKDIR/w5c-no-cargo-bin"
+NO_CARGO_LOG_DIR5C="$BASE_WORKDIR/w5c-no-cargo-log"
+launchd_sandbox_install_stubs "$NO_CARGO_BIN_DIR5C" "$NO_CARGO_LOG_DIR5C"
+TEST_PATH_NO_CARGO5C="$NO_CARGO_BIN_DIR5C:$MINIMAL_PATH"
+
+# The fake cargo lives ONLY under a scratch $HOME's rustup-default location,
+# simulating a non-interactive SSH shell that never sourced the profile line
+# rustup's installer adds.
+HOME5C="$BASE_WORKDIR/w5c-home"
+mkdir -p "$HOME5C/.cargo/bin"
+write_fake_cargo "$HOME5C/.cargo/bin/cargo"
+
+out5c=$( cd "$W5C" && PATH="$TEST_PATH_NO_CARGO5C" HOME="$HOME5C" \
+    LOOM_DAEMON_BIN="$INSTALLED5C" NEW_FAKE_BIN_SRC="$NEW_FAKE5C" \
+    bash "$UPDATE_SCRIPT" 2>&1 )
+rc5c=$?
+assert_eq "0" "$rc5c" "update succeeds when cargo is absent from PATH but present at \$HOME/.cargo/bin (#4695)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -x "$INSTALLED5C" ]] && "$INSTALLED5C" --version 2>/dev/null | grep -q "$HEAD5C"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} \$HOME/.cargo/bin fallback cargo actually rebuilt+provisioned the fresh binary"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} \$HOME/.cargo/bin fallback cargo actually rebuilt+provisioned the fresh binary"
+    echo "  output: $out5c"
+fi
+
+# ============================================================
+# 5d. cargo genuinely absent (not on PATH, not under $HOME/.cargo/bin either)
+#     -> exit 1 with a failure message that suggests installing via rustup,
+#     not just "not found" (#4695 AC).
+# ============================================================
+W5D="$BASE_WORKDIR/w5d"
+new_fixture "$W5D"
+HOME5D="$BASE_WORKDIR/w5d-home"
+mkdir -p "$HOME5D" # deliberately no .cargo/bin at all
+NO_CARGO_BIN_DIR5D="$BASE_WORKDIR/w5d-no-cargo-bin"
+NO_CARGO_LOG_DIR5D="$BASE_WORKDIR/w5d-no-cargo-log"
+launchd_sandbox_install_stubs "$NO_CARGO_BIN_DIR5D" "$NO_CARGO_LOG_DIR5D"
+TEST_PATH_NO_CARGO5D="$NO_CARGO_BIN_DIR5D:$MINIMAL_PATH"
+
+out5d=$( cd "$W5D" && PATH="$TEST_PATH_NO_CARGO5D" HOME="$HOME5D" \
+    bash "$UPDATE_SCRIPT" 2>&1 )
+rc5d=$?
+assert_eq "1" "$rc5d" "update exits 1 when cargo is genuinely absent (no PATH, no \$HOME/.cargo/bin)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out5d" | grep -qi 'rustup'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} genuinely-absent-cargo error message suggests installing via rustup"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} genuinely-absent-cargo error message suggests installing via rustup"
+    echo "  output: $out5d"
 fi
 
 # ============================================================
@@ -759,6 +988,7 @@ write_fake_daemon "$NEW_FAKE7" "$HEAD7" "$W7/new-marker"
 
 "$INSTALLED7" >/dev/null 2>&1 &
 old_pid7=$!
+bg_proc_track "$old_pid7"
 sleep 0.3
 echo "$old_pid7" > "$W7/.loom/.daemon.pid"
 
@@ -1039,6 +1269,7 @@ echo "--work-finder" > "$W15/.loom/.daemon.flags"
 # #4232 poll requires a live pid (kill -0), not just a differing number.
 sleep 60 >/dev/null 2>&1 &
 RELAUNCHED_PID15=$!
+bg_proc_track "$RELAUNCHED_PID15"
 LD_BIN15="$W15/launchd-bin"
 write_fake_launchd_loaded_bin "$LD_BIN15" "$W15/launchctl.log" "$RESTART_MARKER15" "$RELAUNCHED_PID15"
 
@@ -1172,6 +1403,7 @@ fi
 # (b) LOOM_DAEMON_LAUNCHD=0 + live pid file -> manager: PID-file/nohup.
 "$INSTALLED17" >/dev/null 2>&1 &
 pid17=$!
+bg_proc_track "$pid17"
 sleep 0.3
 echo "$pid17" > "$W17/.loom/.daemon.pid"
 check_pid_out=$( cd "$W17" && PATH="$TEST_PATH" LOOM_DAEMON_LAUNCHD=0 \
@@ -1258,6 +1490,22 @@ else
 fi
 
 # ============================================================
+# Scenarios 21+22 are the only two in this suite that need a REAL `plutil`
+# (#4799). They drive loom-daemon-update.sh's `--relaunch` path, whose first
+# step is `harvest_plist_env` (lib/daemon-env-harvest.sh) -- which requires
+# plutil + jq by contract ("required on the macOS launchd path") and returns 2
+# when either is missing, so perform_relaunch aborts with 6 and never
+# re-renders the plist. Scenario 22 then reads the result back with
+# `plutil -extract` directly. Everything else launchd-flavored in this suite
+# runs off the stub `launchctl`/`uname` pair and IS portable; these two are
+# not, and plutil is macOS-only (no ubuntu package stands in -- an XML-plist
+# parser stub would be testing the stub, not the production path). So skip
+# them where plutil is absent rather than fail a Linux CI runner on a genuinely
+# Darwin-only code path. They still run on every macOS dev/CI host.
+if ! command -v plutil >/dev/null 2>&1; then
+    echo -e "${YELLOW}⊘${NC} SKIP scenarios 21-22 (--relaunch plist re-render + env preservation): plutil not available — harvest_plist_env is a macOS-only production path"
+else
+# ============================================================
 # 21. --relaunch re-renders the plist with the SUPERVISED keys (#4118 AC1):
 #     after a refused restart, `--relaunch` re-renders via loom-daemon-start.sh,
 #     installing KeepAlive:{SuccessfulExit:true} + LOOM_DAEMON_SUPERVISOR=launchd
@@ -1333,6 +1581,7 @@ else
     echo "  WF=[$wf22] HG=[$hg22] MAXC=[$mc22] PERTOK=[$pt22]"
     echo "  plist: $(cat "$PLIST22" 2>/dev/null)"
 fi
+fi # end plutil-availability guard for scenarios 21-22
 
 # ============================================================
 # 23. --no-restart on a launchd host does NOT print a bare `launchctl bootstrap`
@@ -1484,7 +1733,7 @@ SD_BIN26="$W26/systemd-bin"
 SD_LOG26="$W26/systemctl.log"
 write_fake_systemd_active_bin "$SD_BIN26" "$SD_LOG26" "4242"
 
-out26=$( cd "$W26" && PATH="$SD_BIN26:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 \
+out26=$( cd "$W26" && PATH="$SD_BIN26:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="loom-daemon-test-sd26.service" \
     LOOM_DAEMON_BIN="$INSTALLED26" NEW_FAKE_BIN_SRC="$NEW_FAKE26" \
     bash "$UPDATE_SCRIPT" 2>&1 )
@@ -1539,7 +1788,7 @@ SD_BIN27="$W27/systemd-bin"
 SD_LOG27="$W27/systemctl.log"
 write_fake_systemd_active_bin "$SD_BIN27" "$SD_LOG27" "4242"
 
-out27=$( cd "$W27" && PATH="$SD_BIN27:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 \
+out27=$( cd "$W27" && PATH="$SD_BIN27:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="loom-daemon-test-sd27.service" \
     LOOM_DAEMON_BIN="$INSTALLED27" NEW_FAKE_BIN_SRC="$NEW_FAKE27" \
     bash "$UPDATE_SCRIPT" 2>&1 )
@@ -1584,7 +1833,7 @@ write_fake_daemon "$INSTALLED28" "deadbee" "$W28/marker"
 SD_BIN28="$W28/systemd-bin"
 SD_LOG28="$W28/systemctl.log"
 write_fake_systemd_active_bin "$SD_BIN28" "$SD_LOG28" "4242"
-check_sd_out=$( cd "$W28" && PATH="$SD_BIN28:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 \
+check_sd_out=$( cd "$W28" && PATH="$SD_BIN28:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="loom-daemon-test-sd28.service" LOOM_DAEMON_BIN="$INSTALLED28" \
     bash "$UPDATE_SCRIPT" --check 2>&1 )
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -1610,7 +1859,7 @@ write_fake_daemon_restart "$INSTALLED29" "deadbee" "$RESTART_MARKER29" 0
 SD_BIN29="$W29/systemd-bin"
 SD_LOG29="$W29/systemctl.log"
 write_fake_systemd_active_bin "$SD_BIN29" "$SD_LOG29" "4242"
-dry29_out=$( cd "$W29" && PATH="$SD_BIN29:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 \
+dry29_out=$( cd "$W29" && PATH="$SD_BIN29:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="loom-daemon-test-sd29.service" LOOM_DAEMON_BIN="$INSTALLED29" \
     bash "$UPDATE_SCRIPT" --dry-run 2>&1 )
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -1686,18 +1935,19 @@ write_fake_systemd_active_bin "$SD_BIN31" "$SD_LOG31" "4242"
 HOME31="$W31/home"
 UNIT_PATH31="$HOME31/.config/systemd/user/${UNIT31}"
 write_fixture_unit_pre4267 "$UNIT_PATH31" "$INSTALLED31"
-( cd "$W31" && PATH="$SD_BIN31:$TEST_PATH" HOME="$HOME31" LOOM_SYSTEMD_FORCE=1 \
+( cd "$W31" && PATH="$SD_BIN31:$TEST_PATH" HOME="$HOME31" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="$UNIT31" \
     LOOM_DAEMON_BIN="$INSTALLED31" NEW_FAKE_BIN_SRC="$NEW_FAKE31" \
     bash "$UPDATE_SCRIPT" --relaunch >/dev/null 2>&1 )
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q 'LOOM_DAEMON_SUPERVISOR=systemd' "$UNIT_PATH31" 2>/dev/null \
-    && grep -qx 'Restart=on-success' "$UNIT_PATH31" 2>/dev/null; then
+    && grep -qx 'Restart=on-success' "$UNIT_PATH31" 2>/dev/null \
+    && grep -qx 'KillMode=mixed' "$UNIT_PATH31" 2>/dev/null; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --relaunch re-renders the unit with Restart=on-success + LOOM_DAEMON_SUPERVISOR=systemd"
+    echo -e "${GREEN}✓${NC} --relaunch re-renders the unit with Restart=on-success + KillMode=mixed (#4862) + LOOM_DAEMON_SUPERVISOR=systemd"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --relaunch re-renders the unit with Restart=on-success + LOOM_DAEMON_SUPERVISOR=systemd"
+    echo -e "${RED}✗${NC} --relaunch re-renders the unit with Restart=on-success + KillMode=mixed + LOOM_DAEMON_SUPERVISOR=systemd"
     echo "  unit: $(cat "$UNIT_PATH31" 2>/dev/null)"
 fi
 
@@ -1723,7 +1973,7 @@ write_fake_systemd_active_bin "$SD_BIN32" "$SD_LOG32" "4242"
 HOME32="$W32/home"
 UNIT_PATH32="$HOME32/.config/systemd/user/${UNIT32}"
 write_fixture_unit_pre4267 "$UNIT_PATH32" "$INSTALLED32"
-( cd "$W32" && PATH="$SD_BIN32:$TEST_PATH" HOME="$HOME32" LOOM_SYSTEMD_FORCE=1 \
+( cd "$W32" && PATH="$SD_BIN32:$TEST_PATH" HOME="$HOME32" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="$UNIT32" \
     LOOM_DAEMON_BIN="$INSTALLED32" NEW_FAKE_BIN_SRC="$NEW_FAKE32" \
     bash "$UPDATE_SCRIPT" --relaunch >/dev/null 2>&1 )
@@ -1758,7 +2008,7 @@ write_fake_daemon_restart "$NEW_FAKE33" "$HEAD33" "$RESTART_MARKER33" 0
 SD_BIN33="$W33/systemd-bin"
 SD_LOG33="$W33/systemctl.log"
 write_fake_systemd_active_bin "$SD_BIN33" "$SD_LOG33" "4242"
-out33=$( cd "$W33" && PATH="$SD_BIN33:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 \
+out33=$( cd "$W33" && PATH="$SD_BIN33:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="loom-daemon-test-sd33.service" \
     LOOM_DAEMON_BIN="$INSTALLED33" NEW_FAKE_BIN_SRC="$NEW_FAKE33" \
     bash "$UPDATE_SCRIPT" --no-restart 2>&1 )
@@ -1799,7 +2049,7 @@ write_fake_systemd_active_bin "$SD_BIN34" "$SD_LOG34" "4242"
 HOME34="$W34/home"
 mkdir -p "$HOME34/.config/systemd/user"   # dir exists, unit deliberately absent
 UNIT_PATH34="$HOME34/.config/systemd/user/${UNIT34}"
-out34=$( cd "$W34" && PATH="$SD_BIN34:$TEST_PATH" HOME="$HOME34" LOOM_SYSTEMD_FORCE=1 \
+out34=$( cd "$W34" && PATH="$SD_BIN34:$TEST_PATH" HOME="$HOME34" LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_SYSTEMD=1 \
     LOOM_SYSTEMD_UNIT="$UNIT34" \
     LOOM_DAEMON_BIN="$INSTALLED34" NEW_FAKE_BIN_SRC="$NEW_FAKE34" \
     bash "$UPDATE_SCRIPT" --relaunch 2>&1 )
@@ -1837,8 +2087,10 @@ write_fake_daemon_restart "$NEW_FAKE35" "$HEAD35" "$RESTART_MARKER35" 0
 
 sleep 60 >/dev/null 2>&1 &
 OLD_PID26=$!
+bg_proc_track "$OLD_PID26"
 sleep 60 >/dev/null 2>&1 &
 KICKSTART_PID35=$!
+bg_proc_track "$KICKSTART_PID35"
 STATE35="$W35/launchd-pid-state"
 echo "$OLD_PID26" > "$STATE35"
 LD_BIN35="$W35/launchd-bin"
@@ -1897,6 +2149,7 @@ write_fake_daemon_restart "$NEW_FAKE36" "$HEAD36" "$RESTART_MARKER36" 0
 
 sleep 60 >/dev/null 2>&1 &
 OLD_PID27=$!
+bg_proc_track "$OLD_PID27"
 STATE36="$W36/launchd-pid-state"
 echo "$OLD_PID27" > "$STATE36"
 LD_BIN36="$W36/launchd-bin"
@@ -2279,6 +2532,117 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} LOOM_SKIP_STALE_ENTRY_POINT_CHECK=1 suppresses the advisory"
     echo "  output: $out48"
+fi
+
+# ============================================================
+# 49-53. Idle-shutdown cron-guard post-update notice (#4697): the update
+#     script should warn, post-update, that this host will power itself off
+#     after N idle minutes when the stage-2 `fleet add-worker
+#     --idle-shutdown-minutes` cron guard is installed — and stay silent
+#     when it is not. Uses --check (fast, no rebuild) exactly like the
+#     stale-entry-point block above; a sandboxed $HOME49 keeps the
+#     `$HOME/.local/bin/loom-idle-shutdown.sh` lookup off the real operator
+#     account (belt-and-braces alongside the fake `crontab` stub above).
+# ============================================================
+W49="$BASE_WORKDIR/w49"
+new_fixture "$W49"
+HEAD49="$(cd "$W49" && git rev-parse --short HEAD)"
+write_fake_daemon "$W49/resolved-daemon" "$HEAD49" "$W49/marker49"
+
+HOME49="$BASE_WORKDIR/home49"
+mkdir -p "$HOME49/.local/bin"
+cat > "$HOME49/.local/bin/loom-idle-shutdown.sh" <<'GUARD'
+#!/usr/bin/env bash
+set -euo pipefail
+LIMIT=45
+GUARD
+chmod +x "$HOME49/.local/bin/loom-idle-shutdown.sh"
+
+CRONFIX49="$BASE_WORKDIR/cron49-with-guard"
+echo "*/5 * * * * $HOME49/.local/bin/loom-idle-shutdown.sh >/dev/null 2>&1" > "$CRONFIX49"
+
+# 49. Guard installed + configured window readable -> notice names "45".
+out49=$( cd "$W49" && PATH="$TEST_PATH" HOME="$HOME49" \
+    LOOM_DAEMON_BIN="$W49/resolved-daemon" \
+    FAKE_CRONTAB_CONTENTS_FILE="$CRONFIX49" \
+    bash "$UPDATE_SCRIPT" --check 2>&1 )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out49" | grep -q 'idle-shutdown cron guard installed' \
+   && echo "$out49" | grep -q -- '--idle-shutdown-minutes 45)'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} idle-shutdown guard installed -> post-update notice names the configured minutes (#4697)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} idle-shutdown guard installed -> post-update notice names the configured minutes (#4697)"
+    echo "  output: $out49"
+fi
+
+# 50. No guard installed (empty crontab fixture) -> completely silent.
+CRONFIX50="$BASE_WORKDIR/cron50-empty"
+: > "$CRONFIX50"
+out50=$( cd "$W49" && PATH="$TEST_PATH" HOME="$HOME49" \
+    LOOM_DAEMON_BIN="$W49/resolved-daemon" \
+    FAKE_CRONTAB_CONTENTS_FILE="$CRONFIX50" \
+    bash "$UPDATE_SCRIPT" --check 2>&1 )
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$out50" | grep -qi 'idle-shutdown'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} no idle-shutdown guard installed -> no notice at all (#4697)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} no idle-shutdown guard installed -> no notice at all (#4697)"
+    echo "  output: $out50"
+fi
+
+# 51. LOOM_SKIP_IDLE_SHUTDOWN_NOTICE=1 suppresses it even with the guard present.
+out51=$( cd "$W49" && PATH="$TEST_PATH" HOME="$HOME49" \
+    LOOM_DAEMON_BIN="$W49/resolved-daemon" \
+    FAKE_CRONTAB_CONTENTS_FILE="$CRONFIX49" \
+    LOOM_SKIP_IDLE_SHUTDOWN_NOTICE=1 \
+    bash "$UPDATE_SCRIPT" --check 2>&1 )
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! echo "$out51" | grep -qi 'idle-shutdown'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} LOOM_SKIP_IDLE_SHUTDOWN_NOTICE=1 suppresses the notice"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} LOOM_SKIP_IDLE_SHUTDOWN_NOTICE=1 suppresses the notice"
+    echo "  output: $out51"
+fi
+
+# 52. The notice never changes the exit code (still exit 0 -- up to date).
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out49" | grep -q . && ( cd "$W49" && PATH="$TEST_PATH" HOME="$HOME49" \
+    LOOM_DAEMON_BIN="$W49/resolved-daemon" \
+    FAKE_CRONTAB_CONTENTS_FILE="$CRONFIX49" \
+    bash "$UPDATE_SCRIPT" --check >/dev/null 2>&1 ); then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} the idle-shutdown notice never changes the exit code"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} the idle-shutdown notice never changes the exit code"
+fi
+
+# 53. Guard entry present in cron but the guard SCRIPT (and thus its LIMIT=)
+#     unreadable -- e.g. a hand-installed or relocated guard. The notice must
+#     still fire (the host still powers itself off) with the honest
+#     "window unknown" wording rather than silently degrading to nothing or
+#     inventing a minutes value. $HOME53 has no .local/bin/loom-idle-shutdown.sh.
+HOME53="$BASE_WORKDIR/home53"
+mkdir -p "$HOME53/.local/bin"
+out53=$( cd "$W49" && PATH="$TEST_PATH" HOME="$HOME53" \
+    LOOM_DAEMON_BIN="$W49/resolved-daemon" \
+    FAKE_CRONTAB_CONTENTS_FILE="$CRONFIX49" \
+    bash "$UPDATE_SCRIPT" --check 2>&1 )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out53" | grep -q 'idle-shutdown cron guard installed' \
+   && echo "$out53" | grep -q 'could not be read from'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} unreadable guard script -> notice still fires with an honest unknown window (#4697)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} unreadable guard script -> notice still fires with an honest unknown window (#4697)"
+    echo "  output: $out53"
 fi
 
 # ============================================================
