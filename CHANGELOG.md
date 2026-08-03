@@ -142,3 +142,14 @@ version. Not an exhaustive commit-by-commit log.
   (no `schema_version` bump), but changes `environment` contents for every
   gf180mcu Monte Carlo run — see `docs/cli/sim.md`'s
   `environment.monte_carlo` subsection.
+- 2026-08-03 — new verb `klt eval` (#387) — a single scored-gate envelope
+  (`valid` + one scalar `objective` with a declared `minimize`/`maximize`
+  polarity) an optimization loop can compare two candidates on, instead of
+  fanning out `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` as four
+  subprocesses with four exit-code vocabularies. Pure orchestration over
+  those verbs' own library entry points, driven by a caller-declared
+  descriptor (`checks`/`gates`/`objective` — never a hardcoded check-name
+  set) plus `--candidate KEY=VALUE` placeholder substitution. Exit `0`
+  (valid), `1` (failed to run at all — the outcome an optimizer must never
+  mistake for a bad score), or `3` (ran, `valid: false`) — see
+  `docs/cli/eval.md`.

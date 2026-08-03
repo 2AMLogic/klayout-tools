@@ -14,6 +14,7 @@ from . import (
     cells_cmd,
     draw_cmd,
     drc_cmd,
+    eval_cmd,
     extract_cmd,
     gen_cmd,
     gen_compose_cmd,
@@ -730,6 +731,52 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     report_parser.set_defaults(func=report_cmd.run)
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help=(
+            "score one candidate against a declared gate + objective "
+            "(optimizer loop primitive)"
+        ),
+        description=(
+            "Run the gate/objective composition declared by a descriptor "
+            "JSON file and return one envelope combining validity (a hard "
+            "gate composed from named `klt drc`/`klt lvs`/`klt sim`/`klt "
+            "layout-metrics` checks) with a single scalar objective and its "
+            "declared polarity -- so an optimization loop can compare two "
+            "candidates without fanning out four subprocesses and "
+            "reconciling four exit-code vocabularies itself. Which checks "
+            "gate validity and what the objective is are declared in the "
+            "descriptor, never hardcoded -- see docs/cli/eval.md."
+        ),
+    )
+    eval_parser.add_argument(
+        "descriptor",
+        help=(
+            "klt eval descriptor: a path to a JSON file, '-' to read the "
+            "descriptor from stdin, or an inline JSON object string (same "
+            "three forms as `klt lvs`/`klt sim`'s request argument)"
+        ),
+    )
+    eval_parser.add_argument(
+        "--candidate",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "fill a `{KEY}` placeholder in the descriptor's check arguments "
+            "with VALUE (repeatable) -- e.g. `--candidate "
+            "layout=candidate.gds` lets an optimizer loop swap just the "
+            "candidate file between iterations without rewriting the "
+            "descriptor"
+        ),
+    )
+    eval_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    eval_parser.set_defaults(func=eval_cmd.run)
 
     _add_kb_parser(subparsers)
 
