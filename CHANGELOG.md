@@ -38,11 +38,22 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
-- Since 0.1.0 the CLI has grown from 5 verbs to 18: `layout-metrics`,
+- Since 0.1.0 the CLI has grown from 5 verbs to 19: `layout-metrics`,
   `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
-  `precheck`, `socket-check`, `ring-check`, and `report` were added on
-  `main`. Each is documented in [`docs/cli/`](docs/cli/); the next release
-  will carry them collectively.
+  `precheck`, `socket-check`, `ring-check`, `report`, and `trajectory` were
+  added on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
+  release will carry them collectively.
+- 2026-08-03 — `klt trajectory`: new verb (#388). Renders an append-only
+  JSONL optimization-trajectory log (one record per evaluation: `turn`,
+  `candidate_ref`, `objective` `{name, value, polarity}`, optional
+  `gate_results`/`wall_clock_s`) into a markdown milestone table plus a
+  self-contained objective-vs-turn SVG plot for a block repo's README.
+  Milestones are the turns where the objective improves on the best-prior
+  record by more than a configurable `--threshold`. Operates purely on the
+  JSONL file — no live optimizer required — so a hand-written or
+  human-curated log renders identically. The record schema mirrors the
+  planned `klt eval` envelope's `objective`/`gate_results` shape (#387). See
+  `docs/cli/trajectory.md`.
 - 2026-08-02 — `klt lvs`: new `device.body_unverified` mismatch category
   (`a483ed0`, #281/#285). Warns (`severity: "warning"`, never changes
   `status`) when a MOS body terminal was extracted onto a deck-synthesized

@@ -29,6 +29,7 @@ from . import (
     sim_cmd,
     socket_check_cmd,
     stats_cmd,
+    trajectory_cmd,
 )
 
 
@@ -730,6 +731,52 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     report_parser.set_defaults(func=report_cmd.run)
+
+    trajectory_parser = subparsers.add_parser(
+        "trajectory",
+        help="render an optimization trajectory JSONL log to a milestone table + plot",
+        description=(
+            "Read an append-only JSONL optimization trajectory log (one "
+            "record per evaluation: turn, candidate_ref, objective, "
+            "gate_results, wall_clock_s) and render (a) a markdown milestone "
+            "table -- the turns where the objective improved past a "
+            "threshold -- and (b) a self-contained objective-vs-turn SVG plot "
+            "for a block repo's README. The record schema mirrors the "
+            "`klt eval` envelope's objective/gate_results shape (#387). "
+            "Operates purely on the JSONL file: no live optimizer required, "
+            "so a hand-written or human-curated log renders identically. See "
+            "docs/cli/trajectory.md."
+        ),
+    )
+    trajectory_parser.add_argument(
+        "log", help="path to a JSONL trajectory log (one record per line)"
+    )
+    trajectory_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "objective-unit improvement a record must beat the best-prior "
+            "record by (strictly) to count as a milestone (default: 0.0, so "
+            "any strict improvement is a milestone)"
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--plot",
+        default=None,
+        help=(
+            "also write the objective-vs-turn plot as a standalone SVG file to "
+            "this path (for embedding in a README); omit to only emit it "
+            "inline in the --format json payload"
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    trajectory_parser.set_defaults(func=trajectory_cmd.run)
 
     _add_kb_parser(subparsers)
 

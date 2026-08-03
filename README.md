@@ -92,6 +92,7 @@ klt lvs request.json                     # compare extracted vs reference netlis
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
 klt report result.json                   # render a klt JSON report as markdown summary
+klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone table + plot
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/), one page per verb.
