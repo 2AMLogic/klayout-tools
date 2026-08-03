@@ -3257,6 +3257,47 @@ def test_run_sim_remote_backend_requires_ssh_key_path(tmp_path):
         sim.run_sim(str(request))
 
 
+def test_run_sim_remote_backend_plumbs_ami_manifest_field_to_launcher(
+    tmp_path, monkeypatch
+):
+    # request.remote.ami_manifest (issue #370) must reach
+    # RemoteLauncher(manifest_path=...) unchanged -- the explicit-override
+    # tier of remote_launcher's AMI manifest resolution order.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(
+            remote={
+                **_base_remote_request()["remote"],
+                "ami_manifest": "/opt/klt/my-manifest.json",
+            }
+        ),
+    )
+    _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert (
+        _FakeRemoteLauncher.last_instance.kwargs["manifest_path"]
+        == "/opt/klt/my-manifest.json"
+    )
+
+
+def test_run_sim_remote_backend_omits_ami_manifest_defers_to_launcher_resolution(
+    tmp_path, monkeypatch
+):
+    # No request.remote.ami_manifest -- manifest_path passed through as
+    # None, so RemoteLauncher/load_ami_manifest's own $KLT_AMI_MANIFEST ->
+    # user-scope -> packaged-default fallback chain applies.
+    _write_body(tmp_path)
+    request = _write_request(tmp_path, _base_remote_request())
+    _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert _FakeRemoteLauncher.last_instance.kwargs["manifest_path"] is None
+
+
 def test_run_sim_remote_backend_populates_environment_remote_block(
     tmp_path, monkeypatch
 ):

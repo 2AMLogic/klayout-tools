@@ -9,9 +9,15 @@
 # `idle_guard_install_script()` generates (single source of truth — this
 # script calls that Python function via `python3 -c ...` rather than
 # maintaining a second copy of the guard script), snapshots the instance to
-# a new AMI, and appends/updates the published entry in
-# data/remote-sim-ami-manifest.json (see
-# docs/schemas/remote-sim-ami-manifest.schema.json for that file's shape).
+# a new AMI, and appends/updates the published entry in BOTH
+# data/remote-sim-ami-manifest.json (the repo checkout's copy, `--manifest`
+# overridable) AND `~/.config/klt/remote-sim-ami-manifest.json` (the
+# user-scope copy `src/klayout_tools/remote_launcher.py`'s
+# `USER_MANIFEST_PATH` resolves -- issue #370: a tool-installed `klt` (`uv
+# tool`/pipx/pip) resolves the manifest from its own installed package-data
+# dir, never this checkout's `data/`, so without this second write an
+# operator-built AMI would be invisible to that installed `klt`) -- see
+# docs/schemas/remote-sim-ami-manifest.schema.json for the entry shape.
 #
 # Also bakes `klt` itself (issue #265's SSH/SCP transport requirement): the
 # `remote` backend's corner fan-out invokes `klt sim ... --backend
@@ -67,6 +73,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/data/remote-sim-ami-manifest.json"
+#: Mirrors src/klayout_tools/remote_launcher.py's USER_MANIFEST_PATH -- an
+#: installed (uv tool/pipx/pip) `klt` resolves the AMI manifest from its own
+#: package-data dir, never this repo checkout's `data/`, so this build
+#: additionally writes here (issue #370) so a freshly built AMI is usable
+#: from any `klt` install on this machine immediately, no release required.
+USER_MANIFEST="${HOME}/.config/klt/remote-sim-ami-manifest.json"
 
 PDK=""
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
@@ -92,7 +104,7 @@ log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
 
 usage() {
-  sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -252,20 +264,35 @@ aws ec2 terminate-instances --region "$REGION" --instance-ids "$BUILD_ID" >/dev/
 PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
 
 # ── manifest update (append; resolve_ami() picks the latest built_at for a
-# (pdk, region) pair, so old entries are kept as an audit trail) ───────────
-update_manifest() {  # <ami_id> <region>
-  local ami="$1" region="$2" tmp
+# (pdk, region) pair, so old entries are kept as an audit trail). Writes
+# BOTH $MANIFEST (the repo checkout's copy) and $USER_MANIFEST (the
+# user-scope copy an installed `klt` resolves -- issue #370) so a freshly
+# built AMI is usable from any `klt` install on this machine immediately,
+# no release required. ──────────────────────────────────────────────────
+write_manifest_entry() {  # <manifest-path> <ami_id> <region>
+  local target="$1" ami="$2" region="$3" tmp
+  mkdir -p "$(dirname "$target")"
+  # $USER_MANIFEST may not exist yet on a fresh machine -- $MANIFEST always
+  # does (checked into the repo with an empty "images" array), but seeding
+  # unconditionally keeps this one code path correct for both.
+  [[ -f "$target" ]] || printf '%s' '{"schema_version": 1, "images": []}' > "$target"
   tmp="$(mktemp)"
   jq --arg pdk "$PDK" --arg region "$region" --arg ami "$ami" \
      --arg snapshot "$PDK_SNAPSHOT" --arg ngspice "$NGSPICE_VERSION_HINT" \
      --arg built_at "$BUILT_AT" \
      '.images += [{"pdk": $pdk, "region": $region, "ami_id": $ami, "pdk_snapshot": $snapshot, "ngspice_version": $ngspice, "built_at": $built_at}]' \
-     "$MANIFEST" > "$tmp"
-  mv "$tmp" "$MANIFEST"
+     "$target" > "$tmp"
+  mv "$tmp" "$target"
+}
+
+update_manifest() {  # <ami_id> <region>
+  local ami="$1" region="$2"
+  write_manifest_entry "$MANIFEST" "$ami" "$region"
+  write_manifest_entry "$USER_MANIFEST" "$ami" "$region"
 }
 
 update_manifest "$NEW_AMI" "$REGION"
-log "published ${NEW_AMI} for pdk=${PDK} region=${REGION}; manifest updated at ${MANIFEST}"
+log "published ${NEW_AMI} for pdk=${PDK} region=${REGION}; manifest updated at ${MANIFEST} and ${USER_MANIFEST}"
 
 for target_region in "${COPY_TO_REGIONS[@]}"; do
   log "copying ${NEW_AMI} to ${target_region} ..."

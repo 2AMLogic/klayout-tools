@@ -138,6 +138,19 @@ implements against.
 | `remote.max_hourly_cost_usd` | number | Optional caller-side ceiling on the *estimated* hourly rate (a transparency guardrail, not a spend cap — see the design note's "AWS-native budget boundary vs. tool-side mechanical guardrails"). If the resolved instance type's estimated cost exceeds it, provisioning fails before any billable AWS API call. |
 | `remote.ssh_ready_timeout_s` | number | Overall budget waiting for SSH to become reachable after the instance reaches `running`. Defaults to 240s. |
 | `remote.ssh_timeout_s` | number | Overall SSH-command timeout for the remote `klt sim` invocation itself. Defaults to a conservative fully-serial-worst-case bound (`options.timeout_s * corner_count + 120`) — the provisioned box is right-sized to run every corner concurrently, so real runs finish far faster. |
+| `remote.ami_manifest` | string | Explicit override path for the AMI manifest (`remote_launcher.load_ami_manifest`'s resolution order, step 1 of 4) — use this to point at an operator-built manifest (e.g. one `scripts/aws/build-remote-sim-ami.sh` wrote) without relying on the `$KLT_AMI_MANIFEST` env var or the user-scope/packaged fallbacks. No default: when absent, resolution falls through to `$KLT_AMI_MANIFEST`, then `~/.config/klt/remote-sim-ami-manifest.json`, then the packaged `data/remote-sim-ami-manifest.json`. |
+
+**AMI manifest resolution order** (first hit wins, mirroring [`klt pdk
+find`](pdk.md)'s documented search order): (1) `remote.ami_manifest`
+(explicit — an unfound explicit path is an error, not a silent fallback),
+else (2) `$KLT_AMI_MANIFEST`, else (3) the user-scope
+`~/.config/klt/remote-sim-ami-manifest.json`, else (4) the packaged
+`data/remote-sim-ami-manifest.json`. Steps 2–4 exist so a tool-installed
+`klt` (`uv tool install` / `pipx` / `pip`) can see an operator-built AMI:
+`scripts/aws/build-remote-sim-ami.sh` writes both the repo checkout's
+`data/` copy *and* the step-3 user-scope copy on every successful build, so
+a freshly built AMI is usable from any `klt` install on that machine
+immediately — no release, and no `uv run klt` from a checkout, required.
 
 A `remote` run's response adds an additive `environment.remote` block —
 report schema is otherwise **unchanged** from `local`/`local-parallel`:
@@ -821,7 +834,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
 | `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there (see "Execution backends" and "Remote backend" above). Overridable with the `--backend` CLI flag. |
-| `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
+| `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`, `ami_manifest`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
 | `remote.hosts`           | integer           | Shard the expanded unit list across this many hosts and merge the per-shard reports. Defaults to `1` (today's single-host behaviour, byte-identical). Must be a positive integer. Currently implemented for `local`/`local-parallel` only — pairing `hosts > 1` with `backend: "remote"` is an application error (exit 1). Overridable with the `--hosts` CLI flag, same precedence rule as `backend`/`--backend`. See "Fleet sharding" above. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |

@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import signal
 import subprocess
@@ -66,11 +67,34 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+#: Step 2 of :func:`load_ami_manifest`'s 4-step resolution order -- an
+#: explicit manifest path, consulted when no ``manifest_path`` argument
+#: (``request.remote.ami_manifest``, plumbed through by ``sim.py``'s
+#: ``_run_remote``) is given. Mirrors ``pdk.py``'s ``$PDK_ROOT`` convention
+#: (issue #370).
+AMI_MANIFEST_ENV_VAR = "KLT_AMI_MANIFEST"
+
+#: Step 3 of :func:`load_ami_manifest`'s resolution order -- where
+#: ``scripts/aws/build-remote-sim-ami.sh`` additionally writes an
+#: operator-built AMI's manifest (alongside the repo checkout's own
+#: ``data/`` copy) so it is usable from *any* ``klt`` install on that
+#: machine immediately, no release required (issue #370 -- a tool-installed
+#: ``klt`` resolves :data:`DEFAULT_MANIFEST_PATH` inside its own installed
+#: package-data dir, never an operator's checkout).
+USER_MANIFEST_PATH: Path = Path(
+    "~/.config/klt/remote-sim-ami-manifest.json"
+).expanduser()
+
+#: Step 4 (final fallback) of :func:`load_ami_manifest`'s resolution order:
 #: <repo root>/data/remote-sim-ami-manifest.json -- this file lives at
 #: <repo root>/src/klayout_tools/remote_launcher.py. Mirrors kb.py's
 #: DEFAULT_KB_ROOT convention: walk up from this module's own location so the
 #: module works the same from an installed wheel's source checkout or a repo
 #: clone; every function also accepts an explicit path override for tests.
+#: For a tool-installed ``klt`` (uv tool / pipx / pip) this resolves inside
+#: the installed package's own data dir -- the historically sole location,
+#: now the last-resort fallback behind :data:`USER_MANIFEST_PATH` and
+#: :data:`AMI_MANIFEST_ENV_VAR`.
 DEFAULT_MANIFEST_PATH: Path = (
     Path(__file__).resolve().parent.parent.parent
     / "data"
@@ -319,30 +343,93 @@ def require_cost_config(
 # --------------------------------------------------------------------------- #
 
 
+def _candidate_manifest_paths(
+    manifest_path: str | Path | None,
+) -> list[tuple[Path, str]]:
+    """Build the ordered ``(path, resolved_via)`` search candidates for the
+    AMI manifest, mirroring ``pdk.py``'s ``_candidate_roots`` "first hit
+    wins" shape (issue #370).
+
+    Resolution order:
+
+    1. ``manifest_path`` -- an explicit override (``request.remote.ami_manifest``,
+       plumbed through by ``sim.py``'s ``_run_remote``). Disables the rest of
+       the search, same as ``pdk.find_pdk``'s ``root=`` parameter: an
+       explicit path that does not exist is an error, not a silent fallback
+       (the module's own "no silent default" discipline -- a wrong AMI
+       silently used is worse than a loud failure).
+    2. :data:`AMI_MANIFEST_ENV_VAR` (``$KLT_AMI_MANIFEST``), when (1) is not
+       given.
+    3. :data:`USER_MANIFEST_PATH` -- where
+       ``scripts/aws/build-remote-sim-ami.sh`` additionally writes an
+       operator-built AMI's manifest, usable by any ``klt`` install on the
+       machine immediately, no release required.
+    4. :data:`DEFAULT_MANIFEST_PATH` -- the packaged default (historically
+       the sole location; a tool-installed ``klt`` resolves this inside its
+       own installed package-data dir, never an operator's checkout -- see
+       (3) for the fix).
+    """
+    if manifest_path is not None:
+        return [(Path(manifest_path), "explicit ami_manifest override")]
+
+    candidates: list[tuple[Path, str]] = []
+    env_value = os.environ.get(AMI_MANIFEST_ENV_VAR)
+    if env_value:
+        candidates.append(
+            (
+                Path(env_value).expanduser(),
+                f"${AMI_MANIFEST_ENV_VAR} environment variable",
+            )
+        )
+    candidates.append((USER_MANIFEST_PATH, f"user config: {USER_MANIFEST_PATH}"))
+    candidates.append(
+        (DEFAULT_MANIFEST_PATH, f"packaged default: {DEFAULT_MANIFEST_PATH}")
+    )
+    return candidates
+
+
+def _manifest_not_found_message(candidates: list[tuple[Path, str]]) -> str:
+    """Build the actionable "AMI manifest not found" message -- mirrors
+    ``pdk._not_found_message``'s "tried: X (via), Y (via)" shape (issue
+    #370) so every location searched is debuggable, not just the one this
+    module happened to check first."""
+    tried = ", ".join(f"{via} ({path})" for path, via in candidates)
+    return (
+        f"AMI manifest not found. Searched, in order: {tried}. Run "
+        "scripts/aws/build-remote-sim-ami.sh to build and publish one, or "
+        "point request.remote.ami_manifest (or $KLT_AMI_MANIFEST) at an "
+        "existing manifest."
+    )
+
+
 def load_ami_manifest(manifest_path: str | Path | None = None) -> dict[str, Any]:
     """Load the versioned AMI manifest (see ``scripts/aws/build-remote-sim-ami.sh``,
-    the build/refresh pipeline that produces it).
+    the build/refresh pipeline that produces it), resolving its path via
+    :func:`_candidate_manifest_paths`'s 4-step "first hit wins" order.
 
-    Raises :class:`RemoteLaunchError` if the manifest is missing/unreadable/
-    malformed -- resolving an AMI to run real corners against is exactly the
-    kind of cost-relevant fact the design note's "no silent default"
-    discipline applies to (a wrong or stale AMI silently used is worse than a
-    loud failure).
+    Raises :class:`RemoteLaunchError` if no candidate manifest exists, or the
+    first one found is unreadable/malformed -- resolving an AMI to run real
+    corners against is exactly the kind of cost-relevant fact the design
+    note's "no silent default" discipline applies to (a wrong or stale AMI
+    silently used is worse than a loud failure).
     """
-    path = Path(manifest_path) if manifest_path is not None else DEFAULT_MANIFEST_PATH
-    if not path.is_file():
-        raise RemoteLaunchError(
-            f"AMI manifest not found: {path} -- run "
-            "scripts/aws/build-remote-sim-ami.sh to build and publish one"
-        )
+    candidates = _candidate_manifest_paths(manifest_path)
+    path, resolved_via = next(
+        ((p, via) for p, via in candidates if p.is_file()), (None, None)
+    )
+    if path is None:
+        raise RemoteLaunchError(_manifest_not_found_message(candidates))
     try:
         with open(path, encoding="utf-8") as handle:
             manifest = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise RemoteLaunchError(f"AMI manifest is not valid JSON: {exc}") from exc
+        raise RemoteLaunchError(
+            f"AMI manifest at {path} ({resolved_via}) is not valid JSON: {exc}"
+        ) from exc
     if not isinstance(manifest, dict) or "images" not in manifest:
         raise RemoteLaunchError(
-            f"AMI manifest at {path} is missing a top-level 'images' array"
+            f"AMI manifest at {path} ({resolved_via}) is missing a top-level "
+            "'images' array"
         )
     return manifest
 
@@ -656,6 +743,11 @@ class RemoteLauncher:
         security_group_id: str | None = None,
         key_name: str | None = None,
         subnet_id: str | None = None,
+        # AMI manifest override (typically request.remote.ami_manifest,
+        # plumbed through by sim.py's _run_remote). None defers to
+        # load_ami_manifest's/resolve_ami's own 4-step resolution order
+        # ($KLT_AMI_MANIFEST -> user-scope -> packaged default) -- see
+        # _candidate_manifest_paths (issue #370).
         manifest_path: str | Path | None = None,
         aws_runner: AwsRunner | None = None,
         retry_on_demand_on_spot_failure: bool = True,

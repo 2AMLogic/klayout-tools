@@ -1683,6 +1683,15 @@ def _run_remote(
         security_group_id=remote_spec.get("security_group_id"),
         key_name=remote_spec.get("key_name"),
         subnet_id=remote_spec.get("subnet_id"),
+        # request.remote.ami_manifest is the explicit-override tier of
+        # remote_launcher's 4-step AMI manifest resolution order (issue
+        # #370); when absent (None), RemoteLauncher/load_ami_manifest fall
+        # through to $KLT_AMI_MANIFEST, then the user-scope manifest
+        # (~/.config/klt/remote-sim-ami-manifest.json -- written by
+        # scripts/aws/build-remote-sim-ami.sh alongside its repo-checkout
+        # copy), then the packaged default -- see
+        # remote_launcher._candidate_manifest_paths.
+        manifest_path=remote_spec.get("ami_manifest"),
     )
 
     started = time.monotonic()
