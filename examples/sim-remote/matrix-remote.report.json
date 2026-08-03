@@ -85,7 +85,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 138.4,
+      "runtime_s": 256.9,
       "measurements": [
         {
           "name": "t_rise_400",
@@ -126,7 +126,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 140.2,
+      "runtime_s": 260.0,
       "measurements": [
         {
           "name": "t_rise_400",
@@ -167,7 +167,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 136.9,
+      "runtime_s": 254.2,
       "measurements": [
         {
           "name": "t_rise_400",
@@ -208,7 +208,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 139.1,
+      "runtime_s": 258.4,
       "measurements": [
         {
           "name": "t_rise_400",
@@ -249,7 +249,7 @@
       },
       "temperature_c": 27,
       "status": "pass",
-      "runtime_s": 138.8,
+      "runtime_s": 257.8,
       "measurements": [
         {
           "name": "t_rise_400",
