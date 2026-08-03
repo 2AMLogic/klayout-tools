@@ -2340,6 +2340,91 @@ The following cells had property errors:
  inv
 """
 
+# Verbatim `comp.out` of the same from-source netgen 1.5.323 build, run over
+# two one-subcircuit SPICE files whose only difference is a *string-valued*
+# instance parameter (`model=fast` vs `model=slow`):
+#
+#     netgen -batch lvs "c.spice top" "d.spice top" "" out2.log
+#
+# netgen compares a non-numeric property exactly, so it emits the
+# `(exact match req'd)` qualifier instead of the `(delta=..., cutoff=...)`
+# form of `_NETGEN_PROPERTY_LOG`. Regression fixture for the false-`"match"`
+# defect found in review of issue #343: the property line failed to parse,
+# the property-error block yielded zero entries, and the clean-unique-match
+# early return reported `status: "match"` with an empty `mismatches[]` even
+# though netgen itself printed "Property errors were found."
+# (Trailing whitespace on netgen's column-padded table rows is stripped, as
+# in the other fixtures here; the property lines are verbatim.)
+_NETGEN_STRING_PROPERTY_LOG = """
+Subcircuit summary:
+Circuit 1: sub                             |Circuit 2: sub
+-------------------------------------------|-------------------------------------------
+r (1)                                      |r (1)
+Number of devices: 1                       |Number of devices: 1
+Number of nets: 2                          |Number of nets: 2
+---------------------------------------------------------------------------------------
+Resolving symmetries by property value.
+Resolving symmetries by pin name.
+Netlists match uniquely.
+
+Subcircuit pins:
+Circuit 1: sub                             |Circuit 2: sub
+-------------------------------------------|-------------------------------------------
+a                                          |a
+b                                          |b
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes sub and sub are equivalent.
+
+Subcircuit summary:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+sub (1)                                    |sub (1)
+Number of devices: 1                       |Number of devices: 1
+Number of nets: 2                          |Number of nets: 2
+---------------------------------------------------------------------------------------
+Netlists match uniquely with property errors.
+sub:1 vs. sub:1:
+ model circuit1: "fast"   circuit2: "slow"   (exact match req'd)
+
+Subcircuit pins:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+a                                          |a
+b                                          |b
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes top and top are equivalent.
+
+Final result: Circuits match uniquely.
+Property errors were found.
+
+The following cells had property errors:
+ top
+"""
+
+# Same declared property error, but with the per-parameter evidence in a
+# shape this module does not structure (a hypothetical future/unknown netgen
+# qualifier wording). netgen's own "Property errors were found." marker must
+# still force `status: "mismatch"` -- the downgrade may never depend on the
+# per-line regex succeeding.
+_NETGEN_UNSTRUCTURED_PROPERTY_LOG = """
+Subcircuit summary:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+sub (1)                                    |sub (1)
+Number of devices: 1                       |Number of devices: 1
+Number of nets: 2                          |Number of nets: 2
+---------------------------------------------------------------------------------------
+Netlists match uniquely with property errors.
+
+Final result: Circuits match uniquely.
+Property errors were found.
+
+The following cells had property errors:
+ top
+"""
+
 _NETGEN_TOPOLOGY_LOG = """
 Subcircuit summary:
 Circuit 1: inv                             |Circuit 2: inv
@@ -2523,6 +2608,65 @@ def test_netgen_engine_property_mismatch_reports_device_property(tmp_path, monke
         "class": "pmos",
     }
     assert mismatch["details"] is None
+
+
+def test_netgen_engine_string_property_error_is_not_a_false_match(
+    tmp_path, monkeypatch
+):
+    """Regression (issue #343 review): netgen compares a *string-valued*
+    property exactly and reports `(exact match req'd)` instead of
+    `(delta=..., cutoff=...)`. That line previously failed to parse, the
+    property block yielded no entries, and the clean-unique-match early
+    return produced `status: "match"` with an empty `mismatches[]` -- while
+    netgen's own report said "Property errors were found."
+
+    The verdict must be `"mismatch"` with a non-empty `mismatches[]`, and the
+    string-valued difference must still be structured into a `device.property`
+    entry rather than only tripping the marker guard."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_STRING_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["mismatches"], "netgen declared property errors -- must not be empty"
+    assert report["mismatch_count"] == 1
+    assert report["category_counts"] == {"device.property": 1}
+    (mismatch,) = report["mismatches"]
+    assert mismatch["category"] == "device.property"
+    assert mismatch["severity"] == "error"
+    assert mismatch["property"] == {
+        "name": "model",
+        "layout": '"fast"',
+        "reference": '"slow"',
+    }
+    assert mismatch["device"] == {
+        "layout": "sub:1",
+        "reference": "sub:1",
+        "class": "sub",
+    }
+    assert "exact match req'd" in mismatch["description"]
+
+
+def test_netgen_engine_declared_property_errors_without_parsable_detail(
+    tmp_path, monkeypatch
+):
+    """The marker guard is independent of the per-line regex: when netgen
+    declares "Property errors were found." but no per-parameter line can be
+    structured at all, the verdict is still `"mismatch"` and a best-effort
+    entry carries netgen's own text in `details.raw` -- never a clean match
+    with an empty `mismatches[]`."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_UNSTRUCTURED_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 1}
+    (mismatch,) = report["mismatches"]
+    assert mismatch["category"] == "device.property"
+    assert "property errors" in mismatch["description"]
+    assert "property errors" in mismatch["details"]["raw"]
 
 
 def test_netgen_engine_topology_mismatch_buckets_net_details(tmp_path, monkeypatch):

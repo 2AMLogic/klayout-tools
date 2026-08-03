@@ -1774,9 +1774,45 @@ _NETGEN_ENGINE_VERSION_RE = re.compile(r"Netgen\s+([\w.]+)")
 _NETGEN_PROPERTY_BLOCK_RE = re.compile(
     r"^(\S+):(\d+) vs\. (\S+):(\d+):\n((?: .+\n)+)", re.MULTILINE
 )
+
+#: One parameter-difference line inside a :data:`_NETGEN_PROPERTY_BLOCK_RE`
+#: body. netgen emits (at least) two trailing-qualifier shapes, both verified
+#: against a from-source netgen 1.5.323 build::
+#:
+#:      W circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=1%)
+#:      model circuit1: "fast"   circuit2: "slow"   (exact match req'd)
+#:
+#: -- the numeric form for a tolerance-compared property, and the "exact
+#: match req'd" form for a string-valued one (``PropertyErrorCheck``'s
+#: non-numeric branch). The qualifier is therefore captured as free text and
+#: interpreted afterwards by :func:`_describe_netgen_property_delta`, rather
+#: than hard-requiring the ``delta=…, cutoff=…`` shape: a line whose
+#: qualifier wording changes across netgen versions must still parse, because
+#: a property line silently failing to parse is exactly how a real property
+#: error turned into a false ``"match"`` verdict (issue #343 review).
 _NETGEN_PROPERTY_LINE_RE = re.compile(
-    r"^\s*(\S+)\s+circuit1:\s*(\S+)\s+circuit2:\s*(\S+)\s+"
-    r"\(delta=([^,]+),\s*cutoff=([^)]+)\)\s*$"
+    r"^\s*(\S+)\s+circuit1:\s*(.+?)\s+circuit2:\s*(.+?)"
+    r"(?:\s*\(([^)]*)\))?\s*$"
+)
+
+#: The ``delta=…, cutoff=…`` qualifier shape, when netgen used it.
+_NETGEN_PROPERTY_DELTA_RE = re.compile(
+    r"^delta=([^,]+),\s*cutoff=(.+)$",
+)
+
+#: netgen's own declarations that a matched netlist nonetheless carries
+#: parameter (property) errors -- the summary line printed with the
+#: per-circuit verdict, and the trailing marker printed after ``Final
+#: result:``. These are the *authoritative* signal that property errors
+#: exist: :func:`_parse_netgen_report` keys the match -> mismatch downgrade
+#: on them directly, never on whether :data:`_NETGEN_PROPERTY_LINE_RE`
+#: happened to parse the supporting evidence (issue #343 review -- a
+#: string-valued property difference parsed to nothing and the report was
+#: reported as a clean ``"match"``).
+_NETGEN_PROPERTY_ERROR_MARKERS: tuple[str, ...] = (
+    "Property errors were found.",
+    "match uniquely with property errors",
+    "had property errors",
 )
 
 #: Side-by-side report section headers netgen prints ahead of a topology
@@ -1967,6 +2003,14 @@ def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
       unique but with a pin-count/order disagreement; treated as a mismatch
       (never let a pin disagreement read as a clean match).
 
+    The property-error downgrade is keyed on netgen's own declaration
+    (:data:`_NETGEN_PROPERTY_ERROR_MARKERS`), not on whether the supporting
+    per-parameter lines parsed: when netgen says property errors exist but no
+    structured entry could be recovered, a generic ``device.property`` entry
+    carrying netgen's raw text in ``details.raw`` is emitted and the verdict is
+    still ``"mismatch"``. A recognised verdict line with unparseable *evidence*
+    must never read as a clean match either (issue #343 review).
+
     Raises :class:`LvsError` when no ``"Final result:"`` section is found at
     all, or its text matches none of the above **and** no other structured
     evidence (a parsed parameter-difference block) was found either -- this
@@ -1986,6 +2030,25 @@ def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
     first_line = tail.splitlines()[0] if tail else ""
 
     mismatches = _parse_netgen_property_errors(log_text)
+
+    # netgen's own declaration that property errors exist is the authoritative
+    # signal for the match -> mismatch downgrade -- NOT whether the supporting
+    # per-parameter lines happened to parse. Keying the downgrade on the parse
+    # result is how a real string-valued property difference
+    # (`(exact match req'd)`, which the old line regex could not match) became
+    # a clean `"match"` with an empty `mismatches[]` (issue #343 review).
+    if _declares_netgen_property_errors(log_text) and not mismatches:
+        mismatches.append(
+            _mismatch(
+                CATEGORY_DEVICE_PROPERTY,
+                "error",
+                "netgen reported property errors on one or more matched "
+                "devices, but the per-parameter detail lines could not be "
+                "parsed -- see the 'details.raw' field for netgen's own text",
+                "both",
+                details={"raw": _netgen_property_error_context(log_text)},
+            )
+        )
 
     is_clean_unique_match = tail.startswith("Circuits match uniquely.") and (
         "port errors" not in tail
@@ -2043,32 +2106,109 @@ def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
     return "mismatch", mismatches
 
 
+def _declares_netgen_property_errors(log_text: str) -> bool:
+    """Whether netgen itself declared parameter (property) errors anywhere in
+    the report -- see :data:`_NETGEN_PROPERTY_ERROR_MARKERS`."""
+    return any(marker in log_text for marker in _NETGEN_PROPERTY_ERROR_MARKERS)
+
+
+def _netgen_property_error_context(log_text: str) -> str:
+    """Best-effort raw text for a property error netgen declared but whose
+    per-parameter lines this module could not structure.
+
+    Returns the ``"...match uniquely with property errors"`` summary line and
+    the indented block that follows it when present (netgen's own evidence),
+    otherwise the tail of the report -- so ``details.raw`` always carries
+    something a human/agent can act on rather than an empty string.
+    """
+    lines = log_text.splitlines()
+    for line_no, line in enumerate(lines):
+        if "match uniquely with property errors" not in line:
+            continue
+        block = [line.strip()]
+        for following in lines[line_no + 1 :]:
+            if not following.strip():
+                break
+            block.append(following.rstrip())
+        return "\n".join(block)
+    return log_text.strip()[-2000:]
+
+
+def _describe_netgen_property_delta(qualifier: str | None) -> str:
+    """Render netgen's trailing per-property qualifier for a ``description``.
+
+    Handles both observed shapes -- ``delta=66.7%, cutoff=1%`` (numeric
+    tolerance compare) and ``exact match req'd`` (string-valued property) --
+    and passes any other wording through verbatim rather than dropping the
+    line, so an unfamiliar qualifier still yields a structured entry.
+    """
+    if not qualifier:
+        return "netgen reported a property difference"
+    delta_match = _NETGEN_PROPERTY_DELTA_RE.match(qualifier.strip())
+    if delta_match is not None:
+        delta, cutoff = delta_match.groups()
+        return f"delta={delta}, cutoff={cutoff}"
+    return qualifier.strip()
+
+
 def _parse_netgen_property_errors(log_text: str) -> list[dict[str, Any]]:
     """Parse netgen's parameter-difference block(s) into ``device.property``
     ``mismatches[]`` entries -- see :data:`_NETGEN_PROPERTY_BLOCK_RE` for the
-    exact text shape this matches."""
+    exact text shape this matches.
+
+    A body line that does not match :data:`_NETGEN_PROPERTY_LINE_RE` at all is
+    **not** dropped: it becomes a best-effort entry carrying the raw line in
+    ``details.raw``. Silently discarding evidence netgen printed is what
+    allowed a declared property error to surface as a clean ``"match"``
+    (issue #343 review); the caller's marker-based guard is the backstop, and
+    this is the per-line half of the same rule.
+    """
     entries: list[dict[str, Any]] = []
     for block_match in _NETGEN_PROPERTY_BLOCK_RE.finditer(log_text):
         class1, index1, class2, index2, body = block_match.groups()
         device_layout = f"{class1}:{index1}"
         device_reference = f"{class2}:{index2}"
+
+        def _device(
+            layout: str = device_layout,
+            reference: str = device_reference,
+            device_class: str = class1,
+        ) -> dict[str, Any]:
+            # A fresh dict per entry: `mismatches[]` entries must not share
+            # mutable sub-objects across the list.
+            return {
+                "layout": layout,
+                "reference": reference,
+                "class": device_class,
+            }
+
         for line in body.splitlines():
+            if not line.strip():
+                continue
             line_match = _NETGEN_PROPERTY_LINE_RE.match(line)
             if line_match is None:
+                entries.append(
+                    _mismatch(
+                        CATEGORY_DEVICE_PROPERTY,
+                        "error",
+                        "netgen reported a matched-device property difference "
+                        "in a form this parser does not structure -- see the "
+                        "'details.raw' field for netgen's own text",
+                        "both",
+                        device=_device(),
+                        details={"raw": line.strip()},
+                    )
+                )
                 continue
-            name, layout_value, reference_value, delta, cutoff = line_match.groups()
+            name, layout_value, reference_value, qualifier = line_match.groups()
             entries.append(
                 _mismatch(
                     CATEGORY_DEVICE_PROPERTY,
                     "error",
                     f"netgen: matched device parameter '{name}' differs "
-                    f"(delta={delta}, cutoff={cutoff})",
+                    f"({_describe_netgen_property_delta(qualifier)})",
                     "both",
-                    device={
-                        "layout": device_layout,
-                        "reference": device_reference,
-                        "class": class1,
-                    },
+                    device=_device(),
                     property_={
                         "name": name,
                         "layout": layout_value,
