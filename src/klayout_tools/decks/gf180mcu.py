@@ -60,8 +60,9 @@ first increment of well/substrate-tap coverage (Nwell) and one bipolar
 (:class:`~klayout_tools.decks.DrcRule`) for a second PDK. Coverage is
 expected to grow incrementally in follow-on issues (e.g. Pplus/Nplus
 implant-specific rules, LVPWELL/DNWELL, the remaining BJT rules that key off
-DNWELL/LVPWELL, 5V/6V variants, DFM guidelines, and ``MIMTM.2``'s
-sized/derived-layer need — see its own note below).
+DNWELL/LVPWELL, 5V/6V variants, and DFM guidelines). ``MIMTM.2``'s
+sized/derived-layer need (see its own note below) is closed as of #345 via
+:class:`~klayout_tools.decks.DerivedLayer`.
 
 ``klt extract``'s MiM-capacitor device recognition (``EXTRACTION_DECK.capacitors``
 below, issue #225) is transcribed from a *different*, LVS-specific source
@@ -136,31 +137,38 @@ are always the real, unmodified DRM values:
   "virtual bottom plate" (per the DRM's own note: ``FuseTop`` sized/oversized
   by 1.06um, intersected with ``Metal4``) versus nearby bottom-plate-or-
   routing ``Metal4``; approximated as a general ``Metal4``-to-``Metal4``
-  spacing check across the whole drawn layer, since isolating the virtual
-  bottom plate needs a sized/derived-layer primitive our engine does not
-  have (see the ``MIMTM.2`` note below). This means ordinary ``Metal4``
-  routing traces spaced between the deck's generic metal-spacing range and
-  1.2um apart -- nothing to do with a MiM capacitor -- will be flagged even
-  though they violate no real DRM rule. Threshold value unmodified.
+  spacing check across the whole drawn layer rather than the virtual bottom
+  plate. Unlike ``MIMTM.2`` below, this rule has *not* been rewritten to use
+  :class:`~klayout_tools.decks.DerivedLayer` (added for ``MIMTM.2`` in #345)
+  -- that primitive derives a checked *region*, and ``space_check`` is a
+  single-region check, so scoping it would still over-flag any ordinary
+  ``Metal4`` shape spaced near a genuine virtual bottom plate, just from a
+  smaller set of shapes; left as today's more conservative over-approximation
+  rather than half-fixed. This means ordinary ``Metal4`` routing traces
+  spaced between the deck's generic metal-spacing range and 1.2um apart --
+  nothing to do with a MiM capacitor -- will be flagged even though they
+  violate no real DRM rule. Threshold value unmodified.
 
 ``MIMTM.2`` ("min. MiM bottom-plate overlap of ``Via4``", 0.4um) is
-**deliberately not transcribed** in this deck. Like ``MIMTM.1`` above, it is
-keyed off the same "virtual bottom plate" derived layer (``FuseTop`` sized
-by 1.06um AND ``Metal4`` intersecting ``FuseTop``) -- but here an *unscoped*
-approximation would be actively wrong, not merely conservative: ordinary
+transcribed below as ``mim.enclosing.via4.1`` (issue #345), scoped to the
+same "virtual bottom plate" derived layer ``MIMTM.1``/``mim.space.1``
+already cite (``FuseTop`` sized by 1.06um, restricted to wherever ``Metal4``
+already comes near it) via :class:`~klayout_tools.decks.DerivedLayer`
+(``klayout_tools/decks/__init__.py``). An *unscoped* approximation of this
+rule (checking raw ``Metal4`` enclosure of every ``Via4``) would have been
+actively wrong, not merely conservative like ``mim.space.1``'s: ordinary
 ``Metal4``-to-``Metal5`` routing vias use a much smaller enclosure than a
 MiM cap's virtual bottom plate requires, so a blanket "``Metal4`` must
 enclose every ``Via4`` by 0.4um" check would flag legitimate routing vias
 throughout *any* layout using ``Metal4``/``Via4``/``Metal5`` at all, not
-just genuine MiM structures -- unlike ``mim.space.1``'s over-flagging
-(spurious, but at least confined to the already-narrow ``Metal4`` layer),
-this one would make ordinary interconnect unusable. Implementing it
-correctly needs a sized/derived-layer check primitive
-:class:`~klayout_tools.decks.DrcRule` (``klayout_tools/decks/__init__.py``)
-does not support today (only ``width``/``space``/``notch``/``separation``/
-``enclosing``/``enclosed``/``overlap``, all single- or two-layer, none
-derived/sized) -- tracked as a follow-on issue naming that missing
-primitive as the blocker, per #188's own acceptance criteria.
+just genuine MiM structures -- that is exactly the false-positive risk
+``DerivedLayer`` exists to avoid: the checked region is only the part of
+``Metal4`` that already overlaps a ``FuseTop`` shape somewhere, oversized by
+the DRM's own 1.06um margin, so ordinary routing with no MiM cap anywhere
+nearby has an empty derived region and never trips this rule (see
+``tests/test_drc.py``'s
+``test_run_drc_gf180mcu_mim_enclosing_via4_ordinary_routing_clean`` negative
+control).
 
 The DRM's "10.4 MIM Capacitor" section defines two mutually-exclusive
 process options (a PDK is wired for one or the other, never both): Option A
@@ -219,6 +227,7 @@ from __future__ import annotations
 from . import (
     BipolarDevice,
     CapacitorDevice,
+    DerivedLayer,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -429,6 +438,31 @@ DECK: list[DrcRule] = [
         threshold_dbu=600,  # 0.6 um
         # DRM 10.4.2 MIM Option B, rule "MIMTM.3": "Minimum MiM bottom plate
         # overlap of Top plate" -> 0.6um.
+    ),
+    DrcRule(
+        id="mim.enclosing.via4.1",
+        description=(
+            "minimum MiM virtual bottom plate overlap of via4 (fusetop-sized "
+            "metal4, scoped to genuine MiM structures)"
+        ),
+        layer=(46, 0),  # Metal4 -- reporting identity, matches the two rules above
+        other_layer=(41, 0),  # Via4
+        check="enclosing",
+        threshold_dbu=400,  # 0.4 um
+        derived_layer=DerivedLayer(
+            base=(75, 0),  # FuseTop, sized (oversized) below
+            sized_by_um=1.06,
+            intersect_with=(46, 0),  # Metal4
+        ),
+        # DRM 10.4.2 MIM Option B, rule "MIMTM.2": "Minimum MiM bottom plate
+        # overlap of Via4" -> 0.4um, per the DRM's own note scoped to the
+        # "virtual bottom plate" (FuseTop sized by 1.06um AND Metal4
+        # restricted to wherever it already overlaps FuseTop) rather than raw
+        # Metal4 -- see DerivedLayer's docstring and the module docstring's
+        # own MIMTM.2 note (issue #345) for why an unscoped check here would
+        # be actively wrong (it would flag ordinary Metal4/Via4/Metal5
+        # routing throughout any layout, ordinary interconnect this deck's
+        # `metals`/`vias` stack draws everywhere), not merely conservative.
     ),
     DrcRule(
         id="nwell.space.1",

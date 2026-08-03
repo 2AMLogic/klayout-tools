@@ -18,6 +18,57 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class DerivedLayer:
+    """A "virtual" derived layer computed from two drawn layers, for a
+    :class:`DrcRule` whose official DRM scope is a sized/boolean layer
+    expression rather than a single drawn ``(layer, datatype)`` (issue #345).
+
+    Some DRM rules are defined against a derived geometry rather than a
+    literal drawn layer -- e.g. gf180mcu's ``MIMTM.2`` ("min. MiM bottom-plate
+    overlap of ``Via4``") scopes to the MiM stack's "virtual bottom plate":
+    the purpose-drawn top-plate layer (``FuseTop``) oversized by a fixed
+    margin, restricted to wherever the bottom-plate conductor (``Metal4``)
+    already comes near it. Checking this rule against raw ``Metal4`` (the way
+    ``mim.space.1`` approximates ``MIMTM.1``) would be actively wrong, not
+    merely conservative: ordinary ``Metal4``-``Via4``-``Metal5`` routing
+    anywhere in the layout would falsely trip it, since an unscoped
+    "``Metal4`` must enclose every ``Via4`` by the MiM margin" check has
+    nothing to do with routing vias at all.
+
+    The derived region is
+    ``intersect_with_region.interacting(base_region) & base_region.sized(sized_by_um)``
+    -- i.e. only shapes of ``intersect_with`` that already touch the *unsized*
+    ``base`` region somewhere, clipped to ``base``'s oversized outline. This
+    mirrors :class:`CapacitorDevice`'s own ``bottom_plate_oversize_um``
+    "virtual bottom plate" derivation in ``extract.py`` (issue #314) --
+    the DRC-deck analogue of that same official two-step PDK derivation,
+    reused here as a general escape hatch for any future rule (in this or
+    another deck) whose official scope needs a sized/derived layer that the
+    plain single-/two-layer :class:`DrcRule` check primitives can't express
+    on their own.
+
+    ``base`` is sized (oversized) by ``sized_by_um`` micrometres (a real
+    physical distance, rescaled against the *layout's own* ``dbu`` at run
+    time -- unlike ``DrcRule.threshold_dbu``, which is expressed in the
+    deck's nominal dbu and rescaled by :func:`~klayout_tools.drc.run_drc`'s
+    ``dbu_scale`` instead). ``intersect_with`` is the second drawn layer
+    restricted against it. Both fields are independent of
+    :attr:`DrcRule.layer`, which continues to serve only as the rule's
+    reporting identity (the layer name shown in ``violations[].layer`` and
+    tracked in ``coverage.deck_layers``) -- typically set to whichever of the
+    two derived-layer inputs best matches the sibling non-derived rules that
+    check the same physical structure (e.g. gf180mcu's ``mim.space.1``/
+    ``mim.enclosing.fusetop.1`` both report ``"Metal4"``, so
+    ``mim.enclosing.via4.1``'s ``DrcRule.layer`` does too, even though its
+    ``base`` is ``FuseTop``).
+    """
+
+    base: tuple[int, int]
+    sized_by_um: float
+    intersect_with: tuple[int, int]
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
@@ -40,6 +91,17 @@ class DrcRule:
     "``\"enclosing\"``/``\"enclosed\"`` also catch zero-overlap escapes"
     section and ``drc.py``'s ``_run_check`` (#318).
 
+    ``derived_layer``, when set (issue #345), replaces the *region actually
+    checked* on the ``layer``/enclosing side of the rule with a computed
+    :class:`DerivedLayer` (a sized/boolean combination of two drawn layers)
+    instead of ``layer``'s own raw drawn shapes -- see :class:`DerivedLayer`
+    for the derivation and why this exists. ``layer`` remains required and is
+    still used for reporting (``violations[].layer``, ``coverage``); it is
+    independent of ``derived_layer.base``/``intersect_with``, which name the
+    two real drawn layers actually read to compute the checked region.
+    ``None`` (the default) means ``layer``'s own raw shapes are checked
+    directly, exactly as before this field existed.
+
     ``threshold_dbu`` is **not** used directly against a layout's shapes:
     ``run_drc()`` scales it by the ratio of the deck's ``NOMINAL_DBU_UM`` to
     the layout's actual ``dbu`` before passing it to the ``Region.*_check()``
@@ -57,6 +119,7 @@ class DrcRule:
     check: str
     threshold_dbu: int
     other_layer: tuple[int, int] | None = None
+    derived_layer: DerivedLayer | None = None
 
 
 class UnknownDeckError(Exception):
