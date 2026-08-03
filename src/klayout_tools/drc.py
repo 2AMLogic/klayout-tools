@@ -168,6 +168,13 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         deck_layer_tuples.add(rule.layer)
         if rule.other_layer is not None:
             deck_layer_tuples.add(rule.other_layer)
+        if rule.derived_layer is not None:
+            # `rule.layer` is only the derived rule's *reporting* identity
+            # (see DerivedLayer's docstring) -- the two layers actually read
+            # to compute the checked region are these, independent of
+            # whether either happens to equal `rule.layer`.
+            deck_layer_tuples.add(rule.derived_layer.base)
+            deck_layer_tuples.add(rule.derived_layer.intersect_with)
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
@@ -181,12 +188,34 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     rules_skipped: list[str] = []
 
     for rule in deck:
-        layer_index = layout.find_layer(*rule.layer)
-        if layer_index is None:
-            # rule's layer is absent from this stream -> no violations, but
-            # record it so `coverage.rules_skipped` can surface the skip.
-            rules_skipped.append(rule.id)
-            continue
+        # For a `derived_layer` rule (#345), the region actually checked is
+        # computed from two *different* drawn layers (`derived_layer.base`/
+        # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
+        # `DerivedLayer`'s docstring. `rule.layer` itself is resolved only for
+        # `coverage`/`layer_label` reporting below, never used to build the
+        # checked region in this branch.
+        base_index: int | None = None
+        intersect_index: int | None = None
+        layer_index: int | None = None
+
+        if rule.derived_layer is not None:
+            base_index = layout.find_layer(*rule.derived_layer.base)
+            intersect_index = layout.find_layer(*rule.derived_layer.intersect_with)
+            if base_index is None or intersect_index is None:
+                # Either input layer of the derived region is absent from
+                # this stream -> no violations possible, skip like any other
+                # missing-layer rule.
+                rules_skipped.append(rule.id)
+                continue
+        else:
+            layer_index = layout.find_layer(*rule.layer)
+            if layer_index is None:
+                # rule's layer is absent from this stream -> no violations,
+                # but record it so `coverage.rules_skipped` can surface the
+                # skip.
+                rules_skipped.append(rule.id)
+                continue
+
         other_index = None
         if rule.other_layer is not None:
             other_index = layout.find_layer(*rule.other_layer)
@@ -197,7 +226,24 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
         layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
 
         for cell in top_cells:
-            region = kdb.Region(cell.begin_shapes_rec(layer_index))
+            if rule.derived_layer is not None:
+                # Virtual/derived region (#345): shapes of `intersect_with`
+                # that already touch the *unsized* `base` region somewhere,
+                # clipped to `base`'s outline oversized by `sized_by_um` --
+                # see `DerivedLayer`'s docstring for the full derivation and
+                # why an unscoped check against either raw input layer would
+                # be wrong, not just conservative. `sized_by_um` is a real
+                # micrometre distance, rescaled against this layout's own
+                # `dbu` directly (unlike `rule.threshold_dbu`, which is
+                # rescaled via `dbu_scale` against the deck's nominal dbu).
+                base_region = kdb.Region(cell.begin_shapes_rec(base_index))
+                intersect_region = kdb.Region(cell.begin_shapes_rec(intersect_index))
+                size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
+                region = intersect_region.interacting(base_region) & (
+                    base_region.sized(size_dbu)
+                )
+            else:
+                region = kdb.Region(cell.begin_shapes_rec(layer_index))
             other_region = (
                 kdb.Region(cell.begin_shapes_rec(other_index))
                 if other_index is not None

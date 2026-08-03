@@ -1119,6 +1119,118 @@ def test_run_drc_gf180mcu_mim_enclosing_fusetop_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- mim.enclosing.via4.1 (MIMTM.2) (#345) --------------------------------
+#
+# MIMTM.2 ("min. MiM bottom-plate overlap of Via4", 0.4um / 400 dbu) is
+# scoped to the MiM stack's "virtual bottom plate" -- FuseTop sized/oversized
+# by 1.06um (1060 dbu), restricted to wherever Metal4 already overlaps the
+# *unsized* FuseTop -- via `DerivedLayer`, not raw Metal4. For a FuseTop
+# shape at (2000, 2000)-(18000, 18000) sitting inside a Metal4 shape at
+# (0, 0)-(20000, 20000), the derived virtual bottom plate is
+# (940, 940)-(19060, 19060) (FuseTop's box each expanded by 1060 dbu).
+
+
+def test_run_drc_gf180mcu_mim_enclosing_via4_violation(tmp_path):
+    """A Via4 shape whose right edge sits exactly on the virtual bottom
+    plate's own right edge (19060, i.e. 0 dbu margin, well under the 400 dbu
+    `mim.enclosing.via4.1` threshold) trips exactly one violation."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    via4 = layout.layer(41, 0)
+    layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
+    top.shapes(fusetop).insert(kdb.Box(2000, 2000, 18000, 18000))
+    # Right edge at 19060 == the virtual bottom plate's own right edge.
+    top.shapes(via4).insert(kdb.Box(18900, 9900, 19060, 10100))
+    path = tmp_path / "mim_enclosing_via4_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["mim.enclosing.via4.1"] == 1
+    (violation,) = [
+        v for v in report["violations"] if v["rule"] == "mim.enclosing.via4.1"
+    ]
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Metal4"
+
+
+def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
+    """A Via4 shape centred well inside the virtual bottom plate (>= 400 dbu
+    margin on every side) passes."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    via4 = layout.layer(41, 0)
+    layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
+    top.shapes(fusetop).insert(kdb.Box(2000, 2000, 18000, 18000))
+    top.shapes(via4).insert(kdb.Box(9900, 9900, 10100, 10100))  # centred
+    path = tmp_path / "mim_enclosing_via4_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_mim_enclosing_via4_ordinary_routing_clean(tmp_path):
+    """Negative control (issue #345's own acceptance criterion): a genuine,
+    cleanly-enclosed MiM cap coexists with ordinary Metal4/Via4/Metal5
+    routing *elsewhere* on the same layout -- a routing via whose Metal4 pad
+    it lands on has no FuseTop anywhere nearby, with only a 50 dbu margin
+    (far under the 400 dbu MIMTM.2 threshold, typical of ordinary routing-via
+    enclosure, not a MiM cap's). Because the virtual bottom plate is scoped
+    to Metal4 that already overlaps a FuseTop shape, the routing via's Metal4
+    pad never becomes part of the derived region, so this must **not**
+    report `mim.enclosing.via4.1` for it -- confirming the fix does not
+    reintroduce the "flags all Metal4/Via4/Metal5 routing" false-positive
+    risk the module docstring warns an unscoped version of this rule would
+    cause."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    via4 = layout.layer(41, 0)
+    layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+
+    # Genuine MiM cap, cleanly enclosed (same geometry as the clean case above).
+    top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
+    top.shapes(fusetop).insert(kdb.Box(2000, 2000, 18000, 18000))
+    top.shapes(via4).insert(kdb.Box(9900, 9900, 10100, 10100))
+
+    # Ordinary routing, far from any FuseTop: a small Metal4 landing pad with
+    # a Via4 up to Metal5, at typical routing-via clearance (50 dbu) -- no
+    # MiM structure anywhere nearby.
+    top.shapes(metal4).insert(kdb.Box(100000, 100000, 100300, 100300))
+    top.shapes(via4).insert(kdb.Box(100050, 100050, 100250, 100250))
+    top.shapes(metal5).insert(kdb.Box(100000, 100000, 100300, 100300))
+
+    path = tmp_path / "mim_enclosing_via4_ordinary_routing.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert "mim.enclosing.via4.1" not in report["coverage"]["rules_skipped"]
+    assert report["rule_counts"].get("mim.enclosing.via4.1", 0) == 0
+
+
 # --- #318: enclosing_check/enclosed_check silently pass on zero overlap --
 
 

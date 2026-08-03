@@ -62,6 +62,40 @@ interacts at all) — a residual gap tracked as a known limitation, since
 closing it fully requires compound/connectivity-scoped layer expressions
 this engine does not evaluate (see "Coverage" below).
 
+### Sized/derived-layer rules (`DerivedLayer`)
+
+Some DRM rules are defined against a derived geometry rather than a single
+drawn `(layer, datatype)` — e.g. gf180mcu's `MIMTM.2` scopes to the MiM
+stack's "virtual bottom plate": its purpose-drawn top-plate layer (`FuseTop`)
+oversized by a fixed margin, restricted to wherever the bottom-plate
+conductor (`Metal4`) already comes near it. `DrcRule`'s optional
+`derived_layer` field (a `DerivedLayer(base, sized_by_um, intersect_with)`,
+issue #345) expresses exactly this: the checked region becomes
+`intersect_with.interacting(base) & base.sized(sized_by_um)` — only shapes
+of `intersect_with` that already touch the *unsized* `base` region
+somewhere, clipped to `base`'s outline oversized by `sized_by_um` — instead
+of `layer`'s own raw drawn shapes. `layer` stays required and continues to
+name the rule's reporting identity (`violations[].layer`, `coverage`),
+independent of `derived_layer`'s two input layers.
+
+This exists because an *unscoped* version of some rules would be actively
+wrong, not merely conservative: gf180mcu's `mim.enclosing.via4.1`
+(`MIMTM.2`) checks a `Metal4`-derived region's enclosure of `Via4` by
+0.4um — a blanket "`Metal4` must enclose every `Via4` by 0.4um" check with
+no scoping would flag ordinary `Metal4`-`Via4`-`Metal5` routing throughout
+*any* layout using that stack, since routing vias use a much smaller
+enclosure than a MiM cap's virtual bottom plate requires. Scoping the
+checked region to `Metal4` that already overlaps a `FuseTop` shape keeps
+ordinary routing (no MiM structure nearby) out of the derived region
+entirely, so it never trips the rule — see
+`test_run_drc_gf180mcu_mim_enclosing_via4_ordinary_routing_clean` in
+`tests/test_drc.py` for the regression fixture proving this, and
+`DerivedLayer`'s own docstring (`src/klayout_tools/decks/__init__.py`) for
+the full derivation. `derived_layer` is a general mechanism, not specific to
+MIM capacitors or gf180mcu — any future deck (this one or sky130) can use it
+for another rule whose official scope needs a sized/boolean layer
+expression.
+
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
@@ -83,14 +117,16 @@ script runner does. This is called out explicitly in each such rule's
 docstring; the threshold *values* used are always the real, unmodified
 source values.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 23 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 24 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
 (diffusion/active), `Contact`, `Metal1`-`Metal3`, `Metal5`, and `MetalTop`
 layers, plus a first increment of well/substrate-tap coverage (`Nwell`
 spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
 (`DRC_BJT` mark-layer separation), and the MiM capacitor stack
-(`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap) — transcribed
-from the published GlobalFoundries 180nm MCU **Design Rule Manual**
+(`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap, plus the virtual
+bottom plate's `Via4` overlap, see "Sized/derived-layer rules" above) —
+transcribed from the published GlobalFoundries 180nm MCU **Design Rule
+Manual**
 ([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
 `docs/physical_verification/design_manual/`; Apache License 2.0),
 specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
@@ -106,7 +142,7 @@ cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
 `"Mn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and
 numeric values directly.
 
-Eight of the twenty-three gf180mcu rules approximate an official DRM rule in
+Eight of the twenty-four gf180mcu rules approximate an official DRM rule in
 some way — either a compound-layer context our single/two-layer check
 primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
 `nwell.enclosing.comp.1`), a bound our primitives don't support
@@ -122,22 +158,18 @@ have. Each is called out explicitly in its rule's docstring in
 DRM values.
 
 The DRM's MiM capacitor rule `MIMTM.2` (minimum bottom-plate overlap of
-`Via4`) is **not** transcribed: an unscoped approximation of it (unlike
-`mim.space.1`'s) would flag legitimate `Metal4`-`Via4`-`Metal5` routing
-throughout any layout using that metal stack, not just genuine MiM
-structures, because it requires the same sized/derived "virtual bottom
-plate" layer (`FuseTop` sized by 1.06um, intersected with `Metal4`) that
-neither `DrcRule` nor the `Region` check primitives it drives can express
-today. See `gf180mcu.py`'s module docstring for the full rationale and the
-missing-primitive blocker for a follow-on issue.
+`Via4`) is transcribed as `mim.enclosing.via4.1` (issue #345) using the
+`derived_layer` primitive described above, rather than approximated against
+raw `Metal4` — see "Sized/derived-layer rules (`DerivedLayer`)" above for
+why an unscoped version of this particular rule would have been actively
+wrong, not merely conservative.
 
 Coverage does **not** yet include: `Pplus`/`Nplus` implant-specific rules
 (width/space/enclosure of the implant layers themselves), `LVPWELL` or
 `DNWELL`, the remaining `BJT.*` rules (`BJT.1`/`BJT.2`, which key off
-`DNWELL`), `MIMTM.2` (see above), the MIM Option-A (`MIM.*`) rule set (a
-different, 3-metal-layer process variant this deck doesn't model — see
-`gf180mcu.py`'s docstring), or 5V/6V high-voltage variants — left for
-follow-on issues.
+`DNWELL`), the MIM Option-A (`MIM.*`) rule set (a different, 3-metal-layer
+process variant this deck doesn't model — see `gf180mcu.py`'s docstring), or
+5V/6V high-voltage variants — left for follow-on issues.
 
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
