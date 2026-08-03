@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,18 @@ import pytest
 from klayout_tools import lvs
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
+
+#: Real-binary integration gate for the netgen engine tests below, mirroring
+#: `tests/test_sim.py`'s own `HAVE_NGSPICE`/`_SKIP_NO_NGSPICE` pattern for
+#: `ngspice`. Unlike `ngspice`, CI does not currently install `netgen` (it
+#: has no simple package-manager install -- see the dated addendum in
+#: `docs/design/lvs-extraction-spike.md` for the from-source build this
+#: issue required), so this tier skips cleanly in CI and only runs on a
+#: machine that already has a `netgen` binary on `$PATH`.
+HAVE_NETGEN = shutil.which("netgen") is not None
+_SKIP_NO_NETGEN = pytest.mark.skipif(
+    not HAVE_NETGEN, reason="netgen is not installed on this machine"
+)
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_INV = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
@@ -290,12 +304,12 @@ def test_unsupported_engine_raises(tmp_path):
     path = _write_request(
         tmp_path / "request.json",
         {
-            "engine": "netgen",
+            "engine": "hspice",
             "layout": {"netlist": "x"},
             "reference": {"netlist": "y"},
         },
     )
-    with pytest.raises(LvsError, match="unsupported engine 'netgen'"):
+    with pytest.raises(LvsError, match="unsupported engine 'hspice'"):
         run_lvs(path)
 
 
@@ -2252,3 +2266,539 @@ def test_run_lvs_subckt_call_unknown_device_errors(tmp_path):
     }
     with pytest.raises(LvsError, match="could not convert subckt-call"):
         run_lvs(json.dumps(request))
+
+
+# --------------------------------------------------------------------------- #
+# netgen engine (issue #343): stubbed-subprocess tests
+#
+# Follows `tests/test_sim.py`'s `_stub_subprocess_run` pattern for the
+# ngspice wrap -- no real `netgen` binary is required to run this suite. The
+# captured report text below is not invented: it is the verbatim `comp.out`
+# output of a from-source netgen 1.5.323 build (`RTimothyEdwards/netgen`,
+# built for this issue -- see the dated addendum in
+# docs/design/lvs-extraction-spike.md) run against small hand-written
+# SPICE fixtures, so these tests exercise the exact text this module's
+# parser has to handle, not a guessed format.
+# --------------------------------------------------------------------------- #
+
+_NETGEN_STDOUT_BANNER = "Netgen 1.5.323 compiled on Sun Aug  2 18:51:46 PDT 2026\n"
+
+_NETGEN_MATCH_LOG = """
+Subcircuit summary:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+pmos (1)                                   |pmos (1)
+nmos (1)                                   |nmos (1)
+Number of devices: 2                       |Number of devices: 2
+Number of nets: 4                          |Number of nets: 4
+---------------------------------------------------------------------------------------
+Netlists match uniquely.
+
+Subcircuit pins:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+Y                                          |Y
+A                                          |A
+VDD                                        |VDD
+VSS                                        |VSS
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes inv and inv are equivalent.
+
+Final result: Circuits match uniquely.
+.
+"""
+
+_NETGEN_PROPERTY_LOG = """
+Subcircuit summary:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+pmos (1)                                   |pmos (1)
+nmos (1)                                   |nmos (1)
+Number of devices: 2                       |Number of devices: 2
+Number of nets: 4                          |Number of nets: 4
+---------------------------------------------------------------------------------------
+Netlists match uniquely with property errors.
+pmos:1 vs. pmos:1:
+ W circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=1%)
+
+Subcircuit pins:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+Y                                          |Y
+A                                          |A
+VDD                                        |VDD
+VSS                                        |VSS
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes inv and inv are equivalent.
+
+Final result: Circuits match uniquely.
+Property errors were found.
+
+The following cells had property errors:
+ inv
+"""
+
+_NETGEN_TOPOLOGY_LOG = """
+Subcircuit summary:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+pmos (1)                                   |pmos (1)
+nmos (1)                                   |nmos (1)
+Number of devices: 2                       |Number of devices: 2
+Number of nets: 4                          |Number of nets: 4
+---------------------------------------------------------------------------------------
+NET mismatches: Class fragments follow (with fanout counts):
+Circuit 1: inv                             |Circuit 2: inv
+
+---------------------------------------------------------------------------------------
+Net: A                                     |Net: A
+  pmos/gate = 1                            |  pmos/gate = 1
+  nmos/gate = 1                            |
+                                           |
+Net: VSS                                   |Net: VSS
+  nmos/(drain|source) = 1                  |  nmos/(drain|source) = 1
+  nmos/bulk = 1                            |  nmos/bulk = 1
+                                           |  nmos/gate = 1
+---------------------------------------------------------------------------------------
+Netlists do not match.
+Port matching may fail to disambiguate symmetries.
+
+Subcircuit pins:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+A                                          |A
+VSS                                        |VSS
+VDD                                        |VDD
+Y                                          |Y
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes inv and inv are equivalent.
+
+Final result: Netlists do not match.
+Port matching may fail to disambiguate symmetries.
+"""
+
+_NETGEN_PIN_MISMATCH_LOG = """
+Subcircuit summary:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+pmos (1)                                   |pmos (1)
+nmos (1)                                   |nmos (1)
+(no matching element)                      |r (1)
+Number of devices: 2 **Mismatch**          |Number of devices: 3 **Mismatch**
+Number of nets: 4 **Mismatch**             |Number of nets: 5 **Mismatch**
+---------------------------------------------------------------------------------------
+NET mismatches: Class fragments follow (with fanout counts):
+Circuit 1: inv                             |Circuit 2: inv
+
+---------------------------------------------------------------------------------------
+Net: VSS                                   |Net: VSS
+  nmos/(drain|source) = 1                  |  nmos/(drain|source) = 1
+  nmos/bulk = 1                            |  nmos/bulk = 1
+                                           |  r/(end_a|end_b) = 1
+                                           |
+(no matching net)                          |Net: EXTRA
+                                           |  r/(end_a|end_b) = 1
+---------------------------------------------------------------------------------------
+DEVICE mismatches: Class fragments follow (with node fanout counts):
+Circuit 1: inv                             |Circuit 2: inv
+
+---------------------------------------------------------------------------------------
+(no matching instance)                     |Instance: r:1
+                                           |  (end_a,end_b) = (3,1)
+                                           |
+---------------------------------------------------------------------------------------
+Netlists do not match.
+Port matching may fail to disambiguate symmetries.
+
+Subcircuit pins:
+Circuit 1: inv                             |Circuit 2: inv
+-------------------------------------------|-------------------------------------------
+VSS                                        |VSS
+VDD                                        |VDD
+A                                          |A
+Y                                          |Y
+(no pin, node is VSS)                      |EXTRA
+---------------------------------------------------------------------------------------
+Cell pin lists for inv and inv altered to match.
+Device classes inv and inv are equivalent.
+
+Final result: Top level cell failed pin matching.
+"""
+
+
+class _FakeNetgenCompleted:
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = 0
+
+
+def _stub_netgen_subprocess(
+    monkeypatch,
+    *,
+    log_text: str | None = _NETGEN_MATCH_LOG,
+    stdout: str = _NETGEN_STDOUT_BANNER,
+    side_effect: BaseException | None = None,
+    captured_cmds: list | None = None,
+):
+    """Stub `lvs.subprocess.run` for the netgen engine path -- mirrors
+    `tests/test_sim.py`'s `_stub_subprocess_run` for the ngspice wrap.
+
+    The real `_run_netgen_lvs` derives its log path itself (a temp dir it
+    owns), so the fake reads it back off `cmd[-1]` (the last positional
+    argument `_run_netgen_lvs` passes to `netgen -batch lvs`) rather than
+    an `-o`-style flag (ngspice's convention, not netgen's).
+    """
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if captured_cmds is not None:
+            captured_cmds.append(cmd)
+        if side_effect is not None:
+            raise side_effect
+        if log_text is not None:
+            log_path = cmd[-1]
+            with open(log_path, "w", encoding="utf-8") as handle:
+                handle.write(log_text)
+        return _FakeNetgenCompleted(stdout)
+
+    monkeypatch.setattr(lvs.subprocess, "run", fake_run)
+
+
+def _netgen_request(tmp_path: Path, **extra) -> str:
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "engine": "netgen",
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    request.update(extra)
+    return _write_request(tmp_path / "request.json", request)
+
+
+def test_netgen_engine_clean_match(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["engine"] == "netgen"
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert report["mismatch_count"] == 0
+    assert report["counts"]["nets"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["counts"]["pins"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert report["net_correspondence"] == []
+    assert report["environment"]["engine"] == "netgen"
+    assert report["environment"]["engine_version"] == "1.5.323"
+
+
+def test_netgen_engine_property_mismatch_reports_device_property(tmp_path, monkeypatch):
+    """A netgen 'match uniquely' verdict that also reports a property error
+    is downgraded to `status: "mismatch"` -- a real parameter defect must
+    never read as a clean match, mirroring the `klayout` engine's own
+    `device.property` semantics."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 1}
+    (mismatch,) = report["mismatches"]
+    assert mismatch["category"] == "device.property"
+    assert mismatch["severity"] == "error"
+    assert mismatch["property"] == {
+        "name": "W",
+        "layout": "1e-06",
+        "reference": "2e-06",
+    }
+    assert mismatch["device"] == {
+        "layout": "pmos:1",
+        "reference": "pmos:1",
+        "class": "pmos",
+    }
+    assert mismatch["details"] is None
+
+
+def test_netgen_engine_topology_mismatch_buckets_net_details(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_TOPOLOGY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"net.unmatched": 1}
+    (mismatch,) = report["mismatches"]
+    assert mismatch["category"] == "net.unmatched"
+    assert mismatch["severity"] == "error"
+    assert mismatch["net"] is None
+    assert mismatch["details"] is not None
+    assert "NET mismatches:" in mismatch["details"]["raw"]
+    assert "Net: A" in mismatch["details"]["raw"]
+    # The block stops before the next report section -- it must not swallow
+    # the "Subcircuit pins:"/"Final result:" report tail.
+    assert "Subcircuit pins:" not in mismatch["details"]["raw"]
+    assert "Final result:" not in mismatch["details"]["raw"]
+
+
+def test_netgen_engine_pin_mismatch_reports_pin_unmatched_and_device_bucket(
+    tmp_path, monkeypatch
+):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_PIN_MISMATCH_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    categories = sorted(m["category"] for m in report["mismatches"])
+    assert categories == ["device.unmatched", "net.unmatched", "pin.unmatched"]
+    pin_entry = next(
+        m for m in report["mismatches"] if m["category"] == "pin.unmatched"
+    )
+    assert pin_entry["severity"] == "error"
+    assert "pin matching" in pin_entry["description"]
+
+
+def test_netgen_engine_populates_counts_matched_zero_on_mismatch(tmp_path, monkeypatch):
+    """Known limitation (see docs/cli/lvs.md): the netgen engine does not
+    reconstruct a per-net/per-device correspondence, so `counts.*.matched`
+    stays at the conservative floor (never a fabricated estimate) on a
+    mismatch verdict, and `net_correspondence` stays empty -- keeping the
+    `len(net_correspondence) == counts.nets.matched` invariant intact."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_TOPOLOGY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["counts"]["nets"]["matched"] == 0
+    assert report["counts"]["devices"]["matched"] == 0
+    assert report["counts"]["pins"]["matched"] == 0
+    assert report["net_correspondence"] == []
+    assert len(report["net_correspondence"]) == report["counts"]["nets"]["matched"]
+    # The real (layout/reference) counts are still reported honestly.
+    assert report["counts"]["nets"]["layout"] == 4
+    assert report["counts"]["devices"]["layout"] == 2
+
+
+def test_netgen_engine_missing_binary_raises_actionable_error(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(
+        monkeypatch, side_effect=FileNotFoundError("no such file: netgen")
+    )
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError, match="binary not found on PATH"):
+        run_lvs(path)
+
+
+def test_netgen_engine_timeout_raises(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(
+        monkeypatch,
+        side_effect=subprocess.TimeoutExpired(cmd=["netgen"], timeout=300.0),
+    )
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError, match="did not complete within"):
+        run_lvs(path)
+
+
+def test_netgen_engine_no_report_file_raises(tmp_path, monkeypatch):
+    """netgen exits 0 even when it fails before producing a report (e.g. a
+    malformed netlist) -- verified empirically for this issue. No report
+    file at all must not be silently treated as a match."""
+    _stub_netgen_subprocess(
+        monkeypatch, log_text=None, stdout="Error in SPICE file read: No file\n"
+    )
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError, match="did not produce a report file"):
+        run_lvs(path)
+
+
+def test_netgen_engine_unparseable_report_raises_not_silently_match(
+    tmp_path, monkeypatch
+):
+    """The exact failure mode this issue exists to catch: malformed/
+    unexpected netgen report text must never silently produce
+    `status: "match"` -- the parser fails loud instead."""
+    _stub_netgen_subprocess(
+        monkeypatch, log_text="some garbage netgen never actually writes\n"
+    )
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError, match="could not parse netgen's LVS report"):
+        run_lvs(path)
+
+
+def test_netgen_engine_unrecognised_verdict_text_raises(tmp_path, monkeypatch):
+    """A 'Final result:' section is present, but its text matches none of
+    this module's known netgen verdict strings, and no other structured
+    evidence (a property-error block) was found either -- still fails loud
+    rather than defaulting to a match."""
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text="Final result: Something netgen never actually prints.\n",
+    )
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError, match="could not classify netgen's LVS verdict"):
+        run_lvs(path)
+
+
+def test_netgen_engine_hints_unsupported_raises(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path, hints={"same_nets": [["VPWR", "VPWR"]]})
+
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_netgen_engine_passes_setup_file_argument(tmp_path, monkeypatch):
+    setup_path = _write(tmp_path / "sky130A_setup.tcl", "# netgen setup\n")
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch, log_text=_NETGEN_MATCH_LOG, captured_cmds=captured
+    )
+    path = _netgen_request(tmp_path, options={"netgen_setup": str(setup_path)})
+
+    run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == "netgen"
+    assert cmd[1:3] == ["-batch", "lvs"]
+    assert cmd[5] == str(setup_path)
+
+
+def test_netgen_engine_missing_setup_file_raises(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(
+        tmp_path, options={"netgen_setup": str(tmp_path / "nope_setup.tcl")}
+    )
+
+    with pytest.raises(LvsError, match="options.netgen_setup not found"):
+        run_lvs(path)
+
+
+def test_netgen_engine_omitted_setup_passes_empty_string(tmp_path, monkeypatch):
+    """No `options.netgen_setup` given -- netgen's own documented "trivial
+    default setup" behaviour, passed as an empty-string positional arg
+    (verified against the real `netgen::lvs` Tcl proc for this issue)."""
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch, log_text=_NETGEN_MATCH_LOG, captured_cmds=captured
+    )
+    path = _netgen_request(tmp_path)
+
+    run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[5] == ""
+
+
+def test_netgen_engine_default_engine_still_klayout(tmp_path, monkeypatch):
+    """Omitting `request.engine` entirely still defaults to `"klayout"` --
+    adding `netgen` as a second `SUPPORTED_ENGINES` entry must not change
+    the documented default."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["engine"] == "klayout"
+
+
+# --------------------------------------------------------------------------- #
+# netgen engine: real-binary integration tests (skip if netgen is absent)
+# --------------------------------------------------------------------------- #
+
+
+@_SKIP_NO_NETGEN
+def test_netgen_engine_real_binary_clean_self_compare(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "netgen",
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert report["environment"]["engine_version"]
+
+
+@_SKIP_NO_NETGEN
+def test_netgen_engine_real_binary_reports_device_property(tmp_path):
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"),
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "netgen",
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 1}
+
+
+@_SKIP_NO_NETGEN
+def test_netgen_engine_real_binary_agrees_with_klayout_on_sky130_corpus(tmp_path):
+    """Issue #343's own end-to-end validation, automated: both engines run
+    against the same real sky130 corpus cell (inline extraction + a
+    self-compare, then the corpus round-trip tier's own NMOS-body-short
+    negative control) report the same `status` -- comparator/contract
+    independence, per this issue's acceptance criteria."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+
+    def _report(engine: str, reference: str) -> dict:
+        path = _write_request(
+            tmp_path / f"request-{engine}.json",
+            {
+                "engine": engine,
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {"netlist": reference, "top": extracted["top"]},
+            },
+        )
+        return run_lvs(path)
+
+    clean_klayout = _report("klayout", reference_path)
+    clean_netgen = _report("netgen", reference_path)
+    assert clean_klayout["status"] == clean_netgen["status"] == "match"
+
+    with open(reference_path, encoding="utf-8") as handle:
+        text = handle.read()
+    assert " VGND vsubs" in text
+    broken_path = str(tmp_path / "ref_shorted.spice")
+    with open(broken_path, "w", encoding="utf-8") as handle:
+        handle.write(text.replace(" VGND vsubs", " VGND VGND"))
+
+    broken_klayout = _report("klayout", broken_path)
+    broken_netgen = _report("netgen", broken_path)
+    assert broken_klayout["status"] == broken_netgen["status"] == "mismatch"

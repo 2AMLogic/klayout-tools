@@ -33,6 +33,24 @@ report "match" on a real mismatch): ``status`` can only be ``"match"`` when
 the engine itself says the netlists are equivalent, regardless of any gap in
 this module's own event-to-category mapping.
 
+A second engine, ``"netgen"`` (issue #343), wraps the open-flow LVS
+comparator ``RTimothyEdwards/netgen`` as a subprocess (``netgen -batch
+lvs``) in **netlist-vs-netlist mode only** -- the same layout/reference SPICE
+netlists this module already resolves for the ``"klayout"`` engine, written
+to temporary files for the subprocess to read. Per the accepted spike
+(``docs/design/lvs-extraction-spike.md`` section 1, "netgen (contrast
+candidate)"), netgen has no layout front-end of its own -- the open flow
+pairs it with ``magic`` for extraction -- so this module deliberately does
+**not** wire up a second extraction backend; it only tests whether the
+``mismatches[]`` contract generalises to a second, independent comparator
+implementation (comparator/contract independence), not whether a second
+*extraction* engine agrees with `klt extract` (extraction independence,
+explicitly out of scope). See ``_run_netgen_lvs``/``_parse_netgen_report``
+for the invocation and the (empirically-verified against netgen 1.5.323,
+built from source) report-parsing contract, and the same design doc's
+2026-08-02 addendum for the invocation quirks and report-format findings
+this issue's own acceptance criteria asked to be written up.
+
 Net-merge/net-split classification (a known simplification): KLayout's
 comparer log stream does not label a net mismatch as "merged" or "split" --
 it only reports individual net/device mismatch events. This module
@@ -65,7 +83,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._provenance import build_provenance, sha256_file
@@ -79,10 +100,11 @@ if TYPE_CHECKING:
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: ``klayout`` (in-process ``NetlistComparer``) is the only implemented
-#: engine in v1 -- the spike's engine survey found no reason to wrap a
-#: second one (see this module's docstring and the spike's section 1).
-SUPPORTED_ENGINES = ("klayout",)
+#: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;
+#: ``netgen`` (issue #343) is a second, independent comparator wrapped as a
+#: subprocess in netlist-vs-netlist mode only -- see this module's docstring
+#: for the scope boundary the accepted spike drew around it.
+SUPPORTED_ENGINES = ("klayout", "netgen")
 
 #: Accepted ``request.reference.form`` values (issue #280).
 #: ``"plain-element"`` (default) is the schematic-equivalent form ``klt lvs``
@@ -343,49 +365,136 @@ def run_lvs(request: str) -> dict[str, Any]:
         layout_netlist.combine_devices()
         reference_netlist.combine_devices()
 
-    logger = _make_compare_logger()
-    comparer = kdb.NetlistComparer(logger)
-    # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
-    # `layout_circuit`/`reference_circuit` are each netlist's *sole*
-    # remaining top circuit, so these two are unambiguously the pair the
-    # request declared -- pin that pairing explicitly instead of leaving it
-    # to `NetlistComparer`'s default name-based matching, which silently
-    # degrades to a generic "could not be matched to a counterpart" finding
-    # on both sides whenever `layout.top`/`reference.top` name different
-    # circuits (issue #231). Safe unconditionally: there is no other
-    # circuit either one could be confused with post-pruning.
-    comparer.same_circuits(layout_circuit, reference_circuit)
-    _apply_hints(
-        comparer, request.get("hints") or {}, layout_circuit, reference_circuit
-    )
+    if engine == "klayout":
+        logger = _make_compare_logger()
+        comparer = kdb.NetlistComparer(logger)
+        # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
+        # `layout_circuit`/`reference_circuit` are each netlist's *sole*
+        # remaining top circuit, so these two are unambiguously the pair the
+        # request declared -- pin that pairing explicitly instead of leaving it
+        # to `NetlistComparer`'s default name-based matching, which silently
+        # degrades to a generic "could not be matched to a counterpart" finding
+        # on both sides whenever `layout.top`/`reference.top` name different
+        # circuits (issue #231). Safe unconditionally: there is no other
+        # circuit either one could be confused with post-pruning.
+        comparer.same_circuits(layout_circuit, reference_circuit)
+        _apply_hints(
+            comparer, request.get("hints") or {}, layout_circuit, reference_circuit
+        )
 
-    # `logger` is already bound via the `NetlistComparer(logger)` constructor
-    # above, so the 2-arg overload is used here (not the 3-arg one, which
-    # would pass a second, redundant logger reference).
-    compare_result = comparer.compare(layout_netlist, reference_netlist)
+        # `logger` is already bound via the `NetlistComparer(logger)` constructor
+        # above, so the 2-arg overload is used here (not the 3-arg one, which
+        # would pass a second, redundant logger reference).
+        compare_result = comparer.compare(layout_netlist, reference_netlist)
 
-    mismatches = _build_mismatches(logger, layout_netlist, reference_netlist)
-    if not compare_result and not mismatches:
-        # Safety net for the correctness invariant this module's docstring
-        # states: `compare()` is always authoritative. If the engine says
-        # "mismatch" but this module's own event classification produced
-        # nothing (a gap in event coverage, not a clean run), never let the
-        # response silently look like a match -- report a generic, honest
-        # finding instead of dropping the verdict.
-        mismatches = [
-            {
-                "category": CATEGORY_TOPOLOGY,
-                "severity": "error",
-                "description": (
-                    "netlists do not match (no further detail available "
-                    "from the comparer's event log)"
-                ),
-                "side": "both",
-                "net": None,
-                "device": None,
-                "property": None,
-            }
-        ]
+        mismatches = _build_mismatches(logger, layout_netlist, reference_netlist)
+        if not compare_result and not mismatches:
+            # Safety net for the correctness invariant this module's docstring
+            # states: `compare()` is always authoritative. If the engine says
+            # "mismatch" but this module's own event classification produced
+            # nothing (a gap in event coverage, not a clean run), never let the
+            # response silently look like a match -- report a generic, honest
+            # finding instead of dropping the verdict.
+            mismatches = [
+                {
+                    "category": CATEGORY_TOPOLOGY,
+                    "severity": "error",
+                    "description": (
+                        "netlists do not match (no further detail available "
+                        "from the comparer's event log)"
+                    ),
+                    "side": "both",
+                    "net": None,
+                    "device": None,
+                    "property": None,
+                    "details": None,
+                }
+            ]
+        status = "match" if compare_result else "mismatch"
+        engine_version = _engine_version()
+        net_correspondence = _build_net_correspondence(logger)
+        counts = {
+            "nets": {
+                "layout": sum(1 for _ in layout_circuit.each_net()),
+                "reference": sum(1 for _ in reference_circuit.each_net()),
+                "matched": logger.matched_nets,
+            },
+            "devices": {
+                "layout": sum(1 for _ in layout_circuit.each_device()),
+                "reference": sum(1 for _ in reference_circuit.each_device()),
+                "matched": logger.matched_devices,
+            },
+            "pins": {
+                "layout": layout_circuit.pin_count(),
+                "reference": reference_circuit.pin_count(),
+                "matched": logger.matched_pins,
+            },
+        }
+    else:
+        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member.
+        # Netlist-vs-netlist only (see this module's docstring): no magic
+        # extraction backend, no per-net/per-device `hints` hook (netgen has
+        # no equivalent to `same_nets`/`equivalent_pins` in this scope), and
+        # -- unlike the `klayout` engine's in-process compare -- an external
+        # subprocess whose own exit code is not trustworthy on its own (see
+        # `_run_netgen_lvs`).
+        if request.get("hints"):
+            raise LvsError(
+                "request.hints (same_nets/equivalent_pins) is only supported "
+                "for engine 'klayout' -- the netgen engine has no equivalent "
+                "hook in this issue's netlist-vs-netlist scope (see "
+                'docs/cli/lvs.md, "Engine")'
+            )
+        setup_file = _resolve_netgen_setup(options, request_dir)
+        timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
+        status, mismatches, engine_version = _run_netgen_lvs(
+            layout_netlist=layout_netlist,
+            layout_circuit=layout_circuit,
+            reference_netlist=reference_netlist,
+            reference_circuit=reference_circuit,
+            setup_file=setup_file,
+            timeout_s=timeout_s,
+        )
+        layout_net_count = sum(1 for _ in layout_circuit.each_net())
+        reference_net_count = sum(1 for _ in reference_circuit.each_net())
+        layout_device_count = sum(1 for _ in layout_circuit.each_device())
+        reference_device_count = sum(1 for _ in reference_circuit.each_device())
+        layout_pin_count = layout_circuit.pin_count()
+        reference_pin_count = reference_circuit.pin_count()
+        # Known limitation (see docs/cli/lvs.md, "Engine" -> netgen):
+        # `_parse_netgen_report` classifies netgen's text report into
+        # `mismatches[]`, but does not reconstruct a full per-net/per-device
+        # correspondence the way the `klayout` engine's `NetlistComparer`
+        # callbacks do. On a `"match"` verdict the matched count is exact by
+        # construction (a unique match requires equal cardinality on both
+        # sides); on `"mismatch"` it is intentionally left at the
+        # conservative floor (`0`) rather than a fabricated estimate --
+        # never overstating how much of the netlist was actually verified.
+        # `net_correspondence` is `[]` for the same reason, which keeps the
+        # documented `len(net_correspondence) == counts.nets.matched`
+        # invariant intact for this engine too (both sides of that equation
+        # are `0` together on a mismatch).
+        matched_nets = layout_net_count if status == "match" else 0
+        matched_devices = layout_device_count if status == "match" else 0
+        matched_pins = layout_pin_count if status == "match" else 0
+        net_correspondence = []
+        counts = {
+            "nets": {
+                "layout": layout_net_count,
+                "reference": reference_net_count,
+                "matched": matched_nets,
+            },
+            "devices": {
+                "layout": layout_device_count,
+                "reference": reference_device_count,
+                "matched": matched_devices,
+            },
+            "pins": {
+                "layout": layout_pin_count,
+                "reference": reference_pin_count,
+                "matched": matched_pins,
+            },
+        }
 
     # What the layout-side deck can structurally recognise
     # (`ExtractionDeck.device_classes`, issue #221) -- `null` when
@@ -412,31 +521,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
         mismatches.sort(key=_sort_key)
 
-    status = "match" if compare_result else "mismatch"
-
     category_counts: dict[str, int] = {}
     for mismatch in mismatches:
         category_counts[mismatch["category"]] = (
             category_counts.get(mismatch["category"], 0) + 1
         )
-
-    counts = {
-        "nets": {
-            "layout": sum(1 for _ in layout_circuit.each_net()),
-            "reference": sum(1 for _ in reference_circuit.each_net()),
-            "matched": logger.matched_nets,
-        },
-        "devices": {
-            "layout": sum(1 for _ in layout_circuit.each_device()),
-            "reference": sum(1 for _ in reference_circuit.each_device()),
-            "matched": logger.matched_devices,
-        },
-        "pins": {
-            "layout": layout_circuit.pin_count(),
-            "reference": reference_circuit.pin_count(),
-            "matched": logger.matched_pins,
-        },
-    }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -451,7 +540,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         "device_classes": device_classes,
         "environment": {
             "engine": engine,
-            "engine_version": _engine_version(),
+            "engine_version": engine_version,
             "layout_sha256": sha256_file(layout_hash_source),
             "reference_sha256": sha256_file(reference_netlist_path),
             "extracted_netlist": extracted_netlist_path,
@@ -463,7 +552,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             ),
         ),
         "mismatches": mismatches,
-        "net_correspondence": _build_net_correspondence(logger),
+        "net_correspondence": net_correspondence,
     }
 
 
@@ -995,7 +1084,20 @@ def _mismatch(
     net: dict[str, Any] | None = None,
     device: dict[str, Any] | None = None,
     property_: dict[str, Any] | None = None,
+    details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build one ``mismatches[]`` entry.
+
+    ``details`` (issue #343) is an engine-specific escape hatch: raw data
+    that does not map cleanly onto the shared ``category``/``net``/
+    ``device``/``property`` shape (currently only produced by the ``netgen``
+    engine's report parser, e.g. the raw side-by-side text netgen printed for
+    a net/device mismatch block it did not fully structure) -- additive per
+    ``docs/json-contract.md`` ("adding a field is not [a breaking change]"),
+    so every entry carries the key (``null`` when unused, never omitted,
+    matching this contract's existing null-not-omitted convention) rather
+    than only the netgen-engine ones.
+    """
     return {
         "category": category,
         "severity": severity,
@@ -1004,6 +1106,7 @@ def _mismatch(
         "net": net,
         "device": device,
         "property": property_,
+        "details": details,
     }
 
 
@@ -1640,3 +1743,375 @@ def _engine_version() -> str | None:
     import klayout
 
     return getattr(klayout, "__version__", None)
+
+
+# --------------------------------------------------------------------------- #
+# netgen engine (issue #343): subprocess invocation + report parsing
+# --------------------------------------------------------------------------- #
+
+#: Default ``netgen -batch lvs`` wall-clock budget -- the same idiom as
+#: ``sim.py``'s ``DEFAULT_TIMEOUT_S``/``options.timeout_s``, but a separate,
+#: larger default: an LVS graph-match on a real block can run longer than a
+#: single SPICE corner. Overridable per request via ``options.netgen_timeout_s``.
+_NETGEN_DEFAULT_TIMEOUT_S = 300.0
+
+#: netgen's own startup banner (``tclnetgen.c``'s ``netgen_AppInit``, verified
+#: against a from-source build of netgen 1.5.323 for this issue): ``"Netgen
+#: 1.5.323 compiled on <date>"``, printed to stdout on every invocation --
+#: mirrors ``sim.py``'s ``_ENGINE_VERSION_RE`` (``sim.py:1081``) for ngspice's
+#: analogous ``"ngspice-<version>"`` banner.
+_NETGEN_ENGINE_VERSION_RE = re.compile(r"Netgen\s+([\w.]+)")
+
+#: A matched device pair's parameter-difference block, as netgen's
+#: ``PrintPropertyResults`` (``base/netcmp.c``) writes it to the log file,
+#: e.g.::
+#:
+#:     pmos:1 vs. pmos:1:
+#:      W circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=1%)
+#:
+#: Verified against a from-source netgen 1.5.323 build for this issue (see
+#: the dated addendum in docs/design/lvs-extraction-spike.md).
+_NETGEN_PROPERTY_BLOCK_RE = re.compile(
+    r"^(\S+):(\d+) vs\. (\S+):(\d+):\n((?: .+\n)+)", re.MULTILINE
+)
+_NETGEN_PROPERTY_LINE_RE = re.compile(
+    r"^\s*(\S+)\s+circuit1:\s*(\S+)\s+circuit2:\s*(\S+)\s+"
+    r"\(delta=([^,]+),\s*cutoff=([^)]+)\)\s*$"
+)
+
+#: Side-by-side report section headers netgen prints ahead of a topology
+#: mismatch, and the ``mismatches[]`` category/label each buckets into when
+#: this module does not attempt to parse the column-aligned table itself
+#: (see ``_parse_netgen_section_blocks``'s docstring for why: a fixed-width,
+#: pipe-delimited table with filler cells like ``"(no matching net)"`` is
+#: brittle to parse precisely across netgen versions, so the raw block is
+#: preserved in ``details.raw`` instead of guessing at a per-net/per-device
+#: split that could be wrong in an unbounded way).
+_NETGEN_SECTION_HEADERS: tuple[tuple[str, str, str], ...] = (
+    ("NET mismatches:", CATEGORY_NET_UNMATCHED, "net mismatch(es)"),
+    ("DEVICE mismatches:", CATEGORY_DEVICE_UNMATCHED, "device mismatch(es)"),
+)
+
+#: Boundary markers used to find the end of a ``_NETGEN_SECTION_HEADERS``
+#: block: the next section (of either kind), the "Subcircuit pins:" report
+#: that always follows the mismatch tables, or the terminal "Final result:"
+#: line -- whichever appears first.
+_NETGEN_SECTION_BOUNDARIES: tuple[str, ...] = (
+    "NET mismatches:",
+    "DEVICE mismatches:",
+    "Subcircuit pins:",
+    "Final result:",
+)
+
+
+def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | None:
+    """Resolve ``options.netgen_setup`` (an explicit path to a netgen LVS
+    setup ``.tcl`` file) against ``request_dir``, or ``None`` when omitted.
+
+    ``klt lvs`` deliberately resolves no PDK on its own (this module's
+    docstring, and ``provenance.pdk`` is always ``null``) -- so, unlike
+    ``pdk.netgen_setup_file`` (issue #343's PDK-side lookup), this function
+    does not itself call ``find_pdk``. A caller wanting the PDK-native setup
+    resolved automatically composes the two: pass
+    ``pdk.netgen_setup_file(variant=...)``'s result as this field. Omitting
+    it runs netgen with no setup file (its own documented "trivial default
+    setup" -- device/net comparison still works, but PDK-specific device-class
+    merging/property tolerances from the setup script do not apply).
+    """
+    value = options.get("netgen_setup")
+    if value is None:
+        return None
+    resolved = _resolve_relative(value, request_dir)
+    if not os.path.isfile(resolved):
+        raise LvsError(f"options.netgen_setup not found: {resolved}")
+    return resolved
+
+
+def _run_netgen_lvs(
+    *,
+    layout_netlist: kdb.Netlist,
+    layout_circuit: kdb.Circuit,
+    reference_netlist: kdb.Netlist,
+    reference_circuit: kdb.Circuit,
+    setup_file: str | None,
+    timeout_s: float,
+) -> tuple[str, list[dict[str, Any]], str | None]:
+    """Invoke ``netgen -batch lvs`` headlessly in netlist-vs-netlist mode and
+    return ``(status, mismatches, engine_version)``.
+
+    Writes ``layout_netlist``/``reference_netlist`` (already selected,
+    pruned, and -- when ``options.combine_devices`` was set -- combined,
+    identically to what the ``klayout`` engine compares) to temporary SPICE
+    files via ``klayout.db.NetlistSpiceWriter``, then runs::
+
+        netgen -batch lvs "<layout.spice> <top>" "<reference.spice> <top>" \\
+            <setup_file_or_""> <log_path>
+
+    -- the syntax ``netgen::lvs`` (``tcltk/netgen.tcl.in``) expects: a
+    ``"<file> <cell>"`` pair per side (a single argv token containing a
+    space, which Tcl's ``eval $argv`` re-splits into the 2-element list the
+    proc parses), an empty string for "no setup file" (netgen's own
+    documented behaviour, verified directly against a from-source build for
+    this issue), and the report log path.
+
+    Never trusts the subprocess's exit code alone: like ``sim.py``'s
+    ``_run_corner``, netgen exits ``0`` regardless of match/mismatch/most
+    errors (verified empirically for this issue) -- the log file's own
+    "Final result:" text is the only trustworthy verdict signal, parsed by
+    :func:`_parse_netgen_report`, which raises :class:`LvsError` rather than
+    guessing when that text is missing or unrecognised (the "must not
+    silently produce a false match on unparseable output" requirement this
+    issue exists to satisfy).
+    """
+    import klayout.db as kdb
+
+    work_dir = tempfile.mkdtemp(prefix="klt-lvs-netgen-")
+    try:
+        layout_path = os.path.join(work_dir, "layout.spice")
+        reference_path = os.path.join(work_dir, "reference.spice")
+        log_path = os.path.join(work_dir, "comp.out")
+
+        writer = kdb.NetlistSpiceWriter()
+        writer.use_net_names = True
+        try:
+            layout_netlist.write(
+                layout_path, writer, "klt lvs -- netgen engine layout netlist"
+            )
+            reference_netlist.write(
+                reference_path, writer, "klt lvs -- netgen engine reference netlist"
+            )
+        except Exception as exc:
+            raise LvsError(
+                f"could not write a netlist for the netgen engine: {exc}"
+            ) from exc
+
+        cmd = [
+            "netgen",
+            "-batch",
+            "lvs",
+            f"{layout_path} {layout_circuit.name}",
+            f"{reference_path} {reference_circuit.name}",
+            setup_file or "",
+            log_path,
+        ]
+        try:
+            completed = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_s
+            )
+        except FileNotFoundError as exc:
+            raise LvsError(
+                "could not launch netgen: binary not found on PATH. Install "
+                "netgen (https://github.com/RTimothyEdwards/netgen) or use "
+                f"engine 'klayout' instead. ({exc})"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise LvsError(
+                f"netgen did not complete within {timeout_s}s (raise "
+                "options.netgen_timeout_s to allow more time)"
+            ) from exc
+
+        engine_version = None
+        version_match = _NETGEN_ENGINE_VERSION_RE.search(completed.stdout or "")
+        if version_match:
+            engine_version = version_match.group(1)
+
+        if not os.path.isfile(log_path):
+            # netgen exits 0 even when it never got as far as comparing
+            # anything (e.g. a malformed netlist file) -- verified empirically
+            # for this issue (see the design-doc addendum). No report file at
+            # all means no trustworthy verdict is possible; surface netgen's
+            # own stdout (its errors go there, not to the log file) rather
+            # than a bare "no report" message.
+            raise LvsError(
+                "netgen did not produce a report file -- it likely failed to "
+                "read one of the input netlists. netgen's own output:\n"
+                + (completed.stdout or completed.stderr or "").strip()
+            )
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as handle:
+                log_text = handle.read()
+        except OSError as exc:
+            raise LvsError(f"could not read netgen report '{log_path}': {exc}") from exc
+
+        status, mismatches = _parse_netgen_report(log_text)
+        return status, mismatches, engine_version
+    finally:
+        _cleanup_netgen_work_dir(work_dir)
+
+
+def _cleanup_netgen_work_dir(work_dir: str) -> None:
+    import shutil
+
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _parse_netgen_report(log_text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Classify netgen's ``comp.out`` log text into ``(status, mismatches)``.
+
+    Verdict text (verified empirically against a from-source netgen 1.5.323
+    build for this issue -- see the design-doc addendum for the four
+    scenarios exercised):
+
+    - ``"Final result: Circuits match uniquely."`` -- a unique topological
+      match. Still downgraded to ``"mismatch"`` if a parameter difference was
+      also found (``"Property errors were found."``), consistent with the
+      ``klayout`` engine's own ``device.property`` semantics: a real
+      parameter defect is never reported as a clean match.
+    - ``"Final result: Netlists do not match."`` / ``"...Circuits do not
+      match."`` -- a topology mismatch.
+    - ``"Final result: Top level cell failed pin matching."`` -- a pin/port
+      mismatch (the ``lvs`` Tcl proc's own pre-``verify`` short-circuit).
+    - ``"Final result: Subcell(s) failed matching."`` -- a black-boxed
+      subcircuit mismatch (same short-circuit).
+    - ``"...Circuits match uniquely with port errors."`` -- topologically
+      unique but with a pin-count/order disagreement; treated as a mismatch
+      (never let a pin disagreement read as a clean match).
+
+    Raises :class:`LvsError` when no ``"Final result:"`` section is found at
+    all, or its text matches none of the above **and** no other structured
+    evidence (a parsed parameter-difference block) was found either -- this
+    is the "must fail loud, not soft, on unparseable output" requirement:
+    never let unrecognised report text default to ``"match"``.
+    """
+    marker = "Final result:"
+    idx = log_text.rfind(marker)
+    if idx == -1:
+        raise LvsError(
+            "could not parse netgen's LVS report: no 'Final result:' section "
+            "found -- the report format may be unrecognised or netgen may "
+            "have exited before completing the compare. Raw report "
+            "(last 2000 chars):\n" + log_text.strip()[-2000:]
+        )
+    tail = log_text[idx + len(marker) :].strip()
+    first_line = tail.splitlines()[0] if tail else ""
+
+    mismatches = _parse_netgen_property_errors(log_text)
+
+    is_clean_unique_match = tail.startswith("Circuits match uniquely.") and (
+        "port errors" not in tail
+    )
+    if is_clean_unique_match:
+        if mismatches:
+            return "mismatch", mismatches
+        return "match", []
+
+    mismatches.extend(_parse_netgen_section_blocks(log_text))
+
+    if tail.startswith("Top level cell failed pin matching."):
+        mismatches.append(
+            _mismatch(
+                CATEGORY_PIN_UNMATCHED,
+                "error",
+                "netgen: top-level cell failed pin matching",
+                "both",
+            )
+        )
+    elif tail.startswith("Subcell(s) failed matching."):
+        mismatches.append(
+            _mismatch(
+                CATEGORY_TOPOLOGY,
+                "error",
+                "netgen: one or more subcircuits failed to match",
+                "both",
+            )
+        )
+    elif "do not match" in tail or ("match uniquely" in tail and "port errors" in tail):
+        # "Netlists do not match." / "Circuits do not match." / "Circuits
+        # match uniquely with port errors." -- if the section-block parse
+        # above already found NET/DEVICE mismatch blocks (the common case
+        # for a topology mismatch), those are the detailed findings; only
+        # add a generic entry when nothing more specific was recovered, so
+        # the caller has *something* rather than an empty `mismatches[]` on
+        # a documented mismatch verdict.
+        if not mismatches:
+            mismatches.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "error",
+                    f"netgen: {first_line}",
+                    "both",
+                )
+            )
+    elif not mismatches:
+        # An unrecognised, non-empty "Final result:" text with no other
+        # structured evidence at all: never guess this is a match.
+        raise LvsError(
+            "could not classify netgen's LVS verdict: unrecognised 'Final "
+            f"result:' text {first_line!r}. Raw report tail:\n" + tail[:2000]
+        )
+
+    return "mismatch", mismatches
+
+
+def _parse_netgen_property_errors(log_text: str) -> list[dict[str, Any]]:
+    """Parse netgen's parameter-difference block(s) into ``device.property``
+    ``mismatches[]`` entries -- see :data:`_NETGEN_PROPERTY_BLOCK_RE` for the
+    exact text shape this matches."""
+    entries: list[dict[str, Any]] = []
+    for block_match in _NETGEN_PROPERTY_BLOCK_RE.finditer(log_text):
+        class1, index1, class2, index2, body = block_match.groups()
+        device_layout = f"{class1}:{index1}"
+        device_reference = f"{class2}:{index2}"
+        for line in body.splitlines():
+            line_match = _NETGEN_PROPERTY_LINE_RE.match(line)
+            if line_match is None:
+                continue
+            name, layout_value, reference_value, delta, cutoff = line_match.groups()
+            entries.append(
+                _mismatch(
+                    CATEGORY_DEVICE_PROPERTY,
+                    "error",
+                    f"netgen: matched device parameter '{name}' differs "
+                    f"(delta={delta}, cutoff={cutoff})",
+                    "both",
+                    device={
+                        "layout": device_layout,
+                        "reference": device_reference,
+                        "class": class1,
+                    },
+                    property_={
+                        "name": name,
+                        "layout": layout_value,
+                        "reference": reference_value,
+                    },
+                )
+            )
+    return entries
+
+
+def _parse_netgen_section_blocks(log_text: str) -> list[dict[str, Any]]:
+    """Bucket netgen's ``NET mismatches:``/``DEVICE mismatches:`` side-by-side
+    report tables into one generic entry per section, with the raw block
+    preserved verbatim in ``details.raw``.
+
+    These tables are fixed-width, pipe-delimited, and use filler cells like
+    ``"(no matching net)"`` for a one-sided row -- parsing them into precise
+    per-net/per-device entries (mirroring the ``klayout`` engine's
+    ``net.unmatched``/``device.unmatched`` granularity) would require
+    trusting column alignment that is not a documented, versioned contract
+    of netgen's own report format. Per this issue's scope ("fields that
+    don't map cleanly onto that shape go into a mismatch-level `details`
+    object, not a schema fork"), this module buckets instead of guessing.
+    """
+    entries: list[dict[str, Any]] = []
+    for header, category, label in _NETGEN_SECTION_HEADERS:
+        start = log_text.find(header)
+        if start == -1:
+            continue
+        end = len(log_text)
+        for boundary in _NETGEN_SECTION_BOUNDARIES:
+            boundary_pos = log_text.find(boundary, start + len(header))
+            if boundary_pos != -1:
+                end = min(end, boundary_pos)
+        block = log_text[start:end].strip()
+        entries.append(
+            _mismatch(
+                category,
+                "error",
+                f"netgen reported one or more {label} -- see the "
+                "'details.raw' field for netgen's own side-by-side report",
+                "both",
+                details={"raw": block},
+            )
+        )
+    return entries

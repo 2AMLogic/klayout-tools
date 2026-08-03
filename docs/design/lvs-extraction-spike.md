@@ -888,3 +888,189 @@ disagree, per this document's own opening note) and
 layer-role contract. The resistor device class (#219's one remaining
 sibling sub-issue, #222) is unaffected by this addendum and remains
 separately tracked.
+
+## Addendum (2026-08-02, #343): netgen realized as the intended second engine
+
+**Status:** implementation note, closing the loop this spike's §1 opened.
+§1's "netgen (contrast candidate)" survey reached "Oracle, not runtime" --
+netgen has no layout front-end, so wiring it up meant wiring up `magic` too,
+the "two-backends sprawl" `klt sim`'s "wrap the proven engine" precedent
+exists to prevent -- and the Recommendation section named
+"netgen-behind-the-same-contract" as "the intended second implementation
+and the differential oracle." Issue #343 built exactly that: `klt lvs`'s
+`engine` selector now accepts `"netgen"` alongside `"klayout"`, invoked
+headlessly (`netgen -batch lvs`) in **netlist-vs-netlist mode only** against
+the same layout/reference SPICE netlists the `"klayout"` engine already
+resolves -- no `magic` extraction backend. See `docs/cli/lvs.md` -> "Engine"
+for the shipped contract; this addendum records what the implementation
+found, which the acceptance criteria asked to be written up separately from
+the contract itself.
+
+### netgen was built from source for this issue, not just read about
+
+No `netgen` binary or packaging (Homebrew, conda, apt) was available in the
+sandbox this issue was implemented in, and the `RTimothyEdwards/netgen`
+GitHub repository's Tcl/Tk-based build has a real portability trap worth
+recording: it links against `Tcl_Main`/`Tcl_SetVar`/`Tcl_StaticPackage`,
+none of which exist in Tcl/Tk **9.x** (removed as part of Tcl 9's deprecated
+string-API cleanup) -- `./configure --with-tcl=<tcl 9 prefix>` succeeds, but
+`make` fails at the final `netgenexec` link step with "symbol(s) not found
+for architecture". **netgen (as of 1.5.323, this issue's survey date)
+requires Tcl/Tk 8.6**, not 9 -- `brew install tcl-tk@8` (or the equivalent
+on another platform) then `./configure --with-tcl=<tcl 8.6 prefix>
+--with-tk=<tcl 8.6 prefix>` builds and installs cleanly. A CI image that
+provisions `netgen` for this engine (e.g. to validate #343's own tests
+against the real binary, not just the stubbed-subprocess unit tests) needs
+Tcl/Tk 8.6 explicitly, not whatever "tcl" resolves to on a modern base
+image.
+
+### The `netgen::lvs` Tcl proc's invocation syntax (verified from source)
+
+`netgen -batch lvs <name1> <name2> [setupfile] [logfile]` is not a
+`netgen`-native CLI flag set -- `-batch` only strips itself and sets a Tcl
+`batchmode` flag; the remaining argv is `eval`-ed as a Tcl command in the
+`netgen` namespace (`tcltk/netgen.tcl.in`), where `lvs` is a proc
+(`netgen::lvs`, same file) that expects `name1`/`name2` as either a bare
+filename (cell name == file basename) or a **single argv token containing a
+space**, `"<file> <cell>"`, which Tcl's list semantics re-split into the
+2-element form the proc parses. This is exactly what
+`subprocess.run([..., f"{layout_path} {layout_circuit.name}", ...])`
+produces (each Python list element is one argv token, unsplit by a shell) --
+verified by invoking the real binary this way and reading a produced
+`comp.out` report back. An empty string (`""`) for `setupfile` is netgen's
+own documented "no setup file" path (`netgen::lvs`'s own log line: "No
+setup file specified. Using trivial default setup."), not an
+undocumented convention this implementation invented.
+
+### netgen's exit code is never trustworthy alone (confirmed, matching the ngspice precedent)
+
+`netgen -batch lvs` exits `0` for a clean match, a topology mismatch, a
+pin-count mismatch, *and* for at least one failure mode short of a
+completed compare (a missing input netlist file -- netgen prints a Tcl
+traceback to stdout and returns from the `lvs` proc without ever writing a
+report file, but the process itself still exits `0`). This is the same
+"never trust a subprocess's raw exit code" precedent `sim.py`'s own
+docstring establishes for `ngspice`, now confirmed for netgen too: this
+issue's implementation (`lvs._run_netgen_lvs`) treats "no report file was
+written at all" as its own distinct failure (a clear `LvsError` quoting
+netgen's stdout, since netgen's errors go there, not to the log file), and
+otherwise defers entirely to the log file's own `"Final result:"` text --
+never the process return code.
+
+### Report-format stability: verified against four real scenarios, not guessed
+
+Rather than infer netgen's `comp.out` format from documentation or hearsay,
+this issue captured the actual, byte-for-byte report text from a
+from-source netgen 1.5.323 build for four hand-built SPICE-netlist
+scenarios (a clean match; a single device parameter changed with
+connectivity untouched; a shorted/split net; an extra device changing the
+port list) and grepped the C/Tcl source (`base/netcmp.c`,
+`tcltk/tclnetgen.c`, `tcltk/netgen.tcl.in`) for every `Fprintf`/`Printf`
+call that could produce the terminal verdict line, to confirm the four
+observed strings are the complete, current set rather than a lucky sample:
+
+- `"Final result: Circuits match uniquely."` -- unique topological match
+  (optionally followed by `"Property errors were found."` when a matched
+  device pair's parameter differs by more than netgen's own configured
+  cutoff -- `klt lvs` downgrades this to `status: "mismatch"` with a
+  `device.property` entry, since a real parameter defect must never read as
+  a clean match, exactly as issue #282 already established for the
+  `"klayout"` engine's own minimal-cell degradation).
+- `"Final result: Netlists do not match."` (also seen as `"Circuits do not
+  match."` in `netcmp.c`'s non-Tcl code path, not reachable via
+  `netgen::lvs`'s own Tcl invocation but included in the parser's
+  substring match defensively) -- topology mismatch, with a fixed-width,
+  pipe-delimited `NET mismatches:`/`DEVICE mismatches:` side-by-side report
+  preceding it.
+- `"Final result: Top level cell failed pin matching."` -- a port-list
+  mismatch (`netgen::lvs`'s own pre-`verify` short-circuit, not a
+  `verify`-command message at all).
+- `"Final result: Subcell(s) failed matching."` -- a black-boxed
+  subcircuit mismatch (the sibling short-circuit; not exercised against the
+  real binary for this issue, since provoking it needs a deliberately
+  unmatchable nested subcircuit, but confirmed present verbatim in
+  `tcltk/netgen.tcl.in`).
+- `"Circuits match uniquely with port errors."` (`tclnetgen.c`'s
+  `_netcmp_verify`) -- topologically unique but with a port disagreement;
+  present in the source for completeness but not confirmed reachable from
+  `netgen::lvs`'s own call sequence (its pin-matching step forces the more
+  specific `"Top level cell failed pin matching."` path first in every
+  scenario this issue could construct) -- `klt lvs`'s parser still handles
+  it defensively (never as a clean match) in case a future netgen version's
+  proc reaches it.
+
+The `NET mismatches:`/`DEVICE mismatches:` side-by-side tables are real and
+stable in shape (fixed-width columns, a `"(no matching net)"`/`"(no
+matching instance)"` filler for a one-sided row, a full-width `---` rule
+opening and closing the table), but this issue deliberately does **not**
+parse them into per-net/per-device `mismatches[]` entries the way the
+`"klayout"` engine's own event stream does -- trusting exact column
+alignment across netgen versions/platforms is not a documented, versioned
+part of netgen's report contract the way the verdict lines above are (grep
+hits in the source, not just observed output). `klt lvs` instead buckets
+each whole section into one generic `net.unmatched`/`device.unmatched`
+entry with the raw block preserved in `details.raw` (see `docs/cli/lvs.md`)
+-- an explicit, documented precision gap rather than a per-net claim that
+could silently be wrong. The one report fragment this issue *does* parse
+precisely is the parameter-difference block (`"<class>:<idx> vs.
+<class>:<idx>:"` followed by indented `"<PARAM> circuit1: <v1>
+circuit2: <v2> (delta=<pct>%, cutoff=<pct>%)"` lines, from
+`netcmp.c`'s `PrintPropertyResults`) -- a fixed, `printf`-templated format
+that maps directly onto `device.property`'s `property: {name, layout,
+reference}` shape with no ambiguity.
+
+### Contract gap: `counts.*.matched`/`net_correspondence` do not generalize
+
+The `"klayout"` engine's `counts.nets/devices/pins.matched` and
+`net_correspondence[]` are built directly from `NetlistComparer`'s own
+per-pairing callbacks (`match_nets`, `match_devices`, ...) -- a `netgen`
+subprocess exposes no equivalent structured event stream, only the text
+report above. Reconstructing an equivalent per-item correspondence from
+netgen's fixed-width tables would mean trusting exactly the column
+alignment the section above declined to trust for `mismatches[]` -- so
+`klt lvs` does not attempt it for `"engine": "netgen"`: `matched` is exact
+on a `"match"` verdict (guaranteed by construction -- a unique match
+requires equal net/device/pin cardinality on both sides) and `0` on a
+`"mismatch"` verdict (the conservative floor, never a fabricated estimate);
+`net_correspondence` is always `[]`. This is a genuine, documented contract
+gap between the two engines (see `docs/cli/lvs.md` -> "Engine" ->
+`"netgen"`), not an oversight -- closing it would require either trusting
+netgen's table alignment or a second, netgen-specific compare pass this
+issue's netlist-vs-netlist scope does not otherwise need.
+
+### Schema/contract verdict: no `schema_version` bump
+
+Per `docs/json-contract.md` ("adding a field is not [a breaking change]"),
+this issue's two payload changes are both additive: `"netgen"` as a second
+accepted `engine` value (an enum-like value addition, the same category the
+contract's own "Pre-1.0 caveat" section already covers for a new
+`mismatches[].category`) and the new `mismatches[].details` field (present,
+`null`-valued, on every existing `"klayout"`-engine entry too -- no field
+was renamed, removed, or retyped). `klt lvs`'s `SCHEMA_VERSION` stays `1`.
+
+### Validation: categorically consistent verdicts on the real sky130 corpus fixture
+
+Both engines were run (with a real, from-source netgen 1.5.323 binary, not
+just the stubbed-subprocess unit tests) against `tests/corpus/sky130/
+sky130_fd_sc_hd__inv_1.gds` -- the same real corpus cell
+`tests/test_lvs.py`'s own `test_corpus_known_good_cell_matches_cleanly`
+uses -- through both `klt lvs`'s inline-extraction path (`layout.file` +
+`layout.deck: "sky130"`) and its negative-control counterpart (the same
+curator NMOS-body short, `" VGND vsubs"` -> `" VGND VGND"`, `test_lvs.py`'s
+own corpus round-trip tier applies):
+
+- **Known-good self-compare**: both engines report `status: "match"`.
+- **Deliberately-shorted reference**: both engines report `status:
+  "mismatch"`, and both surface a connectivity finding on the shorted net
+  (`"klayout"`: `device.unmatched`/`net.unmatched`/`topology`; `"netgen"`:
+  `net.unmatched`, its coarser section-bucketed granularity -- see the
+  report-format section above).
+
+Both engines additionally agree on the deck-structural
+`device.body_unverified` warning in both cases (issue #281 -- unaffected by
+the engine choice, since it is derived from the layout-side deck, not the
+compare engine). Categorically consistent per this issue's acceptance
+criteria, without either engine's exact `mismatches[]` shape needing to be
+identical -- the `"netgen"` engine's coarser bucketing on a topology-level
+defect is the one documented, expected divergence (see the contract-gap
+section above).

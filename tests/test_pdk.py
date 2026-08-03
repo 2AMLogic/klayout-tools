@@ -275,6 +275,76 @@ def test_assets_present_and_absent(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# netgen_setup_file (issue #343)
+#
+# Naming convention verified against the open_pdks source tree
+# (`RTimothyEdwards/open_pdks`, `sky130/Makefile.in` and
+# `gf180mcu/Makefile.in`'s `netgen-%` install rule, both cloned for this
+# issue): open_pdks stages `<variant>_setup.tcl` and symlinks a generic
+# `setup.tcl` alongside it in the same `libs.tech/netgen/` directory.
+# --------------------------------------------------------------------------- #
+
+
+def test_netgen_setup_file_prefers_variant_named_file(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("netgen",))
+    netgen_dir = variant_dir / "libs.tech" / "netgen"
+    (netgen_dir / "sky130A_setup.tcl").write_text("# variant setup\n")
+    (netgen_dir / "setup.tcl").write_text("# generic setup\n")
+
+    result = pdk.netgen_setup_file(root=str(root))
+
+    assert result == str(netgen_dir / "sky130A_setup.tcl")
+
+
+def test_netgen_setup_file_falls_back_to_generic_setup_tcl(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuC", assets=("netgen",))
+    netgen_dir = variant_dir / "libs.tech" / "netgen"
+    # Only the generic symlink target survived (e.g. a copy that dropped the
+    # variant-named original but kept `setup.tcl`).
+    (netgen_dir / "setup.tcl").write_text("# generic setup\n")
+
+    result = pdk.netgen_setup_file(root=str(root))
+
+    assert result == str(netgen_dir / "setup.tcl")
+
+
+def test_netgen_setup_file_none_when_directory_has_neither_file(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("netgen",))
+
+    result = pdk.netgen_setup_file(root=str(root))
+
+    assert result is None
+
+
+def test_netgen_setup_file_none_when_pdk_ships_no_netgen_asset(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))  # no "netgen"
+
+    result = pdk.netgen_setup_file(root=str(root))
+
+    assert result is None
+
+
+def test_netgen_setup_file_resolves_variant_and_root_like_find_pdk(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130B", assets=("netgen",))
+    _make_install(root, "sky130A", assets=("netgen",))
+    (variant_dir / "libs.tech" / "netgen" / "sky130B_setup.tcl").write_text("# x\n")
+
+    result = pdk.netgen_setup_file(variant="sky130B", root=str(root))
+
+    assert result == str(variant_dir / "libs.tech" / "netgen" / "sky130B_setup.tcl")
+
+
+def test_netgen_setup_file_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.netgen_setup_file(root=str(tmp_path / "does-not-exist"))
+
+
+# --------------------------------------------------------------------------- #
 # list_pdks
 # --------------------------------------------------------------------------- #
 
