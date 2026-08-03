@@ -129,7 +129,25 @@ in orientation"), generalized here to also stand in for a unit MoM/MiM
 capacitor cell footprint (neither curated DRC deck defines cap-specific
 layers, so the footprint — not the layer stack — is what's shared). Each
 real (non-dummy) unit gets two ports, `R<i>_A`/`R<i>_B`. `device_count` is
-`num` (dummies excluded). `drc_hints.matched_group_id` is `"res_array:<num>"`.
+`num` (dummies excluded). `drc_hints.matched_group_id` is `"res_array:<num>"`
+(unaffected by `rows`).
+
+`rows` (default `1`, the original single-row layout) folds the `num` unit
+resistors into that many parallel rows in boustrophedon ("snake") order —
+row 0 runs left to right, row 1 right to left, and so on — instead of one
+long row, mirroring how `mos_array`/`bjt_array` use `rows`/`cols` to keep an
+array roughly square. Without it, a resistor string with a realistic
+unit-segment count (dummies and trim taps included) produces a bounding box
+dominated by one axis, which can blow a floorplan's area budget even though
+the drawn area itself is small (issue #415). Row-to-row pitch is fixed (unit
+height plus the same `MIN_SAME_LAYER_SPACING_UM` margin `mos_array` uses for
+its own row pitch), independent of `spacing_um`, which stays scoped to
+within-row unit spacing. Port naming keeps the physically-adjacent pad pair
+short across every row transition: on a right-to-left (odd) row, `R<i>_A`
+and `R<i>_B` report the *opposite* physical pad from an even row (the unit's
+own drawn geometry never mirrors), so `R<i>_B` stays next to `R<i + 1>_A` in
+every row, not just even ones — the same short-hop connection a downstream
+router closes between any two consecutive real units today.
 
 Every unit (dummies included) has its resistive *body segment* — the middle
 span between the two contacted end pads — covered by the target PDK's own
@@ -148,6 +166,7 @@ affects `klt drc` status.
 | `spacing_um`   | double | `0.5`   | Spacing between unit resistors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected). |
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
+| `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
 
 ### `guard_ring` (family 3: substrate/well tap ring)
 

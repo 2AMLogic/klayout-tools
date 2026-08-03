@@ -900,6 +900,7 @@ def test_res_array_tight_spacing_is_advisory_not_rejected(tmp_path, pdk_root):
         {"spacing_um": -0.1},
         {"num": 0},
         {"dummy": -1},
+        {"rows": 0},
     ],
 )
 def test_res_array_invalid_params_rejected(tmp_path, pdk_root, params):
@@ -912,6 +913,141 @@ def test_res_array_invalid_params_rejected(tmp_path, pdk_root, params):
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+# --- res_array row folding (issue #415) --------------------------------------- #
+
+
+def test_res_array_rows_default_matches_original_single_row_layout(tmp_path, pdk_root):
+    """Omitting `rows` (or passing `rows=1` explicitly) must reproduce the
+    original single-row layout exactly -- byte-for-byte, not just
+    approximately -- so the fold feature is purely additive."""
+    output_default = tmp_path / "res_array_default.gds"
+    report_default = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 5, "dummy": 2},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_explicit = tmp_path / "res_array_rows1.gds"
+    report_explicit = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 5, "dummy": 2, "rows": 1},
+            "options": {"output": str(output_explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_explicit)
+    assert report_default["bbox_um"] == report_explicit["bbox_um"]
+    assert report_default["ports"] == report_explicit["ports"]
+    # Every port sits on the single row (same y_um) -- the pre-#415 shape.
+    y_values = {p["y_um"] for p in report_default["ports"]}
+    assert len(y_values) == 1
+
+
+def test_res_array_rows_folds_bbox_into_multiple_rows(tmp_path, pdk_root):
+    """The issue's own repro: `num=108` at `length_um=5, width_um=1,
+    spacing_um=0.5` produces a ~710um x 1um strip at `rows=1`. Folding into
+    several rows must shrink the x-extent and grow the y-extent -- the
+    bounding box actually becomes usable in a compact floorplan instead of
+    being dominated by one axis."""
+    params = {"length_um": 5, "width_um": 1, "spacing_um": 0.5, "num": 108, "dummy": 2}
+
+    output_1row = tmp_path / "res_array_1row.gds"
+    report_1row = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {**params, "rows": 1},
+            "options": {"output": str(output_1row)},
+        }
+    )
+    bbox_1row = report_1row["bbox_um"]
+    width_1row = bbox_1row["x1"] - bbox_1row["x0"]
+    height_1row = bbox_1row["y1"] - bbox_1row["y0"]
+
+    output_folded = tmp_path / "res_array_folded.gds"
+    report_folded = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {**params, "rows": 12},
+            "options": {"output": str(output_folded)},
+        }
+    )
+    bbox_folded = report_folded["bbox_um"]
+    width_folded = bbox_folded["x1"] - bbox_folded["x0"]
+    height_folded = bbox_folded["y1"] - bbox_folded["y0"]
+
+    # Same device count/ports either way -- folding only changes placement.
+    assert report_folded["device_count"] == report_1row["device_count"] == 108
+    assert len(report_folded["ports"]) == len(report_1row["ports"]) == 216
+
+    # The pathological single-row aspect ratio from the issue.
+    assert width_1row > 690
+    assert height_1row < 2
+
+    # Folding must substantially shrink the x-extent and grow the y-extent.
+    assert width_folded < width_1row / 5
+    assert height_folded > height_1row * 5
+
+
+def test_res_array_rows_boustrophedon_keeps_series_neighbors_close(tmp_path, pdk_root):
+    """Consecutive unit indices `i`/`i + 1` (the series-chain order implied
+    by the `R<i>_A`/`R<i>_B` port-naming convention) must stay close enough
+    across a row transition for a downstream router to close the gap with a
+    short jumper -- the boustrophedon ("snake") fold order, not a naive
+    left-to-right-then-wrap order that would leave a full row-width hop at
+    every transition."""
+    output = tmp_path / "res_array_snake.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "length_um": 5,
+                "width_um": 1,
+                "spacing_um": 0.5,
+                "num": 12,
+                "dummy": 0,
+                "rows": 4,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    ports_by_name = {p["name"]: p for p in report["ports"]}
+    unit_pitch_um = 5 + 0.5 + 2 * (0.22 + 2 * 0.1)  # length + spacing + 2 contact heads
+    for i in range(12 - 1):
+        b = ports_by_name[f"R{i}_B"]
+        a = ports_by_name[f"R{i + 1}_A"]
+        distance = ((b["x_um"] - a["x_um"]) ** 2 + (b["y_um"] - a["y_um"]) ** 2) ** 0.5
+        # Same-row neighbors are one pitch apart; row-transition neighbors
+        # are a short (row-pitch-scale) hop, never a full row-width jump.
+        assert distance < 3 * unit_pitch_um
+
+
+@pytest.mark.parametrize("deck", ("sky130", "gf180mcu"))
+def test_res_array_rows_folded_is_drc_clean(tmp_path, both_pdk_root, deck):
+    """A folded (`rows > 1`) array must stay DRC-clean on both curated
+    decks -- the new row-to-row pitch must not violate either deck's
+    same-layer spacing rule."""
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"res_array_folded_{deck}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"num": 9, "dummy": 1, "rows": 3},
+            "options": {"output": str(output)},
+        }
+    )
+    assert output.is_file()
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert report["device_count"] == 9
 
 
 # --- res_array resistor-ID marker layer (issue #369) -------------------------- #
