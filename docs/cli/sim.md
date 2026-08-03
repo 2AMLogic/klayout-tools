@@ -239,6 +239,27 @@ control/end cards before pointing a request at it.
   Selecting a process corner needs a model library; `models.lib` is only
   required when this axis is present. Omit entirely for a request that
   doesn't care about process (single point, no `.lib` card emitted).
+
+  **Known-good mismatch sections (per-device variation):** Until full Monte
+  Carlo orchestration lands, hand-rolled MC harnesses can reference validated
+  mismatch-style `.lib` sections from the vendor model deck:
+
+  - **sky130A**: `tt_mm` is confirmed to resolve correctly in
+    `libs.tech/ngspice/sky130.lib.spice` and produces plausible per-device
+    variation (validated by sky130-bandgap's `pnp-mismatch` simulation harness).
+    The `_mm` suffix pattern extends to other process corners (`ss_mm`, `ff_mm`,
+    etc.), following the same validation principle: the section must exist in
+    the model library and produce trustworthy device-level parameter spread
+    over multiple Monte Carlo samples.
+  - **gf180mcu**: Mismatch sections are supported and validated (e.g. via
+    gf180-bandgap's `mc-untrimmed` harness). Consult your gf180mcu PDK
+    variant's model library (`libs.tech/ngspice/`) to identify the specific
+    mismatch-variant section names (typically following a similar `<corner>_mm`
+    naming scheme, but not guaranteed across PDK versions).
+
+  For untested process corners or PDK variants not listed above, verify that
+  the section resolves in the actual `.lib` file before using it in production.
+
 - **`corners.supply_v`** (`object`, optional) — keyed by source/`.param` name
   (`vdd`, `vdda`, …), each an array of volts. **Multiple keys sweep together
   by index** (rails move as a set, not a cross product) — all arrays must be
