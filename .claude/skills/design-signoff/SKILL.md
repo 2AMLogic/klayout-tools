@@ -1,73 +1,105 @@
 ---
 name: "Design Pipeline: Signoff Report (S11)"
-description: "Stub — aggregate klt drc/klt sim (and eventually LVS/extraction) outputs into one pass/fail signoff artifact against the block spec. No aggregation tool exists and no friction issue is filed yet."
+description: "Generate a design-evidence qualification report for a block repo — grade it against the T1 sim-validated checklist (docs/design-evidence-tiers.md), with staleness and coverage-honesty checks. Aggregation tool tracked by #309; until it ships this skill specifies the hand-assembled report."
 domain: design-pipeline
 type: skill
-user-invocable: false
+user-invocable: true
 ---
 
-# S11 — Signoff report
+# S11 — Signoff / qualification report
 
-This is a **thin loader**, not the source of truth. The full stage graph,
-per-stage contracts, and model-class matrix live in
+Source-of-truth chain: the evidence ladder and per-tier checklist live in
+[`docs/design-evidence-tiers.md`](../../../docs/design-evidence-tiers.md);
+the stage contract lives in
 [`docs/design/design-pipeline.md`](../../../docs/design/design-pipeline.md)
-(§1 stage graph, §2 per-stage contracts, §3 model-class matrix, §4 gap map).
-Re-read that doc's S11 entries directly if anything here seems stale — this
-file only restates it for an agent entering the stage.
+(§2, S11). This skill operationalizes both into a report an agent can
+produce today. Re-read those docs if anything here seems stale.
 
-## Status: blocked — no aggregation tool, and no friction issue filed
+## Status
 
-No `klt` command aggregates `klt drc`/`klt sim` (and, later, LVS/extraction)
-JSON outputs into one signoff artifact. Unlike S8's LVS half or S9, this gap
-has **no tracking issue yet** (design doc §4 gap map: "No friction issue
-filed yet"). This is a full stub, and the gap itself is less concretely
-scoped than #54's — there is no engine decision pending, just an unbuilt
-aggregation/report tool.
+The mechanical aggregation tool does not exist yet — **#309** tracks it
+(with concrete friction evidence from the public canary repos). Until it
+ships, the report is hand-assembled per this skill; treat the output as the
+provisional shape of the future `klt.pipeline.signoff/1` artifact, not as
+that artifact.
+
+## Producing a qualification report
+
+Target: one markdown report grading a block repo against the **T1
+checklist** in `docs/design-evidence-tiers.md`. Work through the ten items
+in order; for each, record **PRESENT / PARTIAL / ABSENT**, the artifact
+paths, and the pass condition's actual state.
+
+### Gathering rules
+
+1. **Find the newest artifact of each family, then check freshness.**
+   Typical layouts (from the canary repos): DRC under
+   `layout/drc/reports/`, LVS under `layout/lvs/reports/`, corner records
+   under `sim/<experiment>/records/`, MC likewise, suite roll-ups under
+   `sim/suite/summaries/`. Newest ≠ fresh: compare the report's provenance
+   (input hashes where present — #335 — else record IDs vs the commits
+   that last touched `design/netlist/` and `layout/`) and flag any report
+   that predates its inputs as **STALE**, which fails the item.
+2. **Read verdicts from JSON, not prose.** `status`/`violation_count` from
+   `klt drc` JSON, `status`/mismatch severities from LVS JSON, per-row
+   verdicts from suite records. README status lines drift optimistic —
+   both canaries' did.
+3. **Carry coverage caveats into the verdict.** Deck coverage metadata
+   (rule-free layers, skipped rules), warning-level LVS mismatches,
+   MC legs not combined with process corners, known false negatives
+   documented in repo READMEs — each becomes a named caveat on that item,
+   and an uncombined or undisclosed caveat downgrades PRESENT → PARTIAL.
+4. **Spec ratification gates item 5.** If the spec table is draft, every
+   sim verdict is provisional; say so at the top of the report.
+5. **Completeness before quality.** A spec row with no testbench anywhere
+   is a per-row ABSENT (verification rule: no claim without a testbench).
+
+### Report shape
+
+```markdown
+# Qualification report — <block> on <pdk>
+Generated <date> at repo revision <sha>. Spec status: ratified|draft.
+
+## Verdict: T1 NOT MET — N of 10 items passing
+(or: T1 MET — all items passing; caveats listed below)
+
+| # | Item | Status | Evidence | Caveats |
+|---|------|--------|----------|---------|
+| 1 | Schematic | PRESENT | design/... | — |
+| 3 | DRC clean | PARTIAL | layout/drc/reports/<latest> | 12 rule-free layers; #345 |
+...
+
+## Gaps, ordered by blocking depth
+1. <item>: <what's missing> — <repo-side work | tool-side issue #NNN>
+...
+
+## Tool-side friction observed
+<anything the toolkit should have provided — file as klayout-tools issues>
+```
+
+Split every gap into **repo-side** (design work, missing runs, stale
+records) vs **tool-side** (capability the toolkit lacks — file or link a
+klayout-tools friction issue: e.g. #343 netgen cross-check, #344 Monte
+Carlo, #345 deck holes, #347 harness adoption, #309 aggregation).
+
+Write the report into the block repo (e.g. `docs/qualification/<date>.md`)
+only if the repo's conventions allow generated docs; otherwise deliver it
+in-conversation. The report contains only public-safe content by
+construction — it grades against the public tier doc.
 
 ## Contract (design doc §2, S11)
 
 | | |
 | --- | --- |
-| Input artifact | Converged outputs of S8 (DRC/LVS clean) and S10 (post-extraction sim pass), plus S3's original block spec. |
-| Output artifact | `klt.pipeline.signoff/1` (proposed, not shipped): pass/fail against every S3 spec field, with the corner/measurement/violation evidence each verdict rests on, and provenance hashes for every input artifact (mirroring `klt sim`'s `environment` block's reproducibility discipline). **Not implemented.** |
-| Entry criteria | Both S8 and S10 converged on the same layout/netlist generation — not a stale mix of an old layout's DRC pass and a newer netlist's sim pass. |
-| Exit criteria | Every S3 spec field has a recorded verdict; no field is silently unaddressed. |
-| `klt` verbs | None currently. Available inputs once upstream stages are unblocked: `klt drc --format json` (`docs/cli/drc.md`), `klt sim` (`docs/cli/sim.md`); LVS/extraction outputs once #54 ships. |
-| Failure modes | A spec field with no corresponding check anywhere upstream, discovered only here (the "signoff rejection" backtrack, design doc §1 → re-enters at whichever stage owns that spec); provenance mismatch between the layout and netlist being signed off (stale artifact pairing). |
-
-## What an agent can do today
-
-Until an aggregation tool exists, an agent reaching S11 must hand-assemble
-the signoff comparison: read `klt drc --format json` and `klt sim`'s JSON
-output directly, cross-reference each against the S3 block spec fields, and
-record verdicts manually — there is no shortcut, and no shipped schema to
-target. Treat any hand-assembled result as provisional, not as the
-`klt.pipeline.signoff/1` artifact the design doc proposes (that name is not
-authorized by anything shipped — see design doc "Out of scope for this
-doc").
-
-**If this gap causes real friction** driving a block through Epic #105's
-Phase 3 worked example — e.g. repeatedly hand-assembling the same
-comparison, or a spec field with no clean upstream source to check it
-against — that is worth filing as a new friction issue at that point, since
-none exists yet. Don't file speculatively; file when the worked example
-actually hits the wall.
+| Input artifact | Converged outputs of S8 (DRC/LVS) and S10 (post-extraction sim), plus S3's block spec — or, pre-convergence, whatever exists (the report then shows the gap map). |
+| Output artifact | The qualification report above. `klt.pipeline.signoff/1` (proposed, #309) will mechanize the aggregation; entry criteria and shape mirror this skill. |
+| Entry criteria | None hard — the report is most useful *before* convergence, as a gap map. |
+| Exit criteria | Every S3 spec field has a recorded verdict or a named gap; no field silently unaddressed. |
+| `klt` verbs | `drc`, `lvs`, `extract`, `sim`, `layout-metrics`, `report` outputs as inputs; none aggregate yet (#309). |
+| Failure modes | Stale artifact pairing (staleness rule catches it); a spec field with no upstream check (surfaces as per-row ABSENT → backtrack per design doc §1). |
 
 ## Model-class assignment (design doc §3)
 
-**small-fast.** Templated aggregation of already-converged, already-
-structured JSON (`klt drc`/`klt sim` outputs) into a report; the checks
-were already done upstream.
-
-**Escalation rule:** escalate to mid-tier or frontier-reasoning when
-aggregation surfaces a spec field with no corresponding upstream check (the
-"signoff rejection" backtrack, design doc §1) — that gap needs judgment, not
-templating.
-
-## Failure modes (recap)
-
-- A spec field with no corresponding check anywhere upstream, discovered
-  only here.
-- Provenance mismatch between the layout and netlist being signed off (a
-  stale artifact pairing — e.g. DRC ran against an older layout revision
-  than the one `klt sim`'s post-extraction pass used).
+**small-fast** for the aggregation walk; **escalate** to a stronger tier
+when a spec field has no corresponding upstream check anywhere — deciding
+where that check belongs needs judgment, not templating.
