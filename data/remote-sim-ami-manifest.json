@@ -1,4 +1,13 @@
 {
   "schema_version": 1,
-  "images": []
+  "images": [
+    {
+      "pdk": "sky130A",
+      "region": "us-west-2",
+      "ami_id": "ami-08ff4d015ebd4b1f1",
+      "pdk_snapshot": "sky130A-2026.08.03",
+      "ngspice_version": "46",
+      "built_at": "2026-08-03T13:14:49Z"
+    }
+  ]
 }

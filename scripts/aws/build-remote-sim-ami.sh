@@ -82,6 +82,11 @@ KLT_REF="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo main)"
 #: #265's header comment on why `$PDK_ROOT` -- not a `--pdk-root` request
 #: field -- is how the remote host resolves `request.models.pdk`).
 PDK_ROOT="/opt/pdk"
+#: Pinned open_pdks build the AMI bakes -- the same snapshot the local
+#: ~/.volare installs and the canary block repos pin (decision 4:
+#: reproducible, never "whatever volare's latest is at build time").
+#: Override with --pdk-version for a deliberate refresh.
+PDK_VERSION="c6d73a35f524070e85faff4a6a9eef49553ebc2b"
 
 log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
@@ -97,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --copy-to-region) COPY_TO_REGIONS+=("$2"); shift 2 ;;
     --klt-ref) KLT_REF="$2"; shift 2 ;;
+    --pdk-version) PDK_VERSION="$2"; shift 2 ;;
     --manifest) MANIFEST="$2"; shift 2 ;;
     --yes) YES=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -155,10 +161,10 @@ IDLE_GUARD_SCRIPT="$(cd "$REPO_ROOT" && uv run python3 -c \
 # build instance's own user-data shell (BUILD_USERDATA below), not here.
 case "$PDK" in
   sky130A)
-    PDK_FETCH_CMDS='pip install --break-system-packages volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 $(volare list-remote --pdk sky130 | tail -n1)'
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 '"${PDK_VERSION}"''
     ;;
   gf180mcu)
-    PDK_FETCH_CMDS='pip install --break-system-packages volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu $(volare list-remote --pdk gf180mcu | tail -n1)'
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu '"${PDK_VERSION}"''
     ;;
 esac
 
@@ -176,7 +182,7 @@ ${PDK_FETCH_CMDS}
 # invokes \`klt sim ... --backend local-parallel\` directly on this box, so
 # it must ship the exact klayout-tools code the launcher itself runs,
 # pinned to the same commit (see this script's header comment).
-pip install --break-system-packages "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_REF}"
+PIP_BREAK_SYSTEM_PACKAGES=1 pip install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_REF}"
 ${IDLE_GUARD_SCRIPT}
 touch /var/log/klt-remote-sim-ami-build-complete
 USERDATA
@@ -205,13 +211,26 @@ for _ in $(seq 1 60); do
   [[ "$STATUS" == "ok" ]] && break
   sleep 10
 done
-# A fixed settle window for user-data completion; this script does not poll
-# in-guest state beyond instance-status (no SSH dependency by design — see
-# above). An operator verifying a specific build should confirm
-# /var/log/klt-remote-sim-ami-build-complete exists before trusting the
-# resulting AMI; this is a known, documented limitation of the polling
-# strategy, not a silent success claim.
-sleep 60
+# Instance-status "ok" only means the OS booted -- user-data (PDK download +
+# klt install) takes minutes longer. Poll the console output for the
+# build-complete marker user-data touches (its `set -x` trace prints the
+# `touch` line), keeping the no-inbound-SSH design; die rather than snapshot
+# a half-baked instance. Console output flushes with multi-minute latency,
+# hence the generous budget. (First live run, Epic #253 validation #277,
+# snapshotted an AMI without klt because the old fixed 60s settle raced
+# user-data -- this poll is that bug's fix.)
+log "waiting for user-data build-complete marker in console output (up to 20 minutes) ..."
+MARKER_SEEN=false
+for _ in $(seq 1 40); do
+  if aws ec2 get-console-output --region "$REGION" --instance-id "$BUILD_ID" \
+      --output text --query 'Output' 2>/dev/null \
+      | grep -q "touch /var/log/klt-remote-sim-ami-build-complete"; then
+    MARKER_SEEN=true
+    break
+  fi
+  sleep 30
+done
+[[ "$MARKER_SEEN" == "true" ]] || die 4 "user-data never reported build-complete (console output lacks the marker); refusing to snapshot a half-baked instance. Build instance ${BUILD_ID} left running for inspection."
 
 log "stopping build instance before snapshot ..."
 aws ec2 stop-instances --region "$REGION" --instance-ids "$BUILD_ID" >/dev/null
