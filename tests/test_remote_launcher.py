@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+from pathlib import Path
 
 import pytest
 
@@ -139,6 +140,7 @@ def test_require_cost_config_no_ceiling_never_rejects():
 
 def _write_manifest(tmp_path, images):
     path = tmp_path / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"schema_version": 1, "images": images}))
     return path
 
@@ -219,6 +221,148 @@ def test_resolve_ami_picks_most_recently_built(tmp_path):
     result = rl.resolve_ami("sky130A", "us-east-1", manifest)
     assert result["ami_id"] == "ami-new"
     assert result["pdk_snapshot"] == "sky130A-2026.06.01"
+
+
+# --------------------------------------------------------------------------- #
+# AMI manifest path resolution order (issue #370) -- explicit override wins
+# over $KLT_AMI_MANIFEST wins over the user-scope manifest wins over the
+# packaged default, mirroring pdk.find_pdk's documented "first hit wins"
+# search order.
+# --------------------------------------------------------------------------- #
+
+
+def test_candidate_manifest_paths_explicit_disables_the_rest(tmp_path, monkeypatch):
+    # An explicit manifest_path is a hard override -- the sole candidate,
+    # same as pdk.find_pdk's --pdk-root: it never silently falls through to
+    # a lower tier, even if other tiers would resolve.
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "env.json"))
+    explicit = tmp_path / "explicit.json"
+    candidates = rl._candidate_manifest_paths(explicit)
+    assert candidates == [(explicit, "explicit ami_manifest override")]
+
+
+def test_candidate_manifest_paths_default_order_env_user_packaged(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, "/env/manifest.json")
+    user_path = tmp_path / "user" / "manifest.json"
+    default_path = tmp_path / "packaged" / "manifest.json"
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", user_path)
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", default_path)
+
+    candidates = rl._candidate_manifest_paths(None)
+
+    assert [path for path, _via in candidates] == [
+        Path("/env/manifest.json"),
+        user_path,
+        default_path,
+    ]
+
+
+def test_candidate_manifest_paths_no_env_var_skips_that_tier(tmp_path, monkeypatch):
+    monkeypatch.delenv(rl.AMI_MANIFEST_ENV_VAR, raising=False)
+    user_path = tmp_path / "user" / "manifest.json"
+    default_path = tmp_path / "packaged" / "manifest.json"
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", user_path)
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", default_path)
+
+    candidates = rl._candidate_manifest_paths(None)
+
+    assert [path for path, _via in candidates] == [user_path, default_path]
+
+
+def test_load_ami_manifest_explicit_wins_over_env_var(tmp_path, monkeypatch):
+    explicit = _write_manifest(tmp_path / "explicit", [])
+    env_manifest = tmp_path / "env" / "manifest.json"
+    env_manifest.parent.mkdir()
+    env_manifest.write_text(json.dumps({"schema_version": 1, "images": "not-loaded"}))
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(env_manifest))
+
+    result = rl.load_ami_manifest(explicit)
+
+    assert result["images"] == []  # loaded the explicit file, not the env one
+
+
+def test_load_ami_manifest_env_var_wins_over_user_scope(tmp_path, monkeypatch):
+    env_manifest = _write_manifest(tmp_path / "env", [])
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(env_manifest))
+    user_manifest = tmp_path / "user" / "manifest.json"
+    user_manifest.parent.mkdir()
+    user_manifest.write_text(json.dumps({"schema_version": 1, "images": "not-loaded"}))
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", user_manifest)
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", tmp_path / "packaged.json")
+
+    result = rl.load_ami_manifest()
+
+    assert result["images"] == []  # loaded the env-pointed file, not user-scope
+
+
+def test_load_ami_manifest_user_scope_wins_over_packaged_default(tmp_path, monkeypatch):
+    monkeypatch.delenv(rl.AMI_MANIFEST_ENV_VAR, raising=False)
+    user_manifest = _write_manifest(tmp_path / "user", [])
+    default_manifest = tmp_path / "packaged" / "manifest.json"
+    default_manifest.parent.mkdir()
+    default_manifest.write_text(
+        json.dumps({"schema_version": 1, "images": "not-loaded"})
+    )
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", user_manifest)
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", default_manifest)
+
+    result = rl.load_ami_manifest()
+
+    assert result["images"] == []  # loaded the user-scope file, not packaged
+
+
+def test_load_ami_manifest_falls_back_to_packaged_default(tmp_path, monkeypatch):
+    monkeypatch.delenv(rl.AMI_MANIFEST_ENV_VAR, raising=False)
+    default_manifest = _write_manifest(tmp_path / "packaged", [])
+    monkeypatch.setattr(
+        rl, "USER_MANIFEST_PATH", tmp_path / "user" / "does-not-exist.json"
+    )
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", default_manifest)
+
+    result = rl.load_ami_manifest()
+
+    assert result["images"] == []
+
+
+def test_load_ami_manifest_not_found_lists_every_location_tried(tmp_path, monkeypatch):
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "env" / "m.json"))
+    user_path = tmp_path / "user" / "m.json"
+    default_path = tmp_path / "packaged" / "m.json"
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", user_path)
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", default_path)
+
+    with pytest.raises(rl.RemoteLaunchError) as exc_info:
+        rl.load_ami_manifest()
+
+    message = str(exc_info.value)
+    assert "not found" in message
+    # every candidate location -- not just the packaged default -- is named
+    assert str(tmp_path / "env" / "m.json") in message
+    assert str(user_path) in message
+    assert str(default_path) in message
+    assert f"${rl.AMI_MANIFEST_ENV_VAR}" in message
+    assert "user config" in message
+    assert "packaged default" in message
+
+
+def test_load_ami_manifest_explicit_path_missing_does_not_fall_through(
+    tmp_path, monkeypatch
+):
+    # An explicit override that doesn't exist is an error, not a silent
+    # fallback to a lower tier -- even when a lower tier would resolve.
+    user_manifest = _write_manifest(tmp_path / "user", [])
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", user_manifest)
+    missing_explicit = tmp_path / "explicit" / "does-not-exist.json"
+
+    with pytest.raises(rl.RemoteLaunchError) as exc_info:
+        rl.load_ami_manifest(missing_explicit)
+
+    message = str(exc_info.value)
+    assert "not found" in message
+    assert str(missing_explicit) in message
+    assert str(user_manifest) not in message
 
 
 # --------------------------------------------------------------------------- #
