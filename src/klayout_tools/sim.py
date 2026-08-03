@@ -50,6 +50,7 @@ real failure.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -102,6 +103,13 @@ SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
 #: shape. Unknown names raise :class:`SimError` before any corner runs,
 #: mirroring ``engine`` validation.
 SUPPORTED_BACKENDS = ("local", "local-parallel", "remote")
+
+#: Recognised values for ``request.monte_carlo.vary`` -- which axis (or
+#: axes) of statistical variation the sample sequence is declared to
+#: exercise. See :func:`_expand_monte_carlo` and this module's "Monte Carlo
+#: sampling" section below for the seed-derivation contract this drives, and
+#: docs/cli/sim.md's "Monte Carlo" section for the request/response shape.
+SUPPORTED_MC_VARY = ("mismatch", "process", "both")
 
 #: Assumed ngspice worker-thread count used to derive the ``local-parallel``
 #: backend's conservative default ``max_workers`` -- see :func:`_default_max_workers`.
@@ -371,6 +379,13 @@ def run_sim(
 
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
+    monte_carlo_spec = request.get("monte_carlo")
+    monte_carlo_info: dict[str, Any] | None = None
+    if monte_carlo_spec is not None:
+        corner_points, monte_carlo_info = _expand_monte_carlo(
+            corner_points, monte_carlo_spec
+        )
+
     corners, engine_version, remote_environment = _BACKENDS[backend](
         corner_points=corner_points,
         netlist_path=netlist_path,
@@ -413,6 +428,12 @@ def run_sim(
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
         environment["remote"] = remote_environment
+    if monte_carlo_info is not None:
+        # Additive/optional: only present when the request declares
+        # `monte_carlo` -- the seed contract's request-level echo, per
+        # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
+        # live on each corner (`corners[].monte_carlo`), not here.
+        environment["monte_carlo"] = monte_carlo_info
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -490,23 +511,42 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
 
 
 class CornerPoint:
-    """One expanded (process, supply, temperature) point, pre-run."""
+    """One expanded (process, supply, temperature) point, pre-run.
 
-    __slots__ = ("process", "supply_v", "temperature_c")
+    ``sample_index``/``mc_seed`` are populated only when this point is one of
+    a Monte Carlo sample sequence (see :func:`_expand_monte_carlo`) --
+    ``None``/``None`` for an ordinary PVT corner point. Keeping them on
+    :class:`CornerPoint` itself (rather than a parallel structure) is why
+    sampling needs no new execution backend: every backend already consumes
+    a plain ``list[CornerPoint]`` and calls :func:`_run_corner` per point,
+    so a sampled point flows through exactly the same path as an
+    unsampled one.
+    """
+
+    __slots__ = ("process", "supply_v", "temperature_c", "sample_index", "mc_seed")
 
     def __init__(
         self,
         process: str | None,
         supply_v: dict[str, float],
         temperature_c: float,
+        *,
+        sample_index: int | None = None,
+        mc_seed: dict[str, int] | None = None,
     ) -> None:
         self.process = process
         self.supply_v = supply_v
         self.temperature_c = temperature_c
+        self.sample_index = sample_index
+        self.mc_seed = mc_seed
 
     @property
     def corner_id(self) -> str:
-        """``<process>/<supply>V/<temp>C``, per the spike's response schema.
+        """``<process>/<supply>V/<temp>C``, per the spike's response schema,
+        with a ``/mc<sample_index>`` suffix appended for a Monte Carlo sample
+        point (see :func:`_expand_monte_carlo`) so per-sample corner IDs and
+        artifact paths never collide with each other or with the unsampled
+        corner they were drawn from.
 
         ``process`` defaults to ``"default"`` when the request declares no
         process axis. Multiple supply rails (an extension beyond the spike's
@@ -524,7 +564,10 @@ class CornerPoint:
                 "_".join(f"{k}={v:.3f}" for k, v in sorted(self.supply_v.items())) + "V"
             )
         temp_label = _format_number(self.temperature_c)
-        return f"{process_label}/{supply_label}/{temp_label}C"
+        base = f"{process_label}/{supply_label}/{temp_label}C"
+        if self.sample_index is None:
+            return base
+        return f"{base}/mc{self.sample_index}"
 
     @property
     def slug(self) -> str:
@@ -607,6 +650,149 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
         else:
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Monte Carlo sampling
+# --------------------------------------------------------------------------- #
+#
+# Phase 1 of #344's decomposition: the sampling *orchestration* core --
+# request schema, seed handling, fan-out mechanics. Statistics rollup
+# (mean/sigma/quantiles) and limit-window pass/fail evaluation are phase 2
+# (a separate sub-issue) -- this module only produces N reproducibly-seeded
+# samples per corner point; it never aggregates them.
+#
+# ``request.monte_carlo`` is additive and orthogonal to `corners.*`: the PVT
+# axes still select *which* process/supply/temperature points are simulated
+# (including, per docs/cli/sim.md's "Corner axes" section, an
+# already-supported mismatch-enabled `.lib` section like sky130's `tt_mm` --
+# no schema change needed there); `monte_carlo` instead asks for each of
+# those points to be re-run N times with a fresh, reproducible random seed,
+# standing in for the per-instance device variation ``AGAUSS``/``GAUSS``
+# calls in a mismatch-aware model library draw on. See
+# :func:`_expand_monte_carlo` for the seed-derivation contract and
+# docs/cli/sim.md's "Monte Carlo" section for the full request/response
+# shape.
+
+
+def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
+    """Validate ``request.monte_carlo`` and return its ``(n, seed, vary)``
+    fields. Raises :class:`SimError` with an actionable message for a
+    missing/malformed field -- mirroring the request-level validation style
+    used elsewhere in :func:`run_sim` (e.g. ``request.analysis``,
+    ``request.measurements[]``)."""
+    if not isinstance(mc_spec, dict):
+        raise SimError("request.monte_carlo must be an object")
+
+    n = mc_spec.get("n")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        raise SimError("request.monte_carlo.n must be a positive integer")
+
+    seed = mc_spec.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise SimError("request.monte_carlo.seed must be an integer")
+
+    vary = mc_spec.get("vary")
+    if vary not in SUPPORTED_MC_VARY:
+        raise SimError(
+            "request.monte_carlo.vary must be one of "
+            f"{', '.join(SUPPORTED_MC_VARY)} (got {vary!r})"
+        )
+
+    return n, seed, vary
+
+
+#: Modulus applied to every derived Monte Carlo seed component -- the
+#: largest signed 32-bit prime (``2**31 - 1``), safely inside the range
+#: ngspice's own ``.options seed=<int>`` accepts. Not itself
+#: security-sensitive (this is reproducible sampling, not cryptography); it
+#: only needs to be a fixed, documented constant so the same inputs always
+#: derive the same seed.
+_MC_SEED_MODULUS = 2_147_483_647
+
+
+def _derive_mc_seed(base_seed: int, *parts: object) -> int:
+    """Deterministically derive a reproducible integer seed from
+    ``base_seed`` and ``parts``.
+
+    SHA-256-based, deliberately never Python's built-in ``hash()`` -- string
+    hashing is salted per-process by default (``PYTHONHASHSEED``), which
+    would silently break the "same seed -> same sampled sequence" contract
+    the moment two runs happened to land in different interpreters. Two
+    calls with identical arguments always return the same value, in any
+    process, on any machine, forever -- this is the seed-reproducibility
+    guarantee :func:`_expand_monte_carlo` and ``docs/cli/sim.md``'s "Monte
+    Carlo" section build on. ``parts`` disambiguates *what* is being
+    derived (axis name, corner index, sample index, ...) so unrelated
+    derivations from the same ``base_seed`` never collide by construction.
+    """
+    payload = ":".join(str(part) for part in (base_seed, *parts)).encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:4], "big") % _MC_SEED_MODULUS
+
+
+def _expand_monte_carlo(
+    corner_points: list[CornerPoint], mc_spec: dict[str, Any]
+) -> tuple[list[CornerPoint], dict[str, Any]]:
+    """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
+    points, returning ``(sampled_points, monte_carlo_info)``.
+
+    Fan-out only -- reuses the same ``list[CornerPoint]`` shape every
+    execution backend already consumes (see :class:`CornerPoint`'s
+    docstring), so no new backend is needed. Sample order is deterministic
+    (outer: original corner order from :func:`_expand_corners`; inner:
+    ``sample_index`` ``0..n-1``), matching the odometer-style determinism
+    :func:`_expand_corners` already guarantees for the PVT axes.
+
+    **Seed contract.** Each sample derives two independent seed components
+    from ``mc_spec["seed"]`` via :func:`_derive_mc_seed` -- ``process_seed``
+    and ``mismatch_seed`` -- and a combined ``rndseed`` fed to ngspice (see
+    ``_write_corner_deck``'s ``.options seed=`` card). A component only
+    varies across ``sample_index`` when ``mc_spec["vary"]`` actually asks
+    for that axis (``"process"``/``"mismatch"``/``"both"``); otherwise every
+    sample of that corner derives the same value for it. This is the
+    **deterministic negative control**: request ``vary: "process"`` and
+    every sample's ``mismatch_seed`` -- and therefore anything downstream
+    that depends only on it -- is identical across the N samples (sigma=0),
+    proving the sampler isn't silently injecting variation nobody asked
+    for. Requesting the *same* ``mc_spec["seed"]`` again (same process,
+    different process, doesn't matter) reproduces the exact same sequence
+    of derived seeds -- see :func:`_derive_mc_seed`.
+    """
+    n, seed, vary = _validate_monte_carlo_spec(mc_spec)
+    vary_process = vary in ("process", "both")
+    vary_mismatch = vary in ("mismatch", "both")
+
+    sampled: list[CornerPoint] = []
+    for corner_index, base in enumerate(corner_points):
+        for sample_index in range(n):
+            process_seed = _derive_mc_seed(
+                seed,
+                "process",
+                corner_index,
+                sample_index if vary_process else "fixed",
+            )
+            mismatch_seed = _derive_mc_seed(
+                seed,
+                "mismatch",
+                corner_index,
+                sample_index if vary_mismatch else "fixed",
+            )
+            rndseed = _derive_mc_seed(seed, "rndseed", process_seed, mismatch_seed)
+            sampled.append(
+                CornerPoint(
+                    base.process,
+                    base.supply_v,
+                    base.temperature_c,
+                    sample_index=sample_index,
+                    mc_seed={
+                        "process_seed": process_seed,
+                        "mismatch_seed": mismatch_seed,
+                        "rndseed": rndseed,
+                    },
+                )
+            )
+    return sampled, {"n": n, "seed": seed, "vary": vary}
 
 
 # --------------------------------------------------------------------------- #
@@ -1234,6 +1420,16 @@ def _run_corner(
     else:
         _cleanup_dir(corner_dir)
 
+    monte_carlo: dict[str, Any] | None = None
+    if point.sample_index is not None:
+        assert point.mc_seed is not None  # every sampled point carries one
+        monte_carlo = {
+            "sample_index": point.sample_index,
+            "seed": point.mc_seed["rndseed"],
+            "process_seed": point.mc_seed["process_seed"],
+            "mismatch_seed": point.mc_seed["mismatch_seed"],
+        }
+
     corner = {
         "corner_id": point.corner_id,
         "process": point.process,
@@ -1244,6 +1440,7 @@ def _run_corner(
         "measurements": measurement_results,
         "diagnostics": diagnostics,
         "artifacts": artifacts,
+        "monte_carlo": monte_carlo,
     }
     return corner, engine_version
 
@@ -1270,12 +1467,28 @@ def _write_corner_deck(
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
 ) -> None:
-    """Generate the corner-specific ngspice deck: ``.lib``/``.include``/``.temp``,
-    the request's verbatim ``.meas`` cards, and a ``.control`` block that
-    ``alter``s the supply sources, optionally captures an ASCII rawfile, and
-    runs the declared analysis.
+    """Generate the corner-specific ngspice deck: an optional Monte Carlo
+    seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
+    ``.meas`` cards, and a ``.control`` block that ``alter``s the supply
+    sources, optionally captures an ASCII rawfile, and runs the declared
+    analysis.
     """
     lines = ["* klt sim -- generated corner deck, do not edit"]
+    if point.mc_seed is not None:
+        # `.options seed=` is ngspice's documented mechanism for seeding the
+        # AGAUSS/GAUSS/random() functions a mismatch-aware model library's
+        # behavioral parameters call -- it must appear before any such
+        # function is evaluated, i.e. before `.lib`/`.include` below (see
+        # `_expand_monte_carlo`'s seed contract and docs/cli/sim.md's
+        # "Monte Carlo" section). `mc_process_seed`/`mc_mismatch_seed` are
+        # also exposed as plain `.param`s -- available to a netlist body
+        # that wants to reference the per-axis seed directly (e.g. deriving
+        # its own AGAUSS `N` grouping argument) rather than relying solely
+        # on ngspice's single global seed.
+        lines.append(f".options seed={point.mc_seed['rndseed']}")
+        lines.append(f".param mc_sample_index={point.sample_index}")
+        lines.append(f".param mc_process_seed={point.mc_seed['process_seed']}")
+        lines.append(f".param mc_mismatch_seed={point.mc_seed['mismatch_seed']}")
     if point.process is not None:
         lines.append(f".lib {models_lib} {point.process}")
     lines.append(f".include {netlist_path}")
