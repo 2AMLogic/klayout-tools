@@ -291,6 +291,77 @@ Expansion is deterministic and odometer-style: process outermost, supply
 next, temperature innermost — the same corner list, same order, every run
 against the same request.
 
+## Monte Carlo sampling
+
+`request.monte_carlo` (optional) re-runs each expanded corner point `n`
+times with a fresh, reproducible random seed, standing in for the
+per-instance device variation a mismatch-aware model library's behavioral
+parameters (`AGAUSS`/`GAUSS` calls, e.g. sky130's `mc_mm_switch`/
+`mc_pr_switch`-gated device parameters) draw on:
+
+```json
+{ "monte_carlo": { "n": 300, "seed": 20260801, "vary": "mismatch" } }
+```
+
+This is **phase 1** of Monte Carlo support (issue #348, part of #344's
+decomposition) — the sampling *orchestration* core: request schema, seed
+handling, and fan-out mechanics. Statistics rollup (mean/sigma/quantiles)
+and limit-window pass/fail evaluation across a sample set are phase 2 (a
+separate sub-issue) — `klt sim` reports each sample as its own corner entry
+and does not aggregate them.
+
+- **`monte_carlo.n`** (integer, required) — number of samples per expanded
+  corner point. Must be a positive integer.
+- **`monte_carlo.seed`** (integer, required) — the base seed the entire
+  sample sequence derives from (see "Seed contract" below).
+- **`monte_carlo.vary`** (string, required) — which axis of variation this
+  sample sequence exercises: `"mismatch"`, `"process"`, or `"both"`.
+
+`monte_carlo` is orthogonal to `corners.*`: the PVT axes still select
+*which* process/supply/temperature points are simulated — including an
+already-supported mismatch-enabled `.lib` section like sky130's `tt_mm`
+(see "Corner axes" above) — while `monte_carlo` asks for each of those
+points to be re-run `n` times with a different seed. A request combining
+both expands to `corner_count * monte_carlo.n` total runs.
+
+**Seed contract.** `monte_carlo.seed` makes the sampled sequence
+reproducible run-to-run: the same `seed` always derives the same per-sample
+seed values (module hardware/OS variance aside), in any process, on any
+machine — the derivation is SHA-256-based, never Python's salted built-in
+`hash()`. Each sample derives two independent components — `process_seed`
+and `mismatch_seed` — plus a combined `rndseed` written into the generated
+deck as `.options seed=<rndseed>` (ngspice's documented mechanism for
+seeding `AGAUSS`/`GAUSS`/`random()`, which must appear before the netlist's
+`.lib`/`.include` cards). `mc_process_seed`/`mc_mismatch_seed` are also
+exposed as plain `.param`s in the deck, for a netlist body that wants to
+reference a per-axis seed directly. `monte_carlo.seed`, `n`, and `vary` are
+echoed back in the response's `environment.monte_carlo`; each sample's own
+derived values are on that sample's `corners[]` entry, under
+`monte_carlo: {sample_index, seed, process_seed, mismatch_seed}` — see
+"JSON schema" below.
+
+**Deterministic negative control.** A seed component only varies across
+samples when `monte_carlo.vary` actually asks for that axis — requesting
+`vary: "process"` derives a different `process_seed` per sample but the
+*same* `mismatch_seed` for every sample of a given corner (sigma=0
+downstream), and vice versa for `vary: "mismatch"`. This guards against a
+broken/no-op sampler that silently produces no variation at all (or
+variation from an unrelated source): the axis nobody asked to vary is
+provably pinned, not just "happens to look the same" this run. Two public
+canary repos (gf180-bandgap, sky130-bandgap) already rely on this exact
+guarantee — an MC-off point where every sigma must come back exactly `0` —
+in their own hand-rolled orchestration; this is that same guarantee shipped
+as first-class `klt sim` behavior.
+
+**Unique sample IDs.** Each sample's `corner_id` and artifact directory
+extend the corner it was drawn from with a `/mc<sample_index>` suffix (e.g.
+`tt/1.620V/27C/mc0`, `tt/1.620V/27C/mc1`, …) so per-sample logs never
+collide under `options.keep_artifacts`, and `exclude`d requests won't be
+sampled since they aren't in the corner list. Invalid `monte_carlo` fields
+(missing `n`/`seed`/`vary`, a bad `vary` value, `n < 1`) raise `SimError`
+before any corner runs — the same "the sweep never started" class as an
+unresolvable netlist or unsupported backend.
+
 ## Model library resolution (via `klt pdk`)
 
 `models` resolves through the same discovery/resolution library that backs
@@ -465,6 +536,9 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `corners.supply_v`       | object            | Supply axis, keyed by source/`.param` name; arrays sweep together by index.                                                                                            |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `exclude`                | array\<object\>   | Partial corner specs dropped from the expansion.                                                                                                                       |
+| `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
+| `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |
+| `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
 | `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card. |
 | `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit` and `limits` (`min`/`max`, either optional). No `limits` -> reported, never fails. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
@@ -490,7 +564,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
     "models_lib": "/abs/path/corner.lib",
     "models_lib_sha256": "3ccce27a...",
     "netlist_sha256": "71d273ab...",
-    "netlist_source": "extracted"
+    "netlist_source": "extracted",
+    "monte_carlo": { "n": 300, "seed": 20260801, "vary": "mismatch" }
   },
   "provenance": {
     "klt_version": "0.4.2",
@@ -519,9 +594,34 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
         { "name": "vout", "value": 0.81, "unit": "V", "status": "pass", "margin": 0.06 }
       ],
       "diagnostics": [],
-      "artifacts": { "log": null, "raw": null, "waveform": null }
+      "artifacts": { "log": null, "raw": null, "waveform": null },
+      "monte_carlo": null
     }
   ]
+}
+```
+
+A sample corner (only present when the request declares `monte_carlo`)
+carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
+`corner_id`:
+
+```json
+{
+  "corner_id": "tt/1.620V/-40C/mc0",
+  "process": "tt",
+  "supply_v": { "vdd": 1.62 },
+  "temperature_c": -40,
+  "status": "pass",
+  "runtime_s": 0.079,
+  "measurements": [ /* ... */ ],
+  "diagnostics": [],
+  "artifacts": { "log": null, "raw": null, "waveform": null },
+  "monte_carlo": {
+    "sample_index": 0,
+    "seed": 1732958821,
+    "process_seed": 90210,
+    "mismatch_seed": 552013
+  }
 }
 ```
 
@@ -534,7 +634,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares it) `netlist_source`. |
+| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}`, echoed from the request — see "Monte Carlo sampling" above). |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners, including the worst case and which corner produced it.                |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
@@ -543,7 +643,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 
 | Field            | Type             | Description                                                                                                                   |
 | ---------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `corner_id`      | string           | `<process>/<supply>V/<temp>C` (e.g. `ss/1.620V/125C`); `<process>` is `"default"` and `<supply>` is `"novdd"` when that axis is absent from the request. Multiple supply rails join as `key=value` pairs. |
+| `corner_id`      | string           | `<process>/<supply>V/<temp>C` (e.g. `ss/1.620V/125C`); `<process>` is `"default"` and `<supply>` is `"novdd"` when that axis is absent from the request. Multiple supply rails join as `key=value` pairs. A Monte Carlo sample appends `/mc<sample_index>` (e.g. `ss/1.620V/125C/mc7`). |
 | `process`        | string \| null   | Process-corner section used, or `null` when the request declares no process axis.                                              |
 | `supply_v`       | object           | Supply values for this corner, keyed by source/`.param` name (`{}` when the request declares no supply axis).                  |
 | `temperature_c`  | number           | Temperature for this corner.                                                                                                  |
@@ -552,6 +652,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`), `margin`.               |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` only occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`); every other code is always `"error"`. Empty for a clean run.       |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. Raw log text is **never** inlined into the JSON. |
+| `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 
 ### Semantics and guarantees
 
@@ -581,7 +682,9 @@ the full reasoning):
   including errored corners (with their diagnostics).
 - **Reproducibility is in-band** — `environment` hashes the netlist and
   resolved model library so a stored result can be checked against the
-  inputs that produced it.
+  inputs that produced it; a `monte_carlo` request additionally makes the
+  sampled seed sequence itself reproducible from `monte_carlo.seed` alone
+  (see "Monte Carlo sampling" above).
 
 ## Exit codes
 

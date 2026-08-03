@@ -23,6 +23,7 @@ Two tiers, per the issue's testing requirement (#91):
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -431,6 +432,146 @@ def test_corner_slug_is_filesystem_safe():
     point = sim.CornerPoint("ss", {"vdd": 1.62}, -40)
     assert "/" not in point.slug
     assert point.slug == "ss_1p620V_n40C"
+
+
+def test_corner_id_and_slug_get_sample_suffix():
+    point = sim.CornerPoint(
+        "tt",
+        {"vdd": 1.8},
+        27,
+        sample_index=3,
+        mc_seed={"process_seed": 1, "mismatch_seed": 2, "rndseed": 3},
+    )
+    assert point.corner_id == "tt/1.800V/27C/mc3"
+    assert point.slug == "tt_1p800V_27C_mc3"
+
+
+# --------------------------------------------------------------------------- #
+# Monte Carlo sampling: request validation, seed contract, negative control
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "mc_spec,match",
+    [
+        ({"seed": 1, "vary": "mismatch"}, "monte_carlo.n"),
+        ({"n": 0, "seed": 1, "vary": "mismatch"}, "monte_carlo.n"),
+        ({"n": "5", "seed": 1, "vary": "mismatch"}, "monte_carlo.n"),
+        ({"n": 5, "vary": "mismatch"}, "monte_carlo.seed"),
+        ({"n": 5, "seed": "abc", "vary": "mismatch"}, "monte_carlo.seed"),
+        ({"n": 5, "seed": 1}, "monte_carlo.vary"),
+        ({"n": 5, "seed": 1, "vary": "bogus"}, "monte_carlo.vary"),
+    ],
+)
+def test_validate_monte_carlo_spec_rejects_invalid(mc_spec, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._validate_monte_carlo_spec(mc_spec)
+
+
+def test_validate_monte_carlo_spec_accepts_every_vary_value():
+    for vary in sim.SUPPORTED_MC_VARY:
+        assert sim._validate_monte_carlo_spec({"n": 3, "seed": 42, "vary": vary}) == (
+            3,
+            42,
+            vary,
+        )
+
+
+def test_expand_monte_carlo_produces_n_samples_per_corner():
+    corner_points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    sampled, info = sim._expand_monte_carlo(
+        corner_points, {"n": 3, "seed": 1, "vary": "both"}
+    )
+
+    assert info == {"n": 3, "seed": 1, "vary": "both"}
+    assert len(sampled) == 6  # 2 corners x 3 samples
+    ids = [p.corner_id for p in sampled]
+    assert len(set(ids)) == 6  # every corner_id/artifact path is unique
+    assert ids == [
+        "tt/novdd/27C/mc0",
+        "tt/novdd/27C/mc1",
+        "tt/novdd/27C/mc2",
+        "ss/novdd/27C/mc0",
+        "ss/novdd/27C/mc1",
+        "ss/novdd/27C/mc2",
+    ]
+
+
+def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
+    corner_points = sim._expand_corners({"process": ["tt"]}, [])
+    mc_spec = {"n": 5, "seed": 20260801, "vary": "both"}
+
+    sampled_a, _ = sim._expand_monte_carlo(corner_points, mc_spec)
+    sampled_b, _ = sim._expand_monte_carlo(corner_points, mc_spec)
+
+    seeds_a = [p.mc_seed for p in sampled_a]
+    seeds_b = [p.mc_seed for p in sampled_b]
+    assert seeds_a == seeds_b
+    # Not a broken/no-op sampler: consecutive samples actually differ.
+    assert len({tuple(s.values()) for s in seeds_a}) == 5
+
+
+def test_expand_monte_carlo_different_seed_diverges():
+    corner_points = sim._expand_corners({}, [])
+    sampled_a, _ = sim._expand_monte_carlo(
+        corner_points, {"n": 3, "seed": 1, "vary": "both"}
+    )
+    sampled_b, _ = sim._expand_monte_carlo(
+        corner_points, {"n": 3, "seed": 2, "vary": "both"}
+    )
+    assert [p.mc_seed for p in sampled_a] != [p.mc_seed for p in sampled_b]
+
+
+@pytest.mark.parametrize(
+    "vary,varying_key,pinned_key",
+    [
+        ("process", "process_seed", "mismatch_seed"),
+        ("mismatch", "mismatch_seed", "process_seed"),
+    ],
+)
+def test_expand_monte_carlo_negative_control(vary, varying_key, pinned_key):
+    """The deterministic negative control this issue requires: the axis
+    `vary` does *not* request stays identical (sigma=0) across every sample
+    of a corner, while the requested axis actually varies -- a broken/no-op
+    sampler that always returns the same seeds for both axes (or that
+    varies both regardless of `vary`) fails this test."""
+    corner_points = sim._expand_corners({}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        corner_points, {"n": 4, "seed": 7, "vary": vary}
+    )
+
+    pinned_values = {p.mc_seed[pinned_key] for p in sampled}
+    assert len(pinned_values) == 1  # sigma=0: identical across every sample
+
+    varying_values = {p.mc_seed[varying_key] for p in sampled}
+    assert len(varying_values) == 4  # actually varies, not silently pinned too
+
+
+def test_expand_monte_carlo_both_varies_every_axis():
+    corner_points = sim._expand_corners({}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        corner_points, {"n": 4, "seed": 7, "vary": "both"}
+    )
+    assert len({p.mc_seed["process_seed"] for p in sampled}) == 4
+    assert len({p.mc_seed["mismatch_seed"] for p in sampled}) == 4
+
+
+def test_expand_monte_carlo_negative_control_is_per_corner():
+    # The pinned axis is constant *within* a corner's own sample set, but
+    # different corners still derive independent (not globally identical)
+    # pinned values -- the negative control isn't a single hard-coded
+    # sentinel that would mask a broken corner_index derivation.
+    corner_points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        corner_points, {"n": 3, "seed": 7, "vary": "process"}
+    )
+    by_process = {"tt": [], "ss": []}
+    for point in sampled:
+        by_process[point.process].append(point.mc_seed["mismatch_seed"])
+
+    assert len(set(by_process["tt"])) == 1
+    assert len(set(by_process["ss"])) == 1
+    assert by_process["tt"][0] != by_process["ss"][0]
 
 
 # --------------------------------------------------------------------------- #
@@ -885,6 +1026,143 @@ def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
     # Issue #331 added `provenance.input`, but `sim` wasn't in scope for it --
     # stays null here.
     assert prov["input"] is None
+
+
+# --------------------------------------------------------------------------- #
+# `monte_carlo` via `run_sim`, stubbed ngspice subprocess (#348)
+# --------------------------------------------------------------------------- #
+
+
+def _mc_request(tmp_path: Path, monte_carlo: dict, **overrides) -> Path:
+    _write_body(tmp_path)
+    request: dict[str, object] = {
+        "netlist": "body.spice",
+        "monte_carlo": monte_carlo,
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if overrides.pop("two_corners", False):
+        _write_corner_lib(tmp_path)
+        request["models"] = {"lib": "corner.lib"}
+        request["corners"] = {"process": ["tt", "ss"]}
+    request.update(overrides)
+    return _write_request(tmp_path, request)
+
+
+@pytest.mark.parametrize("missing_field", ["n", "seed", "vary"])
+def test_run_sim_monte_carlo_missing_field_raises(tmp_path, missing_field):
+    monte_carlo = {"n": 5, "seed": 1, "vary": "mismatch"}
+    del monte_carlo[missing_field]
+    request = _mc_request(tmp_path, monte_carlo)
+
+    with pytest.raises(sim.SimError, match=f"monte_carlo.{missing_field}"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_monte_carlo_bad_vary_raises(tmp_path):
+    request = _mc_request(tmp_path, {"n": 5, "seed": 1, "vary": "bogus"})
+
+    with pytest.raises(sim.SimError, match="monte_carlo.vary"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_monte_carlo_expands_n_times_m_corners(tmp_path, monkeypatch):
+    request = _mc_request(
+        tmp_path, {"n": 3, "seed": 1, "vary": "both"}, two_corners=True
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["corner_count"] == 6  # 2 corners x 3 samples
+    ids = [c["corner_id"] for c in report["corners"]]
+    assert len(set(ids)) == 6
+    assert report["environment"]["monte_carlo"] == {
+        "n": 3,
+        "seed": 1,
+        "vary": "both",
+    }
+    for corner in report["corners"]:
+        assert corner["monte_carlo"]["sample_index"] in (0, 1, 2)
+        assert isinstance(corner["monte_carlo"]["seed"], int)
+
+
+def test_run_sim_monte_carlo_omitted_leaves_corner_field_null(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert "monte_carlo" not in report["environment"]
+    (corner,) = report["corners"]
+    assert corner["monte_carlo"] is None
+
+
+def test_run_sim_monte_carlo_reproducible_across_runs(tmp_path, monkeypatch):
+    request = _mc_request(tmp_path, {"n": 4, "seed": 20260801, "vary": "both"})
+    _stub_subprocess_run(monkeypatch)
+
+    report_a = sim.run_sim(str(request))
+    report_b = sim.run_sim(str(request))
+
+    mc_a = [(c["corner_id"], c["monte_carlo"]) for c in report_a["corners"]]
+    mc_b = [(c["corner_id"], c["monte_carlo"]) for c in report_b["corners"]]
+    assert mc_a == mc_b
+
+
+def test_run_sim_monte_carlo_negative_control_via_response(tmp_path, monkeypatch):
+    request = _mc_request(tmp_path, {"n": 4, "seed": 20260801, "vary": "process"})
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    mismatch_seeds = {c["monte_carlo"]["mismatch_seed"] for c in report["corners"]}
+    process_seeds = {c["monte_carlo"]["process_seed"] for c in report["corners"]}
+    assert len(mismatch_seeds) == 1  # not requested -> pinned, sigma=0
+    assert len(process_seeds) == 4  # requested -> actually varies
+
+
+def test_run_sim_monte_carlo_unique_artifact_paths(tmp_path, monkeypatch):
+    request = _mc_request(
+        tmp_path,
+        {"n": 3, "seed": 1, "vary": "mismatch"},
+        options={"keep_artifacts": True},
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    log_paths = [c["artifacts"]["log"] for c in report["corners"]]
+    assert len(log_paths) == 3
+    assert len(set(log_paths)) == 3  # every sample got its own artifact dir
+    for path in log_paths:
+        assert os.path.isfile(path)
+
+
+def test_run_sim_monte_carlo_deck_carries_seed_and_param_cards(tmp_path, monkeypatch):
+    request = _mc_request(
+        tmp_path,
+        {"n": 1, "seed": 20260801, "vary": "mismatch"},
+        options={"keep_artifacts": True},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    deck_path = os.path.join(os.path.dirname(corner["artifacts"]["log"]), "corner.cir")
+    deck_text = Path(deck_path).read_text()
+    mc = corner["monte_carlo"]
+    assert f".options seed={mc['seed']}" in deck_text
+    assert f".param mc_process_seed={mc['process_seed']}" in deck_text
+    assert f".param mc_mismatch_seed={mc['mismatch_seed']}" in deck_text
+    # `.options seed=` must precede any `.lib`/`.include` card -- it seeds
+    # AGAUSS/GAUSS calls evaluated while the netlist is parsed, before the
+    # `.control` block ever runs.
+    assert deck_text.index(".options seed=") < deck_text.index(".include")
 
 
 def _stripped_report(report: dict) -> dict:
@@ -1867,6 +2145,60 @@ def test_integration_process_corner_selects_lib_section(tmp_path):
     # tt: corner_scale isn't referenced by this body -- both corners just
     # confirm .lib section selection didn't error; values are equal here.
     assert set(by_process) == {"tt", "ss"}
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_monte_carlo_seed_reaches_ngspice_and_is_reproducible(tmp_path):
+    """End-to-end confirmation of the seed contract against real ngspice
+    (the test plan's "Manual verification" step, automated here since
+    ngspice happens to be available): `.options seed=` (written from each
+    sample's derived `rndseed`, see `_write_corner_deck`) actually reaches
+    ngspice's `AGAUSS` random-function seed -- distinct samples draw
+    distinct values, and re-running the identical request reproduces the
+    exact same sequence of measured values, not just the exact same
+    sequence of derived seed metadata (already covered by the stubbed
+    tests above)."""
+    body = tmp_path / "body.spice"
+    body.write_text(
+        "* AGAUSS(0,1,1) is seeded by klt sim's `.options seed=` card -- a\n"
+        "* stand-in for a mismatch-aware PDK model's own behavioral variation.\n"
+        ".param vdd=1.0\n"
+        "Vdd vdd 0 DC {vdd}\n"
+        ".param mc_rand = {AGAUSS(0,1,1)}\n"
+        "R1 vdd out {1k*(1+0.01*mc_rand)}\n"
+        "R2 out 0 1k\n"
+        "C1 out 0 1n\n"
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "monte_carlo": {"n": 4, "seed": 20260801, "vary": "mismatch"},
+            "analysis": {"kind": "tran", "args": "1n 5u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=5u"}
+            ],
+        },
+    )
+
+    report_a = sim.run_sim(str(request), backend="local-parallel")
+    report_b = sim.run_sim(str(request), backend="local-parallel")
+
+    assert report_a["status"] == "pass"
+    assert report_a["corner_count"] == 4
+
+    def values_by_sample(report):
+        return {
+            c["monte_carlo"]["sample_index"]: c["measurements"][0]["value"]
+            for c in report["corners"]
+        }
+
+    values_a = values_by_sample(report_a)
+    values_b = values_by_sample(report_b)
+    # Reproducible: identical request -> identical measured sequence.
+    assert values_a == pytest.approx(values_b)
+    # Not a no-op sampler: the seed actually varies AGAUSS's draw.
+    assert len({round(v, 9) for v in values_a.values()}) > 1
 
 
 @_SKIP_NO_NGSPICE

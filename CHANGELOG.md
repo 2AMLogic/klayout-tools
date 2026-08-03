@@ -77,3 +77,21 @@ version. Not an exhaustive commit-by-commit log.
   routing tracks sharing the same resistor-body signature remain a known,
   documented false-positive class with a client-side filtering workaround
   via `unmodelled_poly[]`.
+- 2026-08-02 — `klt sim`: new optional request block `monte_carlo` (#348,
+  phase 1 of #344's decomposition) — re-runs each expanded corner point
+  `n` times with a reproducible seed (`monte_carlo.seed`), standing in for
+  the per-instance device variation a mismatch-aware model library's
+  behavioral parameters draw on. Adds `environment.monte_carlo` (echoes
+  `n`/`seed`/`vary`) and a per-sample `corners[].monte_carlo` field
+  (`{sample_index, seed, process_seed, mismatch_seed}`, `null` for a
+  non-sampled corner); a sample's `corner_id`/artifact path gets a
+  `/mc<sample_index>` suffix so per-sample logs never collide. Ships the
+  deterministic negative control two public canary repos already rely on
+  in their own hand-rolled orchestration: the seed component for whichever
+  axis `monte_carlo.vary` does *not* request stays identical across every
+  sample of a corner (sigma=0), proving the sampler isn't silently
+  injecting or dropping variation. Purely additive (no `schema_version`
+  bump), reuses the existing `local`/`local-parallel`/`remote` backends
+  unchanged — see `docs/cli/sim.md`'s "Monte Carlo sampling" section.
+  Statistics rollup and limit-window evaluation across a sample set are
+  out of scope here (phase 2, a separate sub-issue).

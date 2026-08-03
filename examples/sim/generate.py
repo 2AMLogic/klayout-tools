@@ -92,10 +92,41 @@ def write_request() -> None:
     print(f"wrote {path}")
 
 
+def write_monte_carlo_request() -> None:
+    """A Monte Carlo variant of `request.json`: a single `tt` corner
+    re-sampled `n=5` times instead of the PVT cross product, exercising
+    `monte_carlo` (see docs/cli/sim.md's "Monte Carlo sampling" section)
+    against the same synthetic fixtures -- no PDK mismatch model needed to
+    demonstrate the sampling/seed-reproducibility contract itself."""
+    request = {
+        "netlist": "testbench.spice",
+        "engine": "ngspice",
+        "models": {"lib": "corner.lib"},
+        "corners": {"process": ["tt"]},
+        "monte_carlo": {"n": 5, "seed": 20260801, "vary": "mismatch"},
+        "analysis": {"kind": "tran", "args": "1n 5u"},
+        "measurements": [
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=5u",
+                "unit": "V",
+                "limits": {"min": 0.75, "max": 1.05},
+            }
+        ],
+        "options": {"timeout_s": 30, "keep_artifacts": False},
+    }
+    path = os.path.join(_DIR, "request-monte-carlo.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {path}")
+
+
 def main() -> None:
     write_testbench()
     write_corner_lib()
     write_request()
+    write_monte_carlo_request()
 
 
 if __name__ == "__main__":
