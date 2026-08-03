@@ -1394,6 +1394,42 @@ def test_diff_pair_flavor_nfet_without_guard_ring_draws_no_well(tmp_path, pdk_ro
 
 
 @pytest.mark.parametrize(
+    ("variant", "well_pair"),
+    [
+        ("sky130A", (64, 20)),
+        ("gf180mcuD", (21, 0)),
+    ],
+)
+def test_diff_pair_flavor_nfet_with_guard_ring_draws_no_well(
+    tmp_path, both_pdk_root, variant, well_pair
+):
+    """Regression test for issue #421: with the *default* params
+    (`flavor='nfet'`, `add_guard_ring=True`), the guard ring's own well tie
+    must NOT draw a well shape -- it was previously gated only on
+    `well_present`, missing the `flavor == 'pfet'` gate that the device's
+    own well-enclosure block already had. Covers both curated PDK families,
+    since both resolve a real well layer role."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"diff_pair_nfet_ring_{variant}.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert well_pair not in present
+
+
+@pytest.mark.parametrize(
     ("variant", "deck", "well_pair"),
     [
         ("sky130A", "sky130", (64, 20)),
@@ -1527,6 +1563,33 @@ def test_diff_pair_flavor_pfet_extracts_as_pfet(tmp_path, pdk_root):
 
     assert report["device_counts"].get("pfet", 0) > 0
     assert report["device_counts"].get("nfet", 0) == 0
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck"),
+    [("sky130A", "sky130"), ("gf180mcuD", "gf180mcu")],
+)
+def test_diff_pair_flavor_nfet_extracts_as_nfet(tmp_path, both_pdk_root, variant, deck):
+    """Regression test for issue #421: the *default* `diff_pair` params
+    (`flavor='nfet'`, `add_guard_ring=True`) must extract as `nfet`, not
+    `pfet` -- the guard ring's own well tie previously covered the entire
+    device area regardless of `flavor`, silently misclassifying every
+    enclosed NMOS device as PMOS. Parametrized over both curated PDK
+    families, mirroring `test_mos_array_flavor_nfet_still_extracts_as_nfet`."""
+    gds_path = tmp_path / f"diff_pair_nfet_{deck}.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), deck)
+
+    assert report["device_counts"].get("nfet", 0) > 0
+    assert report["device_counts"].get("pfet", 0) == 0
 
 
 # --- PDK-family support ------------------------------------------------------- #

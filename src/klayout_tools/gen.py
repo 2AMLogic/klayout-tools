@@ -1891,7 +1891,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
                 )
-                if self.well_present:
+                if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
                     margin = WELL_ENCLOSURE_MARGIN_UM
                     well_box = (
