@@ -28,6 +28,29 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.14",
 ]
+# Backs the future `klt functional-verification` verb (issue #422, Phase 3
+# of Epic #391) -- not a runtime dependency of any shipped `klt` command
+# yet, so it is its own extra rather than folded into `dependencies` or
+# `dev`. Pinned per docs/design/cocotb-verification-spike.md's finding
+# (issue #423): cocotb 2.0.1's own PyPI metadata declares
+# `Requires-Python: >=3.6.2` with **no upper bound** (verified against
+# PyPI's JSON API), so pip/uv's resolver has no signal that Python 3.14 is
+# unsupported -- `pip install cocotb` under a 3.14 interpreter proceeds to
+# build the package, then fails with cocotb's own internal check:
+# `RuntimeError: cocotb 2.0.1 only supports a maximum Python version of
+# 3.13` (verified live). The `python_version < "3.14"` marker below moves
+# that failure to dependency-*resolution* time -- the standard, idiomatic
+# way pip/uv already handle a package with no distributable release for a
+# given interpreter -- rather than a confusing traceback surfacing from deep
+# inside cocotb's own build backend. Lift this cap once a cocotb release
+# adds Python 3.14 support (track https://github.com/cocotb/cocotb); until
+# then a `functional-verification` install attempt on 3.14 simply omits
+# cocotb from the resolved set, and any code that needs it must raise its
+# own clear "functional-verification requires Python < 3.14" error before
+# calling into it (the verb issue's concern, not this pin's).
+functional-verification = [
+    "cocotb>=2.0.1,<2.1; python_version < \"3.14\"",
+]
 
 [build-system]
 requires = ["hatchling"]
