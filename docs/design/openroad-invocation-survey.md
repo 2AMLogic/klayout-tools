@@ -283,12 +283,14 @@ if len(layer_map) > 0:
     layout_options.lefdef_config.map_file = layer_map
 
 main_layout = pya_mod.Layout()
-main_layout.read(in_def, layout_options)          # DEF, streamed in via the tech's LEF/DEF reader config
+main_layout.read(
+    in_def, layout_options
+)  # DEF, streamed in via the tech's LEF/DEF reader config
 # ... clear orphan cells, keep VIA_* cells from LEF vias ...
 for fil in in_files.split():
-    main_layout.read(fil)                          # merge in each standard-cell/macro GDS view
+    main_layout.read(fil)  # merge in each standard-cell/macro GDS view
 # ... copy just the top cell into a fresh Layout, validate no missing/orphan cells ...
-top_only_layout.write(out_file)                     # write the final GDS
+top_only_layout.write(out_file)  # write the final GDS
 ```
 
 This is a DEF-plus-GDS-views merge (LEF/DEF gives geometry and connectivity
@@ -309,9 +311,10 @@ this repo's own checkout, not asserted **[VERIFIED]**:
 
 ```python
 import klayout.db as db
-db.Technology()                                   # exists
+
+db.Technology()  # exists
 opts = db.LoadLayoutOptions()
-opts.lefdef_config.map_file = "..."                # exact attribute def2stream.py sets
+opts.lefdef_config.map_file = "..."  # exact attribute def2stream.py sets
 ```
 
 Both classes and the exact attribute path `def2stream.py` uses
