@@ -47,6 +47,7 @@ docs/
     layout-generator-spike.md
     lvs-extraction-spike.md
     netlist-driven-layout-spike.md
+    openroad-invocation-survey.md
     pdk-device-corner-metadata-spike.md
     remote-job-description.md
     remote-sim-backend-spike.md
