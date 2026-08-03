@@ -3990,3 +3990,139 @@ def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
     )
 
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Remote worked example (examples/sim-remote/) -- Epic #253's closing
+# validation matrix, committed as a worked example (#373).
+#
+# These tests are deliberately CI-checkable *without* AWS and without a
+# 12-minute ngspice run: they validate the two requests through the same
+# `sim.load_request()` path `klt sim` itself uses, exercise the remote
+# block's pure-local cost gate, and assert the committed reference reports'
+# documented equivalence (identical corner values across backends, the
+# additive `environment.remote` block only on the remote one). Actually
+# *running* `matrix-remote.request.json` needs AWS credentials.
+# --------------------------------------------------------------------------- #
+
+SIM_REMOTE_EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "sim-remote"
+
+_SKIP_NO_SIM_REMOTE_EXAMPLE = pytest.mark.skipif(
+    not SIM_REMOTE_EXAMPLES_DIR.exists(),
+    reason="examples/sim-remote/ is not present",
+)
+
+
+def _load_sim_remote_json(name: str) -> dict:
+    with open(SIM_REMOTE_EXAMPLES_DIR / name, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+@_SKIP_NO_SIM_REMOTE_EXAMPLE
+def test_examples_sim_remote_requests_differ_only_by_backend():
+    """The example's whole point: two requests that are the *same* corner
+    matrix, differing only in where it runs. `load_request` is the shipped
+    validation path (`klt sim` calls it before dispatch), so this is the
+    schema check the issue's acceptance criteria ask for -- no AWS needed."""
+    local = sim.load_request(str(SIM_REMOTE_EXAMPLES_DIR / "matrix-local.request.json"))
+    remote = sim.load_request(
+        str(SIM_REMOTE_EXAMPLES_DIR / "matrix-remote.request.json")
+    )
+
+    assert local["backend"] == "local"
+    assert remote["backend"] == "remote"
+    assert local["backend"] in sim.SUPPORTED_BACKENDS
+    assert remote["backend"] in sim.SUPPORTED_BACKENDS
+
+    # Everything except `backend` (and the remote-only provisioning block)
+    # must be byte-identical -- otherwise the comparison proves nothing.
+    assert {k: v for k, v in local.items() if k != "backend"} == {
+        k: v for k, v in remote.items() if k not in ("backend", "remote")
+    }
+
+    # The netlist both requests name resolves next to them.
+    assert (SIM_REMOTE_EXAMPLES_DIR / local["netlist"]).is_file()
+
+    # `remote` requires `models.pdk` (docs/cli/sim.md's field table).
+    assert remote["models"]["pdk"] == "sky130A"
+
+
+@_SKIP_NO_SIM_REMOTE_EXAMPLE
+def test_examples_sim_remote_request_carries_placeholder_credentials():
+    """The committed request must never ship the validation run's real
+    keypair/security-group identifiers (the issue calls this out
+    explicitly) -- a reader substitutes their own."""
+    remote = _load_sim_remote_json("matrix-remote.request.json")["remote"]
+
+    for field in ("key_name", "ssh_key_path", "security_group_id"):
+        assert "<" in remote[field] and ">" in remote[field], (
+            f"remote.{field} must be a documented placeholder, not a real value"
+        )
+    assert not re.match(r"^sg-[0-9a-f]+$", remote["security_group_id"])
+
+
+@_SKIP_NO_SIM_REMOTE_EXAMPLE
+def test_examples_sim_remote_request_passes_the_cost_gate():
+    """`remote_launcher`'s sizing + cost gate are pure local computation --
+    they run to completion with no AWS credentials, so the example's
+    `max_hourly_cost_usd` can be verified in CI to actually admit the
+    instance the 5-corner matrix sizes to (the epic's `c7i.12xlarge`)."""
+    request = _load_sim_remote_json("matrix-remote.request.json")
+    remote = request["remote"]
+    corner_count = len(request["corners"]["process"])
+
+    instance_type = rl.select_instance_type(corner_count)
+    assert instance_type == "c7i.12xlarge"
+
+    hourly = rl.require_cost_config(
+        region=remote["region"],
+        instance_type=instance_type,
+        spot=remote["spot"],
+        max_hourly_cost_usd=remote["max_hourly_cost_usd"],
+    )
+    assert hourly <= remote["max_hourly_cost_usd"]
+
+
+@_SKIP_NO_SIM_REMOTE_EXAMPLE
+def test_examples_sim_remote_reference_reports_agree_across_backends():
+    """Epic #253's headline claim, pinned as a test: the `remote` backend is
+    the same code path on a different box, so every corner's measured value
+    and verdict matches the `local` run exactly -- only `environment.remote`
+    and wall-clock timing differ."""
+    local = _load_sim_remote_json("matrix-local.report.json")
+    remote = _load_sim_remote_json("matrix-remote.report.json")
+
+    for report in (local, remote):
+        assert report["schema_version"] == 1
+        assert report["status"] == "pass"
+        assert report["corner_count"] == 5
+        assert report["passed"] == 5
+
+    # Additive `environment.remote`, present only for the remote run.
+    assert "remote" not in local["environment"]
+    remote_env = remote["environment"]["remote"]
+    for field in (
+        "provider",
+        "region",
+        "instance_type",
+        "instance_id",
+        "spot",
+        "estimated_hourly_cost_usd",
+        "ami_id",
+        "pdk_snapshot",
+        "spin_up_s",
+    ):
+        assert field in remote_env, f"environment.remote is missing {field}"
+
+    # Corner-for-corner, measurement-for-measurement equality.
+    assert [c["corner_id"] for c in local["corners"]] == [
+        c["corner_id"] for c in remote["corners"]
+    ]
+    for local_corner, remote_corner in zip(
+        local["corners"], remote["corners"], strict=True
+    ):
+        assert local_corner["status"] == remote_corner["status"]
+        assert local_corner["measurements"] == remote_corner["measurements"]
+
+    # ... and the same rollup verdicts on top of them.
+    assert local["measurements"] == remote["measurements"]
