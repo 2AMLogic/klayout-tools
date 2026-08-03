@@ -2,13 +2,20 @@
 
 ## Vision
 
-An agent can take a spec → schematic/generator → sized circuit → layout →
-DRC/LVS clean → extracted netlist → simulation-verified, on an open PDK,
-unaided — with every step headless and JSON-contracted.
+An agent can take a spec through one of three peer paths on an open PDK,
+unaided, with every step headless and JSON-contracted — analog (spec →
+schematic/generator → sized circuit → layout → DRC/LVS clean →
+extracted netlist → simulation-verified), digital (spec → RTL →
+synthesis → place-and-route → DRC/LVS clean → timing-closed), and
+mixed-signal (both paths plus the signoff seam between them).
 
-That closed loop is the target capability. Everything below is in service
-of it. This is a multiyear effort; complex and difficult work is in scope
-when it serves the loop.
+That closed loop, across all three paths, is the target capability.
+Everything below is in service of it. This is a multiyear effort;
+complex and difficult work is in scope when it serves the loop. Analog
+is the path with tooling today; digital and mixed-signal enter the same
+way every engine class does — contract-first, wrapped rather than
+absorbed, through a spiked epic (#391, #393) — not by loosening the
+headless rule or the wrap-don't-absorb gate.
 
 ## Scope
 

@@ -1,10 +1,13 @@
 # Roadmap
 
-The target capability: an agent can take a spec → schematic/generator →
-sized circuit → layout → DRC/LVS clean → extracted netlist →
-simulation-verified, on an open PDK, unaided — with every step headless
-and JSON-contracted. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-how the pieces fit and how new engines are adopted.
+The target capability: an agent can take a spec through one of three peer
+paths on an open PDK, unaided, with every step headless and
+JSON-contracted — analog (spec → schematic/generator → sized circuit →
+layout → DRC/LVS clean → extracted netlist → simulation-verified),
+digital (spec → RTL → synthesis → place-and-route → DRC/LVS clean →
+timing-closed), and mixed-signal (both paths plus the signoff seam
+between them). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how
+the pieces fit and how new engines are adopted.
 
 Work is tracked in GitHub issues (Loom-orchestrated). This document and
 the architecture doc exist to keep that work aligned with the long-term
@@ -70,17 +73,24 @@ not yet started.
 The forcing function is real IP, not synthetic examples. We use
 klayout-tools daily to push actual block designs forward — PHY-class blocks
 on open PDKs, starting on sky130 — and every place the tools bind, chafe,
-or fall short becomes a friction issue filed here. The block designs
-themselves live in private repos; the friction is public. kicad-tools grew
-its router and DRC surface exactly this way, board by board.
+or fall short becomes a friction issue filed here. Block-design repos start
+private and go public once they clear a Tier-2 audit — the 2026-07-31
+disclosure split for open-PDK canary repos — and wave 1 has already
+flipped public; the friction is public throughout, win or lose on
+disclosure timing. kicad-tools grew its router and DRC surface exactly
+this way, board by board.
 
 ## Beyond the phases
 
-Simulation (SPICE, E&M), optimization, and circuit generators are on the
-path to the closed loop but are not phase-scheduled: each arrives by
-spiking a design epic — candidate-engine survey, proposed JSON contract,
-wrap/build decision — when the friction log demands it (see
-docs/ARCHITECTURE.md, "How capabilities arrive").
+Simulation (SPICE, E&M), optimization, circuit generators, and — for the
+digital path — synthesis, place-and-route, and functional verification
+are on the path to the closed loop but are not phase-scheduled: each
+arrives by spiking a design epic — candidate-engine survey, proposed
+JSON contract, wrap/build decision — when the friction log demands it
+(see docs/ARCHITECTURE.md, "How capabilities arrive"). The digital engine
+class (Yosys + OpenROAD) is spiked in #391; the mixed-signal seam between
+the analog and digital paths — abstracts, co-simulation, cross-domain
+signoff — has no contract yet and is spiked in #393.
 
 The SPICE side has been spiked:
 [docs/design/spice-corner-runner-spike.md](docs/design/spice-corner-runner-spike.md)
