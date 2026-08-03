@@ -478,10 +478,21 @@ class _FakeRunner:
     kwargs the library passed and writing whatever `results.xml` the test
     asked for."""
 
-    def __init__(self, results_xml_text, *, build_exc=None, test_exc=None):
+    def __init__(
+        self,
+        results_xml_text,
+        *,
+        build_exc=None,
+        test_exc=None,
+        coverage_dat_text=None,
+    ):
         self.results_xml_text = results_xml_text
         self.build_exc = build_exc
         self.test_exc = test_exc
+        # When set, `test()` writes a fresh `coverage.dat` into `test_dir` --
+        # standing in for Verilator flushing coverage data as part of *this*
+        # run, the way `results_xml_text` stands in for `results.xml`.
+        self.coverage_dat_text = coverage_dat_text
         self.build_kwargs = None
         self.test_kwargs = None
 
@@ -500,6 +511,10 @@ class _FakeRunner:
         if self.results_xml_text is not None:
             with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
                 handle.write(self.results_xml_text)
+        if self.coverage_dat_text is not None:
+            coverage_dat = os.path.join(kwargs["test_dir"], "coverage.dat")
+            with open(coverage_dat, "w", encoding="utf-8") as handle:
+                handle.write(self.coverage_dat_text)
         if self.test_exc is not None:
             raise self.test_exc
 
@@ -773,11 +788,17 @@ def test_stubbed_coverage_run_populates_the_coverage_block(tmp_path, monkeypatch
         tmp_path / "request.json",
         _base_request(engine="verilator", options={"coverage": True}),
     )
-    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_FAILURE))
-    # Verilator writes coverage.dat into the simulation's working directory.
-    output_dir = tmp_path / ".klt" / "functional-verification"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _write(output_dir / "coverage.dat", "# fake verilator coverage\n")
+    # Verilator writes coverage.dat into the simulation's working directory
+    # as part of `test()` -- the fake runner mirrors that here (rather than
+    # the file existing before the run) so the staleness-removal step ahead
+    # of `_run_test()` doesn't delete it out from under this test.
+    runner = _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_FAILURE,
+            coverage_dat_text="# fake verilator coverage\n",
+        ),
+    )
     _stub_verilator_coverage(monkeypatch)
 
     report = run_functional_verification(request_path)
@@ -804,16 +825,39 @@ def test_coverage_requested_but_no_coverage_dat(tmp_path, monkeypatch):
         run_functional_verification(request_path)
 
 
+def test_stubbed_run_ignores_a_stale_coverage_dat(tmp_path, monkeypatch):
+    """A previous run's `coverage.dat` must never be reported as this run's
+    coverage evidence when the current run's test process crashes after
+    `results.xml` is written but before a fresh `coverage.dat` is flushed --
+    mirrors `test_stubbed_run_ignores_a_stale_results_xml` above, for the
+    equivalent `coverage.dat` staleness guard."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(engine="verilator", options={"coverage": True}),
+    )
+    output_dir = tmp_path / ".klt" / "functional-verification"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write(output_dir / "coverage.dat", "# stale verilator coverage from a prior run\n")
+    # The stubbed runner writes results.xml (the simulation completed) but
+    # never writes a fresh coverage.dat, simulating the crash window between
+    # results.xml being flushed and coverage.dat being flushed.
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    with pytest.raises(FunctionalVerificationError, match="produced no coverage.dat"):
+        run_functional_verification(request_path)
+
+
 def test_coverage_tool_failure_is_an_error(tmp_path, monkeypatch):
     _setup_inputs(tmp_path)
     request_path = _write_request(
         tmp_path / "request.json",
         _base_request(engine="verilator", options={"coverage": True}),
     )
-    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
-    output_dir = tmp_path / ".klt" / "functional-verification"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _write(output_dir / "coverage.dat", "# fake\n")
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(_RESULTS_XML_WITH_SKIP, coverage_dat_text="# fake\n"),
+    )
 
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("no such file: verilator_coverage")
