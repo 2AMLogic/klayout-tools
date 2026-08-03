@@ -16,6 +16,7 @@ from . import (
     drc_cmd,
     eval_cmd,
     extract_cmd,
+    functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
     kb_cmd,
@@ -530,6 +531,42 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
+
+    functional_verification_parser = subparsers.add_parser(
+        "functional-verification",
+        help="run a cocotb regression against Icarus/Verilator",
+        description=(
+            "Run a cocotb testbench against RTL sources through Icarus "
+            "Verilog (default) or Verilator, reporting a per-test "
+            "passed/failed/skipped breakdown plus optional Verilator "
+            "coverage -- see docs/design/cocotb-verification-spike.md "
+            "section 7 for the request/response contract and "
+            "docs/cli/functional-verification.md for the CLI surface. Phase "
+            "3 of Epic #391, and the hard gate behind `klt eval`'s `valid` "
+            "field (#387). Invoked exclusively through cocotb 2.0's "
+            "first-party Python `Runner` API, never a generated Makefile; "
+            "the verdict is always derived from the run's own `results.xml`, "
+            "never from a simulator's exit code. Requires cocotb (`pip "
+            "install cocotb`) plus an `iverilog` or `verilator` binary on "
+            '`$PATH`. `options.coverage` requires `engine: "verilator"`. '
+            "Takes a request document (like `klt lvs`/`klt sim`), not "
+            "positional RTL file args."
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "request",
+        help=(
+            "klt functional-verification request: a path to a JSON file, '-' "
+            "to read the request from stdin, or an inline JSON object string"
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
 
     eval_parser = subparsers.add_parser(
         "eval",

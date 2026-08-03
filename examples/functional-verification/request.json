@@ -1,0 +1,14 @@
+{
+  "schema": "klt.functional_verification.request/1",
+  "engine": "icarus",
+  "sources": ["gcd.v"],
+  "hdl_toplevel": "gcd",
+  "testbench": {
+    "module": "test_gcd",
+    "testcase": null
+  },
+  "options": {
+    "coverage": false,
+    "timescale": ["1ns", "1ps"]
+  }
+}

@@ -4,9 +4,11 @@ Pure orchestration -- this module never re-implements DRC/LVS/sim/metrics
 logic. It imports and calls the existing library entry points
 (:func:`~klayout_tools.drc.run_drc`, :func:`~klayout_tools.lvs.run_lvs`,
 :func:`~klayout_tools.sim.run_sim`,
-:func:`~klayout_tools.layout_metrics.layout_metrics_report`) the same way
-``klt drc``/``klt lvs``/``klt sim``/``klt layout-metrics`` themselves do, and
-reconciles their four separate exit-code vocabularies into one envelope:
+:func:`~klayout_tools.layout_metrics.layout_metrics_report`,
+:func:`~klayout_tools.functional_verification.run_functional_verification`)
+the same way ``klt drc``/``klt lvs``/``klt sim``/``klt layout-metrics``/
+``klt functional-verification`` themselves do, and reconciles their separate
+exit-code vocabularies into one envelope:
 
     {
         "schema_version": 1,
@@ -28,11 +30,13 @@ Descriptor-driven, never hardcoded
 
 Which checks constitute the gate, and what the objective is, come from a
 *descriptor* document -- never a fixed check list baked into this module.
-That is what lets this verb generalise beyond today's four analog checks
-(``drc``/``lvs``/``sim``/``layout-metrics``) to a future descriptor naming
-digital-flow checks (synthesis, functional verification -- see issues
-#391/#398) without a code change here, only a new entry in
-:data:`_INVOKE_FNS`.
+That is what lets this verb generalise beyond its original four analog
+checks (``drc``/``lvs``/``sim``/``layout-metrics``) to digital-flow checks
+without reshaping anything: ``functional-verification`` (Epic #391 Phase 3)
+joined the set as one new entry in :data:`_INVOKE_FNS` plus one in
+:data:`_DEFAULT_STATUS_FNS`, and its ``status: "pass"``/``"fail"`` collapses
+into ``valid`` exactly the way ``drc``'s ``clean``/``violations`` already
+does.
 
 Descriptor shape (see ``docs/cli/eval.md`` for the full field reference)::
 
@@ -91,13 +95,23 @@ from collections.abc import Callable
 from typing import Any
 
 from .drc import DrcError, run_drc
+from .functional_verification import (
+    FunctionalVerificationError,
+    run_functional_verification,
+)
 from .layout_metrics import LayoutMetricsError, layout_metrics_report
 from .lvs import LvsError, run_lvs
 from .sim import SimError, run_sim
 
 SCHEMA_VERSION = 1
 
-_UNDERLYING_ERRORS = (DrcError, LvsError, SimError, LayoutMetricsError)
+_UNDERLYING_ERRORS = (
+    DrcError,
+    LvsError,
+    SimError,
+    LayoutMetricsError,
+    FunctionalVerificationError,
+)
 
 
 class EvalError(Exception):
@@ -244,11 +258,20 @@ def _invoke_layout_metrics(args: dict[str, Any], base_dir: str) -> dict[str, Any
     )
 
 
+def _invoke_functional_verification(
+    args: dict[str, Any], base_dir: str
+) -> dict[str, Any]:
+    if "request" not in args:
+        raise EvalError("'functional-verification' check args require 'request'")
+    return run_functional_verification(_resolve_request(args["request"], base_dir))
+
+
 _INVOKE_FNS: dict[str, Callable[[dict[str, Any], str], dict[str, Any]]] = {
     "drc": _invoke_drc,
     "lvs": _invoke_lvs,
     "sim": _invoke_sim,
     "layout-metrics": _invoke_layout_metrics,
+    "functional-verification": _invoke_functional_verification,
 }
 
 
@@ -277,6 +300,16 @@ def _status_sim(report: dict[str, Any]) -> tuple[str, int, Any]:
     return "fail", 3, report.get("failed")
 
 
+def _status_functional_verification(report: dict[str, Any]) -> tuple[str, int, Any]:
+    """`klt functional-verification`'s own two-outcome split (Epic #391 Phase
+    3): `status: "pass"` -> exit 0 -> `valid: true`, `status: "fail"` -> exit
+    3 -> `valid: false`. A run that never produced a `results.xml` raises
+    `FunctionalVerificationError` upstream and surfaces as this verb's own
+    exit 1 (never reaching `valid`), per that contract's section 8."""
+    status = "pass" if report["status"] == "pass" else "fail"
+    return status, (0 if status == "pass" else 3), report.get("failed_count")
+
+
 # Deliberately excludes "layout-metrics" -- it has no exit code above 2 (no
 # gate semantics of its own), so a gate naming it must declare `threshold`;
 # see `_derive_status` and this module's docstring.
@@ -284,6 +317,7 @@ _DEFAULT_STATUS_FNS: dict[str, Callable[[dict[str, Any]], tuple[str, int, Any]]]
     "drc": _status_drc,
     "lvs": _status_lvs,
     "sim": _status_sim,
+    "functional-verification": _status_functional_verification,
 }
 
 

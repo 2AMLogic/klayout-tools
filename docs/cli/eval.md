@@ -42,11 +42,12 @@ two candidates can be compared without domain knowledge.
 
 Which checks constitute the gate, and what the objective is, are declared in
 the **descriptor** — never a fixed check list built into `klt eval` itself.
-Today's four checks (`drc`/`lvs`/`sim`/`layout-metrics`) are the only ones
-implemented, but the design is check-name-agnostic by construction, so a
-future descriptor can name a different check (e.g. a digital-flow synthesis
-or functional-verification check, see issues #391/#398) without a schema
-change here.
+Five checks are implemented today (`drc`/`lvs`/`sim`/`layout-metrics`/
+`functional-verification`), and the design is check-name-agnostic by
+construction: adding the digital flow's
+[`functional-verification`](functional-verification.md) gate (Epic #391
+Phase 3) needed no schema change here, only a new invoke/status adapter
+pair.
 
 ## Descriptor
 
@@ -88,10 +89,10 @@ change here.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, or `"layout-metrics"`. An unknown value is an application error (exit 1). |
+| `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, `"layout-metrics"`, or `"functional-verification"`. An unknown value is an application error (exit 1). |
 | `name` | string | Label for this gate in the response's `gates[].name` — disambiguates two gates of the same `check` (e.g. two DRC decks). Defaults to `check`. |
 | `args` | object | Arguments forwarded to the underlying check — see "Check `args`" below. `${name}`-style placeholders are substituted from `--candidate` before invocation. |
-| `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"` gates (it has no exit code above 2 of its own — see `docs/cli/layout-metrics.md` — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails"). |
+| `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"` gates (it has no exit code above 2 of its own — see `docs/cli/layout-metrics.md` — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"`/`"functional-verification"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails"). |
 
 ### Check `args`
 
@@ -101,6 +102,7 @@ change here.
 | `"lvs"` | `request` | Forwarded to `run_lvs(request)` — see [`klt lvs`](lvs.md). A string resolves the same file/`-`/inline-JSON three-form convention `klt lvs`'s own `request` CLI argument uses (relative paths resolve against the descriptor file's directory); an inline JSON object is serialised and passed through directly (its own internal relative paths resolve against the current working directory, matching `klt lvs -`'s convention). |
 | `"sim"` | `request` | Forwarded to `run_sim(request, ...)` — see [`klt sim`](sim.md). Same `request` resolution as `"lvs"` above. Optional `artifacts_dir`, `backend`, `max_workers`, `hosts` forward to `run_sim`'s matching keyword arguments. |
 | `"layout-metrics"` | `block` | Forwarded to `layout_metrics_report(block, deck=...)` — see [`klt layout-metrics`](layout-metrics.md). `block` resolves the same way as `"drc"`'s `file`. Optional `deck` forwards to the DRC-violation-count sub-field. |
+| `"functional-verification"` | `request` | Forwarded to `run_functional_verification(request)` — see [`klt functional-verification`](functional-verification.md). Same `request` resolution as `"lvs"` above. `status: "pass"` → `valid: true`, `status: "fail"` → `valid: false`; a run that never produced a `results.xml` is a `klt eval` error (exit 1), never a `false` score. |
 
 ### `objective`
 

@@ -24,6 +24,11 @@ pdks/*
 # klt render output (build artifact, not checked in — see docs/cli/render.md)
 renders/
 
+# Artifacts a request-taking verb writes next to its request document
+# (`klt sim`, `klt synthesize`, `klt functional-verification`) — running
+# examples/ in place must not stage generated build dirs/logs/results.
+.klt/
+
 # Repo Skills machine-local install metadata (absolute source path + timestamp)
 .claude/skills/repo/.install-local.json
 .claude/skills/repo/logs/

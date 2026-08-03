@@ -22,6 +22,7 @@ docs/
     draw.md
     drc.md
     extract.md
+    functional-verification.md
     gen-compose.md
     gen.md
     kb.md
