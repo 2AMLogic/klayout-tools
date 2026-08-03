@@ -90,7 +90,19 @@ JSON contract, wrap/build decision — when the friction log demands it
 (see docs/ARCHITECTURE.md, "How capabilities arrive"). The digital engine
 class (Yosys + OpenROAD) is spiked in #391; the mixed-signal seam between
 the analog and digital paths — abstracts, co-simulation, cross-domain
-signoff — has no contract yet and is spiked in #393.
+signoff — is spiked across #393's phases.
+
+The co-simulation piece of the mixed-signal seam has been spiked:
+[docs/design/co-simulation-approach-survey.md](docs/design/co-simulation-approach-survey.md)
+surveys real-number modeling (RNM), ngspice XSPICE `d_process` co-sim, and
+Verilog-AMS/VHDL-AMS, proposes a co-simulation JSON contract with an
+additive `approach` backend selector, and recommends RNM for v1 — fastest
+and the only approach buildable under open PDKs today — with `klt sim`'s
+existing PVT-corner contract reused as the RNM model's calibration oracle,
+and XSPICE co-sim plus a future commercial (Questa ADMS/AFS-class) backend
+as later additive `approach` values behind the same shape. A proposal, not
+a commitment; Phases 2 (LEF abstracts) and 3 (cross-domain signoff) of #393
+cover the rest of the seam.
 
 The SPICE side has been spiked:
 [docs/design/spice-corner-runner-spike.md](docs/design/spice-corner-runner-spike.md)

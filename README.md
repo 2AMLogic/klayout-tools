@@ -184,6 +184,10 @@ Full index: [`docs/design/`](docs/design/).
 - [sc-leflib evaluation](docs/design/sc-leflib-evaluation.md) — whether
   siliconcompiler's LEF parser fills a gap that KLayout's own LEF/DEF reader
   leaves. Verdict: use `pya`, no new dependency.
+- [Mixed-signal co-simulation approach](docs/design/co-simulation-approach-survey.md) —
+  RNM vs. ngspice XSPICE `d_process` vs. Verilog-AMS/VHDL-AMS, a proposed
+  co-simulation JSON contract with an additive backend selector, and the
+  recommendation: RNM for v1.
 
 ## License
 
