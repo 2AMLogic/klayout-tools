@@ -24,11 +24,15 @@ Parse GDSII/OASIS via KLayout's `pya` into clean Python objects. CLI: `klt
 layers`, `klt cells`, `klt stats`, all with `--format json`. The test corpus
 starts with open PDK example layouts (sky130).
 
-## Phase 2 — check (first cut in v0.1.0)
+## Phase 2 — check (shipped — `klt drc` / `precheck` / `socket-check` / `ring-check` / `layout-metrics`)
 
 `klt drc` running KLayout DRC decks headless with structured violation
 output; deck adapters for open PDKs first. This is the ERC/DRC moment from
-kicad-tools: the step that lets an agent know whether it is wrong.
+kicad-tools: the step that lets an agent know whether it is wrong. The
+check family has since grown beyond DRC: `klt precheck` (layout hygiene),
+`klt socket-check` (pins/outline/budgets vs a socket descriptor),
+`klt ring-check` (guard/tap ring closure), and `klt layout-metrics`
+(normalized per-block metrics).
 
 ## Phase 3 — write (shipped — `klt gen` / `gen-compose` / `draw`)
 

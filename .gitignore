@@ -10,6 +10,9 @@ site/dist/
 # Wrangler local state (Cloudflare Pages deploys, scripts/deploy-site.sh)
 .wrangler/
 
+# Loom 0.17.0 runtime state not yet covered by the loom-managed block below
+.loom/account-health.json
+
 # Fetched open PDK data (scripts/fetch-pdks.sh) — tracked: pdks/README.md only
 pdks/*
 !pdks/README.md

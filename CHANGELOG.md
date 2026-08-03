@@ -127,10 +127,18 @@ version. Not an exhaustive commit-by-commit log.
   `[5, 50, 95]` and is configurable via the new `monte_carlo.quantiles`
   request field. The new `monte_carlo.k_sigma` (overridable per measurement
   with `measurements[].k_sigma`) opts into a `mean ± k*stddev`
-  limit-window check evaluated through the same `_evaluate_limits` path,
-  and margin sign convention, a single deterministic value goes through —
+  limit-window check; both endpoints are scored through the existing
+  `_evaluate_limits`, so min/max handling and the margin sign convention
+  are shared with the path a single deterministic value takes —
   **a failing window makes the run `fail` (exit `3`) even when every
   individual sample passed its limits**. Without a declared `k_sigma`,
   pass/fail behavior is unchanged; without `monte_carlo`, the response
   shape is unchanged (no `schema_version` bump) — see `docs/cli/sim.md`'s
   "Monte Carlo statistics" section.
+- 2026-08-02 — `klt sim`: new `environment.monte_carlo.family_mismatch[]`
+  response field (`85faf9d`, #365) — per-device-family mismatch-section
+  availability for the selected model library, so a Monte Carlo consumer
+  can detect which families actually sampled variation. Purely additive
+  (no `schema_version` bump), but changes `environment` contents for every
+  gf180mcu Monte Carlo run — see `docs/cli/sim.md`'s
+  `environment.monte_carlo` subsection.

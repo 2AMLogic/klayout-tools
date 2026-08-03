@@ -92,6 +92,8 @@ klt report result.json                   # render a klt JSON report as markdown 
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/), one page per verb.
+Note: verbs beyond `layers`/`stats`/`cells`/`drc`/`pdk` require the
+from-source install above — PyPI 0.1.0 predates them.
 
 ## Development
 
@@ -166,6 +168,7 @@ load on demand:
 ## Design notes
 
 Spikes and engine surveys — proposals and findings, not commitments.
+Full index: [`docs/design/`](docs/design/).
 
 - [Staged agent design pipeline](docs/design/design-pipeline.md) — the
   spec-to-simulation-verified stage graph, per-stage input/output contracts,

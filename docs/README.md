@@ -16,6 +16,7 @@ docs/
   README.md              # this file
   ARCHITECTURE.md        # layers, contract-first rule, wrap-vs-rewrite policy
   json-contract.md       # shared JSON output envelope: schema_version, errors, exit codes
+  design-evidence-tiers.md  # four-tier evidence ladder (T1–T4) and per-tier artifact checklist
   cli/                   # per-verb CLI reference
     cells.md
     draw.md
@@ -44,6 +45,7 @@ docs/
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
+    netlist-driven-layout-spike.md
     pdk-device-corner-metadata-spike.md
     remote-job-description.md
     remote-sim-backend-spike.md
