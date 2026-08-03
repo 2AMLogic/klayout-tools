@@ -1782,6 +1782,35 @@ def test_run_sim_keep_artifacts_writes_log(tmp_path, monkeypatch):
     assert Path(log_path).is_relative_to(artifacts_dir)
 
 
+def test_run_sim_keep_artifacts_exposes_deck_path(tmp_path, monkeypatch):
+    """`artifacts.deck` references the exact synthesized `corner.cir` that
+    `_write_corner_deck` already writes to disk (#356) -- same absolute
+    path, same content, only populated when `keep_artifacts` is true."""
+    _write_body(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts_dir))
+
+    deck_path = report["corners"][0]["artifacts"]["deck"]
+    assert deck_path is not None
+    deck_file = Path(deck_path)
+    assert deck_file.is_relative_to(artifacts_dir)
+    assert deck_file.name == "corner.cir"
+    # `_write_corner_deck` synthesizes this file; confirm it's the real deck
+    # ngspice consumed, not a stub -- the analysis card must be present.
+    deck_text = deck_file.read_text()
+    assert "tran 1n 1u" in deck_text
+
+
 def test_run_sim_bundle_process_corner_writes_one_lib_per_section(
     tmp_path, monkeypatch
 ):
@@ -1849,6 +1878,7 @@ def test_run_sim_without_keep_artifacts_cleans_up(tmp_path, monkeypatch):
         "log": None,
         "raw": None,
         "waveform": None,
+        "deck": None,
     }
 
 
@@ -2082,6 +2112,7 @@ def test_run_sim_remote_backend_keep_artifacts_pulls_and_rewrites_paths(
                         "log": f"{remote_root}/default_novdd_27C/ngspice.log",
                         "raw": None,
                         "waveform": None,
+                        "deck": f"{remote_root}/default_novdd_27C/corner.cir",
                     },
                 }
             ],
@@ -2097,6 +2128,8 @@ def test_run_sim_remote_backend_keep_artifacts_pulls_and_rewrites_paths(
     assert state["pull_kwargs"]["local_artifacts_dir"] == str(artifacts_dir)
     log_path = report["corners"][0]["artifacts"]["log"]
     assert log_path == str(artifacts_dir / "default_novdd_27C" / "ngspice.log")
+    deck_path = report["corners"][0]["artifacts"]["deck"]
+    assert deck_path == str(artifacts_dir / "default_novdd_27C" / "corner.cir")
 
 
 def _corner_measurement_summary(report: dict) -> list[dict]:
