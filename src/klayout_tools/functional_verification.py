@@ -789,6 +789,21 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         os.remove(results_xml)
     except OSError:
         pass
+    if coverage_requested:
+        # Same staleness guard for coverage.dat: a leftover file from a prior
+        # run must never be picked up by _find_coverage_dat() if this run's
+        # test process crashes after results.xml is written but before a
+        # fresh coverage.dat is flushed. Only the coverage-requested path
+        # reads coverage.dat, so the removal only needs to happen here.
+        for candidate in (
+            os.path.join(output_dir, "coverage.dat"),
+            os.path.join(output_dir, "logs", "coverage.dat"),
+            os.path.join(build_dir, "coverage.dat"),
+        ):
+            try:
+                os.remove(candidate)
+            except OSError:
+                pass
 
     runner_module = _import_runner()
     engine_runner = _run_build(
