@@ -355,6 +355,21 @@ def test_timescale_shape_validation(tmp_path, timescale):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize("random_seed", [True, False, "1785780800", 1.5, [1]])
+def test_random_seed_must_be_an_integer(tmp_path, random_seed):
+    """`bool` is deliberately rejected too -- `isinstance(True, int)` is
+    `True` in Python, so a naive `isinstance(..., int)` check would silently
+    accept `options.random_seed: true` as seed `1`."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"random_seed": random_seed})
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="random_seed must be an integer"
+    ):
+        run_functional_verification(request_path)
+
+
 def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "cocotb_tools", None)
     with pytest.raises(FunctionalVerificationError, match="cocotb is not installed"):
@@ -411,6 +426,46 @@ def test_parse_results_xml_tolerates_missing_timing_attributes(tmp_path):
     assert tests == [
         {"name": "t", "status": "passed", "sim_time_ns": None, "real_time_s": None}
     ]
+
+
+# --------------------------------------------------------------------------- #
+# `_extract_random_seed_property` -- the `environment.random_seed` source
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_random_seed_property_reads_the_captured_value(tmp_path):
+    """The exact `random_seed` value `docs/design/cocotb-verification-spike.md`
+    section 4 captured live from a real run."""
+    path = _write(tmp_path / "results.xml", _RESULTS_XML_WITH_SKIP)
+    assert fv._extract_random_seed_property(path) == 1785780800
+
+
+def test_extract_random_seed_property_missing_property_is_none(tmp_path):
+    path = _write(
+        tmp_path / "results.xml",
+        '<testsuites><testsuite name="all">'
+        '<testcase name="t" /></testsuite></testsuites>',
+    )
+    assert fv._extract_random_seed_property(path) is None
+
+
+def test_extract_random_seed_property_missing_file_is_none(tmp_path):
+    assert fv._extract_random_seed_property(str(tmp_path / "nope.xml")) is None
+
+
+def test_extract_random_seed_property_unparseable_file_is_none(tmp_path):
+    path = _write(tmp_path / "results.xml", "<testsuites")
+    assert fv._extract_random_seed_property(path) is None
+
+
+def test_extract_random_seed_property_non_integer_value_is_none(tmp_path):
+    path = _write(
+        tmp_path / "results.xml",
+        '<testsuites><testsuite name="all">'
+        '<property name="random_seed" value="not-an-int" />'
+        "</testsuite></testsuites>",
+    )
+    assert fv._extract_random_seed_property(path) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -484,6 +539,10 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "engine_version": "13.0",
         "cocotb_version": "2.0.1",
         "results_xml": report["environment"]["results_xml"],
+        # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
+        # the spike captured live (section 4) -- this is the authoritative
+        # echo, read back from `results.xml` itself.
+        "random_seed": 1785780800,
     }
     results_xml = report["environment"]["results_xml"]
     assert os.path.isabs(results_xml)
@@ -498,6 +557,9 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     assert runner.build_kwargs["hdl_toplevel"] == "gcd"
     assert runner.test_kwargs["test_module"] == "test_gcd"
     assert runner.test_kwargs["testcase"] is None
+    # No `options.random_seed` in the request -- cocotb generates its own,
+    # so `Runner.test()`'s `seed` kwarg is left unset (`None`).
+    assert runner.test_kwargs["seed"] is None
 
 
 def test_stubbed_run_counts_skipped_tests_separately(tmp_path, monkeypatch):
@@ -548,6 +610,39 @@ def test_stubbed_run_passes_testcase_filter_through(tmp_path, monkeypatch):
     run_functional_verification(request_path)
 
     assert runner.test_kwargs["testcase"] == ["test_gcd_known_pairs"]
+
+
+def test_stubbed_run_pins_random_seed_end_to_end(tmp_path, monkeypatch):
+    """`options.random_seed` -> `Runner.test()`'s own `seed` kwarg (which
+    cocotb turns into `COCOTB_RANDOM_SEED` in the simulator subprocess's
+    environment) -> echoed back in `environment.random_seed` -- issue #423's
+    request-field-to-response-echo reproducibility chain, full stack."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"coverage": False, "random_seed": 42}),
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_FAILURE))
+
+    report = run_functional_verification(request_path)
+
+    assert runner.test_kwargs["seed"] == 42
+    # The stubbed `results.xml` fixture's own `<property>` value is echoed
+    # back verbatim -- this module never trusts the *request* value as the
+    # response's `random_seed`, only what `results.xml` itself reports (the
+    # same "results.xml is the only source of truth" discipline the rest of
+    # this contract already follows).
+    assert report["environment"]["random_seed"] == 1785780800
+
+
+def test_stubbed_run_without_random_seed_leaves_seed_kwarg_unset(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.test_kwargs["seed"] is None
 
 
 def test_stubbed_run_swallows_the_simulators_exit_code(tmp_path, monkeypatch):
@@ -1004,6 +1099,67 @@ def test_integration_real_icarus_testcase_filter_passes(tmp_path):
     # `get_results()` undercount the contract's own counts avoid.
     assert report["skipped_count"] == 1
     assert report["test_count"] == 3
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_random_seed_is_pinned_and_echoed(tmp_path):
+    """`options.random_seed` pinned end to end against a real cocotb +
+    Icarus run: the pinned value reaches `COCOTB_RANDOM_SEED` (via
+    `Runner.test()`'s own `seed` parameter) and is echoed back verbatim in
+    `environment.random_seed`, read from `results.xml`'s own
+    `<property name="random_seed">` -- issue #423's `random_seed`
+    reproducibility acceptance criterion, exercised against the real
+    toolchain rather than the stubbed runner."""
+    request_path = _stage_example(tmp_path, "request.json")
+    request = json.loads(Path(request_path).read_text())
+    request["options"]["random_seed"] = 424242
+    request_path = _write_request(tmp_path / "request-seeded.json", request)
+
+    report = run_functional_verification(request_path)
+
+    assert report["environment"]["random_seed"] == 424242
+    # Same pass/fail structure the unseeded worked example produces -- pinning
+    # a seed changes cocotb's own randomized-test bookkeeping, never this
+    # design's deterministic (per-test-fixed-seed) stimulus or verdict.
+    assert (
+        report["test_count"],
+        report["passed_count"],
+        report["failed_count"],
+        report["skipped_count"],
+    ) == (3, 2, 1, 0)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_same_seed_reproduces_identical_results(tmp_path):
+    """Two runs of the same seeded request produce identical `tests[]`
+    content -- issue #423's own edge-case test plan ("confirm two CI runs of
+    the same seeded request produce identical `tests[]`
+    ordering/timing-independent results"). Compares everything except the
+    inherently timing-dependent `real_time_s` (wall-clock, never contracted
+    to be reproducible)."""
+    request_path = _stage_example(tmp_path, "request.json")
+    request = json.loads(Path(request_path).read_text())
+    request["options"]["random_seed"] = 13
+    request_path = _write_request(tmp_path / "request-seeded.json", request)
+
+    def _strip_timing(report):
+        return [
+            {key: value for key, value in test.items() if key != "real_time_s"}
+            for test in report["tests"]
+        ]
+
+    first = run_functional_verification(request_path)
+    second = run_functional_verification(request_path)
+
+    assert first["environment"]["random_seed"] == 13
+    assert second["environment"]["random_seed"] == 13
+    assert _strip_timing(first) == _strip_timing(second)
 
 
 # Sanity: `subprocess` really is the module this file's coverage stubs patch

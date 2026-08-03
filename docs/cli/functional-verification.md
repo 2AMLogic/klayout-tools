@@ -126,6 +126,31 @@ which would be indistinguishable from "not requested".
 Functional coverage (`cocotb-coverage`-style bins defined in the testbench)
 is out of scope for this contract; `coverage` is structural coverage only.
 
+## Reproducibility: `random_seed`
+
+cocotb's regression manager seeds its own `random` module per run and logs
+the value it used in `results.xml`'s `<property name="random_seed">`
+element (verified live, `docs/design/cocotb-verification-spike.md` section
+4) — but does not accept one back in as a request-level input by default.
+`options.random_seed` closes that gap end to end:
+
+- **Request → `Runner.test()`.** `options.random_seed`, when given, is
+  forwarded to `Runner.test()`'s own `seed` parameter, which sets
+  `COCOTB_RANDOM_SEED` in the simulator subprocess's environment — a pinned
+  seed reproduces cocotb's own seeded `random` module state run-to-run, not
+  merely the same *logged* value after the fact.
+- **`Runner.test()` → response.** Whether pinned or left to cocotb's own
+  generator, the *effective* seed is always echoed back in
+  `environment.random_seed`, read from `results.xml`'s own `<property>`
+  element — the same artifact-derived-truth discipline every other count in
+  this contract already follows. An unpinned run still gets a
+  randomly-generated seed this way, worth capturing to reproduce that
+  *specific* run later by feeding it back in as `options.random_seed`.
+
+This is the same reproducibility bar `klt sim`'s Monte Carlo seeding and
+`klt lvs`'s `environment` hashes already set (issue #423) — a stored CI
+result's `environment.random_seed` is enough to reproduce it exactly.
+
 ## Request
 
 ```json
@@ -137,7 +162,8 @@ is out of scope for this contract; `coverage` is structural coverage only.
   "testbench": { "module": "test_gcd", "testcase": null },
   "options": {
     "coverage": false,
-    "timescale": ["1ns", "1ps"]
+    "timescale": ["1ns", "1ps"],
+    "random_seed": 1785780800
   }
 }
 ```
@@ -152,6 +178,7 @@ is out of scope for this contract; `coverage` is structural coverage only.
 | `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Filtered-out tests still appear in the report as `skipped`. |
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
+| `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
 
 ## Response
 
@@ -183,7 +210,8 @@ is out of scope for this contract; `coverage` is structural coverage only.
     "engine": "icarus",
     "engine_version": "13.0",
     "cocotb_version": "2.0.1",
-    "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml"
+    "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml",
+    "random_seed": 1785780800
   }
 }
 ```
@@ -197,7 +225,7 @@ is out of scope for this contract; `coverage` is structural coverage only.
 | `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure. `test_count` includes skipped tests, so `passed + failed + skipped == test_count`. |
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, and `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"). |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
@@ -264,6 +292,7 @@ tests: 3  passed: 2  failed: 1  skipped: 0
     AssertionError: gcd(48, 18): got 6, want 999 (deliberate failure)
 
 results_xml: .../.klt/functional-verification/results_icarus.xml
+random_seed: 1785780800
 $ echo $?
 3
 ```
