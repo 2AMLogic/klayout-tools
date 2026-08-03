@@ -2355,6 +2355,14 @@ The following cells had property errors:
 # though netgen itself printed "Property errors were found."
 # (Trailing whitespace on netgen's column-padded table rows is stripped, as
 # in the other fixtures here; the property lines are verbatim.)
+#
+# NOTE: the `sub:1 vs. sub:1:` header below is *device*-shaped (a numeric
+# index), not subcircuit-instance-shaped -- real netgen only uses a numeric
+# index for primitive devices; a subcircuit instance is named by its
+# instance name instead (e.g. `sub:i1 vs. sub:i1:`, exercised separately by
+# `_NETGEN_SUBCKT_INSTANCE_PROPERTY_LOG` below, issue #363). This fixture
+# remains a valid regression for the string-valued exact-match line path;
+# only the header's construct attribution was previously mislabeled.
 _NETGEN_STRING_PROPERTY_LOG = """
 Subcircuit summary:
 Circuit 1: sub                             |Circuit 2: sub
@@ -2386,6 +2394,68 @@ Number of nets: 2                          |Number of nets: 2
 Netlists match uniquely with property errors.
 sub:1 vs. sub:1:
  model circuit1: "fast"   circuit2: "slow"   (exact match req'd)
+
+Subcircuit pins:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+a                                          |a
+b                                          |b
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes top and top are equivalent.
+
+Final result: Circuits match uniquely.
+Property errors were found.
+
+The following cells had property errors:
+ top
+"""
+
+# Verbatim `comp.out` of a from-source netgen 1.5.323 build, run over two
+# top-level SPICE files whose only difference is a numeric instance
+# parameter (`w=1u` vs `w=2u`) on a *subcircuit instance* `xi1`:
+#
+#     netgen -batch lvs "c.spice top" "d.spice top" "" out3.log
+#
+# Unlike a primitive device (`pmos:1 vs. pmos:1:`), netgen names a
+# subcircuit-instance property-error block by the *instance name*, not a
+# numeric index -- `sub:i1 vs. sub:i1:`. Regression fixture for issue #363:
+# `_NETGEN_PROPERTY_BLOCK_RE`'s block header previously required a numeric
+# index in both positions, so this exact header failed to match, the
+# property-error block yielded zero entries, and the report fell through to
+# the marker-based backstop with `device: null, property: null` instead of
+# a structured `device.property` entry.
+_NETGEN_SUBCKT_INSTANCE_PROPERTY_LOG = """
+Subcircuit summary:
+Circuit 1: sub                             |Circuit 2: sub
+-------------------------------------------|-------------------------------------------
+r (1)                                      |r (1)
+Number of devices: 1                       |Number of devices: 1
+Number of nets: 2                          |Number of nets: 2
+---------------------------------------------------------------------------------------
+Resolving symmetries by property value.
+Resolving symmetries by pin name.
+Netlists match uniquely.
+
+Subcircuit pins:
+Circuit 1: sub                             |Circuit 2: sub
+-------------------------------------------|-------------------------------------------
+a                                          |a
+b                                          |b
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes sub and sub are equivalent.
+
+Subcircuit summary:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+sub (1)                                    |sub (1)
+Number of devices: 1                       |Number of devices: 1
+Number of nets: 2                          |Number of nets: 2
+---------------------------------------------------------------------------------------
+Netlists match uniquely with property errors.
+sub:i1 vs. sub:i1:
+ w circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=0%)
 
 Subcircuit pins:
 Circuit 1: top                             |Circuit 2: top
@@ -2646,6 +2716,39 @@ def test_netgen_engine_string_property_error_is_not_a_false_match(
         "class": "sub",
     }
     assert "exact match req'd" in mismatch["description"]
+
+
+def test_netgen_engine_subcircuit_instance_property_error_is_structured(
+    tmp_path, monkeypatch
+):
+    """Regression (issue #363): a property-error block whose header names a
+    *subcircuit instance* (`sub:i1 vs. sub:i1:`) rather than a numerically
+    indexed device (`pmos:1 vs. pmos:1:`) must still be parsed into a
+    structured `device.property` entry -- not fall through to the
+    marker-based backstop with `device`/`property` left `null`."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_SUBCKT_INSTANCE_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["mismatches"], "netgen declared property errors -- must not be empty"
+    assert report["mismatch_count"] == 1
+    assert report["category_counts"] == {"device.property": 1}
+    (mismatch,) = report["mismatches"]
+    assert mismatch["category"] == "device.property"
+    assert mismatch["severity"] == "error"
+    assert mismatch["property"] == {
+        "name": "w",
+        "layout": "1e-06",
+        "reference": "2e-06",
+    }
+    assert mismatch["device"] == {
+        "layout": "sub:i1",
+        "reference": "sub:i1",
+        "class": "sub",
+    }
+    assert mismatch["details"] is None
 
 
 def test_netgen_engine_declared_property_errors_without_parsable_detail(
