@@ -233,12 +233,47 @@ control/end cards before pointing a request at it.
 
 ## Corner axes
 
-- **`corners.process`** (`array<string>`, optional) — opaque `.lib` section
-  names passed through to `models.lib` (e.g. sky130's `tt`/`ss`/`ff`/`sf`/`fs`,
-  or a mismatch variant like `tt_mm` — no schema change needed for those).
+- **`corners.process`** (`array<string | {"name": string, "sections":
+  string[]}>`, optional) — process-corner axis. Each entry is either:
+  - a **bare string** — opaque `.lib` section name passed through to
+    `models.lib` (e.g. sky130's `tt`/`ss`/`ff`/`sf`/`fs`, or a mismatch
+    variant like `tt_mm` — no schema change needed for those). Emits a
+    single `.lib <models.lib> <name>` card.
+  - a **bundle object** `{"name": str, "sections": list[str]}` — a named
+    corner backed by *multiple* `.lib` sections, emitted as one `.lib
+    <models.lib> <section>` card per entry in `sections`, **in declaration
+    order** (ordering matters when the section set has interdependent
+    global switch params — see gf180mcu below). `name` is what shows up as
+    `corner_id`/the response's `process` field and what `corners.exclude[].process`
+    matches against; it need not equal any of the section strings.
+
   Selecting a process corner needs a model library; `models.lib` is only
-  required when this axis is present. Omit entirely for a request that
-  doesn't care about process (single point, no `.lib` card emitted).
+  required when this axis is present. Omit `corners.process` entirely for a
+  request that doesn't care about process (single point, no `.lib` card
+  emitted).
+
+  The bundle form exists because not every PDK's vendor model deck ships a
+  single all-device section per named corner. **sky130**'s
+  `sky130.lib.spice` does (`tt`/`ss`/`ff`/`sf`/`fs` each covers every device
+  family), so a bare string suffices there. **gf180mcu**'s
+  `sm141064.ngspice` does not: it has no all-device corner sections at
+  all — a named corner is a *bundle* of per-device-family sections (MOS
+  `typical`/`ff`/`ss` plus `bjt_*`/`diode_*`/`res_*`/`moscap_*`/`mimcap_*`),
+  so a gf180mcu `"ss"` corner needs the bundle form:
+
+  ```json
+  "corners": {
+    "process": [
+      "typical",
+      { "name": "ss", "sections": ["ss", "bjt_ss", "diode_ss", "res_ss", "moscap_ss", "mimcap_ss"] }
+    ]
+  }
+  ```
+
+  A bare string and a bundle object may appear side by side in the same
+  `corners.process` array (as above); a single-section bundle
+  (`{"name": "tt", "sections": ["tt"]}`) is functionally equivalent to the
+  bare string `"tt"`.
 
   **Known-good mismatch mechanisms (per-device variation):** Until full Monte
   Carlo orchestration lands, hand-rolled MC harnesses can reference the
@@ -532,7 +567,7 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
-| `corners.process`        | array\<string\>   | Process-corner axis — opaque `.lib` section names.                                                                                                                     |
+| `corners.process`        | array\<string \| {name, sections}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": list[str]}` (one `.lib` card per section, in order) — see "Corner axes" above. |
 | `corners.supply_v`       | object            | Supply axis, keyed by source/`.param` name; arrays sweep together by index.                                                                                            |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `exclude`                | array\<object\>   | Partial corner specs dropped from the expansion.                                                                                                                       |

@@ -521,9 +521,26 @@ class CornerPoint:
     a plain ``list[CornerPoint]`` and calls :func:`_run_corner` per point,
     so a sampled point flows through exactly the same path as an
     unsampled one.
+
+    ``process_sections`` is populated only when the request's
+    ``corners.process[]`` entry for this point was the multi-section bundle
+    object form (``{"name": str, "sections": list[str]}``, see
+    :func:`_parse_process_entry`) rather than a bare string -- ``None`` for
+    an ordinary single-section (or process-less) corner. ``process`` always
+    holds the corner's display name either way (the bundle's ``name``, or
+    the bare string itself), so `corner_id`/`slug` labeling, the response's
+    ``process`` field, and `_matches_exclude` need no bundle-awareness of
+    their own.
     """
 
-    __slots__ = ("process", "supply_v", "temperature_c", "sample_index", "mc_seed")
+    __slots__ = (
+        "process",
+        "process_sections",
+        "supply_v",
+        "temperature_c",
+        "sample_index",
+        "mc_seed",
+    )
 
     def __init__(
         self,
@@ -531,10 +548,12 @@ class CornerPoint:
         supply_v: dict[str, float],
         temperature_c: float,
         *,
+        process_sections: list[str] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, int] | None = None,
     ) -> None:
         self.process = process
+        self.process_sections = process_sections
         self.supply_v = supply_v
         self.temperature_c = temperature_c
         self.sample_index = sample_index
@@ -584,6 +603,48 @@ def _format_number(value: float) -> str:
     return str(value)
 
 
+def _parse_process_entry(entry: Any) -> tuple[str | None, list[str] | None]:
+    """Normalize one ``corners.process[]`` entry into ``(name, sections)``.
+
+    A bare string is today's single-``.lib``-section corner (e.g. sky130's
+    ``"tt"``): returns ``(entry, None)`` -- ``process_sections=None`` signals
+    :func:`_write_corner_deck` to emit its historical single ``.lib`` line,
+    byte-for-byte unchanged from before this function existed.
+
+    An object ``{"name": str, "sections": list[str]}`` is a multi-section
+    corner *bundle* -- e.g. gf180mcu's ``sm141064.ngspice``, which has no
+    all-device corner sections and instead needs one ``.lib`` card per
+    device family (MOS + ``bjt_*`` + ``diode_*`` + ``res_*`` + ``moscap_*`` +
+    ``mimcap_*``) to fully select a named corner: returns ``(name,
+    list(sections))``, and :func:`_write_corner_deck` emits one ``.lib`` line
+    per section, in declaration order (ordering matters -- the gf180 section
+    set has interdependent global switch params).
+    """
+    if isinstance(entry, str):
+        return entry, None
+    if isinstance(entry, dict):
+        name = entry.get("name")
+        sections = entry.get("sections")
+        if not isinstance(name, str) or not name:
+            raise SimError(
+                "corners.process bundle entry requires a non-empty string 'name'"
+            )
+        if (
+            not isinstance(sections, list)
+            or not sections
+            or not all(isinstance(s, str) and s for s in sections)
+        ):
+            raise SimError(
+                "corners.process bundle entry requires a non-empty list of "
+                "non-empty strings 'sections'"
+            )
+        return name, list(sections)
+    raise SimError(
+        "corners.process entries must be a string or an object "
+        '{"name": str, "sections": list[str]}'
+    )
+
+
 def _expand_corners(
     corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
 ) -> list[CornerPoint]:
@@ -595,10 +656,19 @@ def _expand_corners(
     than an error -- a request that only cares about one axis need not
     populate the others.
 
+    Each ``corners.process[]`` entry is either a bare string (one ``.lib``
+    section, unchanged) or a ``{"name": str, "sections": list[str]}`` bundle
+    object (multiple ``.lib`` sections under one named corner) -- see
+    :func:`_parse_process_entry`.
+
     ``corners.supply_v``'s keys sweep together by index (same-length arrays;
     rails move as a set), matching the spike's documented semantics.
     """
-    processes: list[str | None] = corners_spec.get("process") or [None]
+    raw_processes: list[Any] = corners_spec.get("process") or [None]
+    processes: list[tuple[str | None, list[str] | None]] = [
+        (None, None) if raw is None else _parse_process_entry(raw)
+        for raw in raw_processes
+    ]
 
     supply_spec: dict[str, list[float]] = corners_spec.get("supply_v") or {}
     if supply_spec:
@@ -616,10 +686,15 @@ def _expand_corners(
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
 
     points: list[CornerPoint] = []
-    for process in processes:
+    for process, process_sections in processes:
         for supply_v in supply_points:
             for temperature_c in temperatures:
-                point = CornerPoint(process, supply_v, temperature_c)
+                point = CornerPoint(
+                    process,
+                    supply_v,
+                    temperature_c,
+                    process_sections=process_sections,
+                )
                 if not _is_excluded(point, exclude_spec):
                     points.append(point)
     return points
@@ -784,6 +859,7 @@ def _expand_monte_carlo(
                     base.process,
                     base.supply_v,
                     base.temperature_c,
+                    process_sections=base.process_sections,
                     sample_index=sample_index,
                     mc_seed={
                         "process_seed": process_seed,
@@ -1489,7 +1565,13 @@ def _write_corner_deck(
         lines.append(f".param mc_sample_index={point.sample_index}")
         lines.append(f".param mc_process_seed={point.mc_seed['process_seed']}")
         lines.append(f".param mc_mismatch_seed={point.mc_seed['mismatch_seed']}")
-    if point.process is not None:
+    if point.process_sections is not None:
+        # Multi-section corner bundle (e.g. gf180mcu's per-device-family
+        # `.lib` cards) -- one line per declared section, in order (see
+        # `_parse_process_entry`).
+        for section in point.process_sections:
+            lines.append(f".lib {models_lib} {section}")
+    elif point.process is not None:
         lines.append(f".lib {models_lib} {point.process}")
     lines.append(f".include {netlist_path}")
     lines.append(f".temp {point.temperature_c}")

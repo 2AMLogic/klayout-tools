@@ -423,6 +423,177 @@ def test_expand_corners_mismatched_supply_lengths_raises():
         sim._expand_corners({"supply_v": {"vdd": [1.62, 1.98], "vdda": [1.7]}}, [])
 
 
+# --------------------------------------------------------------------------- #
+# corners.process bundle form: {"name": str, "sections": list[str]}
+# --------------------------------------------------------------------------- #
+
+
+def test_expand_corners_bare_string_process_is_unchanged():
+    """Regression: a bare-string `corners.process` entry keeps producing a
+    `CornerPoint` with `process_sections=None` -- the exact shape
+    `_write_corner_deck` used before the bundle form existed."""
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+
+    assert [p.process for p in points] == ["tt", "ss"]
+    assert [p.process_sections for p in points] == [None, None]
+    assert [p.corner_id for p in points] == ["tt/novdd/27C", "ss/novdd/27C"]
+
+
+def test_expand_corners_bundle_process_entry():
+    points = sim._expand_corners(
+        {
+            "process": [
+                "tt",
+                {
+                    "name": "ss",
+                    "sections": [
+                        "ss",
+                        "bjt_ss",
+                        "diode_ss",
+                        "res_ss",
+                        "moscap_ss",
+                        "mimcap_ss",
+                    ],
+                },
+            ]
+        },
+        [],
+    )
+
+    assert [p.process for p in points] == ["tt", "ss"]
+    assert points[0].process_sections is None
+    assert points[1].process_sections == [
+        "ss",
+        "bjt_ss",
+        "diode_ss",
+        "res_ss",
+        "moscap_ss",
+        "mimcap_ss",
+    ]
+    # corner_id/slug use the bundle's `name` -- report shape is unaffected.
+    assert points[1].corner_id == "ss/novdd/27C"
+    assert points[1].slug == "ss_novdd_27C"
+
+
+def test_expand_corners_bundle_single_section_matches_bare_string_shape():
+    """A single-section bundle is functionally equivalent to a bare string
+    (see the issue's edge-case list) -- same `process`, same `corner_id`,
+    just routed through the loop path in `_write_corner_deck` instead of the
+    single-line path."""
+    (bare,) = sim._expand_corners({"process": ["tt"]}, [])
+    (bundle,) = sim._expand_corners(
+        {"process": [{"name": "tt", "sections": ["tt"]}]}, []
+    )
+
+    assert bare.process == bundle.process == "tt"
+    assert bare.corner_id == bundle.corner_id
+
+
+@pytest.mark.parametrize(
+    "entry,match",
+    [
+        ({"sections": ["tt"]}, "name"),
+        ({"name": "", "sections": ["tt"]}, "name"),
+        ({"name": 5, "sections": ["tt"]}, "name"),
+        ({"name": "tt"}, "sections"),
+        ({"name": "tt", "sections": []}, "sections"),
+        ({"name": "tt", "sections": "tt"}, "sections"),
+        ({"name": "tt", "sections": [1, 2]}, "sections"),
+        ({"name": "tt", "sections": ["tt", ""]}, "sections"),
+        (5, "string or an object"),
+    ],
+)
+def test_expand_corners_bundle_process_entry_validation(entry, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._expand_corners({"process": [entry]}, [])
+
+
+def test_expand_corners_exclude_matches_bundle_corner_by_name():
+    """`corners.exclude[].process` compares against the bundle's `name`, not
+    the raw `{"name", "sections"}` object -- an object `!=` a bare string
+    would silently never match without this."""
+    points = sim._expand_corners(
+        {
+            "process": [
+                "tt",
+                {"name": "ss", "sections": ["ss", "bjt_ss"]},
+            ],
+            "temperature_c": [-40, 125],
+        },
+        [{"process": "ss", "temperature_c": -40}],
+    )
+
+    ids = [p.corner_id for p in points]
+    assert "ss/novdd/-40C" not in ids
+    assert len(ids) == 3
+
+
+# --------------------------------------------------------------------------- #
+# _write_corner_deck: .lib card generation
+# --------------------------------------------------------------------------- #
+
+
+def _write_deck(tmp_path: Path, point: sim.CornerPoint, **overrides) -> list[str]:
+    deck_path = tmp_path / "deck.spice"
+    kwargs = {
+        "deck_path": str(deck_path),
+        "netlist_path": str(tmp_path / "body.spice"),
+        "models_lib": str(tmp_path / "corner.lib"),
+        "point": point,
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements_spec": [],
+        "raw_path": None,
+    }
+    kwargs.update(overrides)
+    sim._write_corner_deck(**kwargs)
+    return deck_path.read_text().splitlines()
+
+
+def test_write_corner_deck_bare_string_process_emits_one_lib_line(tmp_path):
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(tmp_path, point)
+
+    lib_lines = [line for line in lines if line.startswith(".lib")]
+    assert lib_lines == [f".lib {tmp_path / 'corner.lib'} tt"]
+
+
+def test_write_corner_deck_bundle_process_emits_one_lib_line_per_section_in_order(
+    tmp_path,
+):
+    point = sim.CornerPoint(
+        "ss",
+        {},
+        27,
+        process_sections=[
+            "ss",
+            "bjt_ss",
+            "diode_ss",
+            "res_ss",
+            "moscap_ss",
+            "mimcap_ss",
+        ],
+    )
+    lines = _write_deck(tmp_path, point)
+
+    lib_lines = [line for line in lines if line.startswith(".lib")]
+    models_lib = tmp_path / "corner.lib"
+    assert lib_lines == [
+        f".lib {models_lib} ss",
+        f".lib {models_lib} bjt_ss",
+        f".lib {models_lib} diode_ss",
+        f".lib {models_lib} res_ss",
+        f".lib {models_lib} moscap_ss",
+        f".lib {models_lib} mimcap_ss",
+    ]
+
+
+def test_write_corner_deck_no_process_emits_no_lib_line(tmp_path):
+    point = sim.CornerPoint(None, {}, 27)
+    lines = _write_deck(tmp_path, point)
+
+    assert not any(line.startswith(".lib") for line in lines)
+
+
 def test_corner_id_multi_rail_format():
     point = sim.CornerPoint("tt", {"vdd": 1.8, "vdda": 1.7}, 27)
     assert point.corner_id == "tt/vdd=1.800_vdda=1.700V/27C"
@@ -1609,6 +1780,59 @@ def test_run_sim_keep_artifacts_writes_log(tmp_path, monkeypatch):
     assert log_path is not None
     assert Path(log_path).read_text() == "clean run\n"
     assert Path(log_path).is_relative_to(artifacts_dir)
+
+
+def test_run_sim_bundle_process_corner_writes_one_lib_per_section(
+    tmp_path, monkeypatch
+):
+    """End-to-end (stubbed ngspice): a `corners.process` bundle entry flows
+    from the request through `_expand_corners` and `_write_corner_deck`
+    into the actual generated deck on disk, gf180mcu-style (one `.lib` card
+    per device-family section, in declaration order)."""
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {
+                "process": [
+                    "tt",
+                    {
+                        "name": "ss",
+                        "sections": ["ss", "bjt_ss", "diode_ss"],
+                    },
+                ]
+            },
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    report = sim.run_sim(str(request), artifacts_dir=str(artifacts_dir))
+
+    assert report["status"] == "pass"
+    by_process = {c["process"]: c for c in report["corners"]}
+    assert set(by_process) == {"tt", "ss"}
+
+    models_lib = tmp_path / "corner.lib"
+
+    tt_log = Path(by_process["tt"]["artifacts"]["log"])
+    tt_deck = (tt_log.parent / "corner.cir").read_text().splitlines()
+    assert [line for line in tt_deck if line.startswith(".lib")] == [
+        f".lib {models_lib} tt"
+    ]
+
+    ss_log = Path(by_process["ss"]["artifacts"]["log"])
+    ss_deck = (ss_log.parent / "corner.cir").read_text().splitlines()
+    assert [line for line in ss_deck if line.startswith(".lib")] == [
+        f".lib {models_lib} ss",
+        f".lib {models_lib} bjt_ss",
+        f".lib {models_lib} diode_ss",
+    ]
 
 
 def test_run_sim_without_keep_artifacts_cleans_up(tmp_path, monkeypatch):
