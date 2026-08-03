@@ -1247,11 +1247,19 @@ def test_run_sim_monte_carlo_expands_n_times_m_corners(tmp_path, monkeypatch):
     assert report["corner_count"] == 6  # 2 corners x 3 samples
     ids = [c["corner_id"] for c in report["corners"]]
     assert len(set(ids)) == 6
-    assert report["environment"]["monte_carlo"] == {
-        "n": 3,
-        "seed": 1,
-        "vary": "both",
+    mc_env = report["environment"]["monte_carlo"]
+    assert mc_env["n"] == 3
+    assert mc_env["seed"] == 1
+    assert mc_env["vary"] == "both"
+    # `vary: "both"` includes mismatch -> the per-family mismatch-activity
+    # report (#355) is present; no `models.pdk` was declared, so activity is
+    # unverified (`active: None`) for every family the netlist body (R1/C1)
+    # instantiates.
+    assert {f["family"] for f in mc_env["family_mismatch"]} == {
+        "resistor",
+        "capacitor",
     }
+    assert all(f["active"] is None for f in mc_env["family_mismatch"])
     for corner in report["corners"]:
         assert corner["monte_carlo"]["sample_index"] in (0, 1, 2)
         assert isinstance(corner["monte_carlo"]["seed"], int)
@@ -1334,6 +1342,172 @@ def test_run_sim_monte_carlo_deck_carries_seed_and_param_cards(tmp_path, monkeyp
     # AGAUSS/GAUSS calls evaluated while the netlist is parsed, before the
     # `.control` block ever runs.
     assert deck_text.index(".options seed=") < deck_text.index(".include")
+
+
+# --------------------------------------------------------------------------- #
+# Per-family mismatch-activity report (#355) -- a device family whose deck
+# mismatch ships structurally disabled (e.g. gf180mcu's poly resistor) must
+# never be indistinguishable from a family that actually got sampled just
+# because the run's global mismatch switch/section was engaged.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("R1 vdd out 1k", "resistor"),
+        ("C1 out 0 1n", "capacitor"),
+        ("D1 anode cathode diode_model", "diode"),
+        ("Q1 c b e npn_model", "bipolar"),
+        ("M1 d g s b nmos_model L=1u W=1u", "mosfet"),
+        ("XM1 d g s b nfet_03v3 L=1u W=1u", "mosfet"),
+        ("XR1 a b res_xpoly_1p1000pl W=1", "resistor"),
+        ("XQ1 c b e bjt_pnp_model", "bipolar"),
+        ("XC1 a b moscap_model", "capacitor"),
+        ("XU1 a b some_unrecognised_block", "other"),
+        ("V1 vdd 0 DC 1.0", None),
+        ("I1 a b DC 1m", None),
+        ("L1 a b 1u", None),
+    ],
+)
+def test_classify_device_family(line, expected):
+    element_type = line[0].upper()
+    assert sim._classify_device_family(element_type, line) == expected
+
+
+def test_detect_device_families_skips_comments_continuations_and_dot_cards():
+    text = (
+        "* a full-line comment\n"
+        ".param vdd=1.0\n"
+        "Vdd vdd 0 DC {vdd}\n"
+        "R1 vdd out 1k\n"
+        "+ ; a continuation line, not a device\n"
+        "C1 out 0 1n\n"
+        "\n"
+        "R2 out 0 1k\n"
+    )
+    # R2 repeats an already-seen family (resistor) -- first-seen order, no
+    # duplicates.
+    assert sim._detect_device_families(text) == ["resistor", "capacitor"]
+
+
+def test_mismatch_family_report_gf180mcu_flags_resistor_inactive(tmp_path):
+    """The concrete case this issue is about: gf180mcu's poly-resistor
+    mismatch hook is structurally disabled, and must be reported as such
+    even though MOS/BJT mismatch is active under the same global switch."""
+    netlist = tmp_path / "body.spice"
+    netlist.write_text(
+        "XR1 a b res_xpoly_1p1000pl W=1\n"
+        "XM1 d g s b nfet_03v3 L=1u W=1u\n"
+        "XQ1 c b e bjt_npn_model\n"
+    )
+
+    report = sim._mismatch_family_report(str(netlist), "gf180mcuC")
+
+    by_family = {entry["family"]: entry for entry in report}
+    resistor_note = by_family["resistor"]["note"]
+    assert by_family["resistor"]["active"] is False
+    assert "hardcoded" in resistor_note or "disabled" in resistor_note
+    assert by_family["mosfet"]["active"] is True
+    assert by_family["bipolar"]["active"] is True
+
+
+def test_mismatch_family_report_sky130(tmp_path):
+    netlist = tmp_path / "body.spice"
+    netlist.write_text(
+        "XM1 d g s b sky130_fd_pr__nfet_01v8 L=1u W=1u\n"
+        "XQ1 c b e sky130_fd_pr__npn_model\n"
+    )
+
+    report = sim._mismatch_family_report(str(netlist), "sky130A")
+
+    by_family = {entry["family"]: entry for entry in report}
+    assert by_family["mosfet"]["active"] is True
+    assert by_family["bipolar"]["active"] is True
+
+
+def test_mismatch_family_report_unrecognised_pdk_family_is_unverified(tmp_path):
+    """A family with no curated table entry -- including an unrecognised
+    PDK -- is reported `active: None` ("not independently verified"),
+    never guessed `True`."""
+    netlist = tmp_path / "body.spice"
+    netlist.write_text("R1 vdd out 1k\nC1 out 0 1n\n")
+
+    report = sim._mismatch_family_report(str(netlist), "not_a_real_pdk")
+
+    for entry in report:
+        assert entry["active"] is None
+        assert "not independently verified" in entry["note"]
+
+
+def test_mismatch_family_report_missing_pdk_variant_is_unverified(tmp_path):
+    netlist = tmp_path / "body.spice"
+    netlist.write_text("R1 vdd out 1k\n")
+
+    report = sim._mismatch_family_report(str(netlist), None)
+
+    assert report == [
+        {
+            "family": "resistor",
+            "active": None,
+            "note": (
+                "PDK family could not be determined for this request (set "
+                "models.pdk) -- mismatch activity for the 'resistor' "
+                "family could not be verified; treat any sampled spread "
+                "for it as unconfirmed."
+            ),
+        }
+    ]
+
+
+def test_run_sim_monte_carlo_family_mismatch_present_only_when_vary_includes_mismatch(
+    tmp_path, monkeypatch
+):
+    """`vary: "process"` never touches mismatch sampling -- no
+    `family_mismatch` report is emitted (there is nothing to report on)."""
+    request = _mc_request(tmp_path, {"n": 2, "seed": 1, "vary": "process"})
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert "family_mismatch" not in report["environment"]["monte_carlo"]
+
+
+def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
+    tmp_path, monkeypatch
+):
+    """End-to-end (`run_sim`): a gf180mcu request declaring `models.pdk`
+    and mismatch sampling gets a `family_mismatch` report that flags the
+    resistor family inactive, never lumping it in with the active MOS/BJT
+    families."""
+    body = tmp_path / "body.spice"
+    body.write_text(
+        ".param vdd=1.0\n"
+        "Vdd vdd 0 DC {vdd}\n"
+        "XR1 vdd mid res_xpoly_1p1000pl W=1\n"
+        "XM1 mid g out b nfet_03v3 L=1u W=1u\n"
+        "C1 out 0 1n\n"
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"pdk": "gf180mcuC"},
+            "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    family_mismatch = report["environment"]["monte_carlo"]["family_mismatch"]
+    by_family = {entry["family"]: entry["active"] for entry in family_mismatch}
+    assert by_family["resistor"] is False
+    assert by_family["mosfet"] is True
+    # capacitor has no curated gf180mcu table entry -- unverified, not
+    # assumed active or inactive.
+    assert by_family["capacitor"] is None
 
 
 def _stripped_report(report: dict) -> dict:

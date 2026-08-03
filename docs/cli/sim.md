@@ -305,6 +305,28 @@ control/end cards before pointing a request at it.
     on per run via `sw_stat_mismatch: 0|1`, never by pointing `corners.process`
     at an `_mm` section.
 
+    **The resistor family is the exception: `sw_stat_mismatch` does not
+    enable it.** The poly-resistor subcircuits carry the per-instance
+    mismatch hook — body resistance multiplied by `(1 + mis_r *
+    sw_stat_mismatch)` — but `mis_r`'s default is a hardcoded `0`, and the
+    accompanying Pelgrom-style sigma formula (`var_r = ... / sqrt(par *
+    r_l * r_w)`, `mis_r = agauss(0, var_r, 1)`) ships **commented out** in
+    the vendored deck. A run with `sw_stat_mismatch: 1` samples real
+    variation for MOS and BJT devices and **none** for resistors, with
+    nothing in the request, deck, or log distinguishing that from "this
+    family contributes negligibly" (issue #355). The disabled
+    coefficient's numeric value is also undocumented — no published PDK
+    source states it is the intended value or under what conditions it was
+    extracted; a caller who enables it by overriding the subcircuit
+    parameter from the instance line is relying on a constant the PDK does
+    not stand behind in any documented way, with no independent source to
+    validate it against short of silicon. `klt sim` surfaces this
+    structurally (never assumes it silently): see "Per-family
+    mismatch-activity report" below — a `monte_carlo.vary` request
+    including `"mismatch"` reports the resistor family's
+    `family_mismatch[].active` as `false`, never lumped in with the active
+    MOS/BJT families.
+
   For untested process corners or PDK variants not listed above, verify that
   the section (sky130-style) or the mismatch switch (gf180mcu-style) resolves in
   the actual `.lib` file before using it in production.
@@ -396,6 +418,57 @@ sampled since they aren't in the corner list. Invalid `monte_carlo` fields
 (missing `n`/`seed`/`vary`, a bad `vary` value, `n < 1`) raise `SimError`
 before any corner runs — the same "the sweep never started" class as an
 unresolvable netlist or unsupported backend.
+
+**Per-family mismatch-activity report.** Turning on the deck's global
+mismatch switch/section does not guarantee *every* device family in the
+netlist actually gets per-instance variation — see "Known-good mismatch
+mechanisms" above: gf180mcu's poly-resistor subcircuits carry the mismatch
+hook, but its default is a hardcoded `0` and the vendored deck ships the
+Pelgrom-style sigma formula commented out, while MOS and BJT ship that
+formula active under the *same* switch. A run whose request, deck, and log
+all say "mismatch on" gives no signal that the resistor family was silently
+excluded — this is the exact gap issue #355 is about.
+
+When `monte_carlo.vary` is `"mismatch"` or `"both"`, the response's
+`environment.monte_carlo` carries an additional `family_mismatch` array:
+one entry per distinct device family the netlist instantiates (detected
+from plain SPICE element types — `R`/`C`/`D`/`Q`/`M` — and from
+recognised keywords in `X` subcircuit-call names, e.g. `nfet_03v3` →
+`mosfet`, `res_xpoly_1p1000pl` → `resistor`), each stating whether that
+family's mismatch is structurally active in the selected PDK deck:
+
+```json
+{
+  "family_mismatch": [
+    { "family": "mosfet", "active": true, "note": "..." },
+    { "family": "resistor", "active": false, "note": "..." },
+    { "family": "capacitor", "active": null, "note": "..." }
+  ]
+}
+```
+
+- **`active: true`** — this family's per-instance mismatch is structurally
+  live in the selected deck under the request's global mismatch
+  switch/section.
+- **`active: false`** — this family's mismatch is structurally disabled in
+  the selected deck regardless of the global switch (e.g. gf180mcu's poly
+  resistor) — a hard-zero-mismatch family is **never** reported as sampled.
+- **`active: null`** — not independently verified: either the family has no
+  curated entry for the resolved PDK, or `models.pdk` was omitted so the PDK
+  itself could not be determined. Treat any spread for a `null` family as
+  unconfirmed, not as evidence mismatch was (or wasn't) sampled.
+
+The PDK is resolved from `models.pdk` (e.g. `"gf180mcuC"` → PDK family
+`"gf180mcu"`, mirroring the family-prefix resolution `klt extract`'s
+device-model binding already uses); the curated table currently covers
+gf180mcu (MOS/BJT active, resistor structurally disabled — see above) and
+sky130 (MOS/BJT active under an `_mm`-suffixed section). Every other family
+and every unrecognised/omitted PDK reports `active: null`. This is
+informational only — `klt sim` does not gate `status` on it and does not
+compute a statistics rollup across samples (that remains out of scope, per
+"phase 2" above); it exists so a caller (or a human) reading the response
+can tell a genuinely-sampled family from a structurally-excluded one without
+reading the vendored model deck line by line.
 
 ## Model library resolution (via `klt pdk`)
 
@@ -617,7 +690,15 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
     "models_lib_sha256": "3ccce27a...",
     "netlist_sha256": "71d273ab...",
     "netlist_source": "extracted",
-    "monte_carlo": { "n": 300, "seed": 20260801, "vary": "mismatch" }
+    "monte_carlo": {
+      "n": 300,
+      "seed": 20260801,
+      "vary": "mismatch",
+      "family_mismatch": [
+        { "family": "mosfet", "active": true, "note": "..." },
+        { "family": "resistor", "active": false, "note": "..." }
+      ]
+    }
   },
   "provenance": {
     "klt_version": "0.4.2",
@@ -686,7 +767,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}`, echoed from the request — see "Monte Carlo sampling" above). |
+| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}`, echoed from the request, plus `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above). |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners, including the worst case and which corner produced it.                |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
