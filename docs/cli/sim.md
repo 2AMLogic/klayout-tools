@@ -526,6 +526,23 @@ before RC-parasitic extraction lands) see
 and [`docs/design/design-pipeline.md`](../design/design-pipeline.md)'s S9/S10
 stages.
 
+## Evidence discipline: records, supersession, and pinning are repo-owned
+
+`klt sim` is a stateless, single-invocation command: `provenance` and
+`environment` pin the inputs a *given* run used (netlist hash, model-library
+hash, PDK version, engine version) but nothing persists across runs, chains
+one run to the next, or enforces a policy from a previous run's result. That
+scope decision — and how a caller should build append-only evidence records,
+supersession chains, PDK-pin enforcement, subset-reason requirements, and
+cross-corner spread checks on top of the existing per-corner data — is
+decided in
+[`docs/design/sim-evidence-discipline-spike.md`](../design/sim-evidence-discipline-spike.md).
+Short version: four of those five are entirely a documented repo-level
+convention built from fields `klt sim` already emits (the same
+report-not-judge precedent `measurements[].limits` already sets); one — a
+per-corner netlist snapshot — is a genuine contract gap tracked by
+[#356](https://github.com/2AMLogic/klayout-tools/issues/356).
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the schema

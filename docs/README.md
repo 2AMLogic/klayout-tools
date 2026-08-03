@@ -50,6 +50,7 @@ docs/
     sc-leflib-evaluation.md
     scgallery-zerosoc-survey.md
     siliconcompiler-core-survey.md
+    sim-evidence-discipline-spike.md
     spice-corner-runner-spike.md
     wasm-spice-playground-spike.md
   schemas/               # published JSON Schemas
