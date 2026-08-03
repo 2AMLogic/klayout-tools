@@ -202,13 +202,13 @@ runner.build(
     hdl_toplevel="gcd",
     build_dir=Path("sim_build"),
     always=True,
-    timescale=("1ns", "1ps"),   # required for icarus -- see the gotcha below
+    timescale=("1ns", "1ps"),  # required for icarus -- see the gotcha below
 )
 results_xml = runner.test(
     test_module="test_gcd",
     hdl_toplevel="gcd",
     hdl_toplevel_lang="verilog",
-    testcase=None,              # None = run every @cocotb.test in the module
+    testcase=None,  # None = run every @cocotb.test in the module
     build_dir=Path("sim_build"),
     results_xml="results.xml",
     timescale=("1ns", "1ps"),
