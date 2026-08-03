@@ -28,6 +28,7 @@ from klayout_tools import pdk
 from klayout_tools.cli import main
 from klayout_tools.decks import ExtractionDeck, get_extraction_deck
 from klayout_tools.extract import ExtractError, _n_squares, run_extract
+from klayout_tools.pdk_models import _select_bipolar_variant, equivalent_rectangle_um
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
@@ -1186,6 +1187,224 @@ def test_pdk_resolved_but_unrecognised_family_is_application_error(tmp_path):
 
     with pytest.raises(ExtractError, match="no curated PDK device-model binding"):
         run_extract(path, "sky130", pdk_variant="totallyUnknownVariant", pdk_root=root)
+
+
+# --------------------------------------------------------------------------- #
+# --pdk model binding for non-MOS device classes (issue #339): resistor and
+# capacitor on both decks, bipolar on sky130 only. gf180mcu's bipolar stays a
+# bare `Q` card (documented carve-out, see `decks/gf180mcu.py:557-559`).
+# Mirrors the MOS `--pdk` binding tests above.
+# --------------------------------------------------------------------------- #
+
+
+def _device_cards(netlist_path: str) -> list[str]:
+    """Every SPICE device card (`M`/`X`/`R`/`C`/`Q`/`D`-prefixed line) in a
+    written netlist -- the lines model binding rewrites from a bare primitive
+    to an `X` subcircuit call."""
+    return [
+        line
+        for line in Path(netlist_path).read_text().splitlines()
+        if line[:1] in ("M", "X", "R", "C", "Q", "D")
+    ]
+
+
+def test_pdk_resolved_binds_resistor_sky130(tmp_path):
+    """--pdk binds a recognised sky130 poly resistor to its real geometry-
+    parameterized subcircuit (`sky130_fd_pr__res_generic_po`, two terminals,
+    `l`/`w` in micrometres) -- not the bare, value-only `R`-card form (#339)."""
+    path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "res.gds")
+    out = str(tmp_path / "res.spice")
+    run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+    )
+    cards = _device_cards(out)
+    assert cards, "expected a device card"
+    assert all(c.startswith("X") for c in cards), cards
+    (card,) = cards
+    assert " sky130_fd_pr__res_generic_po " in card
+    # Two terminals (the contacted heads), no bulk tie for the generic device.
+    assert card.split()[1:3] == ["RA", "RB"]
+    assert "l=6U" in card and "w=1U" in card
+
+
+def test_pdk_resolved_binds_resistor_gf180mcu(tmp_path):
+    """--pdk binds gf180mcu's `ppolyf_u` to its real subcircuit, whose geometry
+    parameters are spelled `r_length`/`r_width` (not `l`/`w`) and which carries
+    the bulk terminal on the deck's substrate global (#339)."""
+    path = _write_gds(_make_poly_resistor_layout("gf180mcu"), tmp_path / "res.gds")
+    out = str(tmp_path / "res.spice")
+    run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+    )
+    (card,) = _device_cards(out)
+    assert card.startswith("X")
+    assert " ppolyf_u " in card
+    substrate = get_extraction_deck("gf180mcu").substrate_net
+    # Three terminals: the two heads plus the substrate-tied bulk.
+    assert card.split()[1:4] == ["RA", "RB", substrate]
+    assert "r_length=6U" in card and "r_width=1U" in card
+
+
+@pytest.mark.parametrize(
+    ("met4", "expected_subckt"),
+    [
+        (False, "sky130_fd_pr__cap_mim_m3_1"),
+        (True, "sky130_fd_pr__cap_mim_m3_2"),
+    ],
+)
+def test_pdk_resolved_binds_capacitor_sky130(tmp_path, met4, expected_subckt):
+    """--pdk binds each sky130 MiM stack to its real simulation subcircuit
+    (`sky130_fd_pr__cap_mim_m3_1`/`_m3_2`), with plate `l`/`w` recovered from
+    the extracted plate area+perimeter via the equivalent-rectangle solver:
+    the 10x5um plate (A=50, P=30) resolves to `l=10U w=5U` (#339)."""
+    path = _write_gds(_make_sky130_mim_layout(met4=met4), tmp_path / "mim.gds")
+    out = str(tmp_path / "mim.spice")
+    run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+    )
+    (card,) = _device_cards(out)
+    assert card.startswith("X")
+    assert f" {expected_subckt} " in card
+    assert "l=10U" in card and "w=5U" in card
+    # No bare `C`-card value-only primitive leaks in.
+    assert not card.startswith("C")
+
+
+def test_pdk_resolved_binds_capacitor_gf180mcu(tmp_path):
+    """--pdk binds gf180mcu's MiM cap to `cap_mim_2f0_m4m5_noshield`, whose
+    geometry parameters are spelled `c_length`/`c_width`; the 10x10um plate
+    (A=100, P=40, a square) resolves to `c_length=10U c_width=10U` (#339)."""
+    path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim.gds")
+    out = str(tmp_path / "mim.spice")
+    run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+    )
+    (card,) = _device_cards(out)
+    assert card.startswith("X")
+    assert " cap_mim_2f0_m4m5_noshield " in card
+    assert "c_length=10U" in card and "c_width=10U" in card
+
+
+def test_pdk_resolved_binds_bipolar_sky130(tmp_path):
+    """--pdk binds sky130's recognised `pnp` to a real `sky130_fd_pr__pnp_05v5`
+    geometry-named variant chosen by measured emitter area (the small synthetic
+    emitter, AE=0.16um^2, is nearest the W0p68L0p68 cell), emitting the four
+    `c b e s` terminals -- not the bare `Q`-card form (#339)."""
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    out = str(tmp_path / "bjt.spice")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+    )
+    assert report["device_counts"] == {"pnp": 1}
+    (card,) = _device_cards(out)
+    assert card.startswith("X")
+    assert " sky130_fd_pr__pnp_05v5_W0p68L0p68" in card
+    # c b e s: collector (= substrate) / base / emitter / substrate again.
+    substrate = get_extraction_deck("sky130").substrate_net
+    assert card.split()[1:5] == [substrate, "BASE", "EMIT", substrate]
+    assert not card.startswith("Q")
+
+
+def test_pdk_bipolar_variant_selected_by_emitter_area():
+    """The bipolar variant selector picks the geometry-named cell whose nominal
+    emitter area is nearest the measured `AE` (sky130's `pnp_05v5` ships as
+    discrete cells, not one parameterized cell) (#339)."""
+    variants = (
+        (0.4624, "sky130_fd_pr__pnp_05v5_W0p68L0p68"),
+        (11.56, "sky130_fd_pr__pnp_05v5_W3p40L3p40"),
+    )
+    assert _select_bipolar_variant(0.16, variants).endswith("W0p68L0p68")
+    assert _select_bipolar_variant(0.5, variants).endswith("W0p68L0p68")
+    assert _select_bipolar_variant(9.0, variants).endswith("W3p40L3p40")
+    assert _select_bipolar_variant(20.0, variants).endswith("W3p40L3p40")
+
+
+def test_pdk_resolved_leaves_gf180mcu_bipolar_unbound(tmp_path):
+    """gf180mcu's bipolar is deliberately NOT bound (its deck has no
+    positively-identified single device-cell name -- `decks/gf180mcu.py:557-559`),
+    so under --pdk its recognised `bjt` stays a bare `Q` card rather than a
+    guessed subcircuit call. Regression-locks that documented carve-out (#339)."""
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    out = str(tmp_path / "bjt.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+    )
+    assert report["device_counts"] == {"bjt": 1}
+    cards = _device_cards(out)
+    (card,) = cards
+    # Bare `Q` primitive, not an `X` subcircuit call.
+    assert card.startswith("Q")
+    assert not any(c.startswith("X") for c in cards)
+
+
+def test_pdk_binding_does_not_change_device_counts_or_class(tmp_path):
+    """Model binding is a SPICE-serialization-only concern: `device_counts` and
+    `devices[].class` are byte-identical with and without --pdk for a resistor
+    and a capacitor, exactly as the MOS binding already guarantees (#339)."""
+    for label, layout, deck in (
+        ("res", _make_poly_resistor_layout("sky130"), "sky130"),
+        ("cap", _make_sky130_mim_layout(met4=False), "sky130"),
+    ):
+        path = _write_gds(layout, tmp_path / f"{label}.gds")
+        plain = run_extract(path, deck, output=str(tmp_path / f"{label}_plain.spice"))
+        bound = run_extract(
+            path,
+            deck,
+            pdk_variant="sky130A",
+            pdk_root=_make_pdk_install(tmp_path / label, "sky130A"),
+            output=str(tmp_path / f"{label}_bound.spice"),
+        )
+        assert bound["device_counts"] == plain["device_counts"]
+        assert [d["class"] for d in bound["devices"]] == [
+            d["class"] for d in plain["devices"]
+        ]
+        assert [d["params"] for d in bound["devices"]] == [
+            d["params"] for d in plain["devices"]
+        ]
+
+
+def test_equivalent_rectangle_um_matches_n_squares_and_solves_geometry():
+    """The factored-out equivalent-rectangle solver returns the rectangle
+    (length >= width) with the given area+perimeter, and `_n_squares` is the
+    length/width ratio of that same rectangle -- the refactor is behavior-
+    preserving (#339)."""
+    # 10x5 rectangle: A=50, P=30 -> (10, 5), 2 squares.
+    assert equivalent_rectangle_um(50.0, 30.0) == pytest.approx((10.0, 5.0))
+    assert _n_squares(50.0, 30.0) == pytest.approx(2.0)
+    # 10x10 square: A=100, P=40 -> (10, 10), 1 square.
+    assert equivalent_rectangle_um(100.0, 40.0) == pytest.approx((10.0, 10.0))
+    assert _n_squares(100.0, 40.0) == pytest.approx(1.0)
+    # "Rounder than any rectangle" (negative discriminant) -> no rectangle;
+    # `_n_squares` clamps to one square, matching its pre-refactor behavior.
+    assert equivalent_rectangle_um(100.0, 20.0) is None
+    assert _n_squares(100.0, 20.0) == pytest.approx(1.0)
+    # Degenerate inputs.
+    assert equivalent_rectangle_um(0.0, 10.0) is None
+    assert _n_squares(0.0, 10.0) == 0.0
 
 
 # --------------------------------------------------------------------------- #
