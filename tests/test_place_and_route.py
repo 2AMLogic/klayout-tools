@@ -1,0 +1,1187 @@
+"""Tests for `klt place-and-route` and the `klayout_tools.place_and_route`
+library.
+
+Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
+
+- **Request/library unit tests** exercise `load_request`/`run_place_and_route`'s
+  validation paths (bad request, floorplan-method conflicts, missing
+  seed/constraints, unresolvable `pdk.cell_library`/corner/LEF) directly,
+  against **fabricated** open_pdks-layout PDK installs created under
+  `tmp_path` (never a real PDK).
+- **Stubbed-OpenROAD tests** run `run_place_and_route` end to end with
+  `place_and_route.subprocess.run` replaced by a fake that writes the same
+  `-metrics <file>.json` shape a real per-stage OpenROAD run produces
+  (verified live for issue #425's own worked example -- see
+  `place_and_route.py`'s own module docstring) -- no `openroad` binary
+  required, covering a full route-stage run, a `target_stage: "place"`
+  partial run (success case), and an engine failure partway through a
+  stage. The DEF->GDS merge (`_merge_def_to_gds`) is stubbed out for these
+  tests (it needs a real DEF + real standard-cell GDS view to exercise
+  meaningfully) and covered by its own focused unit tests below.
+- **CLI tests** cover exit codes and `--format text/json`.
+- **Integration test** (`@pytest.mark.skipif` when either `openroad` is not
+  on `$PATH` or no real PDK install resolving a `sky130_fd_sc_hd`
+  LEF/liberty/GDS set is found) runs the real GCD worked example end to end
+  -- this is the acceptance criterion's "verified end to end against a real
+  sky130 install" check. It is not required for CI (CI installs neither
+  `openroad` nor a real sky130 standard-cell PDK today, matching `klt
+  synthesize`'s own noted CI gap) but runs (and passes) on any machine with
+  both. **This repo's own worked example for issue #425 instead verified
+  the identical code path manually via a real `openroad/orfs` Docker image**
+  (`openroad -no_init -exit -metrics ...` against a real volare-fetched
+  `sky130A` install, floorplan through a full detailed route with 0 DRC
+  violations, followed by a real DEF->GDS merge via this module's own
+  `_merge_def_to_gds` producing a valid GDS) -- see the PR description for
+  the full transcript; that manual run is not automated as a test here
+  since it depends on Docker, which is not a project dependency.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from klayout_tools import pdk as pdk_module
+from klayout_tools import place_and_route
+from klayout_tools.cli import main
+from klayout_tools.place_and_route import (
+    PlaceAndRouteError,
+    load_request,
+    run_place_and_route,
+)
+
+_GCD_RTL = """\
+module gcd #(
+    parameter WIDTH = 16
+) (
+    input  wire             clk,
+    input  wire             rst_n,
+    input  wire              start,
+    input  wire [WIDTH-1:0] a_in,
+    input  wire [WIDTH-1:0] b_in,
+    output reg              done,
+    output reg  [WIDTH-1:0] result
+);
+
+    reg [WIDTH-1:0] a, b;
+    reg             busy;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            a      <= {WIDTH{1'b0}};
+            b      <= {WIDTH{1'b0}};
+            busy   <= 1'b0;
+            done   <= 1'b0;
+            result <= {WIDTH{1'b0}};
+        end else if (start && !busy) begin
+            a      <= a_in;
+            b      <= b_in;
+            busy   <= 1'b1;
+            done   <= 1'b0;
+        end else if (busy) begin
+            if (b == {WIDTH{1'b0}}) begin
+                busy   <= 1'b0;
+                done   <= 1'b1;
+                result <= a;
+            end else if (a > b) begin
+                a <= a - b;
+            end else begin
+                b <= b - a;
+            end
+        end else begin
+            done <= 1'b0;
+        end
+    end
+
+endmodule
+"""
+
+
+def _write(path: Path, text: str) -> str:
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _write_request(path: Path, request: dict) -> str:
+    path.write_text(json.dumps(request), encoding="utf-8")
+    return str(path)
+
+
+def _base_request(**overrides) -> dict:
+    request = {
+        "engine": "openroad",
+        "netlist": "gcd_synth.v",
+        "hdl_toplevel": "gcd",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "floorplan": {
+            "method": "utilization",
+            "utilization_pct": 38,
+            "aspect_ratio": 1.0,
+            "core_margin_um": 2.0,
+            "site": "unithd",
+        },
+        "io": {"layer_h": "met3", "layer_v": "met2"},
+        "constraints": {"clock_port": "clk", "clock_period_ns": 1.1},
+        "seed": 1,
+        "target_stage": "route",
+    }
+    request.update(overrides)
+    return request
+
+
+def _isolate_pdk(monkeypatch, tmp_path: Path) -> None:
+    """Scrub PDK env vars and empty `pdk.py`'s search-space constants, so
+    `find_pdk()` only ever resolves what a test explicitly points it at
+    (mirrors `tests/test_synthesize.py`'s own fixture)."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(pdk_module, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk_module, "CONVENTIONAL_PREFIXES", [])
+
+
+def _make_pdk_install(
+    root: Path,
+    variant: str,
+    *,
+    cell_library: str = "sky130_fd_sc_hd",
+    corner: str = "tt_025C_1v80",
+    with_lib: bool = True,
+    with_lef: bool = True,
+    with_gds: bool = True,
+) -> Path:
+    """Fabricate a minimal open_pdks-layout variant with a standard-cell
+    library's `lib/`/`techlef/`/`lef/`/`gds/` views -- enough for
+    `run_place_and_route`'s own resolution, never real, engine-parseable
+    file contents (the stubbed-OpenROAD tests never invoke a real
+    `openroad`; the GDS merge is separately stubbed in those tests)."""
+    variant_dir = root / variant
+    (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
+    lib_dir = variant_dir / "libs.ref" / cell_library
+
+    if with_lib:
+        lib_views_dir = lib_dir / "lib"
+        lib_views_dir.mkdir(parents=True, exist_ok=True)
+        content = (
+            f'    default_operating_conditions : "{corner}";\n'
+            "    nom_process : 1.0;\n"
+            "    nom_temperature : 25.0;\n"
+            "    nom_voltage : 1.8;\n"
+        )
+        (lib_views_dir / f"{cell_library}__{corner}.lib").write_text(
+            content, encoding="utf-8"
+        )
+
+    if with_lef:
+        techlef_dir = lib_dir / "techlef"
+        techlef_dir.mkdir(parents=True, exist_ok=True)
+        (techlef_dir / f"{cell_library}__nom.tlef").write_text("# tech lef\n")
+        lef_dir = lib_dir / "lef"
+        lef_dir.mkdir(parents=True, exist_ok=True)
+        (lef_dir / f"{cell_library}.lef").write_text("# merged cell lef\n")
+
+    if with_gds:
+        gds_dir = lib_dir / "gds"
+        gds_dir.mkdir(parents=True, exist_ok=True)
+        (gds_dir / f"{cell_library}.gds").write_text("# fake gds\n")
+
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    return variant_dir
+
+
+def _setup_success_env(tmp_path, monkeypatch, **request_overrides) -> str:
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    return _write_request(tmp_path / "request.json", _base_request(**request_overrides))
+
+
+# --------------------------------------------------------------------------- #
+# `load_request`
+# --------------------------------------------------------------------------- #
+
+
+def test_load_request_missing_file(tmp_path):
+    with pytest.raises(PlaceAndRouteError, match="file not found"):
+        load_request(str(tmp_path / "nope.json"))
+
+
+def test_load_request_directory(tmp_path):
+    with pytest.raises(PlaceAndRouteError, match="not a file"):
+        load_request(str(tmp_path))
+
+
+def test_load_request_invalid_json(tmp_path):
+    path = _write(tmp_path / "request.json", "{not json")
+    with pytest.raises(PlaceAndRouteError, match="not valid JSON"):
+        load_request(path)
+
+
+def test_load_request_not_an_object(tmp_path):
+    path = _write(tmp_path / "request.json", "[1, 2, 3]")
+    with pytest.raises(PlaceAndRouteError, match="must contain a JSON object"):
+        load_request(path)
+
+
+@pytest.mark.parametrize(
+    "field", ["netlist", "hdl_toplevel", "pdk", "floorplan", "seed"]
+)
+def test_load_request_missing_required_field(tmp_path, field):
+    request = _base_request()
+    del request[field]
+    path = _write_request(tmp_path / "request.json", request)
+    with pytest.raises(PlaceAndRouteError, match=f"missing required field: {field}"):
+        load_request(path)
+
+
+# --------------------------------------------------------------------------- #
+# `run_place_and_route` request validation (no PDK/OpenROAD involved)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_unsupported_engine(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(engine="siemens-tool")
+    )
+    with pytest.raises(PlaceAndRouteError, match="unsupported engine 'siemens-tool'"):
+        run_place_and_route(request_path)
+
+
+def test_run_netlist_not_found(tmp_path):
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(netlist="nope.v")
+    )
+    with pytest.raises(PlaceAndRouteError, match="netlist not found: nope.v"):
+        run_place_and_route(request_path)
+
+
+def test_run_hdl_toplevel_must_be_nonempty_string(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(hdl_toplevel="")
+    )
+    with pytest.raises(PlaceAndRouteError, match="hdl_toplevel must be"):
+        run_place_and_route(request_path)
+
+
+def test_run_cell_library_required(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"corner": "tt_025C_1v80"}),
+    )
+    with pytest.raises(PlaceAndRouteError, match="pdk.cell_library is required"):
+        run_place_and_route(request_path)
+
+
+def test_run_seed_must_be_integer(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(tmp_path / "request.json", _base_request(seed="1"))
+    with pytest.raises(PlaceAndRouteError, match="seed must be an integer"):
+        run_place_and_route(request_path)
+
+
+def test_run_target_stage_must_be_valid(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(target_stage="cts_and_beyond")
+    )
+    with pytest.raises(PlaceAndRouteError, match="target_stage must be one of"):
+        run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# Floorplan method validation -- the "reject more than one method" rule,
+# mirroring OpenROAD-flow-scripts' own `methods_defined > 1` check.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_floorplan_method_required(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(floorplan={"utilization_pct": 38})
+    )
+    with pytest.raises(PlaceAndRouteError, match="floorplan.method must be one of"):
+        run_place_and_route(request_path)
+
+
+def test_run_floorplan_more_than_one_method_rejected(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "site": "unithd",
+                # Stray field from the "def" method alongside "utilization"'s
+                # own fields -- this is the rejection this test targets.
+                "def_path": "existing.def",
+            }
+        ),
+    )
+    with pytest.raises(PlaceAndRouteError, match="more than one floorplan method"):
+        run_place_and_route(request_path)
+
+
+def test_run_floorplan_utilization_requires_utilization_pct(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(floorplan={"method": "utilization", "site": "unithd"}),
+    )
+    with pytest.raises(PlaceAndRouteError, match="requires: utilization_pct"):
+        run_place_and_route(request_path)
+
+
+def test_run_floorplan_utilization_requires_site(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(floorplan={"method": "utilization", "utilization_pct": 38}),
+    )
+    with pytest.raises(PlaceAndRouteError, match="floorplan.site is required"):
+        run_place_and_route(request_path)
+
+
+def test_run_floorplan_explicit_requires_die_and_core_area(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(floorplan={"method": "explicit", "site": "unithd"}),
+    )
+    with pytest.raises(PlaceAndRouteError, match="requires: die_area_um, core_area_um"):
+        run_place_and_route(request_path)
+
+
+def test_run_floorplan_explicit_area_must_be_4_numbers(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            floorplan={
+                "method": "explicit",
+                "site": "unithd",
+                "die_area_um": [0, 0, 92.13],
+                "core_area_um": [2.3, 2.72, 89.7, 89.76],
+            }
+        ),
+    )
+    with pytest.raises(PlaceAndRouteError, match="die_area_um must be an array"):
+        run_place_and_route(request_path)
+
+
+def test_run_floorplan_def_method_requires_def_path(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(floorplan={"method": "def"})
+    )
+    with pytest.raises(PlaceAndRouteError, match="requires: def_path"):
+        run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# constraints / io / stage-dependent requirements
+# --------------------------------------------------------------------------- #
+
+
+def test_run_constraints_clock_port_and_period_required_together(tmp_path):
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_port": "clk"}),
+    )
+    with pytest.raises(PlaceAndRouteError, match="clock_period_ns must be"):
+        run_place_and_route(request_path)
+
+
+def test_run_target_stage_place_requires_clock(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        constraints=None,
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match="required to reach target_stage 'place'"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_run_target_stage_place_requires_io(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        io=None,
+    )
+    with pytest.raises(PlaceAndRouteError, match="io.layer_h/layer_v are required"):
+        run_place_and_route(request_path)
+
+
+def test_run_target_stage_floorplan_does_not_require_clock(tmp_path, monkeypatch):
+    """A `target_stage: "floorplan"` request needs no clock/io -- those are
+    only meaningful from the "place" stage onward."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        constraints=None,
+        io=None,
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "floorplan"
+
+
+# --------------------------------------------------------------------------- #
+# PDK / LEF / liberty resolution failures
+# --------------------------------------------------------------------------- #
+
+
+def test_run_no_pdk_installed(tmp_path, monkeypatch):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    with pytest.raises(PlaceAndRouteError, match="no open_pdks-layout PDK install"):
+        run_place_and_route(request_path)
+
+
+def test_run_liberty_not_found(tmp_path, monkeypatch):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", with_lib=False)
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    with pytest.raises(PlaceAndRouteError, match="liberty not found for deck"):
+        run_place_and_route(request_path)
+
+
+def test_run_lef_not_found(tmp_path, monkeypatch):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", with_lef=False)
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    with pytest.raises(PlaceAndRouteError, match="LEF not found for deck"):
+        run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# Stubbed OpenROAD: full `run_place_and_route` without a real `openroad`
+# binary. The stub writes the same `-metrics <file>.json` shape a real
+# per-stage run produces (verified live -- see `place_and_route.py`'s own
+# module docstring), parsed from the generated `.tcl` script's own
+# `write_db`/`write_def` lines, so the stub never hardcodes this module's
+# private path-naming scheme.
+# --------------------------------------------------------------------------- #
+
+_WRITE_DB_RE = re.compile(r"^write_db (\S+)$")
+_WRITE_DEF_RE = re.compile(r"^write_def (\S+)$")
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _script_lines(script_path: str) -> list[str]:
+    with open(script_path, encoding="utf-8") as handle:
+        return [line.rstrip("\n") for line in handle]
+
+
+def _script_write_db_path(script_path: str) -> str:
+    for line in _script_lines(script_path):
+        match = _WRITE_DB_RE.match(line)
+        if match:
+            return match.group(1)
+    raise AssertionError(f"no write_db line in {script_path}")
+
+
+def _script_write_def_path(script_path: str) -> str | None:
+    for line in _script_lines(script_path):
+        match = _WRITE_DEF_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _stage_from_script_path(script_path: str) -> str:
+    stem = os.path.basename(script_path)[: -len(".tcl")]
+    for stage in place_and_route.STAGE_ORDER:
+        if stem.endswith(f"_{stage}"):
+            return stage
+    raise AssertionError(f"could not determine stage from {script_path}")
+
+
+#: Real per-stage `-metrics` shapes, trimmed from issue #425's own live
+#: worked example (a real `openroad/orfs` Docker run against a real
+#: volare-fetched sky130A install, full floorplan->place->cts->route).
+_STAGE_METRICS = {
+    "floorplan": {
+        "timing__setup__ws": -3.71641,
+        "timing__setup__tns": -143.072,
+        "design__die__area": 8487.94,
+        "design__core__area": 7607.3,
+        "design__instance__utilization": 0.387993,
+    },
+    "place": {
+        "route__wirelength__estimated": 7852.26,
+        "timing__setup__ws": -1.9939,
+        "timing__setup__tns": -75.8268,
+        "timing__fmax": 3.23217e08,
+        "design__die__area": 8487.94,
+        "design__core__area": 7607.3,
+        "design__instance__utilization": 0.439638,
+        "power__total": 0.0115449,
+    },
+    "cts": {
+        "route__wirelength__estimated": 8095.6,
+        "timing__setup__ws": -2.05,
+        "timing__setup__tns": -78.1,
+        "timing__fmax": 3.1e08,
+        "design__die__area": 8487.94,
+        "design__core__area": 7607.3,
+        "design__instance__utilization": 0.446546,
+        "power__total": 0.0116,
+    },
+    "route": {
+        "route__wirelength": 9616,
+        "route__drc_errors": 0,
+        "timing__setup__ws": -2.18828,
+        "timing__setup__tns": -82.8171,
+        "timing__fmax": 3.0411e08,
+        "design__die__area": 8487.94,
+        "design__core__area": 7607.3,
+        "design__instance__utilization": 0.446546,
+        "power__total": 0.0116,
+    },
+}
+
+
+def _stub_openroad_success(
+    monkeypatch,
+    *,
+    stages: tuple[str, ...] = place_and_route.STAGE_ORDER,
+    setup_violations: dict[str, int] | None = None,
+    hold_violations: dict[str, int] | None = None,
+    version: str = "26Q3-771-gdeadbeef",
+) -> None:
+    setup_violations = setup_violations or {}
+    hold_violations = hold_violations or {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            # `openroad -version` prints a *bare* version token on its own
+            # stdout line -- confirmed live for issue #425's own worked
+            # example -- distinct from the `OpenROAD <version>` banner a
+            # script invocation prints; see `_openroad_version`'s own
+            # docstring.
+            return _FakeCompleted(stdout=f"{version} \n")
+        assert cmd[0] == "openroad"
+        metrics_path = cmd[4]
+        script_path = cmd[5]
+        stage = _stage_from_script_path(script_path)
+        assert stage in stages
+
+        checkpoint_out = _script_write_db_path(script_path)
+        Path(checkpoint_out).write_text("fake odb checkpoint\n")
+
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(_STAGE_METRICS[stage], handle)
+
+        stdout_lines = []
+        if stage != "floorplan":
+            stdout_lines.append(place_and_route._SETUP_VIOLATIONS_BEGIN)
+            stdout_lines += [
+                f"pin_{i} (VIOLATED)" for i in range(setup_violations.get(stage, 0))
+            ]
+            stdout_lines.append(place_and_route._SETUP_VIOLATIONS_END)
+            stdout_lines.append(place_and_route._HOLD_VIOLATIONS_BEGIN)
+            stdout_lines += [
+                f"pin_{i} (VIOLATED)" for i in range(hold_violations.get(stage, 0))
+            ]
+            stdout_lines.append(place_and_route._HOLD_VIOLATIONS_END)
+
+        def_path = _script_write_def_path(script_path)
+        if def_path is not None:
+            Path(def_path).write_text("fake def\n")
+
+        return _FakeCompleted(returncode=0, stdout="\n".join(stdout_lines))
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+
+def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
+    """Replace the DEF->GDS merge with a fake that just writes a placeholder
+    file -- covered by its own focused unit tests below, since it needs a
+    real DEF + real standard-cell GDS view to exercise meaningfully."""
+    calls: list[dict] = []
+
+    def fake_merge(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["out_path"]).write_text("fake gds\n")
+
+    monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
+    return calls
+
+
+def test_stubbed_full_route_success(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(
+        monkeypatch, setup_violations={"route": 3}, hold_violations={"route": 1}
+    )
+    merge_calls = _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["schema_version"] == 1
+    assert report["engine"] == "openroad"
+    assert report["engine_version"] == "26Q3-771-gdeadbeef"
+    assert report["hdl_toplevel"] == "gcd"
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["seed"] == 1
+
+    assert report["die_area_um2"] == 8487.94
+    assert report["core_area_um2"] == 7607.3
+    assert report["utilization_pct"] == pytest.approx(44.6546)
+    assert report["wirelength_um"] == 9616
+    assert report["worst_slack_ns"] == pytest.approx(-2.18828)
+    assert report["total_negative_slack_ns"] == pytest.approx(-82.8171)
+    assert report["fmax_mhz"] == pytest.approx(304.11)
+    assert report["setup_violation_count"] == 3
+    assert report["hold_violation_count"] == 1
+    assert report["estimated_power_mw"] == pytest.approx(11.6)
+
+    assert [stage["name"] for stage in report["stages"]] == list(
+        place_and_route.STAGE_ORDER
+    )
+    # floorplan stage has no wirelength/fmax/power/violation-count fields.
+    assert "wirelength_um" not in report["stages"][0]
+    assert "setup_violation_count" not in report["stages"][0]
+    # place stage onward does.
+    assert "wirelength_um" in report["stages"][1]
+    assert report["stages"][3]["setup_violation_count"] == 3
+
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert len(merge_calls) == 1
+    assert merge_calls[0]["hdl_toplevel"] == "gcd"
+
+    provenance = report["provenance"]
+    assert provenance["klt_version"]
+    assert provenance["pdk"]["name"] == "sky130A"
+    assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+
+
+def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
+    """A `target_stage: "place"` request that completes placement is a
+    successful (exit 0) response with `def_path`/`gds_path` both `null` by
+    design -- contract spike section 5's "Partial-completion design"."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+    merge_calls = _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "place"
+    assert report["def_path"] is None
+    assert report["gds_path"] is None
+    assert len(merge_calls) == 0
+    assert [stage["name"] for stage in report["stages"]] == ["floorplan", "place"]
+    # place-stage metrics are present at top level (the last completed
+    # stage), even though routing never ran.
+    assert report["wirelength_um"] == 7852.26
+    assert report["worst_slack_ns"] == pytest.approx(-1.9939)
+
+
+def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "floorplan"
+    assert len(report["stages"]) == 1
+    assert report["wirelength_um"] is None
+    assert report["fmax_mhz"] is None
+    assert report["setup_violation_count"] is None
+    assert report["def_path"] is None
+    assert report["gds_path"] is None
+
+
+def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return _FakeCompleted(stdout="26Q3-771-gdeadbeef \n")
+        script_path = cmd[5]
+        stage = _stage_from_script_path(script_path)
+        if stage == "floorplan":
+            checkpoint_out = _script_write_db_path(script_path)
+            Path(checkpoint_out).write_text("fake odb\n")
+            with open(cmd[4], "w", encoding="utf-8") as handle:
+                json.dump(_STAGE_METRICS["floorplan"], handle)
+            return _FakeCompleted(returncode=0)
+        return _FakeCompleted(
+            returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
+        )
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    with pytest.raises(
+        PlaceAndRouteError, match=r"openroad 'place' stage failed:.*PPL-0001"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return _FakeCompleted(stdout="26Q3-771-gdeadbeef \n")
+        script_path = cmd[5]
+        checkpoint_out = _script_write_db_path(script_path)
+        Path(checkpoint_out).write_text("fake odb\n")
+        return _FakeCompleted(returncode=0)  # no metrics file written
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    with pytest.raises(PlaceAndRouteError, match="did not produce the expected"):
+        run_place_and_route(request_path)
+
+
+def test_stubbed_missing_openroad_binary(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None
+    )
+
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("no such file: openroad")
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    with pytest.raises(PlaceAndRouteError, match="could not launch openroad"):
+        run_place_and_route(request_path)
+
+
+def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            raise FileNotFoundError("openroad vanished")
+        script_path = cmd[5]
+        checkpoint_out = _script_write_db_path(script_path)
+        Path(checkpoint_out).write_text("fake odb\n")
+        with open(cmd[4], "w", encoding="utf-8") as handle:
+            json.dump(_STAGE_METRICS["floorplan"], handle)
+        return _FakeCompleted(returncode=0)
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    report = run_place_and_route(request_path)
+    assert report["engine_version"] is None
+
+
+# --------------------------------------------------------------------------- #
+# CLI: exit codes, --format text/json
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_success_exits_zero_json(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    exit_code = main(["place-and-route", request_path, "--format", "json"])
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "ok"
+    assert out["stage_reached"] == "floorplan"
+
+
+def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    exit_code = main(["place-and-route", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "status: ok" in out
+    assert "stage_reached: floorplan" in out
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
+
+
+def test_cli_error_exits_one_with_json_error(tmp_path, monkeypatch, capsys):
+    _isolate_pdk(monkeypatch, tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(netlist="nope.v")
+    )
+
+    exit_code = main(["place-and-route", request_path, "--format", "json"])
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "place-and-route"
+    assert "netlist not found" in err["error"]["message"]
+
+
+def test_cli_error_exits_one_text_format(tmp_path, monkeypatch, capsys):
+    _isolate_pdk(monkeypatch, tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(netlist="nope.v")
+    )
+
+    exit_code = main(["place-and-route", request_path])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("klt place-and-route:")
+
+
+def test_cli_missing_request_arg_is_usage_error():
+    with pytest.raises(SystemExit) as exc_info:
+        main(["place-and-route"])
+    assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# DEF -> GDS merge (`_merge_def_to_gds`) -- real `klayout.db`, no OpenROAD
+# needed. Builds a tiny synthetic DEF + matching standard-cell GDS view by
+# hand (real KLayout LEF/DEF/GDS readers, fabricated content) to exercise
+# the merge logic's own success and failure paths.
+# --------------------------------------------------------------------------- #
+
+kdb = pytest.importorskip("klayout.db")
+
+
+def _write_tiny_tech_lef(path: Path) -> None:
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        'BUSBITCHARS "[]" ;\n'
+        'DIVIDERCHAR "/" ;\n'
+        "UNITS\n"
+        "  DATABASE MICRONS 1000 ;\n"
+        "END UNITS\n"
+        "MANUFACTURINGGRID 0.005 ;\n"
+        "SITE unithd\n"
+        "  SYMMETRY Y ;\n"
+        "  CLASS CORE ;\n"
+        "  SIZE 0.46 BY 2.72 ;\n"
+        "END unithd\n"
+        "LAYER met1\n"
+        "  TYPE ROUTING ;\n"
+        "  DIRECTION HORIZONTAL ;\n"
+        "  WIDTH 0.14 ;\n"
+        "  PITCH 0.34 ;\n"
+        "END met1\n",
+        encoding="utf-8",
+    )
+
+
+def _write_tiny_cell_lef(path: Path, cell_name: str) -> None:
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        'BUSBITCHARS "[]" ;\n'
+        'DIVIDERCHAR "/" ;\n'
+        "UNITS\n"
+        "  DATABASE MICRONS 1000 ;\n"
+        "END UNITS\n"
+        f"MACRO {cell_name}\n"
+        "  CLASS CORE ;\n"
+        "  SITE unithd ;\n"
+        "  SIZE 0.46 BY 2.72 ;\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER met1 ; RECT 0 0 0.1 0.1 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END " + cell_name + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_matching_cell_gds(path: Path, cell_name: str) -> None:
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell(cell_name)
+    layer = layout.layer(kdb.LayerInfo(68, 20))  # met1 drawing, sky130-ish
+    cell.shapes(layer).insert(kdb.Box(0, 0, 100, 100))
+    layout.write(str(path))
+
+
+def _write_tiny_def(path: Path, *, design_name: str, cell_name: str) -> None:
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        'DIVIDERCHAR "/" ;\n'
+        'BUSBITCHARS "[]" ;\n'
+        f"DESIGN {design_name} ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( 0 0 ) ( 4600 2720 ) ;\n"
+        "ROW ROW_0 unithd 0 0 N DO 10 BY 1 STEP 460 0 ;\n"
+        "COMPONENTS 1 ;\n"
+        f"- inst1 {cell_name} + PLACED ( 0 0 ) N ;\n"
+        "END COMPONENTS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+
+
+def _fake_pdk_info(root: Path, variant: str = "sky130A") -> dict:
+    return {
+        "schema_version": 1,
+        "root": str(root),
+        "variant": variant,
+        "version": None,
+        "resolved_via": "test",
+        "assets": {
+            "libs_ref": str(root / variant / "libs.ref"),
+            "klayout": None,
+        },
+    }
+
+
+def test_merge_def_to_gds_success(tmp_path):
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", cell_name)
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    out_path = tmp_path / "out.gds"
+
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root),
+        cell_library="sky130_fd_sc_hd",
+        hdl_toplevel="top",
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+    result = kdb.Layout()
+    result.read(str(out_path))
+    assert result.top_cell().name == "top"
+
+
+def test_merge_def_to_gds_missing_top_cell(tmp_path):
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", cell_name)
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    with pytest.raises(PlaceAndRouteError, match="does not define top cell"):
+        place_and_route._merge_def_to_gds(
+            def_path=str(def_path),
+            tech_lef=str(tech_lef),
+            cell_lef=str(cell_lef),
+            pdk_info=_fake_pdk_info(root),
+            cell_library="sky130_fd_sc_hd",
+            hdl_toplevel="wrong_top_name",
+            out_path=str(tmp_path / "out.gds"),
+        )
+
+
+def test_merge_def_to_gds_missing_gds_view(tmp_path):
+    root = tmp_path / "install"
+    (root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd").mkdir(parents=True)
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    with pytest.raises(PlaceAndRouteError, match="standard-cell GDS view not found"):
+        place_and_route._merge_def_to_gds(
+            def_path=str(def_path),
+            tech_lef=str(tech_lef),
+            cell_lef=str(cell_lef),
+            pdk_info=_fake_pdk_info(root),
+            cell_library="sky130_fd_sc_hd",
+            hdl_toplevel="top",
+            out_path=str(tmp_path / "out.gds"),
+        )
+
+
+def test_merge_def_to_gds_empty_cell_is_an_error(tmp_path):
+    """A LEF macro with no matching GDS view produces an empty cell in the
+    merged layout -- def2stream.py's own "LEF Cell has no matching GDS/OAS
+    cell" check, ported here as a raised error rather than a silent GDS."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    # A GDS view for a *different* cell -- the DEF's own `testcell`
+    # instance has nothing to merge against.
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", "some_other_cell")
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    with pytest.raises(PlaceAndRouteError, match="empty \\(unmatched\\) cells"):
+        place_and_route._merge_def_to_gds(
+            def_path=str(def_path),
+            tech_lef=str(tech_lef),
+            cell_lef=str(cell_lef),
+            pdk_info=_fake_pdk_info(root),
+            cell_library="sky130_fd_sc_hd",
+            hdl_toplevel="top",
+            out_path=str(tmp_path / "out.gds"),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Integration: real OpenROAD + a real, host-resolved sky130 PDK
+# (skipped when either is unavailable -- never required for CI, see this
+# module's own docstring)
+# --------------------------------------------------------------------------- #
+
+HAVE_OPENROAD = shutil.which("openroad") is not None
+
+
+def _find_real_sky130_pnr_variant() -> tuple[str, str] | None:
+    """Search every install/variant `list_pdks()` discovers for one shipping
+    a real `sky130_fd_sc_hd` liberty + tech/cell LEF + GDS view. Returns
+    ``(root, variant)`` or ``None``."""
+    try:
+        result = pdk_module.list_pdks()
+    except Exception:
+        return None
+    for install in result["installs"]:
+        for variant in install["variants"]:
+            lib_dir = os.path.join(
+                install["root"], variant["name"], "libs.ref", "sky130_fd_sc_hd"
+            )
+            if all(
+                os.path.exists(os.path.join(lib_dir, sub))
+                for sub in (
+                    "lib",
+                    os.path.join("techlef", "sky130_fd_sc_hd__nom.tlef"),
+                    os.path.join("lef", "sky130_fd_sc_hd.lef"),
+                    os.path.join("gds", "sky130_fd_sc_hd.gds"),
+                )
+            ):
+                return install["root"], variant["name"]
+    return None
+
+
+_REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_integration_real_openroad_gcd_worked_example(tmp_path, monkeypatch):
+    """The GCD worked example, run against a real `openroad` binary and a
+    real, host-resolved sky130 PDK install."""
+    root, variant = _REAL_SKY130_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    # A real synthesized netlist, produced the same way Phase 2's own
+    # integration test does (via `klt synthesize`), kept minimal here.
+    from klayout_tools.synthesize import run_synthesize
+
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text(_GCD_RTL, encoding="utf-8")
+    synth_request = _write_request(
+        tmp_path / "synth_request.json",
+        {
+            "engine": "yosys",
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(netlist=synth_report["netlist_path"]),
+    )
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert report["die_area_um2"] is not None
+    assert report["core_area_um2"] is not None
+
+
+# Sanity: `subprocess` really is the module this file's stubs patch (guards
+# against a future refactor silently making the stubs a no-op).
+def test_place_and_route_uses_stdlib_subprocess():
+    assert place_and_route.subprocess is subprocess

@@ -38,12 +38,12 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
-- Since 0.1.0 the CLI has grown from 5 verbs to 21: `layout-metrics`,
+- Since 0.1.0 the CLI has grown from 5 verbs to 22: `layout-metrics`,
   `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
   `precheck`, `socket-check`, `ring-check`, `report`, `trajectory`,
-  `synthesize`, and `functional-verification` were added on `main`. Each is
-  documented in [`docs/cli/`](docs/cli/); the next release will carry them
-  collectively.
+  `synthesize`, `place-and-route`, and `functional-verification` were added
+  on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
+  release will carry them collectively.
 - 2026-08-03 — `klt functional-verification`: new verb (#422, Phase 3 of
   Epic #391). Runs a cocotb testbench against RTL sources through Icarus
   Verilog (default) or Verilator, reporting `status`
@@ -79,6 +79,25 @@ version. Not an exhaustive commit-by-commit log.
   (`docs/design/cocotb-verification-spike.md` section 6) runs for real in CI
   against both `engine: "icarus"` and `engine: "verilator"` rather than only
   locally.
+- 2026-08-03 — `klt place-and-route`: new verb (#425, Phase 4 of Epic #391).
+  Places and routes a gate-level netlist (`klt synthesize`'s own
+  `netlist_path` output) against a resolved sky130 standard-cell LEF/liberty
+  deck via OpenROAD's native Tcl API, one subprocess per stage
+  (`floorplan` -> `place` -> `cts` -> `route`), chained via `write_db`/
+  `read_db` ODB checkpoints, with `-metrics <file>.json` as the structured
+  per-stage metrics channel (confirmed end-to-end against a real
+  `openroad/orfs` run for this issue's own worked example). Supports all
+  three non-padframe floorplan methods (`utilization`/`explicit`/`def`);
+  `target_stage` makes a partial run (e.g. `"place"`) a normal, successful
+  outcome with `def_path`/`gds_path` both `null` by design. `def_path` is
+  populated once `write_def` has run; `gds_path` only once the DEF is
+  merged with the resolved standard-cell GDS view via KLayout's `pya`, in
+  -process (never a `klayout` subprocess) — ported from ORFS's own
+  `def2stream.py`. Adds a LEF resolver (`klayout_tools.pdk.lef_files()`)
+  alongside the existing liberty resolution. `seed` is a required request
+  field, echoed unchanged in the response. See `docs/cli/place-and-route.md`
+  and `docs/design/digital-flow-contracts-spike.md` section 5 for the full
+  contract.
 - 2026-08-03 — `klt synthesize`: new verb (#416, Phase 2 of Epic #391).
   Synthesizes RTL sources against a resolved sky130 standard-cell liberty
   via Yosys + bundled ABC (`read_verilog` -> `hierarchy` -> `synth` ->

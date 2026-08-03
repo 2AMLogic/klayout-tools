@@ -90,6 +90,7 @@ klt draw --params shapes.json -o out.gds # write a primitive stream (no rule che
 klt extract design.gds --deck sky130     # layout -> schematic-equivalent netlist
 klt lvs request.json                     # compare extracted vs reference netlist
 klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
+klt place-and-route request.json         # netlist -> placed+routed DEF/GDS (OpenROAD), JSON out
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit

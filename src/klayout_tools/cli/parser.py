@@ -24,6 +24,7 @@ from . import (
     layout_metrics_cmd,
     lvs_cmd,
     pdk_cmd,
+    place_and_route_cmd,
     precheck_cmd,
     render_cmd,
     report_cmd,
@@ -567,6 +568,40 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
+
+    place_and_route_parser = subparsers.add_parser(
+        "place-and-route",
+        help="place and route a synthesized netlist against sky130hd via OpenROAD",
+        description=(
+            "Place and route a gate-level netlist (`klt synthesize`'s own "
+            "`netlist_path` output) against a resolved sky130 standard-cell "
+            "LEF/liberty deck via OpenROAD's native Tcl API, stage by stage "
+            "(floorplan -> global/detailed placement -> clock-tree synthesis "
+            "-> global/detailed routing) -- see "
+            "docs/design/digital-flow-contracts-spike.md section 5 for the "
+            "request/response contract and docs/cli/place-and-route.md for "
+            "the CLI surface. Phase 4 of Epic #391. `target_stage` (default "
+            "`route`) controls how far the run goes; a run that reaches (or "
+            "exceeds) the requested stage is always a success, even short "
+            "of a full route. `def_path` is populated once `write_def` has "
+            "run; `gds_path` only once the DEF is also merged with the "
+            "standard-cell GDS views via KLayout's `pya`, in-process -- "
+            "never a `klayout` subprocess. Runs `openroad` as a subprocess "
+            "(once per stage) -- requires an `openroad` binary on `$PATH`. "
+            "Takes a request-document path (like `klt synthesize`/`klt "
+            "lvs`/`klt sim`), not positional file args."
+        ),
+    )
+    place_and_route_parser.add_argument(
+        "request", help="path to a klt place-and-route request JSON file"
+    )
+    place_and_route_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
 
     eval_parser = subparsers.add_parser(
         "eval",

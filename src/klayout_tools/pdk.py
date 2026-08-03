@@ -289,6 +289,73 @@ def netgen_setup_file(
     return None
 
 
+#: Tech-LEF corner suffixes open_pdks ships alongside a standard-cell
+#: library's merged macro LEF (issue #397 / #425 -- the OpenROAD survey's own
+#: finding that ``_ASSET_LAYOUT`` has no ``lef`` key at all). Unlike
+#: liberty's process/temperature/voltage corners, these name a *parasitic*
+#: corner (min/nom/max routing-layer resistance/capacitance), so
+#: ``"nom"`` -- the nominal, typical-parasitic tech LEF -- is the sensible
+#: default for a P&R run's floorplan/routing-layer stack, independent of
+#: whichever liberty corner the same run resolves for timing.
+_NOMINAL_TECH_LEF_CORNER = "nom"
+
+
+def lef_files(
+    cell_library: str,
+    variant: str | None = None,
+    root: str | None = None,
+    corner: str = _NOMINAL_TECH_LEF_CORNER,
+) -> dict[str, str | None]:
+    """Resolve the tech + merged-cell LEF pair for ``cell_library`` (issue
+    #397 / #425's LEF resolver, alongside :func:`find_pdk`'s existing
+    liberty-adjacent resolution -- ``_ASSET_LAYOUT`` never carried a ``lef``
+    key since a LEF pair is per-``libs_ref``-library, not a single
+    variant-wide directory the way ``libs.tech/klayout``/``libs.tech/magic``
+    are).
+
+    Resolves ``variant``/``root`` exactly as :func:`find_pdk` does (same
+    precedence, same :class:`PdkNotFoundError` on no match).
+
+    Layout convention (verified live against a real ``volare``-fetched
+    ``sky130A`` install, issue #425's own worked example -- see
+    ``docs/design/openroad-invocation-survey.md`` section 5): open_pdks
+    stages a per-library **tech LEF** at
+    ``<libs_ref>/<cell_library>/techlef/<cell_library>__<corner>.tlef``
+    (``corner`` one of ``min``/``nom``/``max`` -- a parasitic-extraction
+    corner, not a liberty corner) and a **merged macro/cell LEF** (every
+    standard cell's pins/obstructions/outline, already merged -- no
+    per-cell LEF files to concatenate) at
+    ``<libs_ref>/<cell_library>/lef/<cell_library>.lef``.
+
+    Returns::
+
+        {"tech_lef": <abs path | None>, "cell_lef": <abs path | None>}
+
+    Each value is ``None`` when the resolved install ships no ``libs_ref``
+    asset at all, no ``cell_library`` entry, or that entry's ``techlef``/
+    ``lef`` subdirectory does not contain the expected file -- never guessed
+    or fabricated, matching this module's existing ``None``-means-absent
+    convention (see :func:`_asset_dirs`/:func:`netgen_setup_file`).
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves at all
+    (the same condition :func:`find_pdk` raises for).
+    """
+    info = find_pdk(variant=variant, root=root)
+    libs_ref = info["assets"]["libs_ref"]
+    if libs_ref is None:
+        return {"tech_lef": None, "cell_lef": None}
+
+    lib_dir = os.path.join(libs_ref, cell_library)
+
+    tech_lef = os.path.join(lib_dir, "techlef", f"{cell_library}__{corner}.tlef")
+    cell_lef = os.path.join(lib_dir, "lef", f"{cell_library}.lef")
+
+    return {
+        "tech_lef": tech_lef if os.path.isfile(tech_lef) else None,
+        "cell_lef": cell_lef if os.path.isfile(cell_lef) else None,
+    }
+
+
 def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -> str:
     """Build the actionable ``PdkNotFoundError`` message."""
     tried = ", ".join(f"{via} ({path})" for path, via in candidates)
