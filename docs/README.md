@@ -36,6 +36,7 @@ docs/
     sim.md
     socket-check.md
     stats.md
+    trajectory.md
   design/                # design notes, spikes, and upstream surveys
     design-pipeline.md
     em-field-sim-spike.md

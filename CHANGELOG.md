@@ -38,11 +38,11 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
-- Since 0.1.0 the CLI has grown from 5 verbs to 18: `layout-metrics`,
+- Since 0.1.0 the CLI has grown from 5 verbs to 19: `layout-metrics`,
   `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
-  `precheck`, `socket-check`, `ring-check`, and `report` were added on
-  `main`. Each is documented in [`docs/cli/`](docs/cli/); the next release
-  will carry them collectively.
+  `precheck`, `socket-check`, `ring-check`, `report`, and `trajectory` were
+  added on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
+  release will carry them collectively.
 - 2026-08-02 — `klt lvs`: new `device.body_unverified` mismatch category
   (`a483ed0`, #281/#285). Warns (`severity: "warning"`, never changes
   `status`) when a MOS body terminal was extracted onto a deck-synthesized
@@ -142,3 +142,20 @@ version. Not an exhaustive commit-by-commit log.
   (no `schema_version` bump), but changes `environment` contents for every
   gf180mcu Monte Carlo run — see `docs/cli/sim.md`'s
   `environment.monte_carlo` subsection.
+- 2026-08-03 — new verb `klt trajectory` (#388): renders an append-only
+  JSONL **optimization trajectory log** (one record per candidate
+  evaluation: `turn`, `candidate_ref`, `objective` {name, value, polarity},
+  optional `gate_results`/`eval_ref`, `wall_clock_s`, `note`) into a derived
+  milestone table plus a dependency-free objective-vs-turn SVG
+  (`--plot`). Milestones are computed, not hand-written: a record is
+  flagged when it improves the objective by more than `--threshold` (units)
+  and `--threshold-pct` (percent) relative to the best prior candidate,
+  respecting minimize/maximize polarity; a candidate whose gates failed can
+  never set the best or be a milestone. Requires no optimizer — a
+  hand-curated log renders identically — and never dereferences
+  `candidate_ref`/`eval_ref`, so per-turn artifacts stay referenced by path
+  rather than inlined. Carries two independent versions: `schema_version`
+  (this command's output) and `record_schema_version` (the log record
+  shape), both starting at `1`. Like `klt report`, it accepts a third
+  `--format github-summary`. See [`docs/cli/trajectory.md`](docs/cli/trajectory.md),
+  including its publication-audit rules for canary repos.

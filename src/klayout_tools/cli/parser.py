@@ -29,6 +29,7 @@ from . import (
     sim_cmd,
     socket_check_cmd,
     stats_cmd,
+    trajectory_cmd,
 )
 
 
@@ -730,6 +731,76 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     report_parser.set_defaults(func=report_cmd.run)
+
+    trajectory_parser = subparsers.add_parser(
+        "trajectory",
+        help="render a JSONL optimization trajectory log as a milestone table",
+        description=(
+            "Read an append-only JSONL optimization trajectory log (one "
+            "record per candidate evaluation: turn, candidate_ref, "
+            "objective, gate_results, wall_clock_s) and render the "
+            "milestone table + objective-vs-turn plot that makes a "
+            "multi-candidate run's *path* checkable evidence, not just its "
+            "final artifact. Milestones are derived, not hand-written: a "
+            "record is flagged when it improves the objective by more than "
+            "--threshold/--threshold-pct relative to the best prior "
+            "candidate, respecting the objective's minimize/maximize "
+            "polarity. Requires no optimizer -- a hand-curated log renders "
+            "identically. `--format github-summary` emits GitHub Flavored "
+            "Markdown for a block repo's README or $GITHUB_STEP_SUMMARY. "
+            "See docs/cli/trajectory.md."
+        ),
+    )
+    trajectory_parser.add_argument(
+        "log",
+        help=(
+            "path to a JSONL trajectory log, or '-' to read the log from "
+            "stdin. Not validated by argparse -- a missing/malformed/empty "
+            "log exits 1 with a clean error, per docs/cli/trajectory.md's "
+            "exit-code contract, rather than argparse's usage-error exit 2."
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "minimum improvement, in the objective's own units, for a record "
+            "to count as a milestone (default: 0.0 -- any strict "
+            "improvement). Strictly greater than: an improvement landing "
+            "exactly on the threshold is not a milestone."
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--threshold-pct",
+        dest="threshold_pct",
+        type=float,
+        default=0.0,
+        help=(
+            "minimum improvement as a percentage of the best prior value for "
+            "a record to count as a milestone (default: 0.0). Applied "
+            "together with --threshold: both must be exceeded."
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--plot",
+        default=None,
+        help=(
+            "write an objective-vs-turn plot as a standalone SVG to this "
+            "path (dependency-free, headless); omit to render no plot"
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--format",
+        choices=["text", "json", "github-summary"],
+        default="text",
+        help=(
+            "output format (default: text). github-summary emits GitHub "
+            "Flavored Markdown; json emits this command's own JSON envelope "
+            "(including the rendered markdown), per docs/json-contract.md."
+        ),
+    )
+    trajectory_parser.set_defaults(func=trajectory_cmd.run)
 
     _add_kb_parser(subparsers)
 
