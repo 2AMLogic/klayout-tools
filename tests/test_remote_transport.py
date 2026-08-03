@@ -165,6 +165,25 @@ def test_wait_for_ssh_times_out_raises():
         )
 
 
+def test_wait_for_ssh_timeout_message_names_the_knob_and_egress_ip_hint():
+    # The timeout error must be actionable: name the exact request field a
+    # caller raises to fix a slow cold boot, and call out a security-group-
+    # rule/current-egress-IP mismatch as another common cause (distinct from
+    # "just wait longer") -- see remote_launcher.RemoteLauncher's
+    # launcher_cidr/launcher_cidrs knobs, which are what such a mismatch
+    # would need updating.
+    runner = _FakeRunner()
+    runner.default = _FakeResult(returncode=255, stderr="Connection refused")
+    with pytest.raises(rt.RemoteTransportError) as excinfo:
+        rt.wait_for_ssh(
+            "203.0.113.9", runner=runner, poll_interval_s=0.01, timeout_s=0.03
+        )
+    message = str(excinfo.value)
+    assert "ssh_ready_timeout_s" in message
+    assert "security-group" in message
+    assert "egress-IP" in message or "egress IP" in message
+
+
 def test_wait_for_ssh_tolerates_subprocess_timeout():
     runner = _FakeRunner()
     runner.queue("ssh", subprocess.TimeoutExpired(cmd=["ssh"], timeout=1))

@@ -362,7 +362,13 @@ def wait_for_ssh(
 
         if time.monotonic() >= deadline:
             raise RemoteTransportError(
-                f"timed out waiting for SSH on {host} after {timeout_s}s: {last_detail}"
+                f"timed out waiting for SSH on {host} after {timeout_s}s: "
+                f"{last_detail} -- if this is a slow cold boot, raise "
+                "remote.ssh_ready_timeout_s (the knob backing this timeout); "
+                "another common cause is a security-group-rule/current-"
+                "egress-IP mismatch (the launcher's public IP no longer "
+                "matches remote.launcher_cidr/launcher_cidrs, so the "
+                "security group never allows this connection through)"
             )
         time.sleep(poll_interval_s)
 

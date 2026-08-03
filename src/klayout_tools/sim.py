@@ -1593,10 +1593,14 @@ def _run_sharded(
 #: timeout don't stall, while still reasonable against real EC2 boot times.
 _REMOTE_SSH_POLL_INTERVAL_S = 5.0
 
-#: Default overall SSH-readiness budget, per the design note's documented
-#: 1-3 minute spin-up estimate plus slack (decision 3) -- generous, not
-#: measured; see docs/design/remote-sim-backend-spike.md.
-_REMOTE_SSH_READY_TIMEOUT_S = 240.0
+#: Default overall SSH-readiness budget. Originally 240s per the design
+#: note's documented 1-3 minute spin-up estimate plus slack (decision 3);
+#: raised to 600s after the first live run observed cold boots (AMI
+#: first-boot cloud-init, not just instance ``running``) taking longer than
+#: that budget on some instance types/regions -- see
+#: docs/design/remote-sim-backend-spike.md. Still overridable per-request via
+#: ``remote.ssh_ready_timeout_s``.
+_REMOTE_SSH_READY_TIMEOUT_S = 600.0
 
 
 def _run_remote(
@@ -1680,6 +1684,7 @@ def _run_remote(
         spot=remote_spec.get("spot", True),
         max_hourly_cost_usd=remote_spec.get("max_hourly_cost_usd"),
         launcher_cidr=remote_spec.get("launcher_cidr"),
+        launcher_cidrs=remote_spec.get("launcher_cidrs"),
         security_group_id=remote_spec.get("security_group_id"),
         key_name=remote_spec.get("key_name"),
         subnet_id=remote_spec.get("subnet_id"),
