@@ -345,6 +345,111 @@ def test_netgen_setup_file_no_install_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# lef_files (issue #397 / #425 -- the OpenROAD survey's own finding that
+# `_ASSET_LAYOUT` never carried a `lef` key; naming convention verified
+# against a real, volare-fetched `sky130A` install for issue #425's own
+# worked example: `libs.ref/<lib>/techlef/<lib>__<corner>.tlef` (a
+# min/nom/max routing-parasitic corner) and `libs.ref/<lib>/lef/<lib>.lef`
+# (the merged macro/cell LEF)).
+# --------------------------------------------------------------------------- #
+
+
+def _make_lef_library(variant_dir, name, *, corners=("min", "nom", "max")):
+    """Fabricate a `libs.ref/<name>` entry with `techlef/`/`lef/` views --
+    minimal placeholder content, never a real, KLayout-parseable LEF (this
+    module's own resolver never reads the file contents)."""
+    lib_dir = variant_dir / "libs.ref" / name
+    techlef_dir = lib_dir / "techlef"
+    techlef_dir.mkdir(parents=True, exist_ok=True)
+    for corner in corners:
+        (techlef_dir / f"{name}__{corner}.tlef").write_text("# tech lef\n")
+    lef_dir = lib_dir / "lef"
+    lef_dir.mkdir(parents=True, exist_ok=True)
+    (lef_dir / f"{name}.lef").write_text("# merged cell lef\n")
+    return lib_dir
+
+
+def test_lef_files_resolves_nominal_corner_by_default(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_lef_library(variant_dir, "sky130_fd_sc_hd")
+
+    result = pdk.lef_files("sky130_fd_sc_hd", root=str(root))
+
+    assert result["tech_lef"] == str(
+        variant_dir
+        / "libs.ref"
+        / "sky130_fd_sc_hd"
+        / "techlef"
+        / "sky130_fd_sc_hd__nom.tlef"
+    )
+    assert result["cell_lef"] == str(
+        variant_dir / "libs.ref" / "sky130_fd_sc_hd" / "lef" / "sky130_fd_sc_hd.lef"
+    )
+
+
+def test_lef_files_resolves_explicit_corner(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_lef_library(variant_dir, "sky130_fd_sc_hd")
+
+    result = pdk.lef_files("sky130_fd_sc_hd", root=str(root), corner="max")
+
+    assert result["tech_lef"].endswith("sky130_fd_sc_hd__max.tlef")
+
+
+def test_lef_files_none_when_cell_library_not_shipped(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("libs_ref",))
+
+    result = pdk.lef_files("sky130_fd_sc_hd", root=str(root))
+
+    assert result == {"tech_lef": None, "cell_lef": None}
+
+
+def test_lef_files_none_when_pdk_ships_no_libs_ref(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))  # no libs_ref at all
+
+    result = pdk.lef_files("sky130_fd_sc_hd", root=str(root))
+
+    assert result == {"tech_lef": None, "cell_lef": None}
+
+
+def test_lef_files_none_when_corner_missing(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_lef_library(variant_dir, "sky130_fd_sc_hd", corners=("min", "max"))
+
+    result = pdk.lef_files("sky130_fd_sc_hd", root=str(root))  # default: "nom"
+
+    assert result["tech_lef"] is None
+    assert result["cell_lef"] is not None  # cell lef is corner-independent
+
+
+def test_lef_files_resolves_variant_and_root_like_find_pdk(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130B", assets=("libs_ref",))
+    _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_lef_library(variant_dir, "sky130_fd_sc_hd")
+
+    result = pdk.lef_files("sky130_fd_sc_hd", variant="sky130B", root=str(root))
+
+    assert result["tech_lef"] == str(
+        variant_dir
+        / "libs.ref"
+        / "sky130_fd_sc_hd"
+        / "techlef"
+        / "sky130_fd_sc_hd__nom.tlef"
+    )
+
+
+def test_lef_files_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.lef_files("sky130_fd_sc_hd", root=str(tmp_path / "does-not-exist"))
+
+
+# --------------------------------------------------------------------------- #
 # list_pdks
 # --------------------------------------------------------------------------- #
 

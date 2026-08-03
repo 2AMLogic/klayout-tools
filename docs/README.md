@@ -30,6 +30,7 @@ docs/
     layout-metrics.md
     lvs.md
     pdk.md
+    place-and-route.md
     precheck.md
     render.md
     report.md
