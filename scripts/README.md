@@ -11,6 +11,8 @@ scripts/
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
+  fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
+  install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
   gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
   ingest-canary.py               # ingest a public canary block repo (issue #62) into blocks/<slug>/output/layout.json
@@ -69,6 +71,35 @@ substitution (gf180mcu only).
 
 ```
 scripts/fetch-cell-netlists.sh
+```
+
+## `fetch-sky130-liberty.sh` / `install-yosys.sh`
+
+CI provisioning for `klt synthesize` (issue #417, Phase 2 of
+[Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391)):
+`.github/workflows/ci.yml`'s `test` job runs both so
+`tests/test_synthesize.py`'s real-Yosys GCD integration test — previously
+always skipped in CI — actually runs there.
+
+`install-yosys.sh` builds and installs a pinned, checksum-verified Yosys
+release from source (`apt-get install yosys` resolves Ubuntu 24.04's
+`0.33-5build2`, ~30 releases stale relative to
+[`docs/design/yosys-synthesis-spike.md`](../docs/design/yosys-synthesis-spike.md)'s
+worked example — see that survey's section 3.4). Installs into
+`~/.cache/yosys-<version>` by default (`$YOSYS_INSTALL_PREFIX` to override);
+idempotent, same `--force` convention as the other fetch scripts here.
+
+`fetch-sky130-liberty.sh` fetches the one real `sky130_fd_sc_hd` Liberty
+timing view (`tt_025C_1v80`) that worked example needs, extracted from a
+pinned volare/open_pdks release asset (not the whole ~166 MB tarball) into
+`pdks/sky130-liberty/` — see [`pdks/README.md`](../pdks/README.md) and the
+script's own header comment for why this can't come from `fetch-pdks.sh`'s
+lambdapdk payload.
+
+```
+scripts/install-yosys.sh
+scripts/fetch-sky130-liberty.sh
+PDK_ROOT="$PWD/pdks/sky130-liberty" PDK=sky130A uv run pytest tests/test_synthesize.py -k integration
 ```
 
 ## `gallery_signals.py` / `bootstrap-gallery-blocks.py`

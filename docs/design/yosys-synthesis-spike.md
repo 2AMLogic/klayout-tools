@@ -313,6 +313,22 @@ the author's machine." Checked directly:
   evidence of CI-readiness, and this survey deliberately does not claim it
   is.
 
+**Resolved (issue #417).** Phase 2 picked option (b): CI now builds Yosys
+from source, pinned to the official `v0.67` release tag (checksum-verified,
+`scripts/install-yosys.sh`) — an exact, citable upstream release rather than
+an arbitrary post-tag commit. A companion script
+(`scripts/fetch-sky130-liberty.sh`) fetches the one real, Yosys-parseable
+`sky130_fd_sc_hd__tt_025C_1v80.lib` this section 0's worked example needs
+from a pinned volare/open_pdks release (the same commit section 0's
+`~/.volare/sky130A` install above was built from), so
+`tests/test_synthesize.py::test_integration_real_yosys_gcd_worked_example`
+now runs for real in CI instead of always skipping — see
+`.github/workflows/ci.yml`'s `test` job and `scripts/README.md` for both
+scripts. Verified locally against this exact fetched liberty file: a real
+Yosys `0.67` build reproduces this section's own worked-example numbers
+(335 instances, 2951.5808 µm², 1251.2 µm² sequential) exactly, no drift to
+document.
+
 ### 3.5 Known version-to-version risk for Phase 2 stability
 
 Flagging one concrete behavioral difference discovered live rather than
