@@ -14,6 +14,7 @@ from . import (
     cells_cmd,
     draw_cmd,
     drc_cmd,
+    eval_cmd,
     extract_cmd,
     gen_cmd,
     gen_compose_cmd,
@@ -496,6 +497,46 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     lvs_parser.set_defaults(func=lvs_cmd.run)
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="score a candidate against a per-block gate/objective descriptor",
+        description=(
+            "Orchestrate `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` "
+            "per a per-block descriptor and reconcile their four separate "
+            "exit-code vocabularies into one envelope: a hard `valid` gate "
+            "plus a single scalar `objective` with a declared polarity, so "
+            "an agent can compare two candidates without hand-rolling the "
+            "scoring across four subprocess calls (issue #387). Pure "
+            "orchestration -- calls the same library entry points those "
+            "verbs use, never re-implements their logic."
+        ),
+    )
+    eval_parser.add_argument(
+        "descriptor",
+        help=(
+            "klt eval descriptor: a path to a JSON file, '-' to read the "
+            "descriptor from stdin, or an inline JSON object string -- see "
+            "docs/cli/eval.md"
+        ),
+    )
+    eval_parser.add_argument(
+        "--candidate",
+        default=None,
+        help=(
+            "candidate substitution values for the descriptor's `${name}` "
+            "placeholders: a path to a JSON file, '-' for stdin, or an "
+            "inline JSON object string. Omit when the descriptor's `args` "
+            "need no substitution."
+        ),
+    )
+    eval_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    eval_parser.set_defaults(func=eval_cmd.run)
 
     gen_parser = subparsers.add_parser(
         "gen",
