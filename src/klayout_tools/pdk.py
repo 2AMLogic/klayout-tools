@@ -240,6 +240,55 @@ def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
     return assets
 
 
+def netgen_setup_file(
+    variant: str | None = None, root: str | None = None
+) -> str | None:
+    """Resolve the **filename** of the PDK's netgen LVS setup script inside
+    the already-discovered ``assets["netgen"]`` directory (issue #343).
+
+    ``find_pdk`` (and its ``_ASSET_LAYOUT`` table) only ever resolved the
+    containing directory (``libs.tech/netgen/``); the specific file a caller
+    must hand to ``netgen -batch lvs ... <setup.tcl> ...`` was not looked up
+    anywhere in this repo. Resolves ``variant``/``root`` exactly as
+    :func:`find_pdk` does (same precedence, same :class:`PdkNotFoundError`
+    on no match).
+
+    Naming convention (verified against the open_pdks source tree for both
+    families this repo targets, ``RTimothyEdwards/open_pdks``,
+    ``sky130/Makefile.in`` and ``gf180mcu/Makefile.in``'s ``netgen-%`` install
+    rule): open_pdks stages the setup script as ``<variant>_setup.tcl``
+    (e.g. ``sky130A_setup.tcl``, ``gf180mcuC_setup.tcl``) and additionally
+    symlinks a generic ``setup.tcl`` alongside it in the same directory. This
+    function prefers the variant-named file (unambiguous even if a caller
+    copies the directory contents elsewhere and the symlink does not survive
+    the copy) and falls back to the generic ``setup.tcl`` name.
+
+    Returns the absolute path to the setup file, or ``None`` when the variant
+    ships no ``netgen`` asset directory at all, or that directory exists but
+    contains neither expected filename (e.g. a from-source netgen checkout
+    laid out by hand, or a partial/custom install) -- never guessed or
+    fabricated, matching this module's existing ``None``-means-absent
+    convention (see :func:`_asset_dirs`).
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves at all
+    (the same condition :func:`find_pdk` raises for).
+    """
+    info = find_pdk(variant=variant, root=root)
+    netgen_dir = info["assets"]["netgen"]
+    if netgen_dir is None:
+        return None
+
+    variant_named = os.path.join(netgen_dir, f"{info['variant']}_setup.tcl")
+    if os.path.isfile(variant_named):
+        return variant_named
+
+    generic = os.path.join(netgen_dir, "setup.tcl")
+    if os.path.isfile(generic):
+        return generic
+
+    return None
+
+
 def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -> str:
     """Build the actionable ``PdkNotFoundError`` message."""
     tried = ", ".join(f"{via} ({path})" for path, via in candidates)

@@ -118,6 +118,24 @@ absolute directory when that directory exists on disk, or `null` when the
 install does not ship it. Consumers should ignore keys they don't need and
 tolerate additional keys added in future (additive) versions.
 
+### Resolving the netgen LVS setup **file** (library API, issue #343)
+
+`assets["netgen"]` (above) resolves the containing directory only. A caller
+that wants to hand a netgen setup script to `klt lvs`'s `"netgen"` engine
+(`options.netgen_setup` — see [`docs/cli/lvs.md`](lvs.md)) needs the specific
+**filename** inside it, which `klayout_tools.pdk.netgen_setup_file(variant=,
+root=)` resolves (library-only, no dedicated `klt pdk` subcommand): it
+prefers the variant-named file open_pdks stages (`<variant>_setup.tcl`, e.g.
+`sky130A_setup.tcl`), falling back to the generic `setup.tcl` symlink
+open_pdks also creates alongside it, and returns `None` when the variant
+ships no netgen asset directory, or that directory has neither file.
+
+```python
+from klayout_tools import pdk
+
+setup = pdk.netgen_setup_file(variant="sky130A")  # -> ".../netgen/sky130A_setup.tcl"
+```
+
 ## `klt pdk list`
 
 Enumerates every install and variant across the full search order. An empty

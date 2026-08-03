@@ -40,7 +40,14 @@ cleanly.
 
 ## Engine
 
-`klt lvs` runs fully headless via the pip `klayout` package's native
+`request.engine` is a data field, not a code path (spike section 2b) — it
+selects one of two independent comparator implementations behind the same
+request/response contract. An unsupported value is an application error
+(exit 1).
+
+### `"klayout"` (default)
+
+Runs fully headless via the pip `klayout` package's native
 `klayout.db.NetlistComparer` (graph-isomorphism netlist comparison, net/
 device/pin matching with hint support) and `klayout.db.NetlistSpiceReader`
 (parsing the reference netlist) — the same wrapped dependency `klt extract`,
@@ -53,9 +60,83 @@ per-corner `ngspice` fan-out, `NetlistComparer` is a deterministic graph
 operation on in-memory data structures with no external process to time out
 or kill (spike section 1, "Invocation strategy").
 
-`request.engine` is a data field, not a code path — only `"klayout"` is
-implemented in this version; an unsupported value is an application error
-(exit 1).
+### `"netgen"` (issue #343 — independent open-flow cross-check)
+
+Wraps the ecosystem-standard open-flow LVS comparator,
+[`RTimothyEdwards/netgen`](https://github.com/RTimothyEdwards/netgen), as a
+subprocess (`netgen -batch lvs`), the same "wrap a proven engine" pattern
+`klt sim` uses for `ngspice`. Requires a `netgen` binary on `$PATH` — not
+bundled or pip-installable; a missing binary is a clear, actionable error
+(exit 1), never a traceback.
+
+**Netlist-vs-netlist mode only — no `magic` dependency.** Per the accepted
+spike (`docs/design/lvs-extraction-spike.md` section 1, "netgen (contrast
+candidate)"), netgen has no layout front-end of its own; the open flow pairs
+it with `magic` for extraction. Wiring up `magic` as a second extraction
+backend was explicitly ruled out (the "two-backends sprawl" the spike's
+`klt sim`-precedent "wrap the proven engine" pattern exists to prevent) — so
+this engine feeds netgen the *same* layout/reference SPICE netlists the
+`"klayout"` engine path already resolves (from `layout.netlist`, or from
+inline extraction via `layout.file` + `layout.deck`), written to temporary
+files for the subprocess. This validates **comparator/contract
+independence** — does the JSON contract generalise to a second, independent
+graph-matching implementation? — not **extraction independence**: a
+connectivity bug in `klt extract` itself would still be invisible to this
+engine, since both "engines" compare the same layout-side netlist. A true
+independent oracle would need `magic`'s own extraction, which is out of
+scope here.
+
+`hints` (`same_nets`/`equivalent_pins`) has no netgen equivalent in this
+scope and is an application error (exit 1) when given alongside `"engine":
+"netgen"` — silently ignoring a caller's stated hint would mask an
+expected-different-result assumption instead of surfacing it.
+
+Two additional `options` apply only to this engine:
+
+- `options.netgen_setup` — an explicit path to a netgen LVS setup `.tcl`
+  file (e.g. the PDK's own, resolvable via `klayout_tools.pdk.netgen_setup_file`
+  — see `docs/cli/pdk.md`). `klt lvs` resolves no PDK on its own
+  (`provenance.pdk` is always `null`, matching the `"klayout"` engine), so
+  this is not looked up automatically — pass it explicitly when a PDK-native
+  setup (device-class merging, per-parameter tolerances) matters. Omitted →
+  netgen's own documented "trivial default setup" (still compares device/net
+  topology correctly for the built-in MOSFET/resistor/etc. device types; no
+  PDK-specific tolerances apply). A path that does not exist is an
+  application error (exit 1), not a silent fallback.
+- `options.netgen_timeout_s` — wall-clock budget for the `netgen` subprocess
+  (default `300`). A timeout is an application error (exit 1) — mirrors
+  `klt sim`'s `options.timeout_s`.
+
+`environment.engine_version` for this engine is netgen's own reported
+version (parsed from its startup banner, `"Netgen <version> compiled on
+..."`, verified against a from-source build for this issue — see the dated
+addendum in `docs/design/lvs-extraction-spike.md`), never a hardcoded
+string — the same convention `klt sim`'s `_ENGINE_VERSION_RE` uses for
+`ngspice`.
+
+**Known limitation — `counts.*.matched`/`net_correspondence` are not
+reconstructed for this engine.** netgen's own text report does not expose a
+stable, structured per-net/per-device correspondence the way the `"klayout"`
+engine's `NetlistComparer` callbacks do, and reconstructing one by parsing
+netgen's fixed-width side-by-side tables would require trusting column
+alignment that is not a documented, versioned part of netgen's report
+format. So for `"engine": "netgen"`: `counts.nets/devices/pins.matched`
+equals the (real, always-accurate) `layout`/`reference` counts on a
+`"match"` verdict (exact by construction — a unique match requires equal
+cardinality on both sides) and is `0` on a `"mismatch"` verdict (the
+conservative floor, never a fabricated estimate); `net_correspondence` is
+always `[]` for this engine, which keeps the documented
+`len(net_correspondence) == counts.nets.matched` invariant intact (both
+sides of that equation are `0` together on a mismatch). Consult `status`,
+`mismatches[]`, and `category_counts` for the actual defect detail on a
+netgen-engine mismatch, not `counts`/`net_correspondence`.
+
+**netgen report parsing never silently defaults to a match.** If netgen's
+log has no recognisable `"Final result:"` verdict text at all — a changed
+report format, a crash before completing the compare — `klt lvs` raises an
+application error (exit 1) rather than guessing; this is the exact failure
+mode ("a bad report parse could silently produce a false match") this
+engine exists to catch, so it is designed to fail loud instead.
 
 ## Scope: schematic-equivalent, topological compare only
 
@@ -232,7 +313,7 @@ each resolves relative paths inside the document.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `schema` | string | Request contract identifier (not required — `load_request` does not validate it, matching `klt sim`'s convention for user-authored input). |
-| `engine` | string | Engine selector. Only `"klayout"` is supported; omit to use the default. |
+| `engine` | string | Engine selector: `"klayout"` (default) or `"netgen"` — see "Engine" above. |
 | `layout` | object | The layout side — see "`layout` shapes" below. Exactly one of `file`/`netlist` is required. |
 | `reference.netlist` | string, required | Path to the reference (schematic/golden) SPICE netlist, parsed via `NetlistSpiceReader`. Relative paths resolve against the request file's directory (or the current working directory for the `-`/inline-JSON request forms — see the `<request>` bullet above). |
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
@@ -242,7 +323,9 @@ each resolves relative paths inside the document.
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. |
 | `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |
 | `options.keep_extracted` | boolean | When `layout.file` is given (inline extraction), retain the intermediate extracted netlist on disk at `<request-dir>/.klt/lvs/<top>.spice` and echo its path in `environment.extracted_netlist`, where `<request-dir>` is the request file's directory (or the current working directory for the `-`/inline-JSON forms). Default `false` (nothing is written to disk). |
-| `options.combine_devices` | boolean | When `true`, calls `klayout.db.Netlist.combine_devices()` on **both** the layout and reference netlists before comparing — merging devices a device class recognises as combinable (e.g. parallel/series MOSFETs sharing gate/source/drain/body connectivity). This is what makes folded/multi-finger devices (a wide transistor drawn as N parallel fingers of width `W/N`) and split/interleaved matched-pair segments (common-centroid, interdigitated layout) comparable against a single lumped schematic device — without it, each finger/segment reports as its own unmatched device. Default `false` (today's per-drawn-device matching, unchanged) because unconditional merging would also collapse genuinely-distinct parallel devices (e.g. a DAC array's intentionally-separate legs) that some callers want reported individually — opt in only when the layout actually uses folded/split constructions. |
+| `options.combine_devices` | boolean | When `true`, calls `klayout.db.Netlist.combine_devices()` on **both** the layout and reference netlists before comparing — merging devices a device class recognises as combinable (e.g. parallel/series MOSFETs sharing gate/source/drain/body connectivity). This is what makes folded/multi-finger devices (a wide transistor drawn as N parallel fingers of width `W/N`) and split/interleaved matched-pair segments (common-centroid, interdigitated layout) comparable against a single lumped schematic device — without it, each finger/segment reports as its own unmatched device. Default `false` (today's per-drawn-device matching, unchanged) because unconditional merging would also collapse genuinely-distinct parallel devices (e.g. a DAC array's intentionally-separate legs) that some callers want reported individually — opt in only when the layout actually uses folded/split constructions. Applied identically for both engines. |
+| `options.netgen_setup` | string | Only used with `"engine": "netgen"`. Path to a netgen LVS setup `.tcl` file — see "Engine" -> `"netgen"` above. Omit to run with netgen's own default setup. |
+| `options.netgen_timeout_s` | number | Only used with `"engine": "netgen"`. Wall-clock budget (seconds) for the `netgen` subprocess. Default `300`. |
 
 ### `layout` shapes
 
@@ -300,6 +383,42 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
 }
 ```
 
+A `"netgen"`-engine mismatch (issue #343), showing `environment.engine_version`
+sourced from netgen's own banner and a `details`-carrying entry for a report
+section this engine buckets rather than fully structures:
+
+```json
+{
+  "schema_version": 1,
+  "engine": "netgen",
+  "status": "mismatch",
+  "mismatch_count": 1,
+  "category_counts": { "net.unmatched": 1 },
+  "counts": {
+    "nets": { "layout": 4, "reference": 4, "matched": 0 },
+    "devices": { "layout": 2, "reference": 2, "matched": 0 },
+    "pins": { "layout": 4, "reference": 4, "matched": 0 }
+  },
+  "environment": {
+    "engine": "netgen",
+    "engine_version": "1.5.323"
+  },
+  "mismatches": [
+    {
+      "category": "net.unmatched",
+      "severity": "error",
+      "description": "netgen reported one or more net mismatch(es) -- see the 'details.raw' field for netgen's own side-by-side report",
+      "side": "both",
+      "net": null,
+      "device": null,
+      "property": null,
+      "details": { "raw": "NET mismatches: Class fragments follow ...\n..." }
+    }
+  ],
+  "net_correspondence": []
+}
+```
+
 ### Top-level fields
 
 | Field | Type | Description |
@@ -312,12 +431,12 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
 | `status` | `"match"` \| `"mismatch"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `category_counts` | object\<string, int\> | Per-category mismatch counts, keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
-| `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. |
+| `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. For `"engine": "netgen"`, `matched` is exact on a `"match"` verdict and `0` on a `"mismatch"` verdict (a known limitation — see "Engine" -> `"netgen"` above). |
 | `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Present (currently `["nfet", "pfet", "resistor"]` for both registered decks — MOS plus one drawn precision resistor, see `klt extract`'s "Drawn resistors") when `layout.file` + `layout.deck` (inline extraction) was given; `null` when `layout.netlist` (pre-extracted, no deck involved) was given instead. |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
-| `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (LVS is topological and resolves no PDK); `deck` pins the layout-side extraction deck by name and `sha256:` content hash, and is `null` for the pre-extracted `layout.netlist` form (matching `device_classes`). |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise). |
+| `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is always `null` (LVS is topological and resolves no PDK); `deck` pins the layout-side extraction deck by name and `sha256:` content hash, and is `null` for the pre-extracted `layout.netlist` form (matching `device_classes`). `klayout_version` is populated the same way for both engines (it is this process's own `klayout` package build, used for netlist parsing/writing either way, not the comparator). |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
-| `net_correspondence` | array\<object\> | The layout↔reference net pairing `NetlistComparer` produced — see "`net_correspondence[]` entries" below. `len(net_correspondence) == counts.nets.matched` (the example above is illustrative, not exhaustive, for a 7-net compare). |
+| `net_correspondence` | array\<object\> | The layout↔reference net pairing `NetlistComparer` produced — see "`net_correspondence[]` entries" below. `len(net_correspondence) == counts.nets.matched` (the example above is illustrative, not exhaustive, for a 7-net compare). Always `[]` for `"engine": "netgen"` (see "Engine" -> `"netgen"` above). |
 
 ### `mismatches[]` entries
 
@@ -335,6 +454,7 @@ objects involved.
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
 | `device` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>, "class": <string\|null>}` when a device is involved. |
 | `property` | object \| `null` | `{"name": <string>, "layout": <value>, "reference": <value>}` for a `device.property` mismatch. `name` is `w_um`/`l_um` for the width/length parameters (matching `klt extract`'s own convention); every other declared device-class parameter is reported under its own lower-cased name. |
+| `details` | object \| `null` | Engine-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Currently only populated by the `"netgen"` engine, for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every `"klayout"`-engine entry, and for any `"netgen"`-engine entry precise enough not to need it (e.g. `device.property`). |
 
 `mismatches` is sorted by `(category, side, device.layout, device.reference,
 net.layout, net.reference)` (missing fields sort first) so repeated runs
@@ -513,4 +633,7 @@ is written to stdout. No Python traceback is printed.
 `matched_group_id` (a geometric-matching check, deferred to a follow-up
 epic per the phase 1 spike's section 4), any layout-vs-layout geometric
 diffing, and loop closure through `klt sim` (Epic #153 phase 4) are all
-explicitly out of scope for this command.
+explicitly out of scope for this command. A `magic` extraction backend for
+the `"netgen"` engine (issue #343) is likewise out of scope — that engine is
+netlist-vs-netlist only (comparator/contract independence, not extraction
+independence — see "Engine" -> `"netgen"` above).
