@@ -260,6 +260,25 @@ def estimate_cost(instance_type: str, spot: bool = True) -> tuple[float, bool]:
     return round(on_demand * _SPOT_FRACTION_OF_ON_DEMAND, 4), True
 
 
+def instance_vcpu_count(instance_type: str) -> int:
+    """Return the exact vCPU count for a known :data:`_C7I_LADDER` entry.
+
+    Unlike :func:`estimate_cost`'s deliberately approximate unknown-type
+    fallback, a vCPU count has no "close enough" story: it feeds a hard
+    account-quota comparison (Epic #375 Phase 1B's fleet vCPU pre-check, see
+    :mod:`klayout_tools.remote_fleet`), so an unrecognized ``instance_type``
+    raises :class:`RemoteLaunchError` rather than guessing.
+    """
+    vcpu = dict(_C7I_LADDER).get(instance_type)
+    if vcpu is None:
+        raise RemoteLaunchError(
+            f"unknown instance type {instance_type!r} -- vCPU count is only "
+            "known for the c7i ladder this module sizes from (see "
+            "_C7I_LADDER)"
+        )
+    return vcpu
+
+
 def require_cost_config(
     *,
     region: str | None,
