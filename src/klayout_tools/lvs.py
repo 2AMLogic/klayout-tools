@@ -1771,8 +1771,18 @@ _NETGEN_ENGINE_VERSION_RE = re.compile(r"Netgen\s+([\w.]+)")
 #:
 #: Verified against a from-source netgen 1.5.323 build for this issue (see
 #: the dated addendum in docs/design/lvs-extraction-spike.md).
+#:
+#: The index after the colon is numeric (``1``, ``2``, ...) only for
+#: primitive *devices*. For a *subcircuit instance*, netgen uses the
+#: instance name instead, e.g.::
+#:
+#:     sub:i1 vs. sub:i1:
+#:      w circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=0%)
+#:
+#: so the index group must accept any non-whitespace token, not just
+#: digits (issue #363).
 _NETGEN_PROPERTY_BLOCK_RE = re.compile(
-    r"^(\S+):(\d+) vs\. (\S+):(\d+):\n((?: .+\n)+)", re.MULTILINE
+    r"^(\S+):(\S+) vs\. (\S+):(\S+):\n((?: .+\n)+)", re.MULTILINE
 )
 
 #: One parameter-difference line inside a :data:`_NETGEN_PROPERTY_BLOCK_RE`
