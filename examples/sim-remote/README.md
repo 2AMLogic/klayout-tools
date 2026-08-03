@@ -138,9 +138,18 @@ synthetic fixture) and are pinned to the real, reproducible facts of the
   literal run: `t_rise_400`/`t_rise_500` are the exact values implied by
   each corner's real, documented `ring_freq_hz`
   (`t_rise_500 - t_rise_400 = 100 / ring_freq_hz`, per the request's own
-  `.meas ... PARAM='100/(t_rise_500-t_rise_400)'` card), and per-corner
-  `runtime_s` is apportioned close to uniformly across the matrix so each
-  backend's total sums to its own reported wall-clock figure.
+  `.meas ... PARAM='100/(t_rise_500-t_rise_400)'` card). Per-corner
+  `runtime_s` is reconstructed to fit each backend's own execution model,
+  not carried over between the two: `local` runs its 5 corners
+  **sequentially**, so its `runtime_s` values are apportioned close to
+  uniformly across the matrix and sum to the reported wall-clock exactly
+  (140.1 + 141.8 + 138.6 + 140.9 + 140.6 = 702.0s = 11m42s). `remote` runs
+  the same 5 corners **concurrently** on one provisioned instance, so
+  summing them would double-count overlapped wall-clock time; instead each
+  corner's `runtime_s` is close to its own standalone duration
+  (254.2–260.0s), consistent with `environment.remote.spin_up_s: 19.0`
+  plus the slowest corner's duration reconciling to the reported 4m39s
+  (279s) total (260.0 + 19.0 = 279.0).
 
 A from-scratch live regeneration of `matrix-local.report.json` was
 attempted while authoring this example (`ngspice` is available, no AWS
