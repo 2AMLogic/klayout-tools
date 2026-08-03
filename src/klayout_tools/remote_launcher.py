@@ -711,6 +711,12 @@ class RemoteLauncher:
         # normal completion, an exception raised inside the block, or a
         # caught SIGINT/SIGTERM (see _install_signal_handlers).
 
+    ``launcher_cidr`` accepts one CIDR; a caller behind multiple public
+    egress IPs (e.g. an office VPN plus a CI runner's own NAT IP) can also
+    pass ``launcher_cidrs=[...]`` -- either alone, or alongside
+    ``launcher_cidr``, in which case the two are unioned (see
+    :meth:`_resolve_launcher_cidrs`), one ingress rule per distinct CIDR.
+
     Two independent teardown mechanisms, per guardrail mechanics SS3:
 
     - (a) This class's own ``__exit__`` always calls :meth:`terminate` --
@@ -740,6 +746,7 @@ class RemoteLauncher:
         spot: bool = True,
         max_hourly_cost_usd: float | None = None,
         launcher_cidr: str | None = None,
+        launcher_cidrs: list[str] | None = None,
         security_group_id: str | None = None,
         key_name: str | None = None,
         subnet_id: str | None = None,
@@ -760,6 +767,7 @@ class RemoteLauncher:
         self.spot = spot
         self.max_hourly_cost_usd = max_hourly_cost_usd
         self.launcher_cidr = launcher_cidr
+        self.launcher_cidrs = launcher_cidrs
         self.security_group_id = security_group_id
         self.key_name = key_name
         self.subnet_id = subnet_id
@@ -866,14 +874,33 @@ class RemoteLauncher:
             "spin_up_s": self.spin_up_s,
         }
 
+    def _resolve_launcher_cidrs(self) -> list[str]:
+        """Combine ``launcher_cidr`` and ``launcher_cidrs`` into one ordered,
+        de-duplicated list -- both knobs can be given together (multi-egress
+        callers, e.g. an office VPN plus a CI runner's NAT IP), in which case
+        they are unioned rather than one silently overriding the other:
+        ``launcher_cidr`` (if set) comes first, followed by any entries in
+        ``launcher_cidrs`` not already present. A caller that only ever sets
+        one of the two sees identical behavior to before this knob existed.
+        """
+        cidrs: list[str] = []
+        if self.launcher_cidr:
+            cidrs.append(self.launcher_cidr)
+        for cidr in self.launcher_cidrs or ():
+            if cidr not in cidrs:
+                cidrs.append(cidr)
+        return cidrs
+
     def _resolve_security_group(self) -> str:
         if self.security_group_id:
             return self.security_group_id
-        if not self.launcher_cidr:
+        cidrs = self._resolve_launcher_cidrs()
+        if not cidrs:
             raise RemoteLaunchError(
-                "either security_group_id or launcher_cidr is required to "
-                "provision -- the design note's SSH-inbound-only network "
-                "posture needs one or the other to build the ingress rule"
+                "either security_group_id or launcher_cidr/launcher_cidrs is "
+                "required to provision -- the design note's SSH-inbound-only "
+                "network posture needs one of these to build the ingress "
+                "rule(s)"
             )
         group_id = self._aws(
             [
@@ -892,7 +919,11 @@ class RemoteLauncher:
             ]
         )
         self._created_security_group = True
-        self._aws(build_security_group_ingress_args(self.launcher_cidr, group_id))
+        # One ingress rule per CIDR -- build_security_group_ingress_args
+        # itself stays single-CIDR; multi-egress support is a loop at this
+        # call site rather than a per-CIDR variant of that helper.
+        for cidr in cidrs:
+            self._aws(build_security_group_ingress_args(cidr, group_id))
         self._aws(build_security_group_egress_lockdown_args(group_id))
         self.security_group_id = group_id
         return group_id
@@ -909,6 +940,17 @@ class RemoteLauncher:
         spot-capacity failure propagate as a loud :class:`RemoteLaunchError`
         (matching the design note's other option, "surface as an `error`
         corner [matrix] requiring the caller to retry explicitly").
+
+        Before the fallback's own ``run-instances`` call, the on-demand
+        estimate is re-checked against ``max_hourly_cost_usd`` -- the
+        up-front cost gate in :meth:`provision` only ever validated the
+        *requested* (spot) rate, and on-demand is reliably pricier, so a spot
+        failure must not silently walk past a ceiling the caller set
+        specifically to bound spend. A failure here raises
+        :class:`RemoteLaunchError` with no further billable call made,
+        distinguishing this "fallback leg refused by the cost gate" failure
+        from :meth:`provision`'s own up-front spot-side cost-gate rejection
+        so the caller can tell which leg failed.
         """
         args = build_run_instances_args(
             ami_id=self.ami["ami_id"],
@@ -930,6 +972,24 @@ class RemoteLauncher:
                 and _is_spot_capacity_error(str(exc))
             ):
                 raise
+
+            on_demand_hourly, _approximate = estimate_cost(
+                self.instance_type, spot=False
+            )
+            if (
+                self.max_hourly_cost_usd is not None
+                and on_demand_hourly > self.max_hourly_cost_usd
+            ):
+                raise RemoteLaunchError(
+                    f"spot capacity failure ({exc}) would normally fall back "
+                    f"to on-demand, but the fallback's own cost check "
+                    f"refused it: estimated hourly cost ${on_demand_hourly:.4f} "
+                    f"for {self.instance_type} (on-demand) exceeds "
+                    f"remote.max_hourly_cost_usd=${self.max_hourly_cost_usd:.4f} "
+                    "-- refusing the on-demand fallback (no on-demand "
+                    "run-instances call was made)"
+                ) from exc
+
             on_demand_args = build_run_instances_args(
                 ami_id=self.ami["ami_id"],
                 instance_type=self.instance_type,

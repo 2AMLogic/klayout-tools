@@ -682,6 +682,206 @@ def test_non_capacity_run_instances_failure_never_retried(manifest_path):
     assert len(run_instances_calls) == 1  # never retried for a non-capacity failure
 
 
+# -- on-demand fallback re-checked against the cost gate --------------------
+#
+# c7i.12xlarge (the type _make_launcher's 5-corner default sizes to):
+# on-demand ~= 2.142/hr, spot ~= 2.142 * 0.45 ~= 0.9639/hr (see
+# test_estimate_cost_known_type_*). The up-front cost gate in provision()
+# only ever validates the *requested* (spot) rate -- these tests pin that a
+# spot-capacity failure's on-demand fallback is re-checked against the same
+# ceiling before its own billable call.
+
+
+def test_spot_capacity_failure_fallback_refused_when_over_ceiling(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond(
+        "ec2",
+        "run-instances",
+        rl.RemoteLaunchError(
+            "aws ec2 run-instances failed: InsufficientInstanceCapacity"
+        ),
+    )
+
+    # Ceiling clears the spot estimate (~0.9639) so provision()'s up-front
+    # gate passes, but sits below the on-demand estimate (~2.142) so the
+    # fallback leg must be the one that refuses.
+    launcher = _make_launcher(manifest_path, aws, max_hourly_cost_usd=1.5)
+    with pytest.raises(rl.RemoteLaunchError, match="on-demand fallback"):
+        launcher.provision()
+
+    # No second (on-demand) run-instances call was made -- the cost gate
+    # fired before any further billable AWS API call, same "no billable call"
+    # discipline as provision()'s own up-front cost gate.
+    run_instances_calls = [c for c in aws.calls if c[:2] == ["ec2", "run-instances"]]
+    assert len(run_instances_calls) == 1
+    launcher.instance_id = None
+
+
+def test_spot_capacity_failure_fallback_error_distinguishes_from_upfront_gate(
+    manifest_path,
+):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond(
+        "ec2",
+        "run-instances",
+        rl.RemoteLaunchError(
+            "aws ec2 run-instances failed: InsufficientInstanceCapacity"
+        ),
+    )
+    launcher = _make_launcher(manifest_path, aws, max_hourly_cost_usd=1.5)
+    with pytest.raises(rl.RemoteLaunchError) as excinfo:
+        launcher.provision()
+    message = str(excinfo.value)
+    # Names both legs so the caller can tell which one failed: the spot
+    # capacity failure that triggered the fallback attempt, and the
+    # fallback's own cost-gate refusal (distinct from provision()'s up-front
+    # spot-side require_cost_config rejection, which instead matches
+    # "exceeds" with no mention of a fallback).
+    assert "InsufficientInstanceCapacity" in message
+    assert "on-demand" in message
+    assert "no on-demand run-instances call was made" in message
+    launcher.instance_id = None
+
+
+def test_spot_capacity_failure_fallback_allowed_at_cost_ceiling_boundary(
+    manifest_path,
+):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond(
+        "ec2",
+        "run-instances",
+        [
+            rl.RemoteLaunchError(
+                "aws ec2 run-instances failed: InsufficientInstanceCapacity"
+            ),
+            "i-ondemand",
+        ],
+    )
+
+    on_demand_hourly, _ = rl.estimate_cost("c7i.12xlarge", spot=False)
+    # Exactly at the ceiling passes -- matches require_cost_config's own
+    # boundary behavior (strictly-greater-than is what rejects).
+    launcher = _make_launcher(manifest_path, aws, max_hourly_cost_usd=on_demand_hourly)
+    info = launcher.provision()
+
+    assert info["instance_id"] == "i-ondemand"
+    assert info["spot"] is False
+    run_instances_calls = [c for c in aws.calls if c[:2] == ["ec2", "run-instances"]]
+    assert len(run_instances_calls) == 2
+    launcher.instance_id = None
+
+
+def test_spot_capacity_failure_fallback_cost_gate_skipped_with_no_ceiling(
+    manifest_path,
+):
+    # max_hourly_cost_usd=None (the default) never rejects, on either leg --
+    # mirrors require_cost_config's own "no ceiling never rejects" contract.
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond(
+        "ec2",
+        "run-instances",
+        [
+            rl.RemoteLaunchError(
+                "aws ec2 run-instances failed: InsufficientInstanceCapacity"
+            ),
+            "i-ondemand",
+        ],
+    )
+
+    launcher = _make_launcher(manifest_path, aws)
+    info = launcher.provision()
+
+    assert info["instance_id"] == "i-ondemand"
+    assert info["spot"] is False
+    launcher.instance_id = None
+
+
+# -- launcher_cidr / launcher_cidrs (multi-egress support) ------------------
+
+
+def test_launcher_cidrs_builds_one_ingress_rule_per_entry(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+
+    launcher = _make_launcher(
+        manifest_path,
+        aws,
+        launcher_cidr=None,
+        launcher_cidrs=["203.0.113.4/32", "198.51.100.7/32"],
+    )
+    launcher.provision()
+
+    ingress_calls = [
+        c for c in aws.calls if c[:2] == ["ec2", "authorize-security-group-ingress"]
+    ]
+    assert len(ingress_calls) == 2
+    assert any("203.0.113.4/32" in c for c in ingress_calls)
+    assert any("198.51.100.7/32" in c for c in ingress_calls)
+    launcher.instance_id = None
+
+
+def test_launcher_cidrs_single_entry_behaves_like_launcher_cidr(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+
+    launcher = _make_launcher(
+        manifest_path,
+        aws,
+        launcher_cidr=None,
+        launcher_cidrs=["203.0.113.4/32"],
+    )
+    launcher.provision()
+
+    ingress_calls = [
+        c for c in aws.calls if c[:2] == ["ec2", "authorize-security-group-ingress"]
+    ]
+    assert len(ingress_calls) == 1
+    assert "203.0.113.4/32" in ingress_calls[0]
+    launcher.instance_id = None
+
+
+def test_launcher_cidr_and_launcher_cidrs_combined_are_unioned_and_deduped(
+    manifest_path,
+):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+
+    # launcher_cidr's default fixture value is duplicated in launcher_cidrs
+    # to pin de-duplication; the third entry is genuinely additional.
+    launcher = _make_launcher(
+        manifest_path,
+        aws,
+        launcher_cidrs=["203.0.113.4/32", "198.51.100.7/32"],
+    )
+    launcher.provision()
+
+    ingress_calls = [
+        c for c in aws.calls if c[:2] == ["ec2", "authorize-security-group-ingress"]
+    ]
+    assert len(ingress_calls) == 2  # deduped, not 2 (cidr) + 2 (cidrs) == 3
+    assert any("203.0.113.4/32" in c for c in ingress_calls)
+    assert any("198.51.100.7/32" in c for c in ingress_calls)
+    launcher.instance_id = None
+
+
+def test_provision_requires_security_group_or_any_cidr(manifest_path):
+    aws = _FakeAws(manifest_path)
+    launcher = _make_launcher(
+        manifest_path, aws, launcher_cidr=None, launcher_cidrs=None
+    )
+    with pytest.raises(
+        rl.RemoteLaunchError, match="security_group_id or launcher_cidr"
+    ):
+        launcher.provision()
+
+
 # -- teardown guarantees (guardrail mechanics SS3) --------------------------
 
 
