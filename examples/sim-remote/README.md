@@ -147,7 +147,7 @@ synthetic fixture) and are pinned to the real, reproducible facts of the
   the same 5 corners **concurrently** on one provisioned instance, so
   summing them would double-count overlapped wall-clock time; instead each
   corner's `runtime_s` is close to its own standalone duration
-  (256.9–260.0s), consistent with `environment.remote.spin_up_s: 19.0`
+  (254.2–260.0s), consistent with `environment.remote.spin_up_s: 19.0`
   plus the slowest corner's duration reconciling to the reported 4m39s
   (279s) total (260.0 + 19.0 = 279.0).
 
