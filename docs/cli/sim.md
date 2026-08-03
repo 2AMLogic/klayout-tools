@@ -240,9 +240,11 @@ control/end cards before pointing a request at it.
   required when this axis is present. Omit entirely for a request that
   doesn't care about process (single point, no `.lib` card emitted).
 
-  **Known-good mismatch sections (per-device variation):** Until full Monte
-  Carlo orchestration lands, hand-rolled MC harnesses can reference validated
-  mismatch-style `.lib` sections from the vendor model deck:
+  **Known-good mismatch mechanisms (per-device variation):** Until full Monte
+  Carlo orchestration lands, hand-rolled MC harnesses can reference the
+  validated per-device-variation mechanism for each PDK's vendor model deck.
+  Note the two PDKs differ structurally — sky130 selects a mismatch `.lib`
+  section, while gf180mcu toggles a model parameter:
 
   - **sky130A**: `tt_mm` is confirmed to resolve correctly in
     `libs.tech/ngspice/sky130.lib.spice` and produces plausible per-device
@@ -251,14 +253,26 @@ control/end cards before pointing a request at it.
     etc.), following the same validation principle: the section must exist in
     the model library and produce trustworthy device-level parameter spread
     over multiple Monte Carlo samples.
-  - **gf180mcu**: Mismatch sections are supported and validated (e.g. via
-    gf180-bandgap's `mc-untrimmed` harness). Consult your gf180mcu PDK
-    variant's model library (`libs.tech/ngspice/`) to identify the specific
-    mismatch-variant section names (typically following a similar `<corner>_mm`
-    naming scheme, but not guaranteed across PDK versions).
+  - **gf180mcu**: Mismatch works differently — there is **no** corner-suffixed
+    `_mm` section to select. `sm141064.ngspice` (`libs.tech/ngspice/`) exposes
+    only plain corner sections (`typical`, `ss`, `ff`, `sf`, `fs`, plus
+    per-device-family variants like `res_typical`/`bjt_typical`), and every one
+    of them pulls in the same internal mismatch includes — `fets_mm` for MOS
+    devices and `bjt_mc` for BJTs. Per-instance mismatch is enabled by the
+    model-level netlist parameter `sw_stat_mismatch` (`0` = off, `1` = on; it
+    scales the per-device `delvto`/`mulu0` terms), with global
+    process-statistical spread gated by the companion `sw_stat_global`
+    parameter. Because these are `.param` switches baked into the corner —
+    **not** selectable `.lib` section names — you set them directly in the deck;
+    `corners.process`, which only chooses a section name, cannot toggle them.
+    gf180-bandgap's `mc-untrimmed` harness validates exactly this path: it loads
+    the plain `typical`/`res_typical`/`bjt_typical` sections and turns mismatch
+    on per run via `sw_stat_mismatch: 0|1`, never by pointing `corners.process`
+    at an `_mm` section.
 
   For untested process corners or PDK variants not listed above, verify that
-  the section resolves in the actual `.lib` file before using it in production.
+  the section (sky130-style) or the mismatch switch (gf180mcu-style) resolves in
+  the actual `.lib` file before using it in production.
 
 - **`corners.supply_v`** (`object`, optional) — keyed by source/`.param` name
   (`vdd`, `vdda`, …), each an array of volts. **Multiple keys sweep together
