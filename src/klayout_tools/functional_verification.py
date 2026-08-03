@@ -16,7 +16,7 @@ spikes -- read them first:
 - ``docs/design/digital-flow-contracts-spike.md`` section 6 (#399) restates
   that contract alongside the synthesis/place-and-route ones.
 
-Four findings from those spikes are load-bearing here, and each is
+Five findings from those spikes are load-bearing here, and each is
 implemented deliberately rather than rediscovered:
 
 1. **Never trust a raw subprocess/``make`` exit code** (spike section 4).
@@ -41,6 +41,18 @@ implemented deliberately rather than rediscovered:
 4. **``options.coverage: true`` requires ``engine: "verilator"``** (spike
    sections 1/5) -- Icarus has no coverage path through this flow at all, so
    the combination is rejected up front rather than silently no-op'ing.
+5. **``random_seed`` reproducibility** (spike's own "open questions", issue
+   #423). ``request.options.random_seed``, when given, is forwarded to
+   ``Runner.test()``'s own ``seed`` parameter (which sets
+   ``COCOTB_RANDOM_SEED`` in the simulator subprocess's environment) so a
+   pinned seed reproduces cocotb's own seeded ``random`` module state
+   run-to-run. Whether pinned or left to cocotb's own generator, the
+   *effective* seed is always echoed back in ``environment.random_seed`` --
+   read from ``results.xml``'s own ``<property name="random_seed">``
+   element (spike section 4), the same artifact-derived-truth discipline as
+   every other count this module reports -- matching the reproducibility
+   bar ``klt sim``'s Monte Carlo seeding and ``klt lvs``'s ``environment``
+   hashes already set.
 
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
@@ -280,8 +292,11 @@ def _resolve_testbench(
     return module, os.path.dirname(os.path.abspath(module_path)), testcase
 
 
-def _resolve_options(options: Any, engine: str) -> tuple[bool, tuple[str, str]]:
-    """Validate ``request.options`` and return ``(coverage, timescale)``.
+def _resolve_options(
+    options: Any, engine: str
+) -> tuple[bool, tuple[str, str], int | None]:
+    """Validate ``request.options`` and return
+    ``(coverage, timescale, random_seed)``.
 
     Enforces the spike's hard constraint that coverage is a Verilator-only
     capability -- ``options.coverage: true`` with ``engine: "icarus"`` is a
@@ -303,8 +318,8 @@ def _resolve_options(options: Any, engine: str) -> tuple[bool, tuple[str, str]]:
 
     timescale = options.get("timescale")
     if timescale is None:
-        return coverage, DEFAULT_TIMESCALE
-    if (
+        resolved_timescale = DEFAULT_TIMESCALE
+    elif (
         not isinstance(timescale, (list, tuple))
         or len(timescale) != 2
         or not all(isinstance(entry, str) and entry for entry in timescale)
@@ -313,7 +328,18 @@ def _resolve_options(options: Any, engine: str) -> tuple[bool, tuple[str, str]]:
             "request.options.timescale must be a [unit, precision] pair of "
             'non-empty strings, e.g. ["1ns", "1ps"]'
         )
-    return coverage, (timescale[0], timescale[1])
+    else:
+        resolved_timescale = (timescale[0], timescale[1])
+
+    random_seed = options.get("random_seed")
+    if random_seed is not None and (
+        isinstance(random_seed, bool) or not isinstance(random_seed, int)
+    ):
+        raise FunctionalVerificationError(
+            "request.options.random_seed must be an integer when given"
+        )
+
+    return coverage, resolved_timescale, random_seed
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +411,40 @@ def _maybe_float(value: str | None) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def _extract_random_seed_property(results_xml: str) -> int | None:
+    """The effective ``random_seed`` cocotb's regression manager used for
+    this run, read back out of ``results.xml``'s own
+    ``<property name="random_seed" value="...">`` element (spike section 4,
+    captured live -- every ``results.xml`` this verb produces carries one).
+
+    This is the authoritative echo for ``environment.random_seed``: cocotb
+    always logs the seed it actually used, whether or not
+    ``request.options.random_seed`` pinned one explicitly (an unpinned run
+    still gets a randomly-generated seed, itself worth knowing so that
+    *specific* run can be reproduced later by feeding this value back in as
+    ``request.options.random_seed``).
+
+    Never raises -- a missing/unparseable/absent property degrades to
+    ``None``, since this purely-informational field must never sink a run
+    whose pass/fail verdict (from :func:`parse_results_xml`) is otherwise
+    perfectly well defined.
+    """
+    try:
+        tree = ElementTree.parse(results_xml)
+    except (ElementTree.ParseError, OSError):
+        return None
+    for prop in tree.iter("property"):
+        if prop.get("name") == "random_seed":
+            value = prop.get("value")
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +547,7 @@ def _run_test(
     module_dir: str,
     hdl_toplevel: str,
     testcase: str | list[str] | None,
+    random_seed: int | None,
     build_dir: str,
     test_dir: str,
     results_xml: str,
@@ -503,6 +564,18 @@ def _run_test(
     because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
     to the simulator as ``PYTHONPATH`` (verified live) -- there is no
     ``test_module`` search-path parameter to use instead.
+
+    ``random_seed``, when given, is forwarded to ``Runner.test()``'s own
+    ``seed`` parameter, which sets ``COCOTB_RANDOM_SEED`` in the simulator
+    subprocess's environment (spike's "open question" on `random_seed`
+    reproducibility, issue #423) -- cocotb seeds its regression manager's
+    ``random`` module from this value, so a pinned seed reproduces the same
+    randomized-test content run-to-run, not merely the same *logged* value
+    after the fact. ``None`` leaves cocotb to generate (and itself log) its
+    own seed, still recovered afterwards from ``results.xml``'s own
+    ``<property name="random_seed">`` element (see
+    :func:`_extract_random_seed_property`) so every run's effective seed is
+    echoed in the response regardless of whether the request pinned one.
     """
     inserted = module_dir not in sys.path
     if inserted:
@@ -513,6 +586,7 @@ def _run_test(
             hdl_toplevel=hdl_toplevel,
             hdl_toplevel_lang="verilog",
             testcase=testcase,
+            seed=random_seed,
             build_dir=build_dir,
             test_dir=test_dir,
             results_xml=results_xml,
@@ -693,7 +767,9 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     module, module_dir, testcase = _resolve_testbench(
         request_doc["testbench"], request_dir
     )
-    coverage_requested, timescale = _resolve_options(request_doc.get("options"), engine)
+    coverage_requested, timescale, random_seed = _resolve_options(
+        request_doc.get("options"), engine
+    )
 
     output_dir = os.path.join(request_dir, ".klt", "functional-verification")
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
@@ -732,6 +808,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         module_dir=module_dir,
         hdl_toplevel=hdl_toplevel,
         testcase=testcase,
+        random_seed=random_seed,
         build_dir=build_dir,
         test_dir=output_dir,
         results_xml=results_xml,
@@ -780,5 +857,6 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             "engine_version": _engine_version(engine),
             "cocotb_version": _cocotb_version(),
             "results_xml": results_xml,
+            "random_seed": _extract_random_seed_property(results_xml),
         },
     }

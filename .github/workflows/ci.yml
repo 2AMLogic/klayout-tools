@@ -230,6 +230,17 @@ jobs:
         # loudly instead of quietly invalidating
         # docs/design/cocotb-verification-spike.md's captured worked-example
         # numbers.
+        #
+        # The same real toolchain also flips
+        # tests/test_functional_verification.py's `@pytest.mark.skipif`-
+        # guarded integration tier from skipped to real here (issue #423 AC
+        # #3): the GCD worked example (spike section 6) runs through `klt
+        # functional-verification` against both `engine: "icarus"` and
+        # `engine: "verilator"`, asserting the exact `TESTS=3 PASS=2 FAIL=1
+        # SKIP=0` outcome and (Verilator only) its line/toggle/branch/expr
+        # coverage percentages, plus the `options.random_seed` end-to-end
+        # pinning/echo tests (issue #423 AC #4) -- including that two runs of
+        # the same seeded request reproduce identical `tests[]` content.
         run: uv run --frozen --extra dev --extra functional-verification pytest
         env:
           GH_TOKEN: ${{ github.token }}

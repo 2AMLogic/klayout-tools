@@ -65,6 +65,20 @@ version. Not an exhaustive commit-by-commit log.
   `docs/cli/functional-verification.md` and
   `docs/design/cocotb-verification-spike.md` section 7 for the full
   contract.
+- 2026-08-03 — `klt functional-verification`: `options.random_seed` (issue
+  #423). Pinned to `Runner.test()`'s own `seed` parameter
+  (`COCOTB_RANDOM_SEED`) when given; the effective seed cocotb actually used
+  (pinned or its own generated value) is always echoed back in
+  `environment.random_seed`, read from `results.xml`'s own
+  `<property name="random_seed">` — the same reproducibility bar `klt sim`'s
+  Monte Carlo seeding and `klt lvs`'s `environment` hashes already set. CI
+  now also provisions pinned, checksum-verified Icarus Verilog/Verilator
+  builds and the pinned cocotb extra (`scripts/install-icarus-verilog.sh`,
+  `scripts/install-verilator.sh`, `pyproject.toml`'s
+  `functional-verification` extra), so the GCD worked example
+  (`docs/design/cocotb-verification-spike.md` section 6) runs for real in CI
+  against both `engine: "icarus"` and `engine: "verilator"` rather than only
+  locally.
 - 2026-08-03 — `klt synthesize`: new verb (#416, Phase 2 of Epic #391).
   Synthesizes RTL sources against a resolved sky130 standard-cell liberty
   via Yosys + bundled ABC (`read_verilog` -> `hierarchy` -> `synth` ->

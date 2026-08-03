@@ -80,3 +80,6 @@ def _print_text(report: dict) -> None:
 
     print()
     print(f"results_xml: {environment['results_xml']}")
+    random_seed = environment.get("random_seed")
+    if random_seed is not None:
+        print(f"random_seed: {random_seed}")
