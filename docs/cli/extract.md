@@ -790,6 +790,17 @@ above, and that carries no metal) — not because it lacks a label.
   `net__par` parasitic nodes never surface in `devices[]`/`nets[]` (see below)
   or on the `.SUBCKT` pin interface. The netlist stays a drop-in `klt sim`
   `netlist`.
+- **Series R between device terminals is not modelled.** The emitted resistor
+  is a shunt, not a through element: it runs from `net` to the internal
+  `net__par` node, and the *only* thing attached to `net__par` is the grounded
+  parasitic capacitor (`net --R--> net__par --C--> <substrate_net>`, per the
+  topology above). Every device terminal on the net stays wired to the original
+  `net` name, never to `net__par`, so the resistor carries no DC current and
+  never appears in series between two terminals on the same net — not between a
+  driver and its receivers, and not between two receivers. The practical
+  consequence: `--parasitics` does **not** model IR drop on a shared
+  supply/ground/bias rail, nor series resistance in a matched or
+  high-impedance path, regardless of the computed R value.
 
 ### JSON `parasitics` block
 
@@ -1021,6 +1032,14 @@ above, issue #217). The following remain out of scope:
   deliberately deferred (it needs spacing-aware neighbor geometry the
   lumped-to-ground model does not capture) and is a credible second
   increment. Without `--parasitics`, no interconnect R/C is extracted at all.
+- **Series resistance between device terminals.** `--parasitics` emits each
+  net's resistor as a shunt to a grounded capacitor, not as a through element
+  between terminals (see "Parasitic (RC) extraction" → "What it does *not*
+  do"); every device terminal stays on the original net, so the emitted R
+  never carries DC current between two terminals on the same net. It therefore
+  does not model IR drop on a shared supply/ground/bias rail, nor series
+  resistance in a matched or high-impedance path, regardless of the computed R
+  value.
 - **Parasitic-extraction accuracy calibration.** The `--parasitics`
   coefficients are now sourced and cited from each PDK's public magic
   technology file (see "Parasitic (RC) extraction"), but they remain
