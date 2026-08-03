@@ -1569,9 +1569,7 @@ def test_diff_pair_flavor_pfet_extracts_as_pfet(tmp_path, pdk_root):
     ("variant", "deck"),
     [("sky130A", "sky130"), ("gf180mcuD", "gf180mcu")],
 )
-def test_diff_pair_flavor_nfet_extracts_as_nfet(
-    tmp_path, both_pdk_root, variant, deck
-):
+def test_diff_pair_flavor_nfet_extracts_as_nfet(tmp_path, both_pdk_root, variant, deck):
     """Regression test for issue #421: the *default* `diff_pair` params
     (`flavor='nfet'`, `add_guard_ring=True`) must extract as `nfet`, not
     `pfet` -- the guard ring's own well tie previously covered the entire
