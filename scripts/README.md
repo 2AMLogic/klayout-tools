@@ -13,6 +13,8 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
+  install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
   bootstrap-gallery-blocks.py   # regenerate blocks/*/output/layout.json (incl. `signals`) from the #4 corpus
   gallery_signals.py            # `klt sim` PVT-sweep pipeline for the 7 gallery cells (imported by the above)
   ingest-canary.py               # ingest a public canary block repo (issue #62) into blocks/<slug>/output/layout.json
@@ -100,6 +102,31 @@ lambdapdk payload.
 scripts/install-yosys.sh
 scripts/fetch-sky130-liberty.sh
 PDK_ROOT="$PWD/pdks/sky130-liberty" PDK=sky130A uv run pytest tests/test_synthesize.py -k integration
+```
+
+## `install-icarus-verilog.sh` / `install-verilator.sh`
+
+CI provisioning for the future `klt functional-verification` verb (issue
+#423, Phase 3 of [Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391)):
+`.github/workflows/ci.yml`'s `test` job runs both (alongside `uv sync
+--extra functional-verification`, which pulls the pinned `cocotb` from
+`pyproject.toml`) so
+[`tests/test_functional_verification_toolchain_pins.py`](../tests/test_functional_verification_toolchain_pins.py)
+asserts the real, provisioned toolchain versions there instead of skipping.
+
+Each builds and installs a pinned, checksum-verified release from source
+(`apt-get install iverilog`/`verilator` resolve Ubuntu 24.04's stale
+`12.0-2build2`/`5.020-1` -- see
+[`docs/design/cocotb-verification-spike.md`](../docs/design/cocotb-verification-spike.md)
+for the exact versions the survey's worked example was captured against),
+same `--force`/idempotent/`$*_INSTALL_PREFIX` conventions as
+`install-yosys.sh`.
+
+```
+scripts/install-icarus-verilog.sh
+scripts/install-verilator.sh
+uv sync --extra dev --extra functional-verification
+uv run pytest tests/test_functional_verification_toolchain_pins.py
 ```
 
 ## `gallery_signals.py` / `bootstrap-gallery-blocks.py`

@@ -64,7 +64,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies (includes the klayout wheel)
-        run: uv sync --locked --extra dev
+        # --extra functional-verification pulls in the pinned cocotb (issue
+        # #423, Phase 3 of Epic #391) -- a no-op on any interpreter >=3.14
+        # per pyproject.toml's own marker (none in this job's matrix today,
+        # but the resolver handles it correctly either way, verified while
+        # developing this pin).
+        run: uv sync --locked --extra dev --extra functional-verification
 
       - name: Install ngspice
         # klt sim (docs/cli/sim.md) invokes `ngspice -b` as a subprocess --
@@ -140,6 +145,60 @@ jobs:
         # scripts/fetch-pdks.sh's lambdapdk payload.
         run: scripts/fetch-sky130-liberty.sh
 
+      - name: Install Icarus Verilog + Verilator build dependencies
+        # scripts/install-icarus-verilog.sh / scripts/install-verilator.sh
+        # build both from pinned, checksum-verified source releases (issue
+        # #423, Phase 3 of Epic #391) -- `apt-get install iverilog`/
+        # `verilator` resolve Ubuntu 24.04's `12.0-2build2`/`5.020-1`,
+        # respectively a full major version and 30 releases stale relative
+        # to the exact versions
+        # docs/design/cocotb-verification-spike.md's worked example (section
+        # 6) was captured against (verified against
+        # packages.ubuntu.com/noble). This installs the from-source builds'
+        # own prerequisites; package-manager install, same posture as the
+        # ngspice/Yosys steps above. `autoconf`/`help2man` back Verilator's
+        # build specifically (its source tarball ships `configure.ac`, not a
+        # pre-generated `configure`); `gperf` backs Icarus's own lexer
+        # generation.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison flex gperf autoconf help2man
+
+      - name: Cache pinned Icarus Verilog build
+        id: icarus-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/icarus-13.0
+          key: icarus-13.0-${{ runner.os }}-${{ hashFiles('scripts/install-icarus-verilog.sh') }}
+
+      - name: Build + install pinned Icarus Verilog (cache miss only)
+        if: steps.icarus-cache.outputs.cache-hit != 'true'
+        run: scripts/install-icarus-verilog.sh
+
+      - name: Add pinned Icarus Verilog to PATH
+        run: echo "$HOME/.cache/icarus-13.0/bin" >>"$GITHUB_PATH"
+
+      - name: Verify Icarus Verilog runs headlessly
+        run: iverilog -V
+
+      - name: Cache pinned Verilator build
+        id: verilator-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/verilator-5.050
+          key: verilator-5.050-${{ runner.os }}-${{ hashFiles('scripts/install-verilator.sh') }}
+
+      - name: Build + install pinned Verilator (cache miss only)
+        if: steps.verilator-cache.outputs.cache-hit != 'true'
+        run: scripts/install-verilator.sh
+
+      - name: Add pinned Verilator to PATH
+        run: echo "$HOME/.cache/verilator-5.050/bin" >>"$GITHUB_PATH"
+
+      - name: Verify Verilator runs headlessly
+        run: verilator --version
+
       - name: pytest
         # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`
         # integration tests (issue #62's public-repo gate + full canary
@@ -161,7 +220,17 @@ jobs:
         # monkeypatch before use (test_synthesize.py's own stubbed-Yosys
         # tests) -- these two job-level values are only ever observed by
         # code that does not already override them.
-        run: uv run --frozen --extra dev pytest
+        #
+        # The pinned cocotb/Icarus Verilog/Verilator versions provisioned
+        # above are asserted for real here by
+        # tests/test_functional_verification_toolchain_pins.py (issue #423)
+        # -- a real `cocotb`/`iverilog`/`verilator` on $PATH means those
+        # tests run their actual version-string assertion rather than
+        # skipping, so a silent apt/pip resolution drift fails this job
+        # loudly instead of quietly invalidating
+        # docs/design/cocotb-verification-spike.md's captured worked-example
+        # numbers.
+        run: uv run --frozen --extra dev --extra functional-verification pytest
         env:
           GH_TOKEN: ${{ github.token }}
           PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
