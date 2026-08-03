@@ -176,3 +176,95 @@ jobs:
             echo "::error::step summary markdown did not mention violations"
             exit 1
           }
+
+  yosys-pin-check:
+    name: Yosys pinned-build check (sky130 liberty + GCD worked example)
+    # Provisions a version-pinned, reproducible Yosys build for CI (issue
+    # #417) -- NOT `apt-get install yosys` (Ubuntu 24.04's apt package is
+    # ~30 releases stale relative to this pin; see
+    # docs/design/yosys-synthesis-spike.md §3.4). Verifies the pin two ways:
+    # sky130_fd_sc_hd liberty compatibility (dfflibmap/abc -liberty must
+    # consume the real liberty file with zero errors -- this job's exit code
+    # is that check) and the GCD worked example from the spike's §4, which
+    # must reproduce the exact same num_cells/area/num_cells_by_type
+    # (scripts/verify-yosys-pin.py). `klt synthesize` itself -- the verb
+    # wrapping this invocation -- is issue #416, not built yet, so this job
+    # invokes Yosys directly rather than through `klt`.
+    #
+    # Uses actions/setup-python rather than this repo's usual setup-uv step:
+    # this job never touches the project's own uv-managed dependency graph
+    # (no klayout/jsonschema import, no `uv sync`), it only needs a plain
+    # pip-capable CPython to install the pinned Yosys/volare CLIs into --
+    # the same "outside the project's own dependencies" posture the ngspice
+    # step above has for `klt sim`.
+    runs-on: ubuntu-latest
+    env:
+      # open_pdks build docs/design/yosys-synthesis-spike.md's worked
+      # example used (§0/§4) -- pinned so the fetched sky130_fd_sc_hd
+      # liberty matches exactly.
+      OPEN_PDKS_PIN: bdc9412b3e468c102d01b7cf6337be06ec6e9c9a
+      # sha256 of sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+      # at the pinned commit above -- defense-in-depth against a
+      # compromised/mirrored release asset, same discipline as
+      # scripts/fetch-pdks.sh / scripts/fetch-yosys.sh.
+      SKY130_FD_SC_HD_LIB_SHA256: e66aab4e0a3eef8d0b13eb5b75aaadb725ba78b032203342eb1e419a2c111baf
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned Yosys
+        # Pin + checksum verification lives in scripts/fetch-yosys.sh so it
+        # is reusable outside CI. Symlinked to a plain `yosys` name so this
+        # job's `yosys -s <script>` invocation (and a future `klt
+        # synthesize`, issue #416) don't need to know the underlying
+        # yowasp-yosys package name.
+        run: |
+          scripts/fetch-yosys.sh
+          sudo ln -sf "$(command -v yowasp-yosys)" /usr/local/bin/yosys
+
+      - name: Verify pinned Yosys version
+        run: yosys -V
+
+      - name: Install volare
+        # Fetches the pinned open_pdks sky130_fd_sc_hd liberty below -- not
+        # a project dependency (klt's own PDK discovery in
+        # src/klayout_tools/pdk.py is unrelated to how this job fetches its
+        # verification fixture).
+        run: pip install --quiet volare
+
+      - name: Cache sky130_fd_sc_hd liberty data
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare-pdk-cache
+          key: volare-sky130_fd_sc_hd-${{ env.OPEN_PDKS_PIN }}
+
+      - name: Fetch sky130_fd_sc_hd liberty (pinned open_pdks build)
+        # --include-libraries restricts the download to sky130_fd_sc_hd
+        # (+ the common tech data every library needs) rather than every
+        # sky130 standard-cell/IO/SRAM library volare's default set covers.
+        run: volare enable --pdk-root ~/.volare-pdk-cache --include-libraries sky130_fd_sc_hd "$OPEN_PDKS_PIN"
+
+      - name: Verify fetched liberty checksum
+        run: |
+          lib="$HOME/.volare-pdk-cache/volare/sky130/versions/$OPEN_PDKS_PIN/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"
+          test -f "$lib" || {
+            echo "::error::expected liberty file not found at $lib"
+            exit 1
+          }
+          actual_sha256="$(sha256sum "$lib" | awk '{print $1}')"
+          if [[ "$actual_sha256" != "$SKY130_FD_SC_HD_LIB_SHA256" ]]; then
+            echo "::error::sky130_fd_sc_hd liberty checksum mismatch (expected $SKY130_FD_SC_HD_LIB_SHA256, got $actual_sha256)"
+            exit 1
+          fi
+          echo "SKY130_FD_SC_HD_LIB=$lib" >> "$GITHUB_ENV"
+
+      - name: Run the GCD worked example against the pinned Yosys + liberty
+        # docs/design/yosys-synthesis-spike.md §4's exact invocation
+        # sequence, replayed via scripts/verify-yosys-pin.py -- asserts
+        # num_cells/area/sequential_area/num_cells_by_type match the spike's
+        # findings exactly (no documented drift as of this pin: identical to
+        # the spike's local Yosys 0.67+post build, cell-for-cell).
+        run: python3 scripts/verify-yosys-pin.py "$SKY130_FD_SC_HD_LIB"

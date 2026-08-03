@@ -313,6 +313,26 @@ the author's machine." Checked directly:
   evidence of CI-readiness, and this survey deliberately does not claim it
   is.
 
+**Resolved by issue #417** (path (a) above): CI now installs
+[`yowasp-yosys`](https://github.com/YoWASP/yosys) — a WASM-compiled,
+platform-independent PyPI wheel redistribution of the official, tagged
+Yosys `0.67` release — via `scripts/fetch-yosys.sh` (exact version + sha256
+pin, same "pin + checksum, fail closed" discipline as `scripts/fetch-pdks.sh`).
+`.github/workflows/ci.yml`'s `yosys-pin-check` job then fetches the same
+open_pdks commit this spike used (`bdc9412b3e468c102d01b7cf6337be06ec6e9c9a`,
+restricted to just the `sky130_fd_sc_hd` library via `volare enable
+--include-libraries`) and replays this section's exact worked example
+through `scripts/verify-yosys-pin.py`. **Result: zero drift** — the pinned
+CI build (`Yosys 0.67`, git sha1 `2d1509d1b`, the `v0.67` release tag)
+reproduces §4's `num_cells`/`area`/`sequential_area`/`num_cells_by_type`
+output byte-for-byte against the spike's local Homebrew `0.67+post` build
+(git sha1 `b8e7da6f4`, a later dev snapshot past that same tag) — no
+tolerance needed. `dfflibmap`/`abc -liberty` also consumed the fetched
+liberty with zero errors/warnings beyond the same expected multi-output-cell
+notices §3.2 already documented, confirming liberty compatibility against
+the pinned version too. `klt synthesize` itself (the verb wrapping this
+invocation) remains issue #416's scope, not built as of this pin.
+
 ### 3.5 Known version-to-version risk for Phase 2 stability
 
 Flagging one concrete behavioral difference discovered live rather than
@@ -644,7 +664,7 @@ design.
 | Invocation surface | Generate a `.ys` script per run (`read_verilog` → `hierarchy` → `synth` → `dfflibmap` → `abc -liberty` → `clean` → `stat`/`write_*`) and invoke `yosys -s <script>`. Not the `-S` shortcut (no liberty mapping) and not an ever-growing `-p` string. |
 | Output parsing | `stat -liberty <lib> -json -top <top>` captured via `tee -q -o <path>` for `cell_count`/`area`/`sequential_area`/`num_cells_by_type` — a purpose-built, already-correct summary. Treat `write_verilog`'s mapped netlist (or `write_json`'s full design JSON, if a future consumer needs full connectivity) as a referenced artifact, never re-derived-from for metrics. |
 | Licensing | Yosys core: ISC (permissive). Bundled ABC: UC Berkeley permissive academic license. `sky130_fd_sc_hd` liberty: Apache-2.0. No copyleft anywhere in this stack — fully compatible with wrapping behind `klt`'s MIT license. |
-| Version/CI | `0.67+post` used here (Homebrew, current). **CI reproducibility is an open gap**: Ubuntu 24.04's `apt` `yosys` is `0.33-5build2`, ~30 releases stale — Phase 2 must pin a real version (prebuilt release or a from-source build), not assume `apt-get install yosys` reproduces this. |
+| Version/CI | `0.67+post` used here (Homebrew, current). CI reproducibility — **resolved by issue #417**: CI pins `yowasp-yosys` (a prebuilt PyPI wheel of the tagged `0.67` release) via `scripts/fetch-yosys.sh`, not `apt-get install yosys` (Ubuntu 24.04's `apt` package is `0.33-5build2`, ~30 releases stale). See §3.4's addendum — zero drift found reproducing this section's worked example on the pinned build. |
 | Synthesis-contract mapping | `cell_count`/`area` map directly and reliably to `stat -json`'s `num_cells`/`area`. **`timing summary` does not** — Yosys's own `sta`/`ltp` passes could not produce a usable result against the liberty-mapped netlist in this spike; recommend #399 either omit timing at Phase 2 or defer it explicitly to Phase 4's OpenROAD/OpenSTA invocation. |
 | PDK input | `sky130_fd_sc_hd` liberty is **not** in this repo's fetched lambdapdk payload; it comes from a volare/open_pdks install via the same `find_pdk()`/`libs_ref` discovery `klt pdk`/`klt cells` already use — no new PDK-resolution mechanism needed for Phase 2. |
 
