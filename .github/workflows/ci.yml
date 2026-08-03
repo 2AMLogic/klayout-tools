@@ -92,6 +92,54 @@ jobs:
         # silently pass) if this step is ever unavailable, but CI always has it.
         run: scripts/fetch-cell-netlists.sh
 
+      - name: Install Yosys build dependencies
+        # scripts/install-yosys.sh builds Yosys from a pinned, checksum-
+        # verified source release (issue #417) -- `apt-get install yosys`
+        # would resolve Ubuntu 24.04's 0.33-5build2, ~30 releases stale
+        # relative to the version docs/design/yosys-synthesis-spike.md's
+        # worked example used (survey section 3.4). This installs the
+        # from-source build's own prerequisites (CMake >= 3.28 already
+        # ships on ubuntu-latest/noble); package-manager install, same
+        # posture as the ngspice step above.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
+            libffi-dev pkg-config zlib1g-dev
+
+      - name: Cache pinned Yosys build
+        id: yosys-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/yosys-0.67
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh') }}
+
+      - name: Build + install pinned Yosys (cache miss only)
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        run: scripts/install-yosys.sh
+
+      - name: Add pinned Yosys to PATH
+        run: echo "$HOME/.cache/yosys-0.67/bin" >>"$GITHUB_PATH"
+
+      - name: Verify Yosys runs headlessly
+        run: yosys -V
+
+      - name: Cache pinned sky130_fd_sc_hd liberty
+        id: sky130-liberty-cache
+        uses: actions/cache@v4
+        with:
+          path: pdks/sky130-liberty
+          key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh') }}
+
+      - name: Fetch sky130_fd_sc_hd liberty (tt_025C_1v80 corner)
+        # A real, Yosys-parseable Liberty timing view for `klt synthesize`'s
+        # GCD worked example (yosys-synthesis-spike.md section 4) -- pinned
+        # to the exact volare/open_pdks build the spike itself used, one
+        # file extracted (not the whole ~166 MB release asset). See the
+        # script's header comment for why this can't come from
+        # scripts/fetch-pdks.sh's lambdapdk payload.
+        run: scripts/fetch-sky130-liberty.sh
+
       - name: pytest
         # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`
         # integration tests (issue #62's public-repo gate + full canary
@@ -100,9 +148,24 @@ jobs:
         # needs at ingest time: it can read public repos anywhere, but a
         # private repo in a different org (e.g. 2AMLogic/gf180-trng) 404s,
         # which is the fail-closed "refuse" behavior those tests assert.
+        #
+        # PDK_ROOT/PDK point at the sky130_fd_sc_hd liberty fetched above --
+        # this is what lets
+        # tests/test_synthesize.py::test_integration_real_yosys_gcd_worked_example
+        # (previously skipped in CI, per that test module's own docstring)
+        # run for real here: a real pinned Yosys binary on $PATH plus a
+        # real sky130_fd_sc_hd liberty resolving via `list_pdks()`. Every
+        # other test that resolves a PDK either isolates PDK_ROOT/PDK
+        # itself (autouse fixtures across test_gen.py/test_gen_compose.py/
+        # test_extract.py/test_pdk.py) or sets them explicitly via
+        # monkeypatch before use (test_synthesize.py's own stubbed-Yosys
+        # tests) -- these two job-level values are only ever observed by
+        # code that does not already override them.
         run: uv run --frozen --extra dev pytest
         env:
           GH_TOKEN: ${{ github.token }}
+          PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
+          PDK: sky130A
 
       - name: klt kb validate
         # Belt-and-suspenders alongside tests/test_kb.py (which calls the same
