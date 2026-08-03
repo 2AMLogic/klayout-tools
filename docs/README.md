@@ -36,6 +36,7 @@ docs/
     sim.md
     socket-check.md
     stats.md
+    synthesize.md
     trajectory.md
   design/                # design notes, spikes, and upstream surveys
     co-simulation-approach-survey.md
