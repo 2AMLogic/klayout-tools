@@ -1117,6 +1117,48 @@ R2 VDD $2 1k
     assert with_hint["mismatches"] == []
 
 
+def test_same_nets_hint_rejected_pairing_is_reported(tmp_path):
+    """Issue #499: a `hints.same_nets` pair the comparer refuses (the two
+    nets are not topologically equivalent, unlike the symmetric-swap case
+    above) must not be silently dropped -- it is reported as one
+    `hints.rejected`/`error` `mismatches[]` entry naming both sides exactly
+    as declared."""
+    reference_spice = """
+.subckt cell VDD GND
+R1 VDD P1 1k
+R2 GND P2 2k
+.ends
+"""
+    layout_spice = """
+.subckt cell VDD GND
+R1 VDD $1 1k
+R2 GND $2 2k
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+
+    # $1 sits on the VDD/1k leg; forcing it equal to P2 (the GND/2k leg) is
+    # not a valid isomorphism -- the comparer must refuse this assertion.
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "cell"},
+            "reference": {"netlist": reference_path, "top": "cell"},
+            "hints": {"same_nets": [["$1", "P2"]]},
+        },
+    )
+    response = run_lvs(request_path)
+
+    rejected = [m for m in response["mismatches"] if m["category"] == "hints.rejected"]
+    assert len(rejected) == 1
+    (entry,) = rejected
+    assert entry["severity"] == "error"
+    assert entry["net"] == {"layout": "$1", "reference": "P2"}
+    assert response["category_counts"]["hints.rejected"] == 1
+    assert response["status"] == "mismatch"
+
+
 def test_same_nets_hint_unknown_layout_net_raises(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)

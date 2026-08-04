@@ -527,8 +527,8 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `device.combine_incomplete`, `pin.unmatched`, `topology`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `device.combine_incomplete`, `pin.unmatched`, `topology`, `hints.rejected`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
@@ -701,6 +701,24 @@ not a clean run), `klt lvs` reports one generic `severity: "error"`,
 `side: "both"` `topology` entry rather than silently reporting
 `status: "match"` — see this module's docstring on the "`compare()` is
 always authoritative" invariant.
+
+#### `hints.rejected`: a declared `hints.same_nets` pairing the comparer refused
+
+Every `hints.same_nets` entry is passed to `NetlistComparer.same_nets(...,
+must_match=True)` — a hard assertion, not a suggestion. If the comparer does
+not end up confirming a declared pair as an actual net match, the caller's
+assertion was refused, and `klt lvs` reports that refusal as one
+`category: "hints.rejected"`, `severity: "error"`, `side: "both"` entry per
+unhonored pair, `net: {"layout": <layout net name>, "reference": <reference
+net name>}` naming both sides exactly as declared in the request. This is
+detected structurally — after `compare()` runs, each declared pair is checked
+against the comparer's own record of every net pairing it actually confirmed
+— not by parsing `NetlistComparer`'s own log text (which is version-dependent
+and, per this repo's own testing, sometimes empty; see the `description`
+field's own contract above). A run with every declared `hints.same_nets` pair
+honored produces zero `hints.rejected` entries. `hints.equivalent_pins` has no
+comparable "rejected" outcome (it declares swappable pins, not an assertion
+about a specific pairing) and never produces this category.
 
 #### Net-merge/net-split classification (a documented simplification)
 

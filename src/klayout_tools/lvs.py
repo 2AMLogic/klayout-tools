@@ -125,6 +125,10 @@ CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 CATEGORY_TOPOLOGY = "topology"
+#: Issue #499: a `hints.same_nets` pairing the caller asserted with
+#: `must_match=True` that the comparer refused to confirm -- see
+#: `_build_mismatches`'s `same_nets_hints` handling.
+CATEGORY_HINTS_REJECTED = "hints.rejected"
 
 #: Substring KLayout's own ``Netlist.combine_devices()`` internal-consistency
 #: ``RuntimeError`` always carries (issue #466) -- e.g. "Internal error:
@@ -411,7 +415,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         _purge_emptied_nets(reference_netlist)
 
     if engine == "klayout":
-        logger = _make_compare_logger()
+        logger = _make_compare_logger(layout_circuit, reference_circuit)
         comparer = kdb.NetlistComparer(logger)
         # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
         # `layout_circuit`/`reference_circuit` are each netlist's *sole*
@@ -423,7 +427,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         # circuits (issue #231). Safe unconditionally: there is no other
         # circuit either one could be confused with post-pruning.
         comparer.same_circuits(layout_circuit, reference_circuit)
-        _apply_hints(
+        same_nets_hints = _apply_hints(
             comparer, request.get("hints") or {}, layout_circuit, reference_circuit
         )
 
@@ -432,7 +436,12 @@ def run_lvs(request: str) -> dict[str, Any]:
         # would pass a second, redundant logger reference).
         compare_result = comparer.compare(layout_netlist, reference_netlist)
 
-        mismatches = _build_mismatches(logger, layout_netlist, reference_netlist)
+        mismatches = _build_mismatches(
+            logger,
+            layout_netlist,
+            reference_netlist,
+            same_nets_hints=same_nets_hints,
+        )
         if not compare_result and not mismatches:
             # Safety net for the correctness invariant this module's docstring
             # states: `compare()` is always authoritative. If the engine says
@@ -989,7 +998,7 @@ def _apply_hints(
     hints: dict[str, Any],
     layout_circuit: kdb.Circuit,
     reference_circuit: kdb.Circuit,
-) -> None:
+) -> list[tuple[str, str]]:
     """Wire ``request.hints`` into the comparer, per spike section 2b.
 
     ``same_nets``: ``[[layout_net_name, reference_net_name], ...]`` -- ties a
@@ -1005,7 +1014,18 @@ def _apply_hints(
     the second netlist passed to ``compare()``, which is always the
     reference netlist in this module's ``compare(layout, reference)`` call
     order -- see ``run_lvs``).
+
+    Returns the declared ``same_nets`` pairs as ``(layout_net.expanded_name(),
+    reference_net.expanded_name())`` tuples (issue #499) -- the caller passes
+    this to :func:`_build_mismatches` so it can tell, after ``compare()``
+    runs, which of these hard assertions the comparer actually confirmed
+    (``must_match=True`` is passed unconditionally above, so a hint the
+    comparer disagrees with is a real finding, not a no-op). Deliberately
+    excludes ``equivalent_pins``: it declares swappable pins, not an
+    assertion about a specific pairing, so it has no "rejected" outcome to
+    detect.
     """
+    same_nets_declared: list[tuple[str, str]] = []
     same_nets = hints.get("same_nets") or []
     for entry in same_nets:
         if not isinstance(entry, list) or len(entry) != 2:
@@ -1022,6 +1042,7 @@ def _apply_hints(
                 f"hints.same_nets: reference net '{reference_name}' not found"
             )
         comparer.same_nets(layout_circuit, reference_circuit, net_a, net_b, True)
+        same_nets_declared.append((net_a.expanded_name(), net_b.expanded_name()))
 
     equivalent_pins = hints.get("equivalent_pins") or {}
     for subcircuit_name, pin_groups in equivalent_pins.items():
@@ -1043,6 +1064,8 @@ def _apply_hints(
                     )
                 pin_ids.append(pin.id())
             comparer.equivalent_pins(target_circuit, pin_ids)
+
+    return same_nets_declared
 
 
 # --------------------------------------------------------------------------- #
@@ -1108,7 +1131,9 @@ def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     )
 
 
-def _make_compare_logger() -> Any:
+def _make_compare_logger(
+    layout_circuit: Any | None = None, reference_circuit: Any | None = None
+) -> Any:
     """Build a ``klayout.db.GenericNetlistCompareLogger`` subclass instance
     that captures every compare event into plain Python records for
     post-processing into the documented ``mismatches[]`` shape.
@@ -1118,6 +1143,20 @@ def _make_compare_logger() -> Any:
     ``klayout`` module to already be imported -- this module keeps that
     import lazy, matching ``extract.py``'s discipline of not paying that
     cost for ``klt --version``/argument parsing.
+
+    ``layout_circuit``/``reference_circuit`` (issue #499, optional -- the
+    ``_FakeLogger`` classification unit tests construct their own stand-in
+    instead of calling this factory, so no caller of *this* function omits
+    them in practice) are the same top-circuit objects ``run_lvs`` passes to
+    ``NetlistComparer.same_circuits``/``compare``. ``begin_circuit`` compares
+    each circuit pair it is handed against these two by identity to record
+    ``top_scope`` -- the ``scope`` counter value in effect while the *top*
+    circuit pair is being compared (empirically NOT scope 1 in general:
+    ``NetlistComparer`` visits subcircuits before their parent, so a
+    hierarchical design's top circuit is typically one of the *last*
+    ``begin_circuit`` calls). ``_build_mismatches`` needs this to turn a
+    declared ``hints.same_nets`` pair's *names* back into the exact
+    ``_NetKey`` the top circuit's own compare events used.
     """
     import klayout.db as kdb
 
@@ -1163,12 +1202,24 @@ def _make_compare_logger() -> Any:
             self.matched_nets = 0
             self.matched_devices = 0
             self.matched_pins = 0
+            #: The ``scope`` value in effect while the top circuit pair is
+            #: being compared, or ``None`` if that pair was never handed to
+            #: `begin_circuit` (e.g. the top circuits could not be compared
+            #: at all). See this factory's docstring.
+            self.top_scope: int | None = None
 
         def _net_key(self, net: Any) -> _NetKey | None:
             return None if net is None else (self.scope, net.expanded_name())
 
         def begin_circuit(self, a: Any, b: Any) -> None:
             self.scope += 1
+            if (
+                layout_circuit is not None
+                and reference_circuit is not None
+                and a is layout_circuit
+                and b is reference_circuit
+            ):
+                self.top_scope = self.scope
 
         def match_nets(self, a: Any, b: Any) -> None:
             self.matched_nets += 1
@@ -1386,6 +1437,8 @@ def _build_mismatches(
     logger: Any,
     layout_netlist: Any | None = None,
     reference_netlist: Any | None = None,
+    *,
+    same_nets_hints: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     mismatches: list[dict[str, Any]] = []
 
@@ -1551,6 +1604,32 @@ def _build_mismatches(
                 },
             )
         )
+
+    # Issue #499: a `hints.same_nets` pairing is a hard assertion --
+    # `_apply_hints` calls `comparer.same_nets(..., must_match=True)` for
+    # every declared pair. If the comparer did not end up confirming that
+    # pair as a match, the caller's assertion was refused, and that
+    # disagreement is reported here rather than silently dropped. Detected
+    # structurally (declared pair vs. `logger.matched_net_keys`, both keyed
+    # by the top circuit's `top_scope`), not by parsing the comparer's own
+    # `log_entry` text -- this field's own contract (docs/cli/lvs.md,
+    # "mismatches[].description") requires a curated description, never raw
+    # `NetlistComparer` log text.
+    top_scope = getattr(logger, "top_scope", None)
+    matched_net_keys = set(getattr(logger, "matched_net_keys", None) or ())
+    for layout_name, reference_name in same_nets_hints or ():
+        pair = ((top_scope, layout_name), (top_scope, reference_name))
+        if top_scope is None or pair not in matched_net_keys:
+            mismatches.append(
+                _mismatch(
+                    CATEGORY_HINTS_REJECTED,
+                    "error",
+                    "hints.same_nets declared this pairing, but the "
+                    "comparer did not confirm it as a topological match",
+                    "both",
+                    net={"layout": layout_name, "reference": reference_name},
+                )
+            )
 
     mismatches.sort(key=_sort_key)
     return mismatches
