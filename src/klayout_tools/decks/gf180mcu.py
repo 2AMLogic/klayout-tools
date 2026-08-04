@@ -91,6 +91,22 @@ literally reads ``"Global Foundries 0.18um MCU CMOS, 2fF MiM + 1k high
 sheet rho poly"`` for this built variant (confirming ``2.0`` fF/um² -- not
 ``1.0``/``1.5`` -- is the one this specific PDK build ships).
 
+``area_cap_f_um2``/``perim_cap_f_um`` (issue #512) are refined from the LVS
+deck's own ``2.0e-15`` F/um² above to the *simulation* model's own
+two-term law, ``c_c0 = c_cox * c_AREA + c_capsw * c_PERI``, transcribed from
+the same ``volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b``
+fetch's ``libs.tech/ngspice/sm141064.ngspice``, ``.subckt cap_mim_2f0fF``
+(the "2.0fF/um² MiM" variant matching the LVS deck's own default cited
+above): ``c_cox = 1.99e-3`` F/m² = ``1.99e-15`` F/um² (the area term --
+0.5% below the LVS deck's rounded ``2.0e-15`` nominal-density label) and
+``c_capsw = 2.383e-10`` F/m = ``2.383e-16`` F/um (the previously-unmodelled
+perimeter/fringe term). Both device-recognition *geometry* (this deck's own
+job) and the simulation model's *coefficients* trace to the same PDK
+snapshot, so using the model card's own numbers here -- rather than the
+LVS-extraction script's separately-rounded restatement of them -- keeps
+``klt extract``'s reported ``c_f`` consistent with what the same drawn
+geometry simulates as.
+
 Eight rules below approximate the official DRM rule in some way (each is
 called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
@@ -605,6 +621,12 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #     extract_devices(capacitor('cap_mim_2f0_m4m5_noshield', 2.0e-15, MIMCap),
 #                     { 'P1' => mimtm_virtual, 'P2' => fuse_cap })
 #
+# `area_cap_f_um2`/`perim_cap_f_um` below use the more precise two-term
+# `sm141064.ngspice` simulation-model coefficients rather than the LVS
+# script's own rounded `2.0e-15` single-term call shown above -- see the
+# module docstring's provenance note (issue #512) for the exact source and
+# why both terms come from that file instead.
+#
 # for `METAL_LEVEL = '5LM'` (this curated deck's own Metal1-Metal5 stack --
 # see the DRC deck's own "10.4 MIM Capacitor" note above on why only Option B
 # applies here) and the LVS deck's own default `MIM_CAP = '2'` (2.0fF/um^2 --
@@ -815,7 +837,11 @@ EXTRACTION_DECK = ExtractionDeck(
             bottom_plate=(46, 0),  # Metal4 (topmin1_metal for the 5LM stack)
             # DRM 10.4.2 footnote 1 / MIMTM.1's "virtual bottom plate":
             bottom_plate_oversize_um=1.06,
-            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+            # sm141064.ngspice's cap_mim_2f0fF: c_cox=1.99e-3 F/m^2 (area) /
+            # c_capsw=2.383e-10 F/m (perimeter/fringe), see the module
+            # docstring's provenance note (issue #512) above.
+            area_cap_f_um2=1.99e-15,
+            perim_cap_f_um=2.383e-16,
             # Top-plate connectivity (issue #314): `main.drc`'s own
             # `top_via = via4` / `top_metal = metal5` confirms Via4 lands
             # directly on FuseTop and connects up to Metal5 for this 5LM

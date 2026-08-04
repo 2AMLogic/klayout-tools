@@ -582,10 +582,29 @@ class CapacitorDevice:
     ``area_cap_f_um2`` is the device's capacitance per square micrometre of
     plate *overlap* area, in **Farads**. KLayout's
     ``kdb.DeviceExtractorCapacitor`` computes ``C = A * area_cap`` from the
-    two plates' actual geometric overlap, so **this number is the whole
-    accuracy of the extracted capacitance** -- exactly the role
+    two plates' actual geometric overlap -- exactly the role
     ``sheet_rho_ohm_sq`` plays for a resistor device (#222). Every deck that
     sets it must cite the PDK/DRM source it came from inline.
+
+    ``perim_cap_f_um`` (issue #512) is an optional second coefficient: the
+    device's *fringe/sidewall* capacitance per micrometre of plate-overlap
+    *perimeter*, in Farads, added on top of the area term so the reported
+    ``c_f`` becomes ``area_cap_f_um2 * A + perim_cap_f_um * P`` -- ``A``/``P``
+    are the same overlap area/perimeter KLayout's own
+    ``DeviceClassCapacitor`` already computes and exposes as its ``A``/``P``
+    device parameters (``extract.py``'s ``_describe_devices`` reads both back
+    and applies this correction after extraction; KLayout's
+    ``DeviceExtractorCapacitor`` constructor itself takes only one
+    coefficient, so this is *not* threaded into that call). Defaults to
+    ``0.0``, which reproduces ``C = area_cap_f_um2 * A`` only -- today's
+    behaviour, bit-for-bit -- for every deck that does not set it. A MiM
+    capacitor's real model is two-term (area *and* perimeter/fringe), the
+    same shape :class:`LayerRC` below already uses for
+    ``--parasitics``'s substrate capacitance (``cap_area_ff_um2``/
+    ``cap_perim_ff_um``); a deck that transcribes its PDK's own two-term MiM
+    model card (e.g. gf180mcu's/sky130's own SPICE ``.model`` cards'
+    ``c_cox``/``c_capsw`` or ``camimc``/``cpmimc`` coefficients) should set
+    this rather than leave the perimeter term silently dropped.
 
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and one of the values :attr:`ExtractionDeck.device_classes`
@@ -617,6 +636,7 @@ class CapacitorDevice:
     bottom_plate_oversize_um: float = 0.0
     top_plate_via: tuple[int, int] | None = None
     top_plate_via_metal: tuple[int, int] | None = None
+    perim_cap_f_um: float = 0.0
 
 
 @dataclass(frozen=True)

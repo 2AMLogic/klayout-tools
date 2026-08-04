@@ -29,7 +29,9 @@ from klayout_tools.cli import main
 from klayout_tools.decks import ExtractionDeck, get_extraction_deck
 from klayout_tools.extract import (
     ExtractError,
+    _describe_devices,
     _exclude_capacitor_top_via_overlap,
+    _extract_netlist,
     _n_squares,
     _region,
     run_extract,
@@ -1090,11 +1092,13 @@ def _make_sky130_mim_layout(*, met4: bool = False) -> kdb.Layout:
 
 def test_gf180mcu_synthetic_mim_extracts_one_capacitor_device(tmp_path):
     """The synthetic marked FuseTop-over-Metal4 layout extracts exactly one
-    `cap_mim_2f0_m4m5_noshield` device: `C = A * area_cap` for the 10x10um
-    `FuseTop` top-plate area against the deck's cited 2.0fF/um^2 coefficient
-    (100um^2 * 2.0e-15 F/um^2 = 2.0e-13 F), independent of the much larger
-    `Metal4` bottom-plate conductor it sits over (clipped to the "virtual
-    bottom plate" by the 1.06um `FuseTop` oversize -- see `gf180mcu.py`)."""
+    `cap_mim_2f0_m4m5_noshield` device: `C = A * area_cap + P * perim_cap`
+    for the 10x10um `FuseTop` top-plate area/perimeter against the deck's
+    cited 1.99fF/um^2 / 0.2383fF/um coefficients (100um^2 * 1.99e-15 F/um^2
+    + 40um * 2.383e-16 F/um = 2.08532e-13 F, issue #512), independent of the
+    much larger `Metal4` bottom-plate conductor it sits over (clipped to the
+    "virtual bottom plate" by the 1.06um `FuseTop` oversize -- see
+    `gf180mcu.py`)."""
     path = _write_gds(_make_gf180mcu_mim_layout(), tmp_path / "mim.gds")
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "mim.spice"))
 
@@ -1102,8 +1106,9 @@ def test_gf180mcu_synthetic_mim_extracts_one_capacitor_device(tmp_path):
 
     (device,) = report["devices"]
     assert device["class"] == "cap_mim_2f0_m4m5_noshield"
-    assert device["params"]["c_f"] == pytest.approx(2.0e-13)
+    assert device["params"]["c_f"] == pytest.approx(2.08532e-13)
     assert device["params"]["area_um2"] == pytest.approx(100.0)
+    assert device["params"]["perimeter_um"] == pytest.approx(40.0)
 
 
 def test_gf180mcu_unmarked_metal4_fusetop_overlap_is_not_a_capacitor(tmp_path):
@@ -1205,7 +1210,7 @@ def test_gf180mcu_capacitor_bottom_plate_connects_to_routed_metal_net(tmp_path):
 
     assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
     (device,) = report["devices"]
-    assert device["params"]["c_f"] == pytest.approx(2.0e-13)
+    assert device["params"]["c_f"] == pytest.approx(2.08532e-13)
     assert device["params"]["area_um2"] == pytest.approx(100.0)
     assert device["nets"]["a"] == "VBOT"
     assert device["nets"]["b"].startswith("$")
@@ -1229,7 +1234,7 @@ def test_gf180mcu_capacitor_top_plate_connects_to_routed_metal_net(tmp_path):
 
     assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
     (device,) = report["devices"]
-    assert device["params"]["c_f"] == pytest.approx(2.0e-13)
+    assert device["params"]["c_f"] == pytest.approx(2.08532e-13)
     assert device["params"]["area_um2"] == pytest.approx(100.0)
     assert device["nets"]["b"] == "VTOP"
     assert device["nets"]["a"].startswith("$")
@@ -1361,11 +1366,12 @@ def test_sky130_synthetic_mim_extracts_one_capacitor_device(
     tmp_path, met4, expected_class
 ):
     """Both of sky130's curated MiM stacks (met3's `capm`, met4's `capm2`)
-    extract exactly one capacitor device each: `C = A * area_cap` for the
-    10x5um top-plate mark's own area against the deck's cited 2.0fF/um^2
-    coefficient (50um^2 * 2.0e-15 F/um^2 = 1.0e-13 F) -- no "virtual bottom
-    plate" derivation needed (see `sky130.py`'s provenance note), so the
-    extracted area is exactly the drawn mark's own area."""
+    extract exactly one capacitor device each: `C = A * area_cap + P *
+    perim_cap` for the 10x5um top-plate mark's own area/perimeter against
+    the deck's cited 2.0fF/um^2 / 0.19fF/um coefficients (50um^2 * 2.0e-15
+    F/um^2 + 30um * 1.9e-16 F/um = 1.057e-13 F, issue #512) -- no "virtual
+    bottom plate" derivation needed (see `sky130.py`'s provenance note), so
+    the extracted area/perimeter are exactly the drawn mark's own."""
     path = _write_gds(_make_sky130_mim_layout(met4=met4), tmp_path / "mim.gds")
     report = run_extract(path, "sky130", output=str(tmp_path / "mim.spice"))
 
@@ -1373,8 +1379,120 @@ def test_sky130_synthetic_mim_extracts_one_capacitor_device(
 
     (device,) = report["devices"]
     assert device["class"] == expected_class
-    assert device["params"]["c_f"] == pytest.approx(1.0e-13)
+    assert device["params"]["c_f"] == pytest.approx(1.057e-13)
     assert device["params"]["area_um2"] == pytest.approx(50.0)
+    assert device["params"]["perimeter_um"] == pytest.approx(30.0)
+
+
+def _make_gf180mcu_mim_square_layout(side_um: float) -> kdb.Layout:
+    """A `side_um`x`side_um` `FuseTop`-over-`Metal4` MiM cap, marked with
+    `CAP_MK`/`MIM_L_MK` and drawn well clear of `Metal4`'s own edges so the
+    "virtual bottom plate" derivation clips to `FuseTop`'s own footprint --
+    the parametrised sibling of `_make_gf180mcu_mim_layout`'s fixed 10x10um
+    case, used by `test_gf180mcu_mim_perimeter_correction_matches_pdk_model_card`
+    (issue #512) to exercise several plate sizes against the PDK's own
+    two-term `c_cox`/`c_capsw` law."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    margin = side_um + 20.0
+    draw(46, 0, _box_um(-margin, -margin, margin, margin))  # Metal4
+    draw(75, 0, _box_um(0, 0, side_um, side_um))  # FuseTop
+    mark_margin = 5.0
+    draw(
+        117,
+        5,
+        _box_um(
+            -mark_margin, -mark_margin, side_um + mark_margin, side_um + mark_margin
+        ),
+    )  # CAP_MK
+    draw(
+        117,
+        10,
+        _box_um(
+            -mark_margin, -mark_margin, side_um + mark_margin, side_um + mark_margin
+        ),
+    )  # MIM_L_MK
+
+    return layout
+
+
+@pytest.mark.parametrize("side_um", [2.7, 5.0, 10.0, 20.0])
+def test_gf180mcu_mim_perimeter_correction_matches_pdk_model_card(tmp_path, side_um):
+    """Issue #512: for each of the issue's own cited plate sizes, the
+    corrected `c_f` matches `sm141064.ngspice`'s own two-term
+    `c_cox*c_AREA + c_capsw*c_PERI` law -- evaluated here with the deck's
+    transcribed coefficients (1.99e-15 F/um^2 area, 2.383e-16 F/um
+    perimeter) against the drawn square's own area/perimeter -- to a tight
+    tolerance, not just the pre-#512 area-only value."""
+    path = _write_gds(
+        _make_gf180mcu_mim_square_layout(side_um), tmp_path / f"mim_{side_um}.gds"
+    )
+    report = run_extract(
+        path, "gf180mcu", output=str(tmp_path / f"mim_{side_um}.spice")
+    )
+
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    (device,) = report["devices"]
+
+    area_um2 = side_um * side_um
+    perimeter_um = 4.0 * side_um
+    expected_c_f = 1.99e-15 * area_um2 + 2.383e-16 * perimeter_um
+
+    assert device["params"]["area_um2"] == pytest.approx(area_um2)
+    assert device["params"]["perimeter_um"] == pytest.approx(perimeter_um)
+    assert device["params"]["c_f"] == pytest.approx(expected_c_f, rel=1e-6)
+    # The pre-#512 area-only value is a systematic undercount -- confirms
+    # the correction actually changed the reported number, not a no-op.
+    assert device["params"]["c_f"] > 1.99e-15 * area_um2
+
+
+def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
+    """`CapacitorDevice.perim_cap_f_um` defaults to `0.0` (issue #512): a
+    deck entry that does not set it (mirroring every deck's own field before
+    this feature existed) still reports the plate's `perimeter_um` (issue
+    #512's other half -- `P` is now always read back), but `c_f` stays
+    exactly `area_cap_f_um2 * A` -- bit-for-bit what `klt extract` reported
+    before this feature existed, not silently corrected by a coefficient the
+    deck never opted into."""
+    deck = get_extraction_deck("gf180mcu")
+    (mim,) = deck.capacitors
+    assert mim.perim_cap_f_um != 0.0  # the curated deck itself now opts in
+
+    uncorrected_deck = dataclasses.replace(
+        deck,
+        capacitors=(
+            dataclasses.replace(
+                mim,
+                area_cap_f_um2=2.0e-15,
+                perim_cap_f_um=0.0,  # the pre-#512 default
+            ),
+        ),
+    )
+
+    layout = _make_gf180mcu_mim_layout()
+    (
+        netlist,
+        _warnings,
+        _parasitic_nets,
+        _black_box_regions,
+        _dummy_devices_dropped,
+        _unmodelled_poly,
+    ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
+    circuit = netlist.circuit_by_name(layout.top_cell().name)
+    capacitor_perim_cap_f_um = {
+        capacitor.name: capacitor.perim_cap_f_um
+        for capacitor in uncorrected_deck.capacitors
+    }
+    devices, _device_counts = _describe_devices(circuit, capacitor_perim_cap_f_um)
+
+    (device,) = devices
+    assert device["params"]["c_f"] == pytest.approx(2.0e-13)  # 100um^2 * 2.0e-15
+    assert device["params"]["area_um2"] == pytest.approx(100.0)
+    assert device["params"]["perimeter_um"] == pytest.approx(40.0)
 
 
 def test_sky130_unmarked_metal_has_no_capacitor_device(tmp_path):
