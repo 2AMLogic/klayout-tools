@@ -9,18 +9,21 @@ Two tiers:
   actual record formats, and the forward-compat GDS-found upgrade path
   against a synthetic corpus-style GDS.
 - **Integration tests** (`@pytest.mark.skipif`, real network + `gh`):
-  the actual public-repo gate against a real private canary
-  (`2AMLogic/gf180-trng`) and a full end-to-end ingest of both real public
-  canaries (`2AMLogic/gf180-bandgap`, `2AMLogic/sky130-bandgap`). Skipped
-  (with a clear reason, never silently passing) when `gh`/network access
-  isn't available -- mirrors `tests/test_gallery_signals.py`'s
-  `HAVE_NGSPICE` skip convention.
+  the actual public-repo gate against a real private canary, dynamically
+  selected at test time from `blocks/README.md`'s "still-private" canary
+  list (falling back to a `pytest.skip` -- not a false pass or a failure --
+  if every candidate has since gone public), and a full end-to-end ingest
+  of both real public canaries (`2AMLogic/gf180-bandgap`,
+  `2AMLogic/sky130-bandgap`). Skipped (with a clear reason, never silently
+  passing) when `gh`/network access isn't available -- mirrors
+  `tests/test_gallery_signals.py`'s `HAVE_NGSPICE` skip convention.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -370,12 +373,56 @@ def test_no_gds_yields_in_design_status(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+# Candidates for the "real private canary" integration fixture below, per
+# `blocks/README.md`'s "still-private canaries" list. Deliberately not a
+# single hardcoded repo: any one of these graduates to public on its own
+# lifecycle schedule (that is the point of the pipeline), so this test picks
+# whichever candidate is *actually* still private right now rather than
+# hard-depending on one repo's mutable visibility state (see #489).
+_PRIVATE_CANARY_CANDIDATES = (
+    "2AMLogic/gf180-trng",
+    "2AMLogic/gf180-sar-adc",
+    "2AMLogic/gf180-pll",
+    "2AMLogic/gf180-temp-por",
+    "2AMLogic/gf180-ldo",
+)
+
+
+def _try_repo_visibility(repo: str) -> str | None:
+    """`ic.repo_visibility(repo)`, or `None` on any failure (e.g. no access).
+
+    Used only to *select* a fixture repo from a candidate list -- an API
+    error for one candidate (permissions, rate limit, etc.) should not fail
+    the whole test, just rule that candidate out.
+    """
+    try:
+        return ic.repo_visibility(repo)
+    except ic.IngestError:
+        return None
+
+
 @_SKIP_NO_NETWORK
 def test_gate_refuses_real_private_canary(tmp_path):
+    repo = next(
+        (
+            r
+            for r in _PRIVATE_CANARY_CANDIDATES
+            if _try_repo_visibility(r) == "private"
+        ),
+        None,
+    )
+    if repo is None:
+        pytest.skip(
+            "no candidate in _PRIVATE_CANARY_CANDIDATES is currently private "
+            "(all have gone public) -- see #489; this is a fixture-"
+            "availability gap, not a gate-logic failure, and does not "
+            "exercise the real-network private-repo path right now"
+        )
+
     blocks_dir = tmp_path / "blocks"
-    with pytest.raises(ic.IngestError, match="gf180-trng"):
+    with pytest.raises(ic.IngestError, match=re.escape(repo.split("/")[-1])):
         ic.ingest(
-            "2AMLogic/gf180-trng",
+            repo,
             blocks_dir=blocks_dir,
             cache_dir=tmp_path / "cache",
         )
