@@ -2309,3 +2309,315 @@ def test_compose_pins_gate_port_survives_extraction_as_named_pin(tmp_path, pdk_r
     # The gate node now comes back as a real, biasable pin -- not an anonymous
     # $N net (the friction #210 reports).
     assert "VBIAS" in pin_names
+
+
+# --------------------------------------------------------------------------- #
+# Ring routing openings (#434): a guard/collector ring generated with
+# `ring_gap_side` reports a `GAP_<side>` opening, and a route that actually
+# passes through that opening is allowed into an otherwise-ringed block. The
+# closed-ring rejection above (#199 case 2) is unchanged.
+# --------------------------------------------------------------------------- #
+
+
+#: The ring gap #434's own repro needs: an opening on the side the route
+#: leaves/enters through, slid onto the pair's lower device row (whose ports
+#: sit 0.41um below the automatically-sized ring's own mid-height).
+_DIFF_PAIR_GAP_E = {
+    "ring_gap_side": "E",
+    "ring_gap_um": 1.0,
+    "ring_gap_offset_um": -0.41,
+}
+_DIFF_PAIR_GAP_W = dict(_DIFF_PAIR_GAP_E, ring_gap_side="W")
+
+
+def _shares_merged_polygon(gds_path, cell_name, layer, datatype, p0_um, p1_um):
+    """Whether the two points sit on the *same* merged polygon of one layer --
+    i.e. whether they are electrically one net in the drawn geometry."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    cell = layout.cell(cell_name)
+    merged = kdb.Region(cell.begin_shapes_rec(layout.layer(layer, datatype))).merged()
+
+    def _probe(point_um):
+        x, y = (int(round(v / layout.dbu)) for v in point_um)
+        return kdb.Region(kdb.Box(x - 1, y - 1, x + 1, y + 1))
+
+    at_p0 = merged.interacting(_probe(p0_um))
+    at_p1 = merged.interacting(_probe(p1_um))
+    # Both probes must land on real metal for the answer to mean anything.
+    assert not at_p0.is_empty(), f"no metal at {p0_um}"
+    assert not at_p1.is_empty(), f"no metal at {p1_um}"
+    return not at_p0.interacting(_probe(p1_um)).is_empty()
+
+
+def _compose_two_diff_pairs(tmp_path, pdk_root, name, a_params, b_params):
+    """#434's documented repro: a mirror-labelled pair wired to a plain pair's
+    source, both with their default guard ring, differing only in the ring-gap
+    params under test."""
+    a = _gen_block(
+        tmp_path, pdk_root, "diff_pair", f"a_{name}", mirror=True, splits=2, **a_params
+    )
+    b = _gen_block(
+        tmp_path, pdk_root, "diff_pair", f"b_{name}", mirror=False, splits=2, **b_params
+    )
+    output = tmp_path / f"{name}.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "a", "generator_report": a},
+                {"id": "b", "generator_report": b},
+            ],
+            "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "a", "port": "M1_1_D"},
+                        {"block": "b", "port": "Q1_1_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": name, "output": str(output)},
+        }
+    )
+    return a, report, output
+
+
+def test_compose_routes_into_guard_ringed_block_through_a_declared_ring_gap(
+    tmp_path, pdk_root
+):
+    # The exact case #434 filed: two diff_pairs, each keeping its default
+    # guard ring, wired drain-to-source. With an opening declared on the side
+    # each route leaves/enters through, the net routes instead of coming back
+    # in unrouted_nets[].
+    a_report, report, output = _compose_two_diff_pairs(
+        tmp_path, pdk_root, "ringgap", _DIFF_PAIR_GAP_E, _DIFF_PAIR_GAP_W
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+    assert output.is_file()
+
+    # ...and the drawn wire really goes *through* the opening: the routed
+    # metal in the channel between the blocks is not part of the same merged
+    # polygon as block a's guard ring (which would be exactly the short the
+    # ring check exists to prevent).
+    offsets = {b["id"]: b["offset_um"] for b in report["blocks"]}
+    placed = {b["id"]: b["bbox_um"] for b in report["blocks"]}
+    tap_n = next(p for p in a_report["ports"] if p["name"] == "TAP_N")
+    route_point = (
+        (placed["a"]["x1"] + placed["b"]["x0"]) / 2.0,
+        0.21 + offsets["a"]["y"],
+    )
+    ring_point = (tap_n["x_um"] + offsets["a"]["x"], tap_n["y_um"] + offsets["a"]["y"])
+    assert not _shares_merged_polygon(
+        output, "ringgap", 67, 20, route_point, ring_point
+    )
+
+
+def test_compose_rejects_route_when_the_ring_gap_is_on_a_different_side(
+    tmp_path, pdk_root
+):
+    # An opening exists, but not on the side this route crosses -- the ring is
+    # still closed where the wire would go, so #199 case 2's protection holds.
+    _, report, _ = _compose_two_diff_pairs(
+        tmp_path,
+        pdk_root,
+        "ringgap_wrongside",
+        dict(_DIFF_PAIR_GAP_E, ring_gap_side="N"),
+        _DIFF_PAIR_GAP_W,
+    )
+    assert report["unrouted_nets"] == ["N1"]
+    assert any("declares no opening" in note for note in report["drc_hints"]["notes"])
+
+
+def test_compose_rejects_route_that_misses_the_declared_ring_gap(tmp_path, pdk_root):
+    # The opening is on the right side but left at the ring's own mid-height,
+    # while the route crosses at the lower device row -- the wire would cut
+    # the ring's metal, so the net is still reported unroutable.
+    _, report, _ = _compose_two_diff_pairs(
+        tmp_path,
+        pdk_root,
+        "ringgap_missed",
+        dict(_DIFF_PAIR_GAP_E, ring_gap_offset_um=0.0),
+        _DIFF_PAIR_GAP_W,
+    )
+    assert report["unrouted_nets"] == ["N1"]
+    assert any(
+        "outside the" in note and "opening it declares" in note
+        for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_ring_gap_too_narrow_for_the_route_width_is_rejected(
+    tmp_path, pdk_root
+):
+    # A route needs half its width *plus* the block's own reported
+    # min_spacing_um of clearance inside the opening -- an opening only just
+    # wider than the wire would leave the wire shorted to the ring's cut ends.
+    _, report, _ = _compose_two_diff_pairs(
+        tmp_path,
+        pdk_root,
+        "ringgap_narrow",
+        dict(_DIFF_PAIR_GAP_E, ring_gap_um=0.4),
+        _DIFF_PAIR_GAP_W,
+    )
+    assert report["unrouted_nets"] == ["N1"]
+    assert any(
+        "clearance inside the opening" in n for n in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_rejects_connectivity_to_a_ring_gap_port(tmp_path, pdk_root):
+    # A GAP_* port marks the *absence* of metal -- wiring to it is an
+    # application error, not a routable net.
+    a = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "gapport_a", splits=1, **_DIFF_PAIR_GAP_E
+    )
+    b = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "gapport_b", splits=1, add_guard_ring=False
+    )
+    with pytest.raises(GenComposeError, match="marks a ring \\*opening\\*"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "a", "generator_report": a},
+                    {"id": "b", "generator_report": b},
+                ],
+                "placement": {
+                    "strategy": "row",
+                    "order": ["a", "b"],
+                    "spacing_um": 1.0,
+                },
+                "connectivity": [
+                    {
+                        "net": "N1",
+                        "pins": [
+                            {"block": "a", "port": "GAP_E"},
+                            {"block": "b", "port": "Q1_1_S"},
+                        ],
+                    }
+                ],
+                "routing": {"layer_role": "metal", "width_um": 0.17},
+                "options": {"output": str(tmp_path / "gapport.gds")},
+            }
+        )
+
+
+def test_compose_rejects_pins_entry_naming_a_ring_gap_port(tmp_path, pdk_root):
+    a = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "gappin_a", splits=1, **_DIFF_PAIR_GAP_E
+    )
+    with pytest.raises(GenComposeError, match="marks a ring \\*opening\\*"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "a", "generator_report": a}],
+                "placement": {"strategy": "row", "order": ["a"], "spacing_um": 1.0},
+                "pins": [{"net": "N1", "block": "a", "port": "GAP_E"}],
+                "options": {"output": str(tmp_path / "gappin.gds")},
+            }
+        )
+
+
+def test_compose_routes_into_collector_ringed_bjt_array_through_a_ring_gap(
+    tmp_path, pdk_root
+):
+    # bjt_array's `add_collector_ring` (also on by default) is covered
+    # symmetrically to diff_pair's `add_guard_ring`: its emitter ports face
+    # north, so the opening goes on the ring's N side, and the partner block
+    # is placed directly above with an explicit origin so the route is a
+    # straight vertical line through the opening.
+    bjt = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "bjt_gap",
+        ring_gap_side="N",
+        ring_gap_um=1.0,
+        ring_gap_offset_um=-0.41,  # slides the opening onto Q0_E's own column
+    )
+    ring = _gen_block(tmp_path, pdk_root, "guard_ring", "bjt_partner")
+    output = tmp_path / "bjt_ringgap.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "bjt", "generator_report": bjt},
+                {"id": "ring", "generator_report": ring},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["bjt", "ring"],
+                "origins_um": {
+                    "bjt": {"x": 0.0, "y": 0.0},
+                    # TAP_S sits at x=1.92 in the ring's own frame; Q0_E at
+                    # x=2.12 in the array's -- so a 0.2um shift lines them up.
+                    "ring": {"x": 0.2, "y": 5.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "EMIT",
+                    "pins": [
+                        {"block": "bjt", "port": "Q0_E"},
+                        {"block": "ring", "port": "TAP_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "bjt_ringgap", "output": str(output)},
+        }
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert output.is_file()
+
+
+def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
+    tmp_path, pdk_root
+):
+    # The same composition with bjt_array's default *closed* collector ring is
+    # still rejected -- the ring-gap path is additive, not a relaxation.
+    bjt = _gen_block(tmp_path, pdk_root, "bjt_array", "bjt_closed")
+    ring = _gen_block(tmp_path, pdk_root, "guard_ring", "bjt_closed_partner")
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "bjt", "generator_report": bjt},
+                {"id": "ring", "generator_report": ring},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["bjt", "ring"],
+                "origins_um": {
+                    "bjt": {"x": 0.0, "y": 0.0},
+                    "ring": {"x": 0.2, "y": 5.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "EMIT",
+                    "pins": [
+                        {"block": "bjt", "port": "Q0_E"},
+                        {"block": "ring", "port": "TAP_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {
+                "cell_name": "bjt_closed_top",
+                "output": str(tmp_path / "bjt_closed.gds"),
+            },
+        }
+    )
+    assert report["unrouted_nets"] == ["EMIT"]
+    assert any(
+        "closed guard/collector ring" in note for note in report["drc_hints"]["notes"]
+    )

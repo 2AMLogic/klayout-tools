@@ -114,6 +114,10 @@ survives extraction as a named pin, and `klt lvs` no longer logs a spurious
 `severity: "error"` mismatch for an unused device class — but the router
 still cannot *route around* the two obstacle cases below; both remain
 workarounds a caller must apply, exactly as the worked example below does.
+(#434 adds one way *through* rather than around: a ring generated with a
+declared opening — see "Routing through a ring opening" below — so a matched
+group no longer has to choose between keeping its guard ring and being wired
+into the circuit.)
 
 - **The router detects, but does not avoid, two obstacle cases —
   same-facing port pairs and guard-ringed blocks (#199, fixed).** A routed
@@ -128,22 +132,62 @@ workarounds a caller must apply, exactly as the worked example below does.
   `_D` ports, both `direction_deg: 0`) would route straight through the
   *destination* device's nearer same-row pin (its `_S` port), shorting that
   device's own source and drain together; **(2)** routing to/from a
-  non-tap port on a block with `add_guard_ring: true` (the default for
-  `diff_pair`) would cross the guard ring's own local-metal loop, merging
-  the signal net with the ring's tap net (checked symmetrically — a
-  guard-ringed *source* block is caught the same as a guard-ringed
-  *destination* block). Neither case is *routable* at this phase — the
-  router reports the obstruction rather than routing around it — so the
-  worked example below still applies the same workarounds as before (an
-  `add_guard_ring: false` block parameter, and connectivity wired between
-  *opposite*-facing port pairs only); the difference #199 makes is that
-  skipping a workaround now fails visibly (partial success, exit `3`)
-  instead of silently producing a shorted device. The underlying detection
+  non-tap port on a block whose ring is **closed** (`add_guard_ring: true`,
+  the default for `diff_pair`, with no ring opening declared) would cross
+  the guard ring's own local-metal loop, merging the signal net with the
+  ring's tap net (checked symmetrically — a guard-ringed *source* block is
+  caught the same as a guard-ringed *destination* block). Neither case is
+  *routable* at this phase — the router reports the obstruction rather than
+  routing around it — so the worked example below still applies the same
+  workarounds as before (an `add_guard_ring: false` block parameter, and
+  connectivity wired between *opposite*-facing port pairs only); the
+  difference #199 makes is that skipping a workaround now fails visibly
+  (partial success, exit `3`) instead of silently producing a shorted
+  device. The underlying detection
   is a bbox/margin heuristic against each block's own already-reported
   geometry (not a general obstacle-avoiding router, e.g. `route_astar`,
   and not aware of a block's *internal* geometry beyond its `bbox_um` and
   `ports[]`) — full obstacle avoidance (needed once `"grid"` placement
   lands, per the spike's own open questions) remains its own follow-up.
+  Case **(2)** now also has a remedy that keeps the ring: see "Routing
+  through a ring opening" below.
+- **Routing through a ring opening (#434, fixed).** A closed ring left
+  `add_guard_ring: false` as the only way to wire a matched group into the
+  rest of a circuit — i.e. a block could have its ring or its connectivity,
+  not both. A block generated with
+  [`klt gen`](gen.md)'s `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um`
+  params reports its ring's one routing opening as a `GAP_<side>` port, and
+  `route_two_pin()` then admits a route to that block's non-tap ports —
+  **only if the drawn backbone actually goes through the opening**. Every
+  segment of the backbone is tested against all four of the ring's own side
+  centre lines (located from the ring's own `TAP_*`/`COLL_*`/`GAP_*` ports)
+  inside the block's placed bbox, and the net is still reported unroutable
+  when the backbone: crosses a side that declares no opening; crosses the
+  gapped side outside the opening, or closer to either cut end than half the
+  route width plus the block's own reported `drc_hints.min_spacing_um`; or
+  runs *along* a ring side (metal laid on the ring is a short however wide
+  the opening is). A ring that does not report where all four of its sides
+  run is rejected rather than assumed clear. So the ring check is *widened*,
+  never relaxed: with no opening declared, the behavior is exactly #199's.
+  A `GAP_*` port itself is a marker for the absence of metal, not a
+  conductor — naming one in `connectivity[]` or `pins[]` is an application
+  error (exit `1`).
+
+  ```bash
+  # A guard-ringed pair whose ring is opened on the east side, on the row
+  # its M1_1_D port sits on (0.41um below the ring's own mid-height), so a
+  # route east out of that port passes through the opening:
+  klt gen diff_pair --pdk sky130A -o a.gds --format json \
+    --params '{"mirror": true, "splits": 2, "ring_gap_side": "E",
+               "ring_gap_um": 1.0, "ring_gap_offset_um": -0.41}' > a.json
+  # ...and its neighbour, opened on the west side it is approached from:
+  klt gen diff_pair --pdk sky130A -o b.gds --format json \
+    --params '{"splits": 2, "ring_gap_side": "W",
+               "ring_gap_um": 1.0, "ring_gap_offset_um": -0.41}' > b.json
+  # connectivity[] between a.M1_1_D and b.Q1_1_S now routes (exit 0) with
+  # both guard rings intact, instead of exit 3 + unrouted_nets[].
+  klt gen-compose request.json --format json
+  ```
 - **The composed output now carries net labels (#200, fixed).** Previously,
   `klt gen-compose` drew routed metal with no `kdb.Text` label, so `klt
   extract`'s pin-promotion (`Netlist.make_top_level_pins()` + `purge()`) kept

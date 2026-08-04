@@ -44,6 +44,27 @@ version. Not an exhaustive commit-by-commit log.
   `synthesize`, `place-and-route`, and `functional-verification` were added
   on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
   release will carry them collectively.
+- 2026-08-04 — `klt gen` + `klt gen-compose`: ring routing openings (#434).
+  `guard_ring`, `diff_pair` (`add_guard_ring`) and `bjt_array`
+  (`add_collector_ring`) accept `ring_gap_side` (`""`/`"N"`/`"S"`/`"E"`/
+  `"W"`), `ring_gap_um` and `ring_gap_offset_um`, cutting **one** opening
+  through the ring's band — on every layer the ring is drawn on, dropping
+  any contact it would clip — so the ring stays a single connected C-shaped
+  conductor rather than splitting into two arcs. The opening is reported as
+  a new `GAP_<side>` entry in `ports[]` (`width_um` = the opening's length
+  along that side, `direction_deg` = the side's outward normal), and
+  `klt gen-compose` uses it to admit a route to a ringed block's non-tap
+  port — but only when the drawn backbone actually passes through the
+  opening with half the route width plus the block's own
+  `drc_hints.min_spacing_um` of clearance from either cut end; a crossing on
+  any other side, a crossing that misses the opening, and a segment laid
+  along a ring side are all still reported in `unrouted_nets[]`. With no
+  opening declared, the #199 closed-ring rejection is unchanged (its message
+  now also names the new remedy). Wiring or labelling a `GAP_*` port is an
+  application error (exit `1`). Before this, a matched analog group could
+  keep its default guard/collector ring **or** be wired into the rest of a
+  composed circuit, not both. See `docs/cli/gen.md` ("Ring routing
+  openings") and `docs/cli/gen-compose.md`.
 - 2026-08-03 — `klt functional-verification`: new verb (#422, Phase 3 of
   Epic #391). Runs a cocotb testbench against RTL sources through Icarus
   Verilog (default) or Verilator, reporting `status`
