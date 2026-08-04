@@ -146,6 +146,42 @@ merge below) -- when omitted, the DEF->GDS merge tolerates that instance's
 cell being empty (a caller using this field purely for the DEF-level
 placement/obstruction verification this issue's acceptance criteria call
 for does not need to supply one).
+
+Macro-pin routability cross-check (issue #464)
+-------------------------------------------------
+
+``klt lef-abstract`` (issue #438's other half) deliberately emits a ``PIN``
+block with **no** ``PORT`` geometry when a socket-descriptor pin's declared
+layer does not resolve to a routing-type tech-LEF layer (e.g. a device gate
+pin on bare poly) -- a structurally valid LEF, reported via that command's
+own ``warnings[]``/``unroutable_pins[]``, never an error there. Left
+unchecked, wiring such a pin into a real net and placing the macro here
+used to surface only as an opaque OpenROAD ``GRT-0029`` failure several
+stages into a real run (global routing, well after floorplan/place/cts have
+already succeeded) -- accurate, but useless for tracing the failure back to
+its actual root cause (an earlier ``lef-abstract`` run, a different process
+entirely).
+
+:func:`_validate_macros` now catches this **before** OpenROAD is invoked at
+all: for each declared macro, it reads the macro LEF's own ``PIN`` blocks
+(:func:`klayout_tools.lef_header.read_lef_header`, whose ``pins[].has_port``
+field this cross-check exists for) to find pins with no ``PORT`` at all,
+then does a best-effort structural-Verilog scan of the netlist
+(:func:`_macro_instance_port_connections`) for that instance's own named
+port connections (``.PIN(NET)``). A ``PORT``-less pin that connects to a
+non-empty net is rejected with a specific :class:`PlaceAndRouteError` naming
+the instance, pin, and net -- before any OpenROAD subprocess runs. A
+``PORT``-less pin the netlist leaves unconnected (``.PIN()``, or simply
+absent from the instantiation's own port list) is not an error -- an
+internally-terminated node is a legitimate macro-pin state, not a routing
+request. The netlist scan is deliberately conservative: when the specific
+``<cell_name> <instance>( ... )`` instantiation cannot be confidently
+located in the netlist text (e.g. a positional-connection instantiation, a
+non-Verilog/stubbed netlist, or the instance simply not referenced there),
+the cross-check is skipped entirely for that macro rather than risk a false
+positive or false negative on text it cannot actually parse -- OpenROAD's
+own ``link_design`` remains the authority on whether the netlist and LEF
+actually agree structurally.
 """
 
 from __future__ import annotations
@@ -339,7 +375,7 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
-    macros = _validate_macros(request.get("macros"), request_dir)
+    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
@@ -588,12 +624,22 @@ def _validate_io(io_spec: Any) -> dict[str, str] | None:
     return {"layer_h": layer_h, "layer_v": layer_v}
 
 
-def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+def _validate_macros(
+    macros: Any, request_dir: str, netlist_path: str | None = None
+) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #438). Each
     entry fixes one hard-macro instance at a caller-given location during
     the ``"floorplan"`` stage -- see this module's docstring "Hard-macro
     placement" section. Returns ``[]`` when the field is omitted/``None``
-    (unchanged behavior -- purely additive)."""
+    (unchanged behavior -- purely additive).
+
+    ``netlist_path`` (issue #464) additionally cross-checks each macro's LEF
+    pins with no ``PORT`` geometry at all against the netlist's own wiring --
+    see this module's docstring "Macro-pin routability cross-check" section.
+    ``None`` (the default, used by this module's own direct unit tests below
+    that exercise validation in isolation, with no netlist in hand) skips
+    that cross-check entirely -- it is purely additive to the pre-existing
+    validation this function already performed."""
     if macros is None:
         return []
     if not isinstance(macros, list):
@@ -626,6 +672,19 @@ def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
                 f"(found {len(macro_cells)})"
             )
         macro_cell_name = macro_cells[0]["name"]
+
+        no_port_pin_names = sorted(
+            pin["name"] for pin in macro_cells[0]["pins"] if not pin["has_port"]
+        )
+        if no_port_pin_names and netlist_path is not None:
+            _reject_wired_port_less_pins(
+                index=i,
+                instance=instance,
+                lef=lef,
+                macro_cell_name=macro_cell_name,
+                no_port_pin_names=no_port_pin_names,
+                netlist_path=netlist_path,
+            )
 
         for key in ("x_um", "y_um"):
             if not isinstance(macro.get(key), (int, float)) or isinstance(
@@ -670,6 +729,117 @@ def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
         raise PlaceAndRouteError("request.macros[].instance values must be unique")
 
     return validated
+
+
+#: A structural-Verilog module instantiation with **named** port
+#: connections: ``<cell_name> <instance> ( .PORT(NET), ... ) ;`` -- the form
+#: every real synthesis tool (Yosys included, per this module's own
+#: ``read_verilog``/``link_design`` use) emits for a blackbox module
+#: instance. Deliberately does **not** match a ``#( ... )`` parameter block
+#: (an analog macro blackbox is never parameterized) or a positional
+#: connection list (no declared port order is available to this module to
+#: interpret one) -- either shape simply fails to match, and
+#: :func:`_macro_instance_port_connections` reports "cannot confidently
+#: locate" (``None``) rather than a wrong answer.
+_MACRO_INSTANCE_RE_TEMPLATE = r"\b{cell}\b\s+\b{instance}\b\s*\("
+
+#: One named port connection within an instantiation's own port list, e.g.
+#: ``.Q1_1_G(net123)`` or ``.Q1_1_G()`` (left unconnected).
+_PORT_CONNECTION_RE = re.compile(r"\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^()]*)\)")
+
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _strip_verilog_comments(text: str) -> str:
+    return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
+
+
+def _macro_instance_port_connections(
+    netlist_path: str, cell_name: str, instance_name: str
+) -> dict[str, str] | None:
+    """Best-effort structural-Verilog lookup of one macro instance's own
+    named port connections (``{port_name: connection_expression}``), used
+    only by :func:`_reject_wired_port_less_pins`'s netlist-wiring
+    cross-check (issue #464).
+
+    Returns ``None`` -- "cannot confidently locate" -- when the netlist
+    cannot be read, or no ``<cell_name> <instance_name>( ... )``
+    instantiation is found (a positional-connection instantiation, a
+    non-Verilog/placeholder netlist, or the instance genuinely not
+    referenced by that exact name/type pair). The caller treats ``None`` as
+    "skip the cross-check for this macro" -- never as "no pins are wired".
+    """
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+
+    text = _strip_verilog_comments(text)
+    pattern = re.compile(
+        _MACRO_INSTANCE_RE_TEMPLATE.format(
+            cell=re.escape(cell_name), instance=re.escape(instance_name)
+        )
+    )
+    match = pattern.search(text)
+    if match is None:
+        return None
+
+    depth = 1
+    i = match.end()
+    while i < len(text) and depth > 0:
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None  # unterminated -- malformed/truncated text, don't guess
+
+    port_list_text = text[match.end() : i - 1]
+    connections = {
+        port_name: connection.strip()
+        for port_name, connection in _PORT_CONNECTION_RE.findall(port_list_text)
+    }
+    return connections if connections else None
+
+
+def _reject_wired_port_less_pins(
+    *,
+    index: int,
+    instance: str,
+    lef: str,
+    macro_cell_name: str,
+    no_port_pin_names: list[str],
+    netlist_path: str,
+) -> None:
+    """Raise :class:`PlaceAndRouteError` when any of ``no_port_pin_names``
+    (macro pins with no ``PORT`` geometry at all in the declared LEF) is
+    actually wired to a real net in the netlist's own instantiation of this
+    macro -- see this module's docstring "Macro-pin routability cross-check"
+    section. A no-op when the netlist cannot be confidently parsed for this
+    instance, or when every no-``PORT`` pin is left unconnected there."""
+    connections = _macro_instance_port_connections(
+        netlist_path, macro_cell_name, instance
+    )
+    if connections is None:
+        return
+
+    for pin_name in no_port_pin_names:
+        net = connections.get(pin_name)
+        if net:
+            raise PlaceAndRouteError(
+                f"request.macros[{index}] instance '{instance}' pin "
+                f"'{pin_name}' has no PORT geometry in '{lef}' (MACRO "
+                f"'{macro_cell_name}') but is wired to net '{net}' in the "
+                "netlist -- OpenROAD's global router would fail with "
+                "GRT-0029 once this pin is reached. The pin's declared "
+                "layer likely does not resolve to a routing-type tech-LEF "
+                "layer (see klt lef-abstract's 'unroutable_pins[]'/"
+                "warnings[] for that run); fix the LEF abstract, or leave "
+                f"'{pin_name}' unconnected in the netlist."
+            )
 
 
 def _validate_constraints(constraints: Any) -> tuple[str | None, float | None]:

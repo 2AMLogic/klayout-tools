@@ -463,6 +463,19 @@ def test_pin_layer_with_no_lef_mapping_gets_no_geometry_and_a_warning(
     assert any(
         "does not resolve to a known routing LEF layer" in w for w in report["warnings"]
     )
+    # Issue #464: the same condition is also promoted to a top-level,
+    # programmatically-checkable `unroutable_pins[]` echo -- not just a
+    # `warnings[]` string a caller would otherwise have to grep.
+    assert report["unroutable_pins"] == [{"name": "WEIRD", "layer": [99, 99]}]
+
+
+def test_unroutable_pins_empty_when_every_pin_resolves(tmp_path, monkeypatch):
+    """A run with no `geometry_source: "none"` pins reports an empty
+    `unroutable_pins[]` -- not omitted, per this repo's own
+    empty-list-not-null convention for echoed arrays."""
+    report = _run(tmp_path, monkeypatch)
+    assert all(pin["geometry_source"] != "none" for pin in report["pins"])
+    assert report["unroutable_pins"] == []
 
 
 # --------------------------------------------------------------------------- #

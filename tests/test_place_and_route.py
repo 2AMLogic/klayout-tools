@@ -610,6 +610,214 @@ def test_duplicate_macro_instance_names_rejected(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Macro-pin routability cross-check (issue #464): a LEF pin with no `PORT`
+# geometry at all (e.g. a device gate pin on bare poly `klt lef-abstract`
+# emitted with `geometry_source: "none"`) that is actually wired into the
+# netlist must be rejected before OpenROAD is invoked, rather than surfacing
+# only as an opaque `GRT-0029` mid-route.
+# --------------------------------------------------------------------------- #
+
+
+def _write_macro_lef_with_port_less_pin(
+    path: Path, macro_name: str = "diff_pair_0"
+) -> None:
+    """A macro LEF with one routable pin (`S`, real `PORT` on `li1`) and one
+    PORT-less pin (`G`, no `PORT` at all) -- mirrors what `klt lef-abstract`
+    emits for a device gate pin on bare poly (issue #464's own repro)."""
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        f"MACRO {macro_name}\n"
+        "  CLASS BLOCK ;\n"
+        "  SIZE 5.0 BY 5.0 ;\n"
+        "  PIN S\n"
+        "    DIRECTION INOUT ;\n"
+        "    USE ANALOG ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.2 0.2 ;\n"
+        "    END\n"
+        "  END S\n"
+        "  PIN G\n"
+        "    DIRECTION INOUT ;\n"
+        "    USE ANALOG ;\n"
+        "  END G\n"
+        f"END {macro_name}\n"
+        "END LIBRARY\n",
+        encoding="utf-8",
+    )
+
+
+def _write_structural_netlist(
+    path: Path,
+    *,
+    cell_name: str = "diff_pair_0",
+    instance_name: str = "u_analog",
+    connections: dict[str, str],
+) -> None:
+    ports = ",\n    ".join(f".{port}({net})" for port, net in connections.items())
+    path.write_text(
+        "module top (clk);\n"
+        "  input clk;\n"
+        "  wire net_g, net_s;\n"
+        f"  {cell_name} {instance_name} (\n"
+        f"    {ports}\n"
+        "  );\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+
+
+def test_macro_pin_with_no_port_wired_into_netlist_is_rejected(tmp_path):
+    _write_macro_lef_with_port_less_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    _write_structural_netlist(netlist_path, connections={"S": "net_s", "G": "net_g"})
+
+    with pytest.raises(PlaceAndRouteError, match="pin 'G' has no PORT geometry"):
+        place_and_route._validate_macros(
+            [{"instance": "u_analog", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+            str(tmp_path),
+            str(netlist_path),
+        )
+
+
+def test_macro_pin_with_no_port_left_unconnected_is_not_rejected(tmp_path):
+    _write_macro_lef_with_port_less_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    _write_structural_netlist(netlist_path, connections={"S": "net_s", "G": ""})
+
+    macros = place_and_route._validate_macros(
+        [{"instance": "u_analog", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+    assert macros[0]["instance"] == "u_analog"
+
+
+def test_macro_pin_with_no_port_absent_from_port_list_is_not_rejected(tmp_path):
+    """The netlist's own instantiation simply never names the PORT-less pin
+    at all (e.g. an internally-terminated node the RTL author never
+    exposed) -- not an error; only an *actually wired* PORT-less pin is."""
+    _write_macro_lef_with_port_less_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    _write_structural_netlist(netlist_path, connections={"S": "net_s"})
+
+    macros = place_and_route._validate_macros(
+        [{"instance": "u_analog", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+    assert macros[0]["instance"] == "u_analog"
+
+
+def test_macro_pin_with_a_port_is_never_flagged_even_when_wired(tmp_path):
+    """Edge case from the issue's own test plan: a pin with a real `PORT`
+    (regardless of which routing layer it lands on) must never be flagged,
+    even though it is wired -- only a `PORT`-less pin is a routability
+    problem."""
+    _write_macro_lef_with_port_less_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    _write_structural_netlist(netlist_path, connections={"S": "net_s", "G": ""})
+
+    # No exception -- `S` (which has a real PORT) is wired, `G` (PORT-less)
+    # is left unconnected.
+    place_and_route._validate_macros(
+        [{"instance": "u_analog", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+
+
+def test_macro_cross_check_skipped_without_netlist_path(tmp_path):
+    """`netlist_path=None` (this module's own direct unit tests above all
+    rely on this default) skips the cross-check entirely -- even a pin that
+    *would* be flagged if checked raises nothing."""
+    _write_macro_lef_with_port_less_pin(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [{"instance": "u_analog", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+    )
+    assert macros[0]["instance"] == "u_analog"
+
+
+def test_macro_cross_check_skipped_when_instance_not_found_in_netlist(tmp_path):
+    """A placeholder/non-Verilog netlist (or one that simply never
+    instantiates this macro under this exact name) cannot be confidently
+    parsed -- the cross-check is skipped rather than risk a false result,
+    mirroring every pre-existing stubbed-OpenROAD macro test's own
+    `// fake mapped netlist` fixture."""
+    _write_macro_lef_with_port_less_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    netlist_path.write_text("// fake mapped netlist\n", encoding="utf-8")
+
+    macros = place_and_route._validate_macros(
+        [{"instance": "u_analog", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+    assert macros[0]["instance"] == "u_analog"
+
+
+def test_macro_instance_port_connections_parses_named_ports(tmp_path):
+    netlist_path = tmp_path / "top.v"
+    _write_structural_netlist(
+        netlist_path, connections={"S": "net_s", "D": "net_d", "G": ""}
+    )
+    connections = place_and_route._macro_instance_port_connections(
+        str(netlist_path), "diff_pair_0", "u_analog"
+    )
+    assert connections == {"S": "net_s", "D": "net_d", "G": ""}
+
+
+def test_macro_instance_port_connections_none_when_instance_absent(tmp_path):
+    netlist_path = tmp_path / "top.v"
+    netlist_path.write_text("module top; endmodule\n", encoding="utf-8")
+    assert (
+        place_and_route._macro_instance_port_connections(
+            str(netlist_path), "diff_pair_0", "u_analog"
+        )
+        is None
+    )
+
+
+def test_full_route_rejects_wired_port_less_macro_pin_before_openroad(
+    tmp_path, monkeypatch
+):
+    """End-to-end: a `request.macros` entry whose LEF has a PORT-less pin
+    that the real netlist wires up is rejected at request-validation time --
+    `openroad` is never invoked (the `subprocess.run` stub below asserts
+    this by raising if called at all)."""
+    macro_lef = tmp_path / "diff_pair_0.lef"
+    _write_macro_lef_with_port_less_pin(macro_lef, "diff_pair_0")
+
+    def fail_if_called(cmd, **kwargs):
+        raise AssertionError(f"OpenROAD must not be invoked: {cmd}")
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fail_if_called)
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "diff_pair_0.lef",
+                "x_um": 12.5,
+                "y_um": 3.0,
+            }
+        ],
+    )
+    _write_structural_netlist(
+        tmp_path / "gcd_synth.v",
+        cell_name="diff_pair_0",
+        instance_name="u_analog",
+        connections={"S": "net_s", "G": "net_g"},
+    )
+
+    with pytest.raises(PlaceAndRouteError, match="pin 'G' has no PORT geometry"):
+        run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
 # Stubbed OpenROAD: full `run_place_and_route` without a real `openroad`
 # binary. The stub writes the same `-metrics <file>.json` shape a real
 # per-stage run produces (verified live -- see `place_and_route.py`'s own

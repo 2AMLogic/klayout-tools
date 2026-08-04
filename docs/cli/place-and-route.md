@@ -143,15 +143,28 @@ error otherwise.
 | `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
 | `gds` | string \| omitted | The macro's own GDS view. When given, merged into the final `gds_path` alongside the standard-cell GDS view (same "0 missing/orphan cells" check). When omitted, this instance's cell is expected to stay empty in the merged GDS — not an error — for a caller only after this issue's own DEF-level placement/obstruction verification. |
 
-**Known gap (#464):** a macro LEF pin that `klt lef-abstract` emitted with
-no `PORT` geometry (a pin whose declared layer is not a routing-type
-tech-LEF layer — e.g. a device gate pin on bare poly, see
-[`klt lef-abstract`'s "Pins"](lef-abstract.md#pins) section) is not
-validated by this command. If the netlist actually wires that pin into a
-real net, `global_route` fails with an opaque OpenROAD `GRT-0029` error
-several stages into a real run, rather than a clear `klt`-level error at
-request-validation time. Discovered during Epic #393 Phase 3 (#456); see
-#464 for the full repro and fix options.
+**Macro-pin routability cross-check (#464).** A macro LEF pin that `klt
+lef-abstract` emitted with no `PORT` geometry at all (a pin whose declared
+layer is not a routing-type tech-LEF layer — e.g. a device gate pin on bare
+poly, see [`klt lef-abstract`'s "Pins"](lef-abstract.md#pins) section, and
+that command's own `unroutable_pins[]` echo) is validated by this command
+**before** OpenROAD is invoked: for each declared macro, this command reads
+the macro LEF's own `PIN` blocks and, for every pin with no `PORT`, does a
+best-effort scan of the netlist's own named port connections for that
+instance (`.PIN(NET)`, the form every real synthesis tool emits for a
+blackbox instance). A `PORT`-less pin actually wired to a non-empty net is
+rejected with a specific application error (exit `1`) naming the macro
+instance, pin, and net — never surfacing only as OpenROAD's opaque
+`GRT-0029` several stages into a real run. A `PORT`-less pin the netlist
+leaves unconnected (or never names in that instantiation's own port list)
+is **not** an error — an internally-terminated node is a legitimate macro
+state. The netlist scan is deliberately conservative: when the specific
+`<MACRO> <instance>( ... )` instantiation cannot be confidently located
+(e.g. a positional-connection instantiation, or a placeholder/non-Verilog
+netlist), the cross-check is silently skipped for that macro rather than
+risk a false positive or negative — OpenROAD's own `link_design` remains
+the authority on whether the netlist and LEF actually agree structurally.
+Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
 
 ## Request
 
