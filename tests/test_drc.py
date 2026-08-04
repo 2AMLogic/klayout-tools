@@ -84,6 +84,10 @@ def test_run_drc_reports_seeded_violation(tmp_path):
     assert violation["check"] == "width"
     assert violation["layer"] == "poly.drawing"
     assert violation["cell"] == "TOP"
+    # Top-level geometry sits inside no placed instance, so per-instance
+    # attribution is (correctly) null and `cell` remains the only origin.
+    assert violation["source_cell"] is None
+    assert violation["source_path"] is None
     assert violation["bbox"] == {"left": 0, "bottom": 0, "right": 50, "top": 2000}
     assert violation["polygon"] == [[0, 0], [0, 2000], [50, 2000], [50, 0]]
 
@@ -121,6 +125,117 @@ def test_run_drc_raises_on_unknown_deck(tmp_path):
 
     with pytest.raises(DrcError):
         run_drc(str(path), "not-a-real-deck")
+
+
+# ---------------------------------------------------------------------------
+# per-instance attribution: source_cell / source_path (#451)
+# ---------------------------------------------------------------------------
+
+
+def _make_hierarchical_violation_layout() -> kdb.Layout:
+    """A hierarchical, multi-instance layout mirroring machine-generated
+    standard-cell placement (e.g. an OpenROAD P&R run).
+
+    A single ``sky130_fd_sc_hd__inv_2``-named leaf cell carries one seeded
+    ``poly.width.1`` violation (a 50 dbu poly bar < the 150 dbu threshold).
+    It is placed twice directly under the top cell (two occurrences of the
+    *same* definition, so attribution must not conflate them) and once more,
+    one level deeper, inside a ``block_a`` sub-block (so ``source_path`` has
+    depth 2). A clean ``sky130_fd_sc_hd__buf_1`` cell is also placed to prove
+    a violation-free instance is never attributed to.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    poly = layout.layer(66, 20)
+    layout.set_info(poly, kdb.LayerInfo(66, 20, "poly.drawing"))
+
+    inv = layout.create_cell("sky130_fd_sc_hd__inv_2")
+    inv.shapes(poly).insert(kdb.Box(0, 0, 50, 2000))  # 50 dbu < 150 -> violation
+
+    buf = layout.create_cell("sky130_fd_sc_hd__buf_1")
+    buf.shapes(poly).insert(kdb.Box(0, 0, 200, 2000))  # 200 dbu -> clean
+
+    block = layout.create_cell("block_a")
+    block.insert(kdb.CellInstArray(inv.cell_index(), kdb.Trans(kdb.Vector(0, 0))))
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(inv.cell_index(), kdb.Trans(kdb.Vector(0, 0))))
+    top.insert(kdb.CellInstArray(inv.cell_index(), kdb.Trans(kdb.Vector(5000, 0))))
+    top.insert(kdb.CellInstArray(buf.cell_index(), kdb.Trans(kdb.Vector(10000, 0))))
+    top.insert(kdb.CellInstArray(block.cell_index(), kdb.Trans(kdb.Vector(0, 5000))))
+    return layout
+
+
+def test_run_drc_attributes_violation_to_placed_instance(tmp_path):
+    """Violations inside placed instances name the originating leaf cell in
+    ``source_cell`` (not just the top cell in ``cell``), and ``source_path``
+    records the full instance chain -- including a two-deep path for the
+    nested block placement."""
+    path = tmp_path / "hier.gds"
+    _make_hierarchical_violation_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    # Three placements of the violating cell (two direct, one nested); the
+    # clean buf placement contributes nothing.
+    assert report["violation_count"] == 3
+    assert report["rule_counts"] == {"poly.width.1": 3}
+
+    for v in report["violations"]:
+        # `cell` (the flattened top-cell attribution) is unchanged/back-compat.
+        assert v["cell"] == "TOP"
+        # ...but every violation now also names its originating leaf instance.
+        assert v["source_cell"] == "sky130_fd_sc_hd__inv_2"
+
+    # The nested placement carries a two-deep path; the two direct placements
+    # carry a one-deep path -- and the two direct occurrences of the *same*
+    # definition are not conflated (distinct bboxes at their own coordinates).
+    by_bbox = {
+        (v["bbox"]["left"], v["bbox"]["bottom"]): v for v in report["violations"]
+    }
+    assert by_bbox[(0, 0)]["source_path"] == ["sky130_fd_sc_hd__inv_2"]
+    assert by_bbox[(5000, 0)]["source_path"] == ["sky130_fd_sc_hd__inv_2"]
+    assert by_bbox[(0, 5000)]["source_path"] == ["block_a", "sky130_fd_sc_hd__inv_2"]
+
+
+def test_run_drc_attribution_fields_deterministic(tmp_path):
+    """The attribution fields are stable across repeated runs (no reliance on
+    KLayout's internal instance-enumeration order)."""
+    path = tmp_path / "hier.gds"
+    _make_hierarchical_violation_layout().write(str(path))
+
+    assert run_drc(str(path), "sky130") == run_drc(str(path), "sky130")
+
+
+def test_attribute_to_instance_straddling_and_top_level_are_null():
+    """`_attribute_to_instance` returns ``(None, None)`` when a violation bbox
+    is contained in no single placement -- top-level geometry, or a bbox that
+    straddles two adjacent instances (a violation *between* placements belongs
+    to neither)."""
+    from klayout_tools.drc import _attribute_to_instance
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li = layout.layer(66, 20)
+    child = layout.create_cell("child")
+    child.shapes(li).insert(kdb.Box(0, 0, 300, 300))
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(kdb.Vector(0, 0))))
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(kdb.Vector(400, 0))))
+
+    # Fully inside the first placement -> attributed to `child`.
+    assert _attribute_to_instance(top, kdb.Box(10, 10, 50, 50)) == (
+        "child",
+        ["child"],
+    )
+    # Straddles the boundary between both placements -> null.
+    assert _attribute_to_instance(top, kdb.Box(250, 10, 450, 50)) == (None, None)
+    # Top-level empty region, no placement nearby -> null.
+    assert _attribute_to_instance(top, kdb.Box(1000, 1000, 1050, 1050)) == (
+        None,
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +411,8 @@ def test_json_contract(tmp_path, capsys):
             "check",
             "layer",
             "cell",
+            "source_cell",
+            "source_path",
             "bbox",
             "polygon",
         }
@@ -304,6 +421,13 @@ def test_json_contract(tmp_path, capsys):
         assert isinstance(entry["check"], str)
         assert isinstance(entry["layer"], str)
         assert isinstance(entry["cell"], str)
+        assert entry["source_cell"] is None or isinstance(entry["source_cell"], str)
+        assert entry["source_path"] is None or (
+            isinstance(entry["source_path"], list)
+            and all(isinstance(v, str) for v in entry["source_path"])
+        )
+        # `source_cell` and `source_path` are null together or set together.
+        assert (entry["source_cell"] is None) == (entry["source_path"] is None)
         assert set(entry["bbox"].keys()) == {"left", "bottom", "right", "top"}
         assert all(isinstance(v, int) for v in entry["bbox"].values())
         assert entry["polygon"] is None or isinstance(entry["polygon"], list)
@@ -592,6 +716,8 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
             "check",
             "layer",
             "cell",
+            "source_cell",
+            "source_path",
             "bbox",
             "polygon",
         }
@@ -635,6 +761,8 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
             "check",
             "layer",
             "cell",
+            "source_cell",
+            "source_path",
             "bbox",
             "polygon",
         }
@@ -651,6 +779,15 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     # property of this input -- not a `klt drc` defect).
     assert report["violation_count"] == 4
     assert report["rule_counts"] == {"diff.enclosing.licon.1": 4}
+
+    # Per-instance attribution (#451), verified against a *real* placed macro:
+    # each violation's flattened `cell` is the top cell, but `source_cell`
+    # names the originating standard cell -- here all four are inside a placed
+    # `sky130_fd_sc_hd__and3_1` instance, not merely "somewhere under gcd".
+    for entry in report["violations"]:
+        assert entry["cell"] == "gcd"
+        assert entry["source_cell"] == "sky130_fd_sc_hd__and3_1"
+        assert entry["source_path"] == ["sky130_fd_sc_hd__and3_1"]
 
 
 def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:

@@ -16,6 +16,8 @@
       "check": "enclosing",
       "layer": "diff.drawing",
       "cell": "TOP",
+      "source_cell": null,
+      "source_path": null,
       "bbox": {
         "left": 3000,
         "bottom": 0,
@@ -47,6 +49,8 @@
       "check": "enclosing",
       "layer": "diff.drawing",
       "cell": "TOP",
+      "source_cell": null,
+      "source_path": null,
       "bbox": {
         "left": 3000,
         "bottom": 0,
@@ -78,6 +82,8 @@
       "check": "enclosing",
       "layer": "diff.drawing",
       "cell": "TOP",
+      "source_cell": null,
+      "source_path": null,
       "bbox": {
         "left": 3000,
         "bottom": 190,
@@ -109,6 +115,8 @@
       "check": "enclosing",
       "layer": "diff.drawing",
       "cell": "TOP",
+      "source_cell": null,
+      "source_path": null,
       "bbox": {
         "left": 3190,
         "bottom": 0,
@@ -140,6 +148,8 @@
       "check": "width",
       "layer": "poly.drawing",
       "cell": "TOP",
+      "source_cell": null,
+      "source_path": null,
       "bbox": {
         "left": 0,
         "bottom": 0,

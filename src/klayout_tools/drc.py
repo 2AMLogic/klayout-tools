@@ -15,7 +15,15 @@ deck through the full KLayout application).
 Limitation: each rule is checked against the *whole layout*, flattened per
 top cell (via ``Cell.begin_shapes_rec``, the same flattening idiom used
 elsewhere in this repo) — there is no ``--top <cell>`` filter in this
-version.
+version. The flattened check still knows *which* top cell a violation was
+found under (the ``"cell"`` field), and — additively, without changing the
+flattened detection — each violation is also attributed back to the
+innermost placed instance whose bounding box contains it, via
+``Cell.begin_instances_rec_touching`` (see :func:`_attribute_to_instance`);
+that origin is reported in the ``"source_cell"`` / ``"source_path"`` fields
+so macro-scale, machine-generated layout (e.g. an OpenROAD place-and-route
+run with hundreds of standard-cell placements) can point at the offending
+instance rather than only the top cell.
 """
 
 from __future__ import annotations
@@ -74,6 +82,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 {
                     "rule": str, "description": str, "check": str,
                     "layer": str, "cell": str,
+                    "source_cell": str | None, "source_path": [str, ...] | None,
                     "bbox": {"left": int, "bottom": int, "right": int, "top": int},
                     "polygon": [[x, y], ...] | None,
                 },
@@ -103,6 +112,26 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     violations that share a corner are still totally ordered, keeping output
     canonical across platforms/KLayout builds regardless of the engine's
     internal shape-enumeration order.
+
+    ``source_cell`` / ``source_path`` attribute each violation back to the
+    originating placed instance, additively to the JSON contract (both new
+    fields; no ``schema_version`` bump -- see ``docs/json-contract.md``). The
+    flattened check (above) reports only the top ``cell`` a violation sits
+    under; for a hierarchical, multi-instance macro that is rarely the
+    actionable answer. After a violation's ``bbox`` is known, it is mapped
+    back to the *innermost* placed instance whose own bounding box fully
+    contains that bbox (see :func:`_attribute_to_instance`): ``source_cell``
+    is that instance's cell-definition name and ``source_path`` is the chain
+    of cell names from the top cell's direct child down to it (inclusive).
+    When no single instance contains the violation -- top-level geometry, or
+    a violation whose bbox straddles an instance boundary (e.g. a spacing
+    violation between two adjacent placements) -- both are ``None`` and the
+    top ``cell`` remains the only attribution, which is the honest answer
+    since the violation belongs to no one instance. A cell placed more than
+    once is not conflated: each placement's violations fall inside only that
+    placement's world bbox, so they attribute to the correct occurrence (the
+    shared ``source_cell``/``source_path`` name the reused definition; the
+    distinct ``bbox`` locates the specific placement).
 
     ``coverage`` reports what was actually checked, purely additive to the
     JSON contract (see ``docs/json-contract.md``; no ``schema_version``
@@ -262,6 +291,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 except Exception:
                     points = None
 
+                source_cell, source_path = _attribute_to_instance(cell, bbox)
                 violations.append(
                     {
                         "rule": rule.id,
@@ -269,6 +299,8 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                         "check": rule.check,
                         "layer": layer_label,
                         "cell": cell.name,
+                        "source_cell": source_cell,
+                        "source_path": source_path,
                         "bbox": {
                             "left": bbox.left,
                             "bottom": bbox.bottom,
@@ -292,6 +324,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                     bbox = polygon.bbox()
                     points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
 
+                    source_cell, source_path = _attribute_to_instance(cell, bbox)
                     violations.append(
                         {
                             "rule": rule.id,
@@ -299,6 +332,8 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                             "check": rule.check,
                             "layer": layer_label,
                             "cell": cell.name,
+                            "source_cell": source_cell,
+                            "source_path": source_path,
                             "bbox": {
                                 "left": bbox.left,
                                 "bottom": bbox.bottom,
@@ -352,6 +387,72 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
             input_path=path,
         ),
     }
+
+
+def _attribute_to_instance(
+    top_cell: Any, bbox: Any
+) -> tuple[str | None, list[str] | None]:
+    """Map a violation ``bbox`` (in ``top_cell`` coordinates) back to the
+    innermost placed instance whose own bounding box fully contains it.
+
+    Returns a ``(source_cell, source_path)`` pair. ``source_cell`` is the
+    cell-definition name of that innermost instance and ``source_path`` is
+    the chain of cell names from ``top_cell``'s direct child down to it
+    (inclusive). Both are ``None`` when no single placed instance contains
+    ``bbox`` -- i.e. the violation is top-level geometry, or its bbox
+    straddles an instance boundary (a spacing/enclosure violation *between*
+    two placements belongs to neither), so the caller's top-cell attribution
+    is the only honest answer.
+
+    This never touches the flattened geometry the check actually ran on: it
+    is a pure, additive lookup over the instance tree, spatially restricted
+    to ``bbox`` via ``Cell.begin_instances_rec_touching`` so it stays cheap
+    even for macros with hundreds of thousands of placements. The instance
+    tree is walked depth-first by KLayout; among every candidate whose world
+    bbox contains the violation, the *deepest* one (longest instance path)
+    wins, with a deterministic tie-break (smallest world-bbox area, then
+    lexicographic path) so repeated runs and different KLayout builds agree.
+    """
+    best_depth = -1
+    best_area: int | None = None
+    best_path: list[str] | None = None
+
+    it = top_cell.begin_instances_rec_touching(bbox)
+    while not it.at_end():
+        inst_cell = it.inst_cell()
+        world = (it.trans() * it.inst_trans()) * inst_cell.bbox()
+        # Full containment (not mere touching): the violation must sit wholly
+        # inside this placement for it to be the origin. `begin_..._touching`
+        # over-returns edge-touching neighbours, so filter explicitly.
+        if (
+            world.left <= bbox.left
+            and world.bottom <= bbox.bottom
+            and world.right >= bbox.right
+            and world.top >= bbox.top
+        ):
+            path = [ie.inst().cell.name for ie in it.path()]
+            path.append(inst_cell.name)
+            depth = len(path)
+            area = world.width() * world.height()
+            if (
+                depth > best_depth
+                or (depth == best_depth and best_area is not None and area < best_area)
+                or (
+                    depth == best_depth
+                    and best_area is not None
+                    and area == best_area
+                    and best_path is not None
+                    and path < best_path
+                )
+            ):
+                best_depth = depth
+                best_area = area
+                best_path = path
+        it.next()
+
+    if best_path is None:
+        return None, None
+    return best_path[-1], best_path
 
 
 def _run_check(

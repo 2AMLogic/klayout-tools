@@ -278,8 +278,42 @@ guarantees".
 Each rule is checked against the **whole layout**, flattened per top cell
 (via `Cell.begin_shapes_rec`) — there is no `--top <cell>` filter to scope
 the check to a single cell in this version. If a layout has multiple top
-cells, each is checked independently and violations report the top cell
-they were found under.
+cells, each is checked independently and the `cell` field reports the top
+cell a violation was found under.
+
+Flattening the geometry does not, however, mean the report is blind to
+hierarchy: see "Per-instance attribution" below for how each violation is
+additionally mapped back to the originating placed instance.
+
+## Per-instance attribution (`source_cell` / `source_path`)
+
+For a hierarchical, machine-generated layout — an OpenROAD place-and-route
+run with hundreds of placed standard cells, say — knowing only that a
+violation is "somewhere under the top cell" is rarely actionable. So, after
+each violation's `bbox` is computed on the flattened geometry, `klt drc`
+maps that bbox back to the **innermost placed instance whose own bounding
+box fully contains it** (via `Cell.begin_instances_rec_touching`, spatially
+restricted so it stays cheap even for very large macros):
+
+- `source_cell` — the cell-definition name of that innermost instance (e.g.
+  `"sky130_fd_sc_hd__inv_2"`).
+- `source_path` — the chain of cell names from the top cell's direct child
+  down to `source_cell`, inclusive (e.g. `["block_a",
+  "sky130_fd_sc_hd__inv_2"]`).
+
+Both are `null` when the violation is contained in **no single** instance —
+top-level routing/geometry, or a `bbox` that straddles an instance boundary
+(a spacing or enclosure violation *between* two adjacent placements belongs
+to neither, so the top `cell` remains the only honest attribution). A cell
+placed more than once is **not conflated**: each placement's violations fall
+inside only that placement's world bounding box, so they attribute to the
+correct occurrence — the shared `source_cell`/`source_path` name the reused
+definition, while the distinct `bbox` locates the specific placement.
+
+These two fields are **purely additive** to the JSON contract — the existing
+`cell` field keeps its meaning (the top cell) and the sort key is unchanged
+— so this did not bump `drc`'s `schema_version` (see
+[`docs/json-contract.md`](../json-contract.md)).
 
 ## Database units (dbu)
 
@@ -364,6 +398,8 @@ On a run with findings:
       "check": "width",
       "layer": "poly.drawing",
       "cell": "TOP",
+      "source_cell": "sky130_fd_sc_hd__inv_2",
+      "source_path": ["sky130_fd_sc_hd__inv_2"],
       "bbox": { "left": 0, "bottom": 0, "right": 100, "top": 2000 },
       "polygon": [[0, 0], [0, 2000], [100, 2000], [100, 0]]
     }
@@ -400,7 +436,9 @@ On a run with findings:
 | `description` | string               | Human-readable rule description.                                              |
 | `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
-| `cell`        | string               | Name of the top cell the violation was found under.                          |
+| `cell`        | string               | Name of the top cell the violation was found under. (The check is flattened per top cell — see "Limitation: whole-layout, flattened" — so this is always a top cell, never a sub-instance.) |
+| `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
+| `source_path` | array\<string\> \| null | The instance chain from the top cell's direct child down to `source_cell` (inclusive), e.g. `["block_a", "sky130_fd_sc_hd__inv_2"]`; a single-element list for a directly-placed leaf. `null` exactly when `source_cell` is `null`. |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
 | `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. |
 
