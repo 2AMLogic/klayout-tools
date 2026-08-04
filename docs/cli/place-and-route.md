@@ -111,6 +111,38 @@ completed; merges the routed DEF with the resolved standard-cell GDS view
 (and the tech+cell LEF, for layer/pin geometry) into a single top-level-only
 GDS, the same "0 missing/orphan cells" check `def2stream.py` performs.
 
+## Hard-macro placement (`request.macros`)
+
+Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line
+in "Out of scope" below into an additive request field, closing that gap
+exactly the way its own note anticipated. `request.macros` is an optional
+array of hard-macro instances — e.g. a LEF abstract
+[`klt lef-abstract`](socket-check.md#lef-translation) emitted from an analog
+block — each fixed at a caller-given location during the `"floorplan"`
+stage, via OpenROAD's own `place_macro -macro_name <instance> -location {x
+y} -orientation <orientation> -exact` (verified live against a real
+`openroad/orfs` container's own `help place_macro` usage string; `-exact`
+places at exactly the given location rather than snapping to the nearest
+legal site). Never OpenROAD's automatic macro placer (`rtl_macro_placer`) —
+a socket-driven macro's location is a caller decision, not something to
+optimize away.
+
+Each macro's LEF is `read_lef`'d alongside the tech/cell LEF, **before**
+`read_verilog`/`link_design` — `link_design` needs every macro's physical
+view already loaded to resolve the netlist's own macro instance. The RTL's
+top module must therefore instantiate a module whose name matches the
+macro LEF's own `MACRO` name, with a matching port list (standard
+hierarchical-netlist convention); `link_design` fails with a clear OpenROAD
+error otherwise.
+
+| `macros[]` field | Type | Description |
+| --- | --- | --- |
+| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array. |
+| `lef` | string | Path to the macro's LEF abstract (e.g. `klt lef-abstract`'s own `output`). Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
+| `x_um` / `y_um` | number | The macro's lower-left corner, in micrometres, in `place_macro -location`'s own coordinate space. Both required. |
+| `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
+| `gds` | string \| omitted | The macro's own GDS view. When given, merged into the final `gds_path` alongside the standard-cell GDS view (same "0 missing/orphan cells" check). When omitted, this instance's cell is expected to stay empty in the merged GDS — not an error — for a caller only after this issue's own DEF-level placement/obstruction verification. |
+
 ## Request
 
 ```json
@@ -131,6 +163,9 @@ GDS, the same "0 missing/orphan cells" check `def2stream.py` performs.
     "site": "unithd"
   },
   "io": { "layer_h": "met3", "layer_v": "met2" },
+  "macros": [
+    { "instance": "u_analog", "lef": "analog_block.lef", "x_um": 12.5, "y_um": 3.0, "orientation": "R0" }
+  ],
   "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
   "seed": 1,
   "target_stage": "route"
@@ -147,6 +182,7 @@ GDS, the same "0 missing/orphan cells" check `def2stream.py` performs.
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
+| `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
@@ -178,6 +214,9 @@ GDS, the same "0 missing/orphan cells" check `def2stream.py` performs.
     { "name": "cts", "...": "..." },
     { "name": "route", "...": "..." }
   ],
+  "macros": [
+    { "instance": "u_analog", "lef": "/abs/path/analog_block.lef", "x_um": 12.5, "y_um": 3.0, "orientation": "R0" }
+  ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
   "gds_path": "/abs/path/.klt/place-and-route/gcd.gds",
   "provenance": {
@@ -205,6 +244,7 @@ GDS, the same "0 missing/orphan cells" check `def2stream.py` performs.
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
+| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
@@ -241,12 +281,13 @@ eval`'s descriptor with an explicit threshold, the same mechanism
 
 ## Out of scope
 
-- **Macro placement, tapcell insertion, power-grid generation (PDN), metal
-  fill, `DONT_USE_CELLS`-style cell exclusion.** A core-only block v1,
-  matching the contract's own IO-ring/footprint exclusion — none of these
-  are part of the request/response contract this phase implements, and can
-  be added later as additive request fields without a contract-shape
-  change.
+- **Tapcell insertion, power-grid generation (PDN), metal fill,
+  `DONT_USE_CELLS`-style cell exclusion.** A core-only block v1, matching
+  the contract's own IO-ring/footprint exclusion — none of these are part
+  of the request/response contract this phase implements, and can be added
+  later as additive request fields without a contract-shape change.
+  (Hard-macro placement was originally scoped out here too — see
+  "Hard-macro placement" above; issue #438 closed that gap.)
 - **IO-ring/footprint floorplanning.** Out of scope for a core-only block,
   per the OpenROAD survey section 2.
 - **A second P&R engine.** `request.engine` exists from day one so a later

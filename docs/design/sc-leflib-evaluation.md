@@ -242,3 +242,35 @@ PY
 KLayout source citations are from `klayout` v0.30.10,
 `src/plugins/streamers/lefdef/db_plugin/dbLEFImporter.cc` (`read_macro`,
 `read_layer`, and the library-level `SITE` branch) and `dbDEFImporter.cc`.
+
+## 2026-08-03 addendum: the deferred trigger fired (issue #438)
+
+Section 5's trigger — "a real verb needs LEF header attributes... needs pin
+`DIRECTION`/`USE` to classify pins as in/out/power" — fired for issue #438
+(Epic #393 Phase 2 Capability A, "emit a LEF abstract from an analog block's
+GDS + socket descriptor"): `klt lef-abstract` needs a tech LEF's `SITE`/
+routing-layer geometry to classify which GDS layers are routing-eligible for
+the abstract it emits, and needs to write (and can round-trip-verify) a
+macro LEF's own `PIN DIRECTION`/`USE` statements.
+
+**Resolved via option 1** — read the header ourselves — exactly as this
+document's own preference order recommended, and matching option 1's
+original size estimate closely: `klayout_tools.lef_header` is ~250 lines
+(regex-based block extraction over `SITE`/`LAYER`/`MACRO`/`PIN`, verified
+correct against the real sky130 tech LEF, a real merged standard-cell LEF's
+437 macros, and a real sky130 SRAM hard-macro LEF — see
+`src/klayout_tools/lef_header.py` and `tests/test_lef_header.py`). No new
+dependency; `sc-leflib` was not reconsidered, since option 1 succeeded on
+its own terms. Covers macro `CLASS`/`SYMMETRY`/`SITE` reference too — the
+three attributes this document's own comparison table noted sc-leflib does
+*not* return either.
+
+Deliberately still narrower than a full LEF grammar: `PORT`/`OBS` geometry
+(`RECT`/`POLYGON`/`PATH`, `VIA`/`VIARULE` blocks, LEF58 properties) is not
+parsed by this reader — that remains `klayout.db`'s job, read a second time
+by the same caller when geometry is also needed (`klt lef-abstract` does
+exactly this: `lef_header.read_lef_header()` for the tech LEF's header,
+`klayout.db` for the block's own GDS geometry). The "wrap the proven
+engine"/"rewrite rule" analysis in section 4 above is unchanged by this
+addendum — nothing about *reading LEF geometry* moved; only the previously-
+unread header layer gained a reader.

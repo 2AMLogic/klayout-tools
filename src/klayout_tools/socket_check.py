@@ -46,6 +46,16 @@ CHECK_NAMES: tuple[str, ...] = ("pins", "outline", "reserved_layers")
 #: Descriptor format identifier (see ``docs/schemas/socket.schema.json``).
 SOCKET_SCHEMA = "klt.socket/1"
 
+#: Valid ``pins[].direction``/``pins[].use`` values -- LEF's own ``PIN
+#: DIRECTION``/``PIN USE`` vocabulary (LEF 5.7 section 5.6.2). Optional,
+#: descriptive-only fields in this module (``klt socket-check`` never checks
+#: them against drawn geometry -- there is no mechanical way to derive
+#: signal direction from geometry alone); :mod:`klayout_tools.lef_abstract`
+#: (issue #438) is the first consumer that reads them, to classify a LEF
+#: ``PIN`` it emits without guessing when the descriptor already states it.
+_VALID_PIN_DIRECTIONS = frozenset({"INPUT", "OUTPUT", "INOUT", "FEEDTHRU"})
+_VALID_PIN_USES = frozenset({"SIGNAL", "ANALOG", "POWER", "GROUND", "CLOCK"})
+
 
 class SocketCheckError(Exception):
     """Raised when a layout cannot be checked against a socket descriptor:
@@ -311,6 +321,19 @@ def _validate_pins(pins: Any) -> list[dict[str, Any]]:
                     f"socket descriptor 'pins[{i}].{key}' must be a number"
                 )
 
+        direction = pin.get("direction")
+        if direction is not None and direction not in _VALID_PIN_DIRECTIONS:
+            raise SocketCheckError(
+                f"socket descriptor 'pins[{i}].direction' must be one of: "
+                + ", ".join(sorted(_VALID_PIN_DIRECTIONS))
+            )
+        use = pin.get("use")
+        if use is not None and use not in _VALID_PIN_USES:
+            raise SocketCheckError(
+                f"socket descriptor 'pins[{i}].use' must be one of: "
+                + ", ".join(sorted(_VALID_PIN_USES))
+            )
+
         validated.append(
             {
                 "name": name,
@@ -322,6 +345,8 @@ def _validate_pins(pins: Any) -> list[dict[str, Any]]:
                 else 0.0,
                 "width_um": pin.get("width_um"),
                 "height_um": pin.get("height_um"),
+                "direction": direction,
+                "use": use,
             }
         )
     return validated

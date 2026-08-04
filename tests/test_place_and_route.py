@@ -483,6 +483,133 @@ def test_run_lef_not_found(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# `request.macros` validation (issue #438, Epic #393 Phase 2 Capability A)
+# --------------------------------------------------------------------------- #
+
+
+def _write_macro_lef(path: Path, macro_name: str = "analog_block") -> None:
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        f"MACRO {macro_name}\n"
+        "  CLASS BLOCK ;\n"
+        "  SIZE 5.0 BY 5.0 ;\n"
+        "  PIN VOUT\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    USE ANALOG ;\n"
+        "  END VOUT\n"
+        f"END {macro_name}\n"
+        "END LIBRARY\n",
+        encoding="utf-8",
+    )
+
+
+def test_macros_field_absent_validates_to_empty_list(tmp_path):
+    assert place_and_route._validate_macros(None, str(tmp_path)) == []
+
+
+def test_macros_field_must_be_a_list(tmp_path):
+    with pytest.raises(PlaceAndRouteError, match="request.macros must be a list"):
+        place_and_route._validate_macros({"not": "a list"}, str(tmp_path))
+
+
+def test_macro_entry_must_be_an_object(tmp_path):
+    with pytest.raises(
+        PlaceAndRouteError, match=r"request\.macros\[0\] must be an object"
+    ):
+        place_and_route._validate_macros(["not an object"], str(tmp_path))
+
+
+def test_macro_instance_required(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="instance is required"):
+        place_and_route._validate_macros(
+            [{"lef": "m.lef", "x_um": 1, "y_um": 1}], str(tmp_path)
+        )
+
+
+def test_macro_lef_must_exist(tmp_path):
+    with pytest.raises(PlaceAndRouteError, match="lef not found"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "missing.lef", "x_um": 1, "y_um": 1}],
+            str(tmp_path),
+        )
+
+
+def test_macro_lef_must_declare_exactly_one_macro(tmp_path):
+    (tmp_path / "empty.lef").write_text(
+        "VERSION 5.7 ;\nEND LIBRARY\n", encoding="utf-8"
+    )
+    with pytest.raises(PlaceAndRouteError, match="must declare exactly one MACRO"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "empty.lef", "x_um": 1, "y_um": 1}],
+            str(tmp_path),
+        )
+
+
+def test_macro_x_y_um_required_numbers(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match=r"x_um is required"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "m.lef", "y_um": 1}], str(tmp_path)
+        )
+
+
+def test_macro_orientation_must_be_valid(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="orientation must be one of"):
+        place_and_route._validate_macros(
+            [
+                {
+                    "instance": "u1",
+                    "lef": "m.lef",
+                    "x_um": 1,
+                    "y_um": 1,
+                    "orientation": "SIDEWAYS",
+                }
+            ],
+            str(tmp_path),
+        )
+
+
+def test_macro_orientation_defaults_to_r0(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 2}], str(tmp_path)
+    )
+    assert macros[0]["orientation"] == "R0"
+    assert macros[0]["cell_name"] == "analog_block"
+
+
+def test_macro_gds_must_exist_when_given(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="gds not found"):
+        place_and_route._validate_macros(
+            [
+                {
+                    "instance": "u1",
+                    "lef": "m.lef",
+                    "x_um": 1,
+                    "y_um": 1,
+                    "gds": "missing.gds",
+                }
+            ],
+            str(tmp_path),
+        )
+
+
+def test_duplicate_macro_instance_names_rejected(tmp_path):
+    _write_macro_lef(tmp_path / "m.lef")
+    with pytest.raises(PlaceAndRouteError, match="instance values must be unique"):
+        place_and_route._validate_macros(
+            [
+                {"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1},
+                {"instance": "u1", "lef": "m.lef", "x_um": 2, "y_um": 2},
+            ],
+            str(tmp_path),
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Stubbed OpenROAD: full `run_place_and_route` without a real `openroad`
 # binary. The stub writes the same `-metrics <file>.json` shape a real
 # per-stage run produces (verified live -- see `place_and_route.py`'s own
@@ -692,6 +819,89 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["klt_version"]
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+
+
+def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
+    tmp_path, monkeypatch
+):
+    """Issue #438: a declared `request.macros` entry must (a) `read_lef` the
+    macro before `read_verilog`/`link_design`, and (b) `place_macro` it at
+    the declared location -- both inside the floorplan stage script, per
+    `place_macro`'s own real-OpenROAD-verified usage (this module's
+    docstring "Hard-macro placement" section)."""
+    macro_lef = tmp_path / "analog_block.lef"
+    _write_macro_lef(macro_lef, "analog_block")
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "instance": "u_analog",
+                "lef": "analog_block.lef",
+                "x_um": 12.5,
+                "y_um": 3.0,
+                "orientation": "MX",
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["macros"] == [
+        {
+            "instance": "u_analog",
+            "lef": str(macro_lef),
+            "x_um": 12.5,
+            "y_um": 3.0,
+            "orientation": "MX",
+        }
+    ]
+
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    lines = _script_lines(floorplan_script)
+    assert f"read_lef {macro_lef}" in lines
+    read_lef_idx = lines.index(f"read_lef {macro_lef}")
+    read_verilog_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("read_verilog")
+    )
+    assert read_lef_idx < read_verilog_idx
+
+    place_macro_line = (
+        "place_macro -macro_name u_analog -location {12.5 3.0} -orientation MX -exact"
+    )
+    assert place_macro_line in lines
+    link_design_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("link_design")
+    )
+    make_tracks_idx = lines.index("make_tracks")
+    place_macro_idx = lines.index(place_macro_line)
+    assert link_design_idx < place_macro_idx < make_tracks_idx
+
+
+def test_stubbed_no_macros_field_emits_no_place_macro_lines(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["macros"] == []
+    floorplan_script = os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        "pnr_gcd_floorplan.tcl",
+    )
+    lines = _script_lines(floorplan_script)
+    assert not any("place_macro" in line for line in lines)
 
 
 def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
@@ -1003,6 +1213,7 @@ def test_merge_def_to_gds_success(tmp_path):
         pdk_info=_fake_pdk_info(root),
         cell_library="sky130_fd_sc_hd",
         hdl_toplevel="top",
+        macros=[],
         out_path=str(out_path),
     )
 
@@ -1035,6 +1246,7 @@ def test_merge_def_to_gds_missing_top_cell(tmp_path):
             pdk_info=_fake_pdk_info(root),
             cell_library="sky130_fd_sc_hd",
             hdl_toplevel="wrong_top_name",
+            macros=[],
             out_path=str(tmp_path / "out.gds"),
         )
 
@@ -1059,6 +1271,7 @@ def test_merge_def_to_gds_missing_gds_view(tmp_path):
             pdk_info=_fake_pdk_info(root),
             cell_library="sky130_fd_sc_hd",
             hdl_toplevel="top",
+            macros=[],
             out_path=str(tmp_path / "out.gds"),
         )
 
@@ -1091,8 +1304,153 @@ def test_merge_def_to_gds_empty_cell_is_an_error(tmp_path):
             pdk_info=_fake_pdk_info(root),
             cell_library="sky130_fd_sc_hd",
             hdl_toplevel="top",
+            macros=[],
             out_path=str(tmp_path / "out.gds"),
         )
+
+
+def _write_tiny_macro_lef(
+    path: Path, macro_name: str, size_um: tuple[float, float]
+) -> None:
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        f"MACRO {macro_name}\n"
+        "  CLASS BLOCK ;\n"
+        f"  SIZE {size_um[0]} BY {size_um[1]} ;\n"
+        "END " + macro_name + "\n"
+        "END LIBRARY\n",
+        encoding="utf-8",
+    )
+
+
+def _write_tiny_def_with_macro(
+    path: Path, *, design_name: str, cell_name: str, macro_cell_name: str
+) -> None:
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        'DIVIDERCHAR "/" ;\n'
+        'BUSBITCHARS "[]" ;\n'
+        f"DESIGN {design_name} ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( 0 0 ) ( 46000 27200 ) ;\n"
+        "ROW ROW_0 unithd 0 0 N DO 10 BY 1 STEP 460 0 ;\n"
+        "COMPONENTS 2 ;\n"
+        f"- inst1 {cell_name} + PLACED ( 0 0 ) N ;\n"
+        f"- u_macro {macro_cell_name} + PLACED ( 10000 10000 ) N ;\n"
+        "END COMPONENTS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+
+
+def test_merge_def_to_gds_tolerates_abstract_only_macro_instance(tmp_path):
+    """A macro instance with no declared `gds` (issue #438) stays empty in
+    the merged layout without raising -- the abstract-only case this
+    issue's own DEF-level placement/obstruction verification needs."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    macro_cell_name = "analog_block"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    macro_lef = tmp_path / "analog_block.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+    _write_tiny_macro_lef(macro_lef, macro_cell_name, (5.0, 5.0))
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", cell_name)
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def_with_macro(
+        def_path,
+        design_name="top",
+        cell_name=cell_name,
+        macro_cell_name=macro_cell_name,
+    )
+
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root),
+        cell_library="sky130_fd_sc_hd",
+        hdl_toplevel="top",
+        macros=[
+            {
+                "instance": "u_macro",
+                "lef": str(macro_lef),
+                "cell_name": macro_cell_name,
+                "x_um": 10.0,
+                "y_um": 10.0,
+                "orientation": "R0",
+                "gds": None,
+            }
+        ],
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+    result = kdb.Layout()
+    result.read(str(out_path))
+    assert result.cell(macro_cell_name) is not None
+
+
+def test_merge_def_to_gds_merges_macro_gds_view_when_declared(tmp_path):
+    """When a macro entry declares its own `gds`, that view is merged in
+    (non-empty) exactly like the standard-cell GDS view."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    macro_cell_name = "analog_block"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    macro_lef = tmp_path / "analog_block.lef"
+    macro_gds = tmp_path / "analog_block.gds"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+    _write_tiny_macro_lef(macro_lef, macro_cell_name, (5.0, 5.0))
+    _write_matching_cell_gds(macro_gds, macro_cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", cell_name)
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def_with_macro(
+        def_path,
+        design_name="top",
+        cell_name=cell_name,
+        macro_cell_name=macro_cell_name,
+    )
+
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root),
+        cell_library="sky130_fd_sc_hd",
+        hdl_toplevel="top",
+        macros=[
+            {
+                "instance": "u_macro",
+                "lef": str(macro_lef),
+                "cell_name": macro_cell_name,
+                "x_um": 10.0,
+                "y_um": 10.0,
+                "orientation": "R0",
+                "gds": str(macro_gds),
+            }
+        ],
+        out_path=str(out_path),
+    )
+
+    result = kdb.Layout()
+    result.read(str(out_path))
+    macro_cell = result.cell(macro_cell_name)
+    assert macro_cell is not None
+    assert not macro_cell.is_empty()
 
 
 # --------------------------------------------------------------------------- #
