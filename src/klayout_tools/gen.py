@@ -220,6 +220,24 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # exist purely for `gen_compose`'s router to resolve.
         "metal2": (68, 20),  # met1.drawing -- EXTRACTION_DECK.metals[1]
         "via1": (67, 44),  # mcon.drawing -- EXTRACTION_DECK.vias[0] (li1<->met1)
+        # Third routing-metal role + its connecting via (issue #508, follow-up
+        # to #454/#468): sky130's curated *extraction* deck now declares a
+        # third connectivity level and the via that lands on it
+        # (`klayout_tools.decks.sky130.EXTRACTION_DECK.metals[2]`/`.vias[1]`)
+        # -- a genuinely independent second routing plane above `"metal2"`
+        # (met1) for a caller whose own intra-block bussing already saturates
+        # met1, mirroring the exact shape `"metal2"`/`"via1"` established
+        # above. Same caveat as `"metal2"`/`"via1"`: not drawn by any `klt
+        # gen` generator itself -- both roles exist purely for
+        # `gen_compose`'s router to resolve. `gen_compose`'s via-drop is
+        # single-hop only (see `_resolve_via_drop_layer`), so `"metal3"`
+        # only reaches a pin already on `"metal2"` (met1, one via hop away)
+        # -- a pin still on the base `"metal"` role (li1, two hops away) is
+        # not reachable from a `"metal3"` backbone, the same
+        # "more-than-one-hop" rejection `docs/cli/gen-compose.md`'s Via-drop
+        # section already documents.
+        "metal3": (69, 20),  # met2.drawing -- EXTRACTION_DECK.metals[2]
+        "via2": (68, 44),  # via.drawing -- EXTRACTION_DECK.vias[1] (met1<->met2)
         "dummy": (83, 20),  # curated marker, matches
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.dummy` -- see that
         # deck's own comment for why sky130 has no native dummy-device GDS

@@ -113,7 +113,7 @@ The `sky130` and `gf180mcu` decks are **curated starter subsets**, the
 extraction analogue of `klt drc`'s curated rule decks (see
 [`docs/cli/drc.md`](drc.md) → "Coverage"): a two-terminal-well CMOS stack
 (one drawn well layer splitting NMOS/PMOS, contact/local-interconnect up
-through the PDK's metal stack — sky130's `li1`/`met1` and gf180mcu's full
+through the PDK's metal stack — sky130's `li1`/`met1`/`met2` and gf180mcu's full
 `Metal1`–`Metal5` with `Via1`–`Via4` between them, so a block routed on any
 declared level extracts as connected nets, not a pile of disconnected
 ones), not a full PDK's device zoo. Both decks
@@ -356,7 +356,7 @@ Two consequences worth knowing:
     top terminal is tied in the same way.
   - **sky130**: neither plate is wired. `met3`/`met4` (the two stacks'
     `bottom_plate` layers) are not among this curated deck's own `metals`
-    (`li1`/`met1` only), and while the real PDK's MiM stacks do have a
+    (`li1`/`met1`/`met2` only), and while the real PDK's MiM stacks do have a
     landing via for the top plate too (`sky130.lvs`'s `connect(capm, via3)`
     / `connect(capm2, via4)`), those land on `met4`/`met5` — also above this
     curated deck's `metals` stack — so `CapacitorDevice.top_plate_via` is
