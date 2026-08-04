@@ -225,6 +225,12 @@ matching the Yosys survey's own live-verified numbers exactly.
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
   contract's `netlist` request field) — this command does not floorplan,
   place, or route.
+- **Fleet-scale evaluation of many design-space candidates.** See
+  [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation of
+  digital candidates" section (Epic #391 Phase 6) — `klayout_tools.digital_fleet`
+  composes this command with `klt place-and-route`/`klt eval` into one
+  fleet-scheduled candidate job; this command itself takes no `--backend`/
+  `--hosts` flag.
 - **A second synthesis engine.** `request.engine` exists from day one so a
   later backend (e.g. a Siemens tool) is an additive enum value and a new
   glue module, never a contract-shape change — but only `"yosys"` is
