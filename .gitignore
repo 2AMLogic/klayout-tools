@@ -29,6 +29,14 @@ renders/
 # examples/ in place must not stage generated build dirs/logs/results.
 .klt/
 
+# macOS Finder droppings
+.DS_Store
+
+# Claude Code agent worktrees (mirrors .loom/worktrees/ below) and
+# machine-local settings overrides
+.claude/worktrees/
+.claude/settings.local.json
+
 # Repo Skills machine-local install metadata (absolute source path + timestamp)
 .claude/skills/repo/.install-local.json
 .claude/skills/repo/logs/

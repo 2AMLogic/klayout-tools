@@ -46,7 +46,7 @@ an agent needs instead:
 
 Early alpha — [v0.1.0 is on PyPI](https://pypi.org/project/klayout-tools/)
 with the first five verbs (`layers`, `stats`, `cells`, `drc`, `pdk`);
-`main` has since grown to 18 verbs — see [`docs/cli/`](docs/cli/). The
+`main` has since grown to 24 verbs — see [`docs/cli/`](docs/cli/). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
 See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
@@ -171,8 +171,9 @@ load on demand:
   the back-end stages ([DRC/LVS](.claude/skills/design-drc-lvs/SKILL.md),
   [layout generation](.claude/skills/design-layout-generation/SKILL.md),
   [extraction](.claude/skills/design-extraction/SKILL.md), and
-  [signoff](.claude/skills/design-signoff/SKILL.md) — the last three are
-  declared stubs, each naming the capability gap that blocks it).
+  [signoff](.claude/skills/design-signoff/SKILL.md) — layout generation and
+  extraction now run against shipped `klt` verbs; signoff remains a
+  declared stub gated on the #309 aggregation tool).
 
 ## Design notes
 

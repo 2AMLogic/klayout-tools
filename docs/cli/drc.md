@@ -181,7 +181,7 @@ handful of shapes, one or two drawn layers, shallow hierarchy. Issue #436
 ran it against the first machine-generated, macro-scale target: a real
 `sky130_fd_sc_hd` standard-cell GCD macro produced end to end by
 `klt synthesize` + `klt place-and-route` (real Yosys + real OpenROAD, see
-`tests/corpus/place_and_route/README.md`'s provenance note) — thousands of
+`tests/corpus/README.md`'s provenance note) — thousands of
 instances, one level of real hierarchy, and routing-layer usage across
 `met1`-`met5` plus vias, none of which the analog fixtures exercise. `klt
 drc` itself required **no code changes**: it ran cleanly (no crash,

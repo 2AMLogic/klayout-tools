@@ -214,7 +214,8 @@ a no-op. gf180mcu is out of scope for this phase — sky130 only.
 ### SPICE playground engine wrapper (phase B)
 
 `src/lib/playground/` is the client-side SPICE engine wrapper (Epic #90, issue
-#150 / parent #148) that phase C's playground UI (#151) builds on. It wraps
+#150 / parent #148) that the shipped playground UI (#151,
+`src/components/playground/`'s `StimulusPlayground`) builds on. It wraps
 [`eecircuit-engine`](https://www.npmjs.com/package/eecircuit-engine) — a
 MIT-licensed WASM build of ngspice (BSD-3 core) recommended by the spike
 (`docs/design/wasm-spice-playground-spike.md`) — with three concerns:
@@ -297,6 +298,7 @@ site/
   scripts/
     copy-renders.mjs    # prebuild: stages blocks/*/output/... into public/blocks/
     stage-models.mjs    # prebuild: stages checksummed sky130 SPICE model decks (issue #149)
+    stage-models.test.mjs  # tests for the model-deck staging script
     sky130-models.NOTICE.txt  # Apache-2.0 attribution staged alongside model decks
     playground-perf.mjs  # perf harness: reproduces the spike's engine timing (issue #150)
     prerender.mjs        # build: client + SSR Vite builds -> static dist/<route>/index.html
@@ -312,6 +314,13 @@ site/
       Header.tsx          # site header — GitHub repo link
       Footer.tsx           # site footer — build SHA, copyright, scope link
       LayoutCard.tsx        # one gallery card per block
+      LayoutCard.test.tsx
+      playground/
+        StimulusPlayground.tsx      # interactive SPICE playground UI (#151)
+        StimulusPlayground.test.tsx
+        types.ts                     # playground UI prop/state shapes
+        types.test.ts
+        index.ts                     # public re-exports
       ui/
         badge.tsx           # shadcn/ui-style Badge primitive
         card.tsx             # shadcn/ui-style Card primitives
@@ -322,6 +331,7 @@ site/
         waveformMath.ts        # pure zoom/cursor/format helpers
         waveformMath.test.ts
         types.ts                # WaveformData artifact shape (mirrors klt sim)
+        index.ts                 # public re-exports
     data/
       types.ts             # Layout type (schema v1, mirrors klt layout-metrics)
       loadLayouts.ts        # build-time layout data loader
@@ -340,6 +350,7 @@ site/
     pages/
       IndexPage.tsx         # landing page (closed-loop vision statement) + gallery card grid
       DetailPage.tsx         # per-block detail page
+      DetailPage.test.tsx
     setupTests.ts           # vitest global setup (@testing-library/jest-dom matchers)
 ```
 
@@ -356,6 +367,7 @@ is #65. Issue #92 (Epic #90 Phase 1) replatformed all of the above from
 Astro to Vite + React + Tailwind + shadcn/ui without changing URLs, content,
 the data contract, or the deploy story — laying the groundwork for Epic
 #90's interactive phases. Issue #100 (Epic #90 Phase 2) added the Signals
-section and its waveform viewer, built against a hand-written fixture (see
-`blocks/README.md`'s "Signals fixture" note) since the signals pipeline
-issue (#99) that will produce this data for real had not yet merged.
+section and its waveform viewer — originally built against a hand-written
+fixture; the signals pipeline (#99) has since merged and produces this data
+for real from `klt sim` runs (see `blocks/README.md`'s "Signals (issue
+#99)" section).

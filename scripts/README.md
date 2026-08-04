@@ -106,7 +106,7 @@ PDK_ROOT="$PWD/pdks/sky130-liberty" PDK=sky130A uv run pytest tests/test_synthes
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`
 
-CI provisioning for the future `klt functional-verification` verb (issue
+CI provisioning for the `klt functional-verification` verb (issue
 #423, Phase 3 of [Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391)):
 `.github/workflows/ci.yml`'s `test` job runs both (alongside `uv sync
 --extra functional-verification`, which pulls the pinned `cocotb` from

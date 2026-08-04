@@ -21,6 +21,7 @@ docs/
     cells.md
     draw.md
     drc.md
+    eval.md
     extract.md
     functional-verification.md
     gen-compose.md
@@ -28,6 +29,7 @@ docs/
     kb.md
     layers.md
     layout-metrics.md
+    lef-abstract.md
     lvs.md
     pdk.md
     place-and-route.md
