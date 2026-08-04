@@ -1587,13 +1587,45 @@ def _extract_netlist(
     for index, texts in enumerate(metal_labels):
         l2n.register(texts, f"metal{index}_label")
 
-    # NMOS body has no drawn substrate-tap geometry in this curated deck (see
-    # the family deck's docstring); tie it to the deck's global substrate
-    # net instead of leaving it floating. The same empty, globally-connected
-    # region doubles as the bulk terminal of any declared resistor with
-    # `bulk_to_substrate` (#222), which carries the identical approximation.
+    # NMOS body (issue #490). `nfet_body` itself stays a permanently empty
+    # placeholder `Region` -- deliberately never touched by an ordinary
+    # `l2n.connect()` call anywhere below. It is shared, as-is, by every
+    # recognised NMOS device's "W" terminal below, by any declared
+    # `bulk_to_substrate` resistor's "W" terminal (#222), and by a
+    # collector-less bipolar's collector terminal (`bipolar_collector`
+    # further down) -- and KLayout's `LayoutToNetlist` does not tolerate an
+    # ordinary inter-layer `connect()` declaration against a region that is
+    # simultaneously used as a *shared* device-terminal input across more
+    # than one recognised device: it was empirically found to corrupt
+    # *unrelated* terminals' connectivity (observed: two independent NMOS
+    # devices' gate nets, and their otherwise-distinct real tap-ring nets,
+    # all collapsing onto one shared node) rather than raising or silently
+    # no-op'ing. `connect_global` alone -- never plain `connect()` -- is the
+    # only supported way to give this placeholder a net identity.
+    #
+    # `tap` (already resolved above) serves double duty in this curated
+    # deck: a shape drawn *inside* `nwell` is a PMOS well tie (handled
+    # below, unchanged), a shape drawn *outside* `nwell` sits on native
+    # P-substrate and is a genuine, drawable substrate tie. `tap_substrate`
+    # is that outside-the-well slice -- real, possibly-empty geometry (empty
+    # exactly when the deck draws no `tap` layer at all, e.g. gf180mcu, or
+    # when no tap shape happens to sit outside every `nwell` in this
+    # particular layout) -- registered as its own, ordinary (not a device
+    # terminal) layer, so it is safe to `connect()` to `contact`/the metal
+    # stack the same way the well-tie slice already is (see the
+    # `deck.tap is not None` connectivity block below). It is then tied to
+    # `nfet_body`'s shared identity purely via `connect_global` using the
+    # *same* global name (`deck.substrate_net`) -- `connect_global` unifies
+    # every layer/region tied to a given name into one net regardless of
+    # geometric overlap between them, so a drawn tap ring's real, routed net
+    # and every device sharing the (still-empty) `nfet_body` placeholder
+    # land on that one net together, while a layout with no drawn tap ring
+    # at all (`tap_substrate` empty) still falls back to exactly the same
+    # synthesized `substrate_net` identity as before this fix.
     nfet_body = kdb.Region()
     l2n.register(nfet_body, "nfet_body")
+    tap_substrate = tap - nwell
+    l2n.register(tap_substrate, "tap_substrate")
 
     nfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.nfet_class)
     pfet_extractor = kdb.DeviceExtractorMOS4Transistor(deck.pfet_class)
@@ -1793,6 +1825,15 @@ def _extract_netlist(
         l2n.connect(tap)
         l2n.connect(nwell, tap)
         l2n.connect(tap, contact)
+        # Substrate-tie slice of `tap` (issue #490): `tap_substrate` is a
+        # *different*, ordinary (non-device-terminal) registered layer than
+        # `tap` above, even though its geometry -- where present -- is a
+        # literal subset of it, so it needs its own `contact` connection to
+        # join the same metal-routed net a tap ring's shapes reach via
+        # `tap`/`contact` above. Safe to `connect()` normally here (unlike
+        # `nfet_body` above): `tap_substrate` is never passed to
+        # `extract_devices` as a terminal.
+        l2n.connect(tap_substrate, contact)
     l2n.connect(nwell, well_label)
     # Name a poly/gate node directly off a text on the poly-label layer -- the
     # only way a bare-poly gate (no contact/metal landing pad) can carry a
@@ -1819,6 +1860,12 @@ def _extract_netlist(
                 l2n.connect(metals[index + 1], metal_labels[index + 1])
 
     l2n.connect_global(nfet_body, deck.substrate_net)
+    # `connect_global` with the *same* name on a second, ordinary (non-
+    # device-terminal) layer merges it into the identical net (see the
+    # `nfet_body`/`tap_substrate` docstring above) -- the only supported way
+    # to give a drawn substrate-tap ring's real net the same identity as
+    # every device's `nfet_body` terminal.
+    l2n.connect_global(tap_substrate, deck.substrate_net)
 
     for bipolar, bipolar_base, bipolar_emitter, bipolar_collector in bipolar_regions:
         # Base shares net identity with the deck's own `nwell` (`bipolar_base`

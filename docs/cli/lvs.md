@@ -586,18 +586,23 @@ name (one per circuit) — that is expected, and is what keeps
 
 #### `device.body_unverified`: MOS body terminals compared against a deck-synthesized net
 
-The curated extraction decks give some MOS body terminals a net that does not
-come from any drawn tap/well-label geometry (`docs/cli/extract.md` →
-"Coverage"): every NMOS body is tied to the deck's global substrate net
-(`connect_global`, e.g. `vsubs`), since no curated deck draws a distinct NMOS
-substrate/tap layer today; gf180mcu additionally has no distinct PMOS
-well-tap layer (`Comp` is shared with ordinary transistor active), so its
-PMOS bodies land on an anonymous, deck-synthesized well net instead of a real
-one. Comparing those against a schematic reference's real ground/rail net
-still produces a genuine `NetlistComparer` finding if they disagree, but a
-*clean* compare on that dimension does not mean the well/substrate tie was
-actually verified against the schematic — it means both sides were forced
-onto the same synthetic net.
+The curated extraction decks can give some MOS body terminals a net that does
+not come from any drawn tap/well-label geometry (`docs/cli/extract.md` →
+"Coverage"). On **sky130**, `tap.drawing` does double duty: a shape drawn
+outside every `nwell` is a genuine, drawable P-substrate tie, so a layout
+that draws one and contacts it up to a named net gives the NMOS body
+terminal (and the identically-modelled `bulk_to_substrate` resistor bulk and
+collector-less bipolar collector) a real net (issue #490) — only a layout
+with **no** such ring falls back to the deck's global substrate net
+(`connect_global`, e.g. `vsubs`). **gf180mcu** has no distinct tap layer at
+all (`Comp` is shared with ordinary transistor active), so its NMOS bodies —
+and, since it also has no distinct well-tap layer, its PMOS bodies too — land
+on an anonymous, deck-synthesized net unconditionally. Comparing a
+synthesized net against a schematic reference's real ground/rail net still
+produces a genuine `NetlistComparer` finding if they disagree, but a *clean*
+compare on that dimension does not mean the well/substrate tie was actually
+verified against the schematic — it means both sides were forced onto the
+same synthetic net.
 
 `klt lvs` surfaces this as one or two `severity: "warning"` entries
 (`category: "device.body_unverified"`, `side: "layout"`) whenever
@@ -605,19 +610,25 @@ onto the same synthetic net.
 pre-extracted `layout.netlist` form, since no deck (and therefore no known
 synthetic-net behaviour) is involved there:
 
-- An NMOS entry fires whenever the layout has one or more NMOS devices
-  (`device.class` is the deck's `nfet_class`, e.g. `"nfet"`).
+- An NMOS entry fires when the layout has one or more NMOS devices whose
+  body terminal **still** resolved to the deck's synthesized `substrate_net`
+  (`device.class` is the deck's `nfet_class`, e.g. `"nfet"`) — a device whose
+  body terminal resolved to a real, drawn-tap-derived net (sky130 only, and
+  only where a layout actually draws one) is not counted.
 - A PMOS entry additionally fires when the layout-side deck has no distinct
   well-tap layer (`ExtractionDeck.tap is None`, gf180mcu today) **and** the
   layout has one or more PMOS devices (`device.class` is the deck's
   `pfet_class`, e.g. `"pfet"`). sky130's `tap` layer gives PMOS bodies a real,
-  named net, so sky130 never emits this entry.
+  named net unconditionally (every PMOS sits inside an `nwell` by
+  construction), so sky130 never emits this entry.
 
-Both entries are deck-structural (a property of which deck ran extraction,
-not of any individual device pairing or `hints`), always `severity:
-"warning"`, and never change `status` or break `mismatch_count`'s error
-semantics — they only make it visible, in-band, that this dimension of the
-compare was not fully verified against the schematic.
+Both entries reflect real device-level extraction outcomes (per-device for
+NMOS since #490; still deck-structural for PMOS, a property of which deck
+ran extraction rather than of any individual device pairing or `hints`),
+always `severity: "warning"`, and never change `status` or break
+`mismatch_count`'s error semantics — they only make it visible, in-band,
+that this dimension of the compare was not fully verified against the
+schematic.
 
 #### `device.combine_incomplete`: `options.combine_devices` could not fully combine a partial-match device group
 

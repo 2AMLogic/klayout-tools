@@ -297,16 +297,21 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # to `contact` directly (see `ExtractionDeck`'s docstring for why the
 # opposite (connecting the *well* to *every* contact inside it) is wrong).
 #
-# NMOS body: sky130 draws no separate substrate/pwell layer for a curated
-# subset like this one (the whole non-well area is one native P-substrate),
-# so there is no drawn tap geometry to derive a real net name from; the NMOS
-# body terminal is tied to the deck's `substrate_net` global instead
-# (`ExtractionDeck.substrate_net`, default `"vsubs"`) -- a documented
-# approximation, not a real substrate-tap extraction (this repo's real
-# sky130 corpus cells keep VPB (nwell) as a genuine standalone pin, but never
-# expose an equivalent pin for the native substrate at the single-cell
-# level -- see the well-tap connectivity open question in
-# `docs/design/lvs-extraction-spike.md`).
+# NMOS body (issue #490): sky130 draws no separate substrate/pwell layer, so
+# `tap.drawing` does double duty -- a shape drawn *inside* an `nwell` is a
+# PMOS well tie (unchanged, described above), a shape drawn *outside* every
+# `nwell` sits on native P-substrate and is a genuine, drawable substrate
+# tie. `extract.py` splits `tap` by `nwell` containment and wires the
+# outside-the-well slice through `contact`/the metal stack the same way the
+# well-tie slice already is, so the NMOS body terminal (and the identically-
+# modelled `bulk_to_substrate` resistor bulk and collector-less bipolar
+# collector terminals) resolve to that ring's own real, labelled net when a
+# substrate tap ring is drawn and contacted up to a named net. This repo's
+# own `sky130_fd_sc_hd__*` corpus cells draw no such ring at the single-cell
+# level (only VPB/nwell is a genuine standalone pin there), so single-cell
+# extraction still falls back to the deck's `substrate_net` global
+# (`ExtractionDeck.substrate_net`, default `"vsubs"`) exactly as before --
+# the real-tap case matters for analog macros/guard rings that do draw one.
 #
 # `poly_label` (66/5) mirrors `well_label`: a text on the poly layer names the
 # poly net directly, so a device gate `klt gen` draws as bare poly -- with no
