@@ -490,7 +490,19 @@ def run_extract(
         capacitor_perim_cap_f_um = {
             capacitor.name: capacitor.perim_cap_f_um for capacitor in deck.capacitors
         }
-        devices, device_counts = _describe_devices(circuit, capacitor_perim_cap_f_um)
+        # Fixed head/end-effect resistance offset (issue #518), keyed by
+        # `ResistorDevice.name` -- the same `capacitor_perim_cap_f_um`
+        # lookup shape, one field over. A deck's default
+        # `fixed_offset_ohm=0.0` reports as `0.0` here too, so
+        # `_describe_devices` applies a no-op correction for every resistor
+        # entry that has not opted in -- today's `r_ohm` stays bit-for-bit
+        # unchanged.
+        resistor_fixed_offset_ohm = {
+            resistor.name: resistor.fixed_offset_ohm for resistor in deck.resistors
+        }
+        devices, device_counts = _describe_devices(
+            circuit, capacitor_perim_cap_f_um, resistor_fixed_offset_ohm
+        )
         nets = _describe_nets(circuit)
     else:
         devices, device_counts, nets = [], {}, []
@@ -2350,6 +2362,7 @@ def _unique_net_name(base: str, existing: set[str]) -> str:
 def _describe_devices(
     circuit: kdb.Circuit,
     capacitor_perim_cap_f_um: dict[str, float] | None = None,
+    resistor_fixed_offset_ohm: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Build the response's ``devices[]`` array and ``device_counts`` map.
 
@@ -2362,10 +2375,22 @@ def _describe_devices(
     and ``P`` have been read back. Omitted (or a `0.0`/absent coefficient)
     reproduces today's area-only ``c_f`` bit-for-bit -- the non-breaking
     default this feature is designed around.
+
+    ``resistor_fixed_offset_ohm`` (issue #518) is the resistor analogue: an
+    optional ``ResistorDevice.name`` -> ``fixed_offset_ohm`` lookup (the
+    caller passes the owning deck's own ``resistors`` table). When a
+    device's class name is present with a nonzero coefficient, the raw
+    ``r_ohm`` KLayout computed (``L / W * sheet_rho_ohm_sq`` only -- see
+    ``ResistorDevice``'s docstring) is corrected to ``L / W *
+    sheet_rho_ohm_sq + fixed_offset_ohm`` once ``R`` has been read back.
+    Omitted (or a `0.0`/absent coefficient) reproduces today's ``r_ohm``
+    bit-for-bit -- the same non-breaking default `capacitor_perim_cap_f_um`
+    is designed around.
     """
     devices: list[dict[str, Any]] = []
     device_counts: dict[str, int] = {}
     perim_cap_lookup = capacitor_perim_cap_f_um or {}
+    fixed_offset_lookup = resistor_fixed_offset_ohm or {}
 
     for device in circuit.each_device():
         device_class = device.device_class()
@@ -2381,6 +2406,7 @@ def _describe_devices(
         params: dict[str, float] = {}
         raw_c_f: float | None = None
         raw_perimeter_um: float | None = None
+        raw_r_ohm: float | None = None
         for param in device_class.parameter_definitions():
             if param.name == "W":
                 params["w_um"] = round(
@@ -2425,10 +2451,13 @@ def _describe_devices(
             elif param.name == "R":
                 # Drawn-resistor device classes only (#222): KLayout's
                 # `R = L / W * sheet_rho`, in ohms. MOS classes have no `R`
-                # parameter, so this branch never fires for them.
-                params["r_ohm"] = round(
-                    device.parameter(param.id()), _PARAM_PRECISION_OHM
-                )
+                # parameter, so this branch never fires for them. Kept
+                # unrounded until the fixed head/end-effect offset
+                # correction below (issue #518) has had a chance to run, so
+                # the correction is applied to the full-precision value
+                # rather than an already-rounded one.
+                raw_r_ohm = device.parameter(param.id())
+                params["r_ohm"] = round(raw_r_ohm, _PARAM_PRECISION_OHM)
 
         # Perimeter/fringe capacitance correction (issue #512): only fires
         # for a capacitor device (both `raw_c_f`/`raw_perimeter_um` were set
@@ -2441,6 +2470,19 @@ def _describe_devices(
         if perim_cap_f_um and raw_c_f is not None and raw_perimeter_um is not None:
             corrected_c_f = raw_c_f + perim_cap_f_um * raw_perimeter_um
             params["c_f"] = round(corrected_c_f, _PARAM_PRECISION_FARAD)
+
+        # Fixed head/end-effect resistance offset correction (issue #518):
+        # only fires for a resistor device (`raw_r_ohm` was set above) whose
+        # owning deck declared a nonzero `fixed_offset_ohm` for this class.
+        # `raw_r_ohm` already carries `L / W * sheet_rho_ohm_sq` (that is
+        # what KLayout's `DeviceExtractorResistor`/`...ResistorWithBulk`
+        # computed it from), so adding `fixed_offset_ohm` here reproduces
+        # the full two-term `ResistorDevice` formula without re-deriving the
+        # length-scaling body term.
+        fixed_offset_ohm = fixed_offset_lookup.get(class_name, 0.0)
+        if fixed_offset_ohm and raw_r_ohm is not None:
+            corrected_r_ohm = raw_r_ohm + fixed_offset_ohm
+            params["r_ohm"] = round(corrected_r_ohm, _PARAM_PRECISION_OHM)
 
         devices.append(
             {

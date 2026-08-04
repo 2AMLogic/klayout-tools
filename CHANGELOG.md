@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-04 — `klt extract`: sky130's `res_high_po` precision poly
+  resistor now includes a fixed per-instance head/end-effect resistance
+  term, correcting a systematic, one-sided undercount (previously
+  `R = L / W * sheet_rho_ohm_sq` only) against the PDK's own two-term
+  `sky130_fd_pr__res_high_po` simulation model (#518). `ResistorDevice`
+  gains an optional `fixed_offset_ohm` coefficient (default `0.0`,
+  non-breaking for any deck entry that does not set it); when set, `klt
+  extract` reads back KLayout's own already-computed `L`/`W` and corrects
+  `r_ohm` to `L / W * sheet_rho_ohm_sq + fixed_offset_ohm`. sky130's
+  `res_high_po` entry is updated with coefficients measured via ngspice
+  against the real PDK model card at the `tt` corner
+  (`sheet_rho_ohm_sq=324.827244`, `fixed_offset_ohm=379.705147`) — for a
+  short resistor this had been undercounting extracted resistance by up to
+  ~120%. See `docs/cli/extract.md` -> "Drawn resistors".
+
 - 2026-08-04 — `klt extract`: MiM capacitor devices now include a
   perimeter/fringe capacitance term, correcting a systematic, one-sided
   undercount (previously area-only: `C = A * area_cap_f_um2`) against the

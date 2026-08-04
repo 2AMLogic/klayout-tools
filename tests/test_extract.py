@@ -2338,16 +2338,27 @@ def test_gf180mcu_high_sheet_rho_poly_extracts_as_ppolyf_u_1k(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("mask", "device_class", "sheet_rho"),
-    [((86, 20), "res_high_po", 319.8), ((79, 20), "res_xhigh_po", 2000.0)],
+    ("mask", "device_class", "sheet_rho", "fixed_offset_ohm"),
+    [
+        # res_high_po's sheet_rho/offset are the issue #518 pair, measured
+        # via ngspice against the real two-term PDK model (see
+        # `decks/sky130.py`'s provenance note) -- `r_ohm` is `L / W *
+        # sheet_rho + fixed_offset_ohm`, not the area-only-equivalent
+        # `319.8` `sky130.lvs` itself cites.
+        ((86, 20), "res_high_po", 324.827244, 379.705147),
+        # res_xhigh_po is untouched by #518 -- still the plain single-term
+        # `sky130.lvs`-cited value, `fixed_offset_ohm` at its `0.0` default.
+        ((79, 20), "res_xhigh_po", 2000.0, 0.0),
+    ],
 )
 def test_sky130_precision_implant_mask_extracts_own_flavour(
-    tmp_path, mask, device_class, sheet_rho
+    tmp_path, mask, device_class, sheet_rho, fixed_offset_ohm
 ):
     """A poly segment marked with sky130's `rpm`/`urpm` precision-implant
     masks *and* the `psdm` P+ implant layer both wired flavours also
-    require now extracts as `res_high_po`/`res_xhigh_po` (319.8/2000
-    ohm/sq) instead of collapsing to a short."""
+    require now extracts as `res_high_po`/`res_xhigh_po` instead of
+    collapsing to a short, with `res_high_po`'s fixed head/end-effect offset
+    (issue #518) applied on top of the plain `L / W * sheet_rho` term."""
     path = _write_gds(
         _make_poly_resistor_layout(
             "sky130",
@@ -2363,8 +2374,133 @@ def test_sky130_precision_implant_mask_extracts_own_flavour(
     assert report["device_counts"] == {device_class: 1}
     (device,) = report["devices"]
     assert device["class"] == device_class
-    assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * sheet_rho)
+    assert device["params"]["r_ohm"] == pytest.approx(
+        _RES_SQUARES * sheet_rho + fixed_offset_ohm
+    )
     assert device["nets"]["w"] == get_extraction_deck("sky130").substrate_net
+
+
+def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
+    """A `w=1um` `res_high_po`-marked poly bar with a `l_um`-long marked
+    (resistive) segment and a contacted, labelled 3um head at each end --
+    the parametrised sibling of `_make_poly_resistor_layout`'s fixed 6um
+    marked segment, used by
+    `test_sky130_res_high_po_fixed_offset_matches_pdk_model_card` (issue
+    #518) to exercise the issue's own cited lengths (1/5/10/35um) against
+    the real PDK model's measured total resistance."""
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    head_um = 3.0
+    total_um = l_um + 2.0 * head_um
+    l_nm = int(round(l_um * 1000))
+    head_nm = int(round(head_um * 1000))
+    total_nm = int(round(total_um * 1000))
+
+    draw(66, 20, kdb.Box(0, 0, total_nm, 1000))  # poly.drawing
+    marked = kdb.Box(head_nm, 0, head_nm + l_nm, 1000)
+    draw(66, 13, marked)  # poly.res
+    draw(86, 20, marked.enlarged(200, 200))  # rpm
+    draw(94, 20, marked.enlarged(200, 200))  # psdm
+
+    for x, name in ((head_nm // 2, "RA"), (total_nm - head_nm // 2, "RB")):
+        draw(66, 44, kdb.Box(x - 100, 400, x + 100, 600))  # licon1.drawing
+        draw(67, 20, kdb.Box(x - 400, 200, x + 400, 800))  # li1.drawing
+        label(67, 5, name, x, 500)  # li1.pin
+
+    return layout
+
+
+@pytest.mark.parametrize("l_um", [1.0, 5.0, 10.0, 35.0])
+def test_sky130_res_high_po_fixed_offset_matches_pdk_model_card(tmp_path, l_um):
+    """Issue #518: for each of the issue's own cited lengths, the corrected
+    `r_ohm` matches ngspice's own measurement of the real two-term PDK model
+    (`sky130_fd_pr__res_high_po`'s `rhead` + `rbody`) at `w=1um` -- not just
+    the pre-#518 single-term `L / W * sheet_rho` value."""
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(l_um), tmp_path / f"res_high_po_{l_um}.gds"
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / f"res_high_po_{l_um}.spice")
+    )
+
+    assert report["device_counts"] == {"res_high_po": 1}
+    (device,) = report["devices"]
+
+    # Measured via ngspice against the real PDK model at the `tt` corner,
+    # `w=1um` (see `decks/sky130.py`'s provenance note) -- the issue's own
+    # citation table, to the digit it quotes.
+    expected_r_ohm = {
+        1.0: 704.532385,
+        5.0: 2003.84137,
+        10.0: 3627.97760,
+        35.0: 11748.6587,
+    }[l_um]
+
+    assert device["params"]["l_um"] == pytest.approx(l_um)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(expected_r_ohm, rel=1e-6)
+    # The pre-#518 single-term value is a systematic undercount -- confirms
+    # the correction actually changed the reported number, not a no-op.
+    assert device["params"]["r_ohm"] > l_um / 1.0 * 319.8
+
+
+def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
+    """`ResistorDevice.fixed_offset_ohm` defaults to `0.0` (issue #518): a
+    deck entry that does not set it (mirroring every deck's own field before
+    this feature existed, e.g. `res_xhigh_po`/`res_generic_po` above) still
+    reports `r_ohm` exactly as `L / W * sheet_rho_ohm_sq` -- bit-for-bit
+    what `klt extract` reported before this feature existed, not silently
+    corrected by an offset the deck never opted into."""
+    deck = get_extraction_deck("sky130")
+    (res_high_po,) = [r for r in deck.resistors if r.name == "res_high_po"]
+    assert res_high_po.fixed_offset_ohm != 0.0  # the curated deck itself now opts in
+
+    uncorrected_deck = dataclasses.replace(
+        deck,
+        resistors=tuple(
+            dataclasses.replace(r, fixed_offset_ohm=0.0)
+            if r.name == "res_high_po"
+            else r
+            for r in deck.resistors
+        ),
+    )
+
+    layout = _make_poly_resistor_layout(
+        "sky130",
+        extra=(
+            (86, 20, _RES_MARKED.enlarged(200, 200)),  # rpm
+            (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+        ),
+    )
+    (
+        netlist,
+        _warnings,
+        _parasitic_nets,
+        _black_box_regions,
+        _dummy_devices_dropped,
+        _unmodelled_poly,
+    ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
+    circuit = netlist.circuit_by_name(layout.top_cell().name)
+    resistor_fixed_offset_ohm = {
+        resistor.name: resistor.fixed_offset_ohm
+        for resistor in uncorrected_deck.resistors
+    }
+    devices, _device_counts = _describe_devices(
+        circuit, None, resistor_fixed_offset_ohm
+    )
+
+    (device,) = devices
+    assert device["class"] == "res_high_po"
+    assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * 324.827244)
 
 
 @pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
