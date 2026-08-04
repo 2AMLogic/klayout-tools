@@ -61,7 +61,7 @@ Usage
 
     python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap
     python scripts/ingest-canary.py --repo 2AMLogic/sky130-bandgap
-    python scripts/ingest-canary.py --repo 2AMLogic/gf180-trng  # refused
+    python scripts/ingest-canary.py --repo 2AMLogic/<a-still-private-canary>  # refused
 
 Clones are cached (fetched, not re-cloned) under `.cache/canary-repos/`
 (gitignored) at the repo root, mirroring `pdks/`'s gitignore pattern.
