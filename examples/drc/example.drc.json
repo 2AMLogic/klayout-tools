@@ -183,7 +183,9 @@
       "66/44",
       "67/20",
       "67/44",
-      "68/20"
+      "68/20",
+      "68/44",
+      "69/20"
     ],
     "layers_checked": [
       "65/20",
@@ -196,7 +198,13 @@
       "li1.space.1",
       "li1.width.1",
       "mcon.space.1",
-      "met1.enclosing.mcon.1"
+      "met1.enclosing.mcon.1",
+      "met1.enclosing.via.1",
+      "met2.enclosing.via.1",
+      "met2.space.1",
+      "met2.width.1",
+      "via.space.1",
+      "via.width.1"
     ]
   }
 }

@@ -127,6 +127,27 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
     mcon.drawing    67/44
     met1.drawing    68/20
     via.drawing     68/44
+    met2.drawing    69/20
+
+met2/via rule coverage (issue #513, closing the gap #511 opened when it
+extended ``EXTRACTION_DECK`` to a third connectivity level -- see that
+field's own comment below): ``m2.1``/``m2.2``/``m2.4``/``m2.5`` and
+``via.1a``/``via.2``/``via.4a``/``via.5a`` below are transcribed from a real
+sky130A PDK install (volare), whose
+``libs.tech/klayout/drc/sky130A_mr.drc`` is the sky130A variant's current
+name for the same official, community-maintained KLayout DRC deck this
+module's other rules already cite as ``sky130.lydrc`` (confirmed by
+cross-checking: every rule id/value this module already cites --
+``poly.1a``, ``li.1``, ``li.3``, ``m1.1``, ``m1.2``, ``m1.4``,
+``licon.5``/``licon.8``, ``ct.2`` -- appears in ``sky130A_mr.drc`` with the
+identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676
+um^2) is a real rule in that same source but is **not** transcribed: no
+``"area"`` check primitive exists anywhere in this engine's ``DrcRule``
+vocabulary (``drc.py``'s ``_SINGLE_LAYER_CHECKS``/``_TWO_LAYER_CHECKS``
+support only ``width``/``space``/``notch``/``separation``/``enclosing``/
+``enclosed``/``overlap``) -- adding it would require a new check primitive,
+out of scope for this "extend the deck with existing-shape rules" issue; see
+#513 for a candidate follow-on.
 """
 
 from __future__ import annotations
@@ -247,6 +268,87 @@ DECK: list[DrcRule] = [
         threshold_dbu=190,  # 0.19 um
         # sky130.lydrc rule "ct.2": mcon.space(0.19, euclidian)
         # -> "ct.2 : min. mcon spacing : 0.19um"
+    ),
+    # met2/via rule coverage (issue #513), mirroring the met1/mcon rule
+    # shapes just above -- see the module docstring's own #513 note for
+    # source/provenance and the m2.6 (area) scope-out.
+    DrcRule(
+        id="met2.width.1",
+        description="minimum met2 width",
+        layer=(69, 20),  # met2.drawing
+        check="width",
+        threshold_dbu=140,  # 0.14 um
+        # sky130A_mr.drc rule "m2.1": m2.width(0.14, euclidian)
+        # -> "m2.1 : min. m2 width : 0.14um"
+    ),
+    DrcRule(
+        id="met2.space.1",
+        description="minimum met2 spacing",
+        layer=(69, 20),  # met2.drawing
+        check="space",
+        threshold_dbu=140,  # 0.14 um
+        # sky130A_mr.drc rule "m2.2": non_huge_m2.space(0.14, euclidian)
+        # -> "m2.2 : min. m2 spacing : 0.14um"
+        # (the wide-metal 0.28um exception, "m2.3ab", is not modelled here --
+        # the same approximation met1.space.1 above already makes for its
+        # own wide-metal exception, "m1.3ab".)
+    ),
+    DrcRule(
+        id="via.width.1",
+        description=(
+            "minimum via1 (met1<->met2 via) size (approximates the "
+            "official rectangularity + min/max-length rule as a "
+            "minimum-width check)"
+        ),
+        layer=(68, 44),  # via.drawing
+        check="width",
+        threshold_dbu=150,  # 0.15 um
+        # sky130A_mr.drc rule "via.1a_a" (part of the "via.1a" family):
+        # via_not_mt.width(0.15, euclidian)
+        # -> "via.1a_a : min. width of via outside of moduleCut : 0.15um"
+        # (mirrors gf180mcu.py's "contact.width.1" approximation: the
+        # official rule also requires the via be rectangular ("via.1a") and
+        # capped at the same 0.15um length ("via.1a_b") -- our width_check
+        # primitive only supports a minimum-width lower bound, so only the
+        # min-size half of the rule is enforced here.)
+    ),
+    DrcRule(
+        id="via.space.1",
+        description="minimum via1 (met1<->met2 via) spacing",
+        layer=(68, 44),  # via.drawing
+        check="space",
+        threshold_dbu=170,  # 0.17 um
+        # sky130A_mr.drc rule "via.2": via.space(0.17, euclidian)
+        # -> "via.2 : min. via spacing : 0.17um"
+    ),
+    DrcRule(
+        id="met1.enclosing.via.1",
+        description="minimum met1 enclosure of via1 (met1<->met2 via)",
+        layer=(68, 20),  # met1.drawing
+        other_layer=(68, 44),  # via.drawing
+        check="enclosing",
+        threshold_dbu=55,  # 0.055 um
+        # sky130A_mr.drc rule "via.4a": m1.edges.enclosing(via, 0.055,
+        # euclidian) -> "via.4a : min. m1 enclosure of 0.15um via : 0.055um"
+        # (a second, 2-adjacent-edges-relaxed refinement, "via.5a" (0.085um),
+        # is not modelled here -- the same "primary rule only" approximation
+        # met1.enclosing.mcon.1 above already makes for its own sibling
+        # refinement, "m1.5".)
+    ),
+    DrcRule(
+        id="met2.enclosing.via.1",
+        description="minimum met2 enclosure of via1 (met1<->met2 via)",
+        layer=(69, 20),  # met2.drawing
+        other_layer=(68, 44),  # via.drawing
+        check="enclosing",
+        threshold_dbu=55,  # 0.055 um
+        # sky130A_mr.drc rule "m2.4": m2.enclosing(via_outside_periphery,
+        # 0.055, euclidian) -> "m2.4 : min. m2 enclosure of via : 0.055um"
+        # (the official rule's periphery-scoped variant, "m2.4_b" (0.045um,
+        # areaid:core-only), and its 2-adjacent-edges-relaxed refinement,
+        # "m2.5" (0.085um), are not modelled -- this curated deck does not
+        # model areaid.* layers elsewhere either; same "primary rule only"
+        # approximation as met1.enclosing.via.1 above.)
     ),
 ]
 
