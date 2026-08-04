@@ -1,4 +1,5 @@
-"""Read, analyze, and render an optimization trajectory log.
+"""Read, analyze, render, and (via :func:`record_from_eval`/:func:`append_record`)
+write an optimization trajectory log.
 
 An optimization run (a multi-candidate loop, or a human proposing candidates
 by hand) is evidence in two halves. The *artifact* half -- the final layout
@@ -6,9 +7,10 @@ and its DRC/LVS/sim envelopes -- proves what the winning design measures.
 The *trajectory* half -- how many candidates were evaluated, what was tried
 and abandoned, and where the real wins came from -- proves the run did not
 just plateau after the low-hanging fruit. This module owns the second half:
-a small, append-only JSONL log of per-evaluation records, plus a renderer
-that turns it into the milestone table + objective-vs-turn plot a block
-repo's README embeds. See issue #388.
+a small, append-only JSONL log of per-evaluation records, a builder that
+turns one ``klt eval`` envelope (#387) into one record (:func:`record_from_eval`,
+issue #437), and a renderer that turns the log into the milestone table +
+objective-vs-turn plot a block repo's README embeds. See issue #388.
 
 Pure library: the public functions return plain Python data (dicts / lists
 of JSON-serialisable primitives, or a rendered string) and never print.
@@ -57,6 +59,8 @@ __all__ = [
     "render_markdown_table",
     "render_plot_svg",
     "build_trajectory",
+    "record_from_eval",
+    "append_record",
 ]
 
 #: Bumped only on a non-additive (breaking) change to this command's own JSON
@@ -194,6 +198,100 @@ def _validate_record(record: dict[str, Any], source: str, lineno: int) -> None:
         isinstance(wall, bool) or not isinstance(wall, (int, float))
     ):
         fail("'wall_clock_s', when present, must be a number")
+
+
+# --------------------------------------------------------------------------- #
+# Writing: building + appending a record from a `klt eval` envelope (#387)
+# --------------------------------------------------------------------------- #
+
+
+def record_from_eval(
+    report: dict[str, Any],
+    *,
+    turn: int,
+    candidate_ref: str,
+    description: str | None = None,
+    wall_clock_s: float | None = None,
+) -> dict[str, Any]:
+    """Build one trajectory record from a single ``klt eval`` envelope (#387).
+
+    This is the concrete form of the bridge this module's own docstring
+    already promised: "once ``klt eval`` lands a turn's record is just that
+    turn's eval envelope's objective/gate_results, not a re-derived parallel
+    summary." Issue #437 (Epic #391 Phase 5) is the first caller -- wiring a
+    digital candidate's combined synthesize/functional-verification/
+    place-and-route/drc/layout-metrics ``klt eval`` result into this log --
+    but the function itself is candidate-shape agnostic, exactly like the
+    record schema it builds: it works identically for an analog ``klt eval``
+    envelope (``drc``/``lvs``/``sim``/``layout-metrics`` gates) since it only
+    ever reads ``report["objective"]``/``report["gates"]``, never anything
+    check-name-specific.
+
+    ``report`` is the dict :func:`klayout_tools.eval.run_eval` returns (or
+    the parsed ``klt eval --format json`` payload) -- its ``objective`` is
+    reused verbatim, and its ``gates`` list collapses to the record schema's
+    lighter ``gate_results`` (``{"check", "status"}`` per entry, dropping
+    ``exit_code``/``count``/``name``) -- a turn's *summary*, matching this
+    module's own "a summary, not the full report" design invariant (see the
+    module docstring's "References, not inline artifacts").
+
+    Raises :class:`TrajectoryError` when the built record would not itself
+    pass :func:`read_log`'s own validation (bad ``turn``/``candidate_ref``,
+    or ``report`` missing ``objective``/``gates``) -- the same "fail loudly"
+    posture applied to a record read back off disk applies here too, so a
+    caller building a record gets identical validation to a hand-written one.
+    """
+    if (
+        not isinstance(report, dict)
+        or "objective" not in report
+        or "gates" not in report
+    ):
+        raise TrajectoryError(
+            "'report' must be a `klt eval` envelope with 'objective' and 'gates' fields"
+        )
+
+    record: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "turn": turn,
+        "candidate_ref": candidate_ref,
+        "objective": dict(report["objective"]),
+        "gate_results": [
+            {"check": gate["check"], "status": gate["status"]}
+            for gate in report["gates"]
+        ],
+    }
+    if wall_clock_s is not None:
+        record["wall_clock_s"] = wall_clock_s
+    if description is not None:
+        record["description"] = description
+
+    _validate_record(record, "<record_from_eval>", 0)
+    return record
+
+
+def append_record(path: str, record: dict[str, Any]) -> None:
+    """Append one record to the append-only JSONL trajectory log at ``path``.
+
+    Creates ``path`` (and any missing parent directories) on the first
+    write. One record per line (``json.dumps`` with no embedded newline),
+    matching the append-only JSONL format :func:`read_log` reads -- a log
+    built entirely through this function reads back identically through
+    that function. This is the "how do I record a turn" counterpart to
+    :func:`read_log`'s "how do I read the whole log."
+
+    Raises :class:`TrajectoryError` if ``path`` cannot be written (e.g. a
+    permissions error, or ``path`` naming an existing directory).
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except OSError as exc:
+        raise TrajectoryError(
+            f"could not append to trajectory log '{path}': {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #

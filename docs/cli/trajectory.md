@@ -94,6 +94,27 @@ format and renderer are useful even when a human is the one proposing
 candidates, and this is a hard requirement of the feature (see #388's
 "Notes"), exercised directly by the test suite.
 
+## Building a record from `klt eval` (issue #437)
+
+`klayout_tools.trajectory.record_from_eval(report, *, turn, candidate_ref,
+description=None, wall_clock_s=None)` builds one record directly from a
+single [`klt eval`](eval.md) envelope (#387) — the concrete form of "the
+record schema mirrors the `klt eval` envelope shape" above: `report`'s own
+`objective` is reused verbatim, and its `gates[]` collapses to this record
+schema's lighter `gate_results` (`{"check", "status"}` per entry, dropping
+`exit_code`/`count`/`name`). `klayout_tools.trajectory.append_record(path,
+record)` then appends the built record to a JSONL log, creating the file
+(and any missing parent directories) on first write.
+
+Both functions are check-name-agnostic — they work identically for an
+analog `klt eval` envelope (`drc`/`lvs`/`sim`/`layout-metrics` gates) or a
+digital one (`synthesize`/`functional-verification`/`place-and-route`
+gates, Epic #391 Phase 5), since they only ever read `report["objective"]`/
+`report["gates"]`. `klt eval`'s own `--trajectory-log`/`--turn`/
+`--candidate-ref`/`--description`/`--wall-clock-s` flags (see
+[`docs/cli/eval.md`](eval.md#trajectory-logging)) call exactly this pair, so
+a single `klt eval` invocation can score a candidate *and* log the turn.
+
 ## Milestone detection
 
 The **first** record establishes the baseline (there is no prior record to

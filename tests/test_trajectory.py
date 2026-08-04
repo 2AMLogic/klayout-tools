@@ -16,9 +16,11 @@ from klayout_tools.cli import main
 from klayout_tools.trajectory import (
     SCHEMA_VERSION,
     TrajectoryError,
+    append_record,
     build_trajectory,
     detect_milestones,
     read_log,
+    record_from_eval,
     render_markdown_table,
     render_plot_svg,
 )
@@ -154,6 +156,157 @@ def test_read_log_rejects_bad_gate_results(tmp_path):
     path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
     with pytest.raises(TrajectoryError, match="check.*status"):
         read_log(str(path))
+
+
+# ---------------------------------------------------------------------------
+# record_from_eval / append_record (issue #437 -- wiring a `klt eval`
+# envelope, #387, into this module's own record schema)
+# ---------------------------------------------------------------------------
+
+
+def _eval_report(**overrides) -> dict:
+    report = {
+        "schema_version": 1,
+        "valid": True,
+        "gates": [
+            {
+                "check": "drc",
+                "name": "drc",
+                "status": "pass",
+                "exit_code": 0,
+                "count": 0,
+            },
+            {
+                "check": "functional-verification",
+                "name": "functional-verification",
+                "status": "pass",
+                "exit_code": 0,
+                "count": 0,
+            },
+        ],
+        "objective": {"name": "area_um2", "value": 2951.5808, "polarity": "minimize"},
+        "metrics": {},
+    }
+    report.update(overrides)
+    return report
+
+
+def test_record_from_eval_builds_a_valid_record():
+    report = _eval_report()
+
+    record = record_from_eval(report, turn=22, candidate_ref="cand/turn-22.gds")
+
+    assert record == {
+        "schema_version": SCHEMA_VERSION,
+        "turn": 22,
+        "candidate_ref": "cand/turn-22.gds",
+        "objective": {"name": "area_um2", "value": 2951.5808, "polarity": "minimize"},
+        "gate_results": [
+            {"check": "drc", "status": "pass"},
+            {"check": "functional-verification", "status": "pass"},
+        ],
+    }
+
+
+def test_record_from_eval_drops_gate_exit_code_and_count():
+    """`gate_results` is a summary -- `exit_code`/`count`/`name` from the
+    `klt eval` envelope's own `gates[]` entries are not carried over."""
+    report = _eval_report(
+        valid=False,
+        gates=[
+            {
+                "check": "drc",
+                "name": "drc",
+                "status": "fail",
+                "exit_code": 3,
+                "count": 5,
+            }
+        ],
+    )
+
+    record = record_from_eval(report, turn=1, candidate_ref="cand/turn-1.gds")
+
+    assert record["gate_results"] == [{"check": "drc", "status": "fail"}]
+    assert "exit_code" not in record["gate_results"][0]
+    assert "count" not in record["gate_results"][0]
+    assert "name" not in record["gate_results"][0]
+
+
+def test_record_from_eval_optional_fields():
+    report = _eval_report()
+
+    record = record_from_eval(
+        report,
+        turn=48,
+        candidate_ref="cand/turn-48.gds",
+        description="pruned registers",
+        wall_clock_s=9.8,
+    )
+
+    assert record["description"] == "pruned registers"
+    assert record["wall_clock_s"] == 9.8
+
+
+def test_record_from_eval_omits_optional_fields_when_not_given():
+    report = _eval_report()
+
+    record = record_from_eval(report, turn=0, candidate_ref="cand/turn-0.gds")
+
+    assert "description" not in record
+    assert "wall_clock_s" not in record
+
+
+def test_record_from_eval_rejects_non_eval_report():
+    with pytest.raises(TrajectoryError, match="objective"):
+        record_from_eval({"not": "an eval envelope"}, turn=0, candidate_ref="x")
+
+
+def test_record_from_eval_validates_turn_and_candidate_ref():
+    report = _eval_report()
+    with pytest.raises(TrajectoryError, match="turn"):
+        record_from_eval(report, turn="not-an-int", candidate_ref="x")  # type: ignore[arg-type]
+    with pytest.raises(TrajectoryError, match="candidate_ref"):
+        record_from_eval(report, turn=0, candidate_ref="")
+
+
+def test_append_record_creates_file_and_parent_dirs(tmp_path):
+    report = _eval_report()
+    record = record_from_eval(report, turn=0, candidate_ref="cand/turn-0.gds")
+    log_path = tmp_path / "nested" / "run.jsonl"
+
+    append_record(str(log_path), record)
+
+    assert log_path.is_file()
+    got = read_log(str(log_path))
+    assert got == [record]
+
+
+def test_append_record_appends_multiple_records_readable_by_read_log(tmp_path):
+    log_path = tmp_path / "run.jsonl"
+
+    for turn, value in ((0, 8298), (22, 2010), (113, 907)):
+        report = _eval_report(
+            objective={"name": "gates", "value": value, "polarity": "minimize"}
+        )
+        record = record_from_eval(
+            report, turn=turn, candidate_ref=f"cand/turn-{turn}.gds"
+        )
+        append_record(str(log_path), record)
+
+    got = read_log(str(log_path))
+    assert [r["turn"] for r in got] == [0, 22, 113]
+
+    trajectory = build_trajectory(str(log_path))
+    assert trajectory["record_count"] == 3
+    assert trajectory["milestone_count"] == 2
+
+
+def test_append_record_write_failure_raises_trajectory_error(tmp_path):
+    # A path naming an existing directory can never be opened for append.
+    directory = tmp_path / "not-a-file"
+    directory.mkdir()
+    with pytest.raises(TrajectoryError, match="could not append"):
+        append_record(str(directory), {"turn": 0})
 
 
 # ---------------------------------------------------------------------------
