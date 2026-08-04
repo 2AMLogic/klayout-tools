@@ -125,6 +125,12 @@ CATEGORY_DEVICE_CLASS = "device.class"
 #: extractor's three-terminal resistor class vs. a plain-element reference's
 #: two-terminal one) -- see `_device_class_arity_mismatch`.
 CATEGORY_DEVICE_CLASS_ARITY = "device.class_arity"
+#: Issue #506: `request.reference.device_bulk` reconciled a reference device
+#: class up to the layout side's terminal list before comparing -- the
+#: disclosure that a match on that class rests on a caller assertion, not on
+#: connectivity read from the reference netlist (see
+#: `_apply_reference_device_bulk`).
+CATEGORY_DEVICE_BULK_RECONCILED = "device.bulk_reconciled"
 CATEGORY_DEVICE_PROPERTY = "device.property"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
@@ -307,6 +313,15 @@ def run_lvs(request: str) -> dict[str, Any]:
     body terminals were compared against a deck-synthesized net rather than
     a real schematic one -- never emitted for the pre-extracted
     ``layout.netlist`` form, and never affecting ``status``.
+
+    ``request.reference.device_bulk`` (issue #506) is the reconciliation
+    counterpart of that disclosure: it normalises a named reference device
+    class up to the layout side's terminal list before comparing (see
+    :func:`_apply_reference_device_bulk`), and every class it reconciles
+    yields its own ``severity: "warning"``
+    ``device.bulk_reconciled`` ``mismatches[]`` entry, so a ``"match"``
+    reached through the hook is never silently indistinguishable from one
+    reached independently.
     """
     request, request_dir = load_request_arg(request)
 
@@ -350,6 +365,15 @@ def run_lvs(request: str) -> dict[str, Any]:
     reference_device_map = reference_spec.get("device_map")
     if reference_device_map is not None and not isinstance(reference_device_map, dict):
         raise LvsError("request.reference.device_map must be a JSON object")
+    reference_device_bulk = reference_spec.get("device_bulk")
+    if reference_device_bulk is not None and not isinstance(
+        reference_device_bulk, dict
+    ):
+        raise LvsError(
+            "request.reference.device_bulk must be a JSON object mapping a "
+            "device-class/model name to the reference net its implicit bulk "
+            "terminal carries"
+        )
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
@@ -419,7 +443,24 @@ def run_lvs(request: str) -> dict[str, Any]:
         _purge_emptied_nets(layout_netlist)
         _purge_emptied_nets(reference_netlist)
 
+    bulk_warnings: list[dict[str, Any]] = []
+
     if engine == "klayout":
+        # Issue #506: normalise the reference side's device classes up to the
+        # layout side's terminal list *before* the comparer is constructed, so
+        # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
+        # resistor's three-terminal `RES_X`) can be compared against a
+        # schematic-derived reference that does not model that terminal at
+        # all. Runs after the `combine_devices()` step above so combining
+        # still sees each side's own, unmodified device classes (the
+        # status-quo behaviour), and returns the `severity: "warning"`
+        # disclosure entries appended to `mismatches[]` further down.
+        bulk_warnings = _apply_reference_device_bulk(
+            reference_device_bulk,
+            layout_netlist,
+            reference_netlist,
+        )
+
         logger = _make_compare_logger(layout_circuit, reference_circuit)
         comparer = kdb.NetlistComparer(logger)
         # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
@@ -502,6 +543,17 @@ def run_lvs(request: str) -> dict[str, Any]:
                 "request.hints (same_nets/equivalent_pins) is only supported "
                 "for engine 'klayout' -- the netgen engine has no equivalent "
                 "hook in this issue's netlist-vs-netlist scope (see "
+                'docs/cli/lvs.md, "Engine")'
+            )
+        if reference_device_bulk:
+            # Issue #506: same boundary as `hints` above -- the reconciliation
+            # is a `klayout.db`-side device-class normalisation applied to the
+            # in-memory reference netlist, and netgen reads its own SPICE
+            # files through its own device-class model.
+            raise LvsError(
+                "request.reference.device_bulk is only supported for engine "
+                "'klayout' -- the netgen engine compares SPICE files through "
+                "its own device model and has no equivalent hook (see "
                 'docs/cli/lvs.md, "Engine")'
             )
         setup_file = _resolve_netgen_setup(options, request_dir)
@@ -589,7 +641,17 @@ def run_lvs(request: str) -> dict[str, Any]:
         # the engine branch above.
         mismatches.extend(combine_warnings)
 
-    if layout_deck is not None or combine_warnings:
+    if bulk_warnings:
+        # Issue #506: same rationale again -- a `reference.device_bulk`
+        # disclosure records a *request-side* normalisation applied before the
+        # compare, not a `NetlistComparer` event, so it is appended here
+        # rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status`, it only keeps a
+        # match achieved through the hook from being indistinguishable from a
+        # fully independent one.
+        mismatches.extend(bulk_warnings)
+
+    if layout_deck is not None or combine_warnings or bulk_warnings:
         mismatches.sort(key=_sort_key)
 
     category_counts: dict[str, int] = {}
@@ -1071,6 +1133,217 @@ def _apply_hints(
             comparer.equivalent_pins(target_circuit, pin_ids)
 
     return same_nets_declared
+
+
+# --------------------------------------------------------------------------- #
+# Reference-side device-class normalisation: reference.device_bulk (issue #506)
+# --------------------------------------------------------------------------- #
+
+
+def _find_device_class(netlist: Any, name: str) -> Any:
+    """The device class named ``name`` in ``netlist``, matched exactly first
+    and then case-insensitively -- ``NetlistSpiceReader`` upper-cases a
+    ``.model``/element model name (``res_x`` -> ``RES_X``), so a request
+    naturally written in the netlist's own lower-case spelling still
+    resolves. ``None`` when no class matches."""
+    exact = netlist.device_class_by_name(name)
+    if exact is not None:
+        return exact
+    lowered = name.lower()
+    for candidate in netlist.each_device_class():
+        if candidate.name.lower() == lowered:
+            return candidate
+    return None
+
+
+def _device_class_names(netlist: Any) -> list[str]:
+    """Every device-class name registered on ``netlist``, sorted -- used to
+    make an unresolvable ``reference.device_bulk`` key's error message
+    actionable."""
+    return sorted(device_class.name for device_class in netlist.each_device_class())
+
+
+def _find_or_create_net(circuit: Any, name: str) -> tuple[Any, bool]:
+    """``(net, created)`` for the net named ``name`` on ``circuit``, matched
+    exactly first and then case-insensitively (same reason as
+    :func:`_find_device_class`), creating it when the reference netlist does
+    not model that node at all -- the ordinary case for a bulk terminal a
+    schematic reference simply does not carry."""
+    exact = circuit.net_by_name(name)
+    if exact is not None:
+        return exact, False
+    lowered = name.lower()
+    for candidate in circuit.each_net():
+        if (candidate.name or "").lower() == lowered:
+            return candidate, False
+    return circuit.create_net(name), True
+
+
+def _apply_reference_device_bulk(
+    spec: Any,
+    layout_netlist: Any,
+    reference_netlist: Any,
+) -> list[dict[str, Any]]:
+    """Reconcile a reference device class that is one terminal short of the
+    layout side's same-named class (issue #506, issue #504's option 1).
+
+    ``spec`` is ``request.reference.device_bulk``:
+    ``{"<device class / model name>": "<reference net name>"}``. For each
+    entry, the reference-side class of that name is given the one terminal
+    the layout-side class declares and it does not (typically the deck's
+    bulk/well/collector terminal, e.g. the ``W`` of a
+    ``bulk_to_substrate`` resistor flavour's three-terminal ``RES_X``), and
+    every reference-side instance of that class has the new terminal tied to
+    the named net -- created on the instance's own circuit when the reference
+    netlist does not model that node at all.
+
+    This is the *reconciliation* :data:`CATEGORY_DEVICE_CLASS_ARITY` (issue
+    #505) deliberately stopped short of: with it, ``NetlistComparer`` can pair
+    the two sides' devices and the run can legitimately report
+    ``status: "match"``; without it, no request whose layout side uses a
+    bulk-terminal device flavour against a schematic reference that does not
+    model that terminal can ever match. Applied before the comparer is built
+    (see ``run_lvs``), so the classes are already the same arity by the time
+    ``compare()`` runs and ``_device_class_arity_mismatch`` no longer fires
+    for the reconciled class.
+
+    Returns one ``severity: "warning"``
+    :data:`CATEGORY_DEVICE_BULK_RECONCILED` entry per reconciled class, which
+    ``run_lvs`` appends to ``mismatches[]``. The disclosure is the point: the
+    added terminal's connectivity is a caller *assertion*, not something read
+    off the reference netlist, so a match reached this way is never silently
+    indistinguishable from a fully independent one -- exactly the discipline
+    :data:`CATEGORY_DEVICE_BODY_UNVERIFIED` (issue #281) applies to an
+    unverified MOS body.
+
+    Every malformed or inapplicable entry is an :class:`LvsError`, never a
+    silent no-op -- the same convention ``hints.same_nets`` follows: a class
+    name that resolves on neither side, a reference class that is not
+    actually missing a terminal, and a class missing more than one terminal
+    (this hook reconciles exactly one extra terminal per class, since the
+    entry names exactly one net) all raise.
+    """
+    entries: list[dict[str, Any]] = []
+    if not spec:
+        return entries
+
+    import klayout.db as kdb
+
+    for model, net_name in spec.items():
+        if not isinstance(net_name, str) or not net_name:
+            raise LvsError(
+                f"request.reference.device_bulk['{model}'] must be a non-empty "
+                "reference net name"
+            )
+
+        reference_class = _find_device_class(reference_netlist, model)
+        if reference_class is None:
+            present = ", ".join(_device_class_names(reference_netlist)) or "none"
+            raise LvsError(
+                f"request.reference.device_bulk: device class '{model}' not "
+                f"found in the reference netlist (classes present: {present})"
+            )
+        layout_class = _find_device_class(layout_netlist, model)
+        if layout_class is None:
+            present = ", ".join(_device_class_names(layout_netlist)) or "none"
+            raise LvsError(
+                f"request.reference.device_bulk: device class '{model}' not "
+                f"found in the layout netlist (classes present: {present}) -- "
+                "there is no layout-side terminal list to reconcile the "
+                "reference class against"
+            )
+
+        layout_terminals = _terminal_names(layout_class)
+        reference_terminals = _terminal_names(reference_class)
+        missing = [
+            terminal
+            for terminal in layout_terminals
+            if terminal not in reference_terminals
+        ]
+        if not missing:
+            raise LvsError(
+                f"request.reference.device_bulk: reference device class "
+                f"'{reference_class.name}' already declares every terminal the "
+                f"layout-side class does ({reference_terminals}) -- there is no "
+                "implicit bulk terminal to reconcile; remove this entry"
+            )
+        if len(missing) > 1:
+            raise LvsError(
+                f"request.reference.device_bulk: reference device class "
+                f"'{reference_class.name}' declares {reference_terminals} against "
+                f"the layout side's {layout_terminals} -- {len(missing)} terminals "
+                f"({missing}) apart. This hook reconciles exactly one extra "
+                "(bulk/well/collector) terminal per class, since the entry names "
+                "exactly one net"
+            )
+
+        terminal_name = missing[0]
+        description = next(
+            (
+                terminal.description
+                for terminal in layout_class.terminal_definitions()
+                if terminal.name == terminal_name
+            ),
+            "",
+        )
+        reference_class.add_terminal(
+            kdb.DeviceTerminalDefinition(terminal_name, description)
+        )
+        terminal_id = reference_class.terminal_id(terminal_name)
+
+        connected = 0
+        net_created = False
+        for circuit in reference_netlist.each_circuit():
+            devices = [
+                device
+                for device in circuit.each_device()
+                if device.device_class() is reference_class
+            ]
+            if not devices:
+                continue
+            net, created = _find_or_create_net(circuit, net_name)
+            net_created = net_created or created
+            for device in devices:
+                device.connect_terminal(terminal_id, net)
+                connected += 1
+
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_BULK_RECONCILED,
+                "warning",
+                f"request.reference.device_bulk reconciled reference device "
+                f"class '{reference_class.name}' with the layout side: a "
+                f"'{terminal_name}' terminal was added to the reference class "
+                f"(layout: {layout_terminals}, reference was: "
+                f"{reference_terminals}) and tied to reference net "
+                f"'{net_name}' on {connected} device instance(s), "
+                + (
+                    "a net created for this compare"
+                    if net_created
+                    else "an existing reference net"
+                )
+                + " -- that terminal's connectivity was asserted by the "
+                "request, not read from the reference netlist, so this "
+                "dimension of the compare is not independently verified (see "
+                "docs/cli/lvs.md, 'device.bulk_reconciled')",
+                "reference",
+                device={
+                    "layout": None,
+                    "reference": None,
+                    "class": reference_class.name,
+                },
+                details={
+                    "terminal": terminal_name,
+                    "reference_net": net_name,
+                    "reference_net_created": net_created,
+                    "devices": connected,
+                    "layout_terminals": layout_terminals,
+                    "reference_terminals": reference_terminals,
+                },
+            )
+        )
+
+    return entries
 
 
 # --------------------------------------------------------------------------- #

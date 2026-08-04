@@ -2681,6 +2681,346 @@ M2 A B VDD VDD pfet W=1.0U L=0.15U
 
 
 # --------------------------------------------------------------------------- #
+# Issue #506: reference.device_bulk reconciles the arity #504/#505 only
+# diagnosed
+# --------------------------------------------------------------------------- #
+
+
+def _device_bulk_request(tmp_path, device_bulk, **extra):
+    """The #504 minimal repro (bulk-terminal resistor layout side vs. plain
+    two-node reference), with `reference.device_bulk` supplied."""
+    layout_path = _write(tmp_path / "layout.spice", _RES_BULK_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _RES_PLAIN_REFERENCE_SPICE)
+    reference = {"netlist": reference_path, "top": "top"}
+    if device_bulk is not None:
+        reference["device_bulk"] = device_bulk
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": reference,
+    }
+    request.update(extra)
+    return _write_request(tmp_path / "request.json", request)
+
+
+def test_reference_device_bulk_reconciles_arity_into_a_match(tmp_path):
+    """Issue #506 (issue #504's option 1): declaring which reference net the
+    layout-side class's implicit bulk terminal carries normalizes the
+    reference class to the deck's own arity before the compare runs, so the
+    repro #505 could only diagnose now reports `status: "match"`."""
+    path = _device_bulk_request(tmp_path, {"res_x": "BULK"})
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+    assert report["counts"]["nets"]["matched"] == 3
+    # The reconciliation replaces the diagnostic: the class the hook covers
+    # is no longer of differing arity by the time `compare()` sees it.
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_CLASS_ARITY for m in report["mismatches"]
+    )
+
+
+def test_reference_device_bulk_discloses_the_reconciliation(tmp_path):
+    """A match reached through the hook is never silently indistinguishable
+    from a fully independent one -- the same disclosure discipline
+    `device.body_unverified` applies to an unverified MOS body."""
+    path = _device_bulk_request(tmp_path, {"res_x": "BULK"})
+    report = run_lvs(path)
+
+    entries = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_BULK_RECONCILED
+    ]
+    assert len(entries) == 1
+    (entry,) = entries
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "reference"
+    assert entry["device"] == {"layout": None, "reference": None, "class": "RES_X"}
+    assert entry["details"] == {
+        "terminal": "W",
+        "reference_net": "BULK",
+        "reference_net_created": True,
+        "devices": 1,
+        "layout_terminals": ["A", "B", "W"],
+        "reference_terminals": ["A", "B"],
+    }
+    assert "not independently verified" in entry["description"]
+    # Disclosed in-band without changing the verdict (`warning`), and
+    # counted like any other category.
+    assert report["category_counts"][lvs.CATEGORY_DEVICE_BULK_RECONCILED] == 1
+    assert report["mismatch_count"] == 1
+
+
+def test_reference_device_bulk_matches_the_model_name_case_insensitively(tmp_path):
+    """`NetlistSpiceReader` upper-cases a model name (`res_x` -> `RES_X`), so
+    a request written in the netlist's own lower-case spelling resolves."""
+    (tmp_path / "lower").mkdir()
+    (tmp_path / "upper").mkdir()
+    lower = run_lvs(_device_bulk_request(tmp_path / "lower", {"res_x": "BULK"}))
+    upper = run_lvs(_device_bulk_request(tmp_path / "upper", {"RES_X": "BULK"}))
+
+    assert lower["status"] == upper["status"] == "match"
+
+
+def test_reference_device_bulk_binds_an_existing_reference_net(tmp_path):
+    """The synthesized-substrate case: the layout's bulk terminal lands on
+    the deck's own `vsubs` net while the reference models a real `VSS`.
+    `reference.device_bulk` binds the added terminal to that *existing*
+    reference net (`reference_net_created: false`) and composes with a
+    `hints.same_nets` pairing for the differing net names."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.SUBCKT top A B VDD vsubs
+R1 A B vsubs 1000 res_x
+M1 A B vsubs vsubs nfet W=0.65U L=0.15U
+.ENDS top
+""",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.SUBCKT top A B VDD VSS
+RR1 A B 1000 res_x
+M1 A B VSS VSS nfet W=0.65U L=0.15U
+.ENDS top
+""",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "device_bulk": {"res_x": "VSS"},
+            },
+            "hints": {"same_nets": [["vsubs", "VSS"]]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_BULK_RECONCILED
+    ]
+    assert entry["details"]["reference_net"] == "VSS"
+    assert entry["details"]["reference_net_created"] is False
+    assert not any(
+        m["category"] == lvs.CATEGORY_HINTS_REJECTED for m in report["mismatches"]
+    )
+
+
+def test_reference_device_bulk_keeps_other_devices_matched(tmp_path):
+    """A circuit that mixes the reconciled class with ordinary, independently
+    matching devices still matches all of them -- the hook must not collapse
+    `counts.devices.matched`/`counts.nets.matched` (#505's own regression
+    criterion, restated for the reconciling path)."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.SUBCKT top A B BULK VDD VSS
+R1 A B BULK 1000 res_x
+M1 A B VSS VSS nfet W=0.65U L=0.15U
+M2 A B VDD VDD pfet W=1.0U L=0.15U
+.ENDS top
+""",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.SUBCKT top A B VDD VSS
+RR1 A B 1000 res_x
+M1 A B VSS VSS nfet W=0.65U L=0.15U
+M2 A B VDD VDD pfet W=1.0U L=0.15U
+.ENDS top
+""",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "device_bulk": {"res_x": "BULK"},
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 3, "reference": 3, "matched": 3}
+    assert report["counts"]["nets"]["matched"] == 5
+    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_BULK_RECONCILED: 1}
+
+
+def test_reference_device_bulk_leaves_an_uncovered_class_diagnosed(tmp_path):
+    """A second bulk-terminal class the request does *not* name still reports
+    `device.class_arity` -- the hook reconciles only what it declares, and
+    never turns a remaining arity gap into a silent pass."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.SUBCKT top A B BULK
+R1 A B BULK 1000 res_x
+R2 B A BULK 2000 res_y
+.ENDS top
+""",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.SUBCKT top A B
+RR1 A B 1000 res_x
+RR2 B A 2000 res_y
+.ENDS top
+""",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "device_bulk": {"res_x": "BULK"},
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"][lvs.CATEGORY_DEVICE_BULK_RECONCILED] == 1
+    arity = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_CLASS_ARITY
+    ]
+    assert len(arity) == 1
+    assert arity[0]["device"]["class"] == "RES_Y"
+
+
+def test_reference_device_bulk_unknown_reference_class_raises(tmp_path):
+    """A model name that resolves on neither side is a malformed request
+    (exit 1), never a silent no-op -- `hints.same_nets`'s own convention."""
+    path = _device_bulk_request(tmp_path, {"res_nope": "BULK"})
+
+    with pytest.raises(LvsError, match="not found in the reference netlist"):
+        run_lvs(path)
+
+
+def test_reference_device_bulk_unknown_layout_class_raises(tmp_path):
+    """The reference class exists but the layout side has no same-named class
+    to take a terminal list from."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.SUBCKT top A B
+R1 A B 1000 res_other
+.ENDS top
+""",
+    )
+    reference_path = _write(tmp_path / "ref.spice", _RES_PLAIN_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "device_bulk": {"res_x": "BULK"},
+            },
+        },
+    )
+
+    with pytest.raises(LvsError, match="not found in the layout netlist"):
+        run_lvs(path)
+
+
+def test_reference_device_bulk_on_an_already_matching_class_raises(tmp_path):
+    """Nothing to reconcile (both sides already declare the same terminal
+    list) is an error, not a no-op that silently rewrites real reference
+    connectivity."""
+    layout_path = _write(tmp_path / "layout.spice", _RES_BULK_LAYOUT_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.SUBCKT top A B BULK
+RR1 A B BULK 1000 res_x
+.ENDS top
+""",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "device_bulk": {"res_x": "BULK"},
+            },
+        },
+    )
+
+    with pytest.raises(LvsError, match="already declares every terminal"):
+        run_lvs(path)
+
+
+def test_reference_device_bulk_multiple_missing_terminals_raises(tmp_path):
+    """The hook reconciles exactly one extra terminal per class (the entry
+    names exactly one net); a class two or more terminals apart is an error
+    rather than an arbitrary guess about which net the rest carry."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.SUBCKT top A B C S
+Q1 A B C S qnpn
+.ENDS top
+""",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.SUBCKT top A B
+RR1 A B 1000 qnpn
+.ENDS top
+""",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "device_bulk": {"qnpn": "S"},
+            },
+        },
+    )
+
+    with pytest.raises(LvsError, match="exactly one extra"):
+        run_lvs(path)
+
+
+def test_reference_device_bulk_must_be_an_object(tmp_path):
+    path = _device_bulk_request(tmp_path, ["res_x", "BULK"])
+
+    with pytest.raises(LvsError, match="device_bulk must be a JSON object"):
+        run_lvs(path)
+
+
+def test_reference_device_bulk_net_must_be_a_string(tmp_path):
+    path = _device_bulk_request(tmp_path, {"res_x": 3})
+
+    with pytest.raises(LvsError, match="must be a non-empty reference net name"):
+        run_lvs(path)
+
+
+# --------------------------------------------------------------------------- #
 # CLI: exit codes, --format text/json
 # --------------------------------------------------------------------------- #
 
@@ -3672,6 +4012,27 @@ def test_netgen_engine_unrecognised_verdict_text_raises(tmp_path, monkeypatch):
 def test_netgen_engine_hints_unsupported_raises(tmp_path, monkeypatch):
     _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
     path = _netgen_request(tmp_path, hints={"same_nets": [["VPWR", "VPWR"]]})
+
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_netgen_engine_device_bulk_unsupported_raises(tmp_path, monkeypatch):
+    """Issue #506: `reference.device_bulk` is a `klayout.db`-side device-class
+    normalisation applied to the in-memory reference netlist -- the netgen
+    engine reads its own SPICE files through its own device model, so the
+    request is rejected rather than silently ignored (same boundary
+    `request.hints` already draws)."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _netgen_request(
+        tmp_path,
+        reference={
+            "netlist": reference_path,
+            "top": "inv",
+            "device_bulk": {"nfet": "VGND"},
+        },
+    )
 
     with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
         run_lvs(path)
