@@ -44,6 +44,27 @@ version. Not an exhaustive commit-by-commit log.
   `synthesize`, `place-and-route`, and `functional-verification` were added
   on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
   release will carry them collectively.
+- 2026-08-04 — `klt lvs`: new `device.combine_incomplete` mismatch category
+  (#466). Only possible with `options.combine_devices: true`. KLayout's own
+  `klayout.db.Netlist.combine_devices()` can raise an unhandled
+  internal-consistency `RuntimeError` on a *partial-match* device group — N
+  real (matching-relevant) instances plus M dummy instances that all share
+  two of three terminals (e.g. a bipolar device's base and collector, tied
+  to a matched array's common well and substrate), but only the N real
+  instances additionally share the third (e.g. an emitter bussed to one
+  signal net). `klt lvs` now catches that one error shape per netlist
+  (narrowly — only a `RuntimeError` carrying KLayout's own `"...in
+  Netlist.combine_devices"` marker text; any other `RuntimeError` still
+  propagates as an application error) instead of letting it abort the whole
+  run: whatever `combine_devices()` already merged stays merged, that
+  netlist's remaining devices are left as individual devices, and a
+  `severity: "warning"` entry (never changes `status`, never breaks
+  `mismatch_count`'s error semantics) records that combine did not fully
+  apply on that side. Purely additive (no `schema_version` bump), but adds a
+  `category_counts["device.combine_incomplete"]` entry for any
+  `combine_devices` run that trips the KLayout error — see
+  `docs/cli/lvs.md`'s `device.combine_incomplete` subsection for the full
+  trigger conditions.
 - 2026-08-04 — `klt gen` + `klt gen-compose`: ring routing openings (#434).
   `guard_ring`, `diff_pair` (`add_guard_ring`) and `bjt_array`
   (`add_collector_ring`) accept `ring_gap_side` (`""`/`"N"`/`"S"`/`"E"`/

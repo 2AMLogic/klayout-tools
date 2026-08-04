@@ -122,8 +122,20 @@ CATEGORY_DEVICE_UNMATCHED = "device.unmatched"
 CATEGORY_DEVICE_CLASS = "device.class"
 CATEGORY_DEVICE_PROPERTY = "device.property"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
+CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 CATEGORY_TOPOLOGY = "topology"
+
+#: Substring KLayout's own ``Netlist.combine_devices()`` internal-consistency
+#: ``RuntimeError`` always carries (issue #466) -- e.g. "Internal error:
+#: Terminal still connected after removing device in device combination:
+#: name=, circuit=<top>, terminal=E in Netlist.combine_devices". Narrows the
+#: ``except RuntimeError`` in :func:`_combine_devices_safely` to *this*
+#: KLayout-internal invariant violation (a partial-match device group -- N
+#: real + M dummy instances sharing two of three terminals, only the N real
+#: ones also matching the third) rather than swallowing an unrelated
+#: ``RuntimeError`` some other code path might raise.
+_COMBINE_DEVICES_ERROR_MARKER = "Netlist.combine_devices"
 
 #: Parameter-name -> reported-property-name map, mirroring ``extract.py``'s
 #: own ``w_um``/``l_um`` convention for the two parameters every consumer
@@ -344,6 +356,7 @@ def run_lvs(request: str) -> dict[str, Any]:
     _prune_extra_top_circuits(layout_netlist, layout_circuit)
     _prune_extra_top_circuits(reference_netlist, reference_circuit)
 
+    combine_warnings: list[dict[str, Any]] = []
     if combine_devices:
         # Opt-in (issue #261): `Netlist.combine_devices()` merges devices
         # that a device class's own `combine_devices` logic recognises as
@@ -362,8 +375,25 @@ def run_lvs(request: str) -> dict[str, Any]:
         # circuit's hierarchy) and before the comparer is constructed, so
         # every subsequent step (`same_circuits`, hints, `compare()`) sees
         # the already-combined device set.
-        layout_netlist.combine_devices()
-        reference_netlist.combine_devices()
+        #
+        # Wrapped per netlist (issue #466): KLayout's own `combine_devices()`
+        # can raise an unhandled internal-consistency `RuntimeError` on a
+        # partial-match device group -- N real (matching-relevant) instances
+        # plus M dummy instances that all share two of three terminals, but
+        # only the N real ones also share the third (e.g. a matched
+        # bipolar/MOS array's flanking dummies). That is a `klayout.db`
+        # behavior this module merely surfaces; letting it propagate as a
+        # bare traceback would violate this module's own JSON-envelope
+        # contract. `_combine_devices_safely` degrades gracefully instead:
+        # whatever `combine_devices()` already merged before hitting the
+        # error stays merged, the rest are left as individual devices, and a
+        # `device.combine_incomplete` warning is added to `mismatches[]`.
+        layout_warning = _combine_devices_safely(layout_netlist, "layout")
+        if layout_warning is not None:
+            combine_warnings.append(layout_warning)
+        reference_warning = _combine_devices_safely(reference_netlist, "reference")
+        if reference_warning is not None:
+            combine_warnings.append(reference_warning)
 
     if engine == "klayout":
         logger = _make_compare_logger()
@@ -519,6 +549,18 @@ def run_lvs(request: str) -> dict[str, Any]:
         # the `compare_result`/safety-net invariant above -- they are purely
         # additive, non-blocking notes.
         mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
+
+    if combine_warnings:
+        # Issue #466: same rationale as `_body_net_warnings` above -- these
+        # never come from a `NetlistComparer` event either, so they are
+        # appended (and the list re-sorted) rather than folded into
+        # `_build_mismatches`. Unlike the deck-structural body-net warnings,
+        # this fires for any request (pre-extracted `layout.netlist` and
+        # `"netgen"` engine included), since `combine_devices()` runs before
+        # the engine branch above.
+        mismatches.extend(combine_warnings)
+
+    if layout_deck is not None or combine_warnings:
         mismatches.sort(key=_sort_key)
 
     category_counts: dict[str, int] = {}
@@ -782,6 +824,66 @@ def _read_reference_netlist(
             except OSError:
                 pass
     return netlist
+
+
+def _combine_devices_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
+    """Call ``netlist.combine_devices()``, degrading gracefully instead of
+    letting KLayout's internal-consistency ``RuntimeError`` abort the whole
+    ``klt lvs`` run (issue #466).
+
+    KLayout's own ``Netlist.combine_devices()`` can raise::
+
+        RuntimeError: Internal error: Terminal still connected after
+        removing device in device combination: name=, circuit=<top>,
+        terminal=E in Netlist.combine_devices
+
+    on a *partial-match* device group: N real (matching-relevant) instances
+    plus M dummy instances that all share two of three terminals (e.g. a
+    bipolar device's base and collector, tied to an array's common well and
+    substrate), but only the N real instances additionally share the third
+    (e.g. an emitter bussed to one signal net) -- the M dummy instances each
+    have their own, mutually distinct, third terminal. That is a
+    ``klayout.db`` behavior this module merely surfaces, not a defect this
+    module's own code introduces, so it is not this module's job to make the
+    partial-match combine itself succeed -- only to keep an unhandled
+    internal exception from breaking this command's JSON-envelope contract
+    (``docs/json-contract.md``, CLAUDE.md's "JSON is the contract").
+
+    Whatever ``combine_devices()`` already merged before hitting the error
+    stays merged (KLayout raises only once it discovers the invariant
+    violation while removing an already-combined device -- earlier,
+    unrelated combines in the same call are not undone); this netlist's
+    remaining, not-yet-combined devices are simply left as individual
+    devices for the rest of this run, exactly as they would be with
+    ``options.combine_devices: false``.
+
+    Returns a ``severity: "warning"`` ``mismatches[]`` entry
+    (``category: "device.combine_incomplete"``) to append to the report when
+    this happened, or ``None`` when ``combine_devices()`` completed cleanly.
+    Only catches this one KLayout-internal error shape (matched narrowly on
+    ``_COMBINE_DEVICES_ERROR_MARKER``, the ``"...in Netlist.combine_devices"``
+    suffix every instance of it carries) -- any other ``RuntimeError``
+    propagates unchanged, so an unrelated failure is never silently
+    swallowed.
+    """
+    try:
+        netlist.combine_devices()
+    except RuntimeError as exc:
+        if _COMBINE_DEVICES_ERROR_MARKER not in str(exc):
+            raise
+        return _mismatch(
+            CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+            "warning",
+            "options.combine_devices could not fully combine devices on "
+            f"the {side} netlist: KLayout's Netlist.combine_devices() hit "
+            "an internal-consistency error on a partial-match device group "
+            "(instances sharing only some, not all, of their matching "
+            "terminals) and stopped -- devices it had already combined "
+            "before the error remain combined, but the rest of this "
+            f"netlist's devices were left uncombined ({exc})",
+            side,
+        )
+    return None
 
 
 def _select_circuit(netlist: kdb.Netlist, top: str | None, side: str) -> kdb.Circuit:
