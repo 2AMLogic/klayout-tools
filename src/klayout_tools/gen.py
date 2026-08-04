@@ -196,6 +196,22 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `bjt_mark` above.
         "res_implant": None,  # `res_generic_po` requires no implant layer
         "res_block": None,  # ...nor a salicide-block layer (contrast gf180mcu)
+        # Second routing-metal role + its connecting via (issue #454, follow-up
+        # to #433): sky130's curated *extraction* deck already declares a
+        # second metal level and the via that lands on it
+        # (`klayout_tools.decks.sky130.EXTRACTION_DECK.metals[1]`/`.vias[0]`),
+        # but `gen_compose`'s router had no role name to select either one --
+        # `routing.layer_role` could only ever resolve to `"metal"` (li1), so
+        # a same-block bus that needed to cross one of its own block's other
+        # li1 pads had no routable path (#433 made that a visible rejection,
+        # not a fix). `"metal2"` lets a route's backbone run on met1 instead;
+        # `gen_compose.route_two_pin`'s via-drop logic drops back to each
+        # target pin's own `"metal"`-role pad only at the connecting via
+        # (`"via1"`), so the backbone itself never touches another pad's li1
+        # layer. Not drawn by any `klt gen` generator itself -- both roles
+        # exist purely for `gen_compose`'s router to resolve.
+        "metal2": (68, 20),  # met1.drawing -- EXTRACTION_DECK.metals[1]
+        "via1": (67, 44),  # mcon.drawing -- EXTRACTION_DECK.vias[0] (li1<->met1)
     },
     "gf180mcu": {
         "active": (22, 0),  # Comp
@@ -214,6 +230,16 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # segment -- the marker alone recognises nothing there.
         "res_implant": (31, 0),  # Pplus -- p+ doped poly (vs. Nplus's npolyf_*)
         "res_block": (49, 0),  # SAB -- salicide block (unsalicided resistor)
+        # Second routing-metal role + its connecting via (issue #454, same
+        # rationale as sky130's pair above). gf180mcu's curated extraction
+        # deck's `metals` stack already runs Metal1-Metal5 (#220); this only
+        # exposes the next level up (Metal2) and the via connecting it to
+        # `"metal"` (Metal1) -- `gen_compose`'s via-drop is single-hop only,
+        # so Metal3-5/`vias[1:]` stay unexposed here (out of this issue's
+        # scope, not a structural limit -- see `EXTRACTION_DECK.metals`/
+        # `.vias` in `klayout_tools.decks.gf180mcu`).
+        "metal2": (36, 0),  # Metal2 -- EXTRACTION_DECK.metals[1]
+        "via1": (35, 0),  # Via1 -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
     },
 }
 

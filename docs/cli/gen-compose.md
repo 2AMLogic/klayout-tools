@@ -60,6 +60,23 @@ cleanly.
   hard failure. **Bundle (>2-pin) routing is out of scope this phase** — a net
   with more than two pins is left unrouted (reported in `unrouted_nets[]` with
   an explanatory `drc_hints.notes[]` entry), not rejected.
+- **Via-drop routing (#454)** — a family whose curated extraction deck
+  declares a second routing-metal level exposes it as a second
+  `routing.layer_role` (sky130's `"metal2"`, resolving to met1 `68/20`;
+  gf180mcu's `"metal2"`, resolving to Metal2 `36/0`), alongside the
+  connecting via role (`"via1"`, sky130's mcon `67/44` / gf180mcu's Via1
+  `35/0`) — sourced directly from each curated `ExtractionDeck`'s own
+  `metals`/`vias` stack, never a second, private layer map. Selecting
+  `"metal2"` runs the whole backbone on that second metal and drops back
+  down to *each* target pin's own base-`"metal"`-role pad only via an
+  enclosed via at that pin's own position — the backbone itself never runs
+  across another pad on the base metal layer, so a same-block bus (e.g.
+  chaining a matched array's unit terminals) is routable without the
+  same-layer short #433 made visible instead of fixing. See "Known
+  limitations" below for the exact before/after against #433's own
+  reproduction, and ["Via-drop routing (metal2/via,
+  #454)"](#via-drop-routing-metal2via-454) for a worked request/response
+  pair.
 - **Net labels (#200, fixed)** — every routed 2-pin net also gets one
   `kdb.Text` label, named after its own `connectivity[].net` field, on the
   PDK-family label layer that pairs with the resolved routing layer (e.g.
@@ -257,13 +274,99 @@ into the circuit.)
   `common_centroid bjt_array` case where bussing two same-row north-facing
   emitters across the intervening unit's base-tie pad previously composed
   `routed: true` and DRC-clean while extraction showed the whole array's
-  shared base node absorbed into the emitter net. This is
-  still metal-only bussing's fundamental limit, not a fix for it: the router
-  has no `metal2`/via role to hop over a crossed pad, so a genuinely
-  necessary intra-block bus (as opposed to a route that happens to cross one
-  because its two ports were picked at either end of a row) has no routable
-  path yet -- it now fails visibly (`unrouted_nets[]`, exit `3`) instead of
-  drawing a short.
+  shared base node absorbed into the emitter net.
+
+  Both rejections above are **same-layer** checks: each skips any port drawn
+  on a different physical layer than `routing.layer_role` (the
+  `other_layer != route_layer: continue` guard in `route_two_pin()`), so each
+  fires only against a pad sitting on the *same* metal the backbone runs on.
+  That was metal-only bussing's fundamental limit at the time, not a fix for
+  it: the router had no `metal2`/via role to hop over a crossed pad, so a
+  genuinely necessary intra-block bus (as opposed to a route that happens to
+  cross one because its two ports were picked at either end of a row) had no
+  routable path -- it failed visibly (`unrouted_nets[]`, exit `3`) instead of
+  drawing a short. **#454 (fixed) closes that gap**: `routing.layer_role:
+  "metal2"` routes the same bus on the second routing-metal level with a
+  via-drop back to each pin's own pad. Because no `klt gen` generator draws
+  any pad on `"metal2"`, the backbone runs on a layer no pad occupies, so both
+  #433's original same-layer check and #453's same-row/same-direction check
+  are structurally bypassed on a `"metal2"` route (each `continue`s past every
+  pad, none being on `route_layer`) rather than having to be crossed at all --
+  see "Via-drop routing (metal2/via, #454)" below. `"metal"` (the base role)
+  is unaffected: a caller who does not opt into `"metal2"` still gets exactly
+  #433's and #453's fail-visibly behavior for a same-layer crossing.
+
+## Via-drop routing (metal2/via, #454)
+
+Re-raising #433's Ask options 1/2 (the merged #433 fix implemented only
+option 3, "fail visibly"): a family whose curated `ExtractionDeck` already
+declares a second routing-metal level and the via that lands on it
+(sky130's `EXTRACTION_DECK.metals=((67,20),(68,20))` / `.vias=((67,44),)`;
+gf180mcu's Metal1→Metal5 stack) now exposes that second level as a second
+`routing.layer_role` (`"metal2"`) plus the via role that connects it back to
+the base `"metal"` role (`"via1"`) — sourced directly from the deck's own
+`metals`/`vias` tuples in `klayout_tools.gen._PDK_ROLE_LAYERS`, never a
+second, private layer map.
+
+Selecting `"metal2"` changes what `route_two_pin()` draws, not the
+request/response shape: the Manhattan backbone still runs between the same
+two composed-frame port positions (`manhattan_backbone`'s own geometry is
+unchanged), but now on the second metal (sky130 met1) instead of the base
+metal (li1). At each endpoint whose own reported layer differs from the
+resolved `routing.layer_role` — every currently-generated block's pads, since
+no `klt gen` generator draws on `"metal2"` itself — the router drops a via
+(sky130 mcon) plus a landing-pad square on *both* the backbone's own layer
+and the pin's own layer, centered exactly on that pin's own composed-frame
+position (`gen_compose._resolve_via_drop_layer`). The backbone itself never
+touches another pad's base-metal layer, so a same-block bus that would
+otherwise cross #433's own pad-crossing rejection is now routable instead of
+`unrouted_nets[]`.
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [{ "id": "arr", "generator_report": "arr.json" }],
+  "placement": { "strategy": "row", "order": ["arr"], "spacing_um": 1.0 },
+  "connectivity": [
+    {
+      "net": "EBUS1",
+      "pins": [
+        { "block": "arr", "port": "Q0_E" },
+        { "block": "arr", "port": "Q1_E" }
+      ]
+    },
+    {
+      "net": "EBUS2",
+      "pins": [
+        { "block": "arr", "port": "Q1_E" },
+        { "block": "arr", "port": "Q2_E" }
+      ]
+    }
+  ],
+  "routing": { "layer_role": "metal2", "width_um": 0.17 },
+  "options": { "cell_name": "bjt_bus", "output": "bjt_bus.gds" }
+}
+```
+
+Against an 8-unit `bjt_array` (the exact repro #433's own tests use), both
+`EBUS1`/`EBUS2` now come back `routed: true` — where the same request with
+`routing.layer_role: "metal"` reports both in `unrouted_nets[]` with #433's
+own rejection reason. The composed output is DRC-clean against `klt drc
+--deck sky130`, and `klt extract --deck sky130` merges exactly the three
+targeted emitters (`Q0_E`/`Q1_E`/`Q2_E`) into one node — every other emitter
+and every base tie stays its own distinct node, matching the hand-drawn `klt
+draw` workaround #454 was filed to replace.
+
+A pin whose own layer is not a member of the resolved family's
+`ExtractionDeck.metals` stack at all (e.g. a bare-poly gate port) is left
+exactly as before #454 — drawn directly on `routing.layer_role`, no via-drop
+attempted, since via-drop only ever applies between two declared
+routing-metal levels. Only a genuinely unresolvable drop (a pin whose layer
+is a *different* metals-stack level than `routing.layer_role`, more than one
+via hop away) is rejected, reporting the net unroutable rather than drawing a
+disconnected short — sky130's/gf180mcu's currently-exposed `"metal2"`/`"via1"`
+pair is always exactly one hop from `"metal"`, so this only matters for a
+future third metal level, not anything expressible today.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
@@ -380,7 +483,7 @@ exit codes).
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
 | `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |
 | `pins[].port` | string | A port name from that block's own `generator_report.ports[]`. An unknown port is an application error (exit 1). A `(block, port)` that also appears in any `connectivity[]` entry is rejected (exit 1) — the router already labels that shape. The label lands at the port's own composed-frame position on the label layer paired with the port's own drawn layer; a port on a layer with no label convention is not labelled (a `drc_hints.notes[]` partial-success note, not an error). |
-| `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) when `connectivity[]` is non-empty; otherwise ignored. |
+| `routing.layer_role` | string | A layer *role* (e.g. `"metal"`) resolved through the **same** per-PDK-family role→layer table every [`klt gen`](gen.md) generator uses — never a raw `{layer, datatype}` pair. **Required** (and must name a role the resolved PDK family actually has a layer for) when `connectivity[]` is non-empty; otherwise ignored. `"metal2"` (#454) runs the backbone on the family's second routing-metal level instead, via-dropping back to each pin's own `"metal"`-role pad through the connecting `"via1"` role — see "Via-drop routing (metal2/via, #454)" below. |
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** when `connectivity[]` is non-empty; otherwise ignored. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 
