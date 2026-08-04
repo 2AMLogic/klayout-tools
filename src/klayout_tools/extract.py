@@ -905,22 +905,25 @@ def _resolve_resistors(
     poly: kdb.Region,
     active: kdb.Region,
     metals: list[kdb.Region],
+    dummy: kdb.Region,
 ) -> tuple[
     list[tuple[ResistorDevice, kdb.Region, kdb.Region]],
     kdb.Region,
     kdb.Region,
     list[kdb.Region],
+    kdb.Region,
+    int,
 ]:
     """Resolve the deck's drawn-resistor declarations against this layout.
 
-    Returns ``(resistors, poly, active, metals)`` where ``resistors`` is one
-    ``(spec, body_region, terminal_region)`` triple per *recognised* device
-    class and the three conductor regions are the deck's originals with
-    every recognised resistor body **subtracted** -- so the caller's
-    connectivity graph (and its MOS gate/source-drain split) sees the
-    resistor's heads as ordinary conductor and the resistive segment as a
-    hole, instead of one continuous short (see
-    :class:`~klayout_tools.decks.ResistorDevice`).
+    Returns ``(resistors, poly, active, metals, poly_candidate_bodies,
+    dummy_devices_dropped)`` where ``resistors`` is one ``(spec,
+    body_region, terminal_region)`` triple per *recognised* device class and
+    the three conductor regions are the deck's originals with every
+    recognised resistor body **subtracted** -- so the caller's connectivity
+    graph (and its MOS gate/source-drain split) sees the resistor's heads as
+    ordinary conductor and the resistive segment as a hole, instead of one
+    continuous short (see :class:`~klayout_tools.decks.ResistorDevice`).
 
     A resistor body is ``body_layer & marker & all(requires) - any(excludes)``.
     A spec whose body region comes out empty on this layout (the common case
@@ -928,13 +931,38 @@ def _resolve_resistors(
     subtracts nothing, so extraction of a resistor-free layout is bit-for-bit
     what it was before this feature existed.
 
+    ``dummy`` is the deck's optional dummy-device marker region (see
+    ``ExtractionDeck.dummy``, issue #295) -- possibly empty when the deck
+    declares no ``dummy`` layer or the layout draws no such geometry.
+    Mirroring the MOS gate-suppression idiom in ``_extract_netlist``, a
+    resistor body's *candidate* region (after ``requires``/``excludes`` but
+    before the ``dummy`` cut) has ``dummy`` subtracted before it is handed
+    off as a recognised device: any *connected component* of the candidate
+    fully consumed by ``dummy`` is dropped outright (counted into
+    ``dummy_devices_dropped``, issue #462) rather than registered as a
+    device, while a component only partially covered survives as a clean
+    geometric cut -- the same all-or-nothing distinction the MOS path
+    already makes. Whatever ``dummy`` removes from a candidate body is *not*
+    subtracted from the caller's conductor region, so it stays present as
+    ordinary conductor, exactly like a suppressed MOS gate's poly.
+
+    ``poly_candidate_bodies`` is the union of every *candidate* body region
+    (post ``requires``/``excludes``, but **before** the ``dummy`` cut) whose
+    ``spec.body`` is the deck's ``poly`` layer -- used by
+    :func:`_detect_unmodelled_poly_bodies` to recognise a fully
+    dummy-suppressed poly resistor's own footprint as "claimed" (so it is
+    never misflagged as an unmodelled-device gap, issue #462), distinct from
+    the narrower post-dummy body carried in ``resistors`` itself.
+
     Raises :class:`ExtractError` for a deck-authoring mistake (a ``body``/
     ``terminal`` layer that is not one of the deck's own conductor layers),
     since the terminal region must be a layer the connectivity graph already
     carries.
     """
+    import klayout.db as kdb
+
     if not deck.resistors:
-        return [], poly, active, metals
+        return [], poly, active, metals, kdb.Region(), 0
 
     # Keyed by drawn conductor layer so a resistor declared on `poly` is cut
     # out of the very same Region the connectivity graph uses.
@@ -952,6 +980,8 @@ def _resolve_resistors(
             ) from None
 
     recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]] = []
+    poly_candidate_bodies = kdb.Region()
+    dummy_devices_dropped = 0
     for spec in deck.resistors:
         base = _conductor(spec.body, "body", spec.name)
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
@@ -962,6 +992,15 @@ def _resolve_resistors(
             body = body & _region(layout, top_cell, layer)
         for layer in spec.excludes:
             body = body - _region(layout, top_cell, layer)
+        if body.is_empty():
+            continue
+        if spec.body == deck.poly:
+            poly_candidate_bodies += body
+        if not dummy.is_empty():
+            for component in body.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            body = body - dummy
         if body.is_empty():
             continue
         recognised.append((spec, body, terminal_layer))
@@ -977,6 +1016,8 @@ def _resolve_resistors(
         bases[deck.poly],
         bases[deck.active],
         [bases[layer] for layer in deck.metals],
+        poly_candidate_bodies,
+        dummy_devices_dropped,
     )
 
 
@@ -1297,8 +1338,9 @@ def _extract_netlist(
     the JSON response's field (issue #293) -- see
     :func:`_resolve_black_box_regions` -- always a list, empty when the
     layout draws no reserved-annotation-layer geometry.
-    ``dummy_devices_dropped`` is the number of MOS gates suppressed by the
-    deck's optional ``dummy`` marker layer (issue #295), ``0`` when no
+    ``dummy_devices_dropped`` is the number of devices suppressed by the
+    deck's optional ``dummy`` marker layer -- MOS gates (issue #295),
+    drawn resistors, and bipolars (both issue #462) alike -- ``0`` when no
     ``dummy`` layer is configured or no dummy geometry is drawn.
     ``unmodelled_poly`` is the JSON response's field (issue #324) -- see
     :func:`_detect_unmodelled_poly_bodies` -- always a list, one entry per
@@ -1353,15 +1395,32 @@ def _extract_netlist(
         metal_labels,
     )
 
+    # Dummy-device marker layer (issue #295, extended to resistors/bipolars
+    # in #462): resolved *before* `_resolve_resistors` below so a resistor
+    # recognition pass can subtract it from a candidate body the same way
+    # the MOS gate-suppression block (further down) already does for
+    # `nfet_gate`/`pfet_gate` -- see `_resolve_resistors`'s docstring for the
+    # exact contract. `dummy_devices_dropped` accumulates across all three
+    # recognition passes (resistor here, MOS and bipolar further below) into
+    # a single JSON-response counter.
+    dummy = _region(layout, top_cell, deck.dummy)
+    dummy_devices_dropped = 0
+
     # Drawn precision resistors (#222), resolved *before* the MOS split
     # below: a recognised resistor body is cut out of its own conductor
     # layer, so (a) the two heads are no longer shorted through it, and (b)
     # a poly resistor crossing diffusion cannot also be mistaken for a gate
     # -- the same ordering both PDKs' own KLayout LVS decks use (sky130's
     # `tgate = poly.and(diff).not(poly_res)...`).
-    resistors, poly, active, metals = _resolve_resistors(
-        layout, top_cell, deck, poly, active, metals
-    )
+    (
+        resistors,
+        poly,
+        active,
+        metals,
+        poly_resistor_candidate_bodies,
+        resistor_dummy_dropped,
+    ) = _resolve_resistors(layout, top_cell, deck, poly, active, metals, dummy)
+    dummy_devices_dropped += resistor_dummy_dropped
 
     # MiM top-plate-via / bottom-plate overlap exclusion (issue #364): must
     # run before `vias` is registered into the netlist graph below and
@@ -1398,19 +1457,19 @@ def _extract_netlist(
     # own `requires`/`excludes`), letting the heuristic tell a "carries a
     # marker this deck knows about, but requires/excludes ruled it out" gap
     # apart from "carries no marker at all" -- see the function's docstring.
-    # `poly_resistor_bodies` is the union of every *recognised* resistor body
+    # `poly_resistor_bodies` is the union of every *candidate* resistor body
     # `_resolve_resistors` returned above (already narrowed by
-    # requires/excludes) -- a poly component abutting one of these is that
-    # resistor's own terminal head, by construction, so it must never be
-    # flagged as a candidate unmodelled-device body (issue #324).
+    # requires/excludes, but -- unlike `resistors` itself -- **before** any
+    # `dummy` cut, issue #462) -- a poly component abutting one of these is
+    # that resistor's own terminal head, by construction, so it must never
+    # be flagged as a candidate unmodelled-device body (issue #324), even
+    # when the resistor itself was fully dummy-suppressed and so carries no
+    # surviving entry in `resistors`.
     poly_resistor_markers = kdb.Region()
     for spec in deck.resistors:
         if spec.body == deck.poly:
             poly_resistor_markers += _region(layout, top_cell, spec.marker)
-    poly_resistor_bodies = kdb.Region()
-    for spec, body, _terminal in resistors:
-        if spec.body == deck.poly:
-            poly_resistor_bodies += body
+    poly_resistor_bodies = poly_resistor_candidate_bodies
     unmodelled_device_warnings, unmodelled_poly = _detect_unmodelled_poly_bodies(
         poly,
         contact,
@@ -1421,18 +1480,21 @@ def _extract_netlist(
         layout.dbu,
     )
 
-    # Dummy-device suppression (issue #295): a deck may declare an optional
-    # `dummy` marker layer (see `ExtractionDeck.dummy`) covering drawn-but-
-    # non-functional dummy devices -- the matched-pair/array edge fill whose
-    # gate and diffusions are tied off to a rail. A MOS gate lying under that
-    # marker must not become a device in the extracted netlist (otherwise
-    # every dummy is a spurious `device.unmatched` under `klt lvs`), so
-    # subtract the marker from the NMOS/PMOS gate regions *before* device
-    # recognition: a gate fully covered by the marker is never handed to
-    # `extract_devices` and so is never recognised as a device at all. Only
-    # the gate is cut -- the dummy's diffusions (`nfet_sd`/`pfet_sd`) and its
-    # gate poly stay in `poly`, so they still participate in ordinary
-    # connectivity below and tie off to the rail exactly as drawn.
+    # Dummy-device suppression, MOS gates (issue #295; extended to resistor
+    # and bipolar recognition in #462 -- see the resistor pass above and the
+    # bipolar pass below): a deck may declare an optional `dummy` marker
+    # layer (see `ExtractionDeck.dummy`) covering drawn-but-non-functional
+    # dummy devices -- the matched-pair/array edge fill whose gate and
+    # diffusions are tied off to a rail. A MOS gate lying under that marker
+    # must not become a device in the extracted netlist (otherwise every
+    # dummy is a spurious `device.unmatched` under `klt lvs`), so subtract
+    # the marker (already resolved above, before `_resolve_resistors`) from
+    # the NMOS/PMOS gate regions *before* device recognition: a gate fully
+    # covered by the marker is never handed to `extract_devices` and so is
+    # never recognised as a device at all. Only the gate is cut -- the
+    # dummy's diffusions (`nfet_sd`/`pfet_sd`) and its gate poly stay in
+    # `poly`, so they still participate in ordinary connectivity below and
+    # tie off to the rail exactly as drawn.
     #
     # Ordered *after* the unmodelled-device diagnostic above (so a dummy gate
     # is still recognised as a gate there and never misflagged as unmodelled
@@ -1444,8 +1506,6 @@ def _extract_netlist(
     # `_detect_unmodelled_poly_bodies`. A marker only partially covering a
     # gate is a clean geometric cut, not a dropped device: the remaining gate
     # area still extracts, so it is not counted.
-    dummy = _region(layout, top_cell, deck.dummy)
-    dummy_devices_dropped = 0
     if not dummy.is_empty():
         for gate in (nfet_gate, pfet_gate):
             for component in gate.merged().each():
@@ -1503,12 +1563,30 @@ def _extract_netlist(
     # base. `bipolar_regions` carries the built regions through to the
     # connectivity section below (registration/extraction must happen once
     # per entry, before any layer can be used in a `connect()` call).
+    #
+    # Dummy-device suppression (issue #295, extended to bipolars in #462):
+    # `dummy` (resolved above, before `_resolve_resistors`) is subtracted
+    # from `bipolar_base` *before* the emitter/collector regions are derived
+    # from it -- mirroring the MOS gate-suppression block's "cut before
+    # recognition" idiom, and (because both `bipolar_emitter` and
+    # `bipolar_collector` are themselves intersections against `bipolar_base`
+    # below) the cut propagates to all three terminals for free, so a
+    # dummy-covered bipolar unit is dropped as a single connected whole
+    # rather than leaving an orphaned emitter/collector fragment behind. A
+    # base component fully consumed by the marker is counted into the
+    # shared `dummy_devices_dropped` counter; a component only partially
+    # covered survives as a clean geometric cut, matching the MOS behaviour.
     bipolar_regions: list[tuple[BipolarDevice, kdb.Region, kdb.Region, kdb.Region]] = []
     for bipolar in deck.bipolars:
         bipolar_base_layer = _region(layout, top_cell, bipolar.base)
         bipolar_marker = _region(layout, top_cell, bipolar.marker)
         bipolar_emitter_layer = _region(layout, top_cell, bipolar.emitter)
         bipolar_base = bipolar_base_layer & bipolar_marker
+        if not dummy.is_empty():
+            for component in bipolar_base.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            bipolar_base = bipolar_base - dummy
         bipolar_emitter = bipolar_emitter_layer & bipolar_base
         # Narrow the emitter the same requires/excludes idiom the resistor
         # (`_resolve_resistors`) and capacitor blocks use, so a base-contact

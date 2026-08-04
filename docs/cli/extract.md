@@ -562,42 +562,52 @@ already known to be routing (by inspection, by contact-cluster count, or by
 aspect ratio) and assert only on what remains, or track the *change* in the
 filtered count across revisions rather than gating on its absolute value.
 
-### Dummy devices: the `dummy` marker layer (issue #295)
+### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462)
 
 Analog matching practice puts **dummy devices** on the edges of a matched
 pair or array so every functional device sees the same lithographic/stress
-neighbourhood. A dummy is drawn geometry that is deliberately *not* part of
-the circuit: its gate and both diffusions are tied off to a rail, and it
-contributes nothing to the schematic. Because a drawn dummy MOS is an
-otherwise-ordinary `nfet`/`pfet`, it used to land in the extracted netlist as
-a real device that the schematic-derived reference has no counterpart for —
-so `klt lvs` reported a spurious `device.unmatched` (plus the usual net
+neighbourhood — the same technique applies to matched MOS pairs, resistor
+arrays/ladders, and bipolar arrays alike. A dummy is drawn geometry that is
+deliberately *not* part of the circuit: its terminals are tied off to a rail,
+and it contributes nothing to the schematic. Because a drawn dummy device is
+otherwise ordinary device geometry, it used to land in the extracted netlist
+as a real device that the schematic-derived reference has no counterpart
+for — so `klt lvs` reported a spurious `device.unmatched` (plus the usual net
 cascade) for every dummy drawn, forcing an unlayoutable choice between
 matching quality and a clean compare.
 
 A deck may now declare an optional `dummy` marker layer (see the deck-schema
-table below). Any MOS gate lying under a shape on that layer is **dropped
-before device recognition**: `_extract_netlist` subtracts the marker region
-from the NMOS/PMOS gate regions, so a gate fully covered by the marker is
-never handed to KLayout's device extractor and never becomes a device at all.
-The dummy therefore does not appear in `devices[]`, `device_count`, or
-`device_counts`, and `klt lvs` no longer sees a phantom device to mismatch.
+table below). Any MOS gate, drawn-resistor body, or bipolar unit lying under
+a shape on that layer is **dropped before device recognition**:
+`_extract_netlist` subtracts the marker region from the NMOS/PMOS gate
+regions, each drawn resistor's candidate body region, and each bipolar's base
+(and, transitively, its emitter/collector) region before handing any of them
+to KLayout's device extractors, so geometry fully covered by the marker is
+never recognised as a device at all. The dummy therefore does not appear in
+`devices[]`, `device_count`, or `device_counts`, and `klt lvs` no longer sees
+a phantom device to mismatch.
 
-Only the **gate** is cut. The dummy's diffusions (source/drain) and its gate
-poly remain in the connectivity graph, so they still extract as ordinary
-interconnect and tie off to the rail exactly as drawn — consistent with a
-dummy being "gate and both diffusions tied off to a rail". A marker that only
-partially covers a gate is a clean geometric cut (the same subtraction
-precedent drawn resistors use), not an all-or-nothing reclassification: the
-remaining gate area still extracts as a device, and only a gate the marker
-fully consumes is counted as dropped.
+Only the **recognition-input region** is cut, never the whole device
+footprint. For a MOS gate, the dummy's diffusions (source/drain) and its gate
+poly remain in the connectivity graph; for a resistor, the marker-covered
+segment of the body layer remains ordinary conductor rather than becoming a
+resistive hole; for a bipolar, the parts of its base/emitter/collector
+outside the marker (if any) are unaffected. Either way the shape still
+extracts as ordinary interconnect and ties off to the rail exactly as drawn —
+consistent with a dummy being "tied off to a rail". A marker that only
+partially covers a device's recognition-input region is a clean geometric cut
+(the same subtraction precedent drawn resistors already use for
+`requires`/`excludes`), not an all-or-nothing reclassification: the remaining
+area still extracts as a device, and only a component the marker fully
+consumes is counted as dropped.
 
 For visibility (rather than a silent drop — the failure mode issue #288 was
-filed about), the JSON response carries a `dummy_devices_dropped` count of
-how many gates the marker suppressed. It is `0` when the active deck declares
-no `dummy` layer or the layout draws no dummy geometry. Declaring `dummy`
-is fully opt-in and additive: a deck that does not set it extracts exactly as
-it did before the field existed, byte-for-byte.
+filed about), the JSON response carries a `dummy_devices_dropped` count of how
+many devices — MOS gates, drawn resistors, and bipolars alike — the marker
+suppressed. It is `0` when the active deck declares no `dummy` layer or the
+layout draws no dummy geometry. Declaring `dummy` is fully opt-in and
+additive: a deck that does not set it extracts exactly as it did before the
+field existed, byte-for-byte.
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 
@@ -1023,7 +1033,7 @@ exit codes).
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |
-| `dummy_devices_dropped` | integer               | Number of MOS gates suppressed by the deck's optional `dummy` marker layer (issue #295) — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
+| `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors, and bipolars (both issue #462) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
 | `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. |
 | `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; and a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above), independent of what this layout happens to contain. Both registered decks currently report `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]`. Note the trailing `"resistor"` is a role token, not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |

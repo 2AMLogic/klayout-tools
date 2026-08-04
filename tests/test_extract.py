@@ -3607,3 +3607,140 @@ def test_partial_marker_coverage_is_a_clean_cut_not_a_drop(tmp_path, monkeypatch
     # inverter pair + the surviving dummy-shaped device = 3.
     assert report["device_count"] == 3
     assert report["device_counts"] == {"nfet": 2, "pfet": 1}
+
+
+# --------------------------------------------------------------------------- #
+# Dummy-device suppression: resistors and bipolars (issue #462)
+# --------------------------------------------------------------------------- #
+#
+# Extends the MOS-only `dummy` marker suppression above (issue #295) to the
+# resistor-body and bipolar-base recognition paths, using the same fully-
+# covered-component counting idiom and the same `_dummy_deck`/`_DUMMY_MARKER`
+# fixtures the MOS tests above already established.
+
+
+def _add_dummy_marker(layout: kdb.Layout, box: kdb.Box) -> None:
+    """Draw a `_DUMMY_MARKER` shape covering `box` into `layout`'s (single)
+    top cell -- the resistor/bipolar analogue of `_add_dummy_nfet`'s own
+    marker-drawing, factored out since those two fixtures already draw their
+    own device geometry and only need the marker added on top."""
+    top = layout.top_cell()
+    top.shapes(layout.layer(*_DUMMY_MARKER)).insert(box)
+
+
+def test_dummy_resistor_is_excluded_and_counted(tmp_path, monkeypatch):
+    """A drawn resistor whose recognised body is fully covered by the
+    `dummy` marker is dropped from the extracted netlist and counted in
+    `dummy_devices_dropped` -- the resistor-recognition analogue of
+    `test_one_dummy_device_is_excluded_and_counted` (issue #462)."""
+    layout = _make_poly_resistor_layout("sky130")
+    _add_dummy_marker(layout, _RES_MARKED.enlarged(100, 100))
+    path = _write_gds(layout, tmp_path / "res_dummy.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 1
+    assert report["device_count"] == 0
+    assert report["device_counts"] == {}
+    # The dummy-suppressed body's pre-dummy footprint must still count as
+    # "recognised" for the unmodelled-poly diagnostic (issue #324) -- a
+    # deliberately excluded dummy is not a deck-coverage gap.
+    assert report["warnings"] == []
+    assert report["unmodelled_poly"] == []
+
+
+def test_dummy_resistor_would_extract_without_the_marker(tmp_path, monkeypatch):
+    """Control for the previous test: the same resistor geometry under the
+    `dummy`-aware deck, with no marker drawn, extracts normally -- proving
+    the exclusion is the marker's doing, not a side effect of the deck
+    change itself."""
+    layout = _make_poly_resistor_layout("sky130")
+    path = _write_gds(layout, tmp_path / "res_nomark.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == 1
+    assert report["device_counts"] == {"res_generic_po": 1}
+
+
+def test_partial_dummy_marker_on_resistor_is_a_clean_cut_not_a_drop(
+    tmp_path, monkeypatch
+):
+    """A `dummy` marker that only partially covers a drawn resistor's
+    recognised body is a clean geometric cut, not an all-or-nothing
+    misclassification: the body is not fully consumed, so the resistor is
+    *not* counted as dropped and still extracts (issue #462's complex edge
+    case, resistor analogue of
+    `test_partial_marker_coverage_is_a_clean_cut_not_a_drop`)."""
+    layout = _make_poly_resistor_layout("sky130")
+    # Only a 300 nm sliver at the body's right edge (x 8700..9000) is
+    # dummy-covered; the sliver merges into the adjoining "RB" head (a clean
+    # edge trim), while the remaining x 3000..8700 body slice stays one
+    # connected component still touching both heads.
+    _add_dummy_marker(layout, kdb.Box(8700, 0, 9000, 1000))
+    path = _write_gds(layout, tmp_path / "res_partial_dummy.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    # Body only partially covered -> not fully consumed -> not a dropped device.
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == 1
+    assert report["device_counts"] == {"res_generic_po": 1}
+    assert report["warnings"] == []
+
+
+def test_dummy_bipolar_is_excluded_and_counted(tmp_path, monkeypatch):
+    """A bipolar device whose recognised base is fully covered by the
+    `dummy` marker is dropped from the extracted netlist and counted in
+    `dummy_devices_dropped` -- the bipolar-recognition analogue of
+    `test_one_dummy_device_is_excluded_and_counted` (issue #462)."""
+    layout = _make_sky130_bjt_layout()
+    # Fully covers the 2000x2000 marked (nwell & pnp.drawing) base.
+    _add_dummy_marker(layout, kdb.Box(-100, -100, 2100, 2100))
+    path = _write_gds(layout, tmp_path / "bjt_dummy.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 1
+    assert report["device_counts"].get("pnp", 0) == 0
+
+
+def test_dummy_bipolar_would_extract_without_the_marker(tmp_path, monkeypatch):
+    """Control for the previous test: the same bipolar geometry under the
+    `dummy`-aware deck, with no marker drawn, extracts normally -- proving
+    the exclusion is the marker's doing, not a side effect of the deck
+    change itself."""
+    layout = _make_sky130_bjt_layout()
+    path = _write_gds(layout, tmp_path / "bjt_nomark.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_counts"] == {"pnp": 1}
+
+
+def test_partial_dummy_marker_on_bipolar_is_a_clean_cut_not_a_drop(
+    tmp_path, monkeypatch
+):
+    """A `dummy` marker that only partially covers a bipolar's recognised
+    base is a clean geometric cut, not an all-or-nothing misclassification:
+    the base is not fully consumed, so the device is *not* counted as
+    dropped and still extracts (issue #462's complex edge case, bipolar
+    analogue of `test_partial_marker_coverage_is_a_clean_cut_not_a_drop`)."""
+    layout = _make_sky130_bjt_layout()
+    # A corner of the 2000x2000 base well clear of the emitter (800..1200)
+    # and the base tie (100..300); the base still spans both terminals.
+    _add_dummy_marker(layout, kdb.Box(1500, 1500, 2000, 2000))
+    path = _write_gds(layout, tmp_path / "bjt_partial_dummy.gds")
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_counts"] == {"pnp": 1}
