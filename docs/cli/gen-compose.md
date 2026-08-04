@@ -368,6 +368,28 @@ disconnected short — sky130's/gf180mcu's currently-exposed `"metal2"`/`"via1"`
 pair is always exactly one hop from `"metal"`, so this only matters for a
 future third metal level, not anything expressible today.
 
+  A third check (#469) generalizes both checks above from *reported*
+  `ports[]` geometry to the block's **actual drawn** shapes. The two checks
+  above only fire for a same-row/same-column, same-direction pin pair —
+  exactly the degenerate single-jog backbone their reasoning models — so
+  they still miss a same-facing pair on *different* rows/columns, or a route
+  wide enough to reach an adjacent row's pad while clearing every modelled
+  reported-`width_um` square. For a **self-net only**, `compose()` now reads
+  the block's own GDS stream once per block (`read_block_layer_geometry()`,
+  lazily, cached — every other net is already covered by the whole-block
+  bbox check and never needs it) for its merged shapes on `routing.
+  layer_role`, translated into the composed frame. `route_two_pin()` then
+  intersects the route's actual drawn metal (the same `kdb.Path` construction
+  the composed GDS gets) against those shapes: overlapping any merged shape
+  other than the two the endpoints land on (a positive-area overlap only —
+  an edge touch is a `klt drc` spacing question, not a short) is a silent
+  short, reported `unrouted_nets[]` rather than drawn. This is the *only*
+  place this command reads a block's shapes rather than its
+  `generator_report` — placement math is still never re-derived from a
+  block's GDS stream (see below); this reads obstacle geometry only, for a
+  self-net's own block. The two checks compose rather than replace each
+  other: either can catch a short the other's information set cannot see.
+
 ## CLI shape (a Builder decision, per the spike's own flag)
 
 The spike's contract section names `klt gen compose` as a working name only
@@ -416,13 +438,20 @@ miter that fully fills the bend, so no separate bend-insertion pass is needed.
 
 **A block's `bbox_um`/`ports[]` are consumed exactly as its own
 `generator_report` reported them** — this command never re-derives a
-block's placement math from its GDS stream (the spike's "one new guarantee
+block's *placement math* from its GDS stream (the spike's "one new guarantee
 specific to composition," section 2). Every block referenced by
 `blocks[].generator_report` must share the same `dbu` (design-rule grid
 resolution) — every `klt gen` generator uses `0.001` (see
 [`docs/cli/gen.md`](gen.md)), so this only matters for a hand-crafted
 `generator_report` with a different `dbu`; a mismatch is an application
 error (exit 1).
+
+The one exception (#453/#469): for a **self-net**, `route_two_pin()`'s
+drawn-metal short check (above) reads the two ports' own block's GDS stream a
+second time — not to re-derive placement, but to read its *drawn* shapes on
+the route layer as routing obstacles, since a port's reported `width_um` can
+under-state the real pad it draws. That read happens lazily and is cached
+once per block, only when `connectivity[]` contains a self-net.
 
 ## JSON schema (the contract)
 
