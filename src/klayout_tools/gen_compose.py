@@ -62,8 +62,11 @@ PDK resolution goes through the one resolver every other verb uses
 PDK lookup. A block's own geometry is consumed exactly as its
 ``generator_report`` reported it (``bbox_um``, ``ports[]``, ``cell_name``,
 ``gds_path``) -- this module never re-derives a block's placement math from
-its GDS stream; the GDS stream is only read once, at write time, to copy each
-block's already-computed geometry into the composed output.
+its GDS stream; the GDS stream is read at write time, to copy each block's
+already-computed geometry into the composed output, and (#453) for the
+route-layer *obstacle* shapes of a block a self-net lands on, since a port's
+reported ``width_um`` is its contact size rather than the extent of the pad
+metal drawn around it (see :func:`read_block_layer_geometry`).
 """
 
 from __future__ import annotations
@@ -1129,6 +1132,148 @@ def _segment_bbox_interior_overlap_um(
     return 0.0
 
 
+def read_block_layer_geometry(
+    block_id: str,
+    block: dict[str, Any],
+    offset_um: dict[str, float],
+    layer: tuple[int, int],
+) -> dict[str, Any] | None:
+    """Read ``block``'s **drawn** shapes on ``layer`` into the composed frame.
+
+    Returns ``{"region": kdb.Region, "dbu": float}`` -- the block's own GDS
+    geometry on the ``(layer, datatype)`` pair the route is drawn on, merged
+    and translated by the block's placed ``offset_um``, in integer database
+    units -- or ``None`` when the block draws nothing there.
+
+    This is the one place this module looks at a block's *shapes* rather than
+    at its ``generator_report``. It exists because a ``klt gen`` port's
+    reported ``width_um`` is the port's **contact/access** size, not the
+    extent of the pad metal drawn around it (e.g. a ``bjt_array`` base tie
+    reports ``width_um: 0.22`` -- ``CONTACT_SIZE_UM`` -- for a pad whose drawn
+    local metal is 0.42um x 0.68um, see ``gen.py``'s ``_bjt_unit_layout``), so
+    the reported-geometry pad model :func:`route_two_pin`'s self-net check
+    started from systematically *under*-estimates what a route can short to
+    (#453). Placement math is still never re-derived from the stream -- this
+    reads obstacle geometry only, and only for a self-net's own block.
+    """
+    import klayout.db as kdb
+
+    gds_path = block["gds_path"]
+    src_layout = kdb.Layout()
+    try:
+        src_layout.read(gds_path)
+    except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
+        raise GenComposeError(
+            f"block '{block_id}': could not read gds_path '{gds_path}': {exc}"
+        ) from exc
+
+    src_cell_name = block["cell_name"]
+    src_cell = src_layout.cell(src_cell_name)
+    if src_cell is None:
+        raise GenComposeError(
+            f"block '{block_id}': gds '{gds_path}' has no cell named "
+            f"'{src_cell_name}' (from its generator_report.cell_name)"
+        )
+
+    dbu = src_layout.dbu
+    layer_index = src_layout.find_layer(layer[0], layer[1])
+    if layer_index is None:
+        return None
+
+    region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
+    region.merge()
+    if region.is_empty():
+        return None
+    region.transform(
+        kdb.Trans(
+            int(round(offset_um["x"] / dbu)),
+            int(round(offset_um["y"] / dbu)),
+        )
+    )
+    return {"region": region, "dbu": dbu}
+
+
+def _drawn_route_region(
+    points_um: list[tuple[float, float]], width_um: float, dbu: float
+):
+    """The metal a routed backbone actually draws, as a ``kdb.Region``.
+
+    Built from the *same* ``kdb.Path(points, width)`` construction
+    :func:`_write_composed_gds` inserts into the composed cell, so the check
+    and the drawn output cannot disagree about the route's footprint.
+    """
+    import klayout.db as kdb
+
+    path = kdb.Path(
+        [kdb.Point(int(round(x / dbu)), int(round(y / dbu))) for (x, y) in points_um],
+        int(round(width_um / dbu)),
+    )
+    return kdb.Region(path.polygon())
+
+
+def _self_net_drawn_short(
+    points_um: list[tuple[float, float]],
+    geometry: dict[str, Any],
+    a: tuple[float, float],
+    b: tuple[float, float],
+    width_um: float,
+    own_ports: dict[str, Any],
+    own_offset: dict[str, float],
+) -> tuple[float, list[str]] | None:
+    """Whether a self-net's drawn metal lands on its own block's *other*
+    drawn shapes on the route layer.
+
+    ``geometry`` is :func:`read_block_layer_geometry`'s result for the block
+    both pins sit on. Every merged shape of that block on the route layer is
+    an obstacle **except** the two the route is supposed to land on -- the
+    shapes holding the two endpoint ports themselves. Any remaining shape the
+    drawn metal actually overlaps (positive area; a mere edge touch is a
+    spacing question for ``klt drc``, not a short) is a silent short.
+
+    Returns ``(overlap_um2, crossed_port_names)`` for the first such shape
+    set, or ``None`` when the route only lands on its own two endpoints.
+    """
+    import klayout.db as kdb
+
+    region = geometry["region"]
+    dbu = geometry["dbu"]
+
+    def _probe(x_um: float, y_um: float):
+        px = int(round(x_um / dbu))
+        py = int(round(y_um / dbu))
+        return kdb.Box(px - 1, py - 1, px + 1, py + 1)
+
+    endpoints = kdb.Region()
+    for x_um, y_um in (a, b):
+        endpoints.insert(_probe(x_um, y_um))
+
+    # Everything on this block's route layer that is *not* one of the two
+    # shapes the route is meant to terminate on.
+    obstacles = region.not_interacting(endpoints)
+    if obstacles.is_empty():
+        return None
+
+    overlap = obstacles & _drawn_route_region(points_um, width_um, dbu)
+    if overlap.is_empty():
+        return None
+
+    overlap_um2 = overlap.area() * dbu * dbu
+    hit = obstacles.interacting(overlap)
+    crossed: list[str] = []
+    for name, port in own_ports.items():
+        if not _port_has_geometry(port):
+            continue
+        probe = kdb.Region(
+            _probe(
+                float(port["x_um"]) + own_offset["x"],
+                float(port["y_um"]) + own_offset["y"],
+            )
+        )
+        if not hit.interacting(probe).is_empty():
+            crossed.append(name)
+    return overlap_um2, crossed
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -1137,6 +1282,7 @@ def route_two_pin(
     placed_bboxes_um: dict[str, dict[str, float]],
     width_um: float,
     route_layer: tuple[int, int] | None = None,
+    block_geometry: dict[str, dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -1168,7 +1314,19 @@ def route_two_pin(
        pad footprint (side length its reported ``width_um``); a backbone
        overlapping that footprint's interior is rejected rather than drawn
        as a silent short.
-    4. **Obstacle-overlap check** (#199 case 1): after each port's own
+    4. **Self-net drawn-metal check** (#453): the reported-``width_um`` pad
+       model check 3 uses systematically *under*-estimates a pad -- a port's
+       ``width_um`` is its contact/access size, not the extent of the metal
+       drawn around it -- so it misses whole classes of short, notably two
+       same-row ports facing the *same* direction with a third port's pad
+       between them (the route's jog then clears the modelled square but not
+       the real pad). When ``block_geometry`` supplies the block's actual
+       drawn shapes on ``route_layer``
+       (:func:`read_block_layer_geometry`), the route's own drawn metal
+       (:func:`_drawn_route_region`, the same ``kdb.Path`` the composed cell
+       gets) is intersected with them: overlapping any shape other than the
+       two the endpoints sit on is a silent short.
+    5. **Obstacle-overlap check** (#199 case 1): after each port's own
        unavoidable "sit set back from my own block's edge" margin is
        excluded (:func:`_port_edge_margin_um`), the drawn backbone must not
        cross the *interior* of any block's bbox -- including the two pins'
@@ -1178,13 +1336,18 @@ def route_two_pin(
        third block's bbox the straight-line/single-jog backbone happens to
        cross in a longer row.
 
-    Any of the four reports the net unroutable (spike section 2,
+    Any of the five reports the net unroutable (spike section 2,
     ``unrouted_nets[]``) rather than silently drawing a short. ``route_layer``
     (the ``(layer, datatype)`` pair ``routing.layer_role`` resolved to, see
     :func:`_resolve_route_layer`) is optional only for callers that predate
     #433/don't care about check 3 (e.g. direct unit tests) -- ``compose()``
     always passes it when ``connectivity[]`` is non-empty, since that's the
-    only time a route is actually drawn.
+    only time a route is actually drawn. ``block_geometry`` (block ``id`` ->
+    :func:`read_block_layer_geometry` result, ``None`` for a block that draws
+    nothing on the route layer) is likewise optional and likewise always
+    supplied by ``compose()`` for the blocks a self-net lands on; without it
+    check 4 is skipped and only the weaker reported-pad model of check 3
+    applies.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "reason": str | None}``.
@@ -1415,6 +1578,58 @@ def route_two_pin(
                     ),
                 }
 
+    # Self-net drawn-metal check (#453): the pad model above is built from
+    # each port's reported ``width_um``, which is the port's *contact/access*
+    # size -- not the extent of the pad metal drawn around it. A bjt_array
+    # base tie, for instance, reports ``width_um: 0.22`` (``CONTACT_SIZE_UM``)
+    # for a pad whose drawn local metal is 0.42um x 0.68um. So the modelled
+    # square systematically under-states the obstacle, and the check above
+    # misses any short whose clearance falls between the two: notably two
+    # same-row ports facing the *same* direction with a third port's pad
+    # between them, where the backbone's jog sits exactly ``width_um`` off the
+    # shared port line -- clear of the modelled square whenever the route is
+    # at least as wide as the reported pad, but squarely on top of the real
+    # metal. Compare the route's *drawn* metal against the block's *drawn*
+    # shapes on the route layer instead: every merged shape except the two the
+    # endpoints land on is an obstacle, and overlapping one (positive area --
+    # an edge touch is a spacing question for `klt drc`, not a short) is the
+    # same silent short, just measured against geometry the reported port
+    # model cannot see.
+    if same_block_self_net and block_geometry is not None:
+        geometry = block_geometry.get(own_a)
+        if geometry is not None:
+            drawn = _self_net_drawn_short(
+                points,
+                geometry,
+                a,
+                b,
+                width_um,
+                blocks[own_a].get("ports") or {},
+                offsets_um[own_a],
+            )
+            if drawn is not None:
+                overlap_um2, crossed_names = drawn
+                if not crossed_names:
+                    where = "drawn geometry (no port of its own sits on it)"
+                else:
+                    noun = "port" if len(crossed_names) == 1 else "ports"
+                    where = f"{noun} " + ", ".join(f"'{n}'" for n in crossed_names)
+                return {
+                    "routed": False,
+                    "route_length_um": None,
+                    "points_um": None,
+                    "reason": (
+                        f"self-net's drawn {width_um}um metal overlaps "
+                        f"{overlap_um2:.4g}um^2 of block '{own_a}''s own drawn "
+                        f"pad metal on the route layer ({where}) -- bussing "
+                        "this net across the block would draw a silent short "
+                        "to that pad (its drawn metal is larger than the "
+                        "contact size its port reports); route to a layer_role "
+                        "with a metal2/via stack instead, or wire this net "
+                        "externally"
+                    ),
+                }
+
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
         for other_id, other_bbox in placed_bboxes_um.items():
@@ -1610,6 +1825,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 "as named .SUBCKT pins after extraction"
             )
 
+    # Drawn-geometry obstacles for the self-net check (#453), read lazily and
+    # cached per block: only a *self*-net needs them (every other net is
+    # already covered by the whole-block bbox check), and only once per block
+    # however many self-nets land on it.
+    block_geometry: dict[str, dict[str, Any] | None] = {}
+
+    def _block_geometry_for(block_id: str) -> dict[str, dict[str, Any] | None]:
+        if route_layer is not None and block_id not in block_geometry:
+            block_geometry[block_id] = read_block_layer_geometry(
+                block_id, blocks[block_id], offsets_um[block_id], route_layer
+            )
+        return block_geometry
+
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
     routed_geometry: list[dict[str, Any]] = []
@@ -1643,6 +1871,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             placed_bboxes_um,
             width_um,
             route_layer,
+            (
+                _block_geometry_for(pins[0]["block"])
+                if pins[0]["block"] == pins[1]["block"]
+                else None
+            ),
         )
         nets.append(
             {

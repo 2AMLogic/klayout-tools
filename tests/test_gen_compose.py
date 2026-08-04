@@ -1825,6 +1825,211 @@ def test_compose_routes_self_net_with_no_other_pad_in_the_way(tmp_path, pdk_root
     assert report["nets"][0]["route_length_um"] > 0
 
 
+# --------------------------------------------------------------------------- #
+# Self-net drawn-metal crossing (#453): the #433/#439 check models each other
+# port as a square of its *reported* `width_um`, which is a port's contact
+# size -- not the extent of the pad metal actually drawn around it. Whenever a
+# route is at least as wide as that reported size, a same-row/same-direction
+# port pair's jog clears the modelled square while sitting squarely on the
+# real pad, and the short composed `routed: true` + DRC-clean. `route_two_pin`
+# must additionally compare the route's *drawn* metal against the block's own
+# *drawn* shapes on the route layer.
+# --------------------------------------------------------------------------- #
+
+
+def _bjt_same_row_request(pdk_root, arr, output, width_um):
+    """The issue's exact reproduction: an 8-unit common-centroid bjt_array,
+    self-net between two same-row, same-direction (north-facing) emitter pads
+    whose x positions sandwich a third port -- the intervening unit's base-tie
+    pad (`Q4_B` sits between `Q4_E` and `Q0_E`)."""
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [{"id": "pnp", "generator_report": arr}],
+        "placement": {"strategy": "row", "order": ["pnp"], "spacing_um": 1.0},
+        "connectivity": [
+            {
+                "net": "EBUS",
+                "pins": [
+                    {"block": "pnp", "port": "Q4_E"},
+                    {"block": "pnp", "port": "Q0_E"},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": width_um},
+        "options": {"cell_name": "pnp_bus", "output": str(output)},
+    }
+
+
+def _bjt_array_8(tmp_path, pdk_root):
+    return _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "pnp_test",
+        emitter_um=0.68,
+        rows=2,
+        cols=4,
+        dummy=1,
+        ratio=8,
+        topology="common_centroid",
+        add_collector_ring=False,
+    )
+
+
+def test_compose_rejects_self_net_between_same_row_same_direction_ports(
+    tmp_path, pdk_root
+):
+    # routing.width_um 0.3 is deliberately >= the 0.22 `width_um` every
+    # bjt_array port reports (CONTACT_SIZE_UM): that is exactly the regime the
+    # #433/#439 square-pad model misses, since the backbone's jog then sits
+    # `width_um` off the shared port line -- outside the modelled
+    # (pad_w/2 + width_um/2) square -- while the base tie's *drawn* metal is
+    # 0.42um x 0.68um and reaches right up into the route. Before #453 this
+    # composed `routed: true` and DRC-clean, and `klt extract` showed the
+    # array's whole shared base node absorbed into the emitter net.
+    arr = _bjt_array_8(tmp_path, pdk_root)
+    output = tmp_path / "pnp_bus.gds"
+    report = compose(_bjt_same_row_request(pdk_root, arr, output, 0.3))
+
+    assert report["unrouted_nets"] == ["EBUS"]
+    assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["route_length_um"] is None
+    assert any(
+        "EBUS" in note and "Q4_B" in note for note in report["drc_hints"]["notes"]
+    )
+
+    # Nothing was drawn on li1 for the net, so the short never reaches the GDS.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("pnp_bus")
+    li1 = layout.layer(67, 20)
+    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+
+
+def test_route_two_pin_same_row_pair_needs_drawn_geometry_to_be_caught(
+    tmp_path, pdk_root
+):
+    # Pins the regression precisely on the new check: the reported-port model
+    # alone (`block_geometry=None`, the pre-#453 information set) still calls
+    # this route routable -- it is only when `route_two_pin` is given the
+    # block's actual drawn shapes on the route layer that the short is caught.
+    arr = _bjt_array_8(tmp_path, pdk_root)
+    blocks = gen_compose._parse_blocks([{"id": "pnp", "generator_report": arr}])
+    offsets = {"pnp": {"x": 0.0, "y": 0.0}}
+    bboxes = {"pnp": blocks["pnp"]["bbox_um"]}
+    pin_a = {"block": "pnp", "port": "Q4_E"}
+    pin_b = {"block": "pnp", "port": "Q0_E"}
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+
+    without = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.3, route_layer
+    )
+    assert without["routed"] is True  # pre-#453 information set: silent short
+
+    geometry = {
+        "pnp": gen_compose.read_block_layer_geometry(
+            "pnp", blocks["pnp"], offsets["pnp"], route_layer
+        )
+    }
+    with_geometry = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.3, route_layer, geometry
+    )
+    assert with_geometry["routed"] is False
+    assert "Q4_B" in with_geometry["reason"]
+
+
+def test_compose_same_row_self_net_short_is_not_extracted_as_a_merged_base(
+    tmp_path, pdk_root
+):
+    # The issue's confirmation step, as an assertion: with the net rejected,
+    # no emitter metal is drawn across the base ties, so extraction still
+    # reports the array's own shared base node on every device -- rather than
+    # every base terminal absorbed into the emitter route's net.
+    arr = _bjt_array_8(tmp_path, pdk_root)
+    output = tmp_path / "pnp_bus.gds"
+    report = compose(_bjt_same_row_request(pdk_root, arr, output, 0.3))
+    assert report["unrouted_nets"] == ["EBUS"]
+
+    result = extract.run_extract(str(output), "sky130", top="pnp_bus")
+    bjts = [d for d in result["devices"] if d["class"] == "pnp"]
+    assert bjts, "expected the composed array to extract as pnp devices"
+    assert all(d["nets"]["b"] != "EBUS" for d in bjts)
+    assert len({d["nets"]["b"] for d in bjts}) == 1  # one shared base node
+
+
+def test_compose_routes_same_direction_self_net_when_nothing_is_drawn_between(
+    tmp_path, pdk_root
+):
+    # No false positive: two same-direction (both north-facing) ports on the
+    # same row still route when no drawn shape of the block sits between them
+    # -- #453 rejects a route whose metal lands on another *drawn* pad, not
+    # every same-facing self-net (the issue's own fallback option 2). Same
+    # 0.3um width as the rejected case above, so the difference is the
+    # geometry in the way, not the trace width.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "unit",
+        rows=1,
+        cols=1,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_eb_wide.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EB",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q0_B"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.3},
+            "options": {"cell_name": "bjt_eb_wide", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+
+
+def test_read_block_layer_geometry_returns_none_for_an_undrawn_layer(
+    tmp_path, pdk_root
+):
+    # A block that draws nothing on the route layer contributes no obstacles
+    # (and must not crash the check) -- e.g. a bjt_array has no `poly` at all.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "unit",
+        rows=1,
+        cols=1,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    blocks = gen_compose._parse_blocks([{"id": "arr", "generator_report": arr}])
+    poly_layer = gen_compose._resolve_route_layer("sky130A", "poly")
+    assert (
+        gen_compose.read_block_layer_geometry(
+            "arr", blocks["arr"], {"x": 0.0, "y": 0.0}, poly_layer
+        )
+        is None
+    )
+
+
 def test_compose_self_net_pad_crossing_ignores_ports_on_a_different_layer(
     tmp_path, pdk_root
 ):

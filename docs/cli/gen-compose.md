@@ -245,6 +245,30 @@ into the circuit.)
   because its two ports were picked at either end of a row) has no routable
   path yet -- it now fails visibly (`unrouted_nets[]`, exit `3`) instead of
   drawing a short.
+- **A self-net is also checked against the block's *drawn* pad metal, not
+  only its reported port sizes (#453, fixed).** The square-pad model above is
+  built from each port's reported `width_um`, which is the port's
+  **contact/access** size — not the extent of the pad metal drawn around it
+  (a `bjt_array` base tie reports `width_um: 0.22` for a pad whose drawn
+  local metal is 0.42µm × 0.68µm). It therefore systematically
+  *under*-estimates the obstacle, and missed a whole class of short: two
+  ports on the **same row** facing the **same direction** with a third port's
+  pad between them. Their backbone's jog sits exactly `routing.width_um` off
+  the shared port line, which clears the modelled square whenever the route
+  is at least as wide as the reported pad — so an 8-unit `bjt_array` emitter
+  self-net across an intervening base tie composed `routed: true` and
+  DRC-clean while `klt extract` showed the array's entire shared base node
+  absorbed into the emitter net. `route_two_pin()` now additionally
+  intersects the route's **actual drawn metal** (the same `kdb.Path` the
+  composed cell receives) with the block's **actual drawn shapes** on
+  `routing.layer_role`: landing on any shape other than the two the route's
+  own endpoints sit on is reported unroutable. This is the one place the
+  command reads a block's GDS stream for anything other than copying it into
+  the output — obstacle shapes only, for a self-net's own block, never
+  placement math (which still comes exclusively from the block's own
+  `generator_report`). A same-direction pair with nothing drawn between the
+  two ports still routes: the check rejects a route whose metal lands on a
+  drawn pad, not every same-facing self-net.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 
@@ -295,7 +319,13 @@ miter that fully fills the bend, so no separate bend-insertion pass is needed.
 **A block's `bbox_um`/`ports[]` are consumed exactly as its own
 `generator_report` reported them** — this command never re-derives a
 block's placement math from its GDS stream (the spike's "one new guarantee
-specific to composition," section 2). Every block referenced by
+specific to composition," section 2). The one thing that *is* read back from
+a block's stream, and only for a **self-net's own block**, is its drawn
+obstacle shapes on `routing.layer_role` — the routability check described
+under "Known limitations" (#453), which needs the pad metal a port's reported
+contact `width_um` does not describe. That informs `routed`/`unrouted_nets[]`
+only; no placement, `bbox_um`, or port position is ever derived from it.
+Every block referenced by
 `blocks[].generator_report` must share the same `dbu` (design-rule grid
 resolution) — every `klt gen` generator uses `0.001` (see
 [`docs/cli/gen.md`](gen.md)), so this only matters for a hand-crafted

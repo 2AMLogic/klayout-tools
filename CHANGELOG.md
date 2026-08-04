@@ -44,6 +44,28 @@ version. Not an exhaustive commit-by-commit log.
   `synthesize`, `place-and-route`, and `functional-verification` were added
   on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
   release will carry them collectively.
+- 2026-08-04 — `klt gen-compose`: a self-net is now checked against its own
+  block's **drawn** pad metal, not only its reported port sizes (#453). The
+  #433/#439 self-net pad-crossing check modelled every other port as a square
+  of its reported `width_um` — a port's *contact* size, not the extent of the
+  pad metal drawn around it (a `bjt_array` base tie reports `width_um: 0.22`
+  for a pad whose drawn local metal is 0.42µm × 0.68µm) — so it missed any
+  short whose clearance fell between the two. Most notably: two ports on the
+  same row facing the **same** direction with a third port's pad between
+  them, whose backbone jogs exactly `routing.width_um` off the shared port
+  line and therefore clears the modelled square whenever the route is at
+  least as wide as the reported pad. An 8-unit `bjt_array` emitter self-net
+  across an intervening base tie composed `routed: true` and DRC-clean while
+  `klt extract` showed the array's entire shared base node absorbed into the
+  emitter net. `route_two_pin()` now also intersects the route's actual drawn
+  metal (the same `kdb.Path` the composed cell receives) with the block's
+  actual drawn shapes on `routing.layer_role`, and reports the net in
+  `unrouted_nets[]` (exit `3`) when it lands on any shape other than the two
+  its own endpoints sit on. This is the only place the command reads a
+  block's GDS stream for anything but copying it into the output — obstacle
+  shapes only, never placement math. A same-direction pair with nothing drawn
+  between its two ports still routes. No response-shape change. See
+  `docs/cli/gen-compose.md`.
 - 2026-08-04 — `klt gen` + `klt gen-compose`: ring routing openings (#434).
   `guard_ring`, `diff_pair` (`add_guard_ring`) and `bjt_array`
   (`add_collector_ring`) accept `ring_gap_side` (`""`/`"N"`/`"S"`/`"E"`/
