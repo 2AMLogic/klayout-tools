@@ -178,6 +178,29 @@ workarounds a caller must apply, exactly as the worked example below does.
   `severity: "error"` alone would have seen a false positive. Not specific
   to composed circuits, but first observed while LVS-checking the worked
   example below.
+- **A self-net that crosses another pad on its own block is no longer a
+  silent short (#433, fixed).** #199's obstacle-overlap check above exempts
+  a **self-net** (both pins on the *same* block) from the whole-block bbox
+  check entirely -- a same-block net's backbone is, by construction, always
+  inside its own block's bbox, so without the exemption every self-net would
+  be rejected. But the exemption also meant nothing checked whether that
+  backbone ran straight over one of the block's *other* pads on the way --
+  exactly what happens bussing a matched array's unit devices into one node
+  (e.g. chaining three of an 8-unit `bjt_array`'s emitters with two 2-pin
+  self-nets: each backbone jogs directly over the base pad sitting between
+  the two emitters it connects). `route_two_pin()` now compares the backbone
+  against every *other* same-layer port on that block (each approximated as
+  a square pad footprint, its reported `width_um` on a side, inflated by the
+  route's own trace half-width so a wire narrower than the gap between pad
+  and centerline still counts) and reports the net **unroutable** instead of
+  drawing it. A port on a different physical layer than `routing.layer_role`
+  is not treated as an obstacle (it cannot short on that layer). This is
+  still metal-only bussing's fundamental limit, not a fix for it: the router
+  has no `metal2`/via role to hop over a crossed pad, so a genuinely
+  necessary intra-block bus (as opposed to a route that happens to cross one
+  because its two ports were picked at either end of a row) has no routable
+  path yet -- it now fails visibly (`unrouted_nets[]`, exit `3`) instead of
+  drawing a short.
 
 ## CLI shape (a Builder decision, per the spike's own flag)
 

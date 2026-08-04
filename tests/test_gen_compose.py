@@ -1697,6 +1697,174 @@ def test_compose_allows_opposite_facing_ports_without_guard_ring(tmp_path, pdk_r
 
 
 # --------------------------------------------------------------------------- #
+# Self-net pad-crossing (#433): a same-block net (both pins on one block) was
+# exempted from the #199 case 1 obstacle-overlap check entirely, since its
+# backbone is always inside its own block's bbox -- but that exemption also
+# let a self-net's backbone be drawn straight over one of the block's *other*
+# pads with no check at all, silently shorting them together on the router's
+# one available metal role. `route_two_pin` must instead compare the
+# backbone against every other same-layer port on that block, and report the
+# net unrouted (never `routed: true`) when it overlaps one.
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_rejects_self_net_that_crosses_another_pad_on_same_block(
+    tmp_path, pdk_root
+):
+    # The exact reproduction from the issue: an 8-unit bjt_array, bussing
+    # three emitters (Q0_E, Q1_E, Q2_E) into one node via two 2-pin self-nets
+    # chained end to end. Each net's backbone jogs directly over the base pad
+    # sitting between the two emitters it connects (Q0_B between Q0_E/Q1_E,
+    # Q1_B between Q1_E/Q2_E) -- before #433 this composed `routed: true` and
+    # extracted a single 12-terminal net for what should be a 3-terminal bus.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_bus.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                {
+                    "net": "EBUS2",
+                    "pins": [
+                        {"block": "arr", "port": "Q1_E"},
+                        {"block": "arr", "port": "Q2_E"},
+                    ],
+                },
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "bjt_bus", "output": str(output)},
+        }
+    )
+
+    # Partial success -- blocks still placed, but neither bussing net routed.
+    assert output.is_file()
+    assert report["unrouted_nets"] == ["EBUS1", "EBUS2"]
+    assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["route_length_um"] is None
+    assert report["nets"][1]["routed"] is False
+    assert report["nets"][1]["route_length_um"] is None
+    assert any(
+        "EBUS1" in note and "Q0_B" in note for note in report["drc_hints"]["notes"]
+    )
+    assert any(
+        "EBUS2" in note and "Q1_B" in note for note in report["drc_hints"]["notes"]
+    )
+
+    # No metal path was drawn for either net at all -- routed: false means no
+    # `routed_geometry[]` entry, so nothing was drawn on li1 for these nets in
+    # the first place (the short the issue describes never gets a chance to
+    # be drawn).
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bjt_bus")
+    li1 = layout.layer(67, 20)
+    paths = [s for s in top.shapes(li1).each() if s.is_path()]
+    assert paths == []
+
+
+def test_compose_routes_self_net_with_no_other_pad_in_the_way(tmp_path, pdk_root):
+    # No regression: a self-net between a block's only two ports (nothing
+    # else on the block to cross) must still route -- #433's check only
+    # rejects a backbone that actually overlaps another pad, not every
+    # same-block net.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "unit",
+        rows=1,
+        cols=1,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_eb.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EB",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q0_B"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "bjt_eb", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+
+
+def test_compose_self_net_pad_crossing_ignores_ports_on_a_different_layer(
+    tmp_path, pdk_root
+):
+    # A self-net's backbone crossing over another port that reports a
+    # *different* physical layer than routing.layer_role cannot short to it
+    # on that layer -- only same-layer ports count as obstacles. mos_array's
+    # gate ports (`U*_G`) draw on `poly`, not `metal`; a metal-layer route
+    # between two gate ports geometrically passes right over the middle
+    # unit's own gate position (same axis, elevated only by the stub) but
+    # must still route, since that in-between port is on a different layer
+    # than the metal route being drawn.
+    m = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m", rows=1, cols=3, topology="array"
+    )
+    output = tmp_path / "mos_gg.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "m", "generator_report": m}],
+            "placement": {"strategy": "row", "order": ["m"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "GBUS",
+                    "pins": [
+                        {"block": "m", "port": "U0_G"},
+                        {"block": "m", "port": "U2_G"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "mos_gg", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+
+
+# --------------------------------------------------------------------------- #
 # CLI: `klt gen-compose`
 # --------------------------------------------------------------------------- #
 
