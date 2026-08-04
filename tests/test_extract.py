@@ -54,7 +54,7 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 def _make_inverter_layout(
     top_name: str = "TOP",
     a_label_in_subcell: bool = False,
-    extra_y_label: str | None = None,
+    extra_y_label: str | list[str] | None = None,
 ) -> kdb.Layout:
     """A minimal inverter: one NMOS (active outside nwell) and one PMOS
     (active inside nwell) sharing a poly gate, contacted up through li1 to
@@ -67,12 +67,15 @@ def _make_inverter_layout(
     ``A`` still names the gate net -- but its naming label now lives *below* an
     instance boundary, exercising issue #291's below-top-label pin promotion.
 
-    When ``extra_y_label`` is given, a second, distinct text label with that
-    string is drawn on the PMOS-side ``Y`` pad (same li1 shape, a different
-    coordinate within it) so the net carries two distinct label texts --
-    KLayout's ``Net.expanded_name()`` joins multiple distinct labels on one
-    net with a comma (e.g. ``Y,<extra_y_label>``), which is issue #312's
-    multi-label repro case.
+    When ``extra_y_label`` is given, one or more additional, distinct text
+    labels are drawn on the PMOS-side ``Y`` pad (same li1 shape, distinct
+    coordinates within it, one per extra label) so the net carries 2+
+    distinct label texts -- KLayout's ``Net.expanded_name()`` joins multiple
+    distinct labels on one net with a comma (e.g. ``Y,<extra_y_label>``, or
+    ``Y,<label2>,<label3>`` for 3+), which is issue #312's multi-label repro
+    case (and issue #470's `merged_net_labels[]` detection target). A single
+    string adds one extra label; a list adds one per element (for 3+-label
+    edge cases).
     """
     layout = kdb.Layout()
     top = layout.create_cell(top_name)
@@ -115,7 +118,11 @@ def _make_inverter_layout(
     label(67, 5, "VPWR", 200, 2500)
     label(67, 5, "Y", 1800, 2500)
     if extra_y_label is not None:
-        label(67, 5, extra_y_label, 1650, 2500)
+        extra_labels = (
+            [extra_y_label] if isinstance(extra_y_label, str) else extra_y_label
+        )
+        for i, extra_label_text in enumerate(extra_labels):
+            label(67, 5, extra_label_text, 1650 + i * 10, 2500)
     if a_label_in_subcell:
         sub = layout.create_cell("A_LABEL")
         sub.shapes(layout.layer(67, 5)).insert(kdb.Text("A", kdb.Trans(1000, 1500)))
@@ -3442,6 +3449,56 @@ def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
 
     assert sim_report["status"] == "pass"
     assert sim_report["measurements"][0]["worst_case"]["value"] == pytest.approx(1.8)
+
+
+# --------------------------------------------------------------------------- #
+# Merged net labels (issue #470)
+# --------------------------------------------------------------------------- #
+
+
+def test_merged_net_labels_reports_two_label_collision(tmp_path):
+    """A net carrying two distinct labels (`Y` and `Y2`, joined by KLayout as
+    `Y,Y2` via `Net.expanded_name()`) is surfaced structurally in
+    `merged_net_labels[]` and as a matching prose entry in `warnings[]` --
+    `net_count`/`nets[]`/`pin_count` stay unchanged (purely additive)."""
+    path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "multi.spice"))
+
+    assert report["merged_net_labels"] == [{"net": "Y,Y2", "labels": ["Y", "Y2"]}]
+    assert any("Y,Y2" in w and "merges" in w for w in report["warnings"]), report[
+        "warnings"
+    ]
+
+    # nets[] still carries the joined net exactly once, under its full name.
+    net_names = [n["name"] for n in report["nets"]]
+    assert "Y,Y2" in net_names
+    assert report["net_count"] == len(report["nets"])
+    assert report["pin_count"] == sum(1 for n in report["nets"] if n["pin"])
+
+
+def test_merged_net_labels_empty_when_no_collision(tmp_path):
+    """No net carries multiple labels in the plain fixture (no
+    `extra_y_label`) -- `merged_net_labels[]` is present and empty, and no
+    `warnings[]` entry mentions a merge."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["merged_net_labels"] == []
+    assert not any("merges" in w and "distinct labels" in w for w in report["warnings"])
+
+
+def test_merged_net_labels_lists_all_three_plus_labels(tmp_path):
+    """A net with 3+ distinct labels (not just 2) has every label listed in
+    `labels[]`, not just the first two."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label=["Y2", "Y3"]), tmp_path / "multi3.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "multi3.spice"))
+
+    assert report["merged_net_labels"] == [
+        {"net": "Y,Y2,Y3", "labels": ["Y", "Y2", "Y3"]}
+    ]
+    assert any("Y,Y2,Y3" in w for w in report["warnings"])
 
 
 # --------------------------------------------------------------------------- #

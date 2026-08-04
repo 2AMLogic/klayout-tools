@@ -282,6 +282,9 @@ def run_extract(
                 },
                 ...
             ],
+            "merged_net_labels": [
+                {"net": str, "labels": [str, ...]}, ...
+            ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -349,6 +352,17 @@ def run_extract(
     includes every layout that draws no such geometry at all) -- a consumer
     can enumerate and triage the exact flagged shapes instead of
     re-implementing the heuristic against the stream.
+
+    ``merged_net_labels`` (issue #470) reports every net whose KLayout-
+    assigned name is a comma-joined merge of 2+ distinct labels -- see
+    :func:`_detect_merged_net_labels` for the exact heuristic and
+    ``docs/cli/extract.md``'s "Merged net labels" section for the false-
+    positive limitation. One entry per affected net, each ``{"net": "<full
+    joined name>", "labels": [str, ...]}`` -- ``labels`` is the joined name
+    split on ``,``, so a consumer does not have to re-derive the label list
+    from the string itself. A matching prose entry is also appended to
+    ``warnings`` for every affected net. Always a list, empty when no net
+    carries multiple labels.
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
@@ -447,6 +461,34 @@ def run_extract(
     else:
         devices, device_counts, nets = [], {}, []
 
+    # Nets whose KLayout-assigned name is a comma-joined multi-label merge
+    # (issue #470): `Net.expanded_name()` joins every distinct label found on
+    # one electrical net with `,` (see `tests/test_extract.py`'s
+    # `_make_inverter_layout(extra_y_label=...)` fixture, built for issue
+    # #312's SPICE-name-sanitization fix). That is a silent signal that two
+    # differently-named nets were shorted together on the layout side --
+    # e.g. a `gen-compose` `pins[]` entry naming a port that other
+    # connectivity already reaches. Surfaced two ways: a structured
+    # `merged_net_labels[]` entry (so a caller does not have to re-derive
+    # the label list from the joined string) and a matching prose
+    # `warnings[]` entry (so a caller checking only `warnings[]`, per the
+    # documented contract, still sees it). See docs/cli/extract.md's
+    # "Merged net labels" section for the false-positive limitation: a
+    # label that legitimately contains a literal comma is indistinguishable
+    # from a real collision by this heuristic.
+    merged_net_labels = _detect_merged_net_labels(nets)
+    for merged_entry in merged_net_labels:
+        labels_str = ", ".join(merged_entry["labels"])
+        warnings.append(
+            f"net '{merged_entry['net']}' merges "
+            f"{len(merged_entry['labels'])} distinct labels ({labels_str}) "
+            "onto one net -- KLayout joins multiple labels found on the "
+            "same electrical net with ',' in Net.expanded_name(); this "
+            "usually means two differently-named nets were shorted "
+            "together in the layout -- see docs/cli/extract.md's "
+            "'Merged net labels' section."
+        )
+
     # Layers carrying shapes the deck's connectivity graph never reads (issue
     # #220): geometry there is invisible to extraction, so surface it rather
     # than let it become a silent LVS mismatch downstream.
@@ -510,6 +552,11 @@ def run_extract(
         # carries no unmodelled-device entry -- see run_extract's docstring
         # and `_detect_unmodelled_poly_bodies` for the field's full meaning.
         "unmodelled_poly": unmodelled_poly,
+        # Additive field (issue #470): always a list, empty when no net
+        # carries more than one KLayout-assigned label -- see
+        # `_detect_merged_net_labels` and the comment above where it is
+        # computed for the field's full meaning.
+        "merged_net_labels": merged_net_labels,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -2254,6 +2301,38 @@ def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
 
     nets.sort(key=lambda entry: entry["name"])
     return nets
+
+
+def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the response's ``merged_net_labels[]`` array (issue #470).
+
+    KLayout's ``Net.expanded_name()`` joins every distinct label found on one
+    electrical net with ``,`` (e.g. two labels ``Y`` and ``OUT`` shorted
+    together on layout come back as the single net name ``"Y,OUT"``,
+    verified for issue #312's SPICE-instance-name-sanitization fix). That
+    join is otherwise silent: `nets[]`' ``name`` field carries it, but
+    nothing calls it out as the layout asserting a connectivity equality the
+    caller may not have intended.
+
+    Scans ``nets`` (the already-built ``nets[]`` array, so this reuses the
+    same ``name`` KLayout assigned rather than re-querying the circuit) for
+    any net whose name splits into 2+ parts on ``,``, and returns one entry
+    per match: ``{"net": "<full joined name>", "labels": ["Y", "OUT", ...]}``.
+    Always a list; empty when no net carries multiple labels.
+
+    Known limitation (heuristic, not exact): a label that legitimately
+    contains a literal comma is indistinguishable from a real multi-label
+    collision by this substring split -- see docs/cli/extract.md's "Merged
+    net labels" section.
+    """
+    merged: list[dict[str, Any]] = []
+    for net in nets:
+        name = net["name"]
+        labels = name.split(",")
+        if len(labels) < 2:
+            continue
+        merged.append({"net": name, "labels": labels})
+    return merged
 
 
 def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:

@@ -562,6 +562,52 @@ already known to be routing (by inspection, by contact-cluster count, or by
 aspect ratio) and assert only on what remains, or track the *change* in the
 filtered count across revisions rather than gating on its absolute value.
 
+### Merged net labels (issue #470)
+
+Two *different* net labels can land on the same electrical net — for
+example, a `klt gen-compose` `pins[]` entry names a port that other
+connectivity (drawn metal, or a second `pins[]`/`connectivity[]` entry)
+already reaches, silently renaming the node that owns the pad rather than
+naming the caller's intended net. KLayout does not treat this as an error:
+`LayoutToNetlist` simply joins every distinct label text found on one net
+with a comma in `Net.expanded_name()` — two labels `Y` and `OUT` shorted
+together come back as the single net name `Y,OUT` (three or more labels
+join the same way, e.g. `Y,OUT,FOO`). That joined name flows into `nets[]`
+and the written netlist unremarked; nothing about the string itself says
+"these were two different names before extraction merged them."
+
+`klt extract` detects this heuristically: any net whose name splits into 2+
+parts on `,` is treated as a label collision. Each match produces two things:
+
+- A structured entry in the response's `merged_net_labels[]` array (see "JSON
+  schema" above): `{ "net": "<full joined name>", "labels": ["Y", "OUT"] }`
+  — `labels` is the joined name pre-split, so a consumer does not have to
+  re-derive the label list by re-implementing the `,`-scan against
+  `nets[].name` itself.
+- A matching prose entry in `warnings[]`, so a caller that only checks
+  `warnings[]` (the documented, minimal self-check every `klt` command
+  supports) still sees the collision rather than needing to know about
+  `merged_net_labels[]` specifically.
+
+`status` stays `"extracted"` and `net_count`/`nets[]`/`pin_count` are
+unaffected — this is a diagnostic layered on top of the existing net, not a
+rejection of the extraction. The collision is invisible to `klt drc` (the
+shapes involved are legal, well-formed, and often not even touching — the
+collision is between *labels* on a shared pad, not between wires), so this
+is currently the only place in the toolchain that surfaces it.
+
+**Known limitation (false positives).** The heuristic is a substring split,
+not a provenance check: KLayout's `Net.expanded_name()` does not record
+*why* a net carries a `,`-containing name, only the final joined string. A
+label that legitimately contains a literal comma in its own text (unusual,
+but not disallowed by any layer's text-shape format) is indistinguishable
+from a genuine two-label collision by this heuristic — it will be reported
+as a false-positive entry in both `merged_net_labels[]` and `warnings[]`.
+There is no server-side fix for this today: a caller that intentionally
+uses comma-containing label text should expect (and can safely ignore) a
+`merged_net_labels[]` entry whose `labels` do not actually correspond to
+independent naming intents.
+
 ### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462)
 
 Analog matching practice puts **dummy devices** on the edges of a matched
@@ -1005,6 +1051,7 @@ exit codes).
   "warnings": [],
   "black_box_regions": [],
   "unmodelled_poly": [],
+  "merged_net_labels": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -1041,6 +1088,7 @@ exit codes).
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
 | `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
+| `merged_net_labels` | array\<object\>          | One entry per net whose KLayout-assigned name is a comma-joined merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`labels` is `net` split on `,`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
