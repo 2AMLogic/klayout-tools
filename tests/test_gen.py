@@ -641,11 +641,13 @@ def test_mos_array_device_count_and_ports(tmp_path, pdk_root):
     assert {"U0_S", "U0_D", "U0_G"} <= set(ports_by_name)
 
     # #210 (Option B): the gate stays a bare-poly node -- U*_G is reported on
-    # the poly layer (66/20 on sky130), not metal. That is deliberate: rather
-    # than give every gate finger a metal landing pad (DRC-unsafe in a
-    # tight-pitch multi-row array), extraction now recognises a text on the
-    # poly-label layer, so `klt gen-compose`'s pins[] can name the gate on its
-    # own poly layer. S/D terminals keep their metal landing pads (67/20).
+    # the poly layer (66/20 on sky130), not metal. That is deliberate:
+    # extraction recognises a text on the poly-label layer, so `klt
+    # gen-compose`'s pins[] can name the gate on its own poly layer. S/D
+    # terminals keep their metal landing pads (67/20). #461 adds a *poly*
+    # landing pad past the diffusion so a gate contact has somewhere legal to
+    # land (see test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean),
+    # but the gate port itself is still reported on poly, not metal.
     assert ports_by_name["U0_G"]["layer"] == {"layer": 66, "datatype": 20, "name": None}
     assert ports_by_name["U0_S"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
     assert ports_by_name["U0_D"]["layer"] == {"layer": 67, "datatype": 20, "name": None}
@@ -839,6 +841,96 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def _layer_bbox(gds_path, layer, datatype):
+    """Merged bounding box (in um) of one layer across the whole cell tree."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    top = layout.top_cell()
+    idx = layout.layer(layer, datatype)
+    bbox = top.bbox_per_layer(idx)
+    dbu = layout.dbu
+    return {
+        "left": bbox.left * dbu,
+        "bottom": bbox.bottom * dbu,
+        "right": bbox.right * dbu,
+        "top": bbox.top * dbu,
+    }
+
+
+@pytest.mark.parametrize(
+    ("generator", "params", "gate_prefix"),
+    [
+        ("mos_array", {"rows": 1, "cols": 1, "dummy": 0}, "U0_G"),
+        ("mos_array", {"rows": 2, "cols": 2, "dummy": 1, "fingers": 2}, "U0_G"),
+        ("diff_pair", {"splits": 1, "add_guard_ring": False}, "Q1_1_G"),
+        ("diff_pair", {"splits": 2, "add_guard_ring": True}, "Q1_1_G"),
+    ],
+)
+def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
+    tmp_path, pdk_root, generator, params, gate_prefix
+):
+    """#461: the gate poly must extend past the diffusion's gate-side edge so a
+    contact can land on the gate outside the channel. Verify the drawn poly
+    (66/20) extends past the diff (65/20) by the landing-pad margin, that the
+    reported gate port sits in that extension, and that a licon placed at the
+    port is DRC-clean (no `poly.enclosing.licon.1`/`diff.enclosing.licon.1`)."""
+    import klayout.db as kdb
+
+    from klayout_tools.gen import CONTACT_SIZE_UM, ENCLOSURE_MARGIN_UM
+
+    output = tmp_path / f"{generator}_gate.gds"
+    report = generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    pad_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    poly_bbox = _layer_bbox(output, 66, 20)
+    diff_bbox = _layer_bbox(output, 65, 20)
+    # Poly extends a full landing-pad height past the diffusion's top edge.
+    assert poly_bbox["top"] == pytest.approx(diff_bbox["top"] + pad_um)
+
+    gate = next(p for p in report["ports"] if p["name"] == gate_prefix)
+    # The reported gate port reports the pad width (not the sub-contact-width
+    # gate length); that it sits clear of the diffusion is proven by the
+    # contact-DRC check below (no diff.enclosing.licon.1 at the port).
+    assert gate["width_um"] == pytest.approx(pad_um)
+
+    # A contact placed at the reported gate port location is DRC-clean.
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    dbu = layout.dbu
+    licon = layout.layer(66, 44)
+    half = CONTACT_SIZE_UM / 2.0
+    gx, gy = gate["x_um"], gate["y_um"]
+    top.shapes(licon).insert(
+        kdb.Box(
+            round((gx - half) / dbu),
+            round((gy - half) / dbu),
+            round((gx + half) / dbu),
+            round((gy + half) / dbu),
+        )
+    )
+    contacted = tmp_path / f"{generator}_gate_contacted.gds"
+    layout.write(str(contacted))
+
+    drc_report = run_drc(str(contacted), "sky130")
+    offending = [
+        v["rule"]
+        for v in drc_report["violations"]
+        if v["rule"] in ("poly.enclosing.licon.1", "diff.enclosing.licon.1")
+    ]
+    assert offending == [], drc_report["violations"]
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
@@ -2064,7 +2156,11 @@ def test_diff_pair_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_r
                 "splits": 2,
                 "ring_gap_side": "E",
                 "ring_gap_um": 1.0,
-                "ring_gap_offset_um": -0.41,
+                # Offset re-centres the opening from the ring's mid-height
+                # (core_h / 2 == 1.04um) onto the lower device row (y==0.21um);
+                # core_h grew with the gate landing pad's row-pitch bump
+                # (issue #461), so the offset that lands there did too.
+                "ring_gap_offset_um": -0.83,
             },
             "options": {"output": str(output)},
         }
