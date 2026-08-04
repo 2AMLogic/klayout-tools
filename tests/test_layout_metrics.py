@@ -8,6 +8,8 @@ no dependency on an external corpus, mirroring `tests/test_cells.py`.
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
@@ -18,6 +20,14 @@ from klayout_tools.layout_metrics import (
     emit_layout_json,
     layout_metrics_report,
 )
+
+# A real sky130_fd_sc_hd GCD macro produced end to end by `klt synthesize` +
+# `klt place-and-route` (real Yosys + real OpenROAD) -- the first exercise of
+# `klt layout-metrics` against machine-generated, macro-scale layout rather
+# than the hand-drawn analog fixtures above. See tests/corpus/README.md's
+# "Machine-generated macro-scale fixture" section for full provenance.
+CORPUS_DIR = Path(__file__).parent / "corpus"
+PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
@@ -348,3 +358,41 @@ def test_cli_output_override(tmp_path):
     assert main(["layout-metrics", str(block_dir), "--output", str(custom)]) == 0
     assert custom.is_file()
     assert not (block_dir / "output" / "layout.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# OpenROAD-produced, macro-scale standard-cell fixture (issue #436)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+def test_openroad_gcd_fixture_report(tmp_path):
+    """`klt layout-metrics` against the real, OpenROAD-produced GCD
+    macro-scale fixture required no verb-side fix (#436) -- it never
+    recomputes metrics itself (see module docstring), so this also confirms
+    `klt layers`/`klt cells`/`klt drc` all stay well-formed when called
+    through this aggregator against thousands of instances."""
+    block_dir = tmp_path / "gcd-block"
+    block_dir.mkdir()
+    # `_find_layout_file` globs `*.gds.gz` directly (see module docstring) --
+    # no test-time decompression needed, matching `run_drc`'s own direct
+    # `.gds.gz` support exercised in test_drc.py.
+    shutil.copy(PLACE_AND_ROUTE_GDS, block_dir / "layout.gds.gz")
+
+    report = layout_metrics_report(str(block_dir), deck="sky130")
+
+    assert report["schema_version"] == 1
+    assert report["slug"] == "gcd-block"
+    assert report["layout_file"] == "layout.gds.gz"
+    assert report["status"] == "ok"
+    assert report["layer_count"] == 31
+    assert report["cell_count"] == 69
+    assert report["instance_count"] == 3645
+    assert report["drc"] == {
+        "deck": "sky130",
+        "status": "violations",
+        "violation_count": 4,
+    }

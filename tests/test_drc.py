@@ -597,6 +597,62 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
         }
 
 
+# --------------------------------------------------------------------------- #
+# OpenROAD-produced, macro-scale standard-cell fixture (issue #436)
+# --------------------------------------------------------------------------- #
+
+# A real sky130_fd_sc_hd GCD macro produced end to end by `klt synthesize` +
+# `klt place-and-route` (real Yosys + real OpenROAD) -- the first exercise of
+# `klt drc` against machine-generated, macro-scale layout rather than the
+# hand-drawn analog fixtures above. See
+# tests/corpus/place_and_route/README.md (in tests/corpus/README.md's
+# "Machine-generated macro-scale fixture" section) for full provenance.
+PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+def test_openroad_gcd_fixture_produces_well_formed_report():
+    """`klt drc --deck sky130` against the real, OpenROAD-produced GCD
+    macro-scale fixture required no verb-side fix (#436): it runs cleanly
+    (no crash) against thousands of instances, one level of real hierarchy,
+    and routing-layer usage the hand-drawn analog corpus never exercises."""
+    report = run_drc(str(PLACE_AND_ROUTE_GDS), "sky130")
+
+    assert report["schema_version"] == 1
+    assert report["file"] == str(PLACE_AND_ROUTE_GDS)
+    assert report["deck"] == "sky130"
+    assert report["status"] in {"clean", "violations"}
+    assert isinstance(report["violation_count"], int)
+    assert report["violation_count"] == sum(report["rule_counts"].values())
+    assert len(report["violations"]) == report["violation_count"]
+    for entry in report["violations"]:
+        assert set(entry.keys()) == {
+            "rule",
+            "description",
+            "check",
+            "layer",
+            "cell",
+            "bbox",
+            "polygon",
+        }
+
+    # Macro-scale sanity: real routing-layer coverage the hand-drawn analog
+    # corpus above never exercises (a handful of drawn layers vs. multiple
+    # metal/via layers here).
+    assert len(report["coverage"]["layers_checked"]) >= 5
+
+    # Regression pin against this specific, static, committed fixture (see
+    # docs/cli/drc.md's "Macro-scale, machine-generated (standard-cell)
+    # layout" section for why a handful of real diff.enclosing.licon.1
+    # violations at standard-cell row boundaries is an expected, understood
+    # property of this input -- not a `klt drc` defect).
+    assert report["violation_count"] == 4
+    assert report["rule_counts"] == {"diff.enclosing.licon.1": 4}
+
+
 def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
     """A layout drawn only on the four originally-covered layers
     (Poly2/Comp/Contact/Metal1), sized to satisfy every one of those

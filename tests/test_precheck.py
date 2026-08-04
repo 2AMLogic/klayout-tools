@@ -7,12 +7,21 @@ no dependency on an external corpus, mirroring `tests/test_drc.py`.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
 from klayout_tools.precheck import CHECK_NAMES, PrecheckError, run_precheck
+
+# A real sky130_fd_sc_hd GCD macro produced end to end by `klt synthesize` +
+# `klt place-and-route` (real Yosys + real OpenROAD) -- the first exercise of
+# `klt precheck` against machine-generated, macro-scale layout rather than
+# the hand-drawn analog fixtures above. See tests/corpus/README.md's
+# "Machine-generated macro-scale fixture" section for full provenance.
+CORPUS_DIR = Path(__file__).parent / "corpus"
+PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
 
 def _write(layout: kdb.Layout, tmp_path, name: str = "layout.gds") -> str:
@@ -560,3 +569,40 @@ def test_cli_allowed_layers_bad_json_is_application_error(tmp_path, capsys):
     assert captured.out == ""
     error = json.loads(captured.err)
     assert error["error"]["command"] == "precheck"
+
+
+# --------------------------------------------------------------------------- #
+# OpenROAD-produced, macro-scale standard-cell fixture (issue #436)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+def test_openroad_gcd_fixture_runs_full_check_battery():
+    """`klt precheck` against the real, OpenROAD-produced GCD macro-scale
+    fixture required no verb-side fix (#436): every check in the battery
+    runs (none skipped, `--grid-um`/`--deck` both supplied) and passes
+    cleanly against thousands of instances and real routing-layer usage."""
+    report = run_precheck(str(PLACE_AND_ROUTE_GDS), grid_um=0.005, deck="sky130")
+
+    assert report["schema_version"] == 1
+    assert report["file"] == str(PLACE_AND_ROUTE_GDS)
+    assert report["check_count"] == len(CHECK_NAMES)
+    assert [c["name"] for c in report["checks"]] == list(CHECK_NAMES)
+
+    checks_by_name = {c["name"]: c for c in report["checks"]}
+    # `layer_whitelist` is the only check this fixture doesn't opt into
+    # (no --allowed-layers given) -- every other check runs for real.
+    for name in CHECK_NAMES:
+        if name == "layer_whitelist":
+            assert checks_by_name[name]["status"] == "skipped"
+        else:
+            assert checks_by_name[name]["status"] in {"pass", "fail"}
+
+    # Regression pin: a real OpenROAD route-stage output should be on-grid,
+    # free of degenerate (zero-area) shapes, and free of forbidden cell-name
+    # characters -- KLayout's own DEF->GDS merge and the sky130 standard-cell
+    # library views are both well-formed by construction.
+    assert report["status"] == "pass"
