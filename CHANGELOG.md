@@ -38,6 +38,17 @@ below are the user-visible, additive behavior changes worth calling out
 explicitly because they affect a verb's output under an unchanged reported
 version. Not an exhaustive commit-by-commit log.
 
+- 2026-08-03 — `klt precheck`: `layer_whitelist` violations' `shapes` count
+  is now **instance-weighted** across the full cell hierarchy instead of
+  summed per cell *definition* — a cell placed hundreds of times by a
+  hierarchical, machine-generated macro (e.g. `klt place-and-route`'s
+  standard-cell output) was previously under-reported by roughly the
+  macro's own placement multiplicity (e.g. `10` reported for 800 shapes
+  actually placed across 320 instances of a repeated cell). This is a
+  **breaking value-semantics change** to an already-published field (the
+  field itself is unchanged — still an integer named `shapes` — but its
+  meaning is not), so `precheck` bumps its own `schema_version` from `1` to
+  `2` (#452). No other verb's `schema_version` is affected.
 - Since 0.1.0 the CLI has grown from 5 verbs to 22: `layout-metrics`,
   `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
   `precheck`, `socket-check`, `ring-check`, `report`, `trajectory`,

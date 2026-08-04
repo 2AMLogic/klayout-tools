@@ -80,7 +80,7 @@ def run_precheck(
     ``docs/cli/precheck.md``)::
 
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "status": "pass" | "fail",
@@ -98,7 +98,11 @@ def run_precheck(
         }
 
     ``schema_version`` is versioned independently per command (see
-    ``docs/json-contract.md``); it starts at ``1``.
+    ``docs/json-contract.md``); it started at ``1`` and is now ``2`` --
+    bumped for the breaking value-semantics change to ``layer_whitelist``
+    violations' ``shapes`` field (instance-weighted, not per-cell-definition;
+    see issue #452 and ``CHANGELOG.md``). No other field changed shape or
+    meaning.
 
     ``status`` is ``"fail"`` iff any check's own ``status`` is ``"fail"`` --
     a ``"skipped"`` check (one whose optional input, e.g. ``grid_um``, was
@@ -124,7 +128,16 @@ def run_precheck(
       cells) has a name containing a character in
       :data:`_CELL_NAME_FORBIDDEN_CHARS`. Always runs.
     - ``layer_whitelist`` -- every ``(layer, datatype)`` pair present in the
-      stream is a member of ``allowed_layers``. Skipped when
+      stream is a member of ``allowed_layers``. Each violation's ``shapes``
+      count is **instance-weighted**: a cell definition's own shape count on
+      that layer is multiplied by the cell's total placement multiplicity
+      across the full hierarchy (composed multiplicatively through nested
+      placements), then summed across all cell definitions -- so it reflects
+      true placed-shape prevalence on a hierarchical, multi-instance macro,
+      not just how many shapes are drawn once per cell *definition* (schema
+      version 2; see issue #452 -- version 1 undercounted by the placement
+      multiplicity, e.g. reporting ``10`` for 800 shapes actually placed
+      across 320 instances of a repeated cell). Skipped when
       ``allowed_layers`` is ``None``: this repo's per-PDK deck layer tables
       (``decks/sky130.py``, ``decks/gf180mcu.py``) are documented **curated
       starter subsets**, not full valid-layer enumerations (see
@@ -158,7 +171,7 @@ def run_precheck(
     overall_status = "fail" if any(c["status"] == "fail" for c in checks) else "pass"
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": path,
         "dbu_um": layout.dbu,
         "status": overall_status,
@@ -326,6 +339,43 @@ def _check_cell_names(layout: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def _cell_placement_multiplicities(layout: Any) -> dict[int, int]:
+    """Every cell's total placement count across the full hierarchy.
+
+    Multiplicities compose **multiplicatively** along nested placements: a
+    cell placed 5 times (e.g. as an array) inside a cell that is itself
+    placed 3 times elsewhere has an effective multiplicity of 15, not 8 or
+    5. A cell with no parent instances anywhere is, by KLayout's own
+    definition, a top cell -- it exists exactly once, as itself, so its
+    multiplicity is 1.
+
+    Computed via :meth:`Layout.each_cell_top_down` (KLayout's own
+    topologically-sorted cell order -- every cell is delivered before it is
+    used as a child anywhere, so each cell's parents have already had their
+    own multiplicity computed by the time it's this cell's turn) and each
+    cell's :meth:`Cell.each_parent_inst` (parent-instance *array*
+    multiplicity via each parent link's ``inst().size()``, i.e. ``na * nb``
+    for a regular array or ``1`` for a single placement). Deliberately
+    **iterative**, not recursive -- a real macro's hierarchy depth is
+    typically shallow (2-3 levels: top -> subcells -> standard cells), but
+    nothing here bounds it, and Python's recursive-call depth is a much
+    lower ceiling than a legitimately deep hierarchy could hit. Also
+    deliberately *not* a full recursive shape flatten (``begin_shapes_rec()``
+    materializing every placed shape), which would be far more expensive on
+    a real macro (see issue #452). O(hierarchy edges), not O(placed shapes)
+    or O(hierarchy depth).
+    """
+    multiplicities: dict[int, int] = {}
+    for cell_index in layout.each_cell_top_down():
+        total = sum(
+            multiplicities[parent.parent_cell_index()] * parent.inst().size()
+            for parent in layout.cell(cell_index).each_parent_inst()
+        )
+        # No parent instances anywhere -- a top cell -- gets multiplicity 1.
+        multiplicities[cell_index] = total if total > 0 else 1
+    return multiplicities
+
+
 def _check_layer_whitelist(
     layout: Any, allowed_layers: list[tuple[int, int]] | None
 ) -> dict[str, Any]:
@@ -335,13 +385,19 @@ def _check_layer_whitelist(
     allowed = {tuple(entry) for entry in allowed_layers}
 
     violations: list[dict[str, Any]] = []
+    multiplicities: dict[int, int] | None = None
     for layer_index in layout.layer_indexes():
         info = layout.get_info(layer_index)
         layer_tuple = (info.layer, info.datatype)
         if layer_tuple in allowed:
             continue
+        # Computed lazily -- and only once -- so a layout with no
+        # off-whitelist layers never pays for the hierarchy walk.
+        if multiplicities is None:
+            multiplicities = _cell_placement_multiplicities(layout)
         shape_count = sum(
-            cell.shapes(layer_index).size() for cell in layout.each_cell()
+            cell.shapes(layer_index).size() * multiplicities[cell.cell_index()]
+            for cell in layout.each_cell()
         )
         violations.append(
             {

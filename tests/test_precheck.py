@@ -44,7 +44,7 @@ def test_run_precheck_all_checks_present_and_pass_on_clean_layout(tmp_path):
 
     report = run_precheck(path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == path
     assert report["dbu_um"] == 0.001
     assert report["status"] == "pass"
@@ -297,6 +297,79 @@ def test_layer_whitelist_passes_when_every_layer_is_allowed(tmp_path):
     assert whitelist["status"] == "pass"
 
 
+def test_layer_whitelist_shapes_are_instance_weighted_through_nested_hierarchy(
+    tmp_path,
+):
+    """Regression for issue #452: `shapes` must reflect true placed-shape
+    prevalence -- weighted by each cell's total placement multiplicity
+    across the *full* hierarchy -- not just how many shapes are drawn once
+    per cell *definition*.
+
+    SUB (1 shape on the checked layer) is placed as a 2x3 array inside MID
+    (multiplicity 6), and MID is itself placed twice (as two separate
+    single instances) inside TOP. Multiplicities compose
+    *multiplicatively* along the nested placements: SUB's true placement
+    count is 6 * 2 = 12, not 6 + 2 = 8 (additive) and not just 2 (only
+    counting the top-level instance count of MID) -- so the expected
+    `shapes` count is 12, while the old per-cell-definition logic would
+    have reported 1 (SUB's own, unweighted shape count).
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    mid = layout.create_cell("MID")
+    sub = layout.create_cell("SUB")
+
+    reserved = layout.layer(71, 44)  # deliberately outside the allowlist below
+    sub.shapes(reserved).insert(kdb.Box(0, 0, 100, 100))
+
+    # SUB placed as a regular 2x3 array inside MID -> multiplicity 6.
+    mid.insert(
+        kdb.CellInstArray(
+            sub.cell_index(),
+            kdb.Trans(),
+            kdb.Vector(1000, 0),
+            kdb.Vector(0, 1000),
+            2,
+            3,
+        )
+    )
+    # MID placed twice (two separate single instances) inside TOP ->
+    # multiplicity 2 -- composing multiplicatively with SUB's own 6 for a
+    # true placement count of 12, not 6 + 2 = 8.
+    top.insert(kdb.CellInstArray(mid.cell_index(), kdb.Trans()))
+    top.insert(kdb.CellInstArray(mid.cell_index(), kdb.Trans(kdb.Vector(5000, 0))))
+
+    path = _write(layout, tmp_path)
+
+    report = run_precheck(path, allowed_layers=[(66, 20)])  # excludes 71/44
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+
+    assert whitelist["status"] == "fail"
+    (violation,) = whitelist["violations"]
+    assert violation["layer"] == "71/44"
+    assert violation["shapes"] == 12
+
+
+def test_layer_whitelist_shapes_orphan_cell_counts_as_multiplicity_one(tmp_path):
+    """A cell definition with no parent instances anywhere (never placed) is,
+    by KLayout's own definition, a top cell (see `layout.top_cells()`) -- it
+    exists exactly once, as itself, so it contributes its own unweighted
+    shape count rather than zero."""
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    orphan = layout.create_cell("ORPHAN")
+    reserved = layout.layer(71, 44)
+    orphan.shapes(reserved).insert(kdb.Box(0, 0, 100, 100))
+
+    path = _write(layout, tmp_path)
+
+    report = run_precheck(path, allowed_layers=[(66, 20)])
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+
+    (violation,) = whitelist["violations"]
+    assert violation["shapes"] == 1
+
+
 # ---------------------------------------------------------------------------
 # pin_labels_over_drawing
 # ---------------------------------------------------------------------------
@@ -424,7 +497,7 @@ def test_json_contract(tmp_path, capsys):
         "checks",
         "provenance",
     }
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["status"] == "fail"
     assert data["check_count"] == len(CHECK_NAMES)
 
@@ -587,7 +660,7 @@ def test_openroad_gcd_fixture_runs_full_check_battery():
     cleanly against thousands of instances and real routing-layer usage."""
     report = run_precheck(str(PLACE_AND_ROUTE_GDS), grid_um=0.005, deck="sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(PLACE_AND_ROUTE_GDS)
     assert report["check_count"] == len(CHECK_NAMES)
     assert [c["name"] for c in report["checks"]] == list(CHECK_NAMES)
@@ -606,3 +679,51 @@ def test_openroad_gcd_fixture_runs_full_check_battery():
     # characters -- KLayout's own DEF->GDS merge and the sky130 standard-cell
     # library views are both well-formed by construction.
     assert report["status"] == "pass"
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+def test_openroad_gcd_fixture_layer_whitelist_shapes_are_instance_weighted():
+    """Regression for issue #452, pinned against the real, hundreds-of-
+    standard-cell-instances OpenROAD fixture (not just the small hand-drawn
+    synthetic case above): a deliberately-excluded real layer's `shapes`
+    count must equal the *actual* number of placed shapes on that layer
+    across the whole design -- independently verified via a full recursive
+    `begin_shapes_rec()` flatten of the top cell -- not the far smaller
+    per-cell-definition count the old (buggy) logic reported (which would
+    only sum each *distinct* standard-cell view's own shapes once,
+    regardless of how many times OpenROAD placed it)."""
+    layout = kdb.Layout()
+    layout.read(str(PLACE_AND_ROUTE_GDS))
+    top = layout.top_cell()
+
+    # 67/44 (a real metal-routing layer in this fixture) is drawn inside
+    # many distinct standard-cell definitions, each placed many times --
+    # exactly the hierarchical-weighting case issue #452 reports.
+    layer_index = layout.find_layer(67, 44)
+    assert layer_index is not None
+
+    expected_flat_count = 0
+    iterator = top.begin_shapes_rec(layer_index)
+    while not iterator.at_end():
+        expected_flat_count += 1
+        iterator.next()
+    # Sanity check this really is a macro-scale, multi-instance count and
+    # not a coincidental single-placement layer.
+    assert expected_flat_count > 1000
+
+    old_per_definition_count = sum(
+        cell.shapes(layer_index).size() for cell in layout.each_cell()
+    )
+    assert old_per_definition_count < expected_flat_count
+
+    report = run_precheck(
+        str(PLACE_AND_ROUTE_GDS),
+        allowed_layers=[(1, 0)],  # deliberately excludes every real layer
+    )
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+    violations_by_layer = {v["layer"]: v for v in whitelist["violations"]}
+
+    assert violations_by_layer["67/44"]["shapes"] == expected_flat_count

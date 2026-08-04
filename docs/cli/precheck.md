@@ -96,7 +96,14 @@ is far more permissive). Always runs.
 ### `layer_whitelist`
 
 Every `(layer, datatype)` pair present in the stream is a member of
-`--allowed-layers`.
+`--allowed-layers`. Each violation's `shapes` count is **instance-weighted**
+(schema version 2, see "Breaking change" below): a cell definition's own
+shape count on that layer is multiplied by the cell's total placement
+multiplicity across the full hierarchy, then summed across all cell
+definitions — so it reflects true placed-shape prevalence on a
+hierarchical, multi-instance macro (e.g. a standard-cell macro placed
+hundreds of times by `klt place-and-route`), not just how many shapes are
+drawn once per cell *definition*.
 
 **Skipped when `--allowed-layers` is omitted.** This repo's per-PDK deck
 layer tables (`src/klayout_tools/decks/sky130.py`,
@@ -134,9 +141,26 @@ unknown fields. See [`docs/json-contract.md`](../json-contract.md) for the
 envelope shared across all `klt` commands (`schema_version`, error shape,
 exit codes).
 
+### Breaking change: `schema_version` 1 → 2 (`layer_whitelist` violations' `shapes`)
+
+`layer_whitelist` violations' `shapes` field changed **value semantics**
+(not type — it is still an integer) in `schema_version` 2: it is now the
+**instance-weighted** placed-shape count described above, instead of a raw
+sum of each cell *definition*'s own shape count (which under-reported true
+prevalence on a hierarchical, multi-instance macro by roughly the macro's
+own placement multiplicity — e.g. reporting `10` for 800 shapes actually
+placed across 320 instances of a repeated cell). Per CLAUDE.md's
+JSON-is-the-contract rule, this is a breaking value-semantics change to an
+already-published field, so it bumped `precheck`'s own `schema_version`
+from `1` to `2` — every other field is unchanged. See issue #452 and
+`CHANGELOG.md`. Consumers that pinned exact `shapes` values for a
+hierarchical input (an unusual thing to pin, since it's a violation count
+rather than a pass/fail verdict) need to recompute their expectation; a
+flat/single-cell layout's count is unaffected (multiplicity 1).
+
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "dbu_um": 0.001,
   "status": "fail",
@@ -169,7 +193,7 @@ exit codes).
 
 | Field            | Type             | Description                                                                 |
 | ---------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `schema_version` | integer          | Version of this command's JSON shape (starts at `1`).                       |
+| `schema_version` | integer          | Version of this command's JSON shape. Started at `1`; now `2` — see "Breaking change" above. |
 | `file`           | string           | The input path exactly as provided on the command line.                     |
 | `dbu_um`         | number (float)   | The input layout's database unit in micrometres, same semantics as `klt layers`. |
 | `status`         | `"pass"` \| `"fail"` | `"fail"` iff any check's own `status` is `"fail"`. A `"skipped"` check never causes an overall failure. |
@@ -213,7 +237,7 @@ stable across runs of the same input).
 | -------- | ------------- | ---------------------------------------------------------------- |
 | `layer`  | string        | `"<layer>/<datatype>"` of the layer not in `--allowed-layers`.   |
 | `name`   | string \| null | The layer's own GDS layer-name property, or `null` if unnamed.   |
-| `shapes` | integer       | Shape count on this layer, summed across all cell definitions.   |
+| `shapes` | integer       | Instance-weighted placed-shape count on this layer (since `schema_version` 2): each cell definition's own shape count on this layer, multiplied by that cell's total placement multiplicity across the full hierarchy, summed across all cell definitions — see "Breaking change" above. |
 
 #### `pin_labels_over_drawing` violations
 

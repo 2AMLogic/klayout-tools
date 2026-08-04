@@ -33,7 +33,13 @@ contract.
   breaking change to one command's JSON shape does not force a version bump
   on another. A command bumps its own `schema_version` only when it makes a
   non-additive (breaking) change to its own payload; adding new fields does
-  not require a bump.
+  not require a bump. This covers **value-semantics** changes to an
+  already-published field, not just renaming/removing/retyping it — e.g.
+  `klt precheck` bumped `1` → `2` when `layer_whitelist` violations'
+  `shapes` field changed from a per-cell-*definition* sum to an
+  instance-weighted placed-shape count (same field name and type, different
+  meaning; see `docs/cli/precheck.md`'s "Breaking change" note and issue
+  #452) — a worked first example of this policy in practice.
 - All other top-level fields are defined by the individual command's own
   documentation (e.g. `docs/cli/layers.md`).
 - Written to **stdout only**, as indented JSON with a trailing newline.
