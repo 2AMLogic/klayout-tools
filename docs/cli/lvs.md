@@ -527,14 +527,14 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `device.combine_incomplete`, `pin.unmatched`, `topology`, `hints.rejected`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.property`, `device.body_unverified`, `device.combine_incomplete`, `pin.unmatched`, `topology`, `hints.rejected`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
 | `device` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>, "class": <string\|null>}` when a device is involved. |
 | `property` | object \| `null` | `{"name": <string>, "layout": <value>, "reference": <value>}` for a `device.property` mismatch. `name` is `w_um`/`l_um` for the width/length parameters (matching `klt extract`'s own convention); every other declared device-class parameter is reported under its own lower-cased name. |
-| `details` | object \| `null` | Engine-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Currently only populated by the `"netgen"` engine, for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every `"klayout"`-engine entry, and for any `"netgen"`-engine entry precise enough not to need it (e.g. `device.property`). |
+| `details` | object \| `null` | Engine-specific/category-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Populated for every `"klayout"`-engine `device.class_arity` entry (see below) with `{"layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}`. Also populated by the `"netgen"` engine for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every other entry (including `"netgen"`-engine device-class-arity mismatches, which this issue's fix does not cover — see "`device.class_arity`" below). |
 
 `mismatches` is sorted by `(category, side, device.layout, device.reference,
 net.layout, net.reference)` (missing fields sort first) so repeated runs
@@ -583,6 +583,62 @@ subcircuits, and each such net is a distinct correspondence with its own
 `pin` flag. Two entries can therefore share the same `layout`/`reference`
 name (one per circuit) — that is expected, and is what keeps
 `len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
+
+#### `device.class_arity`: same device-class name, different terminal count on each side
+
+A curated deck can extract a device flavour through a device extractor that
+declares an extra terminal beyond the plain two/three-node element a
+schematic-derived reference netlist states it as — e.g. a `bulk_to_substrate`
+resistor flavour extracted via `DeviceExtractorResistorWithBulk` writes a
+three-node (`A`/`B`/`W`) `R` card, which `NetlistSpiceReader` reads back as
+`DeviceClassResistorWithBulk`; a schematic reference's plain two-node `R` card
+for the *same model name* reads back as the two-terminal `DeviceClassResistor`
+instead (issue #504). Both sides register a device class of the same name,
+but with a different terminal list — `NetlistComparer` cannot pair any
+instance of that class at all, and since the class *names* agree it does not
+report this as `device.class` (a matched-but-differently-classed pair) or as
+a `topology` device-class-mismatch (a class registered on only one side)
+either. Left unclassified, it degrades into an unattributable
+`device.unmatched`/`net.unmatched` cascade with no entry naming the actual
+cause — the "silent 0/0" this issue describes on a circuit small enough that
+nothing else anchors the compare.
+
+`klt lvs` detects this case directly from the `NetlistComparer` event that
+carries **both** device instances (unlike an ordinary one-sided
+`device.unmatched`, where only one side has a device at all) and reports one
+`category: "device.class_arity"`, `severity: "error"`, `side: "both"` entry
+per affected device pair, naming both classes' terminal lists:
+
+```json
+{
+  "category": "device.class_arity",
+  "severity": "error",
+  "description": "device class 'RES_X' is declared with a different terminal list on each side (layout: ['A', 'B', 'W'], reference: ['A', 'B']) -- the comparer cannot pair devices of this class at all; see docs/cli/lvs.md, 'device.class_arity'",
+  "side": "both",
+  "net": null,
+  "device": {"layout": "1", "reference": "R1", "class": "RES_X"},
+  "property": null,
+  "details": {"layout_terminals": ["A", "B", "W"], "reference_terminals": ["A", "B"]}
+}
+```
+
+This is a **diagnostic-only** fix (issue #504's "at minimum" option): it turns
+the unattributable cascade into a one-line diagnosis naming both terminal
+lists, but does not itself let the two sides' devices match — `status` still
+reports `"mismatch"` when this entry appears, and the collateral
+`net.unmatched`/`device.unmatched` entries the comparer's own event stream
+produces for the same device pair are still reported alongside it (unlike the
+issue #282 minimal-cell parameter recovery, which suppresses genuinely
+collateral entries — there is no such suppression here, since the affected
+nets/devices are not necessarily otherwise accounted for). A request-side hook
+to *reconcile* the two device classes before comparing (e.g. declaring which
+reference net an implicit bulk terminal should bind to, composing with
+`hints.same_nets` the way issue #281's `device.body_unverified` acknowledgement
+does for the MOS-body case) is deliberately deferred — see issue #504's
+"What would close it" options 1/2, not implemented by this entry. Only
+implemented for `"engine": "klayout"`; the `"netgen"` engine's report parser
+does not produce this category (its own report format does not distinguish
+this case from an ordinary unmatched device/net).
 
 #### `device.body_unverified`: MOS body terminals compared against a deck-synthesized net
 

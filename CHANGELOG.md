@@ -33,6 +33,24 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-04 — `klt lvs`: new `device.class_arity` mismatch category (#504,
+  `"engine": "klayout"` only), diagnosing a layout-side and reference-side
+  device class that share a name but declare a different terminal list —
+  e.g. a deck's `bulk_to_substrate` resistor flavour extracted via
+  `DeviceExtractorResistorWithBulk` (a three-terminal `A`/`B`/`W`
+  `DeviceClassResistorWithBulk`) compared against a schematic-derived
+  reference's plain two-node `R` card (a two-terminal `DeviceClassResistor`
+  of the same model name). Previously silent: `NetlistComparer` cannot pair
+  any instance of such a class at all, and since the class names agree the
+  event fits neither `device.class` (a matched-but-differently-classed pair)
+  nor the `topology` device-class-mismatch case (a class registered on only
+  one side) — it degraded into an unattributable `device.unmatched`/
+  `net.unmatched` cascade naming neither class's terminal list. The new
+  `severity: "error"`, `side: "both"` entry names both classes' terminal
+  lists in `details` (`{"layout_terminals": [...], "reference_terminals":
+  [...]}`); diagnostic only — it does not itself make the two sides match,
+  so `status` still reports `"mismatch"`. See `docs/cli/lvs.md`'s
+  `device.class_arity` entry.
 - 2026-08-04 — `klt gen`: `mos_array` and `diff_pair` accept `gate_contact`
   (#492), which finishes the gate stack the #461 poly landing pad only made
   legal — a contact plus a local-metal pad drawn on the pad, and the `_G`
