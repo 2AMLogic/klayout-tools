@@ -194,8 +194,12 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # body extracts as plain interconnect (a short) instead of a
         # resistor. No curated DRC rule checks this layer either, matching
         # `bjt_mark` above.
-        "res_implant": None,  # `res_generic_po` requires no implant layer
-        "res_block": None,  # ...nor a salicide-block layer (contrast gf180mcu)
+        # The resistor *implant*/*salicide-block* layers are no longer a
+        # single per-family constant here -- sky130 recognises three
+        # poly-resistor flavours (`res_generic_po`/`res_high_po`/
+        # `res_xhigh_po`) that differ only in those masks, so they live in the
+        # per-flavour :data:`_PDK_RES_FLAVOR_LAYERS` table below, selected by
+        # `res_array`'s `flavor` request param (issue #463).
         # Second routing-metal role + its connecting via (issue #454, follow-up
         # to #433): sky130's curated *extraction* deck already declares a
         # second metal level and the via that lands on it
@@ -226,10 +230,11 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "res_mark": (110, 5),  # RES_MK -- the resistor-ID marker
         # `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.resistors`'s
         # `ppolyf_u` keys off (issue #369). Unlike sky130, gf180mcu's
-        # `ppolyf_u` also *requires* the two roles below to cover the same
-        # segment -- the marker alone recognises nothing there.
-        "res_implant": (31, 0),  # Pplus -- p+ doped poly (vs. Nplus's npolyf_*)
-        "res_block": (49, 0),  # SAB -- salicide block (unsalicided resistor)
+        # `ppolyf_u` also *requires* an implant (Pplus) and salicide-block
+        # (SAB) layer to cover the same segment -- the marker alone recognises
+        # nothing there. gf180mcu exposes only that single flavour, so its
+        # implant/block pair lives in :data:`_PDK_RES_FLAVOR_LAYERS` below
+        # under the default `"generic"` flavour (issue #463).
         # Second routing-metal role + its connecting via (issue #454, same
         # rationale as sky130's pair above). gf180mcu's curated extraction
         # deck's `metals` stack already runs Metal1-Metal5 (#220); this only
@@ -242,6 +247,68 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "via1": (35, 0),  # Via1 -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
     },
 }
+
+#: Per-PDK-family poly-resistor *flavour* -> implant/salicide-block layer pair,
+#: selected by ``res_array``'s ``flavor`` request param (issue #463). Unlike
+#: the always-single roles in :data:`_PDK_ROLE_LAYERS`, a poly resistor's
+#: recognised device *class* is chosen by which implant/precision-resistor
+#: mask covers its body, and a single PDK family exposes several such classes.
+#: The layer/purpose numbers below are the *same* ``requires`` layers the
+#: curated *extraction* decks key each flavour off -- never a second, private
+#: map: sky130's ``res_high_po``/``res_xhigh_po`` from
+#: ``klayout_tools.decks.sky130.EXTRACTION_DECK.resistors`` (issue #222/#299),
+#: and gf180mcu's single ``ppolyf_u`` (issue #369). ``None`` means the flavour
+#: needs no layer of that kind (sky130's base ``res_generic_po`` requires
+#: neither, so a generator simply omits both there). The first-listed flavour
+#: per family is that family's default (``_DEFAULT_RES_FLAVOR``), chosen so a
+#: request that never mentions ``flavor`` reproduces the pre-#463 geometry
+#: exactly (sky130 -> ``res_generic_po``, gf180mcu -> ``ppolyf_u``).
+_PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, dict[str, tuple[int, int] | None]]] = {
+    "sky130": {
+        # sky130_fd_pr__res_generic_po (48.2 ohm/sq): the poly.res marker
+        # alone, no implant/block -- the base, lowest-sheet-rho flavour.
+        "generic": {"res_implant": None, "res_block": None},
+        # sky130_fd_pr__res_high_po_* (319.8 ohm/sq): psdm P+ implant + rpm
+        # precision-resistor mask (EXTRACTION_DECK.resistors["res_high_po"].
+        # requires).
+        "high": {"res_implant": (94, 20), "res_block": (86, 20)},
+        # sky130_fd_pr__res_xhigh_po_* (2 kohm/sq): psdm P+ implant + urpm
+        # (EXTRACTION_DECK.resistors["res_xhigh_po"].requires). rpm/urpm are
+        # mutually exclusive, so drawing urpm (not rpm) selects xhigh.
+        "xhigh": {"res_implant": (94, 20), "res_block": (79, 20)},
+    },
+    "gf180mcu": {
+        # ppolyf_u: gf180mcu exposes a single recognised drawn-poly-resistor
+        # flavour, which requires both Pplus (implant) and SAB (salicide
+        # block) over the RES_MK marker (issue #369).
+        "generic": {"res_implant": (31, 0), "res_block": (49, 0)},
+    },
+}
+
+#: The default ``res_array`` flavour: the first flavour listed for each family
+#: in :data:`_PDK_RES_FLAVOR_LAYERS`. Every family's first entry is keyed
+#: ``"generic"``, so one default name works across families while resolving to
+#: each family's own base device class.
+_DEFAULT_RES_FLAVOR = "generic"
+
+
+def _res_flavor_layers(family: str, flavor: str) -> dict[str, tuple[int, int] | None]:
+    """Return the ``res_implant``/``res_block`` layer pair for ``flavor`` in
+    ``family`` (see :data:`_PDK_RES_FLAVOR_LAYERS`).
+
+    Raises :class:`GenError` for a flavour the family does not expose, listing
+    the valid names -- mirroring :func:`_pdk_family`'s unsupported-family
+    error so a bad ``res_array`` ``flavor`` request fails clearly and early
+    (during layer resolution, before any geometry is drawn)."""
+    flavors = _PDK_RES_FLAVOR_LAYERS[family]
+    try:
+        return flavors[flavor]
+    except KeyError:
+        raise GenError(
+            f"generator 'res_array': params.flavor '{flavor}' is not a "
+            f"recognised poly-resistor flavour for PDK family '{family}' -- "
+            f"supported flavours: {', '.join(sorted(flavors))}"
+        ) from None
 
 
 def _pdk_family(variant: str) -> str:
@@ -271,7 +338,9 @@ def _role_layer_info(family: str, role: str) -> Any:
     return kdb.LayerInfo(*pair) if pair is not None else None
 
 
-def _resistor_strip_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+def _resistor_strip_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
     """``resistor_strip``'s hidden drawing-layer param -- fixed, PDK-agnostic
     (see the module docstring's phase-1/phase-2 scope note)."""
     import klayout.db as kdb
@@ -279,7 +348,9 @@ def _resistor_strip_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     return {"layer": kdb.LayerInfo(67, 20)}
 
 
-def _device_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+def _device_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
     """Hidden layer params for a generator drawing unit MOS-like devices
     (``mos_array``, and the device half of ``diff_pair``).
 
@@ -301,7 +372,9 @@ def _device_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _resistor_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+def _resistor_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
     """Hidden layer params for ``res_array`` (a poly-body unit resistor/cap
     array -- no separate active-layer role).
 
@@ -309,19 +382,25 @@ def _resistor_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     resistive body segment -- without it, `klt extract` cannot recognise the
     drawn poly body as a resistor device: it is absorbed into ordinary poly
     interconnect and the two terminals come out shorted together (issue
-    #369). On gf180mcu the marker alone is not enough: its own curated
-    deck's `ppolyf_u` device additionally *requires* the Pplus implant and
-    SAB (salicide-block) layers to cover the same segment (see
-    :data:`_PDK_ROLE_LAYERS`'s `res_mark`/`res_implant`/`res_block` roles and
-    ``klayout_tools.decks.gf180mcu``'s `ppolyf_u` declaration); sky130's
-    `res_generic_po` requires neither, so both roles resolve to `None`
-    there, following the `well_present`/`bjt_mark_present` precedent."""
+    #369). The marker alone selects the *base* device class; the
+    higher-sheet-rho flavours a family recognises are selected by additionally
+    drawing an implant and/or precision-resistor mask over the same segment
+    (see :data:`_PDK_RES_FLAVOR_LAYERS`). The ``flavor`` request param picks
+    which flavour -- sky130's `res_generic_po` (default) needs neither mask,
+    while `res_high_po`/`res_xhigh_po` each need the psdm implant plus their
+    own rpm/urpm mask; gf180mcu's single `ppolyf_u` flavour needs both Pplus
+    and SAB. A ``None`` in the resolved pair follows the
+    `well_present`/`bjt_mark_present` precedent (the generator omits it)."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    flavor_layers = _res_flavor_layers(family, flavor)
     mark = _role_layer_info(family, "res_mark")
-    implant = _role_layer_info(family, "res_implant")
-    block = _role_layer_info(family, "res_block")
+    implant_pair = flavor_layers["res_implant"]
+    block_pair = flavor_layers["res_block"]
+    implant = kdb.LayerInfo(*implant_pair) if implant_pair is not None else None
+    block = kdb.LayerInfo(*block_pair) if block_pair is not None else None
     return {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -335,7 +414,9 @@ def _resistor_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ring_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+def _ring_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
     """Hidden layer params for a generator drawing a guard ring
     (``guard_ring``, and the optional ring half of ``diff_pair``)."""
     import klayout.db as kdb
@@ -351,15 +432,19 @@ def _ring_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _diff_pair_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+def _diff_pair_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
     """``diff_pair`` composes a unit-device array and an optional guard ring
     -- union of both their hidden layer params."""
-    params = _device_layer_params(pdk_info)
-    params.update(_ring_layer_params(pdk_info))
-    return params
+    layer_params = _device_layer_params(pdk_info, params)
+    layer_params.update(_ring_layer_params(pdk_info, params))
+    return layer_params
 
 
-def _bjt_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
+def _bjt_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
     """Hidden layer params for ``bjt_array`` (a matched vertical-bipolar/PNP
     array drawn from base layers -- see the module docstring and
     ``docs/design/gen-bjt-array-spike.md`` for why draw-from-scratch was
@@ -1536,7 +1621,7 @@ def _produce(
     decl = lib.layout().pcell_declaration(spec.name)
 
     pcell_values = dict(resolved_params)
-    pcell_values.update(spec.layer_params(pdk_info))
+    pcell_values.update(spec.layer_params(pdk_info, resolved_params))
 
     layout = kdb.Layout()
     layout.dbu = spec.dbu
@@ -1786,6 +1871,17 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=1,
             )
             self.param(
+                "flavor",
+                self.TypeString,
+                "Poly-resistor flavour selecting the recognised device class "
+                "by which implant/precision-resistor masks cover each body: "
+                "'generic' (default, the base sheet-rho flavour -- "
+                "res_generic_po on sky130, ppolyf_u on gf180mcu), or, on "
+                "sky130, 'high' (res_high_po) / 'xhigh' (res_xhigh_po) for the "
+                "higher-sheet-rho flavours (issue #463)",
+                default=_DEFAULT_RES_FLAVOR,
+            )
+            self.param(
                 "poly_layer",
                 self.TypeLayer,
                 "Resistor body drawing layer",
@@ -1851,7 +1947,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         def display_text_impl(self) -> str:
             return (
                 f"res_array(l={self.length_um},w={self.width_um},"
-                f"n={self.num},rows={self.rows})"
+                f"n={self.num},rows={self.rows},flavor={self.flavor})"
             )
 
         def produce_impl(self) -> None:
@@ -2468,7 +2564,7 @@ class _GeneratorSpec:
     dbu: float
     validate: Callable[[dict[str, Any]], None]
     describe: Callable[[dict[str, Any], float, dict[str, Any]], dict[str, Any]]
-    layer_params: Callable[[dict[str, Any]], dict[str, Any]]
+    layer_params: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:

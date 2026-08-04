@@ -168,6 +168,24 @@ being absorbed into ordinary poly interconnect as a short (issue #369).
 Neither curated *DRC* deck checks any of these layers, so drawing them never
 affects `klt drc` status.
 
+`flavor` selects which recognised poly-resistor *device class* the array
+draws, by covering each body segment with the implant/precision-resistor
+masks that class is keyed off in the curated extraction deck (issue #463).
+`"generic"` (the default) is each family's base, lowest-sheet-rho flavour —
+sky130's `res_generic_po` (~48 Ω/□, marker only) and gf180mcu's `ppolyf_u`
+(marker + `Pplus` + `SAB`). On sky130, `"high"` (`res_high_po`, ~320 Ω/□)
+additionally draws the `psdm` P+ implant `(94, 20)` and the `rpm` mask
+`(86, 20)`, and `"xhigh"` (`res_xhigh_po`, ~2 kΩ/□) draws `psdm` plus the
+`urpm` mask `(79, 20)` — the higher-sheet-rho flavours a precision resistor
+ladder uses to spend far fewer squares per ohm. The layer/purpose numbers
+come straight from the same `klayout_tools.decks.sky130` extraction deck that
+recognises them, so a `flavor="high"`/`"xhigh"` array round-trips through
+`klt extract` to the matching device class rather than always reading
+`res_generic_po`. gf180mcu exposes only its single `"generic"` flavour;
+requesting a sky130-only flavour there raises a clear error. As with the
+marker, no curated *DRC* deck checks these masks, so they never affect
+`klt drc` status.
+
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
 | `length_um`    | double | `2.0`   | Unit resistor body length (µm). Must be `> 0`. |
@@ -176,6 +194,7 @@ affects `klt drc` status.
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu) or, on sky130 only, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`) for the higher-sheet-rho flavours. Must be a flavour the resolved PDK family exposes. |
 
 ### `guard_ring` (family 3: substrate/well tap ring)
 

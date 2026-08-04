@@ -1227,6 +1227,185 @@ def test_res_array_extracts_as_resistor_not_a_short(
     assert report["device_counts"].get(device_class, 0) > 0
 
 
+# --- res_array poly-resistor flavour selection (issue #463) ------------------- #
+
+# sky130 masks that distinguish the three recognised poly-resistor flavours --
+# the same `requires`/`excludes` layers `klayout_tools.decks.sky130`'s
+# extraction deck keys `res_high_po`/`res_xhigh_po` off (see
+# `klayout_tools.gen._PDK_RES_FLAVOR_LAYERS`).
+_SKY130_PSDM_LAYER = (94, 20)  # P+ implant, shared by res_high_po/res_xhigh_po
+_SKY130_RPM_LAYER = (86, 20)  # 300 ohm precision-resistor mask -> res_high_po
+_SKY130_URPM_LAYER = (79, 20)  # 2 kohm precision-resistor mask -> res_xhigh_po
+
+
+def _layers_present(gds_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    return {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+
+
+def test_res_array_sky130_default_flavor_draws_no_implant_or_block(tmp_path, pdk_root):
+    """The default `flavor='generic'` (`res_generic_po`) must draw *only* the
+    poly.res marker -- no psdm/rpm/urpm mask -- exactly as before issue #463,
+    so the base flavour's geometry is unchanged."""
+    output = tmp_path / "res_array_generic.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _SKY130_RES_MARK_LAYER in present
+    assert _SKY130_PSDM_LAYER not in present
+    assert _SKY130_RPM_LAYER not in present
+    assert _SKY130_URPM_LAYER not in present
+
+
+def test_res_array_sky130_default_matches_explicit_generic(tmp_path, pdk_root):
+    """Requesting `flavor='generic'` explicitly must be geometry-identical to
+    a request that never mentions `flavor` -- the default is not allowed to
+    drift from the base flavour."""
+    output_default = tmp_path / "res_array_default.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output_default)},
+        }
+    )
+    output_explicit = tmp_path / "res_array_explicit_generic.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "generic"},
+            "options": {"output": str(output_explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(output_default, output_explicit)
+
+
+def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
+    """`flavor='high'` (`res_high_po`) draws the psdm P+ implant and the rpm
+    precision-resistor mask over each unit body -- and *not* urpm, which is
+    mutually exclusive with rpm."""
+    output = tmp_path / "res_array_high.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "high"},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _SKY130_RES_MARK_LAYER in present
+    assert _SKY130_PSDM_LAYER in present
+    assert _SKY130_RPM_LAYER in present
+    assert _SKY130_URPM_LAYER not in present
+
+
+def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
+    """`flavor='xhigh'` (`res_xhigh_po`) draws the psdm P+ implant and the urpm
+    precision-resistor mask over each unit body -- and *not* rpm."""
+    output = tmp_path / "res_array_xhigh.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "xhigh"},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _SKY130_RES_MARK_LAYER in present
+    assert _SKY130_PSDM_LAYER in present
+    assert _SKY130_URPM_LAYER in present
+    assert _SKY130_RPM_LAYER not in present
+
+
+def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):
+    """An unrecognised flavour name raises a clear `GenError` listing the
+    valid flavours (mirroring `_pdk_family`'s unsupported-family error)."""
+    with pytest.raises(GenError, match="flavor 'bogus' is not a recognised"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"flavor": "bogus"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_res_array_sky130_only_flavor_unsupported_on_gf180mcu(tmp_path, both_pdk_root):
+    """gf180mcu exposes only its single `ppolyf_u` (`'generic'`) flavour, so a
+    sky130-only flavour like `'high'` is rejected there -- the error names the
+    family and the flavours it does support."""
+    with pytest.raises(GenError, match="not a recognised poly-resistor flavour"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"flavor": "high"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_res_array_gf180_default_flavor_unchanged(tmp_path, both_pdk_root):
+    """gf180mcu's default `flavor='generic'` still resolves to `ppolyf_u` and
+    draws both its Pplus implant and SAB salicide-block layers -- the pre-#463
+    single-flavour behaviour is preserved."""
+    output = tmp_path / "res_array_gf180_default.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    present = _layers_present(output)
+    assert _GF180_RES_MARK_LAYER in present
+    assert _GF180_RES_IMPLANT_LAYER in present
+    assert _GF180_RES_BLOCK_LAYER in present
+
+
+@pytest.mark.parametrize(
+    ("flavor", "device_class"),
+    [("high", "res_high_po"), ("xhigh", "res_xhigh_po")],
+)
+def test_res_array_higher_sheet_rho_flavor_extracts_as_matching_class(
+    tmp_path, pdk_root, flavor, device_class
+):
+    """The end-to-end acceptance bar from issue #463: a higher-sheet-rho
+    `res_array` flavour, run through (unmodified) `klt extract`, must classify
+    as the matching `res_high_po`/`res_xhigh_po` device class -- not the base
+    `res_generic_po` -- so a schematic reference to that flavour can reach an
+    LVS-clean layout through `klt gen`."""
+    gds_path = tmp_path / f"res_array_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 3, "dummy": 1, "flavor": flavor},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), "sky130")
+
+    assert report["device_counts"].get(device_class, 0) > 0
+    assert report["device_counts"].get("res_generic_po", 0) == 0
+
+
 # --- guard_ring --------------------------------------------------------------- #
 
 
