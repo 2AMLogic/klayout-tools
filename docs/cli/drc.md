@@ -174,6 +174,38 @@ process variant this deck doesn't model — see `gf180mcu.py`'s docstring), or
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
 
+## Macro-scale, machine-generated (standard-cell) layout
+
+`klt drc` was first exercised against hand-drawn analog layout only — a
+handful of shapes, one or two drawn layers, shallow hierarchy. Issue #436
+ran it against the first machine-generated, macro-scale target: a real
+`sky130_fd_sc_hd` standard-cell GCD macro produced end to end by
+`klt synthesize` + `klt place-and-route` (real Yosys + real OpenROAD, see
+`tests/corpus/place_and_route/README.md`'s provenance note) — thousands of
+instances, one level of real hierarchy, and routing-layer usage across
+`met1`-`met5` plus vias, none of which the analog fixtures exercise. `klt
+drc` itself required **no code changes**: it ran cleanly (no crash,
+`status`/`violation_count`/`coverage` all well-formed) in about two seconds
+against this layout, confirming the whole-layout-flattened design (see
+"Limitation: whole-layout, flattened" below) scales to macro-scale,
+deep-instance-count input without a special case.
+
+The run did surface a handful of genuine `diff.enclosing.licon.1`
+violations, though — worth understanding as a property of the **input**,
+not a `klt drc` defect. They cluster at row boundaries between adjacent
+standard-cell instances (confirmed by inspecting the merged `diff` region
+around each violation: the flagged shape spans two neighboring cell
+instances, not one). `klt place-and-route` does not yet run a filler-cell
+insertion stage (its stage set is `floorplan` → `place` → `cts` → `route`
+only, per `docs/cli/place-and-route.md`) — a full ORFS-style flow inserts
+filler cells to close exactly these row gaps before signoff DRC, which
+would very likely absorb this class of violation. Until filler-cell
+insertion exists, a `klt drc` run against `klt place-and-route` output
+directly (skipping filler insertion) can legitimately show a small number
+of row-gap-adjacent enclosure violations — this is the curated `sky130`
+deck correctly reporting real, if flow-artifact-caused, geometry, not a
+false positive to suppress.
+
 ## Reserved annotation layer
 
 Both decks read a fixed, enumerable set of `(layer, datatype)` pairs (a
