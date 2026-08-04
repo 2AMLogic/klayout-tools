@@ -400,6 +400,21 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
     overall source/drain) are exposed as ports -- interior segments (for
     ``fingers > 1``) are drawn but not individually reported, mirroring
     ``resistor_strip``'s P1/P2-only precedent.
+
+    Every gate's poly also grows a landing "cap" past the diffusion's
+    gate-side edge (issue #461): without it, poly and diff share both the
+    top and bottom edge of the channel exactly, leaving zero poly outside
+    the active region for a contact to legally land on -- a contact placed
+    at the (old) reported gate port straddled the diff edge
+    (``diff.enclosing.licon.1``) or sat entirely over channel poly with no
+    enclosure margin at all (``poly.enclosing.licon.1``). The cap reuses
+    :data:`CONTACT_SIZE_UM`/:data:`ENCLOSURE_MARGIN_UM` -- via the same
+    ``contact_region_um`` the S/D pads already size themselves to -- for
+    both its height (how far past diff the poly extends) and a floor on its
+    width: a gate whose ``l_um`` is narrower than a full ``contact_region_um``
+    gets a widened ("T-head") cap; a gate at least that wide keeps the
+    channel's own width, unchanged. No new, unvalidated margin constant is
+    introduced.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     seg_positions: list[tuple[float, float]] = []
@@ -413,12 +428,26 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
             x += l_um
     total_len_um = x
 
+    # Top (gate-side) edge of the poly cap -- the diffusion's own top edge
+    # (`w_um`) plus one `contact_region_um`, so the cap is always tall
+    # enough to enclose a `CONTACT_SIZE_UM` contact with `ENCLOSURE_MARGIN_UM`
+    # margin above it, without the contact ever touching diff below it.
+    poly_top_um = w_um + contact_region_um
+    g_width_um = max(l_um, contact_region_um)
+
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
         "active": [(0.0, 0.0, total_len_um, w_um)],
-        "poly": [(px0, 0.0, px1, w_um) for (px0, px1) in poly_positions],
+        "poly": [],
         "contact": [],
         "metal": [],
     }
+    for px0, px1 in poly_positions:
+        boxes["poly"].append((px0, 0.0, px1, w_um))
+        cap_w = max(px1 - px0, contact_region_um)
+        gate_cx = (px0 + px1) / 2.0
+        boxes["poly"].append(
+            (gate_cx - cap_w / 2.0, w_um, gate_cx + cap_w / 2.0, poly_top_um)
+        )
     contact_half = CONTACT_SIZE_UM / 2.0
     for sx0, sx1 in seg_positions:
         boxes["metal"].append((sx0, 0.0, sx1, w_um))
@@ -430,15 +459,18 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
 
     s_xy = ((seg_positions[0][0] + seg_positions[0][1]) / 2.0, w_um / 2.0)
     d_xy = ((seg_positions[-1][0] + seg_positions[-1][1]) / 2.0, w_um / 2.0)
+    g_y = w_um + contact_region_um / 2.0  # centered in the poly cap's height
     g_xy = (
-        ((poly_positions[0][0] + poly_positions[0][1]) / 2.0, w_um)
+        ((poly_positions[0][0] + poly_positions[0][1]) / 2.0, g_y)
         if poly_positions
-        else (total_len_um / 2.0, w_um)
+        else (total_len_um / 2.0, g_y)
     )
 
     return {
         "total_len_um": total_len_um,
         "height_um": w_um,
+        "poly_top_um": poly_top_um,
+        "g_width_um": g_width_um,
         "boxes_um": boxes,
         "s_xy": s_xy,
         "d_xy": d_xy,
@@ -494,10 +526,15 @@ def _mos_array_layout(
     :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
-    used only when the caller requests ``flavor="pfet"``."""
+    used only when the caller requests ``flavor="pfet"``.
+
+    ``row_pitch_um`` is measured from ``poly_top_um`` (the diffusion height
+    plus the gate-side poly cap added by issue #461), not the bare diffusion
+    height -- otherwise one row's poly cap would overhang into the next
+    row's diffusion."""
     unit = _mos_unit_layout(w_um, l_um, fingers)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    row_pitch = unit["poly_top_um"] + MIN_SAME_LAYER_SPACING_UM
 
     order = (
         _centroid_order(rows, cols)
@@ -858,10 +895,14 @@ def _diff_pair_layout(
     if (row + col) is even else "B"`` -- for ``splits=2`` this is exactly the
     classic differential-pair "A B / B A" layout; it generalises the same
     way for any ``splits``, each column always holding one A and one B.
+
+    ``row_pitch_um`` is measured from ``poly_top_um``, not the bare
+    diffusion height -- see :func:`_mos_array_layout`'s equivalent note
+    (issue #461).
     """
     unit = _mos_unit_layout(w_um, l_um, 1)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    row_pitch = unit["poly_top_um"] + MIN_SAME_LAYER_SPACING_UM
 
     counts = {"A": 0, "B": 0}
     cells = []
@@ -2565,7 +2606,12 @@ def _mos_array_describe(
                 "layer": poly_layer,
                 "x_um": c["x0_um"] + gx,
                 "y_um": c["y0_um"] + gy,
-                "width_um": params["l_um"],
+                # The gate port sits in the poly cap (issue #461), whose
+                # width is `unit["g_width_um"]` -- `params["l_um"]` only
+                # when the channel is already at least as wide as a full
+                # contact landing area; a narrower channel's cap is widened,
+                # so this is not always equal to `l_um` any more.
+                "width_um": unit["g_width_um"],
                 "direction_deg": 90,
             }
         )
@@ -3026,7 +3072,10 @@ def _diff_pair_describe(
                 "layer": poly_layer,
                 "x_um": c["x0_um"] + gx,
                 "y_um": c["y0_um"] + gy,
-                "width_um": params["l_um"],
+                # See the equivalent comment in `_mos_array_describe`
+                # (issue #461) -- the gate port's poly width at its new
+                # cap location, not always `params["l_um"]`.
+                "width_um": unit["g_width_um"],
                 "direction_deg": 90,
             }
         )

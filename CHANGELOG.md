@@ -44,6 +44,22 @@ version. Not an exhaustive commit-by-commit log.
   `synthesize`, `place-and-route`, and `functional-verification` were added
   on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
   release will carry them collectively.
+- 2026-08-04 — `klt gen`: `mos_array`/`diff_pair` now draw each gate's poly
+  with a landing "cap" that extends past the diffusion's gate-side edge,
+  sized from the existing `CONTACT_SIZE_UM`/`ENCLOSURE_MARGIN_UM` margin
+  constants (issue #461). Previously poly and diff shared both the top and
+  bottom edge of the channel exactly, leaving no poly outside the active
+  region for a contact to legally land on — a contact placed at the
+  reported `U<i>_G`/`Q<n>_G`/`M<n>_G` port either straddled the diff edge
+  (`diff.enclosing.licon.1`) or sat on channel poly with no enclosure
+  margin (`poly.enclosing.licon.1`). The `_G` port's `x_um`/`y_um` now sits
+  in the center of this cap instead of on the diff-adjacent edge, and its
+  `width_um` reflects the cap's (possibly widened) width rather than always
+  `params.l_um` — a value-level (not shape-level) change to an
+  already-shipped field per `docs/json-contract.md`'s "redefining semantics"
+  note, so it's called out here rather than a `schema_version` bump. Both
+  generators' row pitch grew to keep one row's poly cap from overlapping the
+  next row's diffusion.
 - 2026-08-04 — `klt gen` + `klt gen-compose`: ring routing openings (#434).
   `guard_ring`, `diff_pair` (`add_guard_ring`) and `bjt_array`
   (`add_collector_ring`) accept `ring_gap_side` (`""`/`"N"`/`"S"`/`"E"`/

@@ -1129,7 +1129,14 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
                     ],
                 }
             ],
-            "routing": {"layer_role": "metal", "width_um": 0.17},
+            # 0.22, not 0.17: issue #461 moved `mos_array`'s gate port
+            # (`U0_G`) ~0.21um inside its own block's bbox edge (it now
+            # reports the poly landing cap's center, not the diff-adjacent
+            # edge) -- the route's stub length is `width_um` itself
+            # (`manhattan_backbone`), so it must clear that margin for the
+            # up-over-down jog to land entirely above both blocks instead of
+            # slicing across their tops.
+            "routing": {"layer_role": "metal", "width_um": 0.22},
             "options": {"cell_name": "jogged_0", "output": str(output)},
         }
     )
@@ -2392,11 +2399,12 @@ def test_compose_pins_gate_port_survives_extraction_as_named_pin(tmp_path, pdk_r
 
 #: The ring gap #434's own repro needs: an opening on the side the route
 #: leaves/enters through, slid onto the pair's lower device row (whose ports
-#: sit 0.41um below the automatically-sized ring's own mid-height).
+#: sit 0.83um below the automatically-sized ring's own mid-height -- issue
+#: #461 grew `diff_pair`'s row pitch, which grew this offset from -0.41).
 _DIFF_PAIR_GAP_E = {
     "ring_gap_side": "E",
     "ring_gap_um": 1.0,
-    "ring_gap_offset_um": -0.41,
+    "ring_gap_offset_um": -0.83,
 }
 _DIFF_PAIR_GAP_W = dict(_DIFF_PAIR_GAP_E, ring_gap_side="W")
 

@@ -2064,7 +2064,14 @@ def test_diff_pair_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_r
                 "splits": 2,
                 "ring_gap_side": "E",
                 "ring_gap_um": 1.0,
-                "ring_gap_offset_um": -0.41,
+                # -0.83, not -0.41: issue #461 grew the pair's row pitch (it
+                # is now measured from each unit's poly cap, not the bare
+                # diffusion height), which grew `core_h_um`/the ring's own
+                # mid-height this offset is relative to. -0.83 is the value
+                # that (still) centers the opening on the pair's lower
+                # device row for the current geometry -- see the `y_um`
+                # assertion below.
+                "ring_gap_offset_um": -0.83,
             },
             "options": {"output": str(output)},
         }

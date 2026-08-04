@@ -88,8 +88,13 @@ non-default `params` set is not guaranteed to (see each generator's
 A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
 strip + poly gate(s) + contact + local-metal source/drain pads), with
 `dummy` extra unit-device columns flanking each side for etch/gradient
-matching. Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
-(local-metal) and `U<i>_G` (poly), where `<i>` is the device's position in
+matching. Each gate's poly extends past the diffusion's gate-side edge into
+a landing "cap" sized from `CONTACT_SIZE_UM`/`ENCLOSURE_MARGIN_UM` (issue
+#461) — without it there is no poly outside the active region for a
+`klt draw`-added contact to legally land on. Each unit device contributes
+three ports: `U<i>_S`/`U<i>_D` (local-metal) and `U<i>_G` (poly, reported at
+the center of this cap, not on the diff-adjacent edge), where `<i>` is the
+device's position in
 the `topology`-selected numbering order — `"array"` numbers row-major;
 `"common_centroid"` (the default) numbers nearest-center-first, pairing each
 instance immediately with its point-reflection through the array center, so
@@ -248,7 +253,9 @@ guard ring (`add_guard_ring`, fixed internal sizing — use the standalone
 `guard_ring` generator directly for a fully-parametrized ring). Ports are
 named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
 `params.mirror` is `true`, for a current-mirror naming convention — geometry
-is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
+is identical either way); `_G` ports sit on the same gate-side poly landing
+cap `mos_array` draws (issue #461), not on the diff-adjacent edge. Plus
+`TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
 `add_guard_ring` is `true` (and a `GAP_<side>` marker when the ring carries a
 routing opening — see `guard_ring`'s "Ring routing openings" above).
 `device_count` is `2 * splits`.
