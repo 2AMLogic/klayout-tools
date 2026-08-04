@@ -739,6 +739,68 @@ def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
     return None
 
 
+#: ``direction_deg`` values a *stub-widen* (#496) applies to -- a port's own
+#: outward-facing north/south stub, never an east/west one. Scoped this
+#: narrowly per the issue: an east/west-facing port's horizontal stub is left
+#: byte-for-byte unchanged.
+_STUB_WIDEN_DIRECTIONS = (90, 270)
+
+
+def _endpoint_stub_widen_um(
+    port: dict[str, Any],
+    pos: tuple[float, float],
+    direction_deg: int,
+    stub_len_um: float,
+    width_um: float,
+    route_layer: tuple[int, int] | None,
+) -> dict[str, Any] | None:
+    """Whether ``port``'s own stub (issue #496) needs widening past
+    ``width_um``, and if so, the entry :func:`_write_composed_gds` draws for
+    it.
+
+    A north/south-facing port's *drawn* pad can be wider than the route's own
+    ``width_um`` -- :func:`manhattan_backbone`'s stub still leaves the pad at
+    ``width_um``, so the pad's edge outside the stub's narrow footprint (but
+    inside the pad's own footprint) can sit closer to the perpendicular jog
+    above/below it than the target deck's same-layer spacing rule allows (a
+    real DRC violation, not a routability question -- see the issue). Mirrors
+    the via-drop landing pad's own precedent (``_VIA_LANDING_SIZE_UM``, sized
+    independent of ``width_um`` for the same enclosure reason): widen just the
+    stub segment leaving the pad -- from the port out to where the
+    un-widened stub already ends (``stub_len_um``, the caller's own
+    ``stub_a_um``/``stub_b_um``) -- to the *port's own reported* ``width_um``,
+    rather than the whole backbone.
+
+    Only fires when: the port faces north/south (``_STUB_WIDEN_DIRECTIONS`` --
+    an east/west-facing port's horizontal stub is untouched, see the issue);
+    the port's own reported ``width_um`` actually exceeds the route's
+    ``width_um`` (an equal or narrower pad is already a no-op); and the pad is
+    actually drawn on ``route_layer`` (a port whose own layer differs needs a
+    via-drop instead -- see :func:`_resolve_via_drop_layer` -- and its real
+    pad lives on a different layer, where this trace-width mismatch does not
+    apply). Not keyed on any port-name convention (``U*_G``, ``TAP_*``, ...)
+    -- purely geometric, so it generalizes to any generator's north/south
+    port, not just a gate contact's.
+    """
+    if direction_deg not in _STUB_WIDEN_DIRECTIONS:
+        return None
+    if route_layer is None or _port_own_layer(port) != route_layer:
+        return None
+    pad_width_um = port.get("width_um")
+    if not isinstance(pad_width_um, (int, float)) or isinstance(pad_width_um, bool):
+        return None
+    pad_width_um = float(pad_width_um)
+    if pad_width_um <= width_um:
+        return None
+    return {
+        "x_um": pos[0],
+        "y_um": pos[1],
+        "direction_deg": direction_deg,
+        "length_um": stub_len_um,
+        "width_um": pad_width_um,
+    }
+
+
 def _resolve_via_drop_layer(
     deck: ExtractionDeck,
     route_layer: tuple[int, int],
@@ -1529,10 +1591,16 @@ def route_two_pin(
     via-drop, exactly as before that issue.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
-    "points_um": list | None, "via_drops": list, "reason": str | None}``.
-    ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer", "port_layer"}``
-    entries (empty unless a drop was resolved), consumed by
+    "points_um": list | None, "via_drops": list, "stub_widen": list, "reason":
+    str | None}``. ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
+    "port_layer"}`` entries (empty unless a drop was resolved), consumed by
     :func:`_write_composed_gds` to draw each drop's via + landing pads.
+    ``stub_widen`` (issue #496, see :func:`_endpoint_stub_widen_um`) is a list
+    of ``{"x_um", "y_um", "direction_deg", "length_um", "width_um"}`` entries
+    -- one per endpoint whose own reported pad is wider than ``width_um`` and
+    faces north/south -- consumed by :func:`_write_composed_gds` to re-draw
+    that endpoint's own first backbone segment at the pad's width, closing
+    the sub-spacing gap a narrower stub would otherwise leave beside it.
     """
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
@@ -1980,11 +2048,27 @@ def route_two_pin(
                     }
                 )
 
+    # Stub-widen (#496): see _endpoint_stub_widen_um's own docstring. Computed
+    # independently of the via-drop loop above (it needs no ExtractionDeck --
+    # only route_layer, to compare against each port's own reported layer),
+    # for both endpoints.
+    stub_widen: list[dict[str, Any]] = []
+    for port, pos, direction, stub_len_um in (
+        (port_a, a, dir_a, stub_a_um),
+        (port_b, b, dir_b, stub_b_um),
+    ):
+        widen = _endpoint_stub_widen_um(
+            port, pos, direction, stub_len_um, width_um, route_layer
+        )
+        if widen is not None:
+            stub_widen.append(widen)
+
     return {
         "routed": True,
         "route_length_um": _polyline_length_um(points),
         "points_um": points,
         "via_drops": via_drops,
+        "stub_widen": stub_widen,
         "reason": None,
     }
 
@@ -2212,6 +2296,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     "points_um": result["points_um"],
                     "width_um": width_um,
                     "via_drops": result.get("via_drops", []),
+                    "stub_widen": result.get("stub_widen", []),
                 }
             )
         else:
@@ -2379,8 +2464,9 @@ def _write_composed_gds(
     not flattened into the composed top cell).
 
     Routed nets (``routed_geometry``: a list of ``{net, points_um, width_um,
-    via_drops}``) are drawn as native :class:`kdb.Path` shapes directly on the
-    composed top cell, on ``route_layer`` (a ``(layer, datatype)`` pair) --
+    via_drops, stub_widen}``) are drawn as native :class:`kdb.Path` shapes
+    directly on the composed top cell, on ``route_layer`` (a ``(layer,
+    datatype)`` pair) --
     top-level metal, not inside any block's sub-cell. When ``label_layer`` is
     given (resolved by :func:`_resolve_label_layer`), each routed net also
     gets one :class:`kdb.Text` label -- named after its own ``net`` field --
@@ -2401,6 +2487,17 @@ def _write_composed_gds(
     same position the backbone's own drawn ``kdb.Path`` already terminates
     at, so the landing pad always overlaps (and merges with) both the
     backbone and the block's own existing pad on that layer.
+
+    Each entry's ``stub_widen`` (:func:`route_two_pin`'s own
+    :func:`_endpoint_stub_widen_um`, issue #496) is a list of ``{x_um, y_um,
+    direction_deg, length_um, width_um}`` -- one per endpoint whose own
+    reported pad is wider than the route's ``width_um``. Each draws one
+    :class:`kdb.Box` re-covering the backbone's own first segment out of that
+    endpoint (from the pin's position, ``length_um`` along ``direction_deg``
+    -- the same span the narrow backbone path already runs) at the *pad's*
+    width instead of the route's, on ``route_layer`` -- merging into one
+    shape with both the backbone and the block's own pad, so no sub-spacing
+    gap is left beside the pad.
 
     ``pin_placements`` (a list of ``{net, x_um, y_um, layer}``, pre-resolved by
     :func:`compose` from the request's ``pins[]``) each get one
@@ -2517,6 +2614,32 @@ def _write_composed_gds(
                 )
                 top.shapes(layer_index).insert(landing_box)  # route_layer side
                 top.shapes(port_layer_index).insert(landing_box)  # pin's own side
+
+            # Stub-widen (#496): each entry (route_two_pin's own
+            # _endpoint_stub_widen_um) re-draws the backbone's own first
+            # segment out of one endpoint -- from that pin's exact position,
+            # `length_um` along its own `direction_deg`, exactly the same
+            # span the narrow backbone above already covers -- at the pin's
+            # own reported `width_um` instead of the route's. Drawn on
+            # route_layer, the same layer/cell the backbone's own Path is
+            # already on, so it merges into one shape with both the backbone
+            # and (when the pin's own pad is also on route_layer, which is
+            # the only case this fires for -- see the docstring) the block's
+            # own pad underneath.
+            for widen in route.get("stub_widen", []):
+                cx = int(round(widen["x_um"] / dbu))
+                cy = int(round(widen["y_um"] / dbu))
+                half_dbu = int(round((widen["width_um"] / 2.0) / dbu))
+                length_dbu = int(round(widen["length_um"] / dbu))
+                if widen["direction_deg"] == 90:
+                    widen_box = kdb.Box(
+                        cx - half_dbu, cy, cx + half_dbu, cy + length_dbu
+                    )
+                else:  # 270
+                    widen_box = kdb.Box(
+                        cx - half_dbu, cy - length_dbu, cx + half_dbu, cy
+                    )
+                top.shapes(layer_index).insert(widen_box)
 
     if pin_placements:
         if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)

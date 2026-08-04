@@ -12,6 +12,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ## Unreleased
 
+### Fixed since release
+
+- 2026-08-04 — `klt gen-compose`: a route to a north/south-facing port whose
+  drawn pad is wider than `routing.width_um` no longer leaves a sub-spacing
+  gap beside the pad (#496). `route_two_pin()`'s stub -- the segment leaving
+  a port before the backbone's perpendicular jog -- was always drawn at
+  `routing.width_um`, even when the port's own reported `width_um` (its
+  pad's extent) was wider; the pad's edge outside the narrow stub's own
+  footprint could then sit closer to the jog above/below it than the target
+  deck's same-layer spacing rule allows -- a real DRC violation in otherwise
+  clean composed output (e.g. a `mos_array`/`diff_pair` gate contact's
+  landing pad, a `guard_ring`/`bjt_array` ring tap, an S/D pad reached from
+  above). The router now widens just that stub segment to the *port's own*
+  reported `width_um` when it exceeds the route's, purely geometrically (no
+  port-name special-casing, so it generalizes past gate contacts); an
+  east/west-facing port's horizontal stub, or an endpoint that needs a
+  via-drop instead (its real pad lives on a different layer), is unaffected.
+  See `docs/cli/gen-compose.md`.
+
 ### Added since release
 
 - 2026-08-04 — `klt gen`: `mos_array` and `diff_pair` accept `gate_contact`
