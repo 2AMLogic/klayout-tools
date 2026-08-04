@@ -1366,11 +1366,41 @@ def route_two_pin(
     # route if the backbone overlaps this inflated footprint's interior --
     # mirroring the bbox-interior accounting above, just against a pad
     # instead of a whole block.
+    #
+    # Same-direction degenerate-jog check (#453): the inflated-footprint test
+    # above models each other port as a square of side its *reported*
+    # ``width_um``. For an array unit's own pad that badly *under*-estimates the
+    # real drawn metal in the port's facing direction -- e.g. a bjt_array
+    # base-tie tap draws li1 metal several times taller than its reported
+    # ``width_um`` (the reported width is roughly the contact size, not the pad
+    # extent). When both pins face the *same* direction and share the
+    # coordinate along that facing axis (same row for a vertical facing, same
+    # column for a horizontal one), ``manhattan_backbone()`` collapses to a
+    # single straight jog lifted just one stub width (``width_um``) to the
+    # ports' outward side -- so a route wide enough that the jog clears the
+    # under-sized reported square still plows straight through the real pad of
+    # any intervening same-facing port. That is exactly the reproduction in
+    # #453 (bussing two same-row north-facing bjt_array emitters across the
+    # intervening unit's north-facing base-tie pad composed ``routed: true``
+    # and DRC-clean while extraction showed the whole array's shared base node
+    # absorbed into the emitter net). Treat any other same-layer port that
+    # faces the same direction and sits strictly between the two pins along the
+    # perpendicular axis (on the same row/column) as crossed: its pad opens
+    # toward the jog, so bussing across it draws a silent short regardless of
+    # how small its reported ``width_um`` is.
     if same_block_self_net:
         own_ports = blocks[own_a].get("ports") or {}
         own_offset = offsets_um[own_a]
         route_half_um = width_um / 2.0
         skip_port_names = {pin_a["port"], pin_b["port"]}
+        facing_vertical = va[1] != 0
+        # A degenerate single-jog backbone only forms when both pins face the
+        # same direction *and* share their facing-axis coordinate (same row for
+        # a vertical facing, same column for a horizontal one).
+        same_line = (
+            abs(a[1] - b[1]) < 1e-9 if facing_vertical else abs(a[0] - b[0]) < 1e-9
+        )
+        conservative_same_dir = dir_a == dir_b and same_line
         for other_name, other_port in own_ports.items():
             if other_name in skip_port_names or not _port_has_geometry(other_port):
                 continue
@@ -1380,6 +1410,40 @@ def route_two_pin(
             )
             if route_layer is not None and other_layer != route_layer:
                 continue  # a pad on a different physical layer can't short
+            px = float(other_port["x_um"]) + own_offset["x"]
+            py = float(other_port["y_um"]) + own_offset["y"]
+
+            # #453: an intervening same-facing pad on the jog's own row/column
+            # is crossed no matter how small its reported footprint is.
+            other_dir = int(other_port.get("direction_deg", 0)) % 360
+            if conservative_same_dir and other_dir == dir_a:
+                if facing_vertical:
+                    between = (
+                        min(a[0], b[0]) < px < max(a[0], b[0]) and abs(py - a[1]) < 1e-9
+                    )
+                else:
+                    between = (
+                        min(a[1], b[1]) < py < max(a[1], b[1]) and abs(px - a[0]) < 1e-9
+                    )
+                if between:
+                    axis = "row" if facing_vertical else "column"
+                    return {
+                        "routed": False,
+                        "route_length_um": None,
+                        "points_um": None,
+                        "reason": (
+                            f"self-net between two same-facing ports on the same "
+                            f"{axis} jogs directly over block '{own_a}''s own "
+                            f"port '{other_name}' (same facing direction, same "
+                            "drawing layer) -- bussing this net across the block "
+                            "would draw a silent short to that pad's real drawn "
+                            "metal, which extends past its reported width_um "
+                            "footprint in its facing direction; route to a "
+                            "layer_role with a metal2/via stack instead, or wire "
+                            "this net externally"
+                        ),
+                    }
+
             pad_w = other_port.get("width_um")
             if (
                 not isinstance(pad_w, (int, float))
@@ -1388,8 +1452,6 @@ def route_two_pin(
             ):
                 pad_w = width_um  # no reported pad size -- fall back to trace width
             half = float(pad_w) / 2.0 + route_half_um
-            px = float(other_port["x_um"]) + own_offset["x"]
-            py = float(other_port["y_um"]) + own_offset["y"]
             pad_bbox_um = {
                 "x0": px - half,
                 "y0": py - half,

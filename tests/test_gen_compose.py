@@ -1864,6 +1864,77 @@ def test_compose_self_net_pad_crossing_ignores_ports_on_a_different_layer(
     assert report["nets"][0]["route_length_um"] > 0
 
 
+@pytest.mark.parametrize("width_um", [0.22, 0.25, 0.3])
+def test_compose_rejects_self_net_same_row_same_direction_pair(
+    tmp_path, pdk_root, width_um
+):
+    # #453: the #439 pad-crossing check modelled each other port as a square of
+    # its *reported* width_um, inflated by the route half-width. For an array
+    # unit's base-tie pad that badly under-estimates the real drawn metal in the
+    # pad's facing direction, so a self-net between two SAME-ROW, SAME-DIRECTION
+    # (both north-facing) emitter ports sandwiching that base pad -- exactly the
+    # issue's 8-unit common_centroid bjt_array reproduction (Q4_E<-Q0_E with
+    # Q4_B between them) -- composed `routed: true` and DRC-clean while actually
+    # shorting the array's shared base node into the emitter net. It reproduced
+    # for every route width >= the pad's reported width_um (0.22um): the jog is
+    # lifted only one stub width, so a wider route clears the under-sized
+    # reported square yet still plows through the pad's real drawn metal. The
+    # conservative same-direction check must reject it at all such widths.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        emitter_um=0.68,
+        rows=2,
+        cols=4,
+        dummy=1,
+        ratio=8,
+        topology="common_centroid",
+        add_collector_ring=False,
+    )
+    output = tmp_path / "pnp_bus.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS",
+                    "pins": [
+                        {"block": "arr", "port": "Q4_E"},
+                        {"block": "arr", "port": "Q0_E"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": width_um},
+            "options": {"cell_name": "pnp_bus", "output": str(output)},
+        }
+    )
+
+    # The crossing self-net must not compose as routed -- before #453 this
+    # returned routed: true (a silent short to the intervening Q4_B base pad).
+    assert output.is_file()
+    assert report["unrouted_nets"] == ["EBUS"]
+    assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["route_length_um"] is None
+    # The explanatory note names the crossed intervening base pad.
+    assert any(
+        "EBUS" in note and "Q4_B" in note for note in report["drc_hints"]["notes"]
+    )
+
+    # routed: false means no metal path was drawn for the net -- the short the
+    # issue describes never gets a chance to be drawn on the route layer.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("pnp_bus")
+    li1 = layout.layer(67, 20)
+    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+
+
 # --------------------------------------------------------------------------- #
 # CLI: `klt gen-compose`
 # --------------------------------------------------------------------------- #
