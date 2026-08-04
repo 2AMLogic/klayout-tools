@@ -1437,6 +1437,216 @@ def test_top_cell_pins_request_field_keeps_subcell_label_internal(tmp_path):
     assert scoped["counts"]["pins"]["layout"] == default["counts"]["pins"]["layout"] - 1
 
 
+def _write_flat_inverter_gds(path: Path) -> str:
+    """Same layout as ``_write_hier_inverter_gds`` but with the gate ``A``
+    label drawn directly in the top cell (not inside an instanced
+    sub-cell) -- exercises the per-*net* declared-pin-set mechanism (issue
+    #514), which is orthogonal to ``top_cell_pins``'s per-*cell* one and
+    applies even when interface and internal labels all live at the same
+    hierarchy level (the natural shape of a hand-drawn overlay)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff (nmos active)
+    draw(65, 20, kdb.Box(0, 2000, 2000, 3000))  # diff (pmos active)
+    draw(64, 20, kdb.Box(-500, 1500, 2500, 3500))  # nwell
+    draw(66, 20, kdb.Box(800, -200, 1200, 3200))  # poly (shared gate bar)
+    for y0 in (0, 2000):
+        draw(66, 44, kdb.Box(100, y0 + 300, 300, y0 + 700))  # licon (S)
+        draw(66, 44, kdb.Box(1700, y0 + 300, 1900, y0 + 700))  # licon (D)
+        draw(67, 20, kdb.Box(0, y0 + 200, 400, y0 + 800))  # li1 (S)
+        draw(67, 20, kdb.Box(1600, y0 + 200, 2000, y0 + 800))  # li1 (D)
+    draw(66, 44, kdb.Box(900, 1400, 1100, 1600))  # gate licon
+    draw(67, 20, kdb.Box(850, 1350, 1150, 1650))  # gate li1
+
+    label(67, 5, "VGND", 200, 500)
+    label(67, 5, "Y", 1800, 500)
+    label(67, 5, "VPWR", 200, 2500)
+    label(67, 5, "Y", 1800, 2500)
+    label(67, 5, "A", 1000, 1500)  # drawn directly in the top cell
+
+    draw(65, 44, kdb.Box(-400, 2400, -200, 2600))  # tap (nwell tap)
+    draw(66, 44, kdb.Box(-380, 2450, -220, 2550))  # licon over tap
+    draw(67, 20, kdb.Box(-450, 2400, -150, 2600))  # li1 over tap
+    label(64, 5, "VPB", -300, 2500)
+
+    layout.write(str(path))
+    return str(path)
+
+
+def test_declared_pins_request_field_keeps_undeclared_label_internal(tmp_path):
+    """Issue #514: `layout.declared_pins` threads through inline extraction so
+    a net named by a label drawn directly in the top cell -- not below any
+    instance boundary, so `top_cell_pins` (issue #291) cannot help -- stays
+    internal when it is not in the declared set. The layout-side pin count
+    drops by exactly the one demoted gate pin (`A`).
+
+    (Declaring the pin set also demotes the synthesized substrate global
+    (`vsubs`) if it is omitted -- unlike `top_cell_pins`, which never
+    touches a `connect_global` net, `declared_pins` treats every promoted
+    pin name uniformly, so a caller must include supply/global net names
+    too if they are meant to stay interface pins. Both fixtures below
+    include `vsubs` for that reason.)"""
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+
+    def _run(declared_pins: list[str] | None) -> dict:
+        request = {
+            "layout": {"file": gds, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        }
+        if declared_pins is not None:
+            request["layout"]["declared_pins"] = declared_pins
+        return run_lvs(_write_request(tmp_path / "request.json", request))
+
+    default = _run(None)
+    scoped = _run(["VGND", "VPWR", "VPB", "Y", "vsubs"])  # omit "A"
+
+    assert scoped["counts"]["pins"]["layout"] == default["counts"]["pins"]["layout"] - 1
+
+
+def test_declared_pins_empty_list_raises(tmp_path):
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": gds, "deck": "sky130", "declared_pins": []},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    with pytest.raises(LvsError, match="must not be empty"):
+        run_lvs(path)
+
+
+def test_declared_pins_wrong_type_raises(tmp_path):
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "file": gds,
+                "deck": "sky130",
+                "declared_pins": "VGND,VPWR",  # must be a list, not a string
+            },
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    with pytest.raises(LvsError, match="must be a list of net name strings"):
+        run_lvs(path)
+
+
+def _write_series_resistor_gds(path: Path) -> str:
+    """Two sky130 drawn poly resistors (`res_generic_po`) wired in series
+    through one interior tap, labelled purely for documentation -- issue
+    #514's motivating scenario in miniature: a schematic that models this as
+    a *single* lumped resistor, drawn as a chain with a human-meaningful
+    interior node (the tap ladder repro's shape, minimised to two segments).
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("RSTRING")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    poly, marker, contact, metal, metal_label = (
+        (66, 20),  # poly.drawing
+        (66, 13),  # poly.res
+        (66, 44),  # licon1.drawing
+        (67, 20),  # li1.drawing
+        (67, 5),  # li1.pin
+    )
+
+    # Segment 1: RA -- (marked 6um resistor body) -- interior tap.
+    draw(*poly, kdb.Box(0, 0, 12000, 1000))
+    draw(*marker, kdb.Box(3000, 0, 9000, 1000))
+    draw(*contact, kdb.Box(1400, 400, 1600, 600))
+    draw(*metal, kdb.Box(1100, 200, 1900, 800))
+    label(*metal_label, "RA", 1500, 500)
+    draw(*contact, kdb.Box(10400, 400, 10600, 600))
+    # One continuous li1 strip spans both segments' inner contacts, merging
+    # them into a single interior net -- labelled "TAP" for documentation.
+    draw(*metal, kdb.Box(10100, 200, 14900, 800))
+    label(*metal_label, "TAP", 12500, 500)
+
+    # Segment 2: interior tap -- (marked 6um resistor body) -- RB.
+    draw(*poly, kdb.Box(13000, 0, 25000, 1000))
+    draw(*marker, kdb.Box(16000, 0, 22000, 1000))
+    draw(*contact, kdb.Box(14400, 400, 14600, 600))
+    draw(*contact, kdb.Box(23400, 400, 23600, 600))
+    draw(*metal, kdb.Box(23100, 200, 23900, 800))
+    label(*metal_label, "RB", 23500, 500)
+
+    layout.write(str(path))
+    return str(path)
+
+
+#: Two 289.2-ohm (6 squares * 48.2 ohm/sq) `res_generic_po` segments folded
+#: into the single 578.4-ohm lumped resistor the reference schematic models.
+_SERIES_RESISTOR_GDS_REFERENCE_SPICE = """
+.subckt rstring RA RB
+R1 RA RB 578.4
+.ends
+"""
+
+
+def test_declared_pins_unblocks_combine_devices_for_labelled_internal_tap(tmp_path):
+    """End-to-end reproduction of issue #514's motivating scenario. Without
+    `declared_pins`, the interior tap's documentation label promotes it to a
+    top-level pin `options.combine_devices` will not fold through, so the
+    two drawn resistor segments stay two separate layout-side devices.
+    Declaring only the real interface (`RA`, `RB`) keeps the tap's *name*
+    (still in `nets[]`/the written netlist) but demotes it to an internal
+    net -- which is exactly what lets `combine_devices` fold the chain into
+    a single device, without deleting the tap label. (The reference here is
+    a plain hand-written SPICE `R` card, which `NetlistSpiceReader` always
+    classes as generic `RES` -- a device-class-naming mismatch against the
+    deck's own `res_generic_po` class that is orthogonal to this issue, so
+    this asserts the fold itself via `counts.devices.layout`, not full
+    `status: "match"`; see `test_declared_pins_request_field_keeps_
+    undeclared_label_internal` above for a `status`-level assertion on the
+    pin-demotion mechanism itself.)"""
+    gds = _write_series_resistor_gds(tmp_path / "rstring.gds")
+    reference_path = _write(
+        tmp_path / "ref.spice", _SERIES_RESISTOR_GDS_REFERENCE_SPICE
+    )
+
+    def _run(declared_pins: list[str] | None) -> dict:
+        request = {
+            "layout": {"file": gds, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": "rstring"},
+            "options": {"combine_devices": True},
+        }
+        if declared_pins is not None:
+            request["layout"]["declared_pins"] = declared_pins
+        return run_lvs(_write_request(tmp_path / "request.json", request))
+
+    without_declared_pins = _run(None)
+    assert without_declared_pins["counts"]["devices"]["layout"] == 2
+
+    with_declared_pins = _run(["RA", "RB"])
+    assert with_declared_pins["counts"]["devices"]["layout"] == 1
+    assert with_declared_pins["counts"]["devices"]["reference"] == 1
+
+
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
     PMOS well-tap layer either (`Comp` is shared with ordinary active,

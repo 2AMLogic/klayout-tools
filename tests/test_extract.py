@@ -657,6 +657,155 @@ def test_subcell_label_kept_internal_with_top_cell_pins(tmp_path):
     assert any("A" in w for w in report["warnings"])
 
 
+# --------------------------------------------------------------------------- #
+# Declared pin set (issue #514)
+# --------------------------------------------------------------------------- #
+
+
+def test_declared_pins_none_default_is_unchanged(tmp_path):
+    """Omitted `declared_pins` (the default) is byte-for-byte identical to
+    today's behaviour -- same invariant `--top-cell-pins`'s own default
+    preserves (issue #514)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    explicit_none = run_extract(
+        path, "sky130", output=str(tmp_path / "none.spice"), declared_pins=None
+    )
+
+    base_pins = {n["name"] for n in base["nets"] if n["pin"]}
+    explicit_pins = {n["name"] for n in explicit_none["nets"] if n["pin"]}
+    assert base_pins == explicit_pins
+    assert base["pin_count"] == explicit_none["pin_count"]
+    assert not any("declared pin set" in w for w in explicit_none["warnings"])
+
+
+def test_declared_pins_matching_every_label_is_unaffected(tmp_path):
+    """Declaring exactly the set of nets already promoted is a no-op: every
+    pin stays a pin, and no demotion warning fires."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    base = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+    base_pins = {n["name"] for n in base["nets"] if n["pin"]}
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "declared.spice"),
+        declared_pins=frozenset(base_pins),
+    )
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert pins == base_pins
+    assert not any("declared pin set" in w for w in report["warnings"])
+
+
+def test_declared_pins_demotes_undeclared_labelled_net(tmp_path):
+    """The core regression (issue #291's motivating scenario, made per-net):
+    a net named by a label drawn directly in the top cell -- not below any
+    instance boundary, so `--top-cell-pins` cannot help -- is demoted to an
+    internal node when it is not in the declared pin set. This is the fix
+    for labelling an internal node of a lumped schematic device purely for
+    documentation without it silently becoming a top-level pin."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "declared.spice"),
+        declared_pins=frozenset({"VGND", "VPWR", "VPB", "Y"}),  # omit "A"
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+
+    # "A" keeps its name (still a real, findable net)...
+    assert "A" in net_names
+    # ...but is no longer a top-level pin.
+    assert "A" not in pins
+    # The declared interface is untouched.
+    assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
+    warning = next((w for w in report["warnings"] if "declared pin set" in w), None)
+    assert warning is not None
+    assert "A" in warning
+
+
+def test_declared_pins_unmatched_name_warns(tmp_path):
+    """A declared pin name that matches no promoted net is reported in
+    `warnings`, not silently ignored (a likely typo)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "declared.spice"),
+        declared_pins=frozenset({"VGND", "VPWR", "VPB", "Y", "A", "NOPE"}),
+    )
+
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    # Every declared name that *does* match stays a pin -- nothing demoted.
+    assert {"VGND", "VPWR", "VPB", "Y", "A"}.issubset(pins)
+    warning = next((w for w in report["warnings"] if "matched no promoted" in w), None)
+    assert warning is not None
+    assert "NOPE" in warning
+
+
+def test_declared_pins_applied_after_top_cell_pins_only(tmp_path):
+    """`declared_pins` is applied *after* `top_cell_pins_only`'s own
+    reconciliation, and can only further restrict -- it never re-promotes a
+    net `top_cell_pins_only` already kept internal."""
+    path = _write_gds(
+        _make_inverter_layout(a_label_in_subcell=True), tmp_path / "hier.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "hier.spice"),
+        top_cell_pins_only=True,
+        # Declares "A" as wanted -- but it was already demoted by
+        # top_cell_pins_only (a below-top label), so it must stay internal.
+        declared_pins=frozenset({"VGND", "VPWR", "VPB", "Y", "A"}),
+    )
+
+    net_names = {n["name"] for n in report["nets"]}
+    pins = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "A" in net_names
+    assert "A" not in pins
+    assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
+
+
+def test_cli_pins_flag_demotes_undeclared_label(tmp_path, capsys):
+    """The `--pins` flag wires through the CLI: a top-cell-drawn label ("A")
+    absent from the declared set is not promoted to a top-level pin, while
+    the declared interface is preserved (issue #514)."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--pins",
+            "VGND,VPWR,VPB,Y",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    pins = {n["name"] for n in out["nets"] if n["pin"]}
+    assert "A" not in pins
+    assert "A" in {n["name"] for n in out["nets"]}  # name kept
+    assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
+
+
+def test_cli_pins_flag_empty_after_parsing_errors(tmp_path, capsys):
+    """`--pins` given but containing no non-empty token is a clear
+    application error, not a silent no-op."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    exit_code = main(
+        ["extract", path, "--deck", "sky130", "--pins", " , ,", "--format", "json"]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "no non-empty name" in err["error"]["message"]
+
+
 def test_default_output_path_replaces_extension(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     report = run_extract(path, "sky130")

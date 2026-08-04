@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -50,6 +50,15 @@ two disagree, this document (and the code) win.
   an unexpected pin count. A flat layout (no instances), or any layout whose
   pin labels all live in the top cell, is byte-for-byte unchanged. See
   "Top-cell-only pin promotion" below.
+- `--pins` — optional, unset by default. Comma-separated declared pin set
+  (e.g. `A,B,VDD,VSS`) — a per-*net* interface declaration, orthogonal to
+  `--top-cell-pins`'s per-*cell* one (issue #514). Every named net not in
+  this set keeps its name but is demoted to an internal node instead of
+  being promoted to a top-level pin — use this to name an internal node of
+  a lumped schematic device (e.g. one tap of a metal-option ladder) for
+  documentation without blocking `klt lvs`'s `options.combine_devices` from
+  folding the series chain. When unset, every named net still promotes to a
+  pin, byte-for-byte unchanged. See "Declared pin set" below.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -710,6 +719,36 @@ A flat layout (no instances), or any layout whose pin labels all live in the top
 cell, has an empty below-top set: `--top-cell-pins` is then a no-op and no
 warning fires. `klt lvs` exposes the same control as the `layout.top_cell_pins`
 request field (see [`docs/cli/lvs.md`](lvs.md)).
+
+## Declared pin set (`--pins`, #514)
+
+`--top-cell-pins` filters labels by **which cell** they were drawn in — the
+right axis when interface and internal labels live at different hierarchy
+levels. It does nothing when they are all drawn in the same cell, which is
+the normal shape for a hand-routed overlay: naming an **internal node** of a
+lumped schematic device (e.g. one tap of a metal-option ladder the reference
+netlist models as a single series device, wired for documentation) still
+promotes it to a top-level pin. A pinned internal node blocks `klt
+lvs`'s `options.combine_devices` from folding the series chain through it —
+the reference's one device becomes several unpairable extracted devices, and
+`klt lvs` reports `device.unmatched` mismatches whose cause is not otherwise
+attributed anywhere in the report.
+
+`--pins A,B,VDD,VSS` (a comma-separated list of net names) declares the
+**intended interface** explicitly, per net rather than per cell: every named
+net **not** in the declared set keeps its name (still visible in the written
+SPICE and in `nets[]`) but is demoted to an internal node instead of being
+promoted to a pin. A declared name that matches no promoted net is reported
+in `warnings` rather than silently ignored (a likely typo). Applied *after*
+`--top-cell-pins`'s own reconciliation — it can only further restrict the
+promoted set, never re-promote a net `--top-cell-pins` already kept
+internal.
+
+Omitting `--pins` (the default) skips this reconciliation entirely: every
+named net still promotes to a pin, byte-for-byte identical to extraction
+before this flag existed. `klt lvs` exposes the same control as the
+`layout.declared_pins` request field (a JSON array of net name strings —
+see [`docs/cli/lvs.md`](lvs.md)).
 
 ## PDK resolution
 

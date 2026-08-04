@@ -20,8 +20,30 @@ from ..extract import ExtractError, run_extract
 from .output import emit_error, emit_success
 
 
+def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
+    """Parse the ``--pins`` flag's comma-separated value (issue #514) into a
+    ``frozenset`` of declared pin names, or ``None`` when the flag was
+    omitted entirely (skips the declared-pin-set reconciliation).
+
+    Raises :class:`ExtractError` if the flag was given but every
+    comma-separated token is blank (e.g. ``--pins ""`` or ``--pins ,,``) --
+    a likely mistake, not a meaningful "declare zero pins" request.
+    """
+    if raw is None:
+        return None
+    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    if not names:
+        raise ExtractError(
+            "--pins was given but contains no non-empty name "
+            f"(got {raw!r}) -- pass a comma-separated list of net names, "
+            "e.g. --pins A,B,VDD,VSS"
+        )
+    return names
+
+
 def run(args: argparse.Namespace) -> int:
     try:
+        declared_pins = _parse_declared_pins(args.pins)
         report = run_extract(
             args.file,
             args.deck,
@@ -31,6 +53,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             parasitics=args.parasitics,
             top_cell_pins_only=args.top_cell_pins,
+            declared_pins=declared_pins,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
