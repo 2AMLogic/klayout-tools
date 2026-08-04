@@ -294,3 +294,88 @@ eval`'s descriptor with an explicit threshold, the same mechanism
   backend (e.g. a Siemens tool) is an additive enum value and a new glue
   module, never a contract-shape change — but only `"openroad"` is
   implemented today.
+
+## Fleet evaluation of digital candidates (Epic #391 Phase 6)
+
+`klt sim`'s `remote`/fleet-sharding backend (see [`docs/cli/sim.md`](sim.md)'s
+"Remote backend"/"Fleet sharding" sections, Epic #375) provisions and
+schedules a **corner-shaped** unit of work — many lightweight ngspice runs
+packed several per host. A digital design-space-exploration run wants the
+opposite shape: **one candidate evaluation** (one complete
+synthesis→[functional-verification]→place-and-route pipeline run at one
+design-space point — a synthesis-strategy / floorplan / P&R-seed
+combination) wanting ~1 whole host, never several packed per host. Rather
+than build a second scheduler, Epic #391 Phase 6
+([#445](https://github.com/2AMLogic/klayout-tools/issues/445), decision
+record
+[`docs/design/digital-fleet-unit-abstraction-decision.md`](../design/digital-fleet-unit-abstraction-decision.md))
+extends #375's own fleet scheduler (`remote_fleet.py`/`remote_launcher.py`/
+`remote_transport.py`, all **unchanged**) with two new pieces, living beside
+it in `src/klayout_tools/digital_fleet.py`:
+
+- **Digital-specific instance sizing**
+  (`digital_fleet.select_digital_instance_type`/`digital_fleet_sizing`) — a
+  fixed/configurable instance tier per PDK (or an explicit design-size-proxy
+  override), never the corner-shaped `unit_count * threads_per_corner`
+  formula `klt sim`'s fleet uses. `digital_fleet_sizing(hosts=..., pdk=...)`
+  returns a `(shard_unit_counts, threads_per_corner)` pair that plugs
+  straight into `remote_fleet.FleetLauncher`/`run_fleet`'s own **unmodified**
+  constructor arguments — `shard_unit_counts` is always `[1] * hosts` (`m ~=
+  1`: each shard is sized for one candidate's own compute footprint, however
+  many candidates it ends up evaluating serially).
+- **A digital-specific `JobDescription` builder + candidate-ranking merge
+  step** (`digital_fleet.build_digital_job_description`,
+  `digital_fleet.merge_candidate_results`/`rank_candidates`) — the same role
+  `sim.py`'s `_build_remote_job_description` plays for `klt sim`'s own fleet
+  use. One `DigitalCandidate` (RTL sources, `hdl_toplevel`, `pdk`,
+  `floorplan`, `seed`, and an optional `DigitalVerification` step) becomes
+  one `remote_transport.JobDescription` that uploads the RTL (+ testbench,
+  when given) and runs `klt synthesize` → [`klt functional-verification`] →
+  `klt place-and-route`, composed as a single `klt eval` descriptor (see
+  [`docs/cli/eval.md`](eval.md), issue #387) so the pipeline's
+  gate/objective/metrics envelope is produced by the existing `eval.py`
+  orchestration rather than reimplemented here. `merge_candidate_results`
+  flattens every shard's `ShardOutcome` into one `CandidateResult` per
+  candidate (an errored/lost shard reports every candidate it was assigned
+  as `status="error"`, mirroring `klt sim`'s own lost-shard convention), and
+  `rank_candidates` orders the scoreable ones best-first by their declared
+  `objective.polarity` — unscoreable candidates sort last, never dropped.
+
+`digital_fleet.make_digital_shard_runner` builds a concrete
+`remote_fleet.ShardRunner` (`(shard_index, launcher, public_ip) -> Any`)
+from a list of candidates per shard, using the same push/run/pull/cleanup
+transport `sim.py`'s single-host `_run_remote` uses — proving the sizing
+function and the `JobDescription` builder genuinely compose with
+`remote_fleet.run_fleet`'s existing contract, not just in theory:
+
+```python
+from klayout_tools import digital_fleet as df
+from klayout_tools import remote_fleet as rf
+
+candidates_by_shard = [[candidate_a], [candidate_b], [candidate_c]]
+shard_unit_counts, threads_per_corner = df.digital_fleet_sizing(
+    hosts=len(candidates_by_shard), pdk="sky130A"
+)
+shard_runner = df.make_digital_shard_runner(
+    candidates_by_shard, ssh_user="ubuntu", ssh_key_path="~/.ssh/my-key.pem"
+)
+
+fleet_result = rf.run_fleet(
+    region="us-east-1",
+    pdk="sky130A",
+    shard_unit_counts=shard_unit_counts,
+    threads_per_corner=threads_per_corner,
+    shard_runner=shard_runner,
+    launcher_cidr="203.0.113.4/32",
+    key_name="my-ec2-keypair",
+)
+
+results = df.merge_candidate_results(fleet_result, candidates_by_shard)
+ranked = df.rank_candidates(results)  # best candidate first
+```
+
+**No `klt` CLI verb yet.** This is a library-level extension of the fleet
+scheduler, not a new `--backend remote`/`--hosts` flag on `klt synthesize`/
+`klt place-and-route` (neither accepts one today) — an orchestrator (a
+design-space-exploration loop, or a future CLI verb) drives `digital_fleet`
+directly, the way the snippet above does.
