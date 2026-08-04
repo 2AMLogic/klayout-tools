@@ -61,6 +61,16 @@ acceptance data keyed on `category_counts`), key that pin off the shared
 fields below — not `klt --version` — until `klt` reaches `1.0` and this
 caveat is retired.
 
+This caveat is narrow: it covers a field's *value set* growing (a new enum
+member appearing), not what an existing, unchanged-type field's value
+*means*. Redefining the semantics of an already-shipped field — e.g. `klt
+precheck`'s `layer_whitelist[].shapes` moving from "summed once per cell
+definition" to "weighted by placement multiplicity across the full cell
+hierarchy" (issue #452) — is a breaking change and does earn a
+`schema_version` bump on that command, even though the field's name and
+JSON type (`integer`) never changed. See `docs/cli/precheck.md` for that
+concrete precedent.
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule

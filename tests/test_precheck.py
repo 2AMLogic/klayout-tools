@@ -44,7 +44,7 @@ def test_run_precheck_all_checks_present_and_pass_on_clean_layout(tmp_path):
 
     report = run_precheck(path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == path
     assert report["dbu_um"] == 0.001
     assert report["status"] == "pass"
@@ -297,6 +297,87 @@ def test_layer_whitelist_passes_when_every_layer_is_allowed(tmp_path):
     assert whitelist["status"] == "pass"
 
 
+def _hierarchical_layout(
+    *, leaf_shapes: int, leaf_per_mid: int, mid_per_top: int
+) -> kdb.Layout:
+    """A three-level hierarchy: TOP places MID ``mid_per_top`` times (as a
+    1-D array), and each MID places LEAF ``leaf_per_mid`` times (as a 1-D
+    array); LEAF itself draws ``leaf_shapes`` shapes on layer 66/20. True
+    placed-shape prevalence for that layer is
+    ``leaf_shapes * leaf_per_mid * mid_per_top`` -- multiplicities compose
+    *multiplicatively* along the hierarchy, not additively.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    mid = layout.create_cell("MID")
+    leaf = layout.create_cell("LEAF")
+    poly = layout.layer(66, 20)
+    layout.set_info(poly, kdb.LayerInfo(66, 20, "poly.drawing"))
+    for i in range(leaf_shapes):
+        leaf.shapes(poly).insert(kdb.Box(i * 10, 0, i * 10 + 5, 5))
+
+    identity = kdb.Trans(kdb.Point(0, 0))
+    mid.insert(
+        kdb.CellInstArray(
+            leaf.cell_index(),
+            identity,
+            kdb.Vector(100, 0),
+            kdb.Vector(0, 0),
+            leaf_per_mid,
+            1,
+        )
+    )
+    top.insert(
+        kdb.CellInstArray(
+            mid.cell_index(),
+            identity,
+            kdb.Vector(0, 100),
+            kdb.Vector(0, 0),
+            mid_per_top,
+            1,
+        )
+    )
+    return layout
+
+
+def test_layer_whitelist_shapes_weighted_by_single_level_placement_count(tmp_path):
+    """A leaf cell placed multiple times inside the top cell contributes its
+    own-shape count once per placement, not once total (issue #452)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    leaf = layout.create_cell("LEAF")
+    poly = layout.layer(66, 20)
+    layout.set_info(poly, kdb.LayerInfo(66, 20, "poly.drawing"))
+    leaf.shapes(poly).insert(kdb.Box(0, 0, 5, 5))
+    identity = kdb.Trans(kdb.Point(0, 0))
+    top.insert(
+        kdb.CellInstArray(
+            leaf.cell_index(), identity, kdb.Vector(100, 0), kdb.Vector(0, 0), 7, 1
+        )
+    )
+    path = _write(layout, tmp_path)
+
+    report = run_precheck(path, allowed_layers=[(65, 20)])  # excludes 66/20
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+
+    assert whitelist["violations"][0]["shapes"] == 7
+
+
+def test_layer_whitelist_shapes_compose_multiplicatively_across_nested_hierarchy(
+    tmp_path,
+):
+    """Nested placement multiplicities multiply along the hierarchy: a leaf
+    placed 3 times inside a mid cell that is itself placed 5 times inside
+    the top cell is placed 15 times overall (not 3 + 5 = 8) (issue #452)."""
+    layout = _hierarchical_layout(leaf_shapes=2, leaf_per_mid=3, mid_per_top=5)
+    path = _write(layout, tmp_path)
+
+    report = run_precheck(path, allowed_layers=[(65, 20)])  # excludes 66/20
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+
+    assert whitelist["violations"][0]["shapes"] == 2 * 3 * 5
+
+
 # ---------------------------------------------------------------------------
 # pin_labels_over_drawing
 # ---------------------------------------------------------------------------
@@ -424,7 +505,7 @@ def test_json_contract(tmp_path, capsys):
         "checks",
         "provenance",
     }
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["status"] == "fail"
     assert data["check_count"] == len(CHECK_NAMES)
 
@@ -587,7 +668,7 @@ def test_openroad_gcd_fixture_runs_full_check_battery():
     cleanly against thousands of instances and real routing-layer usage."""
     report = run_precheck(str(PLACE_AND_ROUTE_GDS), grid_um=0.005, deck="sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(PLACE_AND_ROUTE_GDS)
     assert report["check_count"] == len(CHECK_NAMES)
     assert [c["name"] for c in report["checks"]] == list(CHECK_NAMES)
@@ -606,3 +687,63 @@ def test_openroad_gcd_fixture_runs_full_check_battery():
     # characters -- KLayout's own DEF->GDS merge and the sky130 standard-cell
     # library views are both well-formed by construction.
     assert report["status"] == "pass"
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+def test_openroad_gcd_fixture_layer_whitelist_shapes_match_placed_prevalence():
+    """Regression test for issue #452: `layer_whitelist.shapes` on this real,
+    hierarchical, multi-instance sky130_fd_sc_hd macro must match true
+    placed-shape prevalence (weighted by placement count across the full
+    hierarchy), not the per-cell-*definition* count `layout.each_cell()`
+    would give without weighting -- which under-reports by roughly two
+    orders of magnitude on macro-scale input (issue #452's own example: a
+    layer drawn 800 times across 320 placements reported "shapes": 10).
+
+    Cross-checked against an independent oracle,
+    ``Cell.begin_shapes_rec()`` (a recursive shape *iterator* that visits
+    each placed shape once per instantiation without materializing/copying
+    geometry -- unlike a full flatten), for every reported layer.
+    """
+    layout = kdb.Layout()
+    layout.read(str(PLACE_AND_ROUTE_GDS))
+    top = layout.top_cell()
+
+    # A whitelist excluding every real layer used by this fixture forces
+    # every layer present to appear in the violations list with its shape
+    # count, giving full coverage for the cross-check below.
+    report = run_precheck(str(PLACE_AND_ROUTE_GDS), allowed_layers=[(0, 0)])
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+    assert whitelist["status"] == "fail"
+    assert whitelist["violations"], "fixture should use at least one real layer"
+
+    under_reported_by_old_semantics = False
+    for violation in whitelist["violations"]:
+        layer, datatype = (int(part) for part in violation["layer"].split("/"))
+        layer_index = layout.layer(layer, datatype)
+
+        oracle_count = 0
+        it = top.begin_shapes_rec(layer_index)
+        while not it.at_end():
+            oracle_count += 1
+            it.next()
+
+        assert violation["shapes"] == oracle_count, (
+            f"layer {violation['layer']}: reported {violation['shapes']} != "
+            f"true placed-shape count {oracle_count}"
+        )
+
+        # The pre-#452 semantics summed each cell *definition*'s own shape
+        # count exactly once, ignoring how many times it was placed.
+        per_definition_count = sum(
+            cell.shapes(layer_index).size() for cell in layout.each_cell()
+        )
+        if per_definition_count != violation["shapes"]:
+            under_reported_by_old_semantics = True
+
+    # Confirms this fixture actually exercises the bug: at least one real
+    # layer's placement-weighted count differs from what the old,
+    # per-definition-only semantics would have reported.
+    assert under_reported_by_old_semantics
