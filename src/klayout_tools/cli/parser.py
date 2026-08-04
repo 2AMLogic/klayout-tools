@@ -641,6 +641,40 @@ def create_parser() -> argparse.ArgumentParser:
         default="text",
         help="output format (default: text)",
     )
+    eval_parser.add_argument(
+        "--trajectory-log",
+        default=None,
+        help=(
+            "append this evaluation as one record to an optimization "
+            "trajectory JSONL log (#388) -- requires --turn and "
+            "--candidate-ref; see docs/cli/eval.md"
+        ),
+    )
+    eval_parser.add_argument(
+        "--turn",
+        type=int,
+        default=None,
+        help="the evaluation/iteration index for --trajectory-log's record",
+    )
+    eval_parser.add_argument(
+        "--candidate-ref",
+        default=None,
+        help="a path or identifier for this candidate, for --trajectory-log's record",
+    )
+    eval_parser.add_argument(
+        "--description",
+        default=None,
+        help="a human note for --trajectory-log's record (optional)",
+    )
+    eval_parser.add_argument(
+        "--wall-clock-s",
+        type=float,
+        default=None,
+        help=(
+            "wall-clock seconds this evaluation took, for "
+            "--trajectory-log's record (optional)"
+        ),
+    )
     eval_parser.set_defaults(func=eval_cmd.run)
 
     gen_parser = subparsers.add_parser(

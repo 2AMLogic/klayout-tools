@@ -8,6 +8,8 @@ turns without hand-rolling that reconciliation itself.
 
 ```
 klt eval <descriptor> [--candidate <candidate>] [--format text|json]
+         [--trajectory-log <path> --turn <int> --candidate-ref <ref>
+          [--description <text>] [--wall-clock-s <seconds>]]
 ```
 
 - `<descriptor>` — a descriptor document (see "Descriptor" below), in any of
@@ -20,6 +22,15 @@ klt eval <descriptor> [--candidate <candidate>] [--format text|json]
   below), same three forms. Omit when the descriptor's `args` need no
   `${name}` substitution.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `--trajectory-log` / `--turn` / `--candidate-ref` / `--description` /
+  `--wall-clock-s` — optionally append this evaluation as one record to an
+  [optimization trajectory](trajectory.md) JSONL log (#388), in the same
+  invocation that scores it (issue #437). `--trajectory-log` requires both
+  `--turn` and `--candidate-ref`; `--description`/`--wall-clock-s` are
+  optional record fields. This is a side effect on top of the documented
+  JSON contract below (the response envelope's own shape is unchanged),
+  matching `klt trajectory --plot`'s existing "write a file as a courtesy,
+  independent of `--format`" precedent. See "Trajectory logging" below.
 
 `klt eval` is **pure orchestration**: it imports and calls the existing
 library entry points behind `klt drc`/`klt lvs`/`klt sim`/`klt
@@ -243,12 +254,42 @@ pass a literal `"${name}"` string to the underlying check.**
 | `exit_code` | integer | The exit code the cited `check` would itself have returned for this report (e.g. `3` for a `drc` gate with violations) — `0` for a threshold-derived gate (the underlying check itself ran and reported successfully; the threshold comparison, not that check's own exit-code vocabulary, produced `status`). Lets a human debugging a `valid: false` run trace it back to the specific `klt <check>` invocation and outcome. |
 | `count` | integer \| number | Present when the underlying check (or threshold) has a natural headline count/value: `violation_count` for `drc`, `mismatch_count` for `lvs`, failed/errored corner count for `sim`, the threshold's extracted metric value for a threshold-derived gate. Absent otherwise. |
 
+## Trajectory logging
+
+`--trajectory-log <path> --turn <int> --candidate-ref <ref>` (issue #437)
+appends this evaluation to an [optimization trajectory](trajectory.md)
+JSONL log (#388) as one record, in the same invocation that produces the
+scored-gate verdict above — so a shell-driven optimizer loop scores *and*
+logs a turn with one `klt eval` call:
+
+```
+klt eval descriptor.json --candidate candidate.json \
+  --trajectory-log run.jsonl --turn 42 \
+  --candidate-ref candidates/turn-042/layout.gds \
+  --description "swapped the modulo divider for shift-subtract"
+```
+
+The record is built by `klayout_tools.trajectory.record_from_eval`: the
+response's own `objective` is carried through verbatim, and `gates[]`
+collapses to the record schema's lighter `gate_results`
+(`{"check", "status"}` per entry — see [`docs/cli/trajectory.md`](trajectory.md)
+for the full record schema). `--description`/`--wall-clock-s` are optional
+and map directly to the record's own fields of the same name.
+
+This is a **side effect on top of the documented JSON contract** — the
+response envelope above is unchanged either way, matching
+`klt trajectory --plot`'s existing "write a file as a courtesy, independent
+of `--format`" precedent. `--trajectory-log` without both `--turn` and
+`--candidate-ref` is an application error (exit `1`), and a log-append
+failure (e.g. an unwritable path) is also exit `1` — an optimizer must never
+read a scored, but unlogged, turn as if it had been recorded.
+
 ## Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
 | `0` | Ran, `valid: true`. |
-| `1` | Failed to run at all — bad/missing descriptor or candidate, an unknown `check` name, a descriptor referencing a candidate key `--candidate` did not provide (unresolvable candidate path), or an underlying `klt` subcommand's own "failed to run" error (bad file, unknown deck, engine error, ...). |
+| `1` | Failed to run at all — bad/missing descriptor or candidate, an unknown `check` name, a descriptor referencing a candidate key `--candidate` did not provide (unresolvable candidate path), an underlying `klt` subcommand's own "failed to run" error (bad file, unknown deck, engine error, ...), `--trajectory-log` given without both `--turn` and `--candidate-ref`, or a `--trajectory-log` write failure. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; `valid: false` (at least one gate's `status` is `"fail"`); the documented payload is still on stdout. |
 

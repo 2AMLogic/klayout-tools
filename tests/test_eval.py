@@ -1085,6 +1085,104 @@ def test_place_and_route_gate_timing_violation_is_invalid(tmp_path, monkeypatch)
     assert gate["count"] == 3
 
 
+def test_synthesize_check_requires_request_arg(tmp_path):
+    """`synthesize`'s invoke adapter rejects a descriptor that names the check
+    but omits its one required arg, the same way every other check's adapter
+    does -- the failure is an `EvalError` (exit 1), never a silent pass."""
+    descriptor = {
+        "gates": [{"check": "synthesize", "args": {}}],
+        "objective": {"check": "synthesize", "metric": "area_um2", "args": {}},
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    with pytest.raises(EvalError, match="'synthesize' check args require 'request'"):
+        run_eval(path)
+
+
+def test_place_and_route_check_requires_request_arg(tmp_path):
+    """Same missing-`request` guard as `test_synthesize_check_requires_request_arg`
+    above, for `place-and-route`."""
+    descriptor = {
+        "gates": [{"check": "place-and-route", "args": {}}],
+        "objective": {
+            "check": "place-and-route",
+            "metric": "wirelength_um",
+            "args": {},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    with pytest.raises(
+        EvalError, match="'place-and-route' check args require 'request'"
+    ):
+        run_eval(path)
+
+
+def test_synthesize_check_underlying_error_becomes_eval_error(tmp_path, monkeypatch):
+    """A `SynthesizeError` (synthesis failed to run at all) surfaces as an
+    `EvalError` -- exit 1, "failed to run" -- never as a `valid: false` score.
+    An optimizer must not read a crashed turn as a bad-but-real one."""
+    import klayout_tools.eval as eval_module
+    from klayout_tools.synthesize import SynthesizeError
+
+    def _raise(request_path):
+        raise SynthesizeError("liberty not found for deck")
+
+    monkeypatch.setattr(eval_module, "run_synthesize", _raise)
+    (tmp_path / "synth_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {
+                "check": "synthesize",
+                "args": {"request": "synth_request.json"},
+                "threshold": {"metric": "area_um2", "max": 3000},
+            }
+        ],
+        "objective": {
+            "check": "synthesize",
+            "metric": "area_um2",
+            "args": {"request": "synth_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    with pytest.raises(EvalError, match="liberty not found for deck"):
+        run_eval(path)
+
+
+def test_place_and_route_check_underlying_error_becomes_eval_error(
+    tmp_path, monkeypatch
+):
+    """Same "failed to run is exit 1, not a score" posture as
+    `test_synthesize_check_underlying_error_becomes_eval_error` above."""
+    import klayout_tools.eval as eval_module
+    from klayout_tools.place_and_route import PlaceAndRouteError
+
+    def _raise(request_path):
+        raise PlaceAndRouteError("netlist not found: gcd_synth.v")
+
+    monkeypatch.setattr(eval_module, "run_place_and_route", _raise)
+    (tmp_path / "pnr_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {
+                "check": "place-and-route",
+                "args": {"request": "pnr_request.json"},
+                "threshold": {"metric": "worst_slack_ns", "min": 0},
+            }
+        ],
+        "objective": {
+            "check": "place-and-route",
+            "metric": "wirelength_um",
+            "args": {"request": "pnr_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    with pytest.raises(EvalError, match="netlist not found"):
+        run_eval(path)
+
+
 def test_digital_flow_end_to_end_one_verdict_one_trajectory_record(
     tmp_path, monkeypatch
 ):
@@ -1211,3 +1309,168 @@ def test_digital_flow_end_to_end_one_verdict_one_trajectory_record(
         "objective": 5123.4,
     }
     assert "No milestones" in trajectory["markdown"]
+
+
+# --------------------------------------------------------------------------- #
+# CLI: --trajectory-log (issue #437 -- wiring `klt eval` into #388's log)
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_trajectory_log_appends_one_record(tmp_path):
+    from klayout_tools.trajectory import read_log
+
+    block_dir = _write_block(tmp_path, "clean_block", clean=True)
+    descriptor_path = _write_descriptor(tmp_path, _MINIMAL_DESCRIPTOR)
+    log_path = tmp_path / "run.jsonl"
+    candidate_ref = str(block_dir / "layout.gds")
+
+    exit_code = main(
+        [
+            "eval",
+            descriptor_path,
+            "--candidate",
+            _candidate_for(block_dir),
+            "--format",
+            "json",
+            "--trajectory-log",
+            str(log_path),
+            "--turn",
+            "1",
+            "--candidate-ref",
+            candidate_ref,
+            "--description",
+            "first turn",
+            "--wall-clock-s",
+            "3.5",
+        ]
+    )
+
+    assert exit_code == 0
+    records = read_log(str(log_path))
+    assert len(records) == 1
+    (record,) = records
+    assert record["turn"] == 1
+    assert record["candidate_ref"] == candidate_ref
+    assert record["description"] == "first turn"
+    assert record["wall_clock_s"] == 3.5
+    assert record["objective"]["name"] == "cell_count"
+    assert record["gate_results"] == [{"check": "drc", "status": "pass"}]
+
+
+def test_cli_trajectory_log_creates_parent_dirs(tmp_path):
+    from klayout_tools.trajectory import read_log
+
+    block_dir = _write_block(tmp_path, "clean_block", clean=True)
+    descriptor_path = _write_descriptor(tmp_path, _MINIMAL_DESCRIPTOR)
+    log_path = tmp_path / "nested" / "run.jsonl"
+
+    exit_code = main(
+        [
+            "eval",
+            descriptor_path,
+            "--candidate",
+            _candidate_for(block_dir),
+            "--trajectory-log",
+            str(log_path),
+            "--turn",
+            "0",
+            "--candidate-ref",
+            "turn-0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(read_log(str(log_path))) == 1
+
+
+def test_cli_trajectory_log_multiple_turns_produce_milestones(tmp_path):
+    from klayout_tools.trajectory import build_trajectory, read_log
+
+    log_path = tmp_path / "run.jsonl"
+
+    for turn, clean in ((0, False), (1, True)):
+        block_dir = _write_block(tmp_path, f"block_{turn}", clean=clean)
+        descriptor_path = _write_descriptor(
+            tmp_path, _MINIMAL_DESCRIPTOR, name=f"descriptor_{turn}.json"
+        )
+        exit_code = main(
+            [
+                "eval",
+                descriptor_path,
+                "--candidate",
+                _candidate_for(block_dir),
+                "--trajectory-log",
+                str(log_path),
+                "--turn",
+                str(turn),
+                "--candidate-ref",
+                f"turn-{turn}",
+            ]
+        )
+        assert exit_code in (0, 3)
+
+    assert len(read_log(str(log_path))) == 2
+    trajectory = build_trajectory(str(log_path))
+    assert trajectory["record_count"] == 2
+
+
+def test_cli_trajectory_log_requires_turn_and_candidate_ref(tmp_path, capsys):
+    block_dir = _write_block(tmp_path, "clean_block", clean=True)
+    descriptor_path = _write_descriptor(tmp_path, _MINIMAL_DESCRIPTOR)
+    log_path = tmp_path / "run.jsonl"
+
+    exit_code = main(
+        [
+            "eval",
+            descriptor_path,
+            "--candidate",
+            _candidate_for(block_dir),
+            "--format",
+            "json",
+            "--trajectory-log",
+            str(log_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert not log_path.exists()
+    error = json.loads(capsys.readouterr().err)
+    assert "--turn" in error["error"]["message"]
+    assert "--candidate-ref" in error["error"]["message"]
+
+
+def test_cli_without_trajectory_log_writes_no_file(tmp_path):
+    block_dir = _write_block(tmp_path, "clean_block", clean=True)
+    descriptor_path = _write_descriptor(tmp_path, _MINIMAL_DESCRIPTOR)
+    log_path = tmp_path / "run.jsonl"
+
+    assert (
+        main(["eval", descriptor_path, "--candidate", _candidate_for(block_dir)]) == 0
+    )
+    assert not log_path.exists()
+
+
+def test_cli_trajectory_log_text_format_reports_append(tmp_path, capsys):
+    block_dir = _write_block(tmp_path, "clean_block", clean=True)
+    descriptor_path = _write_descriptor(tmp_path, _MINIMAL_DESCRIPTOR)
+    log_path = tmp_path / "run.jsonl"
+
+    exit_code = main(
+        [
+            "eval",
+            descriptor_path,
+            "--candidate",
+            _candidate_for(block_dir),
+            "--trajectory-log",
+            str(log_path),
+            "--turn",
+            "5",
+            "--candidate-ref",
+            "turn-5",
+        ]
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "trajectory: appended turn 5" in out
+    assert str(log_path) in out

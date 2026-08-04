@@ -80,6 +80,26 @@ version. Not an exhaustive commit-by-commit log.
   produces, and record it as one `klt trajectory` log entry via the same
   `gates`/`objective` shape. No schema change to `klt eval`'s own response
   envelope. See `docs/cli/eval.md`.
+- 2026-08-03 — `klt trajectory` + `klt eval`: a scored evaluation can now be
+  recorded to a trajectory log without hand-rolling the record (#437, Phase 5
+  of Epic #391 — the trajectory-log half of that issue, completing the gate
+  wiring above). New `klayout_tools.trajectory.record_from_eval`/
+  `append_record` build one trajectory record straight from a `klt eval`
+  envelope's own `objective`/`gates` (collapsing `gates[]` to the record
+  schema's lighter `gate_results`) and append it to an append-only JSONL log,
+  creating the file and any missing parent directories on first write. Both
+  are check-name-agnostic — they read only `objective`/`gates`, so an analog
+  envelope (`drc`/`lvs`/`sim`/`layout-metrics`) and a digital one
+  (`synthesize`/`functional-verification`/`place-and-route`) log identically.
+  `klt eval` gains `--trajectory-log`/`--turn`/`--candidate-ref`/
+  `--description`/`--wall-clock-s`, which call that pair as a side effect on
+  top of the unchanged response envelope — so one invocation can score a
+  candidate *and* log the turn, matching `klt trajectory --plot`'s existing
+  "write a file as a courtesy, independent of `--format`" precedent.
+  `--trajectory-log` without both `--turn` and `--candidate-ref`, and a
+  log-append failure, are both application errors (exit `1`). See
+  `docs/cli/eval.md`'s "Trajectory logging" section and
+  `docs/cli/trajectory.md`'s "Building a record from `klt eval`" section.
 - 2026-08-03 — `klt functional-verification`: new verb (#422, Phase 3 of
   Epic #391). Runs a cocotb testbench against RTL sources through Icarus
   Verilog (default) or Verilator, reporting `status`
