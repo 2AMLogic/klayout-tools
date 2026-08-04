@@ -229,3 +229,13 @@ matching the Yosys survey's own live-verified numbers exactly.
   later backend (e.g. a Siemens tool) is an additive enum value and a new
   glue module, never a contract-shape change — but only `"yosys"` is
   implemented today.
+
+## See also
+
+Running many candidate synthesis/P&R combinations across a fleet of remote
+hosts — a design-space exploration over synthesis strategy, floorplan, or
+P&R seed — is [`klt eval`](eval.md)'s
+["Fleet-based candidate sweeps"](eval.md#fleet-based-candidate-sweeps)
+section: each candidate's remote job runs this command as one stage of a
+`klt eval` descriptor's `synthesize` → `[functional-verification]` →
+`place-and-route` pipeline, not this command standalone.

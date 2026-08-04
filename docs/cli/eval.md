@@ -273,10 +273,84 @@ is written to stdout. No Python traceback is printed.
   { "schema_version": 1, "error": { "command": "eval", "message": "descriptor references candidate key 'layout' that 'klt eval' was not given -- unresolvable candidate path" } }
   ```
 
+## Fleet-based candidate sweeps
+
+A digital design-space exploration — sweeping {synthesis strategy} ×
+{floorplan} × {P&R seed} to find the best-objective candidate for this
+command's own `objective` — is "embarrassingly parallel" across
+*candidates* (never across one candidate's own pipeline stages; synthesis
+must finish before place-and-route can read its netlist). Epic #391 Phase 6
+(issue #445) extends [Epic #375](https://github.com/2AMLogic/klayout-tools/issues/375)'s
+`klt sim` fleet scheduler (`docs/cli/sim.md`'s "Fleet sharding" section,
+above) to this shape — `src/klayout_tools/remote_fleet_digital.py`, living
+beside `src/klayout_tools/remote_fleet.py` the same way `sim.py`'s own
+`_build_remote_job_description` does today — per the accepted decision
+record `docs/design/digital-fleet-unit-abstraction-decision.md`: **the unit
+of parallelism is one candidate evaluation** (one complete
+synthesis(+verification)+place-and-route pipeline run at one
+design-space point), never one pipeline stage. `remote_fleet.py`/
+`remote_launcher.py`/`remote_transport.py` are reused **unmodified** — only
+two new pieces were needed:
+
+- **`select_digital_instance_type(design_size_proxy=None, *,
+  instance_tier=None, pdk=None)`** — a digital-specific instance-sizing
+  function, replacing `remote_launcher.select_instance_type`'s
+  `corner_count × threads_per_corner` formula (which packs many lightweight
+  SPICE corners per host). A digital candidate wants ~1 whole host for
+  OpenROAD's own internal multi-threading, so this function instead buckets
+  a design-size proxy (e.g. an expected/measured synthesized instance
+  count) — or an explicit/PDK-default tier — directly into a `c7i` instance
+  type. `digital_threads_per_corner_for(instance_type)` is the small bridge
+  that lets this tier choice drive `FleetLauncher`'s own **unmodified**
+  sizing call (`shard_unit_counts=[1, 1, ...]` — one candidate per shard —
+  plus a computed `threads_per_corner`), so no `FleetLauncher` change is
+  ever needed to honor it.
+- **`build_digital_job_description`/`make_digital_shard_runner`/
+  `rank_digital_candidates`** — the digital-specific `JobDescription`
+  builder plus candidate-ranking merge step. Each candidate's remote job
+  pushes a `klt eval` descriptor (this command's own document, above) and
+  candidate substitution values, plus the RTL/constraint/per-stage request
+  files the descriptor's checks reference, then runs **`klt eval
+  descriptor.json --candidate candidate.json --format json`** unchanged —
+  the already-landed digital `klt eval` descriptor support (Epic #391 Phase
+  5, issue #444) already composes `synthesize` → `[functional-verification]`
+  → `place-and-route` into the one `valid`/`objective`/`metrics` envelope
+  this section's merge step consumes. Issue #387's scored `objective` is
+  therefore never recomputed by the fleet layer — it is read directly off
+  each candidate's own `klt eval` response.
+  `rank_digital_candidates` sorts every **valid** candidate by that
+  objective (best-first, honoring the shared descriptor's `polarity`),
+  separates out invalid/errored candidates (never silently dropped, never
+  mixed into the ranking), and always returns every reporting candidate's
+  own `metrics` — so a sweep with no rankable candidate yet (e.g. every
+  candidate still invalid) still surfaces full per-candidate detail.
+  `make_digital_shard_runner` returns a plain
+  `(shard_index, launcher, public_ip) -> Any` callable — `remote_fleet`'s
+  `ShardRunner` contract, unchanged — that runs every candidate assigned to
+  a shard in its own **serial** loop (a shard is one host; a caller wanting
+  more candidates than available hosts assigns more than one candidate to
+  a shard, per the decision record).
+
+No calibrated digital timing model (`T_o`/`t` — see `docs/cli/sim.md`'s own
+"Fleet sharding" section for what those are for SPICE) exists yet; the
+decision record is explicit that Phase 6 must not import SPICE's
+`T_o ≈ 140 s`/`β ≈ 4–5` numbers, so `make_digital_shard_runner`'s
+`ssh_ready_timeout_s`/`run_timeout_s` ship generous, deliberately
+uncalibrated defaults (10 minutes SSH-ready, 4 hours per candidate) —
+override once a real measurement exists. Generating the candidate sweep
+itself (the {synthesis strategy} × {floorplan} × {P&R seed} cross product,
+and the RTL/constraint/request documents each point needs) is the caller's
+job, not this module's — it only builds/runs/merges the fleet around a
+caller-supplied `DigitalCandidate` list.
+
 ## Out of scope
 
 A sizing-candidate proposer (issue #310) and a signoff-aggregation tool
 (issue #309) are explicitly separate, adjacent pieces — `klt eval` is the
 scorer that sits between them, not either one. `objective.name` is not yet
 tied to issue #247's (unlanded) metric namespace; treat it as an opaque
-per-descriptor string until that namespace lands.
+per-descriptor string until that namespace lands. A CLI verb wiring
+`remote_fleet_digital.py` into a runnable `klt <verb> --backend remote
+--hosts N`-style command is not part of this phase either — only the two
+extension points (sizing + job-description/merge) were in scope, per
+Epic #391 Phase 6's own acceptance criteria.
