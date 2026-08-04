@@ -56,10 +56,11 @@ import os
 import re
 import statistics
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any
 
 from . import remote_transport
@@ -476,6 +477,8 @@ def run_sim(
     backend: str | None = None,
     max_workers: int | None = None,
     hosts: int | None = None,
+    budget_s: float | None = None,
+    resume: bool | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -516,6 +519,38 @@ def run_sim(
     *remote* run across real hosts is Epic #375 Phase 1B (#377), which
     plugs its own per-shard runner into the same merge engine this
     implements.
+
+    ``budget_s`` bounds the **whole sweep's** wall-clock time, overriding the
+    request's own ``options.wall_clock_budget_s`` when given (the
+    ``--budget-s`` CLI flag path, same precedence rule as
+    ``max_workers``/``hosts``). Unlike ``options.timeout_s`` (a *per-corner*
+    bound), this is the bound the incident behind issue #473 was missing --
+    a hand-rolled driver with only a per-sim timeout can still run for hours
+    by simply marching through an N-corner matrix forever. When the budget
+    is exceeded, the dispatch loop stops **launching new corners** (already
+    in-flight ones still run to their own ``timeout_s``); every corner that
+    never got to start is reported with ``status: "error"`` and a
+    ``budget_exceeded`` diagnostic (see ``_unrun_corner_report``), and
+    ``environment.budget`` summarises the outcome. ``None`` (the default)
+    means unbounded, exactly today's behaviour -- opting a caller into a
+    budget is deliberate, mirroring ``options.keep_artifacts``. Applies to
+    the ``local``/``local-parallel`` backends (and any ``hosts > 1`` shard
+    built on them); ``remote`` does not yet honor it (its own dispatch loop
+    runs on the provisioned box, outside this process).
+
+    ``resume`` enables checkpoint/resume: completed corner reports are
+    persisted incrementally to a ``checkpoint.json`` file under
+    ``artifacts_dir`` as the sweep runs, and -- when a *matching* checkpoint
+    already exists (see ``_checkpoint_fingerprint``: same netlist/model
+    library/analysis/measurements/corner list/timeout) -- corners already
+    recorded there are skipped rather than recomputed. Overrides the
+    request's own ``options.resume`` when given (the ``--resume`` CLI flag
+    path). A checkpoint whose fingerprint no longer matches the request
+    (netlist/matrix edited since it was written) is treated as absent, never
+    silently reused. The checkpoint file is removed once a sweep finishes
+    with nothing skipped -- a fully-completed sweep has nothing left to
+    resume. ``None``/``False`` (the default) is exactly today's behaviour:
+    no checkpoint is read or written.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
@@ -617,8 +652,33 @@ def run_sim(
         ):
             raise SimError("options.max_workers must be a positive integer")
 
+    budget_s = budget_s if budget_s is not None else options.get("wall_clock_budget_s")
+    if budget_s is not None:
+        if (
+            not isinstance(budget_s, (int, float))
+            or isinstance(budget_s, bool)
+            or budget_s <= 0
+        ):
+            raise SimError(
+                "options.wall_clock_budget_s must be a positive number of seconds"
+            )
+
+    resume = resume if resume is not None else bool(options.get("resume", False))
+
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "sim")
+
+    # Orphan safety (issue #473): capture the sweep's own parent PID once, up
+    # front. `os.getppid()` changes the moment the launching process exits --
+    # the kernel reparents this process to its new parent (init/systemd on
+    # Linux) -- so a dispatch loop that re-checks this between corners
+    # detects "my launcher is gone" without any external supervisor,
+    # heartbeat file, or IPC. Always on (no opt-in): unlike the budget, there
+    # is no legitimate reason to want a sweep that keeps running after the
+    # process that asked for it has exited.
+    initial_ppid = os.getppid()
+    sweep_started = time.monotonic()
+    deadline = sweep_started + budget_s if budget_s is not None else None
 
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
@@ -652,11 +712,64 @@ def run_sim(
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
 
-    if hosts == 1:
-        # The exact pre-#376 call -- untouched so this path stays
-        # byte-identical for every existing request/response.
-        corners, engine_version, remote_environment = _BACKENDS[backend](
+    # Resumability (issue #473): only active when the caller opts in, and
+    # only for the backends whose corner reports this process itself
+    # produces (`local`/`local-parallel`, including any `hosts > 1` shard
+    # built on them -- see `_run_sharded`). `remote`'s corners come back
+    # from an independently-run box via a JSON report this process does not
+    # construct, so there is no local `CornerPoint.corner_id` to reconcile
+    # a checkpoint against yet; mirrors the existing `hosts > 1` + `remote`
+    # restriction above rather than inventing a new error shape.
+    if resume and backend == "remote":
+        raise SimError(
+            "options.resume is not yet supported for backend 'remote' -- "
+            "wiring the remote backend into the same checkpoint machinery "
+            "as 'local'/'local-parallel' is tracked follow-up work; use "
+            "resume with backend 'local' or 'local-parallel'"
+        )
+
+    # `pre_completed` holds corner reports already recorded by a prior,
+    # interrupted run of this *same* request (fingerprint-matched); those
+    # units are never re-dispatched. `checkpoint` (when not None) is handed
+    # to the backend so it can persist each newly-completed corner
+    # incrementally -- if this run is itself interrupted, only the corners
+    # actually completed here are lost from the next resume, not the whole
+    # sweep.
+    checkpoint_path = _checkpoint_path(artifacts_dir)
+    pre_completed: dict[str, dict[str, Any]] = {}
+    loaded_engine_version: str | None = None
+    checkpoint: _Checkpoint | None = None
+    if resume:
+        fingerprint = _checkpoint_fingerprint(
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
             corner_points=corner_points,
+            timeout_s=timeout_s,
+            engine=engine,
+        )
+        pre_completed, loaded_engine_version = _load_checkpoint(
+            checkpoint_path, fingerprint
+        )
+        checkpoint = _Checkpoint(checkpoint_path, fingerprint)
+        checkpoint.completed = dict(pre_completed)
+        checkpoint.engine_version = loaded_engine_version
+
+    dispatch_points = (
+        [point for point in corner_points if point.corner_id not in pre_completed]
+        if resume
+        else corner_points
+    )
+
+    if hosts == 1:
+        # The exact pre-#376 call for the default case (no budget, no
+        # resume, hosts=1) -- `dispatch_points`/the three new kwargs are
+        # identity no-ops then (`dispatch_points is corner_points`,
+        # `deadline`/`checkpoint` both `None`), so this path stays
+        # byte-identical for every existing request/response.
+        corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
+            corner_points=dispatch_points,
             netlist_path=netlist_path,
             models_lib=models_lib,
             analysis=analysis,
@@ -667,6 +780,9 @@ def run_sim(
             artifacts_dir=artifacts_dir,
             max_workers=max_workers,
             request=request,
+            deadline=deadline,
+            initial_ppid=initial_ppid,
+            checkpoint=checkpoint,
         )
     else:
 
@@ -685,14 +801,77 @@ def run_sim(
                 artifacts_dir=artifacts_dir,
                 max_workers=max_workers,
                 request=request,
+                deadline=deadline,
+                initial_ppid=initial_ppid,
+                checkpoint=checkpoint,
             )
 
-        corners, engine_version, remote_environment = _run_sharded(
+        corners_new, backend_engine_version, remote_environment = _run_sharded(
             shard_runner=_shard_runner,
-            corner_points=corner_points,
+            corner_points=dispatch_points,
             hosts=hosts,
             measurements_spec=measurements_spec,
         )
+
+    if resume:
+        # Reassemble the full corner list in the request's own order: a
+        # corner is either freshly run just now (`corners_new`) or reused
+        # verbatim from a matching checkpoint (`pre_completed`) -- every
+        # `corner_points` entry is in exactly one of the two (see
+        # `dispatch_points` above). Only done under `resume`: every backend
+        # that reaches here is `local`/`local-parallel` (see the `remote`
+        # guard above), which always return exactly one report per
+        # dispatched point, keyed by that point's own `corner_id`.
+        new_by_id = {corner["corner_id"]: corner for corner in corners_new}
+        corners = [
+            new_by_id[point.corner_id]
+            if point.corner_id in new_by_id
+            else pre_completed[point.corner_id]
+            for point in corner_points
+        ]
+    else:
+        # The exact pre-#473 assignment -- `corners_new` is already the
+        # full, correctly-ordered report for every backend (including
+        # `remote`, whose corners this process never reconciles against a
+        # local `CornerPoint` list).
+        corners = corners_new
+    engine_version = (
+        backend_engine_version
+        if backend_engine_version is not None
+        else loaded_engine_version
+    )
+
+    budget_exceeded = any(
+        diag["code"] == "budget_exceeded"
+        for corner in corners
+        for diag in corner["diagnostics"]
+    )
+    orphaned = any(
+        diag["code"] == "orphaned"
+        for corner in corners
+        for diag in corner["diagnostics"]
+    )
+    corners_skipped = sum(
+        1
+        for corner in corners
+        if any(
+            diag["code"] in ("budget_exceeded", "orphaned")
+            for diag in corner["diagnostics"]
+        )
+    )
+
+    if checkpoint is not None:
+        if corners_skipped == 0:
+            # Nothing left to resume -- remove the checkpoint rather than
+            # leave a stale file a future --resume could misread (its
+            # fingerprint guard makes that safe even if left behind, but a
+            # completed sweep has no reason to leave one).
+            checkpoint.clear()
+            checkpoint_retained = False
+        else:
+            checkpoint_retained = True
+    else:
+        checkpoint_retained = False
 
     measurements_rollup = _rollup_measurements(
         measurements_spec, corners, monte_carlo_stats
@@ -737,6 +916,34 @@ def run_sim(
         # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
         # live on each corner (`corners[].monte_carlo`), not here.
         environment["monte_carlo"] = monte_carlo_info
+    if budget_s is not None:
+        # Additive/optional: only present when the request declares
+        # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
+        # see `run_sim`'s docstring and docs/cli/sim.md's "Wall-clock
+        # budget" section. `exceeded`/`corners_skipped` are always reported
+        # here, never left for a caller to infer from scanning
+        # `corners[].diagnostics` itself.
+        environment["budget"] = {
+            "wall_clock_budget_s": budget_s,
+            "elapsed_s": round(time.monotonic() - sweep_started, 3),
+            "exceeded": budget_exceeded,
+            "corners_skipped": corners_skipped,
+        }
+    if orphaned:
+        # Additive/optional: only present when the always-on orphan check
+        # (see `initial_ppid` above) actually fired -- reported for the
+        # benefit of a later `--resume` invocation inspecting this report;
+        # the process that would have read it live is, by definition, the
+        # one that died.
+        environment["orphaned"] = True
+    if resume:
+        # Additive/optional: only present when `options.resume`/`--resume`
+        # was requested -- see `run_sim`'s docstring.
+        environment["resume"] = {
+            "resumed_corners": len(pre_completed),
+            "checkpoint_path": checkpoint_path,
+            "checkpoint_retained": checkpoint_retained,
+        }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1249,6 +1456,144 @@ def _expand_monte_carlo(
 
 
 # --------------------------------------------------------------------------- #
+# Checkpoint/resume (issue #473)
+# --------------------------------------------------------------------------- #
+
+
+def _checkpoint_path(artifacts_dir: str) -> str:
+    """Where a resumable sweep's checkpoint lives: a single ``checkpoint.json``
+    directly under ``artifacts_dir`` -- the same directory ``keep_artifacts``
+    already writes per-corner logs/rawfiles into (see ``run_sim``'s
+    docstring), so a resumable run's on-disk footprint stays in one place
+    regardless of ``keep_artifacts``.
+    """
+    return os.path.join(artifacts_dir, "checkpoint.json")
+
+
+def _checkpoint_fingerprint(
+    *,
+    netlist_path: str,
+    models_lib: str | None,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    corner_points: list[CornerPoint],
+    timeout_s: float,
+    engine: str,
+) -> str:
+    """A SHA-256 fingerprint of everything that determines what a sweep's
+    corners actually run -- the basis for deciding whether an on-disk
+    checkpoint still applies to *this* request.
+
+    Content-hashes the netlist/model library (not just their paths -- an
+    edited-in-place file at the same path must invalidate the checkpoint,
+    per this issue's own acceptance criteria) alongside the analysis,
+    measurement cards, per-corner timeout, engine, and the exact list of
+    expanded corner IDs (covers the whole corner matrix, including any
+    Monte Carlo expansion, since two requests that expand to a different
+    corner list are not resumable against each other's progress). A
+    fingerprint mismatch means "resume against a request file that has
+    changed since the checkpoint was written" -- the checkpoint is treated
+    as if it did not exist, never silently reused against a since-modified
+    matrix (see ``run_sim``'s docstring).
+    """
+    payload = {
+        "netlist_sha256": sha256_file(netlist_path),
+        "models_lib_sha256": sha256_file(models_lib),
+        "analysis": analysis,
+        "measurements_spec": measurements_spec,
+        "timeout_s": timeout_s,
+        "engine": engine,
+        "corner_ids": [point.corner_id for point in corner_points],
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _load_checkpoint(
+    path: str, fingerprint: str
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Read a checkpoint file, returning ``({corner_id: corner_report},
+    engine_version)`` -- both empty/``None`` when the file is missing,
+    unreadable, not valid JSON, or its own fingerprint does not match
+    ``fingerprint`` (see :func:`_checkpoint_fingerprint`). Never raises: a
+    corrupt or stale checkpoint degrades to "nothing completed yet", the
+    same outcome as no checkpoint at all, rather than aborting the sweep.
+    """
+    if not os.path.isfile(path):
+        return {}, None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}, None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return {}, None
+    completed = data.get("completed")
+    if not isinstance(completed, dict):
+        return {}, None
+    return completed, data.get("engine_version")
+
+
+class _Checkpoint:
+    """Incrementally persists completed corner reports to a JSON file so an
+    interrupted sweep (wall-clock budget hit, orphaned parent, plain crash)
+    can resume without recomputing corners that already finished.
+
+    Only constructed when the request enables ``options.resume``/``--resume``
+    (see ``run_sim``) -- writing/reading a checkpoint is an explicit opt-in,
+    mirroring ``options.keep_artifacts``, so a default sweep leaves no extra
+    file behind. Every :meth:`record` call flushes the *entire* completed set
+    to disk immediately (via a temp-file-plus-``os.replace`` atomic write,
+    never a partially-written file a concurrent resume could read) -- a
+    corner report is small, and a sweep is corner-count-bounded, so this
+    stays cheap relative to the ``ngspice`` run it follows. Thread-safe: both
+    ``local-parallel``'s bounded dispatch window and ``_run_sharded``'s
+    per-shard threads call :meth:`record` concurrently.
+    """
+
+    def __init__(self, path: str, fingerprint: str) -> None:
+        self._path = path
+        self._fingerprint = fingerprint
+        self._lock = threading.Lock()
+        self.completed: dict[str, dict[str, Any]] = {}
+        self.engine_version: str | None = None
+
+    def record(
+        self, corner_id: str, report: dict[str, Any], engine_version: str | None
+    ) -> None:
+        with self._lock:
+            self.completed[corner_id] = report
+            if engine_version is not None:
+                self.engine_version = engine_version
+            self._flush_locked()
+
+    def clear(self) -> None:
+        """Remove the checkpoint file once a sweep finishes with nothing
+        skipped -- a fully-completed sweep has nothing left to resume, and a
+        stale file left behind is a pointless leftover (its fingerprint
+        guard already makes it harmless to a future *different* request,
+        but there is no reason to keep it around either)."""
+        with self._lock:
+            self.completed = {}
+            try:
+                os.remove(self._path)
+            except OSError:
+                pass
+
+    def _flush_locked(self) -> None:
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        tmp_path = f"{self._path}.tmp"
+        payload = {
+            "fingerprint": self._fingerprint,
+            "engine_version": self.engine_version,
+            "completed": self.completed,
+        }
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp_path, self._path)
+
+
+# --------------------------------------------------------------------------- #
 # Execution backends
 # --------------------------------------------------------------------------- #
 
@@ -1266,12 +1611,16 @@ def _run_local(
     artifacts_dir: str,
     max_workers: int | None,
     request: dict[str, Any],
+    deadline: float | None = None,
+    initial_ppid: int | None = None,
+    checkpoint: _Checkpoint | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
     This is the unit a backend implements -- given the expanded corner list
     plus the already-resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version, remote_environment)``. It
+    ``(per_corner_reports, engine_version, remote_environment)``. For the
+    default case (no ``deadline``/``initial_ppid``/``checkpoint``) this
     intentionally reproduces the original in-line loop byte-for-byte (same
     ordering, same ``engine_version`` last-writer-wins tracking) so the
     report JSON and on-disk artifacts are unchanged from before the backend
@@ -1280,11 +1629,28 @@ def _run_local(
     called with the same keyword set) but are meaningless for a sequential
     local runner, so both are ignored here; the third return value is always
     ``None`` (only ``remote`` populates it).
+
+    ``deadline``/``initial_ppid`` (issue #473) are checked before *starting*
+    each corner: once either fires, every remaining corner is reported via
+    :func:`_unrun_corner_report` (``budget_exceeded``/``orphaned``) instead
+    of being run -- a corner already in flight is never interrupted (there
+    is only ever one, for this sequential backend). ``checkpoint``, when
+    given, records each corner as it completes so a later ``--resume`` run
+    does not recompute it.
     """
     del max_workers, request  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
+    stop_reason: str | None = None
     for point in corner_points:
+        if stop_reason is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                stop_reason = "budget_exceeded"
+            elif initial_ppid is not None and os.getppid() != initial_ppid:
+                stop_reason = "orphaned"
+        if stop_reason is not None:
+            corners.append(_unrun_corner_report(point, measurements_spec, stop_reason))
+            continue
         result, version = _run_corner(
             point=point,
             netlist_path=netlist_path,
@@ -1299,6 +1665,8 @@ def _run_local(
         corners.append(result)
         if version is not None:
             engine_version = version
+        if checkpoint is not None:
+            checkpoint.record(point.corner_id, result, version)
     return corners, engine_version, None
 
 
@@ -1331,6 +1699,9 @@ def _run_local_parallel(
     artifacts_dir: str,
     max_workers: int | None,
     request: dict[str, Any],
+    deadline: float | None = None,
+    initial_ppid: int | None = None,
+    checkpoint: _Checkpoint | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -1341,7 +1712,7 @@ def _run_local_parallel(
     (a thread, not a process, pool: the actual work is the ``ngspice``
     subprocess call, which releases the GIL for the duration of the wait, so
     threads give the same concurrency as processes here without the
-    pickling/import overhead of ``ProcessPoolExecutor``). Futures are indexed
+    pickling/import overhead of ``ProcessPoolExecutor``). Results are indexed
     by each corner's position in ``corner_points`` and reassembled into that
     same order after every future completes, regardless of completion order
     -- the acceptance criterion that this backend's report is order-identical
@@ -1357,38 +1728,92 @@ def _run_local_parallel(
     ``request`` is accepted for signature parity with the other backends
     (only ``remote`` reads it) and ignored; the third return value is always
     ``None`` here.
+
+    ``deadline``/``initial_ppid`` (issue #473): unlike the naive "submit
+    everything up front" the pre-#473 implementation used (which lets the
+    pool's own internal queue keep draining corners regardless of how long
+    the sweep has been running), corners are dispatched through a bounded
+    window -- never more than ``max_workers`` in flight at once -- refilled
+    only when neither condition has fired. A worker that is already running
+    when the deadline/orphan check fires is left to finish (see this
+    module's docstring/``run_sim`` for why an already-launched ``ngspice``
+    is not preemptively killed here); every corner that never got a slot is
+    reported via :func:`_unrun_corner_report` instead. ``checkpoint``, when
+    given, records each corner the instant its future resolves -- not
+    batched at the end -- so a crash mid-sweep loses at most the corners
+    still in flight at that moment.
     """
     del request  # unused: local-parallel needs no request-level context
     resolved_workers = (
         max_workers if max_workers is not None else _default_max_workers()
     )
 
-    results: list[tuple[dict[str, Any], str | None] | None] = [None] * len(
-        corner_points
-    )
+    total = len(corner_points)
+    results: list[tuple[dict[str, Any], str | None] | None] = [None] * total
+    stop_reason: str | None = None
+    next_index = 0
+
+    def _stopped() -> str | None:
+        nonlocal stop_reason
+        if stop_reason is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                stop_reason = "budget_exceeded"
+            elif initial_ppid is not None and os.getppid() != initial_ppid:
+                stop_reason = "orphaned"
+        return stop_reason
+
     with ThreadPoolExecutor(max_workers=resolved_workers) as pool:
-        future_to_index = {
-            pool.submit(
-                _run_corner,
-                point=point,
-                netlist_path=netlist_path,
-                models_lib=models_lib,
-                analysis=analysis,
-                measurements_spec=measurements_spec,
-                timeout_s=timeout_s,
-                keep_artifacts=keep_artifacts,
-                want_waveforms=want_waveforms,
-                artifacts_dir=artifacts_dir,
-            ): index
-            for index, point in enumerate(corner_points)
-        }
-        for future in as_completed(future_to_index):
-            results[future_to_index[future]] = future.result()
+        in_flight: dict[Any, int] = {}
+
+        def _fill() -> None:
+            nonlocal next_index
+            while (
+                next_index < total
+                and len(in_flight) < resolved_workers
+                and _stopped() is None
+            ):
+                point = corner_points[next_index]
+                future = pool.submit(
+                    _run_corner,
+                    point=point,
+                    netlist_path=netlist_path,
+                    models_lib=models_lib,
+                    analysis=analysis,
+                    measurements_spec=measurements_spec,
+                    timeout_s=timeout_s,
+                    keep_artifacts=keep_artifacts,
+                    want_waveforms=want_waveforms,
+                    artifacts_dir=artifacts_dir,
+                )
+                in_flight[future] = next_index
+                next_index += 1
+
+        _fill()
+        while in_flight:
+            done, _pending = wait(list(in_flight.keys()), return_when=FIRST_COMPLETED)
+            for future in done:
+                index = in_flight.pop(future)
+                result = future.result()
+                results[index] = result
+                if checkpoint is not None:
+                    corner, version = result
+                    checkpoint.record(corner_points[index].corner_id, corner, version)
+            _fill()
 
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
-    for result in results:
-        assert result is not None  # every index was submitted exactly once
+    for index, result in enumerate(results):
+        if result is None:
+            # Never got a worker slot -- `stop_reason` is always set by the
+            # time any index is left `None` (that is the only way `_fill`
+            # stops short of `total`).
+            assert stop_reason is not None
+            corners.append(
+                _unrun_corner_report(
+                    corner_points[index], measurements_spec, stop_reason
+                )
+            )
+            continue
         corner, version = result
         corners.append(corner)
         if version is not None:
@@ -1449,19 +1874,38 @@ def _shard_corner_points(
     return shards
 
 
-def _lost_shard_corner(
-    point: CornerPoint, measurements_spec: list[dict[str, Any]], reason: str
+#: Human-readable message for each :func:`_unrun_corner_report` diagnostic
+#: code -- shared between the ``local``/``local-parallel`` dispatch loops
+#: (issue #473) so both backends report a skipped corner identically.
+_UNRUN_MESSAGES: dict[str, str] = {
+    "budget_exceeded": (
+        "sweep options.wall_clock_budget_s was exceeded before this corner "
+        "started -- see environment.budget"
+    ),
+    "orphaned": (
+        "the launching process exited before this corner started; the "
+        "sweep stopped rather than continue as an orphan -- see "
+        "environment.orphaned"
+    ),
+}
+
+
+def _unrun_corner_report(
+    point: CornerPoint, measurements_spec: list[dict[str, Any]], code: str
 ) -> dict[str, Any]:
-    """Synthesize an ``error`` corner report for one unit of a shard that
-    never returned (Epic #375 decision 2's *merge* half -- the automatic
-    retry that avoids this in the common case is Phase 1B, #377).
+    """Synthesize an ``error`` corner report for a unit that never got the
+    chance to run: the sweep's own wall-clock budget was exceeded before its
+    turn (``code="budget_exceeded"``), the launching process died first
+    (``code="orphaned"``), or its shard never returned at all
+    (``code="lost_shard"``, via :func:`_lost_shard_corner`).
 
     Mirrors :func:`_run_corner`'s own ``error``-status shape field-for-field,
-    so a lost-shard unit is indistinguishable, downstream, from a corner
-    that ran and errored on its own -- ``_rollup_measurements``, the CLI's
-    text/JSON renderers, and the ``errored`` count all need no lost-shard
-    special case.
+    so an unrun unit is indistinguishable, downstream, from a corner that
+    ran and errored on its own -- ``_rollup_measurements``, the CLI's
+    text/JSON renderers, and the ``errored`` count all need no special case
+    for any of these codes.
     """
+    message = _UNRUN_MESSAGES.get(code, code)
     measurements = [
         {
             "name": spec["name"],
@@ -1489,10 +1933,29 @@ def _lost_shard_corner(
         "status": "error",
         "runtime_s": 0.0,
         "measurements": measurements,
-        "diagnostics": [{"severity": "error", "code": "lost_shard", "message": reason}],
+        "diagnostics": [{"severity": "error", "code": code, "message": message}],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
     }
+
+
+def _lost_shard_corner(
+    point: CornerPoint, measurements_spec: list[dict[str, Any]], reason: str
+) -> dict[str, Any]:
+    """Synthesize an ``error`` corner report for one unit of a shard that
+    never returned (Epic #375 decision 2's *merge* half -- the automatic
+    retry that avoids this in the common case is Phase 1B, #377).
+
+    A thin wrapper over :func:`_unrun_corner_report` that keeps its own
+    ``lost_shard`` diagnostic message (which, unlike the other codes there,
+    carries the caller-supplied ``reason`` -- the shard's own exception
+    text -- rather than a fixed message).
+    """
+    report = _unrun_corner_report(point, measurements_spec, "lost_shard")
+    report["diagnostics"] = [
+        {"severity": "error", "code": "lost_shard", "message": reason}
+    ]
+    return report
 
 
 def _run_sharded(
@@ -1616,6 +2079,9 @@ def _run_remote(
     artifacts_dir: str,
     max_workers: int | None,
     request: dict[str, Any],
+    deadline: float | None = None,
+    initial_ppid: int | None = None,
+    checkpoint: _Checkpoint | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``remote`` backend: provision one EC2 instance sized for the whole
     corner matrix, push the netlist + a request-specific copy of ``request``
@@ -1654,8 +2120,17 @@ def _run_remote(
     transport failure is re-raised as :class:`SimError`: no corner ever ran,
     the same "the sweep never started" class as an unresolvable netlist or
     model library.
+
+    ``deadline``/``initial_ppid``/``checkpoint`` (issue #473) are accepted
+    for signature parity with ``local``/``local-parallel`` but not yet
+    honored here: the provisioned box's own dispatch loop runs its
+    corners via a *nested* ``local-parallel`` invocation over SSH, outside
+    this process, so this function has no dispatch loop of its own to gate.
+    Wiring the remote backend into the same budget/orphan/resume machinery
+    is tracked as follow-up work, not silently promised by this signature.
     """
     del analysis, measurements_spec, models_lib, max_workers  # see docstring
+    del deadline, initial_ppid, checkpoint  # not yet honored -- see docstring
 
     remote_spec = request.get("remote") or {}
     region = remote_spec.get("region")

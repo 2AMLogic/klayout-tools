@@ -971,6 +971,32 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     sim_parser.add_argument(
+        "--budget-s",
+        dest="budget_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock budget in seconds for the whole sweep "
+            "(default: unbounded, or the request's `options.wall_clock_"
+            "budget_s`); overrides the request field when given. Distinct "
+            "from `options.timeout_s`, which bounds one corner -- exceeding "
+            "the budget stops launching new corners rather than aborting "
+            "in-flight ones; see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=None,
+        help=(
+            "resume from a matching on-disk checkpoint (--outdir/"
+            "checkpoint.json), skipping corners already completed by a "
+            "prior interrupted run of this same request; overrides the "
+            "request's own `options.resume` when given. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
