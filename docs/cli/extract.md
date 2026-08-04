@@ -80,6 +80,22 @@ device-recognition entries, run through KLayout's native
 `DeviceExtractorResistor`/`DeviceExtractorResistorWithBulk` — see "Drawn
 resistors" under Coverage.
 
+**Because extraction is flat, it does not stop at a macro's instance
+boundary.** Issue #456 (Epic #393 Phase 3) confirmed this concretely
+against a real mixed layout: a `klt gen diff_pair` analog macro (2 nfet
+devices when extracted standalone) placed via `klt place-and-route`'s
+`request.macros` field alongside ~15 real `sky130_fd_sc_hd` standard cells.
+Extracting the *merged* layout in one `klt extract` run produced **256**
+devices (129 nfet + 127 pfet) — since the macro alone contributes only
+`nfet`, every one of the 127 `pfet` devices (and 254 of the 256 total) must
+have been pulled from the standard-cell region, in the same flat pass as
+the macro's own 2 transistors. No code change was needed for this — it
+follows directly from `begin_shapes_rec` flattening every instance,
+regardless of which verb (or how many process boundaries) placed it. See
+[`docs/cli/drc.md`](drc.md) → "Mixed sky130_fd_sc_hd + analog-macro layout"
+and [`docs/cli/lvs.md`](lvs.md) → "Mixed sky130_fd_sc_hd + analog-macro
+netlist" for the same artifact's DRC/LVS findings.
+
 ## Deviation from the spike
 
 The spike's proposed invocation is flag-only (`klt extract <file> --deck

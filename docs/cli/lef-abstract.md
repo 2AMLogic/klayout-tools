@@ -113,6 +113,15 @@ Each declared pin becomes a `PIN <name>` block:
   whose declared `layer` does not resolve to a known routing LEF layer gets
   `"none"` (no `PORT` at all) and a `warnings[]` entry.
 
+  **Known gap (#464):** a `geometry_source: "none"` pin is not itself an
+  error here — this command still writes a structurally valid LEF — but if
+  that pin is later wired into a real net and placed via `klt
+  place-and-route`'s `request.macros` (see
+  [that command's own "Known gap" note](place-and-route.md#hard-macro-placement-requestmacros)),
+  OpenROAD's global router fails with an opaque `GRT-0029` several stages
+  into a real run rather than a clear error here at abstract-emission time.
+  Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
+
 ### Obstructions
 
 Every shape drawn on a routing-type LEF layer, unioned per layer, clipped

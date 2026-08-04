@@ -290,6 +290,41 @@ anchor). A clean LVS run therefore does not by itself establish that a
 top-level pinout is correct; something else (e.g. comparing `pins[]` names
 directly) has to check pin order.
 
+## Mixed sky130_fd_sc_hd + analog-macro netlist (Epic #393 Phase 3, #456)
+
+Applying "Negative controls" above to a genuinely **mixed** design: issue
+#456 extracted a real mixed layout (a `klt gen diff_pair` analog macro
+placed by `klt place-and-route`'s `request.macros` alongside ~15 real
+`sky130_fd_sc_hd` standard cells — real Yosys + real OpenROAD, see
+[`docs/cli/drc.md`](drc.md)'s own "Mixed sky130_fd_sc_hd + analog-macro
+layout" section for the same artifact) and used its own extracted netlist
+(256 devices: 129 nfet + 127 pfet) as the reference, per the two-independent-
+corruptions negative-control methodology above — but with each corruption
+placed in a **different domain** rather than both in the same cell:
+
+- A `device.property` corruption on a standard-cell-region transistor (one
+  of the ~254 devices contributed by the digital fabric — identifiable by
+  device class/parameter combination unique to the standard-cell library)
+  was caught: `status: "mismatch"`, a `device.property` entry naming that
+  exact instance.
+- A `device.property` corruption on one of the analog macro's own two
+  transistors (identifiable by their unique `w_um`/`l_um` — the only nfet
+  pair in the merged extraction matching the standalone macro's own
+  reported device parameters) was caught the same way, naming that
+  instance.
+- The unmodified reference against the unmodified layout reports `status:
+  "match"` (`counts`: 173/173/173 nets, 256/256/256 devices, 71/71/71 pins),
+  modulo the two documented `severity: "warning"` entries above
+  (`device.body_unverified`, the class-with-no-instances `topology` note).
+
+This confirms `klt lvs` does not have an implicit single-domain assumption
+that silently drops connectivity from either the analog macro or the
+digital standard-cell fabric on a layout produced via `klt
+place-and-route`'s `request.macros` field — a defect in either region's
+devices is caught and correctly attributed regardless of which domain it
+came from. See #456 for the full transcript (extracted reference, both
+corrupted variants, and all three `klt lvs` runs).
+
 ## Request
 
 Accepted as a file path, `-` (stdin), or an inline JSON object string on the
