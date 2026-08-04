@@ -431,22 +431,35 @@ that segment extracts as a plain conductor — a **short** between the
 resistor's two heads — so a resistor drawn at the wrong length or width
 passes LVS silently.
 
-| Deck | `devices[].class` | Models | Body | Marker | Also requires | Sheet resistance |
-| ---- | ----------------- | ------ | ---- | ------ | ------------- | ---------------- |
-| `sky130`   | `res_generic_po` | `sky130_fd_pr__res_generic_po` | `poly.drawing` 66/20 | `poly.res` 66/13 | — | **48.2 Ω/□** |
-| `sky130`   | `res_high_po` | `sky130_fd_pr__res_high_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `rpm` 86/20 | **319.8 Ω/□** |
-| `sky130`   | `res_xhigh_po` | `sky130_fd_pr__res_xhigh_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `urpm` 79/20 | **2000 Ω/□** |
-| `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** |
-| `gf180mcu` | `ppolyf_u_1k` | `gf180mcu_fd_pr__ppolyf_u_1k` (`POLY_RES='1k'` default) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000 Ω/□** |
+| Deck | `devices[].class` | Models | Body | Marker | Also requires | Sheet resistance | Fixed head/end offset |
+| ---- | ----------------- | ------ | ---- | ------ | ------------- | ---------------- | ----------------------- |
+| `sky130`   | `res_generic_po` | `sky130_fd_pr__res_generic_po` | `poly.drawing` 66/20 | `poly.res` 66/13 | — | **48.2 Ω/□** | — |
+| `sky130`   | `res_high_po` | `sky130_fd_pr__res_high_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `rpm` 86/20 | **324.827244 Ω/□** | **379.705147 Ω** |
+| `sky130`   | `res_xhigh_po` | `sky130_fd_pr__res_xhigh_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `urpm` 79/20 | **2000 Ω/□** | — |
+| `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** | — |
+| `gf180mcu` | `ppolyf_u_1k` | `gf180mcu_fd_pr__ppolyf_u_1k` (`POLY_RES='1k'` default) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000 Ω/□** | — |
 
 KLayout computes `R = L / W * sheet_rho` from the recognised segment's own
-geometry, so the sheet-resistance number *is* the accuracy of the extracted
-value. Each is transcribed from that PDK's **own official KLayout LVS deck**
-and cross-checked against a second independent source (open_pdks' magic
-technology file) in the same PDK install — see the per-deck module docstrings
-(`src/klayout_tools/decks/sky130.py`, `.../gf180mcu.py`) for the exact source
-lines, the derivation each is transcribed from, and every approximation taken
-relative to it.
+geometry, corrected by `klt extract` itself (issue #518) to
+`R = L / W * sheet_rho + fixed_offset_ohm` once KLayout's own
+already-computed `L`/`W` device parameters are read back — so the two
+coefficients together *are* the accuracy of the extracted value, the
+resistor analogue of a MiM capacitor's area/perimeter pair (issue #512).
+The sheet-resistance figures are transcribed from that PDK's **own official
+KLayout LVS deck** and cross-checked against a second independent source
+(open_pdks' magic technology file) in the same PDK install; sky130's
+`res_high_po` additionally carries a **fixed head/end-effect offset**,
+because its real PDK **simulation model**
+(`sky130_fd_pr__res_high_po`'s SPICE `.subckt`) composes a length-scaling
+`rbody` term with a fixed-length `rhead` contact term the official LVS
+deck's own single-term restatement drops — measured via ngspice against
+that model, not transcribed from the LVS deck. See the per-deck module
+docstrings (`src/klayout_tools/decks/sky130.py`, `.../gf180mcu.py`) for the
+exact source lines/files, the derivation each is transcribed from, and
+every approximation taken relative to it. A deck entry that leaves
+`fixed_offset_ohm` at its `0.0` default (every row above except
+`res_high_po`) reports `r_ohm` exactly as `L / W * sheet_rho` — the
+pre-#518 formula, bit-for-bit.
 
 Three consequences worth knowing:
 
@@ -1169,7 +1182,7 @@ consume.
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, or a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors"). |
 | `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho`. |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 

@@ -175,9 +175,32 @@ class ResistorDevice:
 
     ``sheet_rho_ohm_sq`` is the device's sheet resistance in ohms per
     square; KLayout computes ``R = L / W * sheet_rho`` from the recognised
-    segment's own geometry, so **this number is the whole accuracy of the
-    extracted resistance**. Every deck that sets it must cite the PDK/DRM
-    source it came from inline, the same way the DRC decks cite rule ids.
+    segment's own geometry -- exactly the role ``area_cap_f_um2`` plays for
+    a capacitor device (#512). Every deck that sets it must cite the
+    PDK/DRM source it came from inline, the same way the DRC decks cite
+    rule ids.
+
+    ``fixed_offset_ohm`` (issue #518) is an optional second coefficient: a
+    per-instance resistance added on top of ``L / W * sheet_rho_ohm_sq``,
+    for a precision-resistor flavour whose real PDK model composes a
+    length-scaling *body* term with a fixed-length *head*/end-effect term
+    at the metal-to-resistor contact (sky130's ``res_high_po``'s SPICE
+    ``.subckt`` wires an ``rhead`` sub-resistor -- a constant contact
+    resistance, independent of the segment's own drawn length -- in series
+    with an ``rbody`` sub-resistor that scales with drawn length). KLayout's
+    ``kdb.DeviceExtractorResistor``/``...ResistorWithBulk`` constructors
+    only take one sheet-rho coefficient, so -- mirroring
+    ``CapacitorDevice.perim_cap_f_um``'s post-extraction correction using
+    the already-computed ``A``/``P`` device parameters -- this is *not*
+    threaded into that constructor call: ``extract.py``'s
+    ``_describe_devices`` reads the already-computed ``L``/``W`` device
+    parameters back and applies ``R = L / W * sheet_rho_ohm_sq +
+    fixed_offset_ohm`` after extraction. Defaults to ``0.0``, which
+    reproduces ``R = L / W * sheet_rho_ohm_sq`` only -- today's behaviour,
+    bit-for-bit -- for every deck entry that does not set it. A deck that
+    transcribes (or, as for sky130's ``res_high_po``, measures via ngspice
+    against) its PDK's own composite head-plus-body resistor model should
+    set this rather than leave the fixed head/end term silently dropped.
 
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
@@ -205,6 +228,7 @@ class ResistorDevice:
     excludes: tuple[tuple[int, int], ...] = ()
     terminal: tuple[int, int] | None = None
     bulk_to_substrate: bool = False
+    fixed_offset_ohm: float = 0.0
 
 
 @dataclass(frozen=True)

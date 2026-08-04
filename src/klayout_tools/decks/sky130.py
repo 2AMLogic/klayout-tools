@@ -536,6 +536,54 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # native P-substrate) in the official deck, hence `bulk_to_substrate=True`
 # below -- the same substrate-global approximation the NMOS body terminal and
 # gf180mcu's `ppolyf_u` already carry.
+#
+# `res_high_po`'s `fixed_offset_ohm` (issue #518): the `319.8` ohm/sq
+# `sheet_rho_ohm_sq` cited above is `sky130.lvs`'s own single-term
+# restatement of a real *two*-term device -- `sky130_fd_pr__res_high_po`'s
+# SPICE `.subckt` (`libs.ref/sky130_fd_pr/spice/sky130_fd_pr__res_high_po
+# .model.spice`) composes a length-scaling `rbody` sub-resistor in series
+# with an `rhead` sub-resistor whose own length is a fixed model constant
+# (`l=1.0`), not the caller's drawn length -- i.e. a per-instance *fixed*
+# resistance term `R = L / W * sheet_rho_ohm_sq` alone cannot express. Both
+# `sheet_rho_ohm_sq` and `fixed_offset_ohm` below are *measured* (not
+# transcribed), the same way this issue's own filing measured the gap --
+# via ngspice against the real PDK install (the same `volare enable sky130
+# c6d73a35f524070e85faff4a6a9eef49553ebc2b` fetch cited in the MiM
+# capacitor provenance note above), at the nominal `tt` corner
+# (`libs.tech/combined/sky130.lib.spice`'s `.lib tt` section), `w=1um`,
+# sweeping `l` across {1, 5, 10, 35}um: total two-terminal resistance
+# 704.532385 / 2003.84137 / 3627.97760 / 11748.6587 ohm respectively
+# (matching this issue's own citation table to the digit it quotes).
+# `libs.tech/combined/sky130.lib.spice` is the scalable, single-`.subckt`
+# resistor model `libs.tech/combined/continuous/models_resistors.spice`
+# actually simulates -- its own header calls it "New scalable 300 Ohm/sq
+# Poly resistor model ... Converted from discrete model", and it evaluates
+# to `rhead`'s `rhead_ps * sw_poly_head_res` / `rbody`'s
+# `sw_sky130_fd_pr__res_high_po_rs` sheet-rho values (325.0/345.8312 ohm/sq
+# at the `tt` corner's `libs.tech/combined/continuous/parameters_res_nom
+# .spice`, `corner_factor=0`) rather than the discrete per-length
+# `.model.spice` file's own `p2`/`q2`/`p3`/`q3` shape-correction terms --
+# ngspice does not implement those parameters for its built-in semiconductor
+# resistor device (confirmed directly: instantiating a resistor against a
+# `.model` declaring them logs `unrecognized parameter (p2) - ignored` for
+# every one), so they are a no-op in any ngspice simulation of either the
+# discrete or scalable model -- consistent with the `l`-independence of the
+# measured `rhead` contribution.
+#
+# Both coefficients are exact fits (curve-fit against the 4 lengths above
+# plus an independent, held-out `l=6um` cross-check point --
+# `2328.66861` ohm measured vs. `2328.668611` ohm predicted, a `4e-10`
+# relative residual) to the total-resistance-is-affine-in-`l` relationship
+# this measurement shows at fixed `w=1um`:
+# `R_total(l) = sheet_rho_ohm_sq * l / w + fixed_offset_ohm`. All five
+# measured points (including the held-out one) fit this affine law to a
+# relative residual under `1e-8` -- comfortably inside this deck's own
+# `rel=1e-6` verification bar (see `tests/test_extract.py`). No claim is
+# made here that this affine law holds at a `w` other than the `1um` this
+# issue measures (the real PDK model's `rhead` term does have its own,
+# undetermined `w`-dependence) -- the same single-coefficient,
+# curated-approximation limitation `sheet_rho_ohm_sq` alone already carries
+# for every other resistor entry in this deck, one coefficient over.
 EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
@@ -678,7 +726,7 @@ EXTRACTION_DECK = ExtractionDeck(
             excludes=(
                 (65, 20),  # diff.drawing -- a marked gate is a transistor
                 (65, 44),  # tap.drawing
-                (86, 20),  # rpm  -> sky130_fd_pr__res_high_po_*  (319.8 ohm/sq)
+                (86, 20),  # rpm  -> sky130_fd_pr__res_high_po_*  (see below, #518)
                 (79, 20),  # urpm -> sky130_fd_pr__res_xhigh_po_* (2 kohm/sq)
             ),
         ),
@@ -686,7 +734,12 @@ EXTRACTION_DECK = ExtractionDeck(
             name="res_high_po",  # sky130_fd_pr__res_high_po_* (lengths merged)
             body=(66, 20),  # poly.drawing
             marker=(66, 13),  # poly.res
-            sheet_rho_ohm_sq=319.8,  # sky130.lvs res_high_po_* extract_devices calls
+            # Measured via ngspice against the real two-term PDK model at the
+            # `tt` corner (issue #518), refined from `sky130.lvs`'s own
+            # rounded, area-only-equivalent `319.8` -- see the provenance
+            # note above for the exact methodology/source files.
+            sheet_rho_ohm_sq=324.827244,
+            fixed_offset_ohm=379.705147,
             requires=(
                 (94, 20),  # psdm -- P+ implant, see the module comment above
                 (86, 20),  # rpm  -- 300 ohm precision-resistor implant mask
