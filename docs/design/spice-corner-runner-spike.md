@@ -356,4 +356,27 @@ Those remain candidate follow-up epics gated on this spike's findings.
   states which side of the loop it verified.
 - Caching: corner results are pure functions of
   (netlist, models, corner, analysis) hashes, so re-running a sweep after a
-  one-corner fix need not re-simulate the matrix.
+  one-corner fix need not re-simulate the matrix. **Addressed by
+  [#473](https://github.com/2AMLogic/klayout-tools/issues/473)** as
+  `options.resume`/`--resume`: a checkpoint of completed corner reports,
+  fingerprinted over exactly those inputs, is persisted incrementally and
+  consulted on a later invocation of the same request. See
+  `docs/cli/sim.md`'s "Wall-clock budget, orphan safety, and resume"
+  section for the shipped contract (currently `local`/`local-parallel`
+  only, not yet `remote`).
+
+## Update (issue #473): bounded sweep — budget, orphan safety, resume
+
+A real incident (an agent-hand-rolled corner-sweep driver that ran 8
+concurrent `ngspice` processes unbounded for ~6 hours after its launching
+process had already exited, saturating a shared host) exposed three gaps
+this spike's v1 contract left open: a per-corner `options.timeout_s` alone
+never bounds the *whole* sweep, nothing stopped a sweep after its launcher
+died, and there was no way to resume a truncated sweep without
+recomputing completed corners (the caching question directly above). All
+three are now implemented as an extension of the same `local`/
+`local-parallel` execution-backend contract this spike settled — see
+`docs/cli/sim.md`'s "Wall-clock budget, orphan safety, and resume" section
+for the shipped `options.wall_clock_budget_s`/`options.resume` fields and
+the always-on orphan check. No contract decision this spike made changed;
+this is additive.

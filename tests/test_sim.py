@@ -2376,6 +2376,291 @@ def test_default_max_workers_derives_from_cpu_count(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Bounded corner-sweep runner: wall-clock budget, orphan safety, resume
+# (issue #473)
+# --------------------------------------------------------------------------- #
+
+
+def _fake_run_sleeping(run_calls: list, sleep_s: float = 0.1):
+    """A ``subprocess.run`` stand-in that records the corner's ``.temp`` and
+    sleeps ``sleep_s`` before "completing" -- used to make budget/orphan
+    checks between corners deterministic without a real ngspice binary."""
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[2]
+        log_path = cmd[cmd.index("-o") + 1]
+        deck_text = Path(deck_path).read_text()
+        temp = float(re.search(r"\.temp\s+(-?[\d.]+)", deck_text).group(1))
+        run_calls.append(temp)
+        time.sleep(sleep_s)
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return _FakeCompleted("** ngspice-99\n")
+
+    return fake_run
+
+
+@pytest.mark.parametrize("backend", ["local", "local-parallel"])
+def test_run_sim_budget_exceeded_skips_remaining_corners(
+    tmp_path, monkeypatch, backend
+):
+    _write_body(tmp_path)
+    options = {"wall_clock_budget_s": 0.05}
+    if backend == "local-parallel":
+        options["max_workers"] = 1  # keep dispatch order deterministic
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": backend,
+            "corners": {"temperature_c": [10, 20, 30]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": options,
+        },
+    )
+
+    run_calls: list[float] = []
+    monkeypatch.setattr(sim.subprocess, "run", _fake_run_sleeping(run_calls))
+
+    report = sim.run_sim(str(request))
+
+    # The very first corner always gets a chance to run -- the deadline
+    # check happens before dispatch, not after the budget window opens, so
+    # a budget smaller than one corner's own runtime still attempts (and,
+    # here, completes) the first corner rather than reporting zero.
+    assert run_calls == [10]
+    statuses = [c["status"] for c in report["corners"]]
+    assert statuses == ["pass", "error", "error"]
+    for corner in report["corners"][1:]:
+        codes = [d["code"] for d in corner["diagnostics"]]
+        assert codes == ["budget_exceeded"]
+
+    assert report["status"] == "error"
+    assert report["errored"] == 2
+    budget = report["environment"]["budget"]
+    assert budget["wall_clock_budget_s"] == 0.05
+    assert budget["exceeded"] is True
+    assert budget["corners_skipped"] == 2
+
+
+def test_run_sim_budget_not_exceeded_is_unreported(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"wall_clock_budget_s": 3600},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    budget = report["environment"]["budget"]
+    assert budget["exceeded"] is False
+    assert budget["corners_skipped"] == 0
+    assert report["status"] == "pass"
+
+
+def test_run_sim_omitting_budget_leaves_environment_unchanged(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert "budget" not in report["environment"]
+    assert "orphaned" not in report["environment"]
+    assert "resume" not in report["environment"]
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, "3"])
+def test_run_sim_invalid_wall_clock_budget_s_raises(tmp_path, bad_value):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"wall_clock_budget_s": bad_value},
+        },
+    )
+    with pytest.raises(sim.SimError, match="wall_clock_budget_s"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_budget_s_flag_overrides_request_field(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"temperature_c": [10, 20]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"wall_clock_budget_s": 3600},
+        },
+    )
+    run_calls: list[float] = []
+    monkeypatch.setattr(sim.subprocess, "run", _fake_run_sleeping(run_calls))
+
+    report = sim.run_sim(str(request), budget_s=0.05)
+
+    assert report["environment"]["budget"]["wall_clock_budget_s"] == 0.05
+    assert report["environment"]["budget"]["exceeded"] is True
+
+
+def test_run_sim_orphaned_parent_stops_dispatch(tmp_path, monkeypatch):
+    # Simulates the incident's root failure mode: the launching process
+    # exits mid-sweep. `os.getppid()` is checked between corners; once it
+    # no longer matches the value captured at the start of the sweep, no
+    # further corner is dispatched.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"temperature_c": [10, 20, 30]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    real_getppid = sim.os.getppid
+    calls = {"n": 0}
+
+    def fake_getppid():
+        calls["n"] += 1
+        # Call 1: `run_sim`'s own `initial_ppid` capture. Call 2: the check
+        # before the first corner (still the same launcher -- it runs).
+        # Every call after that reports a different PPID, simulating the
+        # launcher having exited and this process being reparented.
+        if calls["n"] <= 2:
+            return real_getppid()
+        return real_getppid() + 999_999
+
+    monkeypatch.setattr(sim.os, "getppid", fake_getppid)
+
+    report = sim.run_sim(str(request))
+
+    statuses = [c["status"] for c in report["corners"]]
+    assert statuses == ["pass", "error", "error"]
+    for corner in report["corners"][1:]:
+        codes = [d["code"] for d in corner["diagnostics"]]
+        assert codes == ["orphaned"]
+    assert report["environment"]["orphaned"] is True
+
+
+def test_run_sim_resume_persists_and_skips_completed_corners(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request_path = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"temperature_c": [10, 20, 30]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"resume": True, "wall_clock_budget_s": 0.05},
+        },
+    )
+
+    run_calls: list[float] = []
+    monkeypatch.setattr(sim.subprocess, "run", _fake_run_sleeping(run_calls))
+
+    first = sim.run_sim(str(request_path))
+    assert first["status"] == "error"
+    assert [c["status"] for c in first["corners"]] == ["pass", "error", "error"]
+    assert run_calls == [10]
+    assert first["environment"]["resume"]["resumed_corners"] == 0
+    assert first["environment"]["resume"]["checkpoint_retained"] is True
+
+    checkpoint_path = os.path.join(tmp_path, ".klt", "sim", "checkpoint.json")
+    assert os.path.isfile(checkpoint_path)
+
+    # A second invocation of the *same* request, budget lifted: only the
+    # corners the checkpoint doesn't already have get dispatched.
+    request_doc = json.loads(request_path.read_text())
+    del request_doc["options"]["wall_clock_budget_s"]
+    request_path.write_text(json.dumps(request_doc))
+
+    second = sim.run_sim(str(request_path))
+    assert second["status"] == "pass"
+    assert [c["status"] for c in second["corners"]] == ["pass", "pass", "pass"]
+    assert run_calls == [10, 20, 30]  # the completed corner was never re-run
+    assert second["environment"]["resume"]["resumed_corners"] == 1
+    # Nothing left to resume -- the checkpoint is cleaned up.
+    assert second["environment"]["resume"]["checkpoint_retained"] is False
+    assert not os.path.isfile(checkpoint_path)
+
+
+def test_run_sim_resume_ignores_stale_checkpoint_when_netlist_changes(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request_path = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {"temperature_c": [10, 20]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"resume": True, "wall_clock_budget_s": 0.05},
+        },
+    )
+
+    run_calls: list[float] = []
+    monkeypatch.setattr(sim.subprocess, "run", _fake_run_sleeping(run_calls))
+
+    sim.run_sim(str(request_path))
+    assert run_calls == [10]
+
+    # The netlist is edited in place -- the checkpoint's fingerprint no
+    # longer matches, so it must not be silently reused even though the
+    # file still exists and still names the same corner matrix.
+    (tmp_path / "body.spice").write_text(
+        ".param vdd=1.0\nVdd vdd 0 DC {vdd}\nR1 vdd out 2k\nC1 out 0 1n\n"
+    )
+    request_doc = json.loads(request_path.read_text())
+    del request_doc["options"]["wall_clock_budget_s"]
+    request_path.write_text(json.dumps(request_doc))
+
+    second = sim.run_sim(str(request_path))
+
+    assert run_calls == [10, 10, 20]  # corner 10 recomputed, not skipped
+    assert second["environment"]["resume"]["resumed_corners"] == 0
+
+
+def test_run_sim_resume_with_remote_backend_raises(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_remote_request(options={"resume": True}),
+    )
+    with pytest.raises(sim.SimError, match="resume"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_resume_flag_overrides_request_field(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), resume=True)
+
+    assert "resume" in report["environment"]
+
+
+# --------------------------------------------------------------------------- #
 # Fleet shard/merge engine (Epic #375 Phase 1A, #376) -- pure logic, no AWS
 # --------------------------------------------------------------------------- #
 

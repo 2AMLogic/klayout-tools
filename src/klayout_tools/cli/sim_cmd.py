@@ -35,6 +35,8 @@ def run(args: argparse.Namespace) -> int:
             backend=args.backend,
             max_workers=args.max_workers,
             hosts=args.hosts,
+            budget_s=args.budget_s,
+            resume=args.resume,
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)
@@ -61,6 +63,22 @@ def _print_text(report: dict) -> None:
     env = report["environment"]
     print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
     print(f"models_lib: {env['models_lib']}")
+
+    budget = env.get("budget")
+    if budget is not None:
+        print(
+            f"budget: {budget['elapsed_s']}s / {budget['wall_clock_budget_s']}s  "
+            f"exceeded={budget['exceeded']}  skipped={budget['corners_skipped']}"
+        )
+    if env.get("orphaned"):
+        print("orphaned: launching process exited; sweep stopped early")
+    resume = env.get("resume")
+    if resume is not None:
+        print(
+            f"resume: reused {resume['resumed_corners']} checkpointed corner(s)  "
+            f"checkpoint_retained={resume['checkpoint_retained']}  "
+            f"path={resume['checkpoint_path']}"
+        )
 
     measurements = report["measurements"]
     if measurements:

@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -29,6 +29,14 @@ this document (and the code) win.
   many hosts and merge the per-shard reports, overriding the request's own
   `remote.hosts` field when given. Defaults to `1` (today's single-host
   behaviour, byte-identical). See "Fleet sharding" below.
+- `--budget-s` — overall wall-clock budget in seconds for the whole sweep,
+  overriding the request's own `options.wall_clock_budget_s` when given.
+  Defaults to unbounded (today's behaviour). See "Wall-clock budget, orphan
+  safety, and resume" below.
+- `--resume` — resume from a matching on-disk checkpoint, skipping corners a
+  prior interrupted run of this same request already completed, overriding
+  the request's own `options.resume` when given. See "Wall-clock budget,
+  orphan safety, and resume" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -317,6 +325,97 @@ not just equivalent.
   Epic #375 Phase 1B ([#377](https://github.com/2AMLogic/klayout-tools/issues/377)),
   which plugs its own per-shard runner into the same merge engine this
   section describes.
+
+## Wall-clock budget, orphan safety, and resume
+
+Issue [#473](https://github.com/2AMLogic/klayout-tools/issues/473): agents
+doing corner sweeps kept hand-rolling driver scripts into gitignored scratch
+space because nothing committed enforced limits a caller could not
+accidentally omit. One such driver ran 8 concurrent `ngspice` at ~95% CPU
+each for 5h52m on an 8-core host — a per-corner `options.timeout_s` alone
+never bounds the *whole sweep*, and killing the leaf `ngspice` processes did
+nothing because the driver's own launch loop simply kept marching through
+the matrix after its launcher had already exited. `klt sim` now closes all
+three gaps directly, as an extension of `local`/`local-parallel` (and any
+`hosts > 1` shard built on them) rather than a separate tool.
+
+- **`options.wall_clock_budget_s` (`--budget-s`)** bounds the whole sweep's
+  wall-clock time, overriding the request field when given (same precedence
+  rule as `--max-workers`/`--hosts`). Distinct from `options.timeout_s`,
+  which only bounds one corner: a driver with a generous per-sim timeout can
+  still run for hours by simply having a long matrix. Checked **before**
+  dispatching each corner, never mid-corner — a corner already running when
+  the budget is hit is left to finish (bounded by its own `timeout_s`), but
+  no new corner is launched. Every corner that never got the chance to start
+  is reported with `status: "error"` and a `budget_exceeded` diagnostic, and
+  `environment.budget` summarises the outcome:
+
+  ```json
+  {
+    "environment": {
+      "budget": {
+        "wall_clock_budget_s": 1800,
+        "elapsed_s": 1800.04,
+        "exceeded": true,
+        "corners_skipped": 6
+      }
+    }
+  }
+  ```
+
+  Present only when the request declares a budget. Omitting it is exactly
+  today's behaviour: unbounded, same as before this issue. A budget smaller
+  than a single corner's own runtime still attempts (and, if it completes in
+  time, passes) the first corner — the check happens once per dispatch slot,
+  not as a pre-flight gate that could report zero corners for a legitimately
+  tiny budget.
+
+- **Orphan safety is always on, no configuration required.** `klt sim`
+  captures its own parent PID once, at the start of the sweep, and the
+  dispatch loop re-checks `os.getppid()` before launching each new corner.
+  The instant the launching process exits, the kernel reparents this
+  process to init/systemd — the next check sees a different PPID and stops
+  dispatching, exactly the same mechanism the budget uses, just with an
+  always-true trigger condition instead of a clock. No heartbeat file,
+  lease, or external supervisor is needed. Every corner that never started
+  because of this is reported with an `orphaned` diagnostic, and
+  `environment.orphaned: true` is set (present only when it actually fired).
+  An already-running corner is not killed the instant the parent dies — it
+  is still bounded by its own `timeout_s`, same as the budget case.
+
+- **`options.resume` (`--resume`)** persists a checkpoint of completed
+  corner reports to `checkpoint.json` under `--outdir` (the same directory
+  `options.keep_artifacts` writes per-corner logs/rawfiles into) as the
+  sweep runs, and skips any corner already recorded there on a later
+  invocation of the **same** request — this is what makes a short budget an
+  acceptable default rather than a reason to avoid one. "Same request" is
+  enforced by a SHA-256 fingerprint over the netlist/model library content,
+  analysis, measurement cards, per-corner timeout, engine, and the exact
+  expanded corner-ID list; a checkpoint whose fingerprint no longer matches
+  (netlist edited, corner matrix changed) is treated as if it did not exist
+  — never silently reused against a since-modified request. The checkpoint
+  file is removed once a sweep finishes with nothing skipped. Currently
+  implemented for `local`/`local-parallel` only (including any `hosts > 1`
+  shard on them) — pairing `options.resume` with `backend: "remote"` is a
+  clear application error today (exit 1), the same pattern
+  `hosts > 1` + `backend: "remote"` already uses.
+
+  ```json
+  {
+    "environment": {
+      "resume": {
+        "resumed_corners": 6,
+        "checkpoint_path": "/path/to/.klt/sim/checkpoint.json",
+        "checkpoint_retained": false
+      }
+    }
+  }
+  ```
+
+  Present only when `options.resume`/`--resume` was requested.
+  `resumed_corners` counts corners reused from the checkpoint rather than
+  recomputed this run; `checkpoint_retained` is `false` once a run finishes
+  with every corner accounted for (the file is then deleted).
 
 ## Deviation from the spike
 
@@ -706,6 +805,9 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
+| `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
+| `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
+| `lost_shard`       | The corner's `hosts > 1` shard never returned (Epic #375). See "Fleet sharding" above. |
 
 **A `diagnostics` entry at `severity: "error"` makes that corner
 `status: "error"`**, which always outranks a clean limit violation
@@ -867,6 +969,8 @@ verb — see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag. |
+| `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
+| `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 
 ### Response
@@ -964,7 +1068,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above). |
+| `environment`   | object          | Reproducibility block: engine name/version, resolved model-library path + SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested) — see "Wall-clock budget, orphan safety, and resume" above. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
@@ -1028,7 +1132,7 @@ the full reasoning):
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. |
+| `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded or the launching process exited (`budget_exceeded`/`orphaned` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" above. |
 
 This resolves the open question the spike flagged (a pass/fail/error
 trichotomy doesn't fit `klt drc`'s two-way clean/violations split): rather
