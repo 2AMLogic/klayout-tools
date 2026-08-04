@@ -99,23 +99,38 @@ expression.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 10
+design rule manual (which spans hundreds of rules). It currently covers 16
 rules — width, spacing, and enclosure checks across the `poly`, `diff`,
-`li1`, `met1`, `licon1`, and `mcon` layers — transcribed directly from the
-official community sky130 KLayout DRC deck
+`li1`, `met1`, `licon1`, `mcon`, `met2`, and `via` (met1&lt;-&gt;met2 via1)
+layers — transcribed directly from the official community sky130 KLayout
+DRC deck
 ([`fossi-foundation/open-pdks`](https://github.com/fossi-foundation/open-pdks),
-`sky130/klayout/sky130.lydrc` and `sky130.lyt`; GPLv3). Each rule in
+`sky130/klayout/sky130.lydrc` and `sky130.lyt`; GPLv3). The `met2`/`via`
+rules (issue #513) were cross-checked against a real sky130A PDK install's
+own current deck (`libs.tech/klayout/drc/sky130A_mr.drc`), whose rule
+ids/values for every rule already curated here (`poly.1a`, `li.1`, `li.3`,
+`m1.1`, `m1.2`, `m1.4`, `licon.5`, `licon.8`, `ct.2`) match exactly,
+confirming it carries the same content. Each rule in
 `src/klayout_tools/decks/sky130.py` cites the exact source rule id (e.g.
 `"poly.1a"`) and comment it was transcribed from.
 
-Two of the ten rules approximate an official rule defined on a *compound*
-layer expression (a boolean union of two mask layers, e.g. `diff.or(tap)`)
-as a check against a single drawn layer, because the native `Region` check
-primitives check one layer, or one layer against one other layer, at a
-time — they do not evaluate arbitrary layer expressions the way the DRC-DSL
-script runner does. This is called out explicitly in each such rule's
-docstring; the threshold *values* used are always the real, unmodified
-source values.
+Two of the sixteen rules approximate an official rule defined on a
+*compound* layer expression (a boolean union of two mask layers, e.g.
+`diff.or(tap)`) as a check against a single drawn layer, because the native
+`Region` check primitives check one layer, or one layer against one other
+layer, at a time — they do not evaluate arbitrary layer expressions the way
+the DRC-DSL script runner does. Four more (`met2.width.1`, `via.width.1`,
+`met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
+that additionally bounds a max size, length, or a periphery-scoped/
+corner-relaxed refinement our single-layer/two-layer check primitives don't
+support — the same class of approximation `met1.enclosing.mcon.1` and
+gf180mcu's `contact.width.1` already make. Every approximation is called
+out explicitly in its rule's docstring; the threshold *values* used are
+always the real, unmodified source values. The official deck's `m2.6`
+(minimum met2 area, 0.0676 um²) is **not** transcribed: no `"area"` check
+primitive exists in `DrcRule`'s vocabulary today (only
+`width`/`space`/`notch`/`separation`/`enclosing`/`enclosed`/`overlap`) —
+tracked as a candidate follow-on rather than silently dropped.
 
 The `gf180mcu` deck is likewise a **curated starter subset**: 24 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`

@@ -15,7 +15,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.decks import get_deck
+from klayout_tools.decks import get_deck, get_extraction_deck
 from klayout_tools.drc import DrcError, run_drc
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
@@ -1751,3 +1751,292 @@ def test_run_drc_gf180mcu_dbu_invariant(tmp_path, dbu_um):
 
     assert report["dbu_um"] == dbu_um
     _assert_reports_match_modulo_dbu(reference, dbu_um, report)
+
+
+# ---------------------------------------------------------------------------
+# sky130 met2 / via1 rule coverage (#513)
+#
+# #511 extended `EXTRACTION_DECK.metals`/`.vias` to a third connectivity
+# level (met2.drawing 69/20, via.drawing 68/44 as the met1<->met2 via) but
+# left `DECK` with no rules on either layer -- these tests exercise the six
+# rules added to close that gap: `met2.width.1`, `met2.space.1`,
+# `via.width.1`, `via.space.1`, `met1.enclosing.via.1`,
+# `met2.enclosing.via.1`.
+# ---------------------------------------------------------------------------
+
+
+def test_run_drc_sky130_met2_width_violation(tmp_path):
+    """A met2 bar narrower than the 140 dbu (0.14 um) `met2.width.1`
+    threshold trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 140
+    path = tmp_path / "met2_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met2.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met2.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "met2.drawing"
+
+
+def test_run_drc_sky130_met2_space_violation(tmp_path):
+    """Two met2 bars closer than the 140 dbu `met2.space.1` threshold trip
+    exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(met2).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 140
+    path = tmp_path / "met2_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met2.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met2.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "met2.drawing"
+
+
+def test_run_drc_sky130_met2_clean(tmp_path):
+    """A met2 bar wide enough to satisfy `met2.width.1` passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 200, 2000))  # 200 >= 140
+    path = tmp_path / "met2_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_via_width_violation(tmp_path):
+    """A via1 (`via.drawing`, 68/44) shape narrower than the 150 dbu
+    (0.15 um) `via.width.1` threshold trips exactly one violation.
+
+    Elongated (not square), mirroring `_make_violation_layout`'s own note:
+    an elongated shape's `width_check` reports one edge pair per narrow run,
+    while a square shape reports one pair per violating edge direction (two,
+    for a uniformly-undersized square)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(via).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 150
+    path = tmp_path / "via_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"via.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "via.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "via.drawing"
+
+
+def test_run_drc_sky130_via_width_clean(tmp_path):
+    """A via1 shape at least 150 dbu wide passes `via.width.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(via).insert(kdb.Box(0, 0, 150, 150))  # 150 >= 150
+    path = tmp_path / "via_width_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_via_space_violation(tmp_path):
+    """Two via1 shapes closer than the 170 dbu (0.17 um) `via.space.1`
+    threshold trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(via).insert(kdb.Box(0, 0, 150, 150))
+    top.shapes(via).insert(kdb.Box(250, 0, 400, 150))  # 100 dbu gap < 170
+    path = tmp_path / "via_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"via.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "via.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "via.drawing"
+
+
+def test_run_drc_sky130_met1_enclosing_via_violation(tmp_path):
+    """A via1 shape hanging off the edge of its met1 landing pad by less
+    than the 55 dbu (0.055 um) `met1.enclosing.via.1` margin trips exactly
+    one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(68, 20)
+    layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
+    # 400 dbu margin on 3 sides, only 10 dbu (< 55) margin on the right.
+    top.shapes(via).insert(kdb.Box(400, 400, 990, 600))
+    path = tmp_path / "met1_enclosing_via_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met1.enclosing.via.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met1.enclosing.via.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "met1.drawing"
+
+
+def test_run_drc_sky130_met1_enclosing_via_clean(tmp_path):
+    """A via1 shape enclosed by its met1 landing pad with >= 55 dbu margin
+    on every side passes `met1.enclosing.via.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(68, 20)
+    layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 55
+    path = tmp_path / "met1_enclosing_via_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_enclosing_via_violation(tmp_path):
+    """A via1 shape hanging off the edge of its met2 landing pad by less
+    than the 55 dbu (0.055 um) `met2.enclosing.via.1` margin trips exactly
+    one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
+    # 400 dbu margin on 3 sides, only 10 dbu (< 55) margin on the right.
+    top.shapes(via).insert(kdb.Box(400, 400, 990, 600))
+    path = tmp_path / "met2_enclosing_via_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met2.enclosing.via.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met2.enclosing.via.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "met2.drawing"
+
+
+def test_run_drc_sky130_met2_enclosing_via_clean(tmp_path):
+    """A via1 shape enclosed by its met2 landing pad with >= 55 dbu margin
+    on every side passes `met2.enclosing.via.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 55
+    path = tmp_path / "met2_enclosing_via_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_via_layers_now_covered(tmp_path):
+    """The #513 reproducer: a layout drawing well-formed met2/via1 geometry
+    (previously invisible to `DECK`) now shows up in
+    `coverage.layers_checked` and no longer appears in
+    `coverage.layers_in_stream_without_rules` -- the acceptance criterion
+    the issue itself states."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(68, 20)
+    layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via).insert(kdb.Box(400, 400, 600, 600))
+    path = tmp_path / "met2_via_covered.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert "68/44" in report["coverage"]["layers_checked"]
+    assert "69/20" in report["coverage"]["layers_checked"]
+    assert "68/44" not in report["coverage"]["layers_in_stream_without_rules"]
+    assert "69/20" not in report["coverage"]["layers_in_stream_without_rules"]
+
+
+def test_sky130_met2_via_extraction_levels_have_drc_width_and_space_coverage():
+    """Narrow instance of the issue's own "more generally" invariant
+    suggestion (#513): the specific connectivity level this issue adds DRC
+    coverage for -- met2 (69/20) and via1/met1<->met2 via (68/44), both new
+    to `EXTRACTION_DECK.metals`/`.vias` as of #511 -- each have at least one
+    `"width"` and one `"space"` rule in `DECK`, so this issue's own fix is
+    verified structurally, not just via the violation-triggering fixtures
+    above.
+
+    Deliberately **not** generalised to every layer in
+    `EXTRACTION_DECK.metals`/`.vias` (e.g. sky130's own `mcon.drawing`,
+    67/44, has a `mcon.space.1` rule but no `mcon.width.1` rule) or to every
+    registered deck (gf180mcu's `Metal4`/`Via1`-`Via3` have an analogous
+    pre-existing gap) -- both predate this issue and are out of scope for
+    it; asserting the invariant that broadly would fail on those unrelated
+    gaps rather than verify this issue's fix. See #513 for a candidate
+    follow-on generalising this check across every layer and every
+    registered deck.
+    """
+    deck = get_deck("sky130")
+    extraction = get_extraction_deck("sky130")
+
+    assert (69, 20) in extraction.metals  # met2.drawing
+    assert (68, 44) in extraction.vias  # via.drawing (met1<->met2)
+
+    width_layers = {rule.layer for rule in deck if rule.check == "width"}
+    space_layers = {rule.layer for rule in deck if rule.check == "space"}
+
+    for layer in ((69, 20), (68, 44)):
+        assert layer in width_layers, f"{layer} has no width rule in DECK"
+        assert layer in space_layers, f"{layer} has no space rule in DECK"

@@ -1,10 +1,10 @@
 {
   "$comment": "Golden metrics for the sky130 5T OTA klt gen-compose -> klt extract -> klt drc pipeline (issue #248). Regenerate with `python tests/golden_metrics/generate_golden_metrics.py` -- see tests/golden_metrics/README.md for the update policy.",
   "metrics": {
-    "drc.coverage.deck_layers_count": 6,
+    "drc.coverage.deck_layers_count": 8,
     "drc.coverage.layers_checked_count": 4,
     "drc.coverage.layers_in_stream_without_rules_count": 2,
-    "drc.coverage.rules_skipped_count": 4,
+    "drc.coverage.rules_skipped_count": 10,
     "drc.dbu_um": 0.001,
     "drc.schema_version": 1,
     "drc.violation_count": 0,
