@@ -183,7 +183,8 @@ status), which is different from "the layer doesn't exist"; a family with
 neither a well layer nor a well rule would still get the documented no-op,
 reported via `drc_hints.notes`. Four ports —
 `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` — sit at the midpoint of each ring side.
-`device_count` is `contacts_per_side * 4`.
+`device_count` is the number of tap contacts actually drawn
+(`contacts_per_side * 4`, less any the ring opening below clipped away).
 **`drc_hints.matched_group_id` is always `null`** — a guard ring has no
 matching concept (it is excluded from the matched-device generators: 1, 2,
 and 4).
@@ -194,7 +195,46 @@ and 4).
 | `inner_height_um`    | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
 | `ring_width_um`      | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
 | `contacts_per_side`  | int    | `4`     | Tap contacts evenly spaced along each ring side. Must be `>= 1`, and must fit without overlapping (a `contacts_per_side` too large for `inner_width_um`/`inner_height_um` is rejected outright — a structural error, not a DRC-adjacent one). |
+| `ring_gap_side`      | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
+| `ring_gap_um`        | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
+| `ring_gap_offset_um` | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
 | `add_well`           | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
+
+#### Ring routing openings (`ring_gap_side`)
+
+A closed ring encloses whatever it protects — which is the point, and also
+why [`klt gen-compose`](gen-compose.md) refuses to route a signal net to a
+non-tap port on a ringed block: the wire would cross the ring's own metal
+loop and merge that net with the ring's tap net. `ring_gap_side` cuts **one**
+opening through the ring's band so a route can pass through it instead:
+
+- Only one side can be opened, so the ring stays a **single connected**
+  (C-shaped) conductor — its remaining tap ports still describe one tap net.
+  Two openings would split it into two electrically separate arcs, so a
+  second one is not expressible.
+- The opening is cut from **every** layer the ring is drawn on (the tap ring
+  and the local-metal ring; `bjt_array`'s collector ring likewise on both its
+  diffusion and metal roles). A well tie drawn under the ring (`add_well`) is
+  *not* cut — the opening is a routing hole through the ring conductor, not
+  through the well.
+- Any tap contact the opening would clip is dropped, and the side's own
+  `TAP_*`/`COLL_*` port is not reported when its midpoint lands in the
+  opening (there is no metal left under it there).
+- The opening is reported as a `GAP_<side>` entry in `ports[]` on the layer a
+  route would cross the ring on: `x_um`/`y_um` is the opening's centre on the
+  ring's own centre line, **`width_um` is the opening's length along that
+  side**, and `direction_deg` is the side's outward normal. A `GAP_*` entry
+  marks the *absence* of metal, so it is a marker rather than a connectable
+  port — `klt gen-compose` rejects any attempt to wire (`connectivity[]`) or
+  label (`pins[]`) one.
+- A `drc_hints.notes[]` entry records the opening (and that substrate
+  isolation is interrupted there), or — when `ring_gap_side` is set on a
+  block whose ring is switched off — that no opening was cut.
+
+The same three params, with the same semantics, are accepted by `diff_pair`
+(on its `add_guard_ring` ring) and `bjt_array` (on its `add_collector_ring`
+ring). Openings are opt-in: omitting them draws exactly the closed ring
+these generators always drew.
 
 ### `diff_pair` (family 4: differential pair / current mirror cell)
 
@@ -209,7 +249,9 @@ guard ring (`add_guard_ring`, fixed internal sizing — use the standalone
 named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
 `params.mirror` is `true`, for a current-mirror naming convention — geometry
 is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
-`add_guard_ring` is `true`. `device_count` is `2 * splits`.
+`add_guard_ring` is `true` (and a `GAP_<side>` marker when the ring carries a
+routing opening — see `guard_ring`'s "Ring routing openings" above).
+`device_count` is `2 * splits`.
 `drc_hints.matched_group_id` is `"diff_pair:pair:<splits>"` (or
 `"diff_pair:mirror:<splits>"` with `params.mirror`; `flavor` is not folded in
 — see `mos_array`'s equivalent note above).
@@ -230,6 +272,9 @@ automatically-sized ring already draws its own well tie regardless of
 | `l_um`             | double | `0.28`  | Gate length (µm). Must be `> 0`. |
 | `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. |
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
+| `ring_gap_side`    | string | `""`    | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
+| `ring_gap_um`      | double | `0.0`   | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_offset_um` | double | `0.0` | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 
@@ -249,7 +294,10 @@ entry says so).
 
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when
-`add_collector_ring` is `true`. `device_count` is `rows * cols` (dummies
+`add_collector_ring` is `true` (and a `GAP_<side>` marker when that ring
+carries a routing opening — see `guard_ring`'s "Ring routing openings" above;
+the `COLL_*` taps sit on the diffusion role, the `GAP_*` marker on the metal
+role a route crosses the ring on). `device_count` is `rows * cols` (dummies
 excluded). `drc_hints.matched_group_id` is
 `"bjt_array:<rows>x<cols>:<topology>:ratio<ratio>"`.
 
@@ -271,6 +319,9 @@ fidelity limits that choice carries.
 | `dummy`              | int    | `1`                | Dummy unit-device columns added on each side of the array. Must be `>= 0`. |
 | `ratio`              | int    | `8`                | Intended emitter matching ratio (e.g. `8` for a bandgap's 8:1 group) — recorded in `matched_group_id`; a `drc_hints.notes` entry warns if the array is too small to realise it. Must be `>= 1`. |
 | `add_collector_ring` | bool   | `true`             | Surround the array with a collector/substrate guard ring. |
+| `ring_gap_side`      | string | `""`               | Cut one routing opening through the collector ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
+| `ring_gap_um`        | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_offset_um` | double | `0.0`              | Slide the opening off its side's midpoint (µm) — e.g. onto the column of emitter ports a route needs to reach. |
 
 ## JSON schema (the contract)
 

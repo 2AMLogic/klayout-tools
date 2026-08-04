@@ -329,10 +329,18 @@ def _parse_blocks(
 
         drc_hints = report.get("drc_hints")
         matched_group_id = None
+        # The block's own minimum same-layer spacing, used as the clearance a
+        # route must keep from the cut ends of a ring opening (#434). Absent
+        # (or unusable) means "no clearance claimed" rather than an error --
+        # every other consumer of drc_hints treats it as advisory too.
+        min_spacing_um = 0.0
         if isinstance(drc_hints, dict):
             candidate = drc_hints.get("matched_group_id")
             if isinstance(candidate, str) and candidate:
                 matched_group_id = candidate
+            spacing = drc_hints.get("min_spacing_um")
+            if not isinstance(spacing, bool) and isinstance(spacing, (int, float)):
+                min_spacing_um = max(0.0, float(spacing))
 
         blocks[block_id] = {
             "id": block_id,
@@ -343,6 +351,7 @@ def _parse_blocks(
             "port_names": set(ports_by_name),
             "ports": ports_by_name,
             "matched_group_id": matched_group_id,
+            "min_spacing_um": min_spacing_um,
         }
 
     return blocks
@@ -468,6 +477,10 @@ def _validate_block_port(
     of which request field named it). A block that reported no ``ports[]`` at
     all skips the port-name check (it cannot be validated against an empty
     set) -- the same latitude the connectivity path already allowed.
+
+    A ``GAP_*`` port (a ring opening, #434) is rejected outright: it marks
+    *absence* of metal -- where a route may cross the ring -- so it can be
+    neither wired by ``connectivity[]`` nor labelled by ``pins[]``.
     """
     block = blocks.get(block_id)
     if block is None:
@@ -476,6 +489,14 @@ def _validate_block_port(
         raise GenComposeError(
             f"{where} references unknown port '{port}' on block '{block_id}' -- "
             f"available: {', '.join(sorted(block['port_names']))}"
+        )
+    if port.startswith(_RING_GAP_PORT_PREFIX) and _ring_port_side(port) is not None:
+        raise GenComposeError(
+            f"{where} references port '{port}' on block '{block_id}', which "
+            "marks a ring *opening* (a routing hole through the guard/collector "
+            "ring), not a conductor -- route to the port inside the ring the "
+            "opening exists to reach, or to one of the ring's own TAP_*/COLL_* "
+            "tap ports"
         )
     return block
 
@@ -853,9 +874,195 @@ def _block_gap_um(
 _RING_TAP_PORT_PREFIXES = ("TAP_", "COLL_")
 
 
+#: Port-name prefix a ``klt gen`` generator uses to report a *ring opening*
+#: -- the routing gap ``params.ring_gap_side`` cuts through one side of a
+#: guard/collector ring (#434, see ``gen.py``'s ``_ring_ports``). A
+#: ``GAP_<side>`` entry is a marker, not a conductor: ``x_um``/``y_um`` is the
+#: opening's centre on the ring's own centre line, ``width_um`` is how long
+#: the opening is along that side, and ``direction_deg`` is the side's outward
+#: normal. It is the one place a route may cross the ring without merging with
+#: the ring's tap net.
+_RING_GAP_PORT_PREFIX = "GAP_"
+
+#: The four sides of a ring, as named by ``TAP_``/``COLL_``/``GAP_`` ports.
+_RING_SIDES = ("N", "S", "E", "W")
+
+
 def _block_has_ring_taps(block: dict[str, Any]) -> bool:
     """Whether ``block`` reports a guard/collector ring (any tap port)."""
     return any(name.startswith(_RING_TAP_PORT_PREFIXES) for name in block["port_names"])
+
+
+def _ring_port_side(name: str) -> str | None:
+    """The ring side a ``TAP_<side>``/``COLL_<side>``/``GAP_<side>`` port name
+    refers to, or ``None`` for any other port name."""
+    for prefix in (*_RING_TAP_PORT_PREFIXES, _RING_GAP_PORT_PREFIX):
+        if name.startswith(prefix):
+            side = name[len(prefix) :]
+            if side in _RING_SIDES:
+                return side
+    return None
+
+
+def _ring_gap_ports(block: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """The ring openings ``block`` declares, keyed by side (#434).
+
+    Reads every ``GAP_<side>`` port with usable geometry into
+    ``{"x_um", "y_um", "opening_um"}`` (block-local coordinates). An empty
+    dict means the block's ring is a closed loop, which is what the
+    guard/collector-ring check (#199 case 2) requires it to reject routes
+    into.
+    """
+    gaps: dict[str, dict[str, float]] = {}
+    for name, port in block["ports"].items():
+        if not name.startswith(_RING_GAP_PORT_PREFIX) or not isinstance(port, dict):
+            continue
+        side = name[len(_RING_GAP_PORT_PREFIX) :]
+        if side not in _RING_SIDES:
+            continue
+        values: list[float] = []
+        for key in ("x_um", "y_um", "width_um"):
+            value = port.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                break
+            values.append(float(value))
+        if len(values) != 3 or values[2] <= 0.0:
+            continue  # a gap with no usable geometry cannot be routed through
+        gaps[side] = {"x_um": values[0], "y_um": values[1], "opening_um": values[2]}
+    return gaps
+
+
+def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
+    """Each ring side's own centre-line coordinate in the block's local frame
+    (an ``x`` for ``E``/``W``, a ``y`` for ``N``/``S``), keyed by side.
+
+    Read off the ring's own reported ports: a ``TAP_``/``COLL_`` tap port sits
+    at the midpoint of its side, and a ``GAP_`` port sits on the same centre
+    line, so between them a ring reports where all four of its sides run --
+    which is what :func:`_ring_gap_route_conflict` needs to tell a route that
+    passes through a declared opening from one that cuts the ring's metal
+    somewhere else.
+    """
+    lines: dict[str, float] = {}
+    for name, port in block["ports"].items():
+        side = _ring_port_side(name)
+        if side is None or not isinstance(port, dict):
+            continue
+        value = port.get("x_um" if side in ("E", "W") else "y_um")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        lines[side] = float(value)
+    return lines
+
+
+def _ring_gap_route_conflict(
+    points: list[tuple[float, float]],
+    block: dict[str, Any],
+    offset_um: dict[str, float],
+    bbox_um: dict[str, float],
+    width_um: float,
+) -> str | None:
+    """Why ``points`` may not cross ``block``'s (gapped) guard/collector ring,
+    or ``None`` when every crossing passes cleanly through a declared opening.
+
+    Applied only to a block that declares at least one ``GAP_<side>`` opening
+    (#434) -- a closed ring is still rejected outright by the name-based
+    guard/collector-ring check in :func:`route_two_pin`. Every segment of the
+    backbone is tested against all four of the ring's own side centre lines
+    (:func:`_ring_side_lines`), inside the block's placed bbox:
+
+    * a crossing on a side with no declared opening merges the net with the
+      ring's tap net exactly as before;
+    * a crossing on the gapped side must clear the opening's edges by half
+      the route width plus the block's own reported ``min_spacing_um``, so the
+      drawn wire fits *through* the opening rather than shorting to either cut
+      end of the ring;
+    * a segment running *along* a ring side lies on the ring's metal for its
+      whole length, which is a short however wide the opening is.
+
+    A ring that does not report where all four of its sides run cannot be
+    checked this way, and is rejected rather than assumed clear.
+    """
+    eps = 1e-9
+    gaps = _ring_gap_ports(block)
+    lines = _ring_side_lines(block)
+    missing = [side for side in _RING_SIDES if side not in lines]
+    if missing:
+        return (
+            f"block '{block['id']}' declares a ring opening but reports no "
+            f"port locating its ring's {'/'.join(missing)} side(s) -- the "
+            "route cannot be shown to pass through the opening rather than "
+            "across the ring's metal elsewhere"
+        )
+
+    clearance_um = width_um / 2.0 + block.get("min_spacing_um", 0.0)
+    for side, local in lines.items():
+        vertical = side in ("E", "W")
+        line = local + (offset_um["x"] if vertical else offset_um["y"])
+        if vertical:
+            extent = (bbox_um["y0"], bbox_um["y1"])
+        else:
+            extent = (bbox_um["x0"], bbox_um["x1"])
+
+        window: tuple[float, float] | None = None
+        gap = gaps.get(side)
+        if gap is not None:
+            centre = (
+                gap["y_um"] + offset_um["y"]
+                if vertical
+                else gap["x_um"] + offset_um["x"]
+            )
+            half = gap["opening_um"] / 2.0
+            window = (centre - half, centre + half)
+
+        for p0, p1 in zip(points, points[1:], strict=False):
+            # "across" is the coordinate the side's centre line is fixed in;
+            # "along" is the coordinate that runs down the side.
+            across0, across1 = (p0[0], p1[0]) if vertical else (p0[1], p1[1])
+            along0, along1 = (p0[1], p1[1]) if vertical else (p0[0], p1[0])
+
+            if abs(across0 - line) <= eps and abs(across1 - line) <= eps:
+                seg_lo, seg_hi = sorted((along0, along1))
+                if min(seg_hi, extent[1]) - max(seg_lo, extent[0]) > eps:
+                    return (
+                        f"backbone runs along block '{block['id']}''s ring on "
+                        f"its {side} side -- a route laid on the ring's own "
+                        "metal merges this net with the ring's tap net, "
+                        "whatever opening the ring declares"
+                    )
+                continue
+
+            if (across0 - line) * (across1 - line) >= 0.0:
+                continue  # this segment does not cross the side's centre line
+
+            t = (line - across0) / (across1 - across0)
+            at = along0 + t * (along1 - along0)
+            if not (extent[0] - eps <= at <= extent[1] + eps):
+                continue  # crosses the line beyond the block -- clear of the ring
+
+            if window is None:
+                return (
+                    f"backbone crosses block '{block['id']}''s ring on its "
+                    f"{side} side, which declares no opening -- the route "
+                    "would merge this net with the ring's tap net; cut the "
+                    f"opening on that side (params.ring_gap_side: '{side}') "
+                    "or route through the side that already has one"
+                )
+            if (
+                at - clearance_um < window[0] - eps
+                or at + clearance_um > window[1] + eps
+            ):
+                return (
+                    f"backbone crosses block '{block['id']}''s ring on its "
+                    f"{side} side at {at:.4g}um, outside the "
+                    f"[{window[0]:.4g}, {window[1]:.4g}]um opening it declares "
+                    f"(a {width_um}um-wide route needs {clearance_um:.4g}um of "
+                    "clearance inside the opening) -- widen the opening "
+                    "(params.ring_gap_um), move it (params.ring_gap_offset_um), "
+                    "or place the blocks so the route lines up with it"
+                )
+
+    return None
 
 
 def _port_edge_margin_um(
@@ -1005,32 +1212,43 @@ def route_two_pin(
     vb = _DIRECTION_VECTORS[dir_b]
     stub_um = width_um
 
-    # Guard/collector-ring check (#199 case 2): a block with a ring drawn
-    # around it (any TAP_*/COLL_* port reported) cannot be reached at any
-    # *other* port without the route crossing the ring's own metal loop --
-    # on the way in for a destination pin, or on the way out for a source
-    # pin, since the ring fully encloses the block either way. Only meaningful
-    # for distinct blocks: a self-net's two ports already both sit inside the
-    # same ring, so it draws no *additional* ring crossing.
+    # Guard/collector-ring check (#199 case 2): a block with a *closed* ring
+    # drawn around it (any TAP_*/COLL_* port reported, no GAP_* opening)
+    # cannot be reached at any other port without the route crossing the
+    # ring's own metal loop -- on the way in for a destination pin, or on the
+    # way out for a source pin, since the ring fully encloses the block either
+    # way. Only meaningful for distinct blocks: a self-net's two ports already
+    # both sit inside the same ring, so it draws no *additional* ring crossing.
+    #
+    # A block whose ring declares an opening (params.ring_gap_side, #434) is
+    # not rejected here: it is collected instead, and the drawn backbone is
+    # checked against the ring's own geometry below, once `points` exists --
+    # the route is allowed only if it actually passes through that opening.
+    ring_pins: list[tuple[dict[str, Any], dict[str, Any]]] = []
     if pin_a["block"] != pin_b["block"]:
         for pin, block in ((pin_a, block_a), (pin_b, block_b)):
-            if _block_has_ring_taps(block) and not pin["port"].startswith(
+            if not _block_has_ring_taps(block) or pin["port"].startswith(
                 _RING_TAP_PORT_PREFIXES
             ):
-                return {
-                    "routed": False,
-                    "route_length_um": None,
-                    "points_um": None,
-                    "reason": (
-                        f"block '{pin['block']}' has a guard/collector ring "
-                        f"(reports a TAP_*/COLL_* port) -- a route to its "
-                        f"non-tap port '{pin['port']}' would cross the ring's "
-                        "own metal loop and merge this net with the ring's tap "
-                        "net; route to the ring's own tap port instead, or "
-                        "regenerate the block with add_guard_ring/"
-                        "add_collector_ring: false"
-                    ),
-                }
+                continue
+            if _ring_gap_ports(block):
+                ring_pins.append((pin, block))
+                continue
+            return {
+                "routed": False,
+                "route_length_um": None,
+                "points_um": None,
+                "reason": (
+                    f"block '{pin['block']}' has a closed guard/collector ring "
+                    f"(reports a TAP_*/COLL_* port and no GAP_* opening) -- a "
+                    f"route to its non-tap port '{pin['port']}' would cross the "
+                    "ring's own metal loop and merge this net with the ring's "
+                    "tap net; route to the ring's own tap port instead, "
+                    "regenerate the block with a routing opening in the ring "
+                    "(params.ring_gap_side/ring_gap_um), or regenerate it with "
+                    "add_guard_ring/add_collector_ring: false"
+                ),
+            }
 
     # Routability heuristic: a jog perpendicular to the ports' facing axis has
     # to squeeze through the channel between the two blocks. When both ports
@@ -1066,6 +1284,26 @@ def route_two_pin(
                 }
 
     points = manhattan_backbone(a, dir_a, b, dir_b, stub_um)
+
+    # Ring-opening check (#434): for every pin on a block whose ring declares
+    # an opening, the drawn backbone must reach that pin *through* the opening
+    # -- every other crossing of the ring's metal is the same short the
+    # closed-ring check above rejects.
+    for pin, block in ring_pins:
+        conflict = _ring_gap_route_conflict(
+            points,
+            block,
+            offsets_um[pin["block"]],
+            placed_bboxes_um[pin["block"]],
+            width_um,
+        )
+        if conflict is not None:
+            return {
+                "routed": False,
+                "route_length_um": None,
+                "points_um": None,
+                "reason": conflict,
+            }
 
     # Obstacle-overlap check (#199 case 1): sum how much of the drawn backbone
     # lies inside each block's bbox *interior* (a boundary touch doesn't

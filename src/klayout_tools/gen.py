@@ -666,17 +666,118 @@ def _res_array_layout(
     }
 
 
+#: The four sides a ring gap (``ring_gap_side``) can be cut on, and the
+#: outward normal (``direction_deg``) each one's reported port faces.
+RING_SIDE_DIRECTIONS: dict[str, int] = {"N": 90, "S": 270, "E": 0, "W": 180}
+
+
+def _ring_gap_layout(
+    outer_w_um: float,
+    outer_h_um: float,
+    ring_w_um: float,
+    side: str,
+    gap_um: float,
+    gap_offset_um: float,
+) -> dict[str, Any]:
+    """One opening ("gap") cut through a ring's band on ``side`` (#434).
+
+    The opening spans the ring's full thickness on that side and ``gap_um``
+    along it, centred on the side's midpoint plus ``gap_offset_um`` (positive
+    is toward +x on ``"N"``/``"S"``, toward +y on ``"E"``/``"W"``). Exactly
+    *one* side may be cut (enforced by the per-generator validators), so the
+    ring stays a single connected C-shaped conductor -- two openings would
+    split it into two electrically separate arcs while its tap ports still
+    claimed one net.
+
+    Returns the cut ``box_um`` (subtracted from the ring by
+    :func:`_insert_ring`), the opening's centre (``x_um``/``y_um``, on the
+    ring's own centre line for that side, i.e. where a ``GAP_<side>`` port is
+    reported), its ``opening_um`` length, and the ``span_um`` interval it
+    covers along the side's axis.
+    """
+    half = gap_um / 2.0
+    if side in ("N", "S"):
+        cx = outer_w_um / 2.0 + gap_offset_um
+        cy = outer_h_um - ring_w_um / 2.0 if side == "N" else ring_w_um / 2.0
+        y0 = outer_h_um - ring_w_um if side == "N" else 0.0
+        y1 = outer_h_um if side == "N" else ring_w_um
+        box = (cx - half, y0, cx + half, y1)
+        span = (cx - half, cx + half)
+    else:
+        cy = outer_h_um / 2.0 + gap_offset_um
+        cx = outer_w_um - ring_w_um / 2.0 if side == "E" else ring_w_um / 2.0
+        x0 = outer_w_um - ring_w_um if side == "E" else 0.0
+        x1 = outer_w_um if side == "E" else ring_w_um
+        box = (x0, cy - half, x1, cy + half)
+        span = (cy - half, cy + half)
+
+    return {
+        "side": side,
+        "box_um": box,
+        "x_um": cx,
+        "y_um": cy,
+        "opening_um": gap_um,
+        "span_um": span,
+    }
+
+
+def _auto_ring_inner_size_um(info: dict[str, Any]) -> tuple[float, float]:
+    """Inner (protected-area) size of the automatically-sized ring in a
+    ``diff_pair``/``bjt_array`` layout dict -- the straight run available on
+    each ring side, which is what a ring opening has to fit inside
+    (:func:`_validate_ring_gap`). ``(0.0, 0.0)`` when the layout draws no
+    ring."""
+    ring = info.get("ring")
+    if ring is None:
+        return (0.0, 0.0)
+    x0, y0, x1, y1 = ring["inner_box_um"]
+    return (x1 - x0, y1 - y0)
+
+
+def _boxes_overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    """Whether two axis-aligned boxes overlap with non-zero area (a shared
+    edge alone is not an overlap)."""
+    eps = 1e-9
+    return (
+        min(a[2], b[2]) - max(a[0], b[0]) > eps
+        and min(a[3], b[3]) - max(a[1], b[1]) > eps
+    )
+
+
 def _ring_layout(
-    inner_w_um: float, inner_h_um: float, ring_w_um: float, contacts_per_side: int
+    inner_w_um: float,
+    inner_h_um: float,
+    ring_w_um: float,
+    contacts_per_side: int,
+    gap_side: str = "",
+    gap_um: float = 0.0,
+    gap_offset_um: float = 0.0,
 ) -> dict[str, Any]:
     """A tap/metal ring (drawn as an outer-box-minus-inner-box boolean, see
     :func:`_insert_ring`, so it is always one unbroken polygon -- no
     same-layer spacing violation between ring segments) around an
     ``inner_w_um`` x ``inner_h_um`` protected area, with ``contacts_per_side``
-    contacts evenly spaced along each of the four sides."""
+    contacts evenly spaced along each of the four sides.
+
+    ``gap_side`` (``""`` = closed ring, the default) cuts one routing opening
+    through the ring on that side (#434) -- see :func:`_ring_gap_layout`. A
+    contact that would be clipped by the opening is dropped, and the side's
+    own tap port is dropped from ``ports`` when its midpoint falls inside the
+    opening (there is no metal left under it there); the ring stays one
+    connected conductor either way, so the remaining tap ports still describe
+    a single tap net.
+    """
     outer_w = inner_w_um + 2 * ring_w_um
     outer_h = inner_h_um + 2 * ring_w_um
     contact_half = CONTACT_SIZE_UM / 2.0
+
+    gap = (
+        _ring_gap_layout(outer_w, outer_h, ring_w_um, gap_side, gap_um, gap_offset_um)
+        if gap_side
+        else None
+    )
 
     centers: list[tuple[float, float]] = []
     for i in range(contacts_per_side):
@@ -694,6 +795,23 @@ def _ring_layout(
         (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
         for (cx, cy) in centers
     ]
+    if gap is not None:
+        contact_boxes = [
+            box for box in contact_boxes if not _boxes_overlap(box, gap["box_um"])
+        ]
+
+    ports = {
+        "N": (outer_w / 2.0, outer_h - ring_w_um / 2.0),
+        "S": (outer_w / 2.0, ring_w_um / 2.0),
+        "E": (outer_w - ring_w_um / 2.0, outer_h / 2.0),
+        "W": (ring_w_um / 2.0, outer_h / 2.0),
+    }
+    if gap is not None:
+        px, py = ports[gap["side"]]
+        along = px if gap["side"] in ("N", "S") else py
+        lo, hi = gap["span_um"]
+        if lo - 1e-9 <= along <= hi + 1e-9:
+            del ports[gap["side"]]
 
     return {
         "outer_w_um": outer_w,
@@ -706,17 +824,19 @@ def _ring_layout(
             ring_w_um + inner_h_um,
         ),
         "contact_boxes_um": contact_boxes,
-        "ports": {
-            "N": (outer_w / 2.0, outer_h - ring_w_um / 2.0),
-            "S": (outer_w / 2.0, ring_w_um / 2.0),
-            "E": (outer_w - ring_w_um / 2.0, outer_h / 2.0),
-            "W": (ring_w_um / 2.0, outer_h / 2.0),
-        },
+        "gap": gap,
+        "ports": ports,
     }
 
 
 def _diff_pair_layout(
-    w_um: float, l_um: float, splits: int, add_guard_ring: bool
+    w_um: float,
+    l_um: float,
+    splits: int,
+    add_guard_ring: bool,
+    ring_gap_side: str = "",
+    ring_gap_um: float = 0.0,
+    ring_gap_offset_um: float = 0.0,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -759,6 +879,9 @@ def _diff_pair_layout(
             core_h + 2 * padding,
             ring_w,
             GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
+            ring_gap_side,
+            ring_gap_um,
+            ring_gap_offset_um,
         )
         ring_offset = (-(ring_w + padding), -(ring_w + padding))
 
@@ -841,6 +964,9 @@ def _bjt_array_layout(
     dummy: int,
     topology: str,
     add_collector_ring: bool,
+    ring_gap_side: str = "",
+    ring_gap_um: float = 0.0,
+    ring_gap_offset_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` common-centroid (or plain-array) grid of
     :func:`_bjt_unit_layout` unit devices, with ``dummy`` flanking columns
@@ -907,7 +1033,15 @@ def _bjt_array_layout(
         inner_w = (well_box[2] - well_box[0]) + 2 * gap
         inner_h = (well_box[3] - well_box[1]) + 2 * gap
         contacts_per_side = max(1, min(rows + cols, 4))
-        ring = _ring_layout(inner_w, inner_h, ring_w, contacts_per_side)
+        ring = _ring_layout(
+            inner_w,
+            inner_h,
+            ring_w,
+            contacts_per_side,
+            ring_gap_side,
+            ring_gap_um,
+            ring_gap_offset_um,
+        )
         ring_offset = (inner_x0 - ring_w, inner_y0 - ring_w)
 
     return {
@@ -958,10 +1092,16 @@ def _insert_ring(
     dbu: float,
     outer_box_um: tuple[float, float, float, float],
     inner_box_um: tuple[float, float, float, float],
+    gap_box_um: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Insert an outer-box-minus-inner-box ring as one boolean ``Region`` --
     guarantees a single unbroken polygon (no same-layer internal-space
-    violation between "segments"), per :func:`_ring_layout`'s docstring."""
+    violation between "segments"), per :func:`_ring_layout`'s docstring.
+
+    ``gap_box_um`` (#434), when given, is subtracted as well: it cuts one
+    routing opening through the ring's band on a single side, leaving a
+    C-shaped -- still connected, still one polygon -- conductor.
+    """
     import klayout.db as kdb
 
     def _to_box(box_um: tuple[float, float, float, float]) -> Any:
@@ -974,6 +1114,8 @@ def _insert_ring(
         )
 
     ring = kdb.Region(_to_box(outer_box_um)) - kdb.Region(_to_box(inner_box_um))
+    if gap_box_um is not None:
+        ring = ring - kdb.Region(_to_box(gap_box_um))
     cell.shapes(layer_index).insert(ring)
 
 
@@ -1673,6 +1815,27 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=4,
             )
             self.param(
+                "ring_gap_side",
+                self.TypeString,
+                "Cut one routing opening through the ring on this side: "
+                "'' (default, closed ring), 'N', 'S', 'E' or 'W'",
+                default="",
+            )
+            self.param(
+                "ring_gap_um",
+                self.TypeDouble,
+                "Length of the ring opening along its side (um), when "
+                "ring_gap_side is set",
+                default=0.0,
+            )
+            self.param(
+                "ring_gap_offset_um",
+                self.TypeDouble,
+                "Shift of the ring opening from its side's midpoint (um): "
+                "+x on 'N'/'S', +y on 'E'/'W'",
+                default=0.0,
+            )
+            self.param(
                 "add_well",
                 self.TypeBoolean,
                 "Enclose the ring in a well tie when the resolved PDK checks one",
@@ -1722,12 +1885,26 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.inner_height_um,
                 self.ring_width_um,
                 self.contacts_per_side,
+                self.ring_gap_side,
+                self.ring_gap_um,
+                self.ring_gap_offset_um,
+            )
+            gap_box = info["gap"]["box_um"] if info["gap"] is not None else None
+            _insert_ring(
+                self.cell,
+                li_tap,
+                dbu,
+                info["outer_box_um"],
+                info["inner_box_um"],
+                gap_box,
             )
             _insert_ring(
-                self.cell, li_tap, dbu, info["outer_box_um"], info["inner_box_um"]
-            )
-            _insert_ring(
-                self.cell, li_metal, dbu, info["outer_box_um"], info["inner_box_um"]
+                self.cell,
+                li_metal,
+                dbu,
+                info["outer_box_um"],
+                info["inner_box_um"],
+                gap_box,
             )
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.add_well and self.well_present:
@@ -1772,6 +1949,27 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeBoolean,
                 "Enclose the pair in an automatically-sized guard ring",
                 default=True,
+            )
+            self.param(
+                "ring_gap_side",
+                self.TypeString,
+                "Cut one routing opening through the guard ring on this side: "
+                "'' (default, closed ring), 'N', 'S', 'E' or 'W'",
+                default="",
+            )
+            self.param(
+                "ring_gap_um",
+                self.TypeDouble,
+                "Length of the guard-ring opening along its side (um), when "
+                "ring_gap_side is set",
+                default=0.0,
+            )
+            self.param(
+                "ring_gap_offset_um",
+                self.TypeDouble,
+                "Shift of the guard-ring opening from its side's midpoint (um): "
+                "+x on 'N'/'S', +y on 'E'/'W'",
+                default=0.0,
             )
             self.param(
                 "mirror",
@@ -1840,7 +2038,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
             info = _diff_pair_layout(
-                self.w_um, self.l_um, self.splits, self.add_guard_ring
+                self.w_um,
+                self.l_um,
+                self.splits,
+                self.add_guard_ring,
+                self.ring_gap_side,
+                self.ring_gap_um,
+                self.ring_gap_offset_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -1874,12 +2078,18 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 li_tap = self.layout.layer(self.tap_layer)
                 ox, oy = info["ring_offset_um"]
                 ring = info["ring"]
+                gap_box = (
+                    _shift_box(ring["gap"]["box_um"], ox, oy)
+                    if ring["gap"] is not None
+                    else None
+                )
                 _insert_ring(
                     self.cell,
                     li_tap,
                     dbu,
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
                 )
                 _insert_ring(
                     self.cell,
@@ -1887,6 +2097,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -1957,6 +2168,27 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=True,
             )
             self.param(
+                "ring_gap_side",
+                self.TypeString,
+                "Cut one routing opening through the collector ring on this "
+                "side: '' (default, closed ring), 'N', 'S', 'E' or 'W'",
+                default="",
+            )
+            self.param(
+                "ring_gap_um",
+                self.TypeDouble,
+                "Length of the collector-ring opening along its side (um), when "
+                "ring_gap_side is set",
+                default=0.0,
+            )
+            self.param(
+                "ring_gap_offset_um",
+                self.TypeDouble,
+                "Shift of the collector-ring opening from its side's midpoint "
+                "(um): +x on 'N'/'S', +y on 'E'/'W'",
+                default=0.0,
+            )
+            self.param(
                 "active_layer",
                 self.TypeLayer,
                 "Emitter/base/collector diffusion (COMP) drawing layer",
@@ -2014,6 +2246,9 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.dummy,
                 self.topology,
                 self.add_collector_ring,
+                self.ring_gap_side,
+                self.ring_gap_um,
+                self.ring_gap_offset_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -2033,12 +2268,18 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             if info["ring"] is not None and self.add_collector_ring:
                 ring = info["ring"]
                 ox, oy = info["ring_offset_um"]
+                gap_box = (
+                    _shift_box(ring["gap"]["box_um"], ox, oy)
+                    if ring["gap"] is not None
+                    else None
+                )
                 _insert_ring(
                     self.cell,
                     li_active,
                     dbu,
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
                 )
                 _insert_ring(
                     self.cell,
@@ -2046,6 +2287,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -2389,6 +2631,133 @@ def _res_array_describe(
     }
 
 
+def _validate_ring_gap(
+    generator: str,
+    side: str,
+    gap_um: float,
+    offset_um: float,
+    inner_w_um: float,
+    inner_h_um: float,
+) -> None:
+    """Validate a ring-opening request (``ring_gap_side``/``ring_gap_um``/
+    ``ring_gap_offset_um``, #434) against the ring it would be cut into.
+
+    Rejects an unknown side, a gap requested without a side (or a side
+    without a usable opening), an opening narrower than the minimum
+    same-layer spacing (the two cut ends would violate it), and an opening
+    that does not fit inside the side's *straight run* -- cutting into a
+    corner would break the ring into two disconnected arcs while its tap
+    ports still claimed a single tap net.
+
+    Only one side can be named, so the ring always stays a single connected
+    conductor.
+    """
+    if side not in ("", *RING_SIDE_DIRECTIONS):
+        raise GenError(
+            f"generator '{generator}': params.ring_gap_side must be '' (a "
+            "closed ring), 'N', 'S', 'E' or 'W'"
+        )
+    if not side:
+        if gap_um != 0.0 or offset_um != 0.0:
+            raise GenError(
+                f"generator '{generator}': params.ring_gap_um/"
+                "params.ring_gap_offset_um require params.ring_gap_side to "
+                "name the side the opening is cut on"
+            )
+        return
+
+    if gap_um < MIN_SAME_LAYER_SPACING_UM:
+        raise GenError(
+            f"generator '{generator}': params.ring_gap_um must be >= "
+            f"{MIN_SAME_LAYER_SPACING_UM} when params.ring_gap_side is set -- "
+            "a narrower opening leaves the ring's two cut ends closer than the "
+            "minimum same-layer spacing"
+        )
+
+    straight_um = inner_w_um if side in ("N", "S") else inner_h_um
+    if abs(offset_um) + gap_um / 2.0 > straight_um / 2.0 + 1e-9:
+        raise GenError(
+            f"generator '{generator}': the ring opening (ring_gap_um={gap_um}, "
+            f"ring_gap_offset_um={offset_um}) does not fit inside the "
+            f"{straight_um}um straight run of ring side '{side}' -- an opening "
+            "that reaches a corner would split the ring into two disconnected "
+            "arcs"
+        )
+
+
+def _ring_ports(
+    ring: dict[str, Any],
+    offset_um: tuple[float, float],
+    tap_prefix: str,
+    tap_layer: dict[str, Any],
+    tap_width_um: float,
+    gap_layer: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Reported ``ports[]`` entries for a drawn ring.
+
+    One ``<tap_prefix><side>`` tap port at the midpoint of every side that is
+    still covered by ring metal there, plus -- when the ring was cut with
+    ``ring_gap_side`` (#434) -- one ``GAP_<side>`` entry marking the opening
+    itself. A ``GAP_*`` entry is a *marker, not a conductor*: it reports where
+    a route may cross the ring (``x_um``/``y_um`` = the opening's centre on
+    the ring's own centre line, ``width_um`` = the opening's length along that
+    side, ``direction_deg`` = the side's outward normal) on the layer a route
+    would cross it on, and `klt gen-compose` rejects any attempt to wire or
+    label it.
+    """
+    ox, oy = offset_um
+    ports: list[dict[str, Any]] = []
+    for side, direction in RING_SIDE_DIRECTIONS.items():
+        xy = ring["ports"].get(side)
+        if xy is None:
+            continue  # this side's midpoint sits inside the ring opening
+        ports.append(
+            {
+                "name": f"{tap_prefix}{side}",
+                "net": None,
+                "layer": tap_layer,
+                "x_um": xy[0] + ox,
+                "y_um": xy[1] + oy,
+                "width_um": tap_width_um,
+                "direction_deg": direction,
+            }
+        )
+
+    gap = ring["gap"]
+    if gap is not None:
+        ports.append(
+            {
+                "name": f"GAP_{gap['side']}",
+                "net": None,
+                "layer": gap_layer,
+                "x_um": gap["x_um"] + ox,
+                "y_um": gap["y_um"] + oy,
+                "width_um": gap["opening_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
+            }
+        )
+    return ports
+
+
+def _ring_gap_notes(ring: dict[str, Any] | None, ring_gap_side: str) -> list[str]:
+    """``drc_hints.notes`` entries about a requested ring opening (#434)."""
+    if not ring_gap_side:
+        return []
+    if ring is None or ring["gap"] is None:
+        return [
+            f"params.ring_gap_side is '{ring_gap_side}' but no ring is drawn -- "
+            "no opening was cut"
+        ]
+    gap = ring["gap"]
+    return [
+        f"the ring carries a {gap['opening_um']}um routing opening on its "
+        f"'{gap['side']}' side (params.ring_gap_side) -- it is a connected "
+        "C-shaped conductor rather than a closed loop, so substrate isolation "
+        "is interrupted there in exchange for letting a route reach the "
+        f"enclosed devices through the reported GAP_{gap['side']} position"
+    ]
+
+
 def _guard_ring_validate(params: dict[str, Any]) -> None:
     if params["inner_width_um"] <= 0:
         raise GenError("generator 'guard_ring': params.inner_width_um must be > 0")
@@ -2413,6 +2782,15 @@ def _guard_ring_validate(params: dict[str, Any]) -> None:
                 f"along {label}={straight}um without overlapping contacts"
             )
 
+    _validate_ring_gap(
+        "guard_ring",
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        params["inner_width_um"],
+        params["inner_height_um"],
+    )
+
 
 def _guard_ring_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
@@ -2423,32 +2801,24 @@ def _guard_ring_describe(
         params["inner_height_um"],
         params["ring_width_um"],
         params["contacts_per_side"],
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
     )
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     well_supported = _PDK_ROLE_LAYERS[family]["well"] is not None
 
-    ports = []
-    for name, direction in (
-        ("TAP_N", 90),
-        ("TAP_S", 270),
-        ("TAP_E", 0),
-        ("TAP_W", 180),
-    ):
-        px, py = info["ports"][name[-1]]
-        ports.append(
-            {
-                "name": name,
-                "net": None,
-                "layer": metal_layer,
-                "x_um": px,
-                "y_um": py,
-                "width_um": params["ring_width_um"],
-                "direction_deg": direction,
-            }
-        )
+    ports = _ring_ports(
+        info,
+        (0.0, 0.0),
+        "TAP_",
+        metal_layer,
+        params["ring_width_um"],
+        metal_layer,
+    )
 
-    notes = []
+    notes = _ring_gap_notes(info, params["ring_gap_side"])
     for label, straight in (
         ("inner_width_um", params["inner_width_um"]),
         ("inner_height_um", params["inner_height_um"]),
@@ -2474,7 +2844,9 @@ def _guard_ring_describe(
     )
 
     return {
-        "device_count": params["contacts_per_side"] * 4,
+        # The contacts actually drawn -- `contacts_per_side * 4` unless a ring
+        # opening (params.ring_gap_side) clipped one or more of them away.
+        "device_count": len(info["contact_boxes_um"]),
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
@@ -2505,13 +2877,31 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
     if params["flavor"] not in ("nfet", "pfet"):
         raise GenError("generator 'diff_pair': params.flavor must be 'nfet' or 'pfet'")
 
+    inner_w_um, inner_h_um = _auto_ring_inner_size_um(
+        _diff_pair_layout(params["w_um"], params["l_um"], params["splits"], True)
+    )
+    _validate_ring_gap(
+        "diff_pair",
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        inner_w_um,
+        inner_h_um,
+    )
+
 
 def _diff_pair_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     family = _pdk_family(pdk_info["variant"])
     info = _diff_pair_layout(
-        params["w_um"], params["l_um"], params["splits"], params["add_guard_ring"]
+        params["w_um"],
+        params["l_um"],
+        params["splits"],
+        params["add_guard_ring"],
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2561,28 +2951,22 @@ def _diff_pair_describe(
             }
         )
 
-    if info["ring"] is not None and params["add_guard_ring"]:
-        ox, oy = info["ring_offset_um"]
-        for name, direction in (
-            ("TAP_N", 90),
-            ("TAP_S", 270),
-            ("TAP_E", 0),
-            ("TAP_W", 180),
-        ):
-            px, py = info["ring"]["ports"][name[-1]]
-            ports.append(
-                {
-                    "name": name,
-                    "net": None,
-                    "layer": metal_layer,
-                    "x_um": px + ox,
-                    "y_um": py + oy,
-                    "width_um": GUARD_RING_DEFAULT_WIDTH_UM,
-                    "direction_deg": direction,
-                }
+    ring_drawn = info["ring"] is not None and params["add_guard_ring"]
+    if ring_drawn:
+        ports.extend(
+            _ring_ports(
+                info["ring"],
+                info["ring_offset_um"],
+                "TAP_",
+                metal_layer,
+                GUARD_RING_DEFAULT_WIDTH_UM,
+                metal_layer,
             )
+        )
 
-    notes = []
+    notes = _ring_gap_notes(
+        info["ring"] if ring_drawn else None, params["ring_gap_side"]
+    )
     if not params["add_guard_ring"]:
         notes.append(
             "no guard ring drawn (params.add_guard_ring is false) -- isolation from "
@@ -2636,6 +3020,25 @@ def _bjt_array_validate(params: dict[str, Any]) -> None:
             "'common_centroid'"
         )
 
+    inner_w_um, inner_h_um = _auto_ring_inner_size_um(
+        _bjt_array_layout(
+            params["emitter_um"],
+            params["rows"],
+            params["cols"],
+            params["dummy"],
+            params["topology"],
+            True,
+        )
+    )
+    _validate_ring_gap(
+        "bjt_array",
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        inner_w_um,
+        inner_h_um,
+    )
+
 
 def _bjt_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
@@ -2648,6 +3051,9 @@ def _bjt_array_describe(
         params["dummy"],
         params["topology"],
         params["add_collector_ring"],
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
     )
     unit = info["unit"]
     active_pair = _PDK_ROLE_LAYERS[family]["active"]
@@ -2685,29 +3091,27 @@ def _bjt_array_describe(
             }
         )
 
-    if info["ring"] is not None and params["add_collector_ring"]:
-        ox, oy = info["ring_offset_um"]
+    ring_drawn = info["ring"] is not None and params["add_collector_ring"]
+    if ring_drawn:
         ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-        for name, direction in (
-            ("COLL_N", 90),
-            ("COLL_S", 270),
-            ("COLL_E", 0),
-            ("COLL_W", 180),
-        ):
-            px, py = info["ring"]["ports"][name[-1]]
-            ports.append(
-                {
-                    "name": name,
-                    "net": None,
-                    "layer": active_layer,
-                    "x_um": px + ox,
-                    "y_um": py + oy,
-                    "width_um": ring_w,
-                    "direction_deg": direction,
-                }
+        # The collector ring is drawn on both the diffusion and the local-metal
+        # role, so its tap ports report the diffusion layer (what makes them a
+        # collector tie) while a ring opening reports the metal layer -- the one
+        # a `klt gen-compose` route actually crosses it on.
+        ports.extend(
+            _ring_ports(
+                info["ring"],
+                info["ring_offset_um"],
+                "COLL_",
+                active_layer,
+                ring_w,
+                metal_layer,
             )
+        )
 
-    notes = []
+    notes = _ring_gap_notes(
+        info["ring"] if ring_drawn else None, params["ring_gap_side"]
+    )
     if not mark_supported:
         notes.append(
             f"the resolved PDK family ('{family}') has no bipolar device-mark "

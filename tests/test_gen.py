@@ -1633,6 +1633,10 @@ def test_list_generators_bjt_array_params_schema():
         "dummy",
         "ratio",
         "add_collector_ring",
+        # The collector ring's routing opening (#434).
+        "ring_gap_side",
+        "ring_gap_um",
+        "ring_gap_offset_um",
     }
     # Hidden layer/presence params are never request-facing.
     assert not set(params) & {
@@ -1827,6 +1831,301 @@ def test_bjt_array_rejects_unsupported_pdk_family(tmp_path):
             {
                 "generator": "bjt_array",
                 "pdk": {"variant": "someOtherPdkX", "root": str(root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Ring routing openings (#434): `ring_gap_side`/`ring_gap_um`/
+# `ring_gap_offset_um` cut one opening through a guard/collector ring so a
+# `klt gen-compose` route can reach the enclosed devices without merging with
+# the ring's own tap net. Shared by `guard_ring`, `diff_pair`
+# (`add_guard_ring`) and `bjt_array` (`add_collector_ring`).
+# --------------------------------------------------------------------------- #
+
+
+def _merged_polygon_count(gds_path, layer, datatype):
+    """Number of *merged* polygons on one layer -- 1 means the shapes there
+    form a single connected conductor."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(layer, datatype))
+    )
+    region.merge()
+    return region.count()
+
+
+def _gap_port(report):
+    return next(p for p in report["ports"] if p["name"].startswith("GAP_"))
+
+
+def test_guard_ring_gap_opens_the_ring_and_reports_a_gap_port(tmp_path, pdk_root):
+    """The opening is cut out of both the tap and the local-metal ring, is
+    reported as a `GAP_<side>` marker, and leaves the ring a single connected
+    (C-shaped) conductor rather than two arcs."""
+    import klayout.db as kdb
+
+    output = tmp_path / "guard_ring_gap.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "E",
+                "ring_gap_um": 1.0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_E"
+    assert gap["direction_deg"] == 0
+    assert gap["width_um"] == 1.0  # the opening's length along the E side
+    # Centred on the E side: x on the ring's own centre line, y at mid-height.
+    assert gap["x_um"] == pytest.approx(3.84 - 0.42 / 2)
+    assert gap["y_um"] == pytest.approx(3.84 / 2)
+    # TAP_E's midpoint now sits in the void, so it is no longer reported --
+    # the other three tap ports still describe the (still connected) ring.
+    assert {p["name"] for p in report["ports"]} == {
+        "TAP_N",
+        "TAP_S",
+        "TAP_W",
+        "GAP_E",
+    }
+    assert any("routing opening" in n for n in report["drc_hints"]["notes"])
+
+    # Both ring layers keep one merged polygon (connected C), and neither has
+    # any metal left inside the opening.
+    layout = kdb.Layout()
+    layout.read(str(output))
+    opening = kdb.Region(
+        kdb.Box.new(
+            int((3.84 - 0.42) / layout.dbu),
+            int((3.84 / 2 - 0.5) / layout.dbu),
+            int(3.84 / layout.dbu),
+            int((3.84 / 2 + 0.5) / layout.dbu),
+        )
+    )
+    for layer, datatype in ((65, 44), (67, 20)):  # sky130 tap / local metal
+        assert _merged_polygon_count(output, layer, datatype) == 1
+        drawn = kdb.Region(
+            layout.top_cell().begin_shapes_rec(layout.layer(layer, datatype))
+        )
+        assert (drawn & opening).is_empty()
+
+
+def test_guard_ring_gap_offset_moves_the_opening_and_keeps_the_tap_port(
+    tmp_path, pdk_root
+):
+    """`ring_gap_offset_um` slides the opening along its side; a tap port
+    whose midpoint stays on metal is still reported."""
+    output = tmp_path / "guard_ring_gap_offset.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "N",
+                "ring_gap_um": 0.5,
+                "ring_gap_offset_um": 1.0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_N"
+    assert gap["direction_deg"] == 90
+    assert gap["x_um"] == pytest.approx(3.84 / 2 + 1.0)
+    assert gap["y_um"] == pytest.approx(3.84 - 0.42 / 2)
+    assert "TAP_N" in {p["name"] for p in report["ports"]}
+
+
+def test_guard_ring_gap_drops_contacts_it_would_clip(tmp_path, pdk_root):
+    """A tap contact the opening would cut in half is dropped outright (and
+    `device_count` reports the contacts actually drawn)."""
+    closed = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"contacts_per_side": 2},
+            "options": {"output": str(tmp_path / "closed.gds")},
+        }
+    )
+    gapped = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "E",
+                "ring_gap_um": 2.0,
+            },
+            "options": {"output": str(tmp_path / "gapped.gds")},
+        }
+    )
+    assert closed["device_count"] == 8
+    assert gapped["device_count"] == 6  # both E-side contacts fall in the opening
+
+
+def test_guard_ring_without_gap_is_byte_for_byte_the_old_ring(tmp_path, pdk_root):
+    """The new params are opt-in: omitting them draws exactly what an
+    explicit closed-ring request draws."""
+    a = tmp_path / "a.gds"
+    b = tmp_path / "b.gds"
+    for output, params in ((a, {}), (b, {"ring_gap_side": "", "ring_gap_um": 0.0})):
+        generate(
+            {
+                "generator": "guard_ring",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(output)},
+            }
+        )
+    _assert_gds_geometry_equal(a, b)
+
+
+@pytest.mark.parametrize(
+    ("params", "match"),
+    [
+        ({"ring_gap_side": "NE"}, "ring_gap_side must be"),
+        ({"ring_gap_um": 1.0}, "require params.ring_gap_side"),
+        ({"ring_gap_offset_um": 1.0}, "require params.ring_gap_side"),
+        ({"ring_gap_side": "E", "ring_gap_um": 0.2}, "ring_gap_um must be >="),
+        ({"ring_gap_side": "E", "ring_gap_um": 4.0}, "does not fit"),
+        (
+            {"ring_gap_side": "E", "ring_gap_um": 1.0, "ring_gap_offset_um": 1.2},
+            "does not fit",
+        ),
+    ],
+)
+def test_guard_ring_gap_invalid_params_rejected(tmp_path, pdk_root, params, match):
+    """A gap that would leave the ring's cut ends closer than the minimum
+    same-layer spacing, or that would reach a corner and split the ring into
+    two disconnected arcs, is rejected outright."""
+    with pytest.raises(GenError, match=match):
+        generate(
+            {
+                "generator": "guard_ring",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_diff_pair_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_root):
+    """`diff_pair`'s automatically-sized guard ring takes the same opening --
+    reported in the block's own frame (ring offset applied) and still DRC
+    clean on the curated sky130 deck."""
+    output = tmp_path / "diff_pair_gap.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "splits": 2,
+                "ring_gap_side": "E",
+                "ring_gap_um": 1.0,
+                "ring_gap_offset_um": -0.41,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_E"
+    assert gap["direction_deg"] == 0
+    assert gap["width_um"] == 1.0
+    # Opening centred on the pair's lower device row, not on the ring's own
+    # mid-height (that is what ring_gap_offset_um is for).
+    assert gap["y_um"] == pytest.approx(0.21)
+    assert {"TAP_N", "TAP_S", "TAP_W"} <= {p["name"] for p in report["ports"]}
+    assert any("routing opening" in n for n in report["drc_hints"]["notes"])
+    assert _merged_polygon_count(output, 67, 20) > 0
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_diff_pair_ring_gap_without_a_ring_is_noted_not_drawn(tmp_path, pdk_root):
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "add_guard_ring": False,
+                "ring_gap_side": "E",
+                "ring_gap_um": 1.0,
+            },
+            "options": {"output": str(tmp_path / "out.gds")},
+        }
+    )
+    assert not [p for p in report["ports"] if p["name"].startswith("GAP_")]
+    assert any("no ring is drawn" in n for n in report["drc_hints"]["notes"])
+
+
+def test_bjt_array_collector_ring_gap_reports_gap_port_and_stays_drc_clean(
+    tmp_path, both_pdk_root
+):
+    """`bjt_array`'s collector ring behaves symmetrically to `diff_pair`'s
+    guard ring: same params, a `GAP_<side>` port on the metal role (the layer
+    a route crosses the ring on), still DRC clean on gf180mcu's curated deck
+    (the family whose deck checks the bipolar mark layer)."""
+    output = tmp_path / "bjt_gap.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "ring_gap_side": "N",
+                "ring_gap_um": 1.0,
+                "ring_gap_offset_um": -0.41,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_N"
+    assert gap["direction_deg"] == 90
+    assert gap["width_um"] == 1.0
+    coll_e = next(p for p in report["ports"] if p["name"] == "COLL_E")
+    # The tap ports sit on the diffusion role; the opening reports the metal
+    # role a route would cross the ring on.
+    assert gap["layer"] != coll_e["layer"]
+    port_names = {p["name"] for p in report["ports"]}
+    # COLL_N's own midpoint falls inside the opening, so it is not reported;
+    # the other three taps still describe the (still connected) ring.
+    assert {"COLL_S", "COLL_E", "COLL_W"} <= port_names
+    assert "COLL_N" not in port_names
+    assert any("routing opening" in n for n in report["drc_hints"]["notes"])
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize("generator", ["diff_pair", "bjt_array"])
+def test_ring_gap_invalid_params_rejected_on_composite_generators(
+    tmp_path, pdk_root, generator
+):
+    with pytest.raises(GenError, match="ring_gap_side must be"):
+        generate(
+            {
+                "generator": generator,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"ring_gap_side": "up"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+    with pytest.raises(GenError, match="does not fit"):
+        generate(
+            {
+                "generator": generator,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"ring_gap_side": "E", "ring_gap_um": 100.0},
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
