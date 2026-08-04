@@ -26,6 +26,19 @@ klt layout-metrics <block> [--deck sky130|gf180mcu] [--output PATH]
 The command runs fully headless via KLayout's batch database API
 (`klayout.db`) — no GUI, no Qt — and is safe to run in CI.
 
+Verified against machine-generated, macro-scale, hierarchical
+`sky130_fd_sc_hd` standard-cell GDS (e.g. `klt place-and-route`'s own
+output), not just the hand-drawn analog block layouts this command's own
+test suite used exclusively before issue #436 (Epic #391 Phase 5) —
+`layer_count`/`cell_count`/`instance_count` and the composed `drc` field
+all run cleanly at hundreds-of-instances scale. See the ["Against `klt
+place-and-route` output" section of `klt
+drc`](drc.md#against-klt-place-and-route-output-macro-scale-digital-layout)
+and the [`layer_whitelist` known-limitation note of `klt
+precheck`](precheck.md#layer_whitelist-violations) for the two findings
+that exercise turned up (both in the underlying verbs this command
+composes, not in `klt layout-metrics` itself).
+
 ## Block directory layout
 
 A "block" is a directory containing:

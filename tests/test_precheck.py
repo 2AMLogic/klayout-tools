@@ -11,6 +11,7 @@ import json
 import klayout.db as kdb
 import pytest
 
+from helpers.openroad_macro_fixture import build_macro_gds
 from klayout_tools.cli import main
 from klayout_tools.precheck import CHECK_NAMES, PrecheckError, run_precheck
 
@@ -560,3 +561,80 @@ def test_cli_allowed_layers_bad_json_is_application_error(tmp_path, capsys):
     assert captured.out == ""
     error = json.loads(captured.err)
     assert error["error"]["command"] == "precheck"
+
+
+# --------------------------------------------------------------------------- #
+# OpenROAD macro fixture (issue #436, Epic #391 Phase 5) -- the first
+# exercise of `klt precheck` against machine-generated, macro-scale,
+# `sky130_fd_sc_hd` standard-cell GDS (hundreds of real corpus standard-cell
+# instances, hierarchical, multi-master) rather than the small, flat,
+# hand-drawn fixtures every other test in this file uses. See
+# `tests/helpers/openroad_macro_fixture.py` for exactly how it's built.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_precheck_openroad_macro_fixture_runs_cleanly(tmp_path):
+    """`klt precheck`'s own core acceptance bar for issue #436: no crash,
+    correct reporting, against a real macro-scale hierarchical GDS -- every
+    check in the battery, not just a subset. Confirms `offgrid`/`zero_area`
+    (both hierarchy-aware -- they attribute each violation to the shape's
+    actual originating cell via the recursive shape iterator, not just the
+    top cell, see `docs/cli/precheck.md`) scale correctly to hundreds of
+    real standard-cell instances with no false positives."""
+    path = build_macro_gds(tmp_path)
+    report = run_precheck(path, grid_um=0.005, deck="sky130")
+
+    assert report["status"] == "pass"
+    assert report["check_count"] == len(CHECK_NAMES)
+    by_name = {c["name"]: c for c in report["checks"]}
+    assert by_name["offgrid"]["status"] == "pass"
+    assert by_name["zero_area"]["status"] == "pass"
+    assert by_name["cell_names"]["status"] == "pass"
+    # No shapes drawn over labels, since the fixture is placement-only (no
+    # DEF PINS section, so no text labels at all) -- runs (not skipped,
+    # `sky130`'s deck declares label layers) and trivially passes.
+    assert by_name["pin_labels_over_drawing"]["status"] == "pass"
+
+
+def test_run_precheck_openroad_macro_fixture_layer_whitelist_shapes_per_definition(
+    tmp_path,
+):
+    """Known limitation (issue #436, documented in `docs/cli/precheck.md`):
+    `layer_whitelist`'s `shapes` count is summed once per cell *definition*,
+    never multiplied by instance count -- for this fixture's default
+    placement (320 standard-cell instances across 4 real masters), met1
+    (`68/20`) is physically drawn 800 times in the fully flattened design,
+    but only 4 standard-cell masters + the top cell's own single `OUTLINE`
+    shape ever *define* met1 shapes directly, so `shapes` under-reports by
+    two orders of magnitude. Locked in as a regression so a future change
+    to this counting convention is a deliberate, reviewed decision (see the
+    doc's own "value-semantics change to an already-published JSON field"
+    note), not an accidental drift."""
+    path = build_macro_gds(tmp_path)
+
+    # A narrow whitelist naming only diff/poly/li1 -- everything else
+    # (met1 included) is a violation.
+    allowed = [(65, 20), (66, 20), (67, 20)]
+    report = run_precheck(path, allowed_layers=allowed)
+    (whitelist,) = [c for c in report["checks"] if c["name"] == "layer_whitelist"]
+
+    assert whitelist["status"] == "fail"
+    (met1,) = [v for v in whitelist["violations"] if v["layer"] == "68/20"]
+    assert met1["shapes"] == 10
+
+    # Ground truth: the real, fully-flattened met1 shape count.
+    layout = kdb.Layout()
+    layout.read(path)
+    top = layout.top_cell()
+    met1_layer = layout.find_layer(68, 20)
+    flattened_met1_count = sum(1 for _ in top.begin_shapes_rec(met1_layer))
+    assert flattened_met1_count == 800
+    assert met1["shapes"] < flattened_met1_count
+
+
+def test_cli_precheck_openroad_macro_fixture_exit_code(tmp_path):
+    """End-to-end CLI smoke test (issue #436's own acceptance bar): `klt
+    precheck` runs to completion, no traceback, correct exit code, against
+    a macro-scale GDS."""
+    path = build_macro_gds(tmp_path)
+    assert main(["precheck", str(path), "--grid-um", "0.005", "--format", "json"]) == 0

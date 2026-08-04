@@ -174,6 +174,29 @@ process variant this deck doesn't model — see `gf180mcu.py`'s docstring), or
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
 
+### Against `klt place-and-route` output (macro-scale digital layout)
+
+A real `sky130_fd_sc_hd` macro (e.g. from `klt place-and-route`, Epic #391
+Phase 4) draws many real sky130 physical layers the curated `sky130` deck
+above does not model at all — `nwell.drawing` (64/20), `tap.drawing`
+(65/44), `npc.drawing` (95/20), `psdm`/`nsdm` (94/20 / 93/44), and others.
+`coverage.layers_in_stream_without_rules` (below) correctly reports these as
+uncovered rather than a misleadingly complete-looking `"clean"` — verified
+directly against a macro-scale fixture for issue #436 (see
+`tests/helpers/openroad_macro_fixture.py`).
+
+Separately (also found by #436, but a `klt place-and-route` finding, not a
+`klt drc` one): every `klt place-and-route`-produced GDS carries one extra,
+non-physical shape per top cell — a KLayout LEF/DEF-reader `OUTLINE` box
+(`_merge_def_to_gds`'s DEF read leaves the reader's own
+`produce_cell_outlines` default, `True`, in place) that lands on stream
+layer `2/0`. `klt drc` handles it correctly (reported as just another
+uncovered stream layer, never a crash or a miscount) — it is noted here so
+a `layers_in_stream_without_rules` entry of `"2/0"` against real
+place-and-route output isn't mistaken for a `klt drc` bug. Suppressing the
+artifact at the source (`klt place-and-route`'s own DEF->GDS merge) is
+tracked as a follow-up, out of `klt drc`'s own scope.
+
 ## Reserved annotation layer
 
 Both decks read a fixed, enumerable set of `(layer, datatype)` pairs (a
@@ -248,6 +271,27 @@ Each rule is checked against the **whole layout**, flattened per top cell
 the check to a single cell in this version. If a layout has multiple top
 cells, each is checked independently and violations report the top cell
 they were found under.
+
+A consequence, invisible until this command was exercised against a real
+machine-generated, hierarchical, multi-master layout for the first time
+(issue #436, Epic #391 Phase 5's `klt place-and-route` -> `klt drc` chain):
+every `violations[]` entry's own `"cell"` field also names the **top**
+cell — never the actual standard-cell (or other sub-block) *instance* whose
+geometry is the real offender. Every fixture this command's own test suite
+used before #436 was effectively flat (a single cell drawing its own
+shapes directly), so `"cell"` trivially named the right thing by
+construction; a real `sky130_fd_sc_hd` macro from `klt place-and-route`
+routinely places hundreds of instances of a handful of master cells, and a
+spacing/enclosure violation between two adjacent instances is reported
+under the macro's own top-cell name for all of them. A caller that needs
+"which specific standard-cell placement do I need to move" has to
+separately correlate a violation's `bbox` against the layout's own instance
+placements (e.g. `klt cells`) — `klt drc` does not do this correlation
+itself. Fixing it would mean re-associating each `Region.*_check()` output
+edge pair back to its originating instance post hoc (checks run against a
+flattened `Region`, which carries no per-shape origin-cell metadata) —
+a materially bigger change than a rule-table fix, tracked as a known
+limitation rather than attempted as part of #436.
 
 ## Database units (dbu)
 

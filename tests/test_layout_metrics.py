@@ -12,6 +12,7 @@ import json
 import klayout.db as kdb
 import pytest
 
+from helpers.openroad_macro_fixture import build_macro_gds
 from klayout_tools.cli import main
 from klayout_tools.layout_metrics import (
     LayoutMetricsError,
@@ -348,3 +349,72 @@ def test_cli_output_override(tmp_path):
     assert main(["layout-metrics", str(block_dir), "--output", str(custom)]) == 0
     assert custom.is_file()
     assert not (block_dir / "output" / "layout.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# OpenROAD macro fixture (issue #436, Epic #391 Phase 5) -- the first
+# exercise of `klt layout-metrics` against machine-generated, macro-scale,
+# `sky130_fd_sc_hd` standard-cell GDS (hundreds of real corpus standard-cell
+# instances, hierarchical, multi-master) rather than the small, flat,
+# hand-drawn fixtures every other test in this file uses (`_make_layout`'s
+# own 2-cell/2-instance layout is the deepest hierarchy previously
+# exercised). See `tests/helpers/openroad_macro_fixture.py` for exactly how
+# it's built.
+# --------------------------------------------------------------------------- #
+
+
+def _write_openroad_macro_block(tmp_path, *, slug: str = "openroad-macro-block"):
+    block_dir = tmp_path / slug
+    block_dir.mkdir()
+    build_macro_gds(tmp_path / "build", design_name="layout").rename(
+        block_dir / "layout.gds"
+    )
+    return block_dir
+
+
+def test_report_openroad_macro_fixture_runs_cleanly(tmp_path):
+    """`klt layout-metrics`'s own core acceptance bar for issue #436: no
+    crash, correct `layer_count`/`cell_count`/`instance_count` reporting,
+    status `"ok"`, against a real macro-scale hierarchical GDS -- composed
+    from the same `klt layers`/`klt cells` library calls this verb always
+    used, now proven at a scale (hundreds of instances, 5 distinct cells,
+    real sky130 layers) none of this file's other fixtures reach."""
+    block_dir = _write_openroad_macro_block(tmp_path)
+
+    report = layout_metrics_report(str(block_dir))
+
+    assert report["status"] == "ok"
+    assert report["layout_file"] == "layout.gds"
+    # Top cell + 4 distinct real sky130_fd_sc_hd standard-cell masters.
+    assert report["cell_count"] == 5
+    # 10 rows * 8 cycles * 4 cells/cycle (default `build_macro_gds` size).
+    assert report["instance_count"] == 320
+    assert report["layer_count"] > 0
+
+
+def test_report_openroad_macro_fixture_with_drc_deck(tmp_path):
+    """`layout_metrics_report(..., deck="sky130")` composes `klt drc`
+    internally (via `run_drc`, the same library function `tests/test_drc.py`
+    itself exercises against this fixture) -- confirms the composition
+    still runs cleanly end to end at macro scale, not just each library
+    function in isolation."""
+    block_dir = _write_openroad_macro_block(tmp_path)
+
+    report = layout_metrics_report(str(block_dir), deck="sky130")
+
+    assert report["status"] == "ok"
+    assert report["drc"] == {"deck": "sky130", "status": "clean", "violation_count": 0}
+
+
+def test_cli_layout_metrics_openroad_macro_fixture(tmp_path):
+    """End-to-end CLI smoke test (issue #436's own acceptance bar): `klt
+    layout-metrics` runs to completion, no traceback, writes a well-formed
+    `layout.json`, against a macro-scale GDS."""
+    block_dir = _write_openroad_macro_block(tmp_path)
+
+    assert main(["layout-metrics", str(block_dir), "--deck", "sky130"]) == 0
+
+    written = json.loads((block_dir / "output" / "layout.json").read_text())
+    assert written["status"] == "ok"
+    assert written["cell_count"] == 5
+    assert written["instance_count"] == 320

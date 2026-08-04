@@ -3,7 +3,12 @@
 Most fixtures are generated programmatically with `klayout.db` inside the
 tests — no dependency on an external corpus, mirroring `tests/test_layers.py`.
 The gf180mcu section additionally exercises the real corpus layouts checked
-in under `tests/corpus/gf180mcu/` (see `tests/corpus/README.md`).
+in under `tests/corpus/gf180mcu/` (see `tests/corpus/README.md`). The
+"OpenROAD macro fixture" section (issue #436, Epic #391 Phase 5) exercises a
+synthetic but production-code-path macro-scale, hierarchical,
+multi-master GDS shaped like `klt place-and-route`'s own output — see
+`tests/helpers/openroad_macro_fixture.py`'s module docstring for exactly how
+it's built and its documented simplifications.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
+from helpers.openroad_macro_fixture import build_macro_gds
 from klayout_tools.cli import main
 from klayout_tools.decks import get_deck
 from klayout_tools.drc import DrcError, run_drc
@@ -1558,3 +1564,115 @@ def test_run_drc_gf180mcu_dbu_invariant(tmp_path, dbu_um):
 
     assert report["dbu_um"] == dbu_um
     _assert_reports_match_modulo_dbu(reference, dbu_um, report)
+
+
+# --------------------------------------------------------------------------- #
+# OpenROAD macro fixture (issue #436, Epic #391 Phase 5) -- the first
+# exercise of `klt drc` against machine-generated, macro-scale,
+# `sky130_fd_sc_hd` standard-cell GDS (hundreds of real corpus standard-cell
+# instances, hierarchical, multi-master) rather than the small, flat,
+# hand-drawn-analog fixtures every other test in this file uses. See
+# `tests/helpers/openroad_macro_fixture.py` for exactly how it's built (the
+# real `_merge_def_to_gds` production code path, a hand-authored DEF, no
+# OpenROAD binary) and its documented simplifications.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_drc_openroad_macro_fixture_runs_cleanly(tmp_path):
+    """`klt drc`'s own core acceptance bar for issue #436: no crash, correct
+    reporting, against a real macro-scale hierarchical GDS. The fixture's
+    default placement tiles real, individually-DRC-clean sky130 standard
+    cells edge to edge with zero gaps, so a clean result here also confirms
+    `run_drc` introduces no *false* violations at hierarchy/instance-count
+    scales none of this file's other (flat, single-cell) fixtures reach."""
+    path = build_macro_gds(tmp_path)
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    assert report["violations"] == []
+
+
+def test_run_drc_openroad_macro_fixture_coverage_reports_real_layer_gaps(tmp_path):
+    """Finding (issue #436): a real standard-cell macro draws many more real
+    sky130 physical layers (nwell, tap, psdm/nsdm, npc, ...) than this
+    repo's curated DRC deck subset models (see `decks/sky130.py`'s own
+    "curated starter subset" scope guard) -- `coverage.
+    layers_in_stream_without_rules` correctly surfaces this gap rather than
+    silently reporting a false "fully checked" clean.
+
+    Separately: `klt place-and-route`'s own DEF->GDS merge
+    (`_merge_def_to_gds`) leaves KLayout's LEF/DEF reader default
+    `produce_cell_outlines=True` in place, so every real place-and-route GDS
+    (not just this synthetic fixture) carries one extra, non-physical
+    "OUTLINE" box per top cell on layer 2/0 -- also correctly surfaced here
+    as an uncovered stream layer rather than crashing or miscounting.
+    Fixing the upstream default is out of scope for this issue (`klt
+    place-and-route`'s own `_merge_def_to_gds`, not `klt drc`) -- documented
+    here as a known limitation, not silently worked around."""
+    path = build_macro_gds(tmp_path)
+    report = run_drc(str(path), "sky130")
+    coverage = report["coverage"]
+
+    # Every layer this curated deck's rules reference is actually drawn by
+    # the real standard cells -- full self-consistency, not a partial check.
+    assert coverage["layers_checked"] == coverage["deck_layers"]
+    assert coverage["rules_skipped"] == []
+
+    # Real sky130 layers the curated deck does not model at all (nwell
+    # 64/20, npc 95/20, psdm/nsdm 93/44 & 94/20, ...).
+    assert "64/20" in coverage["layers_in_stream_without_rules"]
+    assert "95/20" in coverage["layers_in_stream_without_rules"]
+
+    # The synthetic DEF-outline artifact (KLayout's `produce_cell_outlines`
+    # default, see docstring above) -- never a real drawn layer.
+    assert "2/0" in coverage["layers_in_stream_without_rules"]
+
+
+def test_run_drc_openroad_macro_fixture_detects_hierarchical_violation(tmp_path):
+    """`klt drc` still correctly *detects* a genuine violation introduced
+    across two adjacent standard-cell instances at macro scale (a real
+    physical overlap, not fabricated geometry on an unchecked layer).
+
+    Finding/known limitation (issue #436): every violation's own `"cell"`
+    field names the *top* cell (`run_drc`'s own module docstring: checks run
+    "flattened per top cell", see `_run_check`'s use of
+    `cell.begin_shapes_rec`), never the actual originating standard-cell
+    *instance* (e.g. the specific `sky130_fd_sc_hd__inv_1` placement whose
+    li1/mcon geometry is actually too close to its neighbour). This was
+    invisible in every other fixture in this file because hand-drawn analog
+    test layouts are effectively flat (a single cell drawing its own
+    shapes) -- `"cell"` trivially named the right thing by construction.
+    For a real hierarchical macro, a caller wanting "which standard-cell
+    instance do I need to move" has to separately correlate each
+    violation's `bbox` against the layout's own instance placements (e.g.
+    via `klt cells`) -- not fixed here (would require re-associating each
+    `Region.*_check()` output edge pair back to its originating instance,
+    a materially bigger change than this issue's own "verify and fix what's
+    broken" scope), documented as a known limitation instead."""
+    path = build_macro_gds(tmp_path, num_rows=2, cycles_per_row=3, overlap_shift_um=0.3)
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["violation_count"] > 0
+    # Every violation is attributed to the top cell, not the actual
+    # standard-cell instance whose geometry is too close -- see docstring.
+    assert {v["cell"] for v in report["violations"]} == {"openroad_macro_fixture"}
+
+
+def test_cli_drc_openroad_macro_fixture_exit_codes(tmp_path):
+    """End-to-end CLI smoke test (issue #436's own acceptance bar): `klt
+    drc` runs to completion, no traceback, correct exit code, against both
+    a clean and a violating macro-scale GDS."""
+    clean_path = build_macro_gds(tmp_path / "clean")
+    assert main(["drc", str(clean_path), "--deck", "sky130", "--format", "json"]) == 0
+
+    violating_path = build_macro_gds(
+        tmp_path / "violating",
+        num_rows=2,
+        cycles_per_row=3,
+        overlap_shift_um=0.3,
+    )
+    assert (
+        main(["drc", str(violating_path), "--deck", "sky130", "--format", "json"]) == 3
+    )

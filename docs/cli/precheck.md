@@ -215,6 +215,24 @@ stable across runs of the same input).
 | `name`   | string \| null | The layer's own GDS layer-name property, or `null` if unnamed.   |
 | `shapes` | integer       | Shape count on this layer, summed across all cell definitions.   |
 
+**Known limitation (issue #436):** unlike `offgrid`/`zero_area`'s own `cell`
+field (per-*instance*, via a recursive shape iterator — see above), the
+`layer_whitelist` `shapes` count is summed once per **cell definition**,
+never multiplied by how many times that cell is instantiated. For a flat,
+hand-drawn layout (this repo's fixtures before #436) a cell's own
+definition and its one placement are the same thing, so the distinction was
+invisible. Against a real hierarchical macro (e.g. `klt place-and-route`
+output) it under-reports true prevalence substantially — verified directly
+against a macro-scale fixture for #436: a layer drawn 800 times across 320
+placed standard-cell instances reports `"shapes": 10` (the raw
+per-master-cell-definition count: 4 distinct masters + the top cell's own
+direct shapes). This is a hygiene *count*, not a pass/fail input (a single
+disallowed shape anywhere already fails the check regardless of count), so
+it does not change `status` — but a caller reading `shapes` as "how much of
+this layer exists" for a hierarchical layout will be misled. Left
+documented rather than changed in #436 (a value-semantics change to an
+already-published JSON field, out of that issue's own scope).
+
 #### `pin_labels_over_drawing` violations
 
 | Field      | Type   | Description                                                    |
