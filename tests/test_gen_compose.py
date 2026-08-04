@@ -15,11 +15,14 @@ import pytest
 
 from klayout_tools import extract, gen, gen_compose, pdk
 from klayout_tools.cli import main
+from klayout_tools.decks import get_extraction_deck
+from klayout_tools.drc import run_drc
 from klayout_tools.gen_compose import (
     GenComposeError,
     _cleanup_points,
     _polyline_midpoint_um,
     _resolve_label_layer,
+    _resolve_via_drop_layer,
     _translate_bbox,
     _union_bbox,
     compose,
@@ -1933,6 +1936,160 @@ def test_compose_rejects_self_net_same_row_same_direction_pair(
     top = layout.cell("pnp_bus")
     li1 = layout.layer(67, 20)
     assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+
+
+# --------------------------------------------------------------------------- #
+# Via-drop routing (#454, re-raising #433's Ask options 1/2): a `"metal2"`
+# `routing.layer_role` runs the backbone on sky130's met1 and drops to each
+# target pin's own li1 pad only via the connecting mcon via
+# (`_resolve_via_drop_layer`) -- the exact same-block bus #433 could only
+# reject (`unrouted_nets[]`) is now routable.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_via_drop_layer_same_layer_needs_no_drop():
+    deck = get_extraction_deck("sky130")
+    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), (67, 20))
+    assert via_layer is None
+    assert error is None
+
+
+def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
+    # A poly gate port (66/20) is not a member of the deck's metals stack at
+    # all -- via-drop only ever applies between two declared routing-metal
+    # levels, so this must not be treated as "needs a drop but none found".
+    deck = get_extraction_deck("sky130")
+    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), (66, 20))
+    assert via_layer is None
+    assert error is None
+
+
+def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():
+    # sky130's metals=((67,20),(68,20)), vias=((67,44),) -- li1 (metals[0])
+    # to met1 (metals[1]) resolves to mcon.
+    deck = get_extraction_deck("sky130")
+    via_layer, error = _resolve_via_drop_layer(deck, (68, 20), (67, 20))
+    assert via_layer == (67, 44)
+    assert error is None
+
+
+def test_resolve_via_drop_layer_non_adjacent_metals_is_unresolvable():
+    # sky130's metals stack has only two levels, so no pair in it is ever
+    # more than one hop apart -- exercise the >1-hop rejection path directly
+    # against a synthetic three-level deck instead of relying on a future
+    # PDK deck to reach it.
+    real = get_extraction_deck("sky130")
+    from dataclasses import replace
+
+    deck = replace(
+        real,
+        metals=((67, 20), (68, 20), (69, 20)),
+        vias=((67, 44), (68, 44)),
+    )
+    via_layer, error = _resolve_via_drop_layer(deck, (69, 20), (67, 20))
+    assert via_layer is None
+    assert error is not None
+    assert "single-hop" in error
+
+
+def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
+    tmp_path, pdk_root
+):
+    # The exact #433 reproduction (an 8-unit bjt_array, bussing three
+    # emitters Q0_E/Q1_E/Q2_E into one node via two 2-pin self-nets, each
+    # backbone jogging directly over the base pad sitting between the
+    # emitters it connects) -- but routed on `"metal2"` instead of `"metal"`.
+    # Where `test_compose_rejects_self_net_that_crosses_another_pad_on_same_block`
+    # asserts both nets land in `unrouted_nets[]`, this asserts both now
+    # route: the backbone runs on met1, never touching the li1 base pad it
+    # geometrically crosses over, and drops to each target emitter's own li1
+    # pad only via an mcon via at that pad's own position.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "arr",
+        rows=1,
+        cols=8,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_bus_via_drop.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EBUS1",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q1_E"},
+                    ],
+                },
+                {
+                    "net": "EBUS2",
+                    "pins": [
+                        {"block": "arr", "port": "Q1_E"},
+                        {"block": "arr", "port": "Q2_E"},
+                    ],
+                },
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.17},
+            "options": {"cell_name": "bjt_bus_via_drop", "output": str(output)},
+        }
+    )
+
+    assert output.is_file()
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+    assert report["nets"][1]["routed"] is True
+    assert report["nets"][1]["route_length_um"] > 0
+
+    # The backbone is drawn on met1 (68/20), not li1 -- and a via (mcon,
+    # 67/44) plus li1 landing pad were dropped at each of the four pin
+    # endpoints (Q0_E, Q1_E used twice as the shared middle pin, Q2_E).
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bjt_bus_via_drop")
+    li1 = layout.layer(67, 20)
+    met1 = layout.layer(68, 20)
+    mcon = layout.layer(67, 44)
+    assert [s for s in top.shapes(met1).each() if s.is_path()]
+    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+    assert list(top.shapes(mcon).each())  # at least one via drawn
+
+    # DRC-clean (acceptance criterion): the via-drop's own drawn geometry
+    # (via + landing pads on both met1 and li1) must not violate any curated
+    # sky130 rule (li1/met1 width/space, met1.enclosing.mcon, mcon.space).
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Extraction merges only the three targeted emitters into one node --
+    # every other pad (the other five emitters, every base tie) stays its
+    # own distinct node.
+    result = extract.run_extract(str(output), "sky130", top="bjt_bus_via_drop")
+    bjt_devices = [d for d in result["devices"] if d["class"] == "pnp"]
+    assert len(bjt_devices) == 8
+    emitter_nets = {d["name"]: d["nets"]["e"] for d in bjt_devices}
+    bussed = {name: net for name, net in emitter_nets.items() if net is not None}
+    # Exactly 3 devices' emitters share one common net name...
+    from collections import Counter
+
+    counts = Counter(bussed.values())
+    assert 3 in counts.values(), emitter_nets
+    bussed_net = next(net for net, n in counts.items() if n == 3)
+    bussed_devices = {name for name, net in emitter_nets.items() if net == bussed_net}
+    assert len(bussed_devices) == 3
+    # ...and no base ('b') terminal shares that same net (the bus stayed off
+    # the base pad it geometrically crossed over on met1).
+    base_nets = {d["nets"]["b"] for d in bjt_devices}
+    assert bussed_net not in base_nets
 
 
 # --------------------------------------------------------------------------- #

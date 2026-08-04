@@ -44,6 +44,17 @@ Scope (phase 2, this module's current state):
   ``unrouted_nets[]`` with every block placed is a *partial success* (exit
   code 3; see ``cli/gen_compose_cmd.py`` and the spike's "Proposed exit
   codes").
+* **Via-drop routing** (issue #454, re-raising #433's Ask options 1/2): a
+  family whose curated extraction deck declares a second routing-metal level
+  (e.g. sky130's ``"metal2"``/met1) can be selected as ``routing.layer_role``
+  even though every ``klt gen`` block's own pads are drawn on the base
+  ``"metal"`` role -- :func:`route_two_pin` drops the backbone back down to
+  each target pin's own layer via the connecting via (sky130's ``"via1"``/
+  mcon) exactly at that pin's position, so the backbone itself never runs
+  across another pad on the pad layer. This is what makes a same-block bus
+  (e.g. chaining a matched array's unit terminals) routable without either
+  accepting a same-layer short or failing #433's self-net pad-crossing
+  rejection -- see :func:`_resolve_via_drop_layer`.
 * **``drc_hints``** (new this phase): ``matched_groups[]`` reports every
   distinct ``matched_group_id`` seen among the input blocks' own
   ``generator_report.drc_hints.matched_group_id`` (read-only echo,
@@ -73,8 +84,14 @@ import os
 from typing import Any
 
 from ._layout import write_layout
-from .decks import get_extraction_deck
-from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
+from .decks import ExtractionDeck, get_extraction_deck
+from .gen import (
+    _PDK_ROLE_LAYERS,
+    CONTACT_SIZE_UM,
+    ENCLOSURE_MARGIN_UM,
+    GenError,
+    _pdk_family,
+)
 from .pdk import PdkNotFoundError, find_pdk
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -101,6 +118,23 @@ _DIRECTION_VECTORS: dict[int, tuple[int, int]] = {
     180: (-1, 0),
     270: (0, -1),
 }
+
+#: Via-drop square side (um, issue #454) -- the same drawn contact/via size
+#: every `klt gen` generator's own unit devices already use (`gen.CONTACT_SIZE_UM`),
+#: so a via-drop's via is never a second, unvalidated size.
+_VIA_DROP_SIZE_UM = CONTACT_SIZE_UM
+
+#: Landing-pad square side (um, issue #454) drawn on *both* sides of a
+#: via-drop (the backbone's own ``route_layer`` and the target pin's own
+#: layer), independent of the route's own ``width_um`` -- the same
+#: `CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM` contact-enclosure convention
+#: `gen.py`'s own unit-device layouts already use (e.g. `_bjt_unit_layout`'s
+#: `contact_region_um`), not a new unvalidated margin. Drawing an explicit
+#: landing pad -- rather than relying on the backbone's own trace width --
+#: guarantees the via's enclosure requirement is met even when a caller
+#: requests a `routing.width_um` narrower than a full contact-enclosure
+#: footprint (e.g. sky130's own `li1.width.1` minimum, 0.17um).
+_VIA_LANDING_SIZE_UM = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
 
 
 class GenComposeError(Exception):
@@ -676,6 +710,84 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     return pair
 
 
+def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(layer, datatype)`` a port's own reported ``layer{layer,
+    datatype}`` geometry names, or ``None`` when it is missing/malformed.
+
+    Distinct from :func:`_port_has_geometry` (which also requires
+    ``x_um``/``y_um``) -- callers of this helper already know the port has a
+    usable position and only need its physical layer, e.g. to decide whether
+    a via-drop is needed (issue #454, see :func:`_resolve_via_drop_layer`).
+    """
+    layer = port.get("layer")
+    if not isinstance(layer, dict):
+        return None
+    layer_num, datatype = layer.get("layer"), layer.get("datatype")
+    if (
+        isinstance(layer_num, int)
+        and not isinstance(layer_num, bool)
+        and isinstance(datatype, int)
+        and not isinstance(datatype, bool)
+    ):
+        return (layer_num, datatype)
+    return None
+
+
+def _resolve_via_drop_layer(
+    deck: ExtractionDeck,
+    route_layer: tuple[int, int],
+    port_layer: tuple[int, int],
+) -> tuple[tuple[int, int] | None, str | None]:
+    """Resolve whether a route drawn on ``route_layer`` needs a via-drop to
+    reach a target pin drawn on ``port_layer`` (issue #454, re-raising
+    #433's Ask options 1/2: a ``metal2``/via role pair plus router support
+    for actually using it).
+
+    Looks the two layers up in the resolved PDK family's own
+    :class:`~klayout_tools.decks.ExtractionDeck` ``metals``/``vias`` stack
+    (:func:`~klayout_tools.decks.get_extraction_deck`) -- the *same*
+    connectivity data ``klt extract``'s per-layer connectivity loop already
+    walks (``connect(metals[i], vias[i])`` / ``connect(vias[i],
+    metals[i + 1])``), never a second, private via table.
+
+    Returns ``(via_layer, error)``:
+
+    * ``(None, None)`` -- no drop needed. Either ``port_layer`` already *is*
+      ``route_layer`` (the pre-#454 single-metal routing path, unchanged),
+      or one of the two layers is not itself a member of ``deck.metals`` at
+      all (e.g. a bare-poly gate port) -- via-drop only ever applies between
+      two declared routing-metal levels, so a route to any other role draws
+      directly on ``route_layer`` exactly as it always has.
+    * ``(via_pair, None)`` -- a drop is needed and resolved; draw a via on
+      ``via_pair`` at the pin's own position.
+    * ``(None, reason)`` -- a drop is needed but not resolvable (the two
+      metals-stack levels are more than one via hop apart, or the deck
+      declares no via for the hop needed) -- the caller reports the net
+      unroutable rather than drawing a disconnected short.
+    """
+    if route_layer == port_layer:
+        return None, None
+    try:
+        route_idx = deck.metals.index(route_layer)
+        port_idx = deck.metals.index(port_layer)
+    except ValueError:
+        return None, None  # not a metals-stack level -- an unrelated role
+    if abs(route_idx - port_idx) != 1:
+        return None, (
+            f"routing.layer_role's metal (deck metals[{route_idx}]) is more "
+            f"than one via hop from this pin's own layer (deck "
+            f"metals[{port_idx}]) -- gen_compose's via-drop only supports a "
+            "single-hop drop"
+        )
+    via_index = min(route_idx, port_idx)
+    if via_index >= len(deck.vias):
+        return None, (
+            "the resolved PDK's extraction deck declares no via connecting "
+            f"deck metals[{route_idx}] and metals[{port_idx}]"
+        )
+    return deck.vias[via_index], None
+
+
 def _resolve_label_layer(
     variant: str, draw_layer: tuple[int, int]
 ) -> tuple[int, int] | None:
@@ -1137,6 +1249,7 @@ def route_two_pin(
     placed_bboxes_um: dict[str, dict[str, float]],
     width_um: float,
     route_layer: tuple[int, int] | None = None,
+    extraction_deck: ExtractionDeck | None = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -1177,17 +1290,36 @@ def route_two_pin(
        side, e.g. crossing that block's own opposite-facing pin) and any
        third block's bbox the straight-line/single-jog backbone happens to
        cross in a longer row.
+    5. **Via-drop resolution** (#454): when ``route_layer`` and a pin's own
+       reported layer differ, :func:`_resolve_via_drop_layer` looks up
+       whether ``extraction_deck`` connects the two with a single via hop
+       (e.g. ``routing.layer_role: "metal2"`` backbone reaching a
+       ``"metal"``-role li1 pad via sky130's ``mcon``). A pin whose own layer
+       *is* ``route_layer`` needs no drop; a pin on an unrelated role (e.g. a
+       bare-poly gate) is left exactly as before #454 (drawn directly on
+       ``route_layer``, no via). Only a pin whose layer is a *different*
+       ``deck.metals`` level than ``route_layer``, more than one via hop
+       away, is rejected here -- reported unroutable rather than drawing a
+       disconnected short.
 
-    Any of the four reports the net unroutable (spike section 2,
-    ``unrouted_nets[]``) rather than silently drawing a short. ``route_layer``
-    (the ``(layer, datatype)`` pair ``routing.layer_role`` resolved to, see
+    Checks 1-4 report the net unroutable (spike section 2,
+    ``unrouted_nets[]``) rather than silently drawing a short; check 5 does
+    the same for a route it cannot connect end to end. ``route_layer`` (the
+    ``(layer, datatype)`` pair ``routing.layer_role`` resolved to, see
     :func:`_resolve_route_layer`) is optional only for callers that predate
     #433/don't care about check 3 (e.g. direct unit tests) -- ``compose()``
     always passes it when ``connectivity[]`` is non-empty, since that's the
-    only time a route is actually drawn.
+    only time a route is actually drawn. ``extraction_deck`` is likewise
+    optional and only consulted (check 5) when both it and ``route_layer``
+    are given -- omitting it (e.g. a pre-#454 caller) draws every pin
+    directly on ``route_layer`` with no via-drop, exactly as before this
+    issue.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
-    "points_um": list | None, "reason": str | None}``.
+    "points_um": list | None, "via_drops": list, "reason": str | None}``.
+    ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer", "port_layer"}``
+    entries (empty unless a drop was resolved), consumed by
+    :func:`_write_composed_gds` to draw each drop's via + landing pads.
     """
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
@@ -1514,10 +1646,49 @@ def route_two_pin(
             "reason": reason,
         }
 
+    # Via-drop resolution (#454, check 5 -- see docstring): only consulted
+    # when both a route_layer and an extraction_deck are given (pre-#454
+    # callers that pass neither draw exactly as before, no via-drop). For
+    # each endpoint whose own reported layer differs from route_layer, either
+    # resolve the connecting via (drop needed and available), find nothing to
+    # do (not a metals-stack level -- an unrelated role, unchanged legacy
+    # behavior), or reject the whole net as unroutable (a drop is needed but
+    # not resolvable).
+    via_drops: list[dict[str, Any]] = []
+    if route_layer is not None and extraction_deck is not None:
+        for pin, port, pos in ((pin_a, port_a, a), (pin_b, port_b, b)):
+            port_layer = _port_own_layer(port)
+            if port_layer is None:
+                continue  # no reported layer -- draw directly, legacy behavior
+            via_layer, drop_error = _resolve_via_drop_layer(
+                extraction_deck, route_layer, port_layer
+            )
+            if drop_error is not None:
+                return {
+                    "routed": False,
+                    "route_length_um": None,
+                    "points_um": None,
+                    "reason": (
+                        f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
+                        f"on layer {port_layer}, which routing.layer_role's "
+                        f"{route_layer} cannot reach: {drop_error}"
+                    ),
+                }
+            if via_layer is not None:
+                via_drops.append(
+                    {
+                        "x_um": pos[0],
+                        "y_um": pos[1],
+                        "via_layer": via_layer,
+                        "port_layer": port_layer,
+                    }
+                )
+
     return {
         "routed": True,
         "route_length_um": _polyline_length_um(points),
         "points_um": points,
+        "via_drops": via_drops,
         "reason": None,
     }
 
@@ -1643,6 +1814,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # application error (there is nothing to draw the metal on).
     route_layer: tuple[int, int] | None = None
     label_layer: tuple[int, int] | None = None
+    extraction_deck: ExtractionDeck | None = None
     width_um = 0.0
     if connectivity:
         layer_role = routing.get("layer_role")
@@ -1671,6 +1843,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 "layer will not carry a net label, so they will not survive "
                 "as named .SUBCKT pins after extraction"
             )
+        # Resolved once for the whole request (issue #454) -- route_two_pin's
+        # via-drop check (5) consults this same ExtractionDeck.metals/.vias
+        # stack per net, never a second, private via table.
+        extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -1705,6 +1881,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             placed_bboxes_um,
             width_um,
             route_layer,
+            extraction_deck,
         )
         nets.append(
             {
@@ -1720,6 +1897,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     "net": net_label,
                     "points_um": result["points_um"],
                     "width_um": width_um,
+                    "via_drops": result.get("via_drops", []),
                 }
             )
         else:
@@ -1886,8 +2064,8 @@ def _write_composed_gds(
     re-derived), and hierarchy is preserved (each block stays its own cell,
     not flattened into the composed top cell).
 
-    Routed nets (``routed_geometry``: a list of ``{net, points_um,
-    width_um}``) are drawn as native :class:`kdb.Path` shapes directly on the
+    Routed nets (``routed_geometry``: a list of ``{net, points_um, width_um,
+    via_drops}``) are drawn as native :class:`kdb.Path` shapes directly on the
     composed top cell, on ``route_layer`` (a ``(layer, datatype)`` pair) --
     top-level metal, not inside any block's sub-cell. When ``label_layer`` is
     given (resolved by :func:`_resolve_label_layer`), each routed net also
@@ -1897,6 +2075,18 @@ def _write_composed_gds(
     convention (``metals[i]``/``metal_labels[i]`` -- see
     :class:`klayout_tools.decks.ExtractionDeck`) promotes the net to a named
     ``.SUBCKT`` pin instead of an anonymous one (#200).
+
+    Each entry's ``via_drops`` (resolved by :func:`route_two_pin`'s check 5,
+    issue #454) is a list of ``{x_um, y_um, via_layer, port_layer}`` -- one
+    per endpoint that needed to drop from ``route_layer`` down to its own
+    pin's layer. Each drop draws a via square (``_VIA_DROP_SIZE_UM``) on
+    ``via_layer`` plus a landing-pad square (``_VIA_LANDING_SIZE_UM``, sized
+    independently of the route's own trace width so the via's enclosure
+    requirement holds regardless) on *both* ``route_layer`` and the pin's own
+    layer, all centered on the pin's exact composed-frame position -- the
+    same position the backbone's own drawn ``kdb.Path`` already terminates
+    at, so the landing pad always overlaps (and merges with) both the
+    backbone and the block's own existing pad on that layer.
 
     ``pin_placements`` (a list of ``{net, x_um, y_um, layer}``, pre-resolved by
     :func:`compose` from the request's ``pins[]``) each get one
@@ -1977,6 +2167,42 @@ def _write_composed_gds(
                 top.shapes(label_layer_index).insert(
                     kdb.Text(route["net"], kdb.Trans(label_point))
                 )
+
+            # Via-drops (#454): each entry drops the backbone (route_layer)
+            # down to a target pin's own layer at exactly that pin's own
+            # position -- a via square on `via_layer`, plus a landing-pad
+            # square on *both* route_layer and the pin's own layer
+            # (_VIA_LANDING_SIZE_UM, independent of the route's own trace
+            # width) so the via's enclosure requirement holds regardless of
+            # how thin routing.width_um is. The backbone's own Path already
+            # terminates exactly at this same point (manhattan_backbone's
+            # endpoints are the raw pin positions), so the route_layer
+            # landing pad always overlaps -- and merges with -- the trace.
+            via_half_dbu = int(round((_VIA_DROP_SIZE_UM / 2.0) / dbu))
+            landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
+            for drop in route.get("via_drops", []):
+                via_pair = drop["via_layer"]
+                port_pair = drop["port_layer"]
+                via_layer_index = layout.layer(via_pair[0], via_pair[1])
+                port_layer_index = layout.layer(port_pair[0], port_pair[1])
+                cx = int(round(drop["x_um"] / dbu))
+                cy = int(round(drop["y_um"] / dbu))
+                top.shapes(via_layer_index).insert(
+                    kdb.Box(
+                        cx - via_half_dbu,
+                        cy - via_half_dbu,
+                        cx + via_half_dbu,
+                        cy + via_half_dbu,
+                    )
+                )
+                landing_box = kdb.Box(
+                    cx - landing_half_dbu,
+                    cy - landing_half_dbu,
+                    cx + landing_half_dbu,
+                    cy + landing_half_dbu,
+                )
+                top.shapes(layer_index).insert(landing_box)  # route_layer side
+                top.shapes(port_layer_index).insert(landing_box)  # pin's own side
 
     if pin_placements:
         if dbu is None:  # no blocks read (can't happen -- blocks[] is non-empty)
