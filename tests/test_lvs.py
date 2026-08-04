@@ -1551,6 +1551,128 @@ def test_combine_devices_defaults_false(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# combine_devices() partial-match RuntimeError (issue #466)
+# --------------------------------------------------------------------------- #
+
+# KLayout's own `Netlist.combine_devices()` raises this exact internal-
+# consistency `RuntimeError` on a partial-match device group: N real
+# (matching-relevant) instances plus M dummy instances that all share two of
+# three terminals, but only the N real instances also share the third (see
+# `_combine_devices_safely`'s docstring in `lvs.py`). Reproducing this from
+# the outside proved impractical for a fast unit test: extensive attempts
+# against the pinned `klayout==0.30.10` -- hand-built `klayout.db.Netlist`
+# objects using both `DeviceClassBJT3Transistor` and `DeviceClassMOS4Transistor`
+# (varying real/dummy counts, device ordering, parameters, and pin exposure),
+# SPICE-read netlists using the same partial-match shape, and the real `klt
+# gen bjt_array` -> `klt extract` pipeline with the real units' emitters
+# bused together via drawn metal (mirroring this issue's own reproduction
+# recipe) -- never triggered it; it is, per the issue itself, a `klayout.db`
+# C++-internal invariant violation, not something `klt`'s own Python code can
+# deterministically force to happen. These tests instead exercise the actual
+# code under test -- `_combine_devices_safely`'s handling of this exact
+# `RuntimeError` shape -- by making `Netlist.combine_devices()` raise it
+# directly, the standard way to test a wrapper's handling of a third-party
+# exception whose internal trigger conditions cannot be independently forced.
+_COMBINE_DEVICES_PARTIAL_MATCH_ERROR = (
+    "Internal error: Terminal still connected after removing device in "
+    "device combination: name=, circuit=<top>, terminal=E in "
+    "Netlist.combine_devices"
+)
+
+
+def test_combine_devices_safely_returns_warning_on_partial_match_runtimeerror(
+    monkeypatch,
+):
+    """`_combine_devices_safely` catches KLayout's own partial-match
+    `RuntimeError` and returns a `device.combine_incomplete` warning entry
+    instead of letting it propagate."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    warning = lvs._combine_devices_safely(kdb.Netlist(), "layout")
+
+    assert warning is not None
+    assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_INCOMPLETE
+    assert warning["severity"] == "warning"
+    assert warning["side"] == "layout"
+    assert "combine_devices" in warning["description"]
+    assert warning["net"] is None
+    assert warning["device"] is None
+
+
+def test_combine_devices_safely_reraises_unrelated_runtimeerror(monkeypatch):
+    """A `RuntimeError` that does not carry the KLayout-specific
+    ``Netlist.combine_devices`` marker text is not this issue's error shape
+    -- `_combine_devices_safely` must not silently swallow it, so an
+    unrelated failure is never masked as a benign combine-degradation."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError("some unrelated klayout.db internal error")
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    with pytest.raises(RuntimeError, match="unrelated"):
+        lvs._combine_devices_safely(kdb.Netlist(), "layout")
+
+
+def test_combine_devices_safely_returns_none_on_clean_combine():
+    """No warning when `combine_devices()` completes without raising --
+    the common case, matching every other `options.combine_devices` test in
+    this file."""
+    import klayout.db as kdb
+
+    assert lvs._combine_devices_safely(kdb.Netlist(), "layout") is None
+
+
+def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
+    tmp_path, monkeypatch
+):
+    """End-to-end: `klt lvs` with `options.combine_devices: true` does not
+    raise an unhandled traceback when KLayout's own `combine_devices()` hits
+    the partial-match internal error -- it completes through the normal
+    JSON-envelope return, with a `device.combine_incomplete` warning entry
+    (one per side) recording that combine did not fully apply, instead of
+    the whole run aborting (issue #466)."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"combine_devices": True},
+        },
+    )
+
+    report = run_lvs(path)  # must not raise
+
+    assert report["schema_version"] == lvs.SCHEMA_VERSION
+    combine_warnings = [
+        m for m in report["mismatches"] if m["category"] == "device.combine_incomplete"
+    ]
+    # Both netlists hit the (monkeypatched) error -- one warning per side.
+    assert {m["side"] for m in combine_warnings} == {"layout", "reference"}
+    assert all(m["severity"] == "warning" for m in combine_warnings)
+    # Neither device count changed -- `combine_devices()` never actually ran
+    # (same counts as `test_multifinger_device_mismatches_without_combine_devices`).
+    assert report["counts"]["devices"]["layout"] == 3
+    assert report["counts"]["devices"]["reference"] == 2
+    assert report["status"] == "mismatch"
+
+
+# --------------------------------------------------------------------------- #
 # Direct classification unit tests (fake logger, no real NetlistComparer run)
 # --------------------------------------------------------------------------- #
 

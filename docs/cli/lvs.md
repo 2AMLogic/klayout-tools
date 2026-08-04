@@ -358,7 +358,7 @@ each resolves relative paths inside the document.
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. |
 | `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |
 | `options.keep_extracted` | boolean | When `layout.file` is given (inline extraction), retain the intermediate extracted netlist on disk at `<request-dir>/.klt/lvs/<top>.spice` and echo its path in `environment.extracted_netlist`, where `<request-dir>` is the request file's directory (or the current working directory for the `-`/inline-JSON forms). Default `false` (nothing is written to disk). |
-| `options.combine_devices` | boolean | When `true`, calls `klayout.db.Netlist.combine_devices()` on **both** the layout and reference netlists before comparing — merging devices a device class recognises as combinable (e.g. parallel/series MOSFETs sharing gate/source/drain/body connectivity). This is what makes folded/multi-finger devices (a wide transistor drawn as N parallel fingers of width `W/N`) and split/interleaved matched-pair segments (common-centroid, interdigitated layout) comparable against a single lumped schematic device — without it, each finger/segment reports as its own unmatched device. Default `false` (today's per-drawn-device matching, unchanged) because unconditional merging would also collapse genuinely-distinct parallel devices (e.g. a DAC array's intentionally-separate legs) that some callers want reported individually — opt in only when the layout actually uses folded/split constructions. Applied identically for both engines. |
+| `options.combine_devices` | boolean | When `true`, calls `klayout.db.Netlist.combine_devices()` on **both** the layout and reference netlists before comparing — merging devices a device class recognises as combinable (e.g. parallel/series MOSFETs sharing gate/source/drain/body connectivity). This is what makes folded/multi-finger devices (a wide transistor drawn as N parallel fingers of width `W/N`) and split/interleaved matched-pair segments (common-centroid, interdigitated layout) comparable against a single lumped schematic device — without it, each finger/segment reports as its own unmatched device. Default `false` (today's per-drawn-device matching, unchanged) because unconditional merging would also collapse genuinely-distinct parallel devices (e.g. a DAC array's intentionally-separate legs) that some callers want reported individually — opt in only when the layout actually uses folded/split constructions. Applied identically for both engines. On a **partial-match device group** — N real (matching-relevant) instances plus M dummy instances that all share two of three terminals, but only the N real instances also share the third (e.g. a matched bipolar/MOS array's flanking dummies) — `klayout.db`'s own `combine_devices()` can raise an internal-consistency `RuntimeError` rather than combining just the maximal matching subset; `klt lvs` catches that specific error per netlist instead of letting it abort the run, keeps whatever it had already combined, leaves the rest of that netlist's devices individual, and records a `severity: "warning"`, `category: "device.combine_incomplete"` entry in `mismatches[]` — see "`device.combine_incomplete`" below. |
 | `options.netgen_setup` | string | Only used with `"engine": "netgen"`. Path to a netgen LVS setup `.tcl` file — see "Engine" -> `"netgen"` above. Omit to run with netgen's own default setup. |
 | `options.netgen_timeout_s` | number | Only used with `"engine": "netgen"`. Wall-clock budget (seconds) for the `netgen` subprocess. Default `300`. |
 
@@ -482,8 +482,8 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `pin.unmatched`, `topology`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.property`, `device.body_unverified`, `device.combine_incomplete`, `pin.unmatched`, `topology`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
@@ -573,6 +573,33 @@ not of any individual device pairing or `hints`), always `severity:
 "warning"`, and never change `status` or break `mismatch_count`'s error
 semantics — they only make it visible, in-band, that this dimension of the
 compare was not fully verified against the schematic.
+
+#### `device.combine_incomplete`: `options.combine_devices` could not fully combine a partial-match device group
+
+Only possible when `options.combine_devices: true` (issue #466). KLayout's
+own `klayout.db.Netlist.combine_devices()` can raise an unhandled internal-
+consistency `RuntimeError` on a *partial-match* device group: N real
+(matching-relevant) instances plus M dummy instances that all share two of
+three terminals (e.g. a bipolar device's base and collector, tied to a
+matched array's common well and substrate), but only the N real instances
+additionally share the third (e.g. an emitter bussed to one signal net) —
+each of the M dummy instances has its own, mutually distinct, third
+terminal. That is a `klayout.db` behavior this command merely surfaces, not
+a defect in `klt lvs` itself.
+
+`klt lvs` catches this specific error per netlist (narrowly — only a
+`RuntimeError` carrying KLayout's own `"...in Netlist.combine_devices"`
+marker text; any other `RuntimeError` still propagates as an application
+error) instead of letting it abort the whole run: whatever `combine_devices()`
+had already merged before hitting the error stays merged, the rest of that
+netlist's devices are left as individual devices (the same state they would
+be in with `options.combine_devices: false`), and a `severity: "warning"`,
+`side: "layout"` or `side: "reference"` entry is added recording that combine
+did not fully apply on that side. Never changes `status` or breaks
+`mismatch_count`'s error semantics on its own — a caller relying on
+`options.combine_devices` to fully lump a matched array should treat this
+entry as a signal to inspect `counts.devices` rather than assume every
+combinable device actually got combined.
 
 #### `topology`: catch-all for circuit-, device-class-, and net-identity-level mismatches
 
