@@ -33,6 +33,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-04 — `klt lvs`: new `request.reference.device_bulk` field (#506,
+  `"engine": "klayout"` only) — `{"<model>": "<reference net name>"}` —
+  closing the gap `device.class_arity` (#504/#505) could only diagnose. It
+  declares that a reference-side device class carries an *implicit*
+  bulk/well terminal the schematic does not model, and which reference net
+  it binds to; `klt lvs` adds the one terminal the identically-named
+  layout-side class declares and the reference class does not, connects
+  every reference device of that class to the declared net (creating it when
+  the reference netlist does not model it), and only then runs
+  `NetlistComparer` — so a `bulk_to_substrate`-style device flavour can
+  report `status: "match"` against an independently-authored, schematic-
+  derived reference instead of a permanent `device.class_arity` mismatch.
+  Reference-side only (issue #504's option 1; option 2, dropping the
+  layout-side terminal, is not implemented), and composes with
+  `hints.same_nets`. Every application is disclosed by a new
+  `severity: "warning"`, `side: "reference"` `device.bulk_reconciled`
+  mismatch category naming the class, the bound terminal, the declared net
+  and the device count, so a reconciled match is never silently
+  indistinguishable from an independent one; a declaration that turns out to
+  be a no-op is disclosed the same way, and one that cannot be applied at
+  all is an application error (exit 1), not a silent no-op. See
+  `docs/cli/lvs.md`'s `reference.device_bulk` and `device.bulk_reconciled`
+  entries.
 - 2026-08-04 — `klt lvs`: new `device.class_arity` mismatch category (#504,
   `"engine": "klayout"` only), diagnosing a layout-side and reference-side
   device class that share a name but declare a different terminal list —
