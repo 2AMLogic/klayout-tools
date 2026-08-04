@@ -423,6 +423,29 @@ EXTRACTION_DECK = ExtractionDeck(
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
     well_label=(64, 5),  # nwell.pin
     poly_label=(66, 5),  # poly.pin -- names a bare-poly gate node (#210)
+    # Dummy-device marker (issue #491, extends the `dummy` field's #295/#462
+    # extractor-side machinery -- see `ExtractionDeck.dummy`'s docstring in
+    # `decks/__init__.py`). sky130 has no *native* per-device dummy-marker GDS
+    # layer of its own: dummy fill in the real PDK is a density-rule/DRC
+    # concept (metal-fill "waffle" generation, e.g. `sky130.lyt`'s
+    # `cfom.*`/`fom.dummy` (22/23) family), not a device-recognition mark the
+    # way `pnp.drawing` is for bipolars -- the same "no native mark, curated
+    # substitute" situation this module's docstring already documents for
+    # bipolars (see the "Negative finding" note above) before #223's
+    # `pnp.drawing` follow-up gave that one a real mark to key off.
+    # `(83, 20)` reuses sky130.lyt's own `marker.*` layer *number* (83 --
+    # `marker.error : 83/6`, `marker.warning : 83/7`, `text.drawing : 83/44`,
+    # confirmed against a real `sky130.lyt` checkout, the same source cited at
+    # the top of this module) with datatype 20, the ".drawing"-purpose
+    # datatype convention every other curated layer here follows -- but
+    # `sky130.lyt` assigns no purpose to layer 83 datatype 20 at all, so this
+    # deck reserves it as an extraction-only, deck-local marker with no
+    # official sky130 purpose string and no DRC rule referencing it (`klt drc`
+    # never checks this layer). Verified non-colliding against every shape
+    # this repo's own `tests/corpus/sky130/*.gds` fixtures actually draw
+    # (their only layer-83 shapes are on datatype 44, i.e. real
+    # `text.drawing` instance/cell labels -- never datatype 20).
+    dummy=(83, 20),
     contact=(66, 44),  # licon1.drawing
     metals=((67, 20), (68, 20)),  # li1.drawing, met1.drawing
     metal_labels=((67, 5), (68, 5)),  # li1.pin, met1.pin

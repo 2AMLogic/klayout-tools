@@ -517,6 +517,13 @@ _PHASE2_GENERATOR_X_DECK = [
     (name, deck) for name in _PHASE2_GENERATORS for deck in _PHASE2_DECKS
 ]
 
+#: sky130's curated dummy-device marker layer (issue #491) -- matches
+#: `klayout_tools.decks.sky130.EXTRACTION_DECK.dummy` and
+#: `klayout_tools.gen._PDK_ROLE_LAYERS["sky130"]["dummy"]`. gf180mcu declares
+#: no equivalent (out of scope for #491), so there is no `_GF180_DUMMY_LAYER`
+#: counterpart.
+_SKY130_DUMMY_LAYER = (83, 20)
+
 
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
@@ -547,6 +554,8 @@ def test_list_generators_phase2_params_have_no_hidden_layer_fields(name):
         "tap_layer",
         "well_layer",
         "well_present",
+        "dummy_layer",
+        "dummy_present",
     }
 
 
@@ -726,6 +735,73 @@ def test_mos_array_dummy_devices_not_counted_or_ported(tmp_path, pdk_root):
     assert with_dummy["bbox_um"]["x1"] - with_dummy["bbox_um"]["x0"] > (
         no_dummy["bbox_um"]["x1"] - no_dummy["bbox_um"]["x0"]
     )
+
+
+def test_mos_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk_root):
+    """Issue #491: on sky130, `mos_array` draws the deck's curated `dummy`
+    marker layer (`83, 20`) over each dummy unit's gate footprint -- and
+    *only* the dummy units, never a real cell -- so `klt extract`'s existing
+    dummy-suppression guards (#295/#462) actually fire on sky130. A
+    `dummy: 0` request draws no shapes on that layer at all (the pre-#491
+    regression case)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_dummy_marker.gds"
+    rows, cols, dummy = 1, 2, 2
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_DUMMY_LAYER in present
+
+    layer_index = layout.layer(*_SKY130_DUMMY_LAYER)
+    dummy_region = kdb.Region(layout.top_cell().begin_shapes_rec(layer_index))
+
+    poly_index = layout.layer(66, 20)  # poly.drawing
+    poly_region = kdb.Region(layout.top_cell().begin_shapes_rec(poly_index))
+    # The dummy marker is a strict subset of the drawn poly (it covers only
+    # the dummy gates' footprint, gate landing pad included -- see
+    # `_mos_unit_layout`'s `boxes_um["poly"]` -- not the real ones) --
+    # confirms it never bleeds onto a real cell's gate.
+    assert not dummy_region.is_empty()
+    assert (dummy_region - poly_region).is_empty()
+    assert dummy_region.area() < poly_region.area()
+
+    active_index = layout.layer(65, 20)  # diff.drawing
+    active_region = kdb.Region(layout.top_cell().begin_shapes_rec(active_index))
+    # The channel component `klt extract` actually recognises as a gate is
+    # poly & active -- one connected component per dummy unit device (2
+    # dummy columns/side * rows), matching the count `klt extract`'s
+    # `dummy_devices_dropped` reports for this same request.
+    gate_components = (dummy_region & active_region).merged()
+    assert gate_components.count() == 2 * dummy * rows
+
+    output_no_dummy = tmp_path / "mos_array_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    present_no_dummy = {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
+    assert _SKY130_DUMMY_LAYER not in present_no_dummy
 
 
 @pytest.mark.parametrize(
@@ -1172,6 +1248,61 @@ def test_res_array_sky130_draws_poly_res_marker(tmp_path, pdk_root):
         for i in layout.layer_indexes()
     }
     assert _SKY130_RES_MARK_LAYER in present
+
+
+def test_res_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk_root):
+    """Issue #491: on sky130, `res_array` draws the deck's curated `dummy`
+    marker layer over each dummy unit resistor's recognised body segment --
+    the same footprint the `poly.res` marker covers -- and only over the
+    dummy units, never a real cell, so `klt extract`'s existing
+    dummy-suppression guard (#295/#462) actually fires on sky130."""
+    import klayout.db as kdb
+
+    output = tmp_path / "res_array_dummy_marker.gds"
+    num, dummy = 3, 2
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": num, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_DUMMY_LAYER in present
+
+    dummy_index = layout.layer(*_SKY130_DUMMY_LAYER)
+    dummy_region = kdb.Region(layout.top_cell().begin_shapes_rec(dummy_index))
+    mark_index = layout.layer(*_SKY130_RES_MARK_LAYER)
+    mark_region = kdb.Region(layout.top_cell().begin_shapes_rec(mark_index))
+    # One dummy-marker shape per dummy unit (2 dummies per end, single row).
+    assert dummy_region.count() == 2 * dummy
+    # It is a strict subset of the res-mark marker's own footprint -- never
+    # bleeding onto a real unit's body segment.
+    assert (dummy_region - mark_region).is_empty()
+    assert dummy_region.area() < mark_region.area()
+
+    output_no_dummy = tmp_path / "res_array_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": num, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    present_no_dummy = {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
+    assert _SKY130_DUMMY_LAYER not in present_no_dummy
 
 
 def test_res_array_gf180_draws_res_mk_marker_and_requires_layers(
@@ -2010,6 +2141,8 @@ def test_list_generators_bjt_array_params_schema():
         "well_present",
         "bjt_mark_layer",
         "bjt_mark_present",
+        "dummy_layer",
+        "dummy_present",
     }
     assert params["topology"]["default"] == "common_centroid"
     assert params["rows"]["type"] == "int"
@@ -2158,6 +2291,63 @@ def test_bjt_array_sky130_draws_per_unit_mark_and_tap(tmp_path, both_pdk_root):
     assert marker_region.area() < well_region.area()
     # A per-unit marker must not enclose the well's full bounding box.
     assert marker_region.bbox() != well_region.bbox()
+
+
+def test_bjt_array_sky130_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, both_pdk_root
+):
+    """Issue #491: on sky130, `bjt_array` draws the deck's curated `dummy`
+    marker layer over each dummy unit's bipolar device-mark footprint (the
+    same box `pnp.drawing` covers) -- and only over the dummy units, never a
+    real cell -- so `klt extract`'s existing dummy-suppression guard
+    (#295/#462) actually fires on sky130."""
+    import klayout.db as kdb
+
+    output = tmp_path / "bjt_sky130_dummy.gds"
+    params = {"rows": 3, "cols": 3, "dummy": 1}
+    generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_DUMMY_LAYER in present
+
+    dummy_index = layout.layer(*_SKY130_DUMMY_LAYER)
+    dummy_region = kdb.Region(layout.top_cell().begin_shapes_rec(dummy_index))
+    mark_index = layout.layer(*_SKY130_BJT_MARK_LAYER)
+    mark_region = kdb.Region(layout.top_cell().begin_shapes_rec(mark_index))
+    # 2 dummy columns x 3 rows, one dummy-marker shape per dummy unit.
+    assert dummy_region.count() == 2 * params["dummy"] * params["rows"]
+    # Strict subset of the bjt-mark marker's own footprint -- never bleeding
+    # onto a real unit's emitter pad.
+    assert (dummy_region - mark_region).is_empty()
+    assert dummy_region.area() < mark_region.area()
+
+    output_no_dummy = tmp_path / "bjt_sky130_no_dummy.gds"
+    generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"rows": 3, "cols": 3, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    present_no_dummy = {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
+    assert _SKY130_DUMMY_LAYER not in present_no_dummy
 
 
 def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):
