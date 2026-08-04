@@ -263,8 +263,8 @@ END example_cell
     header = parse_lef_header(text)
     macro = header["macros"][0]
     assert macro["pins"] == [
-        {"name": "A", "direction": "INPUT", "use": "SIGNAL"},
-        {"name": "VPWR", "direction": "INOUT", "use": "POWER"},
+        {"name": "A", "direction": "INPUT", "use": "SIGNAL", "has_port": True},
+        {"name": "VPWR", "direction": "INOUT", "use": "POWER", "has_port": True},
     ]
 
 
@@ -272,8 +272,32 @@ def test_pin_with_no_direction_or_use_is_none():
     text = "MACRO m\n  PIN X\n  END X\nEND m\n"
     header = parse_lef_header(text)
     assert header["macros"][0]["pins"] == [
-        {"name": "X", "direction": None, "use": None}
+        {"name": "X", "direction": None, "use": None, "has_port": False}
     ]
+
+
+def test_pin_has_port_false_when_no_port_block(tmp_path):
+    """Issue #464: a `klt lef-abstract`-emitted PIN block with no PORT at
+    all (a pin whose declared layer did not resolve to a routing LEF layer)
+    must report `has_port: False` -- the signal `klt place-and-route`'s
+    macro-pin/netlist-wiring cross-check relies on."""
+    text = (
+        "MACRO m\n"
+        "  PIN G\n    DIRECTION INOUT ;\n    USE ANALOG ;\n  END G\n"
+        "  PIN S\n"
+        "    DIRECTION INOUT ;\n"
+        "    USE ANALOG ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.1 0.1 ;\n"
+        "    END\n"
+        "  END S\n"
+        "END m\n"
+    )
+    header = parse_lef_header(text)
+    pins = {pin["name"]: pin for pin in header["macros"][0]["pins"]}
+    assert pins["G"]["has_port"] is False
+    assert pins["S"]["has_port"] is True
 
 
 def test_macro_with_no_site_reference_is_none():

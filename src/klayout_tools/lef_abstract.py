@@ -151,11 +151,29 @@ def run_lef_abstract(
                 ...
             ],
             "pin_count": <int>,
+            "unroutable_pins": [
+                {"name": <str>, "layer": [<gds_layer>, <gds_datatype>]}, ...
+            ],
             "obs": [{"layer": str, "shape_count": int}, ...],
             "obs_shape_count": <int>,
             "warnings": [...],
             "provenance": {...},
         }
+
+    ``unroutable_pins`` (issue #464) is a programmatically-checkable echo of
+    every ``pins[]`` entry emitted with ``geometry_source: "none"`` -- a pin
+    whose declared ``layer`` did not resolve to a ``TYPE ROUTING`` tech-LEF
+    layer, so no ``PORT`` at all was written for it (see the "Pins" section
+    of this module's own docstring). ``[]`` on a run with no such pins. This
+    is purely a *promotion* of information already present per-pin in
+    ``pins[].geometry_source``/``warnings[]`` -- a caller composing this
+    command's output into ``klt place-and-route``'s own ``request.macros``
+    field can check this array directly instead of grepping ``warnings[]``
+    strings, or rely on ``klt place-and-route`` itself, which independently
+    cross-checks the emitted LEF's own ``PIN`` blocks against the netlist's
+    actual wiring before invoking OpenROAD (see that command's "Hard-macro
+    placement" docs section) -- either signal reflects the same underlying
+    condition.
 
     Raises :class:`LefAbstractError` for a missing/unreadable layout or
     socket descriptor, an ambiguous/missing top cell, an unresolvable PDK or
@@ -278,6 +296,7 @@ def run_lef_abstract(
             for pin in pins_report
         ],
         "pin_count": len(pins_report),
+        "unroutable_pins": _unroutable_pins(pins_report, descriptor["pins"]),
         "obs": [
             {"layer": layer_name, "shape_count": len(shapes)}
             for layer_name, shapes in obs_report
@@ -505,6 +524,23 @@ def _resolve_pins(
 
     pins_report.sort(key=lambda p: p["name"])
     return pins_report, pin_boxes_by_layer
+
+
+def _unroutable_pins(
+    pins_report: list[dict[str, Any]], descriptor_pins: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Issue #464's top-level ``unroutable_pins[]`` echo: every emitted pin
+    with ``geometry_source: "none"`` (no ``PORT`` at all), paired with its
+    original *declared* GDS ``(layer, datatype)`` -- the same information
+    the per-pin ``warnings[]`` string already reports in prose, promoted to
+    a structured, programmatically-checkable field. Name-sorted, matching
+    ``pins_report``'s own sort order."""
+    descriptor_layer_by_name = {pin["name"]: pin["layer"] for pin in descriptor_pins}
+    return [
+        {"name": pin["name"], "layer": list(descriptor_layer_by_name[pin["name"]])}
+        for pin in pins_report
+        if pin["geometry_source"] == "none"
+    ]
 
 
 def _pin_classification(pin: dict[str, Any]) -> tuple[str, str]:

@@ -113,13 +113,19 @@ Each declared pin becomes a `PIN <name>` block:
   whose declared `layer` does not resolve to a known routing LEF layer gets
   `"none"` (no `PORT` at all) and a `warnings[]` entry.
 
-  **Known gap (#464):** a `geometry_source: "none"` pin is not itself an
-  error here — this command still writes a structurally valid LEF — but if
-  that pin is later wired into a real net and placed via `klt
-  place-and-route`'s `request.macros` (see
-  [that command's own "Known gap" note](place-and-route.md#hard-macro-placement-requestmacros)),
-  OpenROAD's global router fails with an opaque `GRT-0029` several stages
-  into a real run rather than a clear error here at abstract-emission time.
+  A `geometry_source: "none"` pin is not itself an error here — this
+  command still writes a structurally valid LEF — but if that pin is later
+  wired into a real net and placed via `klt place-and-route`'s
+  `request.macros`, OpenROAD's global router would fail with an opaque
+  `GRT-0029` several stages into a real run. `klt place-and-route` itself
+  now catches exactly that condition — a `PORT`-less macro pin the netlist
+  actually wires up — with a clear, specific error before OpenROAD is
+  invoked at all (see
+  [that command's own "Hard-macro placement" section](place-and-route.md#hard-macro-placement-requestmacros)).
+  This command's own `unroutable_pins[]` (below) is the same signal,
+  promoted to a structured field so a caller composing `lef-abstract` ->
+  `place-and-route` can check for it directly rather than relying on either
+  `warnings[]` strings or `place-and-route`'s own downstream rejection.
   Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
 
 ### Obstructions
@@ -153,6 +159,7 @@ view rather than a hole-aware multi-`RECT` decomposition).
     { "name": "VOUT", "direction": "INOUT", "use": "ANALOG", "layer": "li1", "geometry_source": "drawn", "rects_um": [[2.0, 0.0, 3.0, 0.2]] }
   ],
   "pin_count": 2,
+  "unroutable_pins": [],
   "obs": [{ "layer": "met1", "shape_count": 1 }],
   "obs_shape_count": 1,
   "warnings": [],
@@ -180,6 +187,7 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `tech_lef` | string | The resolved tech LEF path this run's routing-layer/`SITE` header came from. |
 | `pins` | array\<object\> | One entry per descriptor pin, in name-sorted order: `{name, direction, use, layer, geometry_source, rects_um}`. `layer` is the resolved LEF layer name, or `null` when unresolvable. `rects_um` is `[]` for `geometry_source: "none"`. |
 | `pin_count` | integer | `len(pins)`. |
+| `unroutable_pins` | array\<object\> | `{name, layer: [gds_layer, gds_datatype]}` for every pin with `geometry_source: "none"` — a programmatically-checkable echo of the same condition (issue #464), so a caller composing this command's output into `klt place-and-route`'s `request.macros` can check it directly instead of grepping `warnings[]`. `[]` on a run with no such pins. |
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
 | `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |

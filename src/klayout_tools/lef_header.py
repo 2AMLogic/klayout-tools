@@ -82,6 +82,19 @@ _OFFSET_RE = re.compile(r"\bOFFSET\s+([0-9.eE+-]+)(?:\s+([0-9.eE+-]+))?\s*;")
 
 _USE_RE = re.compile(r"\bUSE\s+(\S+)\s*;")
 
+#: Presence (not geometry) of a nested ``PORT`` block inside a ``PIN`` body --
+#: a bare-``END``-closed block (see :data:`_PIN_RE`'s own docstring note on
+#: why ``PORT``'s nameless ``END`` cannot be confused with the pin's own
+#: named closing ``END <name>``). Detecting *presence* only (not parsing
+#: ``RECT``/``POLYGON`` geometry -- this module's own "declarative header
+#: attributes only" scope, see the module docstring) is enough to answer
+#: "does this pin have any routable connection point at all" -- issue #464's
+#: ``klt place-and-route`` macro-pin/netlist-wiring cross-check needs
+#: exactly that boolean, not the geometry itself (which it never touches --
+#: ``klayout.db`` already owns geometry parsing, per this module's "wrap the
+#: proven engine" scope cut).
+_PORT_PRESENT_RE = re.compile(r"^[ \t]*PORT\b", re.MULTILINE)
+
 
 def _strip_comments(text: str) -> str:
     return "\n".join(_COMMENT_RE.sub("", line) for line in text.splitlines())
@@ -143,6 +156,7 @@ def _parse_pin(name: str, body: str) -> dict[str, Any]:
         "name": name,
         "direction": direction_match.group(1) if direction_match else None,
         "use": use_match.group(1) if use_match else None,
+        "has_port": bool(_PORT_PRESENT_RE.search(body)),
     }
 
 
@@ -192,7 +206,8 @@ def parse_lef_header(text: str) -> dict[str, Any]:
             ],
             "macros": [
                 {"name", "class", "site", "symmetry": [...], "width_um",
-                 "height_um", "pins": [{"name", "direction", "use"}, ...]},
+                 "height_um",
+                 "pins": [{"name", "direction", "use", "has_port"}, ...]},
                 ...
             ],
         }
