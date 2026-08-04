@@ -929,13 +929,14 @@ def route_two_pin(
     offsets_um: dict[str, dict[str, float]],
     placed_bboxes_um: dict[str, dict[str, float]],
     width_um: float,
+    route_layer: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
     Resolves each pin's port position into the composed coordinate frame
     (port ``x_um``/``y_um`` translated by its block's ``offset_um``),
     generates a Manhattan backbone (:func:`manhattan_backbone`), and applies
-    three routability checks before reporting success -- all diagnostic
+    four routability checks before reporting success -- all diagnostic
     heuristics against the composition's own already-known geometry
     (``bbox_um``/``ports[]``), not a DRC check (``klt drc`` remains
     authoritative):
@@ -950,7 +951,17 @@ def route_two_pin(
        ports; a route touching one of those non-tap ports necessarily
        crosses the ring's own metal loop on its way in or out, merging the
        net with the ring's own tap net.
-    3. **Obstacle-overlap check** (#199 case 1): after each port's own
+    3. **Self-net pad-crossing check** (#433): a same-block net's backbone is
+       always inside its own block's bbox, so the obstacle-overlap check
+       below exempts it entirely -- but nothing else was checking whether
+       that backbone runs straight over one of the block's *other* pads
+       (e.g. bussing a bjt_array's emitters together necessarily crosses the
+       base pads sitting between them). Every other port on the same block
+       that shares the route's own ``route_layer`` is treated as a square
+       pad footprint (side length its reported ``width_um``); a backbone
+       overlapping that footprint's interior is rejected rather than drawn
+       as a silent short.
+    4. **Obstacle-overlap check** (#199 case 1): after each port's own
        unavoidable "sit set back from my own block's edge" margin is
        excluded (:func:`_port_edge_margin_um`), the drawn backbone must not
        cross the *interior* of any block's bbox -- including the two pins'
@@ -960,8 +971,13 @@ def route_two_pin(
        third block's bbox the straight-line/single-jog backbone happens to
        cross in a longer row.
 
-    Any of the three reports the net unroutable (spike section 2,
-    ``unrouted_nets[]``) rather than silently drawing a short.
+    Any of the four reports the net unroutable (spike section 2,
+    ``unrouted_nets[]``) rather than silently drawing a short. ``route_layer``
+    (the ``(layer, datatype)`` pair ``routing.layer_role`` resolved to, see
+    :func:`_resolve_route_layer`) is optional only for callers that predate
+    #433/don't care about check 3 (e.g. direct unit tests) -- ``compose()``
+    always passes it when ``connectivity[]`` is non-empty, since that's the
+    only time a route is actually drawn.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "reason": str | None}``.
@@ -1066,6 +1082,7 @@ def route_two_pin(
                 }
 
     points = manhattan_backbone(a, dir_a, b, dir_b, stub_um)
+    margin_eps_um = 1e-6
 
     # Obstacle-overlap check (#199 case 1): sum how much of the drawn backbone
     # lies inside each block's bbox *interior* (a boundary touch doesn't
@@ -1089,6 +1106,77 @@ def route_two_pin(
             0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b])
         )
 
+    # Self-net pad-crossing check (#433): the whole-block bbox check below
+    # skips a self-net's own block entirely (a same-block net's backbone is,
+    # by construction, always inside its own block's bbox -- that check would
+    # otherwise reject every self-net). But skipping it also means nothing
+    # else was checking whether the backbone runs straight over one of that
+    # block's *other* pads -- exactly what happens bussing an array's unit
+    # devices (e.g. chaining a bjt_array's emitters): a same-layer pad in the
+    # backbone's path shorts to it, silently, since a self-net was never
+    # compared against the block's own ports[] at all. Approximate each other
+    # port on this block as a square pad footprint (side length its own
+    # reported ``width_um``, centered on its position), *inflated* by the
+    # route's own trace half-width on every side -- ``_segment_bbox_interior_
+    # overlap_um`` treats a backbone segment as a zero-width centerline, but
+    # the wire actually drawn is ``width_um`` wide, so a centerline that
+    # merely passes within ``width_um / 2`` of a pad's edge still draws metal
+    # on top of it. This Minkowski-sum inflation is what makes the check
+    # actually catch pads much narrower than the route (e.g. a bjt_array
+    # base contact's reported ``width_um`` alone is too small to reach a jog
+    # stubbed out by the route's own width -- only their sum is). Reject the
+    # route if the backbone overlaps this inflated footprint's interior --
+    # mirroring the bbox-interior accounting above, just against a pad
+    # instead of a whole block.
+    if same_block_self_net:
+        own_ports = blocks[own_a].get("ports") or {}
+        own_offset = offsets_um[own_a]
+        route_half_um = width_um / 2.0
+        skip_port_names = {pin_a["port"], pin_b["port"]}
+        for other_name, other_port in own_ports.items():
+            if other_name in skip_port_names or not _port_has_geometry(other_port):
+                continue
+            other_layer = (
+                other_port["layer"]["layer"],
+                other_port["layer"]["datatype"],
+            )
+            if route_layer is not None and other_layer != route_layer:
+                continue  # a pad on a different physical layer can't short
+            pad_w = other_port.get("width_um")
+            if (
+                not isinstance(pad_w, (int, float))
+                or isinstance(pad_w, bool)
+                or (pad_w <= 0)
+            ):
+                pad_w = width_um  # no reported pad size -- fall back to trace width
+            half = float(pad_w) / 2.0 + route_half_um
+            px = float(other_port["x_um"]) + own_offset["x"]
+            py = float(other_port["y_um"]) + own_offset["y"]
+            pad_bbox_um = {
+                "x0": px - half,
+                "y0": py - half,
+                "x1": px + half,
+                "y1": py + half,
+            }
+            crossed_um = sum(
+                _segment_bbox_interior_overlap_um(seg_p0, seg_p1, pad_bbox_um)
+                for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
+            )
+            if crossed_um > margin_eps_um:
+                return {
+                    "routed": False,
+                    "route_length_um": None,
+                    "points_um": None,
+                    "reason": (
+                        f"self-net backbone crosses {crossed_um:.4g}um through "
+                        f"block '{own_a}''s own port '{other_name}' on the same "
+                        "drawing layer -- bussing this net across the block "
+                        "would draw a silent short to that pad; route to a "
+                        "layer_role with a metal2/via stack instead, or wire "
+                        "this net externally"
+                    ),
+                }
+
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
         for other_id, other_bbox in placed_bboxes_um.items():
@@ -1100,7 +1188,6 @@ def route_two_pin(
                     overlap_by_block_um.get(other_id, 0.0) + length
                 )
 
-    margin_eps_um = 1e-6
     for other_id, crossed_um in overlap_by_block_um.items():
         allowed_um = allowances_um.get(other_id, 0.0)
         if crossed_um <= allowed_um + margin_eps_um:
@@ -1311,7 +1398,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             continue
 
         result = route_two_pin(
-            pins[0], pins[1], blocks, offsets_um, placed_bboxes_um, width_um
+            pins[0],
+            pins[1],
+            blocks,
+            offsets_um,
+            placed_bboxes_um,
+            width_um,
+            route_layer,
         )
         nets.append(
             {
