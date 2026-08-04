@@ -138,6 +138,25 @@ M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
 .ends
 """
 
+# Issue #500's repro sketch: a lumped 3k resistor drawn as a series string of
+# three identical 1k segments chained through two interior nodes (`n1`, `n2`)
+# that carry no pins. `combine_devices()` folds the three segments into one
+# resistor and empties `n1`/`n2` (0 terminals, 0 pins) -- the interior nets
+# whose leftover presence used to inflate `counts.nets.layout`.
+_SERIES_RESISTOR_STRING_LAYOUT_SPICE = """
+.subckt rstring A Y
+R1 Y n1 1k
+R2 n1 n2 1k
+R3 n2 A 1k
+.ends
+"""
+
+_SERIES_RESISTOR_STRING_REFERENCE_SPICE = """
+.subckt rstring A Y
+R1 Y A 3k
+.ends
+"""
+
 
 # --------------------------------------------------------------------------- #
 # load_request / request-shape errors
@@ -1595,6 +1614,11 @@ def test_multifinger_device_matches_with_combine_devices(tmp_path):
     assert report["mismatch_count"] == 0
     assert report["counts"]["devices"]["layout"] == 2
     assert report["counts"]["devices"]["reference"] == 2
+    # Parallel fingers share all four terminals, so folding them frees no
+    # interior net -- both sides carry the inverter's four nets (issue #500:
+    # the post-combine purge must not over-remove when nothing was emptied).
+    assert report["counts"]["nets"]["layout"] == 4
+    assert report["counts"]["nets"]["reference"] == 4
 
 
 def test_split_interleaved_device_matches_with_combine_devices(tmp_path):
@@ -1626,6 +1650,109 @@ def test_split_interleaved_device_matches_with_combine_devices(tmp_path):
     report_with = run_lvs(path_with)
     assert report_with["status"] == "match"
     assert report_with["mismatch_count"] == 0
+    # As with the multi-finger case, the split segments share all terminals,
+    # so no interior net is freed -- the four inverter nets survive the purge
+    # on both sides (issue #500).
+    assert report_with["counts"]["nets"]["layout"] == 4
+    assert report_with["counts"]["nets"]["reference"] == 4
+
+
+def test_combine_devices_purges_emptied_series_string_nets(tmp_path):
+    """Issue #500: with `options.combine_devices: true`, the interior nodes a
+    series string collapses into a single device (0 terminals, 0 pins after
+    the combine) are purged, so `counts.nets.layout` reports the honest
+    post-combine topology (2 nets: `A`, `Y`) instead of the pre-purge 4 (the
+    two interior nodes still counted), and they produce no `net.unmatched`
+    findings in `mismatches[]`."""
+    layout_path = _write(
+        tmp_path / "layout.spice", _SERIES_RESISTOR_STRING_LAYOUT_SPICE
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice", _SERIES_RESISTOR_STRING_REFERENCE_SPICE
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "rstring"},
+            "reference": {"netlist": reference_path, "top": "rstring"},
+            "options": {"combine_devices": True},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    # Three 1k segments folded into a single 3k device on the layout side.
+    assert report["counts"]["devices"]["layout"] == 1
+    assert report["counts"]["devices"]["reference"] == 1
+    # The two interior nodes the combine emptied are purged: the honest net
+    # count is 2 (`A`, `Y`) on both sides, not the pre-purge 4 on the layout.
+    assert report["counts"]["nets"]["layout"] == 2
+    assert report["counts"]["nets"]["reference"] == 2
+    # No spurious net.unmatched findings for the emptied interior nodes.
+    assert report["category_counts"].get("net.unmatched", 0) == 0
+    assert report["mismatch_count"] == 0
+
+
+def test_series_string_nets_not_purged_without_combine_devices(tmp_path):
+    """`options.combine_devices: false` (the default) is unchanged: with no
+    combine, nothing is folded and nothing is purged -- the series string is
+    compared as three real devices with two real interior nodes, so
+    `counts.nets.layout` is the full 4 (issue #500: the purge runs only when
+    combine actually ran)."""
+    layout_path = _write(
+        tmp_path / "layout.spice", _SERIES_RESISTOR_STRING_LAYOUT_SPICE
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice", _SERIES_RESISTOR_STRING_REFERENCE_SPICE
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "rstring"},
+            "reference": {"netlist": reference_path, "top": "rstring"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    # No combine ran, so nothing is purged: the interior nodes are still real,
+    # counted topology (A, Y, n1, n2 = 4 nets; three resistors).
+    assert report["counts"]["nets"]["layout"] == 4
+    assert report["counts"]["devices"]["layout"] == 3
+
+
+def test_purge_emptied_nets_keeps_unused_top_level_pin(tmp_path):
+    """The purge is scoped to genuinely-empty nets: a net with zero terminals
+    but a real pin (a genuinely-unused top-level pin) is preserved, so
+    `counts.pins.*` is unaffected -- only interior nodes with nothing attached
+    are dropped (issue #500's edge case, the reason the fix is narrower than
+    KLayout's own `purge_nets()`)."""
+    import klayout.db as kdb
+
+    spice = _write(
+        tmp_path / "n.spice",
+        """
+.subckt rstring A Y EN
+R1 Y n1 1k
+R2 n1 A 1k
+.ends
+""",
+    )
+    netlist = kdb.Netlist()
+    netlist.read(spice, kdb.NetlistSpiceReader())
+    netlist.combine_devices()
+    circuit = next(iter(netlist.each_circuit()))
+    pins_before = circuit.pin_count()
+
+    lvs._purge_emptied_nets(netlist)
+
+    names = {n.expanded_name() for n in circuit.each_net()}
+    # Interior node n1 (0 terminals, 0 pins) is dropped...
+    assert "N1" not in names
+    # ...but the unused top-level pin's net EN (0 terminals, 1 pin) is kept,
+    # and the pin count is unchanged.
+    assert "EN" in names
+    assert circuit.pin_count() == pins_before
 
 
 def test_combine_devices_does_not_merge_genuinely_distinct_parallel_devices(tmp_path):
