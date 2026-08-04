@@ -1707,10 +1707,24 @@ def test_bjt_array_matched_group_id_encodes_shape_topology_ratio(tmp_path, pdk_r
     assert report["device_count"] == 8
 
 
+#: sky130's `pnp.drawing` bipolar device-mark layer (extraction-only -- no
+#: curated DRC rule checks it, see decks/sky130.py's "Negative finding").
+_SKY130_BJT_MARK_LAYER = (82, 44)
+
+#: sky130's `tap.drawing` layer -- `EXTRACTION_DECK.tap`, the layer
+#: `bjt_array` now draws over each unit's base-tie contact (issue #432) so
+#: `klt extract`'s `nwell -> tap -> contact -> metals` chain resolves the
+#: base terminal to a real net.
+_SKY130_TAP_LAYER = (65, 44)
+
+
 def test_bjt_array_gf180_draws_drc_bjt_mark_layer(tmp_path, both_pdk_root):
-    """On gf180mcu the array draws the DRC_BJT device-mark layer (and a shared
-    Nwell base); the mark encloses every unit's COMP, so
-    `bjt.separation.comp.1` reports no separation violation."""
+    """On gf180mcu the array draws the DRC_BJT device-mark layer, per unit
+    (and a shared Nwell base); every unit's mark encloses that unit's own
+    emitter COMP, so `bjt.separation.comp.1` reports no separation violation
+    (the parametrized `test_bjt_array_default_params_are_drc_clean` is what
+    actually runs the DRC check; this test only asserts the layer/well are
+    drawn and no fidelity note fires)."""
     import klayout.db as kdb
 
     output = tmp_path / "bjt_gf180.gds"
@@ -1733,12 +1747,14 @@ def test_bjt_array_gf180_draws_drc_bjt_mark_layer(tmp_path, both_pdk_root):
     assert report["drc_hints"]["notes"] == []
 
 
-def test_bjt_array_sky130_omits_mark_but_draws_well(tmp_path, both_pdk_root):
-    """sky130's curated deck checks no bipolar mark layer, so the generator
-    omits it and surfaces that in-band via `drc_hints.notes` (the fidelity
-    caveat from the design note) -- but sky130's `well` layer role is real
-    (see issue #208's root-cause correction), so the shared base well *is*
-    now drawn there, same as gf180mcu."""
+def test_bjt_array_sky130_draws_per_unit_mark_and_tap(tmp_path, both_pdk_root):
+    """Issue #432: sky130's extraction deck keys bipolar device recognition
+    off `pnp.drawing` (82/44) even though no curated *DRC* rule checks it --
+    `bjt_array` now draws that marker (per unit, not array-wide) and a `tap`
+    shape over each unit's base-tie contact, so `klt extract --deck sky130`
+    recognises the drawn devices instead of reporting `device_count: 0`.
+    sky130's `well` layer role is real (issue #208), so the shared base well
+    is drawn too, same as gf180mcu."""
     import klayout.db as kdb
 
     output = tmp_path / "bjt_sky130.gds"
@@ -1755,11 +1771,26 @@ def test_bjt_array_sky130_omits_mark_but_draws_well(tmp_path, both_pdk_root):
         (layout.get_info(i).layer, layout.get_info(i).datatype)
         for i in layout.layer_indexes()
     }
-    assert _DRC_BJT_LAYER not in present  # no bipolar mark on sky130
+    assert _SKY130_BJT_MARK_LAYER in present  # pnp.drawing mark now drawn
+    assert _SKY130_TAP_LAYER in present  # base-tie tap now drawn
     assert (64, 20) in present  # shared base well IS drawn (sky130 nwell.drawing)
+    # The marker is now real for every currently supported family, so the
+    # "no device-mark layer" fidelity note no longer fires.
     notes = report["drc_hints"]["notes"]
-    assert any("device-mark" in n for n in notes)
+    assert not any("device-mark" in n for n in notes)
     assert not any("well" in n for n in notes)
+
+    # The mark is per unit device (emitter pad only), not one array-wide box
+    # coincident with the shared well -- one marker shape per drawn unit
+    # (real cells + dummy columns), each far smaller than the well.
+    layer_index = layout.layer(*_SKY130_BJT_MARK_LAYER)
+    marker_region = kdb.Region(layout.top_cell().begin_shapes_rec(layer_index))
+    well_index = layout.layer(64, 20)
+    well_region = kdb.Region(layout.top_cell().begin_shapes_rec(well_index))
+    assert marker_region.count() == 15  # 3x3 real cells + 2*1 dummy cols x 3 rows
+    assert marker_region.area() < well_region.area()
+    # A per-unit marker must not enclose the well's full bounding box.
+    assert marker_region.bbox() != well_region.bbox()
 
 
 def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):

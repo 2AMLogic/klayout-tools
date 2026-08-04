@@ -751,6 +751,71 @@ def test_gf180mcu_bjt_base_contact_ring_extracts_one_device(tmp_path):
     assert device["nets"]["e"] == "EMIT"  # the p+ emitter, not the base ring
 
 
+def test_bjt_array_sky130_extracts_nonzero_devices(tmp_path):
+    """Issue #432: `klt gen bjt_array` (sky130) piped into `klt extract
+    --deck sky130` reports real devices instead of `device_count: 0` -- the
+    generator now draws the per-unit bipolar device-mark (`pnp.drawing`) and
+    a base-tie `tap` shape `bjt_array` previously omitted for this family
+    (see `docs/design/gen-bjt-array-spike.md`). Every drawn unit -- real
+    cells and dummy columns alike -- is geometrically identical and
+    individually marked, so `klt extract`'s device count exceeds `klt gen`'s
+    own `device_count` (real cells only) by the dummy-column count."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "sky130A")
+    params = {"rows": 3, "cols": 3, "dummy": 1, "topology": "common_centroid"}
+    gen_report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "sky130A", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "bjt_t.gds")},
+        }
+    )
+    assert gen_report["device_count"] == params["rows"] * params["cols"]
+
+    report = run_extract(
+        str(tmp_path / "bjt_t.gds"), "sky130", output=str(tmp_path / "bjt_t.spice")
+    )
+
+    expected = params["rows"] * params["cols"] + 2 * params["dummy"] * params["rows"]
+    assert report["device_count"] == expected
+    assert report["device_counts"] == {"pnp": expected}
+
+    # Every device's base terminal shares the same net -- the array's one
+    # shared base well, tied together by the per-unit `tap` shape -- rather
+    # than each device's base staying a separate, per-device floating node.
+    base_nets = {d["nets"]["b"] for d in report["devices"]}
+    assert len(base_nets) == 1
+
+
+def test_sky130_bjt_coincident_marker_is_clean_error_not_traceback(tmp_path):
+    """Issue #432: a bipolar device-mark drawn exactly coincident with (not
+    strictly enclosing) its emitter pad used to abort `klt extract` with an
+    unhandled `RuntimeError` straight out of
+    `LayoutToNetlist.extract_netlist()` (`Terminal 'C' ... isn't connected`)
+    rather than the documented clean error envelope
+    (`docs/cli/extract.md`'s "No Python traceback is printed" contract). It
+    now raises this module's own `ExtractError` -- the type the CLI already
+    catches and turns into a clean stderr message + exit code 1."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(64, 20, kdb.Box(0, 0, 6000, 4000))  # nwell.drawing (base)
+    draw(65, 20, kdb.Box(1000, 1000, 2000, 2000))  # diff.drawing (emitter)
+    draw(82, 44, kdb.Box(1000, 1000, 2000, 2000))  # pnp.drawing -- coincident
+    # with the emitter above, not strictly enclosing it.
+    draw(66, 44, kdb.Box(1400, 1400, 1600, 1600))  # licon1 over the emitter
+    draw(67, 20, kdb.Box(1000, 1000, 2000, 2000))  # li1 over the emitter
+
+    path = _write_gds(layout, tmp_path / "coincident.gds")
+    with pytest.raises(ExtractError, match="unconnected terminal"):
+        run_extract(path, "sky130", output=str(tmp_path / "coincident.spice"))
+
+
 # --------------------------------------------------------------------------- #
 # MiM capacitor device recognition (issue #225)
 # --------------------------------------------------------------------------- #

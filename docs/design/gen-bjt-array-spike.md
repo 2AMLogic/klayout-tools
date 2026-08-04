@@ -82,16 +82,19 @@ points above are that reason.
 existing generator uses. A unit device is an emitter diffusion pad beside a
 base-tie diffusion pad (each with a contact and a covering local-metal pad),
 placed in a `rows` × `cols` common-centroid grid that shares one base well and
-is surrounded by a collector guard ring; on gf180mcu the whole array is
-covered by the `DRC_BJT` device-mark layer its curated deck's
-`bjt.separation.comp.1` (`BJT.3`) rule keys off.
+is surrounded by a collector guard ring; every unit is individually covered by
+a device-mark layer on every PDK family whose *extraction* deck declares a
+bipolar marker (gf180mcu's `DRC_BJT`, which its curated DRC deck's
+`bjt.separation.comp.1`/`BJT.3` rule also keys off; sky130's `pnp.drawing`,
+extraction-only — see "Follow-on friction, now resolved" below).
 
 **Why it wins for this phase:**
 
 - It reuses the one geometry backend (`pya`) and the one PDK-role mechanism
   (`_PDK_ROLE_LAYERS`) already proven headless in CI — adding only a
-  `bjt_mark` role (gf180mcu `127/5`; sky130 `None`, mirroring the existing
-  `well: None` handling exactly).
+  `bjt_mark` role (gf180mcu `127/5`; sky130 `82/44`, drawn for extraction
+  even where the curated *DRC* deck checks no rule against it — the same
+  precedent `res_mark` already set, issue #369).
 - It is verifiable against this repo's curated decks in CI: the generated
   output is DRC-clean on gf180mcu **including the bipolar-specific
   `bjt.separation.comp.1` mark-layer rule**, and on sky130 (whose curated deck
@@ -99,10 +102,13 @@ covered by the `DRC_BJT` device-mark layer its curated deck's
 - It exercises the novel DRC surface honestly. The `DRC_BJT`-to-COMP
   separation rule fires only for a *positive* mark-to-COMP gap below 0.1 µm
   (verified empirically: an overlapping/enclosing/coincident mark reports zero
-  separation). `bjt_array` therefore draws one array-level mark box coincident
-  with the shared well (zero separation to every enclosed emitter/base COMP)
-  and holds the collector ring `BJT_COLLECTOR_GAP_UM` (0.4 µm) outside the
-  well, well beyond the 0.1 µm limit.
+  separation). `bjt_array` draws each unit's own mark box strictly enclosing
+  (grown `BJT_MARK_GROWTH_UM` = 0.1 µm beyond) that unit's emitter pad only —
+  **not** an array-level box coincident with the whole shared well (issue
+  #432: that would make `base == the whole well` in `klt extract`, so every
+  base-tie pad inside it would misrecognise as a second emitter) — and holds
+  both the base-tie pad and the collector ring comfortably outside the
+  0.1 µm limit (0.3 µm and `BJT_COLLECTOR_GAP_UM` = 0.4 µm respectively).
 
 ### What Option B explicitly does *not* claim
 
@@ -122,10 +128,12 @@ vertical PNP:
   common-centroid placement are the load-bearing, downstream-consumable part,
   not its suitability for direct model extraction.
 
-This limitation is surfaced *in-band*, not just here: on any PDK family
-without a curated bipolar mark rule (sky130 today), `bjt_array`'s response
-emits a `drc_hints.notes` entry saying so and pointing back to this note. That
-is the same honesty the existing generators already carry (e.g. `mos_array` is
+This limitation is surfaced *in-band*, not just here: `bjt_array`'s
+`_bjt_array_describe` still carries a `drc_hints.notes` entry for a
+hypothetical future PDK family whose *extraction* deck declares no bipolar
+marker at all (both currently supported families now do, so the note is
+dormant today — see "Follow-on friction, now resolved" below). That is the
+same honesty the existing generators already carry (e.g. `mos_array` is
 documented as "not a bipolar substitute"; none claim model equivalence).
 
 ## Second PDK family
@@ -135,12 +143,14 @@ DRC-clean out of the box on their documented default `params`:
 
 | PDK family | variant tested | device mark | shared well | DRC deck | result |
 | ---------- | -------------- | ----------- | ----------- | -------- | ------ |
-| gf180mcu   | `gf180mcuD`    | `DRC_BJT` (127/5) drawn, `bjt.separation.comp.1` satisfied | Nwell (21/0) | `gf180mcu` | 0 violations |
-| sky130     | `sky130A`      | none (curated deck has no bipolar mark rule — noted in `drc_hints`) | none (curated deck has no well rule) | `sky130`   | 0 violations |
+| gf180mcu   | `gf180mcuD`    | `DRC_BJT` (127/5), per unit — DRC-checked (`bjt.separation.comp.1`) *and* extraction-keyed | Nwell (21/0) | `gf180mcu` | 0 violations |
+| sky130     | `sky130A`      | `pnp.drawing` (82/44), per unit — extraction-keyed only, no curated DRC rule (issue #432) | none (curated deck has no well rule) | `sky130`   | 0 violations |
 
 gf180mcu is the primary family (it carries the meaningful bipolar-specific DRC
 surface). sky130 is supported too, drawing the same diffusion/contact/metal
-device without a device-mark or well layer its curated deck does not check.
+device, now with its own device-mark and base-tie `tap` shapes so `klt
+extract --deck sky130` recognises the drawn devices (issue #432) — it just has
+no well layer its curated DRC deck checks.
 
 ## Follow-on friction (not blocking this PR)
 
@@ -160,8 +170,15 @@ device without a device-mark or well layer its curated deck does not check.
   and its "must never overlap at all" semantics aren't representable by any
   check kind this repo's DRC engine supports (see `DrcRule`'s docstring).
   Documented as a negative finding in `src/klayout_tools/decks/sky130.py`'s
-  module docstring; `_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]` remains `None`,
-  and the `drc_hints.notes` fidelity caveat described above stays accurate.
+  module docstring — still true for *DRC*: no rule checks `pnp.drawing`
+  there. **Resolved for *extraction* (issue #432):** the DRC finding above
+  never implied the generator should skip drawing the marker outright —
+  `klt extract`'s `EXTRACTION_DECK.bipolars` entry keys off `pnp.drawing`
+  regardless of whether any DRC rule also checks it (the same shape #369
+  already resolved for `res_mark`). `_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`
+  is now `(82, 44)`, and `bjt_array` draws it per unit so `klt gen bjt_array`
+  piped into `klt extract --deck sky130` reports real devices instead of
+  `device_count: 0`.
 - Vendor-library-cell instantiation (Option A) remains the right long-term
   mechanism for a *model-exact* device and for fixed vendor primitives
   generally (MiM/MoM caps). It needs its own epic — a library-locate/instantiate

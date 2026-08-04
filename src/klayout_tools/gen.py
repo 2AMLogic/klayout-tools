@@ -180,7 +180,14 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
         # rule checks this layer, but it is real and extraction already
         # trusts it to split nfet/pfet active regions (see `extract.py`).
-        "bjt_mark": None,  # curated deck has no bipolar device mark-layer rule
+        "bjt_mark": (82, 44),  # pnp.drawing -- no curated *DRC* rule checks
+        # this layer (see decks/sky130.py's "Negative finding" docstring
+        # note), but `klayout_tools.decks.sky130.EXTRACTION_DECK.bipolars`
+        # keys off it for device recognition (issue #223, follow-up #432):
+        # without it, `bjt_array`'s output extracts as `device_count: 0`.
+        # Drawn per unit device (see `_bjt_unit_layout`), not array-wide,
+        # matching `res_mark`'s "drawn for extraction even where the DRC
+        # deck has no rule" precedent below.
         "res_mark": (66, 13),  # poly.res -- the resistor-ID marker
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.resistors`'s
         # `res_generic_po` keys off (issue #369): without it, a drawn poly
@@ -333,14 +340,20 @@ def _bjt_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
     chosen over vendor-library-cell instantiation).
 
     A unit device draws its emitter/base/collector diffusion on the ``active``
-    (COMP/diff) role, contacts on ``contact``, local metal on ``metal``, an
-    optional shared base ``well`` (Nwell on gf180mcu; sky130's curated deck
-    checks none), and an optional per-array ``bjt_mark`` device-marking layer
-    (gf180mcu's ``DRC_BJT``, which its ``bjt.separation.comp.1`` rule keys off;
-    sky130's curated deck has no bipolar mark layer -- see
+    (COMP/diff) role, contacts on ``contact``, local metal on ``metal``, a
+    ``tap`` shape over the base-tie contact (mirrors ``mos_array``'s/
+    ``guard_ring``'s ``tap_layer`` -- always a real layer for every currently
+    supported family, unlike the ``*_present``-gated roles below; see
+    :func:`_bjt_unit_layout`'s docstring for why this is needed so the base
+    terminal resolves to a real net rather than a floating node, issue #432),
+    an optional shared base ``well`` (Nwell on gf180mcu; sky130's curated deck
+    checks none), and a per-unit ``bjt_mark`` device-marking layer drawn on
+    every PDK family whose *extraction* deck declares a bipolar marker --
+    gf180mcu's ``DRC_BJT`` (also DRC-checked, via its ``bjt.separation.comp.1``
+    rule) and sky130's ``pnp.drawing`` (extraction-only, issue #432; see
     :data:`_PDK_ROLE_LAYERS`). ``*_present`` flags follow ``guard_ring``'s
-    ``well_present`` precedent so the generator omits a role its resolved PDK
-    family's curated deck does not check.
+    ``well_present`` precedent so the generator omits a role no currently
+    supported family resolves to ``None`` for.
     """
     import klayout.db as kdb
 
@@ -351,6 +364,7 @@ def _bjt_layer_params(pdk_info: dict[str, Any]) -> dict[str, Any]:
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
         "metal_layer": _role_layer_info(family, "metal"),
+        "tap_layer": _role_layer_info(family, "tap"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
         "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
@@ -779,6 +793,26 @@ def _diff_pair_layout(
 #: collector COMP ring never crowds the emitter/base COMP inside the well.
 BJT_COLLECTOR_GAP_UM = 0.4
 
+#: Margin (um) the per-unit bipolar device-mark box (``boxes_um["marker"]``,
+#: see :func:`_bjt_unit_layout`) is grown beyond the emitter pad it encloses,
+#: on every side. Two independent reasons this must be strictly positive
+#: (issue #432):
+#:
+#: 1. A device-mark box exactly coincident with the emitter pad makes
+#:    ``base == emitter`` in `extract.py` (``base = active & marker``,
+#:    ``emitter = active & base``) -- `klt extract`'s
+#:    ``DeviceExtractorBJT3Transistor`` then finds no base-minus-emitter
+#:    extension to derive a collector terminal from and aborts with an
+#:    unhandled ``RuntimeError`` (the "coincident-marker" bug this issue
+#:    fixes) instead of the documented clean error envelope.
+#: 2. Reuses `MIN_SAME_LAYER_SPACING_UM`'s existing 0.4um unit-to-unit gap:
+#:    growing the marker by `ENCLOSURE_MARGIN_UM` (0.1um) on every side still
+#:    leaves 0.3um of clearance to the base-tie pad (same unit) and to every
+#:    neighbouring unit/row -- comfortably above gf180mcu's
+#:    ``bjt.separation.comp.1`` 0.1um threshold (see `decks/gf180mcu.py`), so
+#:    the per-unit marker never trips that DRC rule.
+BJT_MARK_GROWTH_UM = ENCLOSURE_MARGIN_UM
+
 
 def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
     """One vertical-PNP unit device, drawn from base layers (not a vendor
@@ -795,6 +829,23 @@ def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
     role; that fidelity limit is recorded in the design note). The array's
     collector guard ring is drawn once at array level, not per unit (see
     :func:`_bjt_array_layout`).
+
+    ``boxes_um["marker"]`` is the per-unit bipolar device-mark box (issue
+    #432) -- the emitter pad grown by :data:`BJT_MARK_GROWTH_UM` on every
+    side, deliberately *not* the whole unit (base-tie pad included): sky130's
+    ``EXTRACTION_DECK.bipolars`` entry derives ``base = active & marker`` and
+    ``emitter = active & base``, so a marker coincident with the whole unit
+    (or the whole array, as this generator drew previously) would make every
+    diffusion pad inside it -- the base-tie pad included -- look like a
+    second emitter of the same device.
+
+    ``boxes_um["tap"]`` is a ``tap``-role shape over the base-tie pad
+    (coincident with ``base_box``) -- sky130's extraction deck reaches the
+    shared base well's node through ``nwell -> tap -> contact -> metals``
+    (see `extract.py`'s connectivity section); without a drawn ``tap`` shape
+    there, the base-tie pad's own contact/metal stack has no path to the
+    device's recognised base region and the base terminal resolves to a
+    floating anonymous node instead of a real net.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     gap = MIN_SAME_LAYER_SPACING_UM
@@ -805,6 +856,12 @@ def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
 
     emitter_box = (0.0, 0.0, emitter_um, height_um)
     base_box = (base_x0, 0.0, base_x1, height_um)
+    marker_box = (
+        -BJT_MARK_GROWTH_UM,
+        -BJT_MARK_GROWTH_UM,
+        emitter_um + BJT_MARK_GROWTH_UM,
+        height_um + BJT_MARK_GROWTH_UM,
+    )
 
     contact_half = CONTACT_SIZE_UM / 2.0
     ecx, ecy = emitter_um / 2.0, height_um / 2.0
@@ -824,6 +881,8 @@ def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
         "active": [emitter_box, base_box],
         "contact": contacts,
         "metal": [emitter_box, base_box],
+        "marker": [marker_box],
+        "tap": [base_box],
     }
     return {
         "total_len_um": total_len_um,
@@ -845,15 +904,16 @@ def _bjt_array_layout(
     """A ``rows`` x ``cols`` common-centroid (or plain-array) grid of
     :func:`_bjt_unit_layout` unit devices, with ``dummy`` flanking columns
     each side, a single shared base well enclosing every unit's diffusion,
-    an optional collector guard ring (drawn via :func:`_ring_layout` so it is
-    one unbroken polygon), and an array-level device-mark box coincident with
-    the shared well.
+    and an optional collector guard ring (drawn via :func:`_ring_layout` so
+    it is one unbroken polygon).
 
-    The mark box is coincident with (encloses) every unit's diffusion, so the
-    ``DRC_BJT``-to-COMP separation rule sees zero separation there, while the
-    collector ring is held :data:`BJT_COLLECTOR_GAP_UM` outside the well, well
-    beyond the rule's 0.1um limit -- see :func:`_bjt_unit_layout` and the
-    design note.
+    Each unit's own ``boxes_um["marker"]``/``boxes_um["tap"]`` (see
+    :func:`_bjt_unit_layout`) are placed per cell by the caller (there is no
+    array-level device-mark box here as of issue #432 -- a marker coincident
+    with the whole shared well would make every diffusion pad inside it,
+    base-tie pads included, look like a second emitter). The collector ring
+    is still held :data:`BJT_COLLECTOR_GAP_UM` outside the well, well beyond
+    gf180mcu's ``bjt.separation.comp.1`` 0.1um limit.
     """
     unit = _bjt_unit_layout(emitter_um)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
@@ -892,10 +952,6 @@ def _bjt_array_layout(
 
     margin = WELL_ENCLOSURE_MARGIN_UM
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
-    # The device-mark box is coincident with the shared well -- it encloses
-    # every unit's diffusion (zero DRC_BJT-to-COMP separation) and stays
-    # BJT_COLLECTOR_GAP_UM clear of the collector ring's COMP.
-    mark_box = well_box
 
     ring = None
     ring_offset = (0.0, 0.0)
@@ -917,7 +973,6 @@ def _bjt_array_layout(
         "col_pitch_um": col_pitch,
         "row_pitch_um": row_pitch,
         "well_box_um": well_box,
-        "mark_box_um": mark_box,
         "ring": ring,
         "ring_offset_um": ring_offset,
     }
@@ -1908,8 +1963,11 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         """Matched vertical-bipolar (PNP/BJT) array (Epic #152 phase 4): a
         ``rows`` x ``cols`` common-centroid grid of identical unit devices
         (see :func:`_bjt_unit_layout`), sharing one base well, surrounded by
-        a collector guard ring and covered by a device-mark layer on PDK
-        families whose curated deck checks one (gf180mcu's ``DRC_BJT``).
+        a collector guard ring, with each unit individually covered by a
+        device-mark layer (and a base-tie ``tap`` shape) on every PDK family
+        whose extraction deck declares a bipolar marker -- gf180mcu's
+        ``DRC_BJT`` (also DRC-checked) and sky130's ``pnp.drawing``
+        (extraction-only, issue #432).
 
         Draws from base layers rather than instantiating a vendor library
         cell (e.g. gf180mcu ``pnp_05p00x05p00``) -- the design note
@@ -1975,6 +2033,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=kdb.LayerInfo(0, 0),
             )
             self.param(
+                "tap_layer",
+                self.TypeLayer,
+                "Base-tie tap drawing layer, covering each unit's base-tie "
+                "contact so the base terminal resolves to a real net",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
                 "well_layer",
                 self.TypeLayer,
                 "Shared base well drawing layer (only used when well_present)",
@@ -1989,13 +2054,15 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "bjt_mark_layer",
                 self.TypeLayer,
-                "Bipolar device-mark drawing layer (only used when bjt_mark_present)",
+                "Per-unit bipolar device-mark drawing layer, enclosing only "
+                "the emitter pad (only used when bjt_mark_present)",
                 default=kdb.LayerInfo(0, 0),
             )
             self.param(
                 "bjt_mark_present",
                 self.TypeBoolean,
-                "Whether bjt_mark_layer is a real, DRC-checked layer for the PDK",
+                "Whether bjt_mark_layer is a real layer this PDK's extraction "
+                "deck (and, on some families, its DRC deck too) keys off",
                 default=False,
             )
 
@@ -2007,6 +2074,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_active = self.layout.layer(self.active_layer)
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
+            li_tap = self.layout.layer(self.tap_layer)
             info = _bjt_array_layout(
                 self.emitter_um,
                 self.rows,
@@ -2016,11 +2084,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.add_collector_ring,
             )
             unit_boxes = info["unit"]["boxes_um"]
-            for c in info["cells"] + info["dummy_cells"]:
+            all_cells = info["cells"] + info["dummy_cells"]
+            for c in all_cells:
                 for role, li in (
                     ("active", li_active),
                     ("contact", li_contact),
                     ("metal", li_metal),
+                    ("tap", li_tap),
                 ):
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
@@ -2051,9 +2121,19 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
                 )
 
+            # Per-unit bipolar device-mark, drawn on every unit (dummies
+            # included -- they are structurally real unit devices too,
+            # mirroring `res_array`'s marker precedent). Deliberately *not*
+            # an array-wide box (issue #432): see `_bjt_unit_layout`'s
+            # `boxes_um["marker"]` docstring for why that would misrecognise
+            # every base-tie pad as a second emitter.
             if self.bjt_mark_present:
                 li_mark = self.layout.layer(self.bjt_mark_layer)
-                _insert_boxes(self.cell, li_mark, dbu, [info["mark_box_um"]])
+                marker_boxes = unit_boxes["marker"]
+                for c in all_cells:
+                    _insert_boxes(
+                        self.cell, li_mark, dbu, marker_boxes, c["x0_um"], c["y0_um"]
+                    )
 
     return {
         "resistor_strip": _ResistorStripPCell,

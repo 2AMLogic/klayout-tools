@@ -1708,7 +1708,29 @@ def _extract_netlist(
         else:
             l2n.connect_global(bipolar_collector, deck.substrate_net)
 
-    l2n.extract_netlist()
+    try:
+        l2n.extract_netlist()
+    except RuntimeError as exc:
+        # KLayout's own `LayoutToNetlist.extract_netlist()` raises a bare
+        # `RuntimeError` (not one of *this* module's own exception types) for
+        # a device whose recognised geometry leaves a terminal with no net at
+        # all -- e.g. a bipolar device-mark drawn exactly coincident with its
+        # emitter (`base == emitter` geometrically): `DeviceExtractorBJT3Transistor`
+        # then has no base-minus-emitter extension from which to derive a
+        # collector terminal, so the `bipolar.collector is None` branch above
+        # connects an empty region to `deck.substrate_net` -- nothing to
+        # connect, so the extracted device's `C` terminal reaches this point
+        # still unconnected (issue #432). Converted to `ExtractError` here so
+        # it reaches the CLI as the documented clean JSON error envelope
+        # (`docs/cli/extract.md`'s "No Python traceback is printed" contract)
+        # instead of an unhandled traceback.
+        raise ExtractError(
+            "device recognition produced a device with an unconnected "
+            f"terminal ({exc}) -- this usually means a device-mark layer was "
+            "drawn exactly coincident with (rather than strictly enclosing) "
+            "the terminal geometry it scopes, leaving no room to derive the "
+            "device's other terminal(s)"
+        ) from exc
     netlist = l2n.netlist()
 
     # Flat extraction (`begin_shapes_rec`) means `make_top_level_pins()` would

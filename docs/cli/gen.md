@@ -238,14 +238,20 @@ automatically-sized ring already draws its own well tie regardless of
 A `rows` × `cols` common-centroid (or plain-`array`) grid of identical unit
 vertical-bipolar devices, with `dummy` flanking columns each side. Each unit
 device is an emitter diffusion pad beside a base-tie diffusion pad (each with
-a contact and a covering local-metal pad); all units share **one** base well
-(drawn on both `sky130` and `gf180mcu` — see `guard_ring` above for the
-well-layer numbers), are surrounded by a single collector guard ring, and —
-on PDK families whose curated deck checks a bipolar device-mark layer — are
-covered by that mark layer (gf180mcu's `DRC_BJT`, which its
-`bjt.separation.comp.1` / `BJT.3` rule keys off; sky130's curated deck has no
-bipolar mark-layer rule, so no mark is drawn there and a `drc_hints.notes`
-entry says so).
+a contact and a covering local-metal pad, plus a `tap` shape over the
+base-tie contact so `klt extract` resolves the base terminal to a real net
+instead of a floating node); all units share **one** base well (drawn on both
+`sky130` and `gf180mcu` — see `guard_ring` above for the well-layer numbers)
+and are surrounded by a single collector guard ring. Every unit is
+individually covered by a device-mark layer, drawn on every PDK family whose
+*extraction* deck declares a bipolar marker (issue #432) — enclosing only
+that unit's emitter pad, not the whole array or the base-tie pad next to it:
+
+- **gf180mcu**: `DRC_BJT`, which its curated *DRC* deck's
+  `bjt.separation.comp.1` / `BJT.3` rule also keys off.
+- **sky130**: `pnp.drawing` — no curated *DRC* rule checks this layer, but
+  `klt extract --deck sky130`'s device recognition does (mirrors `res_array`'s
+  `res_mark`, issue #369).
 
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when
