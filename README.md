@@ -44,9 +44,8 @@ an agent needs instead:
 
 ## Status
 
-Early alpha — [v0.1.0 is on PyPI](https://pypi.org/project/klayout-tools/)
-with the first five verbs (`layers`, `stats`, `cells`, `drc`, `pdk`);
-`main` has since grown to 24 verbs — see [`docs/cli/`](docs/cli/). The
+Early alpha — [v0.2.0 is on PyPI](https://pypi.org/project/klayout-tools/)
+with all 24 verbs — see [`docs/cli/`](docs/cli/). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
 See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
@@ -101,8 +100,8 @@ klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone 
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/), one page per verb.
-Note: verbs beyond `layers`/`stats`/`cells`/`drc`/`pdk` require the
-from-source install above — PyPI 0.1.0 predates them.
+All 24 verbs ship in PyPI 0.2.0; the from-source install above tracks
+`main`, which may be ahead of the latest release.
 
 ## Development
 
@@ -130,7 +129,7 @@ choose against your layout, and publishes a step summary + JSON/render
 artifacts, exactly like a local `klt` invocation:
 
 ```yaml
-- uses: 2AMLogic/klayout-tools@v0.1.0
+- uses: 2AMLogic/klayout-tools@v0.2.0
   with:
     layout: layout/my_block.gds
     verbs: drc,layout-metrics

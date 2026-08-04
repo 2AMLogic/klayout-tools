@@ -2,48 +2,114 @@
 
 `klt` has not yet reached `1.0`; per [`docs/json-contract.md`](docs/json-contract.md),
 `schema_version` only bumps for non-additive (breaking) shape changes to a
-command's own payload. Additive behavior changes — including new
-`mismatches[].category` values `klt lvs` can emit — land under the same
-`0.1.0` package version and are recorded here instead. This file is the
-source of truth for which categories exist as of a given date; pin
-`provenance.deck` (sha256) and `provenance.klayout_version`, not
-`klt --version`, if you need to detect this kind of drift.
+command's own payload, and is versioned **per command** — so one command's
+breaking change never forces a bump on another, nor on the package version.
+Additive behavior changes — including new `mismatches[].category` values
+`klt lvs` can emit — land within a package version and are recorded here
+instead. This file is the source of truth for which categories exist as of a
+given date; pin `provenance.deck` (sha256) and `provenance.klayout_version`,
+not `klt --version`, if you need to detect this kind of drift.
 
-## 0.1.0 (2026-07-31)
+## 0.2.0 (2026-08-04)
 
-Initial release — the agent-native IC layout toolkit, first cut.
+The first release since `0.1.0`. `klt` grew from **5 verbs to 24**; the 19
+net-new verbs below all existed on `main` but had never shipped in a
+numbered release, so anyone installing from PyPI has until now been getting
+a tool bearing little resemblance to the documented one.
 
-### Added
+Additive at the CLI surface — no existing verb was renamed or removed. One
+per-command breaking change is included (`klt precheck`'s own
+`schema_version` moved `1` -> `2`, detailed below); per
+[`docs/json-contract.md`](docs/json-contract.md) that is scoped to that
+command and does not affect any other verb.
 
-- `klt` CLI with five headless, JSON-contracted verbs:
-  - `klt layers` — layer/datatype enumeration for GDSII/OASIS streams
-  - `klt stats` — bounding box, drawn area, density, polygon/vertex counts (`--per-layer`)
-  - `klt cells` — cell hierarchy: top cells, shape/instance counts, bboxes (`--top`)
-  - `klt drc` — headless DRC via KLayout's native Region check primitives, with
-    curated width/space/enclosure decks for sky130 and gf180mcu (`--deck`)
-  - `klt pdk find|list|env` — discovery/resolution of open_pdks-layout PDK installs
-- Shared JSON output envelope (`schema_version`, error shape, exit codes) across
-  all verbs — `docs/json-contract.md` is the API
-- `scripts/fetch-pdks.sh` — pinned fetch of lambdapdk open PDK data
-- `kb/` knowledge-base scaffold with JSON Schema and seed entries
-- sky130/gf180mcu test corpus with golden fixtures; CI (ruff + pytest, Python 3.10–3.13)
-- Docs: architecture, JSON contract, per-verb CLI references, macOS KLayout
-  source-build guide; site at klayout-tools.org
+### Added — new verbs
 
-### Added since release (still reporting `0.1.0`)
+- `klt precheck` — pre-flight layout checks before an expensive run
+- `klt socket-check` — socket/pin-level connectivity checks
+- `klt ring-check` — guard/collector ring integrity checks
+- `klt layout-metrics` — quantitative layout measurements
+- `klt render` — raster/vector rendering of layout views
+- `klt extract` — parasitic/device extraction with provenance hashing
+- `klt lvs` — layout-versus-schematic comparison
+- `klt gen` — parametric analog cell generation
+- `klt gen-compose` — composition and routing of generated blocks
+- `klt draw` — primitive layout drawing
+- `klt sim` — circuit simulation, including the remote AWS backend
+- `klt report` — aggregated run reporting
+- `klt kb` — knowledge-base query/update
+- `klt trajectory` — append-only optimization-run logs (`--plot`)
+- `klt synthesize` — RTL synthesis (Yosys engine class)
+- `klt place-and-route` — physical implementation (OpenROAD engine class)
+- `klt functional-verification` — cocotb testbenches via Icarus/Verilator
+- `klt eval` — single `valid`/`objective`/`metrics` verdict over gate checks
+- `klt lef-abstract` — LEF abstract generation
 
-`klt` has grown considerably since the initial release above without a
-version bump (see the pre-1.0 note at the top of this file); the entries
-below are the user-visible, additive behavior changes worth calling out
-explicitly because they affect a verb's output under an unchanged reported
-version. Not an exhaustive commit-by-commit log.
+Each is documented in [`docs/cli/`](docs/cli/).
 
-- Since 0.1.0 the CLI has grown from 5 verbs to 22: `layout-metrics`,
-  `render`, `extract`, `lvs`, `gen`, `gen-compose`, `draw`, `sim`, `kb`,
-  `precheck`, `socket-check`, `ring-check`, `report`, `trajectory`,
-  `synthesize`, `place-and-route`, and `functional-verification` were added
-  on `main`. Each is documented in [`docs/cli/`](docs/cli/); the next
-  release will carry them collectively.
+### Changed — behavior detail
+
+The user-visible, additive behavior changes worth calling out explicitly,
+because they affect a verb's output. Not an exhaustive commit-by-commit log.
+
+- 2026-08-04 — `klt sim`: wall-clock budget, orphan safety, and resume for
+  corner sweeps (#482). `options.wall_clock_budget_s`/`--budget-s` bounds
+  the overall sweep (distinct from the existing per-corner
+  `options.timeout_s`); an always-on parent-PID liveness check stops the
+  local/local-parallel dispatch loop the instant the launching process
+  exits; and `options.resume`/`--resume` checkpoints completed corners to
+  `checkpoint.json` and skips them on a later matching invocation. Skipped
+  corners are reported as `status: "error"` with
+  `budget_exceeded`/`orphaned` diagnostics, and `environment.budget`/
+  `environment.orphaned`/`environment.resume` summarise the outcome —
+  purely additive.
+- 2026-08-04 — `klt extract`: comma-joined multi-label net collision
+  detection (#481, closes #470). Any net whose KLayout-assigned name is a
+  comma-joined merge of 2+ distinct labels (e.g. `Y,Y2`) — a silent signal
+  that two differently-named nets were shorted together in the layout, most
+  commonly a `gen-compose` `pins[]` entry naming a port other connectivity
+  already reaches — is now flagged in a new top-level
+  `merged_net_labels[]` array (`{"net", "labels"}` per affected net) plus a
+  matching `warnings[]` entry. Purely additive:
+  `net_count`/`nets[]`/`pin_count` are unchanged.
+- 2026-08-04 — `klt gen-compose`: self-net short detection now reads drawn
+  pad geometry, not just port adjacency (#472, closes #469).
+  `route_two_pin()` gains a fourth self-net check that intersects the
+  route's own drawn metal against the block's actual drawn shapes on the
+  route layer, generalising #467's same-row/same-direction heuristic
+  (still kept) to same-facing pin pairs on different rows and wider routes
+  that reach an adjacent row's pad — cases missed because a port's
+  reported `width_um` systematically under-states the pad metal drawn
+  around it.
+- 2026-08-04 — `klt gen`: `res_array` can draw sky130's higher-sheet-rho
+  precision-resistor flavours (#475, closes #463). A validated `flavor`
+  request param ("generic"/"high"/"xhigh", mirroring `mos_array`'s enum
+  pattern) resolves a per-family implant/block layer pair sourced from the
+  extraction deck's own `requires` layers (sky130 `res_high_po` = psdm +
+  rpm; `res_xhigh_po` = psdm + urpm), so the generated array extracts as
+  the requested device class instead of always `res_generic_po`. Default
+  "generic" reproduces prior geometry exactly on both families; an
+  unsupported flavour raises a clear `GenError`.
+- 2026-08-04 — `klt gen`: MOS generators draw a poly gate landing pad past
+  the diffusion so gate contacts land legally (#474). `mos_array` and
+  `diff_pair` previously drew gate poly sharing the diffusion's exact
+  extent, leaving no DRC-legal spot for a gate contact. The shared unit
+  layout now adds a landing pad extending past the diffusion's gate-side
+  edge on the first finger and reports the gate port at the pad centre —
+  a JSON-contract-visible change: the gate port's `y_um` moves into the
+  extension and its `width_um` becomes the pad width, and
+  `bbox_height_um` now spans diffusion plus pad while `height_um` stays
+  the bare diffusion height. A contact placed at the reported gate port is
+  now DRC-clean on the curated sky130 deck.
+- 2026-08-04 — `klt extract`: `dummy` marker-layer suppression (#295)
+  extended from MOS gates to resistors and bipolars (#471, closes #462).
+  The `dummy` region is now subtracted from each candidate resistor body
+  before device recognition and from `bipolar_base` before
+  emitter/collector are derived, with fully-covered components counted
+  into the shared `dummy_devices_dropped` — so matched resistor/bipolar
+  arrays built with dummy edge units no longer inflate `device.unmatched`
+  under `klt lvs`, and a fully dummy-suppressed poly resistor no longer
+  trips a false `marked_unrecognised` warning.
 - 2026-08-04 — `klt lvs`: new `device.combine_incomplete` mismatch category
   (#466). Only possible with `options.combine_devices: true`. KLayout's own
   `klayout.db.Netlist.combine_devices()` can raise an unhandled
@@ -101,9 +167,9 @@ version. Not an exhaustive commit-by-commit log.
   is itself placed multiple times gets the product, not the sum), via a
   top-down hierarchy walk (`Layout.each_cell_top_down()`/`Instance.size()`)
   rather than a full recursive shape flatten. Only `klt precheck`'s own
-  `schema_version` moved to `2`; every other command's `schema_version` and
-  `klt --version` (still `0.1.0`) are unaffected — per-command versioning
-  per `docs/json-contract.md`. See `docs/cli/precheck.md`.
+  `schema_version` moved to `2`; every other command's `schema_version` is
+  unaffected, and a per-command bump never forces one on the package version
+  — per-command versioning per `docs/json-contract.md`. See `docs/cli/precheck.md`.
 - 2026-08-03 — `klt eval`: `synthesize` and `place-and-route` are now
   first-class gate `check`s (#437, Phase 5 of Epic #391), joining
   `drc`/`lvs`/`sim`/`layout-metrics`/`functional-verification`. Both always
@@ -380,3 +446,24 @@ version. Not an exhaustive commit-by-commit log.
   spurious reject — when the macro's own instance can't be confidently
   located in the netlist text. See `docs/cli/lef-abstract.md`'s "Pins" and
   `docs/cli/place-and-route.md`'s "Hard-macro placement" sections.
+
+## 0.1.0 (2026-07-31)
+
+Initial release — the agent-native IC layout toolkit, first cut.
+
+### Added
+
+- `klt` CLI with five headless, JSON-contracted verbs:
+  - `klt layers` — layer/datatype enumeration for GDSII/OASIS streams
+  - `klt stats` — bounding box, drawn area, density, polygon/vertex counts (`--per-layer`)
+  - `klt cells` — cell hierarchy: top cells, shape/instance counts, bboxes (`--top`)
+  - `klt drc` — headless DRC via KLayout's native Region check primitives, with
+    curated width/space/enclosure decks for sky130 and gf180mcu (`--deck`)
+  - `klt pdk find|list|env` — discovery/resolution of open_pdks-layout PDK installs
+- Shared JSON output envelope (`schema_version`, error shape, exit codes) across
+  all verbs — `docs/json-contract.md` is the API
+- `scripts/fetch-pdks.sh` — pinned fetch of lambdapdk open PDK data
+- `kb/` knowledge-base scaffold with JSON Schema and seed entries
+- sky130/gf180mcu test corpus with golden fixtures; CI (ruff + pytest, Python 3.10–3.13)
+- Docs: architecture, JSON contract, per-verb CLI references, macOS KLayout
+  source-build guide; site at klayout-tools.org
