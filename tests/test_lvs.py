@@ -1428,6 +1428,128 @@ def test_body_unverified_absent_for_pre_extracted_layout_netlist(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# NMOS body resolves to a real, drawn substrate-tap net (issue #490): a
+# reference schematic naming that same net matches cleanly with no
+# `hints.same_nets` workaround, and `device.body_unverified` no longer fires
+# for the NMOS side.
+# --------------------------------------------------------------------------- #
+
+
+def _write_sky130_inv_with_substrate_tap(
+    path: Path, tap_label: str = "VSUBRING"
+) -> str:
+    """The real `sky130_fd_sc_hd__inv_1` corpus cell (guaranteed LVS-legitimate
+    wiring -- unlike a hand-drawn approximation, its drain pads are genuinely
+    tied into one `Y` net), plus an *added* `tap.drawing` ring drawn well
+    outside the cell's own bbox/`nwell` (never touching either), contacted up
+    through licon1/li1 and labelled -- a genuine, drawable P-substrate tie
+    (#490), exactly the issue's own "guard ring around it" repro sketch."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(SKY130_INV))
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # The real cell's bbox is roughly x -190..1570, y -240..2960 (nwell/PMOS
+    # in the upper half, y >= 1305) -- draw the ring well clear of all of it,
+    # off to the left and below.
+    draw(65, 44, kdb.Box(-1200, -800, -1000, -200))  # tap.drawing (substrate tie)
+    draw(66, 44, kdb.Box(-1180, -650, -1020, -550))  # licon1 over the tap
+    draw(67, 20, kdb.Box(-1250, -700, -950, -500))  # li1 over the tap
+    label(67, 5, tap_label, -1100, -600)
+
+    layout.write(str(path))
+    return str(path)
+
+
+#: Reference schematic naming the NMOS body on the *same* net the layout's
+#: substrate-tap ring resolves to (`VSUBRING`) -- a genuine schematic pin,
+#: not the deck's synthesized `vsubs`. Mirrors `_INVERTER_SPICE`, with the
+#: body pin split out as its own net instead of tied straight to `VGND`.
+_SKY130_INV_SPICE_NAMED_SUBSTRATE = """
+.subckt sky130_fd_sc_hd__inv_1 A VGND VPWR Y
+M1 Y A VGND VSUBRING nfet W=0.65U L=0.15U
+M2 Y A VPWR VPB pfet W=1.0U L=0.15U
+.ends
+"""
+
+
+def test_nmos_body_matches_reference_named_substrate_net_without_same_nets_hint(
+    tmp_path,
+):
+    """Issue #490's core acceptance criterion: a layout that draws a real
+    substrate-tap ring reaches `status: "match"` against a reference netlist
+    that names the NMOS body on that same real net -- with **no**
+    `hints.same_nets` workaround required, and the NMOS `device.body_unverified`
+    warning no longer fires (the body terminal resolved to a real net)."""
+    from klayout_tools.extract import run_extract
+
+    gds = _write_sky130_inv_with_substrate_tap(tmp_path / "inv.gds")
+    # The real cell's own pin order/subckt name (needed for `reference.top` to
+    # resolve and the pin count to line up) -- read once via inline extraction
+    # of the *unmodified* corpus cell, matching `test_inline_extraction_
+    # composes_extract_and_compare`'s own pattern.
+    extracted = run_extract(str(SKY130_INV), "sky130", output=str(tmp_path / "x.spice"))
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _SKY130_INV_SPICE_NAMED_SUBSTRATE.replace(
+            "sky130_fd_sc_hd__inv_1", extracted["top"]
+        ),
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": gds, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        and m["device"]["class"] == "nfet"
+        for m in report["mismatches"]
+    )
+
+
+def test_nmos_body_still_warns_when_no_substrate_tap_is_drawn(tmp_path):
+    """Contrast case: the same reference/comparison shape, but the layout
+    draws no substrate-tap ring at all -- the NMOS body still falls back to
+    the synthesized `vsubs` global, so `device.body_unverified` still fires
+    for the NMOS side (no regression from #490 on the common, no-ring
+    case)."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    nmos_body_unverified = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        and m["device"]["class"] == "nfet"
+    ]
+    assert len(nmos_body_unverified) == 1
+
+
+# --------------------------------------------------------------------------- #
 # options.combine_devices (issue #261): folded/multi-finger and split/
 # interleaved matched devices vs. a lumped schematic device
 # --------------------------------------------------------------------------- #

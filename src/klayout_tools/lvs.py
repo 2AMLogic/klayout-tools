@@ -1225,24 +1225,44 @@ def _count_devices_of_class(netlist: Any, device_class: Any) -> int:
     return count
 
 
-def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
-    """Issue #281: flag, as non-blocking ``severity: "warning"`` entries, the
-    MOS body terminals that ``extract.py``'s inline extraction ties to a
-    deck-synthesized net rather than deriving from real drawn tap/well-label
-    geometry -- so a caller recording a clean ``klt lvs`` verdict can also
-    record that this dimension went structurally unverified (see this
-    module's own docstring reference, ``extract.py``'s ``nfet_body``/
-    ``connect_global`` handling, and ``docs/cli/extract.md`` -> "Coverage").
+def _device_body_net_name(device: Any) -> str | None:
+    """The expanded name of ``device``'s body/bulk terminal net (KLayout's
+    ``DeviceExtractorMOS4Transistor`` names it ``"B"`` -- the same
+    ``terminal.name.lower()`` convention ``extract.py``'s ``nets[]`` uses),
+    or ``None`` if the device class declares no such terminal, or the
+    terminal reaches no net at all."""
+    device_class = device.device_class()
+    for terminal in device_class.terminal_definitions():
+        if terminal.name.lower() == "b":
+            net = device.net_for_terminal(terminal.id())
+            return net.expanded_name() if net is not None else None
+    return None
 
-    Deck-structural, not per-instance: every curated deck ties **every**
-    NMOS body to the deck's global substrate net (``deck.substrate_net``,
-    via ``connect_global`` -- no curated deck draws a distinct NMOS tap
-    layer today), so the NMOS warning always fires when the layout side has
-    one or more NMOS devices. The PMOS warning only fires when the deck also
-    has no distinct well-tap layer (``deck.tap is None``, e.g. gf180mcu's
-    shared ``Comp`` layer) -- a deck that draws a real tap (e.g. sky130's
-    ``tap=(65, 44)``) ties PMOS bodies to a genuine, named net, so no warning
-    is warranted there.
+
+def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
+    """Issue #281 (narrowed to real-tap-drawn layouts by #490): flag, as
+    non-blocking ``severity: "warning"`` entries, the MOS body terminals
+    that ``extract.py``'s inline extraction ties to a deck-synthesized net
+    rather than deriving from real drawn tap/well-label geometry -- so a
+    caller recording a clean ``klt lvs`` verdict can also record that this
+    dimension went structurally unverified (see this module's own docstring
+    reference, ``extract.py``'s ``nfet_body``/``connect_global`` handling,
+    and ``docs/cli/extract.md`` -> "Coverage").
+
+    Per-device, not deck-structural (#490): a deck that declares a distinct
+    ``tap`` layer (e.g. sky130's ``tap=(65, 44)``) resolves an NMOS body
+    terminal to a real, named net when a layout draws a substrate-tie ring
+    outside every ``nwell`` and contacts it up to that net -- only a device
+    whose body terminal *still* reaches the deck's synthesized
+    ``substrate_net`` global (no ring drawn, or ``deck.tap is None`` and no
+    split is possible at all, e.g. gf180mcu) is structurally unverified. The
+    NMOS warning therefore counts only devices whose body net name equals
+    ``deck.substrate_net`` (or resolves to no net at all), not every NMOS
+    device. The PMOS warning only fires when the deck also has no distinct
+    well-tap layer (``deck.tap is None``) -- a deck that draws a real tap
+    ties PMOS bodies to a genuine, named net unconditionally (no ring
+    required, since every PMOS sits inside an ``nwell`` by construction), so
+    no warning is warranted there.
 
     Neither warning fires at all for the pre-extracted ``layout.netlist``
     request form -- callers only reach this helper when ``layout.file`` +
@@ -1261,6 +1281,7 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
         1
         for device in layout_circuit.each_device()
         if device.device_class().name == deck.nfet_class
+        and _device_body_net_name(device) in (deck.substrate_net, None)
     )
     if nfet_count:
         entries.append(
@@ -1269,9 +1290,10 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
                 "warning",
                 f"{nfet_count} NMOS device body terminal(s) were compared "
                 f"against the '{deck.substrate_net}' deck-synthesized "
-                "substrate net, not a real schematic net -- this deck draws "
-                "no distinct NMOS substrate/tap layer (see "
-                'docs/cli/extract.md, "Coverage")',
+                "substrate net, not a real schematic net -- no drawn "
+                "substrate-tap geometry resolved these device(s)' body "
+                "terminal to a real net (see docs/cli/extract.md, "
+                '"Coverage")',
                 "layout",
                 device={"layout": None, "reference": None, "class": deck.nfet_class},
             )

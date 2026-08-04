@@ -188,10 +188,13 @@ class ResistorDevice:
     third ``W`` terminal tied to the deck's ``substrate_net`` global)
     instead of the plain two-terminal ``DeviceExtractorResistor``, for a
     device whose PDK LVS deck models a bulk terminal (e.g. gf180mcu's
-    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It inherits the
-    same documented approximation as the NMOS body terminal: there is no
-    drawn substrate-tap geometry in these curated decks, so the bulk is the
-    global net, not a real extracted tap.
+    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the
+    same ``W`` terminal region as the NMOS body (``extract.py``'s
+    ``nfet_body``), so it inherits that terminal's behaviour: on a deck that
+    draws a distinct ``tap`` layer (issue #490), a substrate-tie ring drawn
+    outside every ``nwell`` and contacted up to a named net resolves the
+    bulk terminal to that real net; only a layout with no such ring falls
+    back to the deck's synthesized ``substrate_net`` global.
     """
 
     name: str
@@ -272,10 +275,17 @@ class ExtractionDeck:
 
     ``nfet_class``/``pfet_class`` name the extracted ``DeviceClassMOS4Transistor``
     device classes (``devices[].class`` in the JSON response). ``substrate_net``
-    is the global net name the NMOS body terminal is tied to when no drawn
-    substrate-tap geometry exists to derive one from (KLayout
-    ``connect_global``) -- see the family deck's docstring for why this is a
-    documented approximation, not a real substrate-tap extraction.
+    is the global net name (KLayout ``connect_global``) the NMOS body
+    terminal falls back to when a deck draws a distinct ``tap`` layer but no
+    tap shape ends up outside every ``nwell`` in a given layout, or when
+    ``tap`` is ``None`` entirely (e.g. gf180mcu's shared ``Comp`` layer, no
+    per-purpose split possible). When a deck *does* declare ``tap`` and a
+    layout draws a substrate-tie ring on it (outside every ``nwell``,
+    contacted up to a named net -- issue #490), ``extract.py`` wires that
+    real geometry to the NMOS body terminal instead, so the body terminal
+    resolves to the ring's own real net rather than this synthesized global
+    -- see the family deck's docstring for the tap/nwell-containment split
+    that makes this possible.
 
     ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
     by default) declaring this deck's drawn vertical-BJT device-recognition

@@ -131,9 +131,16 @@ Two known connectivity-fidelity limitations, both documented in the deck
 modules and deliberate (not oversights):
 
 - **NMOS body.** Neither curated deck draws a separate substrate/pwell
-  layer, so there is no drawn tap geometry to derive a real net name from.
-  The NMOS body terminal is tied to a global net (`vsubs` by default) via
-  KLayout's `connect_global` instead of a real substrate-tap extraction.
+  layer. On **sky130**, `tap.drawing` is reused for both purposes: a shape
+  drawn inside an `nwell` is a PMOS well tie (see below), a shape drawn
+  outside every `nwell` is a genuine, drawable P-substrate tie — when a
+  layout draws one and contacts it up to a named net, the NMOS body
+  terminal (and the identically-modelled `bulk_to_substrate` resistor bulk
+  and collector-less bipolar collector terminals) resolve to that real net
+  (issue #490). Only a layout with **no** such ring falls back to a global
+  net (`vsubs` by default) via KLayout's `connect_global`. **gf180mcu** has
+  no distinct tap layer at all (`Comp` is shared with transistor active), so
+  its NMOS body always falls back to the global net.
 - **PMOS body (gf180mcu only).** sky130's curated deck draws well taps on a
   *distinct* layer from transistor active (`tap.drawing`), so the well body
   net picks up its real name via that tap + an `nwell` pin label (verified
