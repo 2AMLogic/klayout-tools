@@ -340,3 +340,22 @@ version. Not an exhaustive commit-by-commit log.
   place-and-route` opaquely (OpenROAD `GRT-0029`) rather than with a clear
   `klt`-level error. This is a documentation/verification-only change — no
   `schema_version` bump for any of the three verbs.
+- 2026-08-04 — Fixed #464 (per the #451/#452 precedent of fixing rather
+  than only documenting a verb-boundary gap). `klt lef-abstract` gains a
+  new top-level `unroutable_pins` response field (`[{name, layer:
+  [gds_layer, gds_datatype]}, ...]`) that promotes the existing per-pin
+  `geometry_source: "none"`/`warnings[]` signal into a structured,
+  programmatically-checkable echo — purely additive, `[]` when every pin
+  resolved a routing-type LEF layer, no `schema_version` bump. `klt
+  place-and-route`'s `_validate_macros` now cross-checks each macro's LEF
+  `PIN` blocks (via a new `has_port` field on `klayout_tools.lef_header`'s
+  parsed `pins[]`) against the netlist's own named port connections for
+  that instance, and rejects the request (exit 1, before OpenROAD is ever
+  invoked) when a `PORT`-less pin is actually wired to a real net — turning
+  the opaque `GRT-0029` global-routing failure into a specific, actionable
+  `klt`-level error. A `PORT`-less pin the netlist leaves unconnected is
+  not rejected; the netlist scan is a best-effort structural-Verilog lookup
+  (paren-depth-matched, comment-stripped) that is skipped — never a
+  spurious reject — when the macro's own instance can't be confidently
+  located in the netlist text. See `docs/cli/lef-abstract.md`'s "Pins" and
+  `docs/cli/place-and-route.md`'s "Hard-macro placement" sections.
