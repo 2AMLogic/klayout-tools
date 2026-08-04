@@ -1,6 +1,6 @@
 """Tests for `klt eval` and the `klayout_tools.eval` library.
 
-Three tiers, mirroring `tests/test_drc.py`/`tests/test_lvs.py`:
+Four tiers, mirroring `tests/test_drc.py`/`tests/test_lvs.py`:
 
 - **Unit tests** exercise descriptor/candidate loading, `${name}` candidate
   substitution, gate composition (1-4 named checks), objective/metric
@@ -14,6 +14,17 @@ Three tiers, mirroring `tests/test_drc.py`/`tests/test_lvs.py`:
 - A **4-gate composition test** (`drc` + `lvs` + `sim` + `layout-metrics` in
   one descriptor) is `@_SKIP_NO_NGSPICE`-gated, mirroring `tests/test_sim.py`'s
   own real-`ngspice` integration tier.
+- A **digital-flow tier** (Epic #391 Phase 5, issue #437) exercises the
+  `synthesize`/`place-and-route` checks -- both need a `threshold` (same rule
+  as `layout-metrics`, since neither has gate semantics of its own) and
+  resolve `request` as a path only, never inline JSON/`-` -- plus one
+  end-to-end test chaining `synthesize` -> `functional-verification` ->
+  `place-and-route` -> `drc`/`layout-metrics` into a single scored verdict,
+  then into a single `klt trajectory` log record, mirroring the shape an
+  analog evaluation already produces. `run_synthesize`/
+  `run_functional_verification`/`run_place_and_route` are stubbed (no
+  `yosys`/cocotb/`openroad` dependency, matching those modules' own stubbed
+  unit tiers) -- `drc`/`layout-metrics` run for real against a fixture GDS.
 """
 
 from __future__ import annotations
@@ -805,3 +816,398 @@ def test_text_format_reports_invalid_gate(tmp_path, capsys):
     assert "valid: False" in out
     assert "drc" in out
     assert "status=fail" in out
+
+
+# --------------------------------------------------------------------------- #
+# digital flow: `synthesize` / `place-and-route` checks (Epic #391 Phase 5)
+# --------------------------------------------------------------------------- #
+
+# Canned reports matching `run_synthesize`/`run_place_and_route`'s own
+# documented shape (docs/cli/synthesize.md / docs/cli/place-and-route.md) --
+# both always report `"status": "ok"` (see each module's own docstring: a
+# run either produces its output or raises, there is no "ran but found a
+# problem" outcome), which is exactly why both are excluded from
+# `_DEFAULT_STATUS_FNS` and need an explicit `threshold` to gate on.
+_SYNTHESIZE_REPORT = {
+    "schema_version": 1,
+    "engine": "yosys",
+    "engine_version": "0.67+11",
+    "hdl_toplevel": "gcd",
+    "status": "ok",
+    "instance_count": 2010,
+    "area_um2": 1234.5678,
+    "sequential_area_um2": 210.25,
+    "instance_counts_by_type": {"sky130_fd_sc_hd__buf_1": 12},
+    "timing": None,
+    "netlist_path": "/tmp/gcd_synth.v",
+    "script_path": "/tmp/synth_gcd.ys",
+    "provenance": {"deck": {"name": "sky130_fd_sc_hd__tt_025C_1v80"}},
+}
+
+_PLACE_AND_ROUTE_REPORT = {
+    "schema_version": 1,
+    "engine": "openroad",
+    "engine_version": "26Q3-771-g7cfb2105c9",
+    "hdl_toplevel": "gcd",
+    "status": "ok",
+    "stage_reached": "route",
+    "seed": 1,
+    "die_area_um2": 2116.0,
+    "core_area_um2": 1936.0,
+    "utilization_pct": 42.5,
+    "wirelength_um": 5123.4,
+    "worst_slack_ns": 0.42,
+    "total_negative_slack_ns": 0.0,
+    "fmax_mhz": 512.3,
+    "setup_violation_count": 0,
+    "hold_violation_count": 0,
+    "estimated_power_mw": 1.23,
+    "stages": [{"name": "route", "wirelength_um": 5123.4}],
+    "def_path": "/tmp/gcd.def",
+    "gds_path": None,  # filled in per test
+    "provenance": {"deck": {"name": "sky130_fd_sc_hd__tt_025C_1v80"}},
+}
+
+_FUNCTIONAL_VERIFICATION_PASS_REPORT = {
+    "schema_version": 1,
+    "engine": "icarus",
+    "hdl_toplevel": "gcd",
+    "testbench": "test_gcd",
+    "status": "pass",
+    "test_count": 3,
+    "passed_count": 3,
+    "failed_count": 0,
+    "skipped_count": 0,
+    "coverage": None,
+    "environment": {"engine": "icarus", "engine_version": "13.0"},
+}
+
+
+def test_synthesize_gate_requires_threshold(tmp_path, monkeypatch):
+    import klayout_tools.eval as eval_module
+
+    monkeypatch.setattr(
+        eval_module, "run_synthesize", lambda request_path: dict(_SYNTHESIZE_REPORT)
+    )
+    (tmp_path / "synth_request.json").write_text("{}")
+    descriptor = {
+        "gates": [{"check": "synthesize", "args": {"request": "synth_request.json"}}],
+        "objective": {
+            "check": "synthesize",
+            "metric": "instance_count",
+            "args": {"request": "synth_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    with pytest.raises(EvalError, match="threshold"):
+        run_eval(path)
+
+
+def test_synthesize_gate_with_threshold(tmp_path, monkeypatch):
+    import klayout_tools.eval as eval_module
+
+    seen_paths = []
+
+    def _fake_run_synthesize(request_path):
+        seen_paths.append(request_path)
+        return dict(_SYNTHESIZE_REPORT)
+
+    monkeypatch.setattr(eval_module, "run_synthesize", _fake_run_synthesize)
+    (tmp_path / "synth_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {
+                "check": "synthesize",
+                "args": {"request": "synth_request.json"},
+                "threshold": {"metric": "instance_count", "max": 5000},
+            }
+        ],
+        "objective": {
+            "check": "synthesize",
+            "metric": "area_um2",
+            "polarity": "minimize",
+            "args": {"request": "synth_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    report = run_eval(path)
+
+    assert report["valid"] is True
+    (gate,) = report["gates"]
+    assert gate["check"] == "synthesize"
+    assert gate["status"] == "pass"
+    assert gate["exit_code"] == 0
+    assert gate["count"] == 2010
+    assert report["objective"] == {
+        "name": "area_um2",
+        "value": 1234.5678,
+        "polarity": "minimize",
+    }
+    # `request` resolves the same way `drc`'s `file`/`layout-metrics`'s
+    # `block` do (a path relative to the descriptor's own directory) --
+    # never the inline-JSON/`-` forms, since `run_synthesize`'s own
+    # `load_request` only reads a real file.
+    assert seen_paths == [str(tmp_path / "synth_request.json")]
+
+
+def test_synthesize_gate_exceeding_threshold_is_invalid(tmp_path, monkeypatch):
+    import klayout_tools.eval as eval_module
+
+    monkeypatch.setattr(
+        eval_module, "run_synthesize", lambda request_path: dict(_SYNTHESIZE_REPORT)
+    )
+    (tmp_path / "synth_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {
+                "check": "synthesize",
+                "args": {"request": "synth_request.json"},
+                "threshold": {"metric": "instance_count", "max": 100},
+            }
+        ],
+        "objective": {
+            "check": "synthesize",
+            "metric": "instance_count",
+            "args": {"request": "synth_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    report = run_eval(path)
+    assert report["valid"] is False
+    (gate,) = report["gates"]
+    assert gate["status"] == "fail"
+    assert gate["count"] == 2010
+
+
+def test_place_and_route_gate_requires_threshold(tmp_path, monkeypatch):
+    import klayout_tools.eval as eval_module
+
+    monkeypatch.setattr(
+        eval_module,
+        "run_place_and_route",
+        lambda request_path: dict(_PLACE_AND_ROUTE_REPORT, gds_path=None),
+    )
+    (tmp_path / "pnr_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {"check": "place-and-route", "args": {"request": "pnr_request.json"}}
+        ],
+        "objective": {
+            "check": "place-and-route",
+            "metric": "wirelength_um",
+            "args": {"request": "pnr_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    with pytest.raises(EvalError, match="threshold"):
+        run_eval(path)
+
+
+def test_place_and_route_gate_with_threshold_on_timing_closure(tmp_path, monkeypatch):
+    import klayout_tools.eval as eval_module
+
+    seen_paths = []
+
+    def _fake_run_place_and_route(request_path):
+        seen_paths.append(request_path)
+        return dict(_PLACE_AND_ROUTE_REPORT, gds_path=None)
+
+    monkeypatch.setattr(eval_module, "run_place_and_route", _fake_run_place_and_route)
+    (tmp_path / "pnr_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {
+                "check": "place-and-route",
+                "args": {"request": "pnr_request.json"},
+                "threshold": {"metric": "setup_violation_count", "max": 0},
+            }
+        ],
+        "objective": {
+            "check": "place-and-route",
+            "metric": "wirelength_um",
+            "polarity": "minimize",
+            "name": "wirelength_um",
+            "args": {"request": "pnr_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    report = run_eval(path)
+
+    assert report["valid"] is True
+    (gate,) = report["gates"]
+    assert gate["check"] == "place-and-route"
+    assert gate["status"] == "pass"
+    assert gate["count"] == 0
+    assert report["objective"] == {
+        "name": "wirelength_um",
+        "value": 5123.4,
+        "polarity": "minimize",
+    }
+    assert seen_paths == [str(tmp_path / "pnr_request.json")]
+
+
+def test_place_and_route_gate_timing_violation_is_invalid(tmp_path, monkeypatch):
+    import klayout_tools.eval as eval_module
+
+    monkeypatch.setattr(
+        eval_module,
+        "run_place_and_route",
+        lambda request_path: dict(
+            _PLACE_AND_ROUTE_REPORT, gds_path=None, setup_violation_count=3
+        ),
+    )
+    (tmp_path / "pnr_request.json").write_text("{}")
+    descriptor = {
+        "gates": [
+            {
+                "check": "place-and-route",
+                "args": {"request": "pnr_request.json"},
+                "threshold": {"metric": "setup_violation_count", "max": 0},
+            }
+        ],
+        "objective": {
+            "check": "place-and-route",
+            "metric": "wirelength_um",
+            "args": {"request": "pnr_request.json"},
+        },
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    report = run_eval(path)
+    assert report["valid"] is False
+    (gate,) = report["gates"]
+    assert gate["status"] == "fail"
+    assert gate["count"] == 3
+
+
+def test_digital_flow_end_to_end_one_verdict_one_trajectory_record(
+    tmp_path, monkeypatch
+):
+    """The acceptance criterion this issue exists for: a full
+    synthesize -> functional-verification -> place-and-route ->
+    drc/layout-metrics run for the epic's reference fixture (gcd) produces
+    one scored-gate verdict and one trajectory-log entry.
+
+    `run_synthesize`/`run_functional_verification`/`run_place_and_route` are
+    stubbed (no `yosys`/cocotb/`openroad` dependency -- each already has its
+    own stubbed-engine unit tier in `tests/test_synthesize.py`/
+    `tests/test_functional_verification.py`/`tests/test_place_and_route.py`;
+    this test is about the *wiring*, not re-verifying each engine). `drc`/
+    `layout-metrics` run for real against a fixture GDS standing in for the
+    one `place-and-route` would have produced.
+    """
+    import klayout_tools.eval as eval_module
+    from klayout_tools.trajectory import build_trajectory
+
+    pnr_dir = tmp_path / ".klt" / "place-and-route"
+    pnr_dir.mkdir(parents=True)
+    gds_path = pnr_dir / "gcd.gds"
+    _make_layout(clean=True).write(str(gds_path))
+
+    monkeypatch.setattr(
+        eval_module, "run_synthesize", lambda request_path: dict(_SYNTHESIZE_REPORT)
+    )
+    monkeypatch.setattr(
+        eval_module,
+        "run_functional_verification",
+        lambda request_path: dict(_FUNCTIONAL_VERIFICATION_PASS_REPORT),
+    )
+    monkeypatch.setattr(
+        eval_module,
+        "run_place_and_route",
+        lambda request_path: dict(_PLACE_AND_ROUTE_REPORT, gds_path=str(gds_path)),
+    )
+
+    for name in ("synth_request.json", "fv_request.json", "pnr_request.json"):
+        (tmp_path / name).write_text("{}")
+
+    descriptor = {
+        "gates": [
+            {
+                "check": "synthesize",
+                "args": {"request": "synth_request.json"},
+                "threshold": {"metric": "instance_count", "max": 5000},
+            },
+            {
+                "check": "functional-verification",
+                "args": {"request": "fv_request.json"},
+            },
+            {
+                "check": "place-and-route",
+                "args": {"request": "pnr_request.json"},
+                "threshold": {"metric": "setup_violation_count", "max": 0},
+            },
+            {"check": "drc", "args": {"file": str(gds_path), "deck": "sky130"}},
+            {
+                "check": "layout-metrics",
+                "args": {"block": str(pnr_dir)},
+                "threshold": {"metric": "cell_count", "max": 10},
+            },
+        ],
+        "objective": {
+            "check": "place-and-route",
+            "metric": "wirelength_um",
+            "polarity": "minimize",
+            "name": "wirelength_um",
+            "args": {"request": "pnr_request.json"},
+        },
+        "metrics": [
+            {
+                "name": "synth",
+                "check": "synthesize",
+                "args": {"request": "synth_request.json"},
+            }
+        ],
+    }
+    path = _write_descriptor(tmp_path, descriptor)
+
+    # One scored-gate verdict.
+    envelope = run_eval(path)
+
+    assert envelope["schema_version"] == 1
+    assert envelope["valid"] is True
+    assert [g["check"] for g in envelope["gates"]] == [
+        "synthesize",
+        "functional-verification",
+        "place-and-route",
+        "drc",
+        "layout-metrics",
+    ]
+    assert all(g["status"] == "pass" for g in envelope["gates"])
+    assert envelope["objective"] == {
+        "name": "wirelength_um",
+        "value": 5123.4,
+        "polarity": "minimize",
+    }
+    assert envelope["metrics"]["synth"]["instance_count"] == 2010
+
+    # One trajectory-log entry recording this turn's combined digital
+    # result (issue #388) -- the record's `gate_results`/`objective` are
+    # just this turn's `klt eval` envelope's `gates`/`objective`, reused
+    # unmodified, per `trajectory.py`'s own design invariant.
+    record = {
+        "turn": 1,
+        "candidate_ref": "gcd@rtl-v1",
+        "objective": envelope["objective"],
+        "gate_results": envelope["gates"],
+        "wall_clock_s": 12.5,
+    }
+    log_path = tmp_path / "trajectory.jsonl"
+    log_path.write_text(json.dumps(record) + "\n")
+
+    trajectory = build_trajectory(str(log_path))
+
+    assert trajectory["record_count"] == 1
+    assert trajectory["milestone_count"] == 0
+    assert trajectory["objective_name"] == "wirelength_um"
+    assert trajectory["baseline"] == {
+        "turn": 1,
+        "candidate_ref": "gcd@rtl-v1",
+        "objective": 5123.4,
+    }
+    assert "No milestones" in trajectory["markdown"]
