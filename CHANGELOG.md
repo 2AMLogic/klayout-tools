@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-04 — `klt extract`: MiM capacitor devices now include a
+  perimeter/fringe capacitance term, correcting a systematic, one-sided
+  undercount (previously area-only: `C = A * area_cap_f_um2`) against the
+  gf180mcu and sky130 PDKs' own two-term simulation models (#512).
+  `CapacitorDevice` gains an optional `perim_cap_f_um` coefficient (default
+  `0.0`, non-breaking for any deck that does not set it); when set, `klt
+  extract` reads back KLayout's own already-computed plate-overlap
+  perimeter (`P`, now also reported as `devices[].params.perimeter_um`) and
+  corrects `c_f` to `area_cap_f_um2 * A + perim_cap_f_um * P`. gf180mcu's
+  `cap_mim_2f0_m4m5_noshield` and sky130's two `cap_mim`/`cap_mim_m4`
+  entries are updated with coefficients transcribed from each PDK's own
+  SPICE model card (`sm141064.ngspice`'s `c_cox`/`c_capsw`,
+  `sky130_fd_pr__cap_mim_m3_*`'s `camimc`/`cpmimc`) — for a small unit
+  capacitor this had been undercounting extracted capacitance by up to
+  ~15%. See `docs/cli/extract.md` -> "MiM capacitor device recognition".
+
 - 2026-08-04 — `klt gen-compose`: a route to a north/south-facing port whose
   drawn pad is wider than `routing.width_um` no longer leaves a sub-spacing
   gap beside the pad (#496). `route_two_pin()`'s stub -- the segment leaving

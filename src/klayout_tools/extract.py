@@ -480,7 +480,17 @@ def run_extract(
 
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
-        devices, device_counts = _describe_devices(circuit)
+        # Perimeter/fringe capacitance coefficients (issue #512), keyed by
+        # `CapacitorDevice.name` -- the same string KLayout reports back as
+        # `devices[].class` (see `_describe_devices`'s `class_name`), so this
+        # is a direct lookup, not a positional match. A deck's default
+        # `perim_cap_f_um=0.0` reports as `0.0` here too, so `_describe_devices`
+        # applies a no-op correction for every capacitor entry that has not
+        # opted in -- today's `c_f` stays bit-for-bit unchanged.
+        capacitor_perim_cap_f_um = {
+            capacitor.name: capacitor.perim_cap_f_um for capacitor in deck.capacitors
+        }
+        devices, device_counts = _describe_devices(circuit, capacitor_perim_cap_f_um)
         nets = _describe_nets(circuit)
     else:
         devices, device_counts, nets = [], {}, []
@@ -2339,10 +2349,23 @@ def _unique_net_name(base: str, existing: set[str]) -> str:
 
 def _describe_devices(
     circuit: kdb.Circuit,
+    capacitor_perim_cap_f_um: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Build the response's ``devices[]`` array and ``device_counts`` map."""
+    """Build the response's ``devices[]`` array and ``device_counts`` map.
+
+    ``capacitor_perim_cap_f_um`` (issue #512) is an optional
+    ``CapacitorDevice.name`` -> ``perim_cap_f_um`` lookup (the caller passes
+    the owning deck's own ``capacitors`` table). When a device's class name
+    is present with a nonzero coefficient, the raw ``c_f`` KLayout computed
+    (``area_cap_f_um2 * A`` only -- see ``CapacitorDevice``'s docstring) is
+    corrected to ``area_cap_f_um2 * A + perim_cap_f_um * P`` once both ``A``
+    and ``P`` have been read back. Omitted (or a `0.0`/absent coefficient)
+    reproduces today's area-only ``c_f`` bit-for-bit -- the non-breaking
+    default this feature is designed around.
+    """
     devices: list[dict[str, Any]] = []
     device_counts: dict[str, int] = {}
+    perim_cap_lookup = capacitor_perim_cap_f_um or {}
 
     for device in circuit.each_device():
         device_class = device.device_class()
@@ -2356,6 +2379,8 @@ def _describe_devices(
             )
 
         params: dict[str, float] = {}
+        raw_c_f: float | None = None
+        raw_perimeter_um: float | None = None
         for param in device_class.parameter_definitions():
             if param.name == "W":
                 params["w_um"] = round(
@@ -2369,10 +2394,12 @@ def _describe_devices(
                 # Drawn-capacitor device classes only (#225): KLayout's
                 # `DeviceClassCapacitor` reports capacitance in farads. MOS/
                 # bipolar classes have no `C` parameter, so this branch never
-                # fires for them.
-                params["c_f"] = round(
-                    device.parameter(param.id()), _PARAM_PRECISION_FARAD
-                )
+                # fires for them. Kept unrounded until the `P`-based
+                # perimeter correction below (issue #512) has had a chance
+                # to run, so the correction is applied to the full-precision
+                # value rather than an already-rounded one.
+                raw_c_f = device.parameter(param.id())
+                params["c_f"] = round(raw_c_f, _PARAM_PRECISION_FARAD)
             elif param.name == "A":
                 # Capacitor plate-overlap area in square micrometres -- the
                 # geometry `c_f` above was computed from (`C = A * area_cap`,
@@ -2386,6 +2413,15 @@ def _describe_devices(
                 params["area_um2"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
+            elif param.name == "P":
+                # Capacitor plate-overlap perimeter in micrometres (issue
+                # #512): KLayout's `DeviceClassCapacitor` already computes
+                # this alongside `A`, but until now it was never read back.
+                # Reported for the same sanity-check reason as `area_um2`,
+                # and consumed below to correct `c_f` for a deck that sets a
+                # nonzero `perim_cap_f_um`.
+                raw_perimeter_um = device.parameter(param.id())
+                params["perimeter_um"] = round(raw_perimeter_um, _PARAM_PRECISION_UM)
             elif param.name == "R":
                 # Drawn-resistor device classes only (#222): KLayout's
                 # `R = L / W * sheet_rho`, in ohms. MOS classes have no `R`
@@ -2393,6 +2429,18 @@ def _describe_devices(
                 params["r_ohm"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_OHM
                 )
+
+        # Perimeter/fringe capacitance correction (issue #512): only fires
+        # for a capacitor device (both `raw_c_f`/`raw_perimeter_um` were set
+        # above) whose owning deck declared a nonzero `perim_cap_f_um` for
+        # this class. `raw_c_f` already carries `area_cap_f_um2 * A` (that is
+        # what KLayout's `DeviceExtractorCapacitor` computed it from), so
+        # adding `perim_cap_f_um * P` here reproduces the full two-term
+        # `CapacitorDevice` formula without re-deriving the area term.
+        perim_cap_f_um = perim_cap_lookup.get(class_name, 0.0)
+        if perim_cap_f_um and raw_c_f is not None and raw_perimeter_um is not None:
+            corrected_c_f = raw_c_f + perim_cap_f_um * raw_perimeter_um
+            params["c_f"] = round(corrected_c_f, _PARAM_PRECISION_FARAD)
 
         devices.append(
             {

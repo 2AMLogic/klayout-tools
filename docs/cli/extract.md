@@ -318,20 +318,26 @@ purpose-drawn top plate and a bottom plate on an ordinary conductor — rather
 than one marked-up conductor the way a drawn resistor or the bipolar entries
 above reuse existing layers:
 
-| Deck | `devices[].class` | Top plate | Bottom plate | Capacitance density |
-| ---- | ------------------ | --------- | ------------ | -------------------- |
-| `gf180mcu` | `cap_mim_2f0_m4m5_noshield` | `FuseTop` (75/0), requires `CAP_MK` (117/5) + `MIM_L_MK` (117/10), excludes `efuse_mk`/`plfuse` | "Virtual bottom plate": `Metal4` (46/0) clipped to `FuseTop` sized (oversized) by 1.06µm | **2.0 fF/µm²** |
-| `sky130` | `sky130_fd_pr__model__cap_mim` | `capm.drawing` (89/44) | `met3.drawing` (70/20), unfiltered | **2.0 fF/µm²** |
-| `sky130` | `sky130_fd_pr__model__cap_mim_m4` | `capm2.drawing` (97/44) | `met4.drawing` (71/20), unfiltered | **2.0 fF/µm²** |
+| Deck | `devices[].class` | Top plate | Bottom plate | Area capacitance | Perimeter capacitance |
+| ---- | ------------------ | --------- | ------------ | ------------------ | ---------------------- |
+| `gf180mcu` | `cap_mim_2f0_m4m5_noshield` | `FuseTop` (75/0), requires `CAP_MK` (117/5) + `MIM_L_MK` (117/10), excludes `efuse_mk`/`plfuse` | "Virtual bottom plate": `Metal4` (46/0) clipped to `FuseTop` sized (oversized) by 1.06µm | **1.99 fF/µm²** | **0.2383 fF/µm** |
+| `sky130` | `sky130_fd_pr__model__cap_mim` | `capm.drawing` (89/44) | `met3.drawing` (70/20), unfiltered | **2.0 fF/µm²** | **0.19 fF/µm** |
+| `sky130` | `sky130_fd_pr__model__cap_mim_m4` | `capm2.drawing` (97/44) | `met4.drawing` (71/20), unfiltered | **2.0 fF/µm²** | **0.19 fF/µm** |
 
-KLayout computes `C = A * area_cap` from the two plates' actual geometric
-overlap area, so the capacitance-density number *is* the accuracy of the
-extracted value — the capacitor analogue of a drawn resistor's sheet
-resistance. Each is transcribed from that PDK's own official KLayout **LVS**
-deck (a different source than the DRC rule tables the rest of each deck
-module cites — sky130's `sky130.lvs`, gf180mcu's `mimcap_derivations.lvs` /
-`mimcap_extraction.lvs`) and cross-checked against independent sources in
-the same PDK install — see the per-deck module docstrings
+KLayout computes `C = A * area_cap` (`area_cap_f_um2`) from the two plates'
+actual geometric overlap area and perimeter, corrected by `klt extract`
+itself (issue #512) to `C = A * area_cap + P * perim_cap`
+(`perim_cap_f_um`) once KLayout's own already-computed `A`/`P` device
+parameters are read back — so the two coefficients together *are* the
+accuracy of the extracted value — the capacitor analogue of a drawn
+resistor's sheet resistance. Both coefficients are transcribed from each
+PDK's own **simulation model** (a two-term area-plus-perimeter/fringe law
+every MiM device model publishes; a different source than the DRC rule
+tables the rest of each deck module cites, and than the official KLayout
+**LVS** deck's own single-term, rounded restatement — sky130's
+`sky130_fd_pr__cap_mim_m3_1`/`_m3_2` SPICE model cards, gf180mcu's
+`sm141064.ngspice` `cap_mim_2f0fF`) and cross-checked against independent
+sources in the same PDK install — see the per-deck module docstrings
 (`src/klayout_tools/decks/sky130.py`, `.../gf180mcu.py`) for the exact
 source files, the derivation each is transcribed from, and every
 approximation taken relative to it. gf180mcu's stack additionally needs a
@@ -1163,7 +1169,7 @@ consume.
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, or a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors"). |
 | `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**) and `"area_um2"` (the plates' overlap area, in square micrometres — `c_f = area_um2 * area_cap`, see "MiM capacitor device recognition" above). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho`. |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho`. |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 

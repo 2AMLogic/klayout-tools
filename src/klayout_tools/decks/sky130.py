@@ -107,6 +107,24 @@ genuine MiM-cap instances -- rather than the full official
 none of which this curated deck otherwise models -- the same "curated
 starter subset" scope guard elsewhere in this file).
 
+``area_cap_f_um2``/``perim_cap_f_um`` (issue #512) are refined from the LVS
+deck's own rounded ``2e-15`` F/um² above to sky130's own **simulation**
+model's two-term law, ``czero = carea + cperim`` with ``carea =
+camimc*w*l`` / ``cperim = cpmimc*(w+l)*2``, transcribed from the same
+``efabless/sky130_klayout_pdk``-adjacent, official ``sky130_fd_pr`` install
+(``volare enable sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b``):
+``libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice`` (met3,
+``sky130_fd_pr__model__cap_mim``) and ``..._cap_mim_m3_2.model.spice`` (met4,
+``sky130_fd_pr__model__cap_mim_m4``) share this same formula; both defer the
+``camimc``/``cpmimc`` numeric values to a per-corner include
+(``libs.tech/ngspice/r+c/res_typical__cap_typical__lin.spice``, the "tt"
+corner this deck otherwise assumes elsewhere), which gives ``camimc =
+2.00e-15`` F/um² (matching the LVS deck's own ``2e-15`` area coefficient
+exactly -- unlike gf180mcu, no area-term correction is needed here) and
+``cpmimc = 0.19e-15`` F/um (the previously-unmodelled perimeter/fringe
+term). Both stacks share one corner file, so the same ``perim_cap_f_um``
+value applies to both curated entries below.
+
 Two rules below (``poly.width.1`` is not one of them) approximate an
 official rule defined on a *compound* layer expression (a union of two mask
 layers) as a check against a single drawn layer, because our engine (native
@@ -633,13 +651,17 @@ EXTRACTION_DECK = ExtractionDeck(
             name="sky130_fd_pr__model__cap_mim",
             top_plate=(89, 44),  # capm.drawing
             bottom_plate=(70, 20),  # met3.drawing
-            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+            # tt-corner camimc/cpmimc, see provenance note above (issue #512):
+            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2 (camimc, unchanged from LVS)
+            perim_cap_f_um=1.9e-16,  # 0.19 fF/um (cpmimc, previously unmodelled)
         ),
         CapacitorDevice(
             name="sky130_fd_pr__model__cap_mim_m4",
             top_plate=(97, 44),  # capm2.drawing
             bottom_plate=(71, 20),  # met4.drawing
-            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2, see provenance note above
+            # tt-corner camimc/cpmimc, see provenance note above (issue #512):
+            area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2 (camimc, unchanged from LVS)
+            perim_cap_f_um=1.9e-16,  # 0.19 fF/um (cpmimc, previously unmodelled)
         ),
     ),
     # Drawn poly precision resistors (issue #222, extended by #299): the
