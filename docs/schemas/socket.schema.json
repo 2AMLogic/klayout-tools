@@ -62,6 +62,16 @@
           "height_um": {
             "description": "Informational: the pin's expected minimum footprint height, in micrometres. Same scope note as width_um. Optional: omit or null when not specified.",
             "type": ["number", "null"]
+          },
+          "direction": {
+            "description": "Informational: the pin's LEF PIN DIRECTION classification (LEF 5.7 section 5.6.2). Not checked by `klt socket-check` (there is no mechanical way to derive signal direction from geometry alone) -- consumed by `klt lef-abstract` (docs/cli/socket-check.md's LEF translation section) when translating this descriptor into a LEF MACRO's PIN statements; a pin with no declared direction falls back to that command's own documented heuristic. Optional: omit or null when not specified.",
+            "type": ["string", "null"],
+            "enum": ["INPUT", "OUTPUT", "INOUT", "FEEDTHRU", null]
+          },
+          "use": {
+            "description": "Informational: the pin's LEF PIN USE classification (LEF 5.7 section 5.6.2). Same scope note as direction -- consumed by `klt lef-abstract`, not checked by `klt socket-check`. Optional: omit or null when not specified.",
+            "type": ["string", "null"],
+            "enum": ["SIGNAL", "ANALOG", "POWER", "GROUND", "CLOCK", null]
           }
         }
       }

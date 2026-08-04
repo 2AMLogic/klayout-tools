@@ -22,6 +22,7 @@ from . import (
     kb_cmd,
     layers_cmd,
     layout_metrics_cmd,
+    lef_abstract_cmd,
     lvs_cmd,
     pdk_cmd,
     place_and_route_cmd,
@@ -233,6 +234,102 @@ def create_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
+
+    lef_abstract_parser = subparsers.add_parser(
+        "lef-abstract",
+        help="emit a LEF abstract (MACRO/PIN/OBS) from a layout + socket descriptor",
+        description=(
+            "Emit a LEF abstract -- a MACRO block with PIN and OBS sections "
+            "-- from a GDSII/OASIS block layout plus its `klt socket-check` "
+            "socket descriptor, so OpenROAD (`klt place-and-route`) can "
+            "place it as a hard macro alongside standard cells. Issue #438, "
+            "Epic #393 Phase 2 Capability A. Pin geometry is read from real "
+            "drawn shapes when the layout has metal at a pin's declared "
+            "position, falling back to a synthesized placeholder box "
+            "otherwise (reported per pin as `geometry_source`); OBS "
+            "geometry is every routing-layer shape not already claimed by a "
+            "declared pin. `--cell-library` resolves the tech LEF (via the "
+            "same PDK resolver `klt synthesize`/`klt place-and-route` use) "
+            "whose SITE/routing-layer header this command reads via "
+            "`klayout_tools.lef_header` -- no external LEF-parsing "
+            "dependency. See docs/cli/socket-check.md's LEF translation "
+            "section for the field-by-field mapping. Runs fully headless "
+            "via KLayout's native batch database API -- no GUI, no Qt."
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "file", help="path to a GDSII or OASIS layout file"
+    )
+    lef_abstract_parser.add_argument(
+        "--socket",
+        required=True,
+        help=(
+            "path to a socket descriptor JSON file (see "
+            "docs/schemas/socket.schema.json). Not validated by argparse -- "
+            "a missing/malformed descriptor exits 1 with a clean error "
+            "rather than argparse's usage-error exit 2."
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "--macro-name",
+        dest="macro_name",
+        required=True,
+        help="name for the emitted LEF MACRO block",
+    )
+    lef_abstract_parser.add_argument(
+        "--cell-library",
+        dest="cell_library",
+        required=True,
+        help=(
+            "standard-cell library whose tech LEF supplies the routing-"
+            "layer/SITE header this command reads (e.g. sky130_fd_sc_hd) -- "
+            "not the macro's own library; resolved via the same PDK "
+            "discovery `klt pdk find`/`klt synthesize` use"
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to read when the stream has more than one",
+    )
+    lef_abstract_parser.add_argument(
+        "--class",
+        dest="macro_class",
+        default="BLOCK",
+        help="LEF MACRO CLASS value (default: BLOCK, a hard macro)",
+    )
+    lef_abstract_parser.add_argument(
+        "--symmetry",
+        default=None,
+        help=(
+            "space-separated LEF SYMMETRY axes, e.g. 'X Y' or 'X Y R90'; "
+            "omit to emit no SYMMETRY statement"
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "--pdk",
+        default=None,
+        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    lef_abstract_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        default=None,
+        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
+    )
+    lef_abstract_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="output LEF path (default: <macro-name>.lef)",
+    )
+    lef_abstract_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
 
     ring_check_parser = subparsers.add_parser(
         "ring-check",

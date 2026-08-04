@@ -222,3 +222,29 @@ version. Not an exhaustive commit-by-commit log.
   (no `schema_version` bump), but changes `environment` contents for every
   gf180mcu Monte Carlo run — see `docs/cli/sim.md`'s
   `environment.monte_carlo` subsection.
+- 2026-08-03 — `klt lef-abstract`: new verb (#438, Epic #393 Phase 2
+  Capability A). Emits a LEF abstract (`MACRO` block with `PIN`/`OBS`
+  sections) from a block's GDSII/OASIS layout plus its `klt socket-check`
+  descriptor, so OpenROAD can place it as a hard macro. Pin geometry is
+  real drawn metal when present, else a synthesized placeholder box
+  (reported per pin as `geometry_source`); obstruction geometry is every
+  routing-layer shape not already claimed by a declared pin. Backed by
+  `klayout_tools.lef_header`, a new dependency-free tech-LEF header reader
+  (`SITE`, routing-layer `PITCH`/`OFFSET`/`DIRECTION`, macro `PIN`
+  `DIRECTION`/`USE`) — the deferred-trigger resolution
+  `docs/design/sc-leflib-evaluation.md` called out. `docs/schemas/socket
+  .schema.json` gains two new optional, additive `pins[]` fields
+  (`direction`/`use`, LEF's own vocabulary) this command consumes when
+  present. See `docs/cli/lef-abstract.md` and
+  `docs/cli/socket-check.md`'s new "LEF translation" section.
+- 2026-08-03 — `klt place-and-route`: new `request.macros` field (#438),
+  closing the "macro placement" gap the verb's own v1 docstring originally
+  scoped out. Each entry fixes one hard-macro instance (e.g. a `klt
+  lef-abstract` LEF) at a caller-given location during the floorplan stage
+  via OpenROAD's own `place_macro -location ... -orientation ... -exact`
+  (never the automatic macro placer). The DEF→GDS merge tolerates an
+  abstract-only macro instance (no declared `gds`) staying empty instead of
+  raising; a declared `gds` merges the macro's own view in, same as the
+  standard-cell GDS merge. Purely additive (`[]`/omitted unchanged; no
+  `schema_version` bump) — see `docs/cli/place-and-route.md`'s new
+  "Hard-macro placement" section.

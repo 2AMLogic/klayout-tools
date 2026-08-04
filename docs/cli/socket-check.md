@@ -83,10 +83,15 @@ A socket descriptor is a JSON document validated against
 - `pins` -- optional (default `[]`). Each entry: `name` (the expected label
   text), `layer` (`[layer, datatype]` the label is expected on), `x`/`y`
   (expected position, micrometres), and optionally `tolerance_um` (default
-  `0`, exact match) and `width_um`/`height_um`.
+  `0`, exact match), `width_um`/`height_um`, and `direction`/`use`.
 
-  **`width_um`/`height_um` are descriptive metadata only in this version** --
-  they are not checked against drawn geometry (see [Scope](#scope-what-is-and-isnt-mechanically-checked) below).
+  **`width_um`/`height_um`/`direction`/`use` are descriptive metadata only in
+  this version** -- `klt socket-check` never checks any of them against
+  drawn geometry (see [Scope](#scope-what-is-and-isnt-mechanically-checked)
+  below); `direction`/`use` are LEF's own `PIN DIRECTION`/`USE` vocabulary
+  (`direction` in `INPUT`/`OUTPUT`/`INOUT`/`FEEDTHRU`, `use` in
+  `SIGNAL`/`ANALOG`/`POWER`/`GROUND`/`CLOCK`), consumed by
+  [`klt lef-abstract`](#lef-translation) when present.
 - `reserved_layers` -- optional (default `[]`). A list of `[layer,
   datatype]` pairs forbidden to this block.
 - `budgets` -- optional (default `[]`). Arbitrary named numeric interface
@@ -109,6 +114,29 @@ tooling to see, never affecting the overall `status`.
 Similarly, a pin's `width_um`/`height_um` describe the pin's expected
 footprint (useful to a future `klt gen-compose` placement consumer) but are
 not checked against the drawn geometry underneath the label in this version.
+
+## LEF translation
+
+A socket descriptor is also the input to
+[`klt lef-abstract`](lef-abstract.md) (issue #438, Epic #393 Phase 2
+Capability A), which turns a block's GDS + this descriptor into a LEF
+abstract (`MACRO` block with `PIN`/`OBS` sections) OpenROAD can place as a
+hard macro alongside standard cells (`klt place-and-route`'s
+`request.macros` field). Summary field-by-field mapping (full detail,
+including the pin-geometry drawn/synthesized fallback and the obstruction
+derivation, lives in [`klt lef-abstract`'s own doc](lef-abstract.md#socket-descriptor-to-lef-macro-translation)):
+
+| Socket descriptor field | LEF translation |
+| --- | --- |
+| `outline` | The macro's `ORIGIN 0 0` + `SIZE`. |
+| `pins[]` | One `PIN <name>` block each — `direction`/`use` from the descriptor when given, else a documented name-based heuristic; `PORT` geometry from real drawn metal at the pin's position, else a synthesized placeholder box. |
+| `reserved_layers[]` | **Not translated** — describes layers reserved *for the integrator*, the opposite of a macro's own `OBS`. |
+| `budgets[]` | **Not translated** — no LEF representation for an unverified interface budget. |
+| (everything else drawn, on a routing-type layer) | `OBS`, per LEF layer. |
+
+`klt socket-check` itself never emits LEF — this section exists so a reader
+of one descriptor understands both consumers without cross-referencing two
+documents from scratch.
 
 ## Checks
 

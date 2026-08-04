@@ -115,11 +115,37 @@ specific constants this module owns directly (:data:`_CTS_BUFFER_CELLS`,
 this module shells out to, reads, or requires an ORFS checkout.
 
 Deliberately out of scope for this v1 (a core-only block, matching the
-contract's own IO-ring/footprint exclusion): macro placement, tapcell
-insertion, power-grid generation (PDN), metal fill, and a
-``DONT_USE_CELLS``-style cell exclusion list -- none of these are part of
-the request/response contract this phase implements, and can be added later
-as additive request fields without a contract-shape change.
+contract's own IO-ring/footprint exclusion): tapcell insertion, power-grid
+generation (PDN), metal fill, and a ``DONT_USE_CELLS``-style cell exclusion
+list -- none of these are part of the request/response contract this phase
+implements, and can be added later as additive request fields without a
+contract-shape change.
+
+Hard-macro placement (issue #438, Epic #393 Phase 2 Capability A)
+--------------------------------------------------------------------
+
+The v1 docstring above originally scoped *macro placement* out entirely;
+this is the additive request field that closes that gap, exactly per its
+own note ("can be added later as additive request fields"). An optional
+``request.macros`` array names hard-macro instances (e.g. a LEF abstract
+:mod:`klayout_tools.lef_abstract` emitted from an analog block) to fix at a
+caller-given location during the ``"floorplan"`` stage, via OpenROAD's own
+``place_macro -macro_name <instance> -location {x y} -orientation
+<orientation>`` Tcl command (verified live against a real
+``openroad/orfs`` container, ``help place_macro``'s own usage string) --
+never OpenROAD's automatic macro placer (``rtl_macro_placer``), since a
+socket-driven macro's location is a caller decision, not an optimization.
+Each macro's LEF is ``read_lef``'d alongside the tech/cell LEF, before
+``read_verilog``/``link_design`` (LEF must be loaded before the netlist that
+references it structurally); the RTL's own top module must instantiate a
+module whose name matches the macro LEF's own ``MACRO`` name, with a
+matching port list, for ``link_design`` to resolve the instance's physical
+view. An optional per-macro ``gds`` field also merges the macro's own GDS
+view into the final ``gds_path`` output (mirroring the standard-cell GDS
+merge below) -- when omitted, the DEF->GDS merge tolerates that instance's
+cell being empty (a caller using this field purely for the DEF-level
+placement/obstruction verification this issue's acceptance criteria call
+for does not need to supply one).
 """
 
 from __future__ import annotations
@@ -131,6 +157,7 @@ import subprocess
 from typing import Any
 
 from ._provenance import build_provenance
+from .lef_header import read_lef_header
 from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -145,6 +172,13 @@ SUPPORTED_ENGINES = ("openroad",)
 #: The four stages ``target_stage`` names, in execution order -- see this
 #: module's own docstring "Stage granularity and invocation shape".
 STAGE_ORDER = ("floorplan", "place", "cts", "route")
+
+#: Valid ``request.macros[].orientation`` values -- OpenROAD's own
+#: orientation vocabulary (the same set ``place_macro``/``place_cell``
+#: accept), matching LEF's ``ORIENT`` enumeration.
+_MACRO_ORIENTATIONS = frozenset(
+    {"R0", "R90", "R180", "R270", "MX", "MY", "MXR90", "MYR90"}
+)
 
 #: Fields the floorplan spec's three mutually-exclusive methods each need,
 #: used both to select the ``initialize_floorplan``/``read_def`` Tcl branch
@@ -305,6 +339,7 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
+    macros = _validate_macros(request.get("macros"), request_dir)
     clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
@@ -377,6 +412,7 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
             hdl_toplevel=hdl_toplevel,
             floorplan=floorplan,
             io_spec=io_spec,
+            macros=macros,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
             cell_library=cell_library,
@@ -413,6 +449,7 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
             pdk_info=pdk_info,
             cell_library=cell_library,
             hdl_toplevel=hdl_toplevel,
+            macros=macros,
             out_path=gds_path,
         )
     else:
@@ -447,6 +484,16 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
         "seed": seed,
         **top_metrics,
         "stages": stages,
+        "macros": [
+            {
+                "instance": macro["instance"],
+                "lef": macro["lef"],
+                "x_um": macro["x_um"],
+                "y_um": macro["y_um"],
+                "orientation": macro["orientation"],
+            }
+            for macro in macros
+        ],
         "def_path": def_path,
         "gds_path": gds_path,
         "provenance": provenance,
@@ -539,6 +586,90 @@ def _validate_io(io_spec: Any) -> dict[str, str] | None:
             "request.io.layer_h/layer_v must both be non-empty strings"
         )
     return {"layer_h": layer_h, "layer_v": layer_v}
+
+
+def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+    """Validate the optional ``request.macros`` array (issue #438). Each
+    entry fixes one hard-macro instance at a caller-given location during
+    the ``"floorplan"`` stage -- see this module's docstring "Hard-macro
+    placement" section. Returns ``[]`` when the field is omitted/``None``
+    (unchanged behavior -- purely additive)."""
+    if macros is None:
+        return []
+    if not isinstance(macros, list):
+        raise PlaceAndRouteError("request.macros must be a list")
+
+    validated: list[dict[str, Any]] = []
+    for i, macro in enumerate(macros):
+        if not isinstance(macro, dict):
+            raise PlaceAndRouteError(f"request.macros[{i}] must be an object")
+
+        instance = macro.get("instance")
+        if not isinstance(instance, str) or not instance:
+            raise PlaceAndRouteError(
+                f"request.macros[{i}].instance is required and must be a "
+                "non-empty string"
+            )
+
+        lef = macro.get("lef")
+        if not isinstance(lef, str) or not lef:
+            raise PlaceAndRouteError(
+                f"request.macros[{i}].lef is required and must be a non-empty string"
+            )
+        lef_path = lef if os.path.isabs(lef) else os.path.join(request_dir, lef)
+        if not os.path.isfile(lef_path):
+            raise PlaceAndRouteError(f"request.macros[{i}].lef not found: {lef}")
+        macro_cells = read_lef_header(lef_path)["macros"]
+        if len(macro_cells) != 1:
+            raise PlaceAndRouteError(
+                f"request.macros[{i}].lef '{lef}' must declare exactly one MACRO "
+                f"(found {len(macro_cells)})"
+            )
+        macro_cell_name = macro_cells[0]["name"]
+
+        for key in ("x_um", "y_um"):
+            if not isinstance(macro.get(key), (int, float)) or isinstance(
+                macro.get(key), bool
+            ):
+                raise PlaceAndRouteError(
+                    f"request.macros[{i}].{key} is required and must be a number"
+                )
+
+        orientation = macro.get("orientation", "R0")
+        if orientation not in _MACRO_ORIENTATIONS:
+            raise PlaceAndRouteError(
+                f"request.macros[{i}].orientation must be one of: "
+                + ", ".join(sorted(_MACRO_ORIENTATIONS))
+            )
+
+        gds = macro.get("gds")
+        gds_path: str | None = None
+        if gds is not None:
+            if not isinstance(gds, str) or not gds:
+                raise PlaceAndRouteError(
+                    f"request.macros[{i}].gds must be a non-empty string when given"
+                )
+            gds_path = gds if os.path.isabs(gds) else os.path.join(request_dir, gds)
+            if not os.path.isfile(gds_path):
+                raise PlaceAndRouteError(f"request.macros[{i}].gds not found: {gds}")
+
+        validated.append(
+            {
+                "instance": instance,
+                "lef": os.path.abspath(lef_path),
+                "cell_name": macro_cell_name,
+                "x_um": float(macro["x_um"]),
+                "y_um": float(macro["y_um"]),
+                "orientation": orientation,
+                "gds": gds_path,
+            }
+        )
+
+    instances = [m["instance"] for m in validated]
+    if len(instances) != len(set(instances)):
+        raise PlaceAndRouteError("request.macros[].instance values must be unique")
+
+    return validated
 
 
 def _validate_constraints(constraints: Any) -> tuple[str | None, float | None]:
@@ -774,6 +905,7 @@ def _stage_script_lines(
     hdl_toplevel: str,
     floorplan: dict[str, Any],
     io_spec: dict[str, str] | None,
+    macros: list[dict[str, Any]],
     clock_port: str | None,
     clock_period_ns: float | None,
     cell_library: str,
@@ -784,16 +916,35 @@ def _stage_script_lines(
         # `create_clock` (`_clock_lines`) must come after `link_design` --
         # see that helper's own docstring; `read_liberty` itself is read
         # ahead of the design load, matching ORFS's own `load.tcl` order
-        # (liberty -> LEF -> verilog -> link_design -> SDC/clock).
+        # (liberty -> LEF -> verilog -> link_design -> SDC/clock). Macro
+        # LEFs (issue #438) are read alongside the tech/cell LEF, before
+        # `read_verilog` -- `link_design` needs every macro's physical view
+        # already loaded to resolve the netlist's own macro instances.
         lines = [
             f"read_liberty {liberty_path}",
             f"read_lef {tech_lef}",
             f"read_lef {cell_lef}",
+        ]
+        lines += [f"read_lef {macro['lef']}" for macro in macros]
+        lines += [
             f"read_verilog {netlist_path}",
             f"link_design {hdl_toplevel}",
         ]
         lines += _clock_lines(clock_port, clock_period_ns)
         lines += _floorplan_init_lines(floorplan)
+        # `place_macro` fixes each declared hard-macro instance at its
+        # caller-given location -- must run after the floorplan's own die/
+        # core area is initialized (a location outside the die is invalid)
+        # and after `link_design` (the instance must already exist in the
+        # linked network). Never OpenROAD's automatic macro placer
+        # (`rtl_macro_placer`): a socket-driven macro's location is a
+        # caller decision, not something to optimize away.
+        lines += [
+            f"place_macro -macro_name {macro['instance']} "
+            f"-location {{{macro['x_um']} {macro['y_um']}}} "
+            f"-orientation {macro['orientation']} -exact"
+            for macro in macros
+        ]
         lines += ["make_tracks"]
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {checkpoint_out}"]
@@ -1020,6 +1171,7 @@ def _merge_def_to_gds(
     pdk_info: dict[str, Any],
     cell_library: str,
     hdl_toplevel: str,
+    macros: list[dict[str, Any]],
     out_path: str,
 ) -> None:
     """Merge the routed DEF with the resolved standard-cell GDS view into a
@@ -1027,6 +1179,18 @@ def _merge_def_to_gds(
     section 4) onto this repo's ``klayout.db`` package, in-process. Never
     shells out to a ``klayout`` binary (matching ``klt drc``'s existing
     in-process ``pya`` posture).
+
+    ``macros`` (issue #438) additionally merges each hard macro's own GDS
+    view (when its request entry declared one via ``gds``) alongside the
+    standard-cell GDS view, keyed by the macro's own LEF ``MACRO`` name
+    (``macro["cell_name"]``, resolved once at request-validation time via
+    :func:`klayout_tools.lef_header.read_lef_header` -- the DEF reader
+    creates one cell per distinct macro reference, named after its LEF
+    ``MACRO``, exactly like a standard cell). A macro with no declared
+    ``gds`` is exempted from the "missing (unmatched) cell" check below
+    instead -- an abstract-only macro instance (this issue's own DEF-level
+    placement/obstruction verification does not need a real GDS view) is
+    expected to stay empty, not an error.
     """
     import klayout.db as kdb
 
@@ -1035,7 +1199,7 @@ def _merge_def_to_gds(
 
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
-    lefdef_config.lef_files = [tech_lef, cell_lef]
+    lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
     if layer_map is not None:
         lefdef_config.map_file = layer_map
 
@@ -1069,12 +1233,32 @@ def _merge_def_to_gds(
             f"could not read standard-cell GDS view '{cell_gds}' for GDS merge: {exc}"
         ) from exc
 
+    for macro in macros:
+        if macro["gds"] is None:
+            continue
+        try:
+            main_layout.read(macro["gds"])
+        except Exception as exc:
+            raise PlaceAndRouteError(
+                f"could not read macro GDS view '{macro['gds']}' for GDS merge: {exc}"
+            ) from exc
+
     top_only = kdb.Layout()
     top_only.dbu = main_layout.dbu
     top = top_only.create_cell(hdl_toplevel)
     top.copy_tree(main_layout.cell(hdl_toplevel))
 
-    missing = sorted(cell.name for cell in top_only.each_cell() if cell.is_empty())
+    # Abstract-only macro instances (no `gds` declared) are expected to stay
+    # empty -- exempt their own LEF MACRO cell name from the missing-cell
+    # check, mirroring the VIA_/_DEF_FILL exemption above.
+    abstract_only_macro_cells = {
+        macro["cell_name"] for macro in macros if macro["gds"] is None
+    }
+    missing = sorted(
+        cell.name
+        for cell in top_only.each_cell()
+        if cell.is_empty() and cell.name not in abstract_only_macro_cells
+    )
     if missing:
         raise PlaceAndRouteError(
             "DEF/GDS merge produced empty (unmatched) cells: "

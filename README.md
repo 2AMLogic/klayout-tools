@@ -95,6 +95,7 @@ klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) 
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
+klt lef-abstract design.gds --socket socket.json --macro-name m --cell-library sky130_fd_sc_hd  # layout+socket -> LEF MACRO abstract
 klt report result.json                   # render a klt JSON report as markdown summary
 klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone table + plot
 ```
