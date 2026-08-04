@@ -34,9 +34,9 @@ mark layer (127/5, see ``gf180mcu.py``). But the *only* rule in
 
 — a compatibility exclusion between two unrelated process layers (``dnwell``,
 the deep-nwell triple-well isolation layer at 64/18, is a *different* layer
-from ``nwell.drawing`` at 64/20, and is not drawn by this curated deck or by
-``bjt_array``'s sky130 output, whose ``well`` role is ``None``). It is not a
-separation/spacing rule protecting
+from ``nwell.drawing`` at 64/20, and is drawn neither by this curated deck nor
+by ``bjt_array``'s sky130 output). It is not a separation/spacing rule
+protecting
 the bipolar device from unrelated diffusion/tap the way gf180mcu's
 ``BJT.3`` (``bjt.separation.comp.1`` below) is, and its "must never overlap
 at all" semantics have no representation among the check kinds this
@@ -48,9 +48,18 @@ under that check kind would silently pass every layout rather than flag
 anything. Conclusion: sky130's official DRC deck has no analogue to
 gf180mcu's ``BJT.3`` bipolar device-mark separation rule; sky130's vertical
 PNP device relies on ``pnp.drawing`` for LVS/device-recognition purposes
-only, not DRC-level mark/separation checking. No rule was added here, and
-``_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`` in ``klayout_tools.gen`` remains
-``None`` accordingly.
+only, not DRC-level mark/separation checking. No rule was added here.
+
+Correction (issue #432): that negative finding stands as a *DRC* statement,
+but the conclusion originally drawn from it -- that
+``_PDK_ROLE_LAYERS["sky130"]["bjt_mark"]`` in ``klayout_tools.gen`` should
+therefore stay ``None`` -- did not. DRC is not the only consumer of a
+device-mark layer: ``EXTRACTION_DECK.bipolars`` below keys its ``pnp`` device
+off ``pnp.drawing``, so a generator that skipped the layer emitted output this
+repo's own ``klt extract`` recognised as *zero* devices. The role now resolves
+to ``(82, 44)``, mirroring the same correction issue #369 made for
+``res_mark``; the role's presence tracks "some curated deck keys off this
+layer", not "a curated DRC rule checks it".
 
 Follow-up (issue #223): ``pnp.drawing`` (82/44) is now consumed for exactly
 that LVS/device-recognition purpose -- ``EXTRACTION_DECK.bipolars`` below

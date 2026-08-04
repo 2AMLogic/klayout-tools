@@ -240,12 +240,27 @@ vertical-bipolar devices, with `dummy` flanking columns each side. Each unit
 device is an emitter diffusion pad beside a base-tie diffusion pad (each with
 a contact and a covering local-metal pad); all units share **one** base well
 (drawn on both `sky130` and `gf180mcu` — see `guard_ring` above for the
-well-layer numbers), are surrounded by a single collector guard ring, and —
-on PDK families whose curated deck checks a bipolar device-mark layer — are
-covered by that mark layer (gf180mcu's `DRC_BJT`, which its
-`bjt.separation.comp.1` / `BJT.3` rule keys off; sky130's curated deck has no
-bipolar mark-layer rule, so no mark is drawn there and a `drc_hints.notes`
-entry says so).
+well-layer numbers) and are surrounded by a single collector guard ring.
+
+Each unit additionally carries two device-recognition roles, so the output
+extracts as real bipolar devices rather than inert geometry (issue #432):
+
+- a **device-mark box over its emitter pad only** (gf180mcu's `DRC_BJT`
+  127/5, which its `bjt.separation.comp.1` / `BJT.3` DRC rule keys off;
+  sky130's `pnp.drawing` 82/44, which no sky130 DRC rule checks but its
+  *extraction* deck's `pnp` device keys off — the same "draw what extraction
+  needs" rule `res_array`'s resistor marker follows). The mark is per unit and
+  never covers the base-tie pad: `klt extract` derives `base = well & marker`
+  and `emitter = active & base`, so one array-wide mark box would make the
+  whole well a single base and every pad inside it an emitter.
+- a **`tap`-role shape over its base-tie contact** (sky130 `tap.drawing`
+  65/44; on gf180mcu the tap role *is* `Comp`), so the base terminal resolves
+  through `well → tap → contact → metals` to a real net instead of a floating
+  anonymous node.
+
+Dummy units are drawn identically to real ones, marker included, so
+`klt extract` recognises `rows * (cols + 2 * dummy)` devices — more than the
+response's `device_count`, which counts only the non-dummy array.
 
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when
@@ -503,6 +518,12 @@ $ klt gen diff_pair --params '{"mirror": true, "splits": 2}' \
 # then verify it's DRC-clean including the bipolar mark-layer rule:
 $ klt gen bjt_array --pdk gf180mcuD -o output/bjt_array.gds --format json
 $ klt drc output/bjt_array.gds --deck gf180mcu
+
+# The same array on sky130, extracted back into a netlist -- one `pnp` per
+# drawn unit device (dummies included), each with a real base net:
+$ klt gen bjt_array --params '{"rows": 2, "cols": 2, "dummy": 0}' \
+    --pdk sky130A --cell-name bjt_q -o output/bjt_sky130.gds --format json
+$ klt extract output/bjt_sky130.gds --deck sky130 --top bjt_q --format json
 ```
 
 ## See also

@@ -253,7 +253,24 @@ via `nwell → well_label`):
 - **sky130** *does* declare `tap` (65/44, distinct from `diff.drawing`) and
   `well_label` (64/5), so its base terminal resolves correctly through
   `nwell → tap → contact → metals` and picks up its real pin name via the
-  `nwell` label — sky130's BJT base is **not** floating.
+  `nwell` label — sky130's BJT base is **not** floating, *provided the layout
+  draws a tap over the base tie*. That proviso is load-bearing: until issue
+  #432, `klt gen bjt_array`'s own sky130 output drew its base tie on
+  `diff.drawing` with no tap at all, so its base stayed anonymous even though
+  the deck supports resolving it. `bjt_array` now draws a per-unit `tap`
+  shape over each base-tie contact for exactly this reason.
+
+**Degenerate bipolar geometry.** A `BipolarDevice` with no drawn `collector`
+layer (both curated decks' vertical bipolars) forms its collector terminal
+from the base area left *outside* the emitter. A device-mark layer drawn
+exactly coincident with the emitter pad leaves none — `base = nwell & marker`
+then equals `emitter = diff & base` — and KLayout's
+`DeviceExtractorBJT3Transistor` cannot form the `C` terminal. `klt extract`
+diagnoses that case up front and fails with the documented error envelope
+("...no base area is left outside the emitter for this deck's substrate
+collector; grow the device-mark layer so the base strictly encloses the
+emitter"), rather than letting the engine's raw `RuntimeError` escape as a
+traceback (issue #432).
 
 A code fix — adding `base_via`/`base_via_metal` fields to `BipolarDevice`
 (analogous to the `CapacitorDevice.top_plate_via`/`top_plate_via_metal`
@@ -1045,7 +1062,7 @@ consume.
 | Code | Meaning                                                                                          |
 | ---- | --------------------------------------------------------------------------------------------------- |
 | `0`  | Extraction succeeded, netlist written.                                                              |
-| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error. |
+| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, degenerate device geometry the deck's extractors cannot form a device from (see "Degenerate bipolar geometry" above), or an engine error. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.                               |
 
 There is no exit code `3` — unlike `klt drc`/`klt lvs`, there is no "ran but

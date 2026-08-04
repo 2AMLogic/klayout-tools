@@ -1615,8 +1615,37 @@ def test_phase2_generator_rejects_unsupported_pdk_family(tmp_path, generator_nam
 # --------------------------------------------------------------------------- #
 
 #: gf180mcu's DRC_BJT device-mark layer (the `bjt.separation.comp.1` rule keys
-#: off it); sky130's curated deck has no bipolar mark layer.
+#: off it) and sky130's `pnp.drawing` counterpart (no DRC rule checks it, but
+#: sky130's *extraction* deck keys its `pnp` device off it -- issue #432).
 _DRC_BJT_LAYER = (127, 5)
+_SKY130_BJT_MARK_LAYER = (82, 44)
+#: sky130's `tap.drawing` -- distinct from `diff.drawing`, unlike gf180mcu
+#: whose `tap` role is the shared `Comp` layer.
+_SKY130_TAP_LAYER = (65, 44)
+
+
+def _unit_ports(report, suffix: str):
+    """`bjt_array`'s per-unit-device ports (`Q<i>_E`/`Q<i>_B`), excluding the
+    collector ring's `COLL_*` ports (whose `COLL_E` would match a bare `_E`
+    suffix test)."""
+    return [
+        p
+        for p in report["ports"]
+        if p["name"].startswith("Q") and p["name"].endswith(suffix)
+    ]
+
+
+def _port_probe(layout, port, half_dbu: int = 10):
+    """A small square `Region` centred on ``port``'s reported location -- a
+    point probe for "does layer X cover this port?" assertions (a truly
+    degenerate box would boolean-AND to empty against anything)."""
+    import klayout.db as kdb
+
+    cx = round(port["x_um"] / layout.dbu)
+    cy = round(port["y_um"] / layout.dbu)
+    return kdb.Region(
+        kdb.Box(cx - half_dbu, cy - half_dbu, cx + half_dbu, cy + half_dbu)
+    )
 
 
 def test_list_generators_bjt_array_params_schema():
@@ -1733,12 +1762,14 @@ def test_bjt_array_gf180_draws_drc_bjt_mark_layer(tmp_path, both_pdk_root):
     assert report["drc_hints"]["notes"] == []
 
 
-def test_bjt_array_sky130_omits_mark_but_draws_well(tmp_path, both_pdk_root):
-    """sky130's curated deck checks no bipolar mark layer, so the generator
-    omits it and surfaces that in-band via `drc_hints.notes` (the fidelity
-    caveat from the design note) -- but sky130's `well` layer role is real
-    (see issue #208's root-cause correction), so the shared base well *is*
-    now drawn there, same as gf180mcu."""
+def test_bjt_array_sky130_draws_pnp_mark_tap_and_well(tmp_path, both_pdk_root):
+    """sky130 draws its own bipolar device-recognition mark (`pnp.drawing`,
+    82/44) even though no curated *DRC* rule checks that layer: its
+    **extraction** deck keys off it, and without it `klt extract` reports zero
+    devices for this generator's own output (issue #432, same resolution as
+    #369's `res_mark`). The base-tie well tap (`tap.drawing`, 65/44) and the
+    shared base well (`nwell.drawing`, 64/20 -- see issue #208's root-cause
+    correction) are drawn too, so no missing-role note is emitted at all."""
     import klayout.db as kdb
 
     output = tmp_path / "bjt_sky130.gds"
@@ -1755,11 +1786,100 @@ def test_bjt_array_sky130_omits_mark_but_draws_well(tmp_path, both_pdk_root):
         (layout.get_info(i).layer, layout.get_info(i).datatype)
         for i in layout.layer_indexes()
     }
-    assert _DRC_BJT_LAYER not in present  # no bipolar mark on sky130
-    assert (64, 20) in present  # shared base well IS drawn (sky130 nwell.drawing)
+    assert _SKY130_BJT_MARK_LAYER in present  # pnp.drawing device mark
+    assert _SKY130_TAP_LAYER in present  # base-tie well tap
+    assert (64, 20) in present  # shared base well (sky130 nwell.drawing)
+    assert _DRC_BJT_LAYER not in present  # gf180mcu's mark layer stays gf180-only
     notes = report["drc_hints"]["notes"]
-    assert any("device-mark" in n for n in notes)
+    assert not any("device-mark" in n for n in notes)
     assert not any("well" in n for n in notes)
+
+
+@pytest.mark.parametrize(
+    ("variant", "mark_layer"),
+    [("sky130A", _SKY130_BJT_MARK_LAYER), ("gf180mcuD", _DRC_BJT_LAYER)],
+)
+def test_bjt_array_mark_is_per_unit_and_covers_only_the_emitter(
+    tmp_path, both_pdk_root, variant, mark_layer
+):
+    """The device mark is drawn once **per unit device**, enclosing that
+    unit's emitter pad only -- never its base-tie pad, and never as one
+    array-wide box coincident with the shared well (issue #432). Extraction
+    derives `base = well & marker` and `emitter = active & base`: an
+    array-level box would make the whole well one base and every diffusion pad
+    inside it -- base ties included -- an emitter, which is not the topology
+    this array draws.
+
+    Checked on a multi-row/multi-column array with dummies, so a marker
+    leaking into a *neighbouring* unit's pads would fail too."""
+    import klayout.db as kdb
+
+    rows, cols, dummy = 2, 3, 1
+    output = tmp_path / f"bjt_mark_{variant}.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {
+                "rows": rows,
+                "cols": cols,
+                "dummy": dummy,
+                "topology": "array",
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    marks = kdb.Region(top.begin_shapes_rec(layout.layer(*mark_layer))).merged()
+
+    # One disjoint mark box per drawn unit device -- dummies included (they are
+    # structurally real unit devices, like `res_array`'s marked dummies).
+    assert marks.count() == rows * (cols + 2 * dummy)
+
+    # `Q<i>_E`/`Q<i>_B` are the unit-device ports; `COLL_*` are the collector
+    # ring's (and `COLL_E` would otherwise match an `_E` suffix test).
+    emitters = _unit_ports(report, "_E")
+    bases = _unit_ports(report, "_B")
+    assert len(emitters) == rows * cols
+    assert len(bases) == rows * cols
+
+    for port in emitters:
+        assert not (marks & _port_probe(layout, port)).is_empty(), port["name"]
+    for port in bases:
+        # No mark box reaches a base-tie contact (its own unit's or a
+        # neighbour's).
+        assert (marks & _port_probe(layout, port)).is_empty(), port["name"]
+
+
+def test_bjt_array_sky130_tap_covers_base_tie_not_emitter(tmp_path, pdk_root):
+    """Each unit's base-tie contact carries a `tap`-role shape so the base
+    terminal resolves to a real net (`nwell -> tap -> contact -> metals`); the
+    emitter pad carries none (issue #432). Asserted on sky130, whose `tap`
+    role is a distinct layer (65/44) -- on gf180mcu `tap` *is* the `active`
+    (COMP) role, so the two roles are geometrically indistinguishable there."""
+    import klayout.db as kdb
+
+    output = tmp_path / "bjt_tap.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"rows": 1, "cols": 2, "dummy": 0, "topology": "array"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    taps = kdb.Region(top.begin_shapes_rec(layout.layer(*_SKY130_TAP_LAYER))).merged()
+    assert taps.count() == 2  # one per unit device
+
+    for port in _unit_ports(report, "_B"):
+        assert not (taps & _port_probe(layout, port)).is_empty(), port["name"]
+    for port in _unit_ports(report, "_E"):
+        assert (taps & _port_probe(layout, port)).is_empty(), port["name"]
 
 
 def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):

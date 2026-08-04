@@ -1264,6 +1264,46 @@ def _detect_unmodelled_poly_bodies(
     return warnings, unmodelled_poly
 
 
+def _reject_degenerate_substrate_bipolar(
+    bipolar: BipolarDevice,
+    bipolar_base: kdb.Region,
+    bipolar_emitter: kdb.Region,
+) -> None:
+    """Raise a clean :class:`ExtractError` for bipolar geometry KLayout's
+    ``DeviceExtractorBJT3Transistor`` cannot form a substrate collector from
+    (issue #432).
+
+    A :class:`~klayout_tools.decks.BipolarDevice` with no drawn ``collector``
+    layer models a vertical device whose collector *is* the substrate: the
+    extractor forms the ``C`` terminal from the base area left **outside** the
+    emitter. When a base region is entirely covered by its own emitter -- what
+    a device-mark layer drawn exactly coincident with the emitter pad produces,
+    since both curated decks derive ``base = well & marker`` and
+    ``emitter = active & base`` -- no such area exists, and
+    ``LayoutToNetlist.extract_netlist`` aborts with a raw ``RuntimeError``
+    ("Terminal 'C' ... isn't connected"). Diagnosing it here turns that into
+    the documented error envelope with an actionable message, before the
+    cryptic engine-level failure can surface.
+    """
+    import klayout.db as kdb
+
+    degenerate = 0
+    for polygon in bipolar_base.merged().each():
+        if (kdb.Region(polygon) - bipolar_emitter).is_empty():
+            degenerate += 1
+    if not degenerate:
+        return
+    region_word = "region" if degenerate == 1 else "regions"
+    raise ExtractError(
+        f"bipolar device '{bipolar.class_name}': {degenerate} base {region_word} "
+        f"(layer {bipolar.base[0]}/{bipolar.base[1]} & marker "
+        f"{bipolar.marker[0]}/{bipolar.marker[1]}) fully covered by the emitter "
+        f"(layer {bipolar.emitter[0]}/{bipolar.emitter[1]}) -- no base area is "
+        "left outside the emitter for this deck's substrate collector terminal; "
+        "grow the device-mark layer so the base strictly encloses the emitter"
+    )
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -1534,6 +1574,9 @@ def _extract_netlist(
             bipolar_collector = kdb.Region()
         l2n.register(bipolar_collector, f"{bipolar.class_name}_collector")
 
+        if bipolar.collector is None:
+            _reject_degenerate_substrate_bipolar(bipolar, bipolar_base, bipolar_emitter)
+
         bjt_extractor = kdb.DeviceExtractorBJT3Transistor(bipolar.class_name)
         l2n.extract_devices(
             bjt_extractor,
@@ -1708,7 +1751,15 @@ def _extract_netlist(
         else:
             l2n.connect_global(bipolar_collector, deck.substrate_net)
 
-    l2n.extract_netlist()
+    # Backstop for any *other* engine-level failure the checks above do not
+    # anticipate: `docs/cli/extract.md` promises a clean stderr message and
+    # exit 1 ("No Python traceback is printed"), so a raw KLayout
+    # `RuntimeError` escaping here would break the documented CLI contract
+    # (issue #432).
+    try:
+        l2n.extract_netlist()
+    except RuntimeError as exc:
+        raise ExtractError(f"netlist extraction failed: {exc}") from exc
     netlist = l2n.netlist()
 
     # Flat extraction (`begin_shapes_rec`) means `make_top_level_pins()` would

@@ -752,6 +752,184 @@ def test_gf180mcu_bjt_base_contact_ring_extracts_one_device(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# `klt gen bjt_array` -> `klt extract` round trip (issue #432)
+# --------------------------------------------------------------------------- #
+
+
+def _gen_bjt_array(
+    tmp_path, name: str, variant: str = "sky130A", **params
+) -> tuple[str, dict]:
+    """Generate a `bjt_array` and return its GDS path + the `klt gen` response
+    (whose `ports[]` locate each unit's emitter/base pads)."""
+    from klayout_tools.gen import generate
+
+    root = tmp_path / f"pdk_{name}"
+    (root / variant / "libs.tech").mkdir(parents=True)
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": params,
+            "options": {"output": str(output), "cell_name": name},
+        }
+    )
+    return str(output), report
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "device_class"),
+    [("sky130A", "sky130", "pnp"), ("gf180mcuD", "gf180mcu", "bjt")],
+)
+@pytest.mark.parametrize(("rows", "cols", "dummy"), [(1, 1, 0), (2, 3, 0), (2, 2, 1)])
+def test_gen_bjt_array_extracts_one_device_per_drawn_unit(
+    tmp_path, variant, deck, device_class, rows, cols, dummy
+):
+    """The end-to-end acceptance bar from issue #432: `klt gen bjt_array`'s own
+    output, run through (unmodified) `klt extract`, must recognise one bipolar
+    device per drawn unit -- not `device_count: 0`, which is what a generator
+    drawing no bipolar device-recognition marker produced on sky130.
+
+    Dummy columns are structurally identical unit devices (drawn with the same
+    marker, mirroring `res_array`'s marked dummies), so they extract as devices
+    too: the expected count is every drawn unit, `rows * (cols + 2 * dummy)`,
+    not the response's dummy-excluding `device_count`. A marker that leaked
+    onto the base-tie pads would push the count *above* that."""
+    path, report = _gen_bjt_array(
+        tmp_path,
+        f"bjt_{rows}x{cols}_d{dummy}",
+        variant=variant,
+        rows=rows,
+        cols=cols,
+        dummy=dummy,
+        topology="array",
+    )
+    assert report["device_count"] == rows * cols
+
+    extracted = run_extract(path, deck, output=str(tmp_path / "bjt.spice"))
+
+    drawn_units = rows * (cols + 2 * dummy)
+    assert extracted["device_count"] == drawn_units
+    assert extracted["device_counts"] == {device_class: drawn_units}
+    for device in extracted["devices"]:
+        assert device["class"] == device_class
+        # Collector = substrate (neither deck's bipolar declares a collector
+        # layer -- the vertical device's collector is the substrate itself).
+        assert device["nets"]["c"] == get_extraction_deck(deck).substrate_net
+
+
+def test_gen_bjt_array_base_tie_tap_resolves_the_base_net(tmp_path):
+    """The base-tie `tap` shape (65/44) is load-bearing, not cosmetic: it wires
+    the shared nwell base through `nwell -> tap -> contact -> metals`, so a pin
+    label dropped on a unit's base-tie metal pad names the extracted base
+    terminal. Without the tap, the base stays an anonymous node disconnected
+    from that pad (issue #432, `docs/cli/extract.md`'s "Base-terminal net
+    resolution")."""
+    path, report = _gen_bjt_array(
+        tmp_path, "bjt_tap", rows=1, cols=1, dummy=0, topology="array"
+    )
+    base_port = next(p for p in report["ports"] if p["name"] == "Q0_B")
+
+    layout = kdb.Layout()
+    layout.read(path)
+    cell = layout.cell("bjt_tap")
+    cell.shapes(layout.layer(67, 5)).insert(  # li1.pin
+        kdb.Text(
+            "BASE",
+            kdb.Trans(
+                kdb.Vector(
+                    round(base_port["x_um"] / layout.dbu),
+                    round(base_port["y_um"] / layout.dbu),
+                )
+            ),
+        )
+    )
+    # Written without PCell context info: `generate()` registers the reference
+    # PCell library in this process, so a GDS carrying context info would have
+    # its geometry *regenerated* from the PCell on read -- silently undoing the
+    # control's layer strip below.
+    plain_gds = kdb.SaveLayoutOptions()
+    plain_gds.write_context_info = False
+    labelled = str(tmp_path / "bjt_tap_labelled.gds")
+    layout.write(labelled, plain_gds)
+
+    (device,) = run_extract(labelled, "sky130", output=str(tmp_path / "bjt_tap.spice"))[
+        "devices"
+    ]
+    assert device["nets"]["b"] == "BASE"
+
+    # Control: strip the tap layer and the same label no longer reaches the
+    # base terminal -- proving this assertion tracks the tap, not the label.
+    stripped = kdb.Layout()
+    stripped.read(labelled)
+    stripped.clear_layer(stripped.layer(65, 44))
+    no_tap = str(tmp_path / "bjt_no_tap.gds")
+    stripped.write(no_tap, plain_gds)
+
+    (untapped,) = run_extract(
+        no_tap, "sky130", output=str(tmp_path / "bjt_no_tap.spice")
+    )["devices"]
+    assert untapped["nets"]["b"].startswith("$")  # anonymous, not "BASE"
+
+
+def _make_sky130_coincident_marker_bjt_layout() -> kdb.Layout:
+    """A degenerate vertical-PNP layout: the `pnp.drawing` device mark is
+    drawn *exactly coincident* with the emitter pad, so the derived
+    `base = nwell & marker` equals `emitter = diff & base` and no base area is
+    left outside the emitter for the substrate collector terminal (issue
+    #432). KLayout's `DeviceExtractorBJT3Transistor` aborts on this with a raw
+    `RuntimeError`; `klt extract` must report it through the documented error
+    envelope instead."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(64, 20, kdb.Box(0, 0, 6000, 4000))  # nwell.drawing (base)
+    draw(65, 20, kdb.Box(1000, 1000, 2000, 2000))  # diff.drawing (emitter)
+    draw(82, 44, kdb.Box(1000, 1000, 2000, 2000))  # pnp.drawing, coincident
+    draw(66, 44, kdb.Box(1400, 1400, 1600, 1600))  # licon1 over the emitter
+    draw(67, 20, kdb.Box(1000, 1000, 2000, 2000))  # li1 over the emitter
+    draw(65, 44, kdb.Box(3000, 1000, 4000, 2000))  # tap.drawing (base tie)
+    draw(66, 44, kdb.Box(3400, 1400, 3600, 1600))  # licon1 over the tap
+    draw(67, 20, kdb.Box(3000, 1000, 4000, 2000))  # li1 over the tap
+    return layout
+
+
+def test_coincident_bipolar_marker_raises_clean_extract_error(tmp_path):
+    """A device mark coincident with its emitter is diagnosed as an
+    `ExtractError` with an actionable message -- not the raw KLayout
+    `RuntimeError` ("Terminal 'C' ... isn't connected") it used to surface as
+    (issue #432)."""
+    path = _write_gds(_make_sky130_coincident_marker_bjt_layout(), tmp_path / "deg.gds")
+    with pytest.raises(ExtractError) as exc_info:
+        run_extract(path, "sky130", output=str(tmp_path / "deg.spice"))
+    message = str(exc_info.value)
+    assert "pnp" in message
+    assert "substrate collector" in message
+    assert "Terminal 'C'" not in message  # not the raw engine message
+
+
+def test_cli_coincident_bipolar_marker_exits_one_with_json_error(tmp_path, capsys):
+    """The CLI surface of the case above: exit code 1 and the documented JSON
+    error envelope on stderr, no Python traceback (issue #432,
+    `docs/cli/extract.md`'s "No Python traceback is printed")."""
+    path = str(
+        _write_gds(_make_sky130_coincident_marker_bjt_layout(), tmp_path / "deg.gds")
+    )
+    exit_code = main(["extract", path, "--deck", "sky130", "--format", "json"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    err = json.loads(captured.err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "extract"
+    assert "substrate collector" in err["error"]["message"]
+    assert "Traceback" not in captured.err
+
+
+# --------------------------------------------------------------------------- #
 # MiM capacitor device recognition (issue #225)
 # --------------------------------------------------------------------------- #
 
