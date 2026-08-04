@@ -120,6 +120,11 @@ CATEGORY_NET_MERGED = "net.merged"
 CATEGORY_NET_SPLIT = "net.split"
 CATEGORY_DEVICE_UNMATCHED = "device.unmatched"
 CATEGORY_DEVICE_CLASS = "device.class"
+#: Issue #504: a layout-side and reference-side device class share a name
+#: but declare a different terminal list (e.g. a deck's `*WithBulk` device
+#: extractor's three-terminal resistor class vs. a plain-element reference's
+#: two-terminal one) -- see `_device_class_arity_mismatch`.
+CATEGORY_DEVICE_CLASS_ARITY = "device.class_arity"
 CATEGORY_DEVICE_PROPERTY = "device.property"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
@@ -1318,6 +1323,66 @@ def _mismatch(
     }
 
 
+def _terminal_names(device_class: Any) -> list[str]:
+    """The ordered terminal names ``device_class`` declares (e.g. ``["A",
+    "B", "W"]`` for KLayout's ``DeviceClassResistorWithBulk``) -- the same
+    ``terminal_definitions()`` walk ``_device_body_net_name`` and
+    ``_degraded_param_pair`` already use, factored out for
+    :func:`_device_class_arity_mismatch`."""
+    return [terminal.name for terminal in device_class.terminal_definitions()]
+
+
+def _device_class_arity_mismatch(a: Any, b: Any) -> dict[str, Any] | None:
+    """Issue #504: detect the ``device_mismatch(a, b, msg)`` shape
+    ``NetlistComparer`` emits when a layout device instance and a reference
+    device instance share a device-class *name* but the class registered on
+    each side declares a *different terminal list* -- e.g. the deck's
+    ``DeviceExtractorResistorWithBulk`` writes a three-terminal (``A``/``B``/
+    ``W``) ``RES_X`` class while a plain-element reference SPICE's two-node
+    ``R`` card reads back as a two-terminal (``A``/``B``) ``RES_X`` class.
+
+    Unlike the ordinary one-sided "no counterpart at all" case this
+    function's caller otherwise reports as ``device.unmatched`` (exactly one
+    of ``a``/``b`` is ``None``), the comparer hands this event **both**
+    instances -- it found a same-named class on each side, could not
+    reconcile the terminal count, and gave up pairing them at all (there is
+    no ``match_devices_with_different_device_classes`` event either, since
+    the class *name* agrees; see this module's docstring). Left
+    unclassified, this collapses into an unattributable
+    ``device.unmatched``/``net.unmatched`` cascade that names neither class's
+    terminal list -- the "silent 0/0" this issue reports. Returns ``None``
+    when ``a``/``b`` is missing, the class names differ (a different,
+    already-covered case -- see ``class_mismatches`` above), or the
+    terminal lists already agree (the ordinary both-sided
+    ``device.unmatched`` case, if it ever arises).
+    """
+    if a is None or b is None:
+        return None
+    class_a = a.device_class()
+    class_b = b.device_class()
+    if class_a.name != class_b.name:
+        return None
+    terminals_a = _terminal_names(class_a)
+    terminals_b = _terminal_names(class_b)
+    if terminals_a == terminals_b:
+        return None
+    return _mismatch(
+        CATEGORY_DEVICE_CLASS_ARITY,
+        "error",
+        f"device class '{class_a.name}' is declared with a different "
+        f"terminal list on each side (layout: {terminals_a}, reference: "
+        f"{terminals_b}) -- the comparer cannot pair devices of this class "
+        "at all; see docs/cli/lvs.md, 'device.class_arity'",
+        "both",
+        device={
+            "layout": _name_or_none(a),
+            "reference": _name_or_none(b),
+            "class": class_a.name,
+        },
+        details={"layout_terminals": terminals_a, "reference_terminals": terminals_b},
+    )
+
+
 def _count_devices_of_class(netlist: Any, device_class: Any) -> int:
     """Count device instances of ``device_class`` anywhere in ``netlist``
     (device classes are netlist-scoped, but instances live on individual
@@ -1463,6 +1528,17 @@ def _build_mismatches(
     )
 
     for a, b in logger.device_mismatches:
+        arity_mismatch = _device_class_arity_mismatch(a, b)
+        if arity_mismatch is not None:
+            # Issue #504: both `a`/`b` are present here (the comparer found
+            # a same-named class on each side, it just could not reconcile
+            # the terminal count) -- report the dedicated, terminal-list-
+            # naming category instead of falling into the generic
+            # one-sided-counterpart wording below, which would misdescribe
+            # a same-named-but-different-arity class pair as having "no
+            # counterpart on the other side" at all.
+            mismatches.append(arity_mismatch)
+            continue
         side = "layout" if b is None else "reference"
         class_name = None
         for obj in (a, b):

@@ -1987,13 +1987,30 @@ class _FakeParam:
         return self._id
 
 
+class _FakeTerminal:
+    """Stands in for a `klayout.db.DeviceTerminalDefinition`: `.name` only
+    (the attribute `_terminal_names`/`_device_class_arity_mismatch` read)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
 class _FakeDeviceClass:
-    def __init__(self, name: str, params: list[_FakeParam] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        params: list[_FakeParam] | None = None,
+        terminals: list[str] | None = None,
+    ) -> None:
         self.name = name
         self._params = params or []
+        self._terminals = [_FakeTerminal(t) for t in (terminals or [])]
 
     def parameter_definitions(self) -> list[_FakeParam]:
         return self._params
+
+    def terminal_definitions(self) -> list[_FakeTerminal]:
+        return self._terminals
 
 
 class _FakeDevice:
@@ -2045,6 +2062,43 @@ def test_build_mismatches_device_class_mismatch():
     assert entry["category"] == lvs.CATEGORY_DEVICE_CLASS
     assert entry["severity"] == "error"
     assert entry["side"] == "both"
+    assert entry["device"] == {"layout": "M1", "reference": "M1", "class": "nfet"}
+
+
+def test_build_mismatches_device_class_arity_mismatch():
+    """Issue #504: a `device_mismatch` event carrying *both* device
+    instances, whose classes share a name but declare a different terminal
+    list, reports the dedicated `device.class_arity` category -- not the
+    generic one-sided `device.unmatched` wording -- naming both terminal
+    lists in `details`."""
+    a = _FakeDevice("1", _FakeDeviceClass("RES_X", terminals=["A", "B", "W"]), {})
+    b = _FakeDevice("R1", _FakeDeviceClass("RES_X", terminals=["A", "B"]), {})
+    logger = _FakeLogger()
+    logger.device_mismatches.append((a, b))
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["category"] == lvs.CATEGORY_DEVICE_CLASS_ARITY
+    assert entry["severity"] == "error"
+    assert entry["side"] == "both"
+    assert entry["device"] == {"layout": "1", "reference": "R1", "class": "RES_X"}
+    assert entry["details"] == {
+        "layout_terminals": ["A", "B", "W"],
+        "reference_terminals": ["A", "B"],
+    }
+
+
+def test_build_mismatches_device_unmatched_same_arity_is_unaffected():
+    """A both-sided `device_mismatch` whose classes agree on name *and*
+    terminal list (not this issue's case) falls through to the ordinary
+    `device.unmatched` classification unchanged."""
+    device_class = _FakeDeviceClass("nfet", terminals=["S", "G", "D", "B"])
+    a = _FakeDevice("M1", device_class, {})
+    b = _FakeDevice("M1", device_class, {})
+    logger = _FakeLogger()
+    logger.device_mismatches.append((a, b))
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["category"] == lvs.CATEGORY_DEVICE_UNMATCHED
     assert entry["device"] == {"layout": "M1", "reference": "M1", "class": "nfet"}
 
 
@@ -2520,6 +2574,110 @@ def test_lvs_res_array_dummy_suppression_no_unmatched_device(tmp_path, monkeypat
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 4, "reference": 4, "matched": 4}
     assert not any(m["category"] == "device.unmatched" for m in report["mismatches"])
+
+
+# --------------------------------------------------------------------------- #
+# Issue #504: bulk-terminal device class vs. plain-element reference (arity)
+# --------------------------------------------------------------------------- #
+
+# The issue's exact minimal reproduction: a `bulk_to_substrate` resistor
+# flavour's layout-side `R` card carries a third (bulk) node, while a
+# schematic-derived reference's plain-element `R` card for the same model
+# name carries only the two ordinary terminals.
+_RES_BULK_LAYOUT_SPICE = """
+.SUBCKT top A B BULK
+R1 A B BULK 1000 res_x
+.ENDS top
+"""
+
+_RES_PLAIN_REFERENCE_SPICE = """
+.SUBCKT top A B
+RR1 A B 1000 res_x
+.ENDS top
+"""
+
+
+def test_lvs_bulk_resistor_vs_plain_reference_reports_class_arity(tmp_path):
+    """Issue #504's own reproduction: previously this collapsed into an
+    unattributable `device.unmatched` + `net.unmatched` cascade with no
+    entry naming the actual cause. Now a dedicated `device.class_arity`
+    entry names both classes' terminal lists."""
+    layout_path = _write(tmp_path / "layout.spice", _RES_BULK_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _RES_PLAIN_REFERENCE_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    arity_entries = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_CLASS_ARITY
+    ]
+    assert len(arity_entries) == 1
+    (entry,) = arity_entries
+    assert entry["severity"] == "error"
+    assert entry["side"] == "both"
+    assert entry["device"] == {"layout": "1", "reference": "R1", "class": "RES_X"}
+    assert entry["details"] == {
+        "layout_terminals": ["A", "B", "W"],
+        "reference_terminals": ["A", "B"],
+    }
+    # Not just a generic device.unmatched entry for this device pair -- the
+    # dedicated category replaces it (see this module's docstring).
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_UNMATCHED
+        and m["device"] == {"layout": "1", "reference": "R1", "class": "RES_X"}
+        for m in report["mismatches"]
+    )
+
+
+def test_lvs_bulk_resistor_arity_mismatch_does_not_collapse_other_matches(tmp_path):
+    """The arity mismatch on one resistor must not collapse the whole
+    compare to `0/0` matched devices/nets -- other, correctly-matched
+    devices elsewhere in the same circuit still report as matched (the
+    issue's acceptance criterion distinguishing this from an unattributable
+    total failure)."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        """
+.SUBCKT top A B BULK VDD VSS
+R1 A B BULK 1000 res_x
+M1 A B VSS VSS nfet W=0.65U L=0.15U
+M2 A B VDD VDD pfet W=1.0U L=0.15U
+.ENDS top
+""",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.SUBCKT top A B VDD VSS
+RR1 A B 1000 res_x
+M1 A B VSS VSS nfet W=0.65U L=0.15U
+M2 A B VDD VDD pfet W=1.0U L=0.15U
+.ENDS top
+""",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {"netlist": reference_path, "top": "top"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["counts"]["devices"]["matched"] == 2
+    assert report["counts"]["nets"]["matched"] >= 2
+    assert any(
+        m["category"] == lvs.CATEGORY_DEVICE_CLASS_ARITY for m in report["mismatches"]
+    )
 
 
 # --------------------------------------------------------------------------- #
