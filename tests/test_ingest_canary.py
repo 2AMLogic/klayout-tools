@@ -404,11 +404,7 @@ def _try_repo_visibility(repo: str) -> str | None:
 @_SKIP_NO_NETWORK
 def test_gate_refuses_real_private_canary(tmp_path):
     repo = next(
-        (
-            r
-            for r in _PRIVATE_CANARY_CANDIDATES
-            if _try_repo_visibility(r) == "private"
-        ),
+        (r for r in _PRIVATE_CANARY_CANDIDATES if _try_repo_visibility(r) == "private"),
         None,
     )
     if repo is None:
