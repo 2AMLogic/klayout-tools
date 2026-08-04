@@ -800,6 +800,9 @@ def manhattan_backbone(
     b: tuple[float, float],
     dir_b_deg: int,
     stub_um: float,
+    *,
+    stub_a_um: float | None = None,
+    stub_b_um: float | None = None,
 ) -> list[tuple[float, float]]:
     """Generate a two-pin Manhattan backbone from port ``a`` to port ``b``.
 
@@ -814,6 +817,11 @@ def manhattan_backbone(
     * both facing along **y**: a single horizontal jog at the midpoint y;
     * mixed (one x, one y): a single corner (an "L").
 
+    ``stub_a_um``/``stub_b_um`` override ``stub_um`` for one port when a
+    longer stub is needed to lift the connecting jog clear of a block the
+    port sits inside (e.g. a gate landing pad recessed below its block's top
+    edge, issue #461); each defaults to ``stub_um``.
+
     Returns the cleaned ordered ``(x, y)`` waypoint list (um). ``pya.Path``
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
@@ -822,8 +830,10 @@ def manhattan_backbone(
     bx, by = b
     va = _DIRECTION_VECTORS[dir_a_deg]
     vb = _DIRECTION_VECTORS[dir_b_deg]
-    sa = (ax + va[0] * stub_um, ay + va[1] * stub_um)
-    sb = (bx + vb[0] * stub_um, by + vb[1] * stub_um)
+    sa_len = stub_um if stub_a_um is None else stub_a_um
+    sb_len = stub_um if stub_b_um is None else stub_b_um
+    sa = (ax + va[0] * sa_len, ay + va[1] * sa_len)
+    sb = (bx + vb[0] * sb_len, by + vb[1] * sb_len)
 
     a_horizontal = va[1] == 0  # port a faces +/-x
     b_horizontal = vb[1] == 0  # port b faces +/-x
@@ -1299,7 +1309,38 @@ def route_two_pin(
                     ),
                 }
 
-    points = manhattan_backbone(a, dir_a, b, dir_b, stub_um)
+    # Recessed same-direction vertical ports (#461): a gate landing pad now
+    # sits *above* its own gate port, so a port facing +y no longer sits on
+    # its block's top edge -- it is inset by the pad's own height. Two such
+    # ports bussed across a row connect through a horizontal jog; left at the
+    # default one-width stub that jog runs at pad height, straight through
+    # both blocks' poly. Lift each stub so the jog clears both blocks' tops
+    # (or bottoms, for -y). Scoped to ring-free blocks: a ringed block routes
+    # through its declared gap at port level, never over its own top. For the
+    # pre-#461 geometry (gate port exactly on the block edge) this reduces to
+    # the default stub, so no existing route changes.
+    stub_a_um = stub_b_um = stub_um
+    if (
+        pin_a["block"] != pin_b["block"]
+        and dir_a == dir_b
+        and va[0] == 0
+        and not _block_has_ring_taps(block_a)
+        and not _block_has_ring_taps(block_b)
+    ):
+        bbox_a = placed_bboxes_um[pin_a["block"]]
+        bbox_b = placed_bboxes_um[pin_b["block"]]
+        if dir_a == 90:
+            jog_y = max(bbox_a["y1"], bbox_b["y1"]) + stub_um
+            stub_a_um = max(stub_um, jog_y - a[1])
+            stub_b_um = max(stub_um, jog_y - b[1])
+        else:  # dir 270
+            jog_y = min(bbox_a["y0"], bbox_b["y0"]) - stub_um
+            stub_a_um = max(stub_um, a[1] - jog_y)
+            stub_b_um = max(stub_um, b[1] - jog_y)
+
+    points = manhattan_backbone(
+        a, dir_a, b, dir_b, stub_um, stub_a_um=stub_a_um, stub_b_um=stub_b_um
+    )
     margin_eps_um = 1e-6
 
     # Ring-opening check (#434): for every pin on a block whose ring declares

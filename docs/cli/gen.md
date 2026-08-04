@@ -88,7 +88,16 @@ non-default `params` set is not guaranteed to (see each generator's
 A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
 strip + poly gate(s) + contact + local-metal source/drain pads), with
 `dummy` extra unit-device columns flanking each side for etch/gradient
-matching. Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
+matching. The first gate finger carries a **poly landing pad** that extends
+one `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
+diffusion's gate-side edge, so a contact can land on the gate *outside* the
+channel — without it the gate poly shared the diffusion's exact extent and a
+contact at the reported gate port straddled the diff edge
+(`poly.enclosing.licon.1`/`diff.enclosing.licon.1`) with nowhere legal to sit
+(issue #461). The reported `U<i>_G` port now sits at that pad's centre (its
+`y_um` is offset past the diffusion edge, and its `width_um` reports the pad
+width rather than `l_um`) — a JSON-contract-visible move of the gate port
+coordinate. Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
 (local-metal) and `U<i>_G` (poly), where `<i>` is the device's position in
 the `topology`-selected numbering order — `"array"` numbers row-major;
 `"common_centroid"` (the default) numbers nearest-center-first, pairing each

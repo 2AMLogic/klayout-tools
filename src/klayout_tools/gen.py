@@ -400,6 +400,20 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
     overall source/drain) are exposed as ports -- interior segments (for
     ``fingers > 1``) are drawn but not individually reported, mirroring
     ``resistor_strip``'s P1/P2-only precedent.
+
+    The first gate finger additionally carries a **poly landing pad** that
+    extends past the diffusion's top edge, so a contact can be placed on the
+    gate outside the channel (issue #461). Without it the gate poly shared
+    both the top and bottom edge of the diffusion, leaving nowhere legal for
+    a gate contact to land: one at the diff edge straddles it
+    (``poly.enclosing.licon.1``/``diff.enclosing.licon.1`` violations) and
+    one moved inward sits over the channel (a gate-oxide short). The pad is a
+    ``contact_region_um`` square (``CONTACT_SIZE_UM`` enclosed by
+    ``ENCLOSURE_MARGIN_UM`` on every side -- the same enclosure budget the
+    S/D contacts use), centred on the gate ``ENCLOSURE_MARGIN_UM`` clear of
+    the diffusion, and the reported gate port sits at its centre. Only the
+    reported (first) finger is padded, so the pad never neighbours another
+    pad and no inter-pad spacing rule can bind regardless of gate length.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     seg_positions: list[tuple[float, float]] = []
@@ -430,19 +444,41 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
 
     s_xy = ((seg_positions[0][0] + seg_positions[0][1]) / 2.0, w_um / 2.0)
     d_xy = ((seg_positions[-1][0] + seg_positions[-1][1]) / 2.0, w_um / 2.0)
-    g_xy = (
-        ((poly_positions[0][0] + poly_positions[0][1]) / 2.0, w_um)
-        if poly_positions
-        else (total_len_um / 2.0, w_um)
-    )
+
+    if poly_positions:
+        # Gate landing pad above the first finger. Its half-width
+        # (contact_region_um / 2) can exceed l_um / 2, so the pad overhangs
+        # the narrow gate on both sides -- that is the point: the pad, not
+        # the sub-contact-width gate, is what encloses the contact. It abuts
+        # the gate at y == w_um (keeping the poly one connected region) and
+        # extends contact_region_um past it.
+        g_cx = (poly_positions[0][0] + poly_positions[0][1]) / 2.0
+        pad_half = contact_region_um / 2.0
+        boxes["poly"].append(
+            (g_cx - pad_half, w_um, g_cx + pad_half, w_um + contact_region_um)
+        )
+        g_xy = (g_cx, w_um + contact_region_um / 2.0)
+        g_width_um = contact_region_um
+        gate_ext_um = contact_region_um
+    else:
+        g_xy = (total_len_um / 2.0, w_um)
+        g_width_um = l_um
+        gate_ext_um = 0.0
 
     return {
         "total_len_um": total_len_um,
         "height_um": w_um,
+        # Full drawn height including the gate landing pad -- what row-to-row
+        # placement (see `_mos_array_layout`/`_diff_pair_layout`) and the
+        # enclosing well box must span. `height_um` stays the bare diffusion
+        # height because it is the S/D ports' perpendicular width.
+        "bbox_height_um": w_um + gate_ext_um,
+        "gate_ext_um": gate_ext_um,
         "boxes_um": boxes,
         "s_xy": s_xy,
         "d_xy": d_xy,
         "g_xy": g_xy,
+        "g_width_um": g_width_um,
     }
 
 
@@ -497,7 +533,7 @@ def _mos_array_layout(
     used only when the caller requests ``flavor="pfet"``."""
     unit = _mos_unit_layout(w_um, l_um, fingers)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
 
     order = (
         _centroid_order(rows, cols)
@@ -528,7 +564,7 @@ def _mos_array_layout(
     min_x0 = min(c["x0_um"] for c in all_cells)
     max_x1 = max(c["x0_um"] + unit["total_len_um"] for c in all_cells)
     min_y0 = min(c["y0_um"] for c in all_cells)
-    max_y1 = max(c["y0_um"] + unit["height_um"] for c in all_cells)
+    max_y1 = max(c["y0_um"] + unit["bbox_height_um"] for c in all_cells)
     margin = WELL_ENCLOSURE_MARGIN_UM
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
 
@@ -861,7 +897,7 @@ def _diff_pair_layout(
     """
     unit = _mos_unit_layout(w_um, l_um, 1)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
 
     counts = {"A": 0, "B": 0}
     cells = []
@@ -2565,7 +2601,7 @@ def _mos_array_describe(
                 "layer": poly_layer,
                 "x_um": c["x0_um"] + gx,
                 "y_um": c["y0_um"] + gy,
-                "width_um": params["l_um"],
+                "width_um": unit["g_width_um"],
                 "direction_deg": 90,
             }
         )
@@ -3026,7 +3062,7 @@ def _diff_pair_describe(
                 "layer": poly_layer,
                 "x_um": c["x0_um"] + gx,
                 "y_um": c["y0_um"] + gy,
-                "width_um": params["l_um"],
+                "width_um": unit["g_width_um"],
                 "direction_deg": 90,
             }
         )
