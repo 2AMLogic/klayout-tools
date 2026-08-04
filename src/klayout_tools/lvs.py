@@ -748,6 +748,28 @@ def _resolve_layout(
         # (the flag is the fix); the pin counts simply match without polluting
         # the reference interface.
         top_cell_pins_only = bool(layout_spec.get("top_cell_pins", False))
+
+        # Issue #514: `declared_pins` is the per-*net* analogue of
+        # `top_cell_pins` above -- every promoted pin not named in this set
+        # is demoted back to an internal net (it keeps its name). Naming an
+        # internal node of a lumped schematic device (e.g. one tap of a
+        # metal-option ladder) for documentation no longer promotes it to a
+        # pin `options.combine_devices` cannot fold through.
+        declared_pins_spec = layout_spec.get("declared_pins")
+        declared_pins: frozenset[str] | None = None
+        if declared_pins_spec is not None:
+            if not isinstance(declared_pins_spec, list) or not all(
+                isinstance(name, str) for name in declared_pins_spec
+            ):
+                raise LvsError(
+                    "request.layout.declared_pins must be a list of net name strings"
+                )
+            declared_pins = frozenset(declared_pins_spec)
+            if not declared_pins:
+                raise LvsError(
+                    "request.layout.declared_pins must not be empty when given "
+                    "-- omit the field entirely to keep every named net promoted"
+                )
         try:
             # LVS is topological -- no parasitics_deck, so the 5th return
             # (parasitic_nets) is always None here and is ignored. The 6th
@@ -775,6 +797,7 @@ def _resolve_layout(
                 deck_name,
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
+                declared_pins=declared_pins,
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc

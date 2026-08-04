@@ -561,6 +561,22 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--pins",
+        default=None,
+        help=(
+            "comma-separated declared pin set (e.g. 'A,B,VDD,VSS'), issue "
+            "#514. Orthogonal to --top-cell-pins (a per-cell filter): this "
+            "is per-net -- every named net not in this set keeps its name "
+            "but is demoted to an internal node, instead of being promoted "
+            "to a top-level pin. Use this to name an internal node of a "
+            "lumped schematic device (e.g. one tap of a metal-option "
+            "ladder) for documentation without blocking `klt lvs`'s "
+            "options.combine_devices from folding the series chain. Off by "
+            "default -- every named net still promotes to a pin, "
+            "byte-identical to today's behavior. See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

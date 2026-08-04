@@ -197,6 +197,7 @@ def run_extract(
     pdk_root: str | None = None,
     parasitics: bool = False,
     top_cell_pins_only: bool = False,
+    declared_pins: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -221,6 +222,28 @@ def run_extract(
     always visible rather than silently inferred from an unexpected pin
     count. Off by default, so a flat layout (or any layout whose pin labels
     all live in the top cell) is byte-for-byte unchanged.
+
+    ``declared_pins`` (the ``--pins`` flag, issue #514) is a per-*net*
+    declaration of the intended interface, orthogonal to
+    ``top_cell_pins_only``'s per-*cell* one: when given (a non-``None`` set
+    of net names), every promoted pin whose net name is *not* in the set is
+    demoted back to an internal net -- it keeps its name, it is simply not
+    exposed as a top-level pin. This is the fix for labelling an internal
+    node of a lumped schematic device (e.g. one tap of a metal-option
+    ladder modelled as a single series device) purely for documentation --
+    today that label always promotes the node to a pin, which blocks ``klt
+    lvs``'s ``options.combine_devices`` from folding the series chain the
+    reference netlist models as one device. Reuses
+    :func:`_reconcile_top_pins` exactly as ``top_cell_pins_only`` does, with
+    a different demote-set: every currently-promoted pin name minus
+    ``declared_pins``. A ``warnings`` entry lists any net demoted this way,
+    and a separate entry lists any declared name that matched no promoted
+    net (a likely typo, not silently ignored). ``None`` (the default) skips
+    this reconciliation entirely -- byte-identical to today's behavior, same
+    invariant ``top_cell_pins_only``'s own default preserves. Applied after
+    ``top_cell_pins_only``'s own reconciliation, and only ever *further*
+    demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
+    kept internal.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags) are
     optional: when either is given, the PDK is resolved via
@@ -423,6 +446,7 @@ def run_extract(
         top=top,
         parasitics_deck=parasitics_deck,
         top_cell_pins_only=top_cell_pins_only,
+        declared_pins=declared_pins,
     )
 
     import klayout.db as kdb
@@ -587,6 +611,7 @@ def extract_netlist_from_layout(
     top: str | None = None,
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
+    declared_pins: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -608,6 +633,11 @@ def extract_netlist_from_layout(
     stays internal. Independent of the flag, ``warnings`` gains an entry
     whenever a below-top label named a promoted pin. See :func:`run_extract`
     for the full rationale.
+
+    ``declared_pins`` (issue #514): when given, every promoted pin *not*
+    named in this set is demoted back to an internal net (it keeps its
+    name). ``None`` skips this reconciliation. See :func:`run_extract` for
+    the full rationale.
 
     ``parasitics_deck`` is optional: when ``None`` (the default, and what
     ``klt lvs``'s inline-extraction path always passes -- LVS is topological
@@ -662,7 +692,12 @@ def extract_netlist_from_layout(
         dummy_devices_dropped,
         unmodelled_poly,
     ) = _extract_netlist(
-        layout, top_cell, deck, parasitics_deck, top_cell_pins_only=top_cell_pins_only
+        layout,
+        top_cell,
+        deck,
+        parasitics_deck,
+        top_cell_pins_only=top_cell_pins_only,
+        declared_pins=declared_pins,
     )
     return (
         netlist,
@@ -1358,6 +1393,7 @@ def _extract_netlist(
     deck: ExtractionDeck,
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
+    declared_pins: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -1939,6 +1975,47 @@ def _extract_netlist(
                 f"{joined} -- these are internal nodes once instanced; pass "
                 f"top_cell_pins_only (--top-cell-pins) to keep them internal "
                 f"(issue #291)"
+            )
+
+    # Issue #514: a per-*net* declared-interface reconciliation, orthogonal
+    # to the per-*cell* one above. When `declared_pins` is given, demote
+    # every currently-promoted pin whose net name is not in the declared
+    # set -- the net keeps its name (a human/testbench can still find it),
+    # it is simply not exposed as a top-level pin `combine_devices` must
+    # treat as un-foldable. Applied *after* the top_cell_pins_only pass, so
+    # it can only further restrict the promoted set, never re-promote a net
+    # that pass already kept internal. Reuses `_reconcile_top_pins` exactly
+    # as top_cell_pins_only does, with a different demote-set.
+    if declared_pins is not None:
+        top_circuit = netlist.circuit_by_name(top_cell.name)
+        promoted_names: set[str] = set()
+        if top_circuit is not None:
+            for pin in top_circuit.each_pin():
+                pin_net = top_circuit.net_for_pin(pin.id())
+                if pin_net is not None and pin_net.name:
+                    promoted_names.add(pin_net.name)
+
+        non_declared = promoted_names - declared_pins
+        demoted_by_declared_pins = _reconcile_top_pins(
+            netlist, top_cell.name, non_declared, demote=True
+        )
+        if demoted_by_declared_pins:
+            joined = ", ".join(demoted_by_declared_pins)
+            warnings.append(
+                f"kept {len(demoted_by_declared_pins)} net(s) internal: not in "
+                f"the declared pin set (--pins / layout.declared_pins) "
+                f"({joined}) -- issue #514"
+            )
+
+        unmatched_declared_pins = sorted(declared_pins - promoted_names)
+        if unmatched_declared_pins:
+            joined = ", ".join(unmatched_declared_pins)
+            count = len(unmatched_declared_pins)
+            plural = "s" if count != 1 else ""
+            warnings.append(
+                f"{count} declared pin name{plural} (--pins / "
+                f"layout.declared_pins) matched no promoted net in the "
+                f"layout: {joined}"
             )
 
     netlist.purge()
