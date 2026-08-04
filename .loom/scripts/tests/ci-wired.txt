@@ -59,7 +59,9 @@ test-install-full-reinstall-no-target-mutation.sh
 test-install-pr-markers.sh
 test-install-source-guard.sh
 test-install-stash-scope.sh
+test-install-sync-labels.sh
 test-judge-fanout-experiment.sh
+test-live-state-sandbox.sh
 test-locate-daemon-bin.sh
 test-loom-daemon-launchd-plist.sh
 test-loom-daemon-start.sh
@@ -71,6 +73,7 @@ test-loom-status.sh
 test-mcp-config.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-reconcile.sh
+test-merge-pr-dirty-worktree-guard.sh
 test-merge-pr-help.sh
 test-merge-pr-local-branch-cleanup.sh
 test-merge-pr-merge-ordering-guard.sh
@@ -94,6 +97,7 @@ test-resync-installed.sh
 test-safehoused-service.sh
 test-spawn-generic.sh
 test-spawn-worker.sh
+test-stale-claim-standdown-suppression.sh
 test-sweep-auto-stack.sh
 test-sweep-checkpoint.sh
 test-sweep-experiment.sh
@@ -101,6 +105,7 @@ test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
 test-sync-labels-repo-flag.sh
 test-verify-install-scope.sh
+test-warn-operator-gated.sh
 test-warn-out-of-set-deps.sh
 test-worktree-base-override.sh
 test-worktree-concurrency.sh
