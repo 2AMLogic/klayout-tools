@@ -395,6 +395,21 @@ def run_lvs(request: str) -> dict[str, Any]:
         if reference_warning is not None:
             combine_warnings.append(reference_warning)
 
+        # combine_devices() folds matched device arrays but leaves the
+        # interior nets it emptied (0 terminals, 0 pins) behind in the
+        # circuit -- e.g. the N-1 interior nodes of a series string it
+        # collapsed into a single device. Left in place they inflate
+        # counts.nets.* (computed off each_net() below) and surface in
+        # mismatches[] as spurious net.unmatched findings no caller can act
+        # on (issue #500). Purge them symmetrically on both sides -- mirroring
+        # the symmetric combine above and running only when combine actually
+        # ran -- so counts and mismatches reflect the post-combine topology,
+        # not combine_devices()'s internal bookkeeping. Scoped to genuinely
+        # empty nets only, so a real (if unused) top-level pin's net is never
+        # dropped and counts.pins.* is unaffected.
+        _purge_emptied_nets(layout_netlist)
+        _purge_emptied_nets(reference_netlist)
+
     if engine == "klayout":
         logger = _make_compare_logger()
         comparer = kdb.NetlistComparer(logger)
@@ -884,6 +899,46 @@ def _combine_devices_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
             side,
         )
     return None
+
+
+def _purge_emptied_nets(netlist: kdb.Netlist) -> None:
+    """Remove nets that ``combine_devices()`` emptied -- nets left with no
+    terminals, no pins, and no subcircuit pins after matched device arrays
+    were folded (issue #500).
+
+    ``Netlist.combine_devices()`` folds combinable device groups (e.g. a
+    series string of N identical devices into one device) but leaves the
+    N-1 interior nodes it disconnected behind in the circuit, each now with
+    zero connections. Those nets are not part of the netlist's topology by
+    any definition, yet they still inflate ``counts.nets.*`` (computed off
+    ``each_net()``) and surface as spurious ``net.unmatched`` findings in
+    ``mismatches[]`` that no caller can act on -- there is nothing to fix
+    about a net with nothing attached to it. Dropping them makes both counts
+    and mismatches honest, symmetric with the combine step itself: a caller
+    reading ``counts.nets.layout`` to judge how far apart two netlists are
+    sees the post-combine topology, not ``combine_devices()``'s internal
+    bookkeeping.
+
+    Deliberately narrower than KLayout's own ``Circuit.purge_nets()``: it
+    only removes nets that are simultaneously terminal-less, pin-less, and
+    subcircuit-pin-less, so a genuinely-unused *top-level pin*'s net (a net
+    with zero terminals but a real pin attached) is never dropped -- that
+    would silently change ``counts.pins.*`` and remove a pin the comparer
+    must still see, which is outside this fix's scope. Applied per circuit
+    across the whole netlist, mirroring ``combine_devices()``'s own
+    netlist-wide scope so interior nodes emptied in subcircuits below the
+    selected top are cleaned up too.
+    """
+    for circuit in netlist.each_circuit():
+        emptied = [
+            net
+            for net in circuit.each_net()
+            if net.terminal_count() == 0
+            and net.pin_count() == 0
+            and net.subcircuit_pin_count() == 0
+        ]
+        for net in emptied:
+            circuit.remove_net(net)
 
 
 def _select_circuit(netlist: kdb.Netlist, top: str | None, side: str) -> kdb.Circuit:
