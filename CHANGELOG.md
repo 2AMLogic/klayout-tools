@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-04 — `klt gen`: `mos_array` and `diff_pair` accept `gate_contact`
+  (#492), which finishes the gate stack the #461 poly landing pad only made
+  legal — a contact plus a local-metal pad drawn on the pad, and the `_G`
+  port reported on the `metal` role, symmetric with `_S`/`_D`. Enabling it
+  raises the pad's contact region `0.4um` clear of the diffusion edge (a
+  contact-enclosure metal square centred on the bare pad shares an edge with
+  the S/D local-metal pads and merges into one polygon, shorting the gate to
+  source/drain), so the unit device — and `diff_pair`'s automatically-sized
+  guard ring — grows taller and `_G`'s `y_um` moves. Defaults to `false`,
+  reproducing the bare-poly gate byte-for-byte. See `docs/cli/gen.md`.
+- 2026-08-04 — `klt gen-compose`: a `connectivity[]` net whose pin sits on
+  the extraction deck's bare `poly` layer (a gate drawn without
+  `params.gate_contact`) is now reported in `unrouted_nets[]` with a
+  `drc_hints.notes[]` reason naming the port's layer and the fix (#492).
+  Previously such a net was drawn anyway — `"routed": true`, no note — as a
+  metal stub sitting *over* the gate with no contact joining the two, an
+  open net only a later `klt drc`/`klt extract`/`klt lvs` run would surface.
+  Behavior for every other port layer is unchanged. See
+  `docs/cli/gen-compose.md`.
 - 2026-08-04 — `klt gen`: `diff_pair` accepts `ring_padding_um` and
   `row_spacing_um` (#484), the ring-to-core padding and inter-row device
   spacing its automatically-sized guard ring previously hardwired to

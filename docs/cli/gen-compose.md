@@ -358,15 +358,30 @@ and every base tie stays its own distinct node, matching the hand-drawn `klt
 draw` workaround #454 was filed to replace.
 
 A pin whose own layer is not a member of the resolved family's
-`ExtractionDeck.metals` stack at all (e.g. a bare-poly gate port) is left
-exactly as before #454 — drawn directly on `routing.layer_role`, no via-drop
-attempted, since via-drop only ever applies between two declared
-routing-metal levels. Only a genuinely unresolvable drop (a pin whose layer
-is a *different* metals-stack level than `routing.layer_role`, more than one
-via hop away) is rejected, reporting the net unroutable rather than drawing a
-disconnected short — sky130's/gf180mcu's currently-exposed `"metal2"`/`"via1"`
-pair is always exactly one hop from `"metal"`, so this only matters for a
-future third metal level, not anything expressible today.
+`ExtractionDeck.metals` stack, but which a `routing.layer_role` shape already
+covers at that position (e.g. a guard ring's `TAP_*` port on the tap layer,
+under the ring's own metal), is left exactly as before #454 — drawn directly
+on `routing.layer_role`, no via-drop attempted, since via-drop only ever
+applies between two declared routing-metal levels.
+
+Two cases are rejected instead, reporting the net unroutable rather than
+drawing something that does not connect:
+
+- A pin whose layer is a *different* metals-stack level than
+  `routing.layer_role`, more than one via hop away — sky130's/gf180mcu's
+  currently-exposed `"metal2"`/`"via1"` pair is always exactly one hop from
+  `"metal"`, so this only matters for a future third metal level, not
+  anything expressible today.
+- A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
+  drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
+  metals stack lands on poly, so the backbone would end as an uncontacted
+  metal stub sitting *over* the gate: before #492 that was drawn anyway
+  (`"routed": true`, no note), leaving an open net that only a later `klt
+  drc`/`klt extract`/`klt lvs` run would surface, with nothing pointing back
+  at the cause. The rejection's `reason` names both the port's actual layer
+  and the two ways forward — re-run the block's generator with
+  `params.gate_contact: true` so the gate reports a contacted `"metal"`-role
+  pad, or name the gate with `pins[]` (below) instead of routing to it.
 
   A third check (#469) generalizes both checks above from *reported*
   `ports[]` geometry to the block's **actual drawn** shapes. The two checks

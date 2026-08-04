@@ -1112,8 +1112,18 @@ def test_compose_labels_jogged_route_exactly_once_not_per_segment(tmp_path, pdk_
     # _mixed_orientation) produces a multi-segment backbone drawn as one
     # kdb.Path -- confirm the label count stays at one per net regardless of
     # how many straight segments make up the drawn path.
-    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "m1", rows=1, cols=1)
-    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "m2", rows=1, cols=1)
+    #
+    # `gate_contact=True` (#492) puts the gate terminal on the metal role, so
+    # the metal backbone actually lands on a contacted pad -- without it the
+    # gate is bare poly and this net is now rejected outright rather than
+    # drawn as an uncontacted stub (see
+    # test_compose_rejects_metal_route_to_bare_poly_gate_port).
+    m1 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m1", rows=1, cols=1, gate_contact=True
+    )
+    m2 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m2", rows=1, cols=1, gate_contact=True
+    )
     output = tmp_path / "jogged.gds"
     report = compose(
         {
@@ -1833,14 +1843,28 @@ def test_compose_self_net_pad_crossing_ignores_ports_on_a_different_layer(
 ):
     # A self-net's backbone crossing over another port that reports a
     # *different* physical layer than routing.layer_role cannot short to it
-    # on that layer -- only same-layer ports count as obstacles. mos_array's
-    # gate ports (`U*_G`) draw on `poly`, not `metal`; a metal-layer route
-    # between two gate ports geometrically passes right over the middle
-    # unit's own gate position (same axis, elevated only by the stub) but
-    # must still route, since that in-between port is on a different layer
-    # than the metal route being drawn.
+    # on that layer -- only same-layer ports count as obstacles. With
+    # `gate_contact` (#492) mos_array's gate ports (`U*_G`) draw on `metal`
+    # (li1); a `metal2` (met1) route between two of them geometrically passes
+    # right over the middle unit's own gate pad (same axis, elevated only by
+    # the stub) but must still route, since that in-between port is on a
+    # different layer than the met1 route being drawn -- it is reached only
+    # by the via-drop at each endpoint.
+    #
+    # Before #492 this exercised the same crossing with a *poly* gate port
+    # under a `metal` route. That pairing is no longer routable at all (a
+    # metal backbone cannot reach bare poly -- see
+    # test_compose_rejects_metal_route_to_bare_poly_gate_port), so the same
+    # geometry is now exercised one level up the stack.
     m = _gen_block(
-        tmp_path, pdk_root, "mos_array", "m", rows=1, cols=3, topology="array"
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m",
+        rows=1,
+        cols=3,
+        topology="array",
+        gate_contact=True,
     )
     output = tmp_path / "mos_gg.gds"
     report = compose(
@@ -1857,7 +1881,7 @@ def test_compose_self_net_pad_crossing_ignores_ports_on_a_different_layer(
                     ],
                 }
             ],
-            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "routing": {"layer_role": "metal2", "width_um": 0.17},
             "options": {"cell_name": "mos_gg", "output": str(output)},
         }
     )
@@ -1955,11 +1979,37 @@ def test_resolve_via_drop_layer_same_layer_needs_no_drop():
 
 
 def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
-    # A poly gate port (66/20) is not a member of the deck's metals stack at
-    # all -- via-drop only ever applies between two declared routing-metal
-    # levels, so this must not be treated as "needs a drop but none found".
+    # A tap port (65/44) is not a member of the deck's metals stack at all,
+    # and is not the deck's poly layer either -- via-drop only ever applies
+    # between two declared routing-metal levels, so this keeps the pre-#454
+    # "draw directly on route_layer" behavior rather than being treated as
+    # "needs a drop but none found".
     deck = get_extraction_deck("sky130")
-    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), (66, 20))
+    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), (65, 44))
+    assert via_layer is None
+    assert error is None
+
+
+def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
+    # #492: a metal backbone ending on the deck's bare `poly` layer (66/20 on
+    # sky130 -- a gate drawn without params.gate_contact) has no via that
+    # reaches it. Before #492 this fell into the "unrelated role, nothing to
+    # do" branch and the net was drawn anyway: `routed: true`, no note, and a
+    # metal stub sitting over the gate with no contact joining the two.
+    deck = get_extraction_deck("sky130")
+    via_layer, error = _resolve_via_drop_layer(deck, (67, 20), deck.poly)
+    assert via_layer is None
+    assert error is not None
+    assert "bare-poly gate" in error
+    assert "gate_contact" in error
+
+
+def test_resolve_via_drop_layer_poly_route_layer_still_draws_directly():
+    # The rejection above is about the *pin's* layer, not the backbone's: a
+    # route whose own layer_role resolves outside the metals stack (e.g.
+    # "poly"/"tap") has no stack to walk and keeps drawing directly.
+    deck = get_extraction_deck("sky130")
+    via_layer, error = _resolve_via_drop_layer(deck, deck.poly, (67, 20))
     assert via_layer is None
     assert error is None
 
@@ -2090,6 +2140,147 @@ def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
     # the base pad it geometrically crossed over on met1).
     base_nets = {d["nets"]["b"] for d in bjt_devices}
     assert bussed_net not in base_nets
+
+
+# --------------------------------------------------------------------------- #
+# Gate-port routing (#492): before this, a `connectivity[]` net naming a
+# bare-poly gate port was drawn as a metal stub *over* the gate with no
+# contact joining the two -- `routed: true`, no note, and an open net only a
+# later `klt drc`/`klt extract`/`klt lvs` run would surface. The router now
+# rejects that pairing outright, and `klt gen`'s `params.gate_contact`
+# finishes the gate stack so the same net routes end to end.
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_rejects_metal_route_to_bare_poly_gate_port(tmp_path, pdk_root):
+    # A metal backbone cannot reach a bare-poly gate: no via in the deck's
+    # metals stack lands on poly. Reported unroutable with a reason naming
+    # both the port's actual layer and the fix -- never drawn as a silently
+    # uncontacted stub.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "m1", rows=1, cols=1)
+    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "m2", rows=1, cols=1)
+    output = tmp_path / "bare_gate.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 2.0},
+            "connectivity": [
+                {
+                    "net": "GBIAS",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "bare_gate_0", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == ["GBIAS"]
+    assert report["nets"][0]["routed"] is False
+    reason = next(
+        note for note in report["drc_hints"]["notes"] if note.startswith("net 'GBIAS'")
+    )
+    assert "(66, 20)" in reason  # the port's actual (poly) layer
+    assert "bare-poly gate" in reason
+    assert "gate_contact" in reason
+
+
+def test_compose_routes_gate_contact_port_end_to_end(tmp_path, pdk_root):
+    # The #492 acceptance case: with `params.gate_contact` the gate reports on
+    # the metal role, so a `connectivity[]` net wires two devices' gates
+    # together with no hand-drawn licon/li1 patchwork -- and the result is one
+    # continuous conductor (not two stubs), DRC-clean, and extracts with both
+    # gates on the named net.
+    # `dummy=0`: a dummy column's own (also contacted) gate pad sits at exactly
+    # the height the inter-gate backbone runs at, and the router's obstacle
+    # checks only model a block's *reported* ports -- routing around a block's
+    # unreported dummy geometry is a separate, pre-existing limitation.
+    m1 = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m1",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    m2 = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "m2",
+        rows=1,
+        cols=1,
+        dummy=0,
+        gate_contact=True,
+    )
+    g1 = next(p for p in m1["ports"] if p["name"] == "U0_G")
+    g2 = next(p for p in m2["ports"] if p["name"] == "U0_G")
+    assert g1["layer"] == {"layer": 67, "datatype": 20, "name": None}
+
+    output = tmp_path / "gate_routed.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": m1},
+                {"id": "b2", "generator_report": m2},
+            ],
+            "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 2.0},
+            "connectivity": [
+                {
+                    "net": "GBIAS",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                }
+            ],
+            # A pad-wide trace. Both gate ports face north, so the backbone
+            # jogs up past each pad's top edge; a trace *narrower* than the
+            # pad leaves a sub-li1.space.1 slit between the pad's top edge
+            # and the backbone's underside beside the stub. That is a generic
+            # router property for any north/south-facing port whose pad is
+            # wider than routing.width_um (a guard ring's TAP_N, a bjt
+            # COLL_N), not something this issue introduced -- keep the trace
+            # as wide as the pad so this test measures the gate contact.
+            "routing": {"layer_role": "metal", "width_um": 0.42},
+            "options": {"cell_name": "gate_routed_0", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    # Both gate pads and the backbone between them are one merged li1
+    # polygon -- a real conductor, not the two disconnected stubs the
+    # pre-#492 silent path produced.
+    b1_off = next(b for b in report["blocks"] if b["id"] == "b1")["offset_um"]
+    b2_off = next(b for b in report["blocks"] if b["id"] == "b2")["offset_um"]
+    p1 = (g1["x_um"] + b1_off["x"], g1["y_um"] + b1_off["y"])
+    p2 = (g2["x_um"] + b2_off["x"], g2["y_um"] + b2_off["y"])
+    assert _shares_merged_polygon(output, "gate_routed_0", 67, 20, p1, p2)
+    # ...and each gate's own licon is there, joining that metal to the poly.
+    assert _shares_merged_polygon(output, "gate_routed_0", 66, 44, p1, p1)
+    assert _shares_merged_polygon(output, "gate_routed_0", 66, 44, p2, p2)
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Extraction sees one named gate net shared by both devices -- the closed
+    # loop the issue asks for (no hand-drawn contact anywhere in this test).
+    result = extract.run_extract(str(output), "sky130", top="gate_routed_0")
+    assert "GBIAS" in {net["name"] for net in result["nets"] if net["pin"]}
+    gate_nets = [d["nets"]["g"] for d in result["devices"] if d["class"] == "nfet"]
+    assert gate_nets == ["GBIAS", "GBIAS"], result["devices"]
 
 
 # --------------------------------------------------------------------------- #

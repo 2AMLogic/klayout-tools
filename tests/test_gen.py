@@ -1010,6 +1010,120 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+def _merged_polygon_at(gds_path, layer, datatype, x_um, y_um):
+    """The merged polygon of one layer containing ``(x_um, y_um)``, or
+    ``None``. Used to prove two terminals are (or are not) the same drawn
+    conductor -- KLayout merges edge-touching boxes into one polygon, which
+    is exactly what an electrical short looks like on a single layer."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    top = layout.top_cell()
+    dbu = layout.dbu
+    region = kdb.Region(top.begin_shapes_rec(layout.layer(layer, datatype)))
+    region.merge()
+    point = kdb.Point(round(x_um / dbu), round(y_um / dbu))
+    for poly in region.each():
+        if poly.inside(point):
+            return poly
+    return None
+
+
+@pytest.mark.parametrize("deck", ["sky130", "gf180mcu"])
+@pytest.mark.parametrize(
+    ("generator", "params", "gate_name"),
+    [
+        ("mos_array", {"rows": 2, "cols": 2, "dummy": 1}, "U0_G"),
+        ("mos_array", {"rows": 1, "cols": 1, "dummy": 0, "fingers": 3}, "U0_G"),
+        ("diff_pair", {"splits": 1, "add_guard_ring": False}, "Q1_1_G"),
+        ("diff_pair", {"splits": 2, "add_guard_ring": True}, "Q1_1_G"),
+    ],
+)
+def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
+    tmp_path, both_pdk_root, deck, generator, params, gate_name
+):
+    """#492: `params.gate_contact` finishes the gate stack the #461 landing pad
+    only prepared -- a contact plus a local-metal pad drawn on it, and the
+    gate port reported on the `metal` role so `klt gen-compose`'s router
+    reaches it exactly like S/D. The drawn result must stay DRC-clean on both
+    curated decks, and the gate metal must *not* merge with the S/D metal."""
+    from klayout_tools.gen import _PDK_ROLE_LAYERS
+
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"{generator}_{deck}_gate_contact.gds"
+    report = generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {**params, "gate_contact": True},
+            "options": {"output": str(output)},
+        }
+    )
+
+    metal = _PDK_ROLE_LAYERS[deck]["metal"]
+    contact = _PDK_ROLE_LAYERS[deck]["contact"]
+    ports = {p["name"]: p for p in report["ports"]}
+    gate = ports[gate_name]
+    source = ports[gate_name.replace("_G", "_S")]
+
+    # The gate port is reported on the metal role, symmetric with S/D.
+    assert gate["layer"] == {"layer": metal[0], "datatype": metal[1], "name": None}
+    assert gate["layer"] == source["layer"]
+
+    # A contact and a metal pad are actually drawn at the reported position.
+    assert (
+        _merged_polygon_at(output, contact[0], contact[1], gate["x_um"], gate["y_um"])
+        is not None
+    )
+    gate_metal = _merged_polygon_at(
+        output, metal[0], metal[1], gate["x_um"], gate["y_um"]
+    )
+    assert gate_metal is not None
+
+    # ...and it is its own conductor: the gate metal pad must not merge with
+    # the source pad below it. Centring a full contact-enclosure metal square
+    # on the *unraised* #461 landing pad would share an edge with the S/D
+    # pads either side and silently short the gate to them.
+    source_metal = _merged_polygon_at(
+        output, metal[0], metal[1], source["x_um"], source["y_um"]
+    )
+    assert source_metal is not None
+    assert gate_metal != source_metal
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
+    tmp_path, pdk_root
+):
+    """#492's `gate_contact` is opt-in: omitting it reproduces the pre-#492
+    bare-poly gate byte-for-byte (same drawn GDS, same reported ports), so no
+    existing consumer's geometry or extracted netlist moves."""
+    baseline = tmp_path / "default.gds"
+    explicit_off = tmp_path / "explicit_off.gds"
+    request = {
+        "generator": "mos_array",
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "params": {"rows": 1, "cols": 2, "dummy": 0},
+        "options": {"output": str(baseline)},
+    }
+    default_report = generate(request)
+    off_report = generate(
+        {
+            **request,
+            "params": {**request["params"], "gate_contact": False},
+            "options": {"output": str(explicit_off)},
+        }
+    )
+
+    assert default_report["ports"] == off_report["ports"]
+    assert baseline.read_bytes() == explicit_off.read_bytes()
+    gate = next(p for p in default_report["ports"] if p["name"] == "U0_G")
+    assert gate["layer"] == {"layer": 66, "datatype": 20, "name": None}
+
+
 # --- res_array --------------------------------------------------------------- #
 
 

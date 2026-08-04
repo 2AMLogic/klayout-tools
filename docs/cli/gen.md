@@ -104,8 +104,28 @@ contact at the reported gate port straddled the diff edge
 (issue #461). The reported `U<i>_G` port now sits at that pad's centre (its
 `y_um` is offset past the diffusion edge, and its `width_um` reports the pad
 width rather than `l_um`) — a JSON-contract-visible move of the gate port
-coordinate. Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
-(local-metal) and `U<i>_G` (poly), where `<i>` is the device's position in
+coordinate.
+
+`gate_contact` (issue #492) finishes that stack rather than leaving it to the
+caller: it draws a contact **and** a local-metal pad on the landing pad, and
+reports `U<i>_G` on the `metal` role, symmetric with `U<i>_S`/`U<i>_D`. That
+is what makes a gate reachable by [`klt gen-compose`](gen-compose.md)'s
+router — a `connectivity[]` net naming a *bare-poly* gate port is rejected as
+unroutable (no via in the metals stack lands on poly), so without it a gate
+still has to be contacted by hand. Enabling it raises the landing pad's
+contact region `0.4` µm clear of the diffusion edge before drawing on it: a
+contact-enclosure metal square centred on the bare `#461` pad would share an
+edge with the S/D local-metal pads either side and merge into one polygon,
+shorting the gate to source/drain. The unit device (and, for `diff_pair`, its
+automatically-sized guard ring) therefore grows taller, and `U<i>_G`'s `y_um`
+moves with it. `gate_contact` defaults to `false`, which reproduces the
+bare-poly gate byte-for-byte — a gate you intend to name with
+`gen-compose`'s `pins[]` (on the `poly_label` layer) rather than route to
+wants the default.
+
+Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
+(local-metal) and `U<i>_G` (poly, or local-metal with `gate_contact`), where
+`<i>` is the device's position in
 the `topology`-selected numbering order — `"array"` numbers row-major;
 `"common_centroid"` (the default) numbers nearest-center-first, pairing each
 instance immediately with its point-reflection through the array center, so
@@ -134,6 +154,7 @@ all — output for the default case is unchanged.
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
+| `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 
 ### `res_array` (family 2: resistor/capacitor array)
 
@@ -321,6 +342,7 @@ automatically-sized ring already draws its own well tie regardless of
 | `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
+| `gate_contact`     | bool   | `false` | Draw a contact + local-metal pad on each gate landing pad and report `*_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. Grows each device row (and the automatically-sized guard ring with it) by `0.4` µm. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
 
