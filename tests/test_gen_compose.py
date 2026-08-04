@@ -2093,6 +2093,214 @@ def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(
 
 
 # --------------------------------------------------------------------------- #
+# Self-net drawn-metal crossing (#453/#469): the #433/#439 pad-crossing check
+# (and #467's same-row/same-direction fallback) model each other port as a
+# square built from its *reported* `width_um` -- a port's contact/access
+# size, not the extent of the pad metal actually drawn around it. Both checks
+# only fire for a degenerate single-jog backbone (same row/column, same
+# facing direction), so they miss a same-facing pair on *different* rows, or
+# a route wide enough to reach an adjacent row's pad. `route_two_pin` must
+# additionally compare the route's *drawn* metal against the block's own
+# *drawn* shapes on the route layer (`read_block_layer_geometry`).
+# --------------------------------------------------------------------------- #
+
+
+def _bjt_array_8(tmp_path, pdk_root):
+    return _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "pnp_test",
+        emitter_um=0.68,
+        rows=2,
+        cols=4,
+        dummy=1,
+        ratio=8,
+        topology="common_centroid",
+        add_collector_ring=False,
+    )
+
+
+def _bjt_self_net_request(pdk_root, arr, output, pin_a, pin_b, width_um):
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [{"id": "pnp", "generator_report": arr}],
+        "placement": {"strategy": "row", "order": ["pnp"], "spacing_um": 1.0},
+        "connectivity": [
+            {
+                "net": "N",
+                "pins": [
+                    {"block": "pnp", "port": pin_a},
+                    {"block": "pnp", "port": pin_b},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": width_um},
+        "options": {"cell_name": "pnp_bus", "output": str(output)},
+    }
+
+
+@pytest.mark.parametrize("width_um", [0.17, 0.22])
+def test_compose_rejects_self_net_between_same_facing_ports_on_different_rows(
+    tmp_path, pdk_root, width_um
+):
+    # Q4_E (row 0) and Q3_E (row 1) both face north but sit on different rows
+    # and columns, so neither #439's inflated-pad-footprint check nor #467's
+    # same-row/same-direction fallback fires (both require the two pins to
+    # share their facing-axis coordinate). The route's drawn metal still
+    # crosses another unit's real drawn emitter/base pads on its way across
+    # the array -- exactly the "different rows" gap the issue's table
+    # measures, at both route widths below the pad's own reported width_um
+    # (0.22) and at it.
+    arr = _bjt_array_8(tmp_path, pdk_root)
+    output = tmp_path / "pnp_bus.gds"
+    report = compose(
+        _bjt_self_net_request(pdk_root, arr, output, "Q4_E", "Q3_E", width_um)
+    )
+
+    assert report["unrouted_nets"] == ["N"]
+    assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["route_length_um"] is None
+    assert any("N" in note for note in report["drc_hints"]["notes"])
+
+    # routed: false means no metal path was drawn for the net.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("pnp_bus")
+    li1 = layout.layer(67, 20)
+    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
+
+
+def test_compose_rejects_self_net_between_adjacent_ports_with_a_wide_route(
+    tmp_path, pdk_root
+):
+    # Q4_E and Q4_B are directly adjacent, same row, same facing direction --
+    # with nothing else reported as a port between them, so #439/#467's
+    # reported-geometry pad models see no obstacle at all. A route wide
+    # enough (0.5um, more than double any port's reported width_um) still
+    # draws metal that lands on another unit's real drawn pad -- only the
+    # block's actual drawn shapes (not its reported ports[]) show that.
+    arr = _bjt_array_8(tmp_path, pdk_root)
+    output = tmp_path / "pnp_bus.gds"
+    report = compose(_bjt_self_net_request(pdk_root, arr, output, "Q4_E", "Q4_B", 0.50))
+
+    assert report["unrouted_nets"] == ["N"]
+    assert report["nets"][0]["routed"] is False
+    assert report["nets"][0]["route_length_um"] is None
+
+
+def test_route_two_pin_same_row_pair_needs_drawn_geometry_to_be_caught(
+    tmp_path, pdk_root
+):
+    # Direct route_two_pin() regression: without block_geometry (the
+    # pre-#469 information set), the different-row Q4_E-Q3_E short from the
+    # test above is *not* caught by checks 1-3 alone -- it is only when
+    # route_two_pin() is given the block's actual drawn shapes on the route
+    # layer that check 4 catches it.
+    arr = _bjt_array_8(tmp_path, pdk_root)
+    blocks = gen_compose._parse_blocks([{"id": "pnp", "generator_report": arr}])
+    offsets = {"pnp": {"x": 0.0, "y": 0.0}}
+    bboxes = {"pnp": blocks["pnp"]["bbox_um"]}
+    pin_a = {"block": "pnp", "port": "Q4_E"}
+    pin_b = {"block": "pnp", "port": "Q3_E"}
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+
+    without = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.17, route_layer
+    )
+    assert without["routed"] is True  # pre-#469 information set: silent short
+
+    geometry = {
+        "pnp": gen_compose.read_block_layer_geometry(
+            "pnp", blocks["pnp"], offsets["pnp"], route_layer
+        )
+    }
+    with_geometry = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer,
+        block_geometry=geometry,
+    )
+    assert with_geometry["routed"] is False
+    assert "drawn" in with_geometry["reason"]
+
+
+def test_read_block_layer_geometry_returns_none_for_an_undrawn_layer(
+    tmp_path, pdk_root
+):
+    # A block that draws nothing on the route layer contributes no obstacles
+    # (and must not crash the check) -- e.g. a bjt_array has no `poly` at all.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "unit",
+        rows=1,
+        cols=1,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    blocks = gen_compose._parse_blocks([{"id": "arr", "generator_report": arr}])
+    poly_layer = gen_compose._resolve_route_layer("sky130A", "poly")
+    assert (
+        gen_compose.read_block_layer_geometry(
+            "arr", blocks["arr"], {"x": 0.0, "y": 0.0}, poly_layer
+        )
+        is None
+    )
+
+
+def test_compose_routes_same_direction_self_net_when_nothing_is_drawn_between(
+    tmp_path, pdk_root
+):
+    # No false positive: two same-direction (both north-facing) ports on a
+    # 1x1 array -- nothing else of the block's own drawn geometry sits
+    # between them -- still route at a route width wider than either pad's
+    # reported width_um. Mirrors the issue's Q0_E-Q0_B "no"-truth row.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "unit",
+        rows=1,
+        cols=1,
+        topology="array",
+        dummy=0,
+        add_collector_ring=False,
+    )
+    output = tmp_path / "bjt_eb_wide.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "arr", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "EB",
+                    "pins": [
+                        {"block": "arr", "port": "Q0_E"},
+                        {"block": "arr", "port": "Q0_B"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.3},
+            "options": {"cell_name": "bjt_eb_wide", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+
+
+# --------------------------------------------------------------------------- #
 # CLI: `klt gen-compose`
 # --------------------------------------------------------------------------- #
 
