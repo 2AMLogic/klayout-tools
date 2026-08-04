@@ -15,7 +15,7 @@ art this mirrors).
 
 The action lives at this repo's root (`action.yml`) rather than in a
 separate `klayout-tools/klt-action` repository. Pinning a downstream
-workflow to a tag of *this* repo (`uses: 2AMLogic/klayout-tools@v0.1.0`)
+workflow to a tag of *this* repo (`uses: 2AMLogic/klayout-tools@v0.2.0`)
 version-locks the action to the exact `klt` build it drives — there is no
 second repository to keep in sync on every release, and the action's own
 "install klt" step defaults to building from the exact source checkout the
@@ -92,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: 2AMLogic/klayout-tools@v0.1.0
+      - uses: 2AMLogic/klayout-tools@v0.2.0
         with:
           layout: layout/my_block.gds
           verbs: drc,layout-metrics,render
