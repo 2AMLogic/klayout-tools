@@ -253,7 +253,12 @@ via `nwell → well_label`):
 - **sky130** *does* declare `tap` (65/44, distinct from `diff.drawing`) and
   `well_label` (64/5), so its base terminal resolves correctly through
   `nwell → tap → contact → metals` and picks up its real pin name via the
-  `nwell` label — sky130's BJT base is **not** floating.
+  `nwell` label — sky130's BJT base is **not** floating, *provided the input
+  geometry actually draws a `tap` shape over the base tie*. `klt gen
+  bjt_array`'s own sky130 output now does (issue #432 — previously it drew
+  the base-tie pad on `diff.drawing` only, with no `tap` shape, leaving its
+  own base terminal an isolated node with no path to the recognised `nwell`
+  base region despite this deck-level mechanism existing).
 
 A code fix — adding `base_via`/`base_via_metal` fields to `BipolarDevice`
 (analogous to the `CapacitorDevice.top_plate_via`/`top_plate_via_metal`
@@ -1045,7 +1050,7 @@ consume.
 | Code | Meaning                                                                                          |
 | ---- | --------------------------------------------------------------------------------------------------- |
 | `0`  | Extraction succeeded, netlist written.                                                              |
-| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error. |
+| `1`  | Failed to run — bad file, unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.                               |
 
 There is no exit code `3` — unlike `klt drc`/`klt lvs`, there is no "ran but
