@@ -10,6 +10,21 @@ instead. This file is the source of truth for which categories exist as of a
 given date; pin `provenance.deck` (sha256) and `provenance.klayout_version`,
 not `klt --version`, if you need to detect this kind of drift.
 
+## Unreleased
+
+### Added since release
+
+- 2026-08-04 — `klt gen`: `diff_pair` accepts `ring_padding_um` and
+  `row_spacing_um` (#484), the ring-to-core padding and inter-row device
+  spacing its automatically-sized guard ring previously hardwired to
+  `0.5um`/`0.4um`. Both default to those values, so omitting them reproduces
+  prior geometry byte-for-byte; a caller that needs room to bring both
+  matched devices' gate nets out of the block (previously nowhere to land a
+  second gate contact stack beside the row/ring boundary) can widen either
+  param and pay the extra area. Validated `>= 0`; `col_pitch_um` (the
+  within-row gap between interleaved splits) is unchanged. See
+  `docs/cli/gen.md`.
+
 ## 0.2.0 (2026-08-04)
 
 The first release since `0.1.0`. `klt` grew from **5 verbs to 24**; the 19

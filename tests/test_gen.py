@@ -1578,9 +1578,101 @@ def test_diff_pair_splits_1_boundary(tmp_path, pdk_root):
     assert report["device_count"] == 2
 
 
+def test_diff_pair_ring_padding_and_row_spacing_defaults_unchanged(tmp_path, pdk_root):
+    """Issue #484: `ring_padding_um`/`row_spacing_um` default to today's
+    fixed values (0.5/0.4), so a request that omits them draws byte-for-byte
+    identical geometry to one that names those defaults explicitly."""
+    implicit = tmp_path / "diff_pair_implicit.gds"
+    explicit = tmp_path / "diff_pair_explicit.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(implicit)},
+        }
+    )
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"ring_padding_um": 0.5, "row_spacing_um": 0.4},
+            "options": {"output": str(explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(implicit, explicit)
+
+
+def test_diff_pair_ring_padding_um_grows_bbox_by_double_delta(tmp_path, pdk_root):
+    """A wider `ring_padding_um` grows the ring-to-core gap on *both* sides
+    of each axis (left/right, top/bottom), so the drawn bbox grows by twice
+    the delta on each axis -- the extra routing room issue #484 asks for."""
+    baseline = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(tmp_path / "baseline.gds")},
+        }
+    )
+    delta = 1.0
+    widened = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"ring_padding_um": 0.5 + delta},
+            "options": {"output": str(tmp_path / "widened.gds")},
+        }
+    )
+    base_bbox = baseline["bbox_um"]
+    wide_bbox = widened["bbox_um"]
+    base_w = base_bbox["x1"] - base_bbox["x0"]
+    base_h = base_bbox["y1"] - base_bbox["y0"]
+    wide_w = wide_bbox["x1"] - wide_bbox["x0"]
+    wide_h = wide_bbox["y1"] - wide_bbox["y0"]
+    assert wide_w == pytest.approx(base_w + 2 * delta)
+    assert wide_h == pytest.approx(base_h + 2 * delta)
+
+
+def test_diff_pair_row_spacing_um_grows_bbox_height_only(tmp_path, pdk_root):
+    """A wider `row_spacing_um` opens up exactly one inter-row gap (there are
+    only two device rows), so the drawn bbox height grows by exactly the
+    delta and the width is unaffected -- `col_pitch_um` stays fixed (out of
+    scope for #484)."""
+    baseline = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(tmp_path / "baseline.gds")},
+        }
+    )
+    delta = 1.0
+    widened = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"row_spacing_um": 0.4 + delta},
+            "options": {"output": str(tmp_path / "widened.gds")},
+        }
+    )
+    base_bbox = baseline["bbox_um"]
+    wide_bbox = widened["bbox_um"]
+    base_w = base_bbox["x1"] - base_bbox["x0"]
+    base_h = base_bbox["y1"] - base_bbox["y0"]
+    wide_w = wide_bbox["x1"] - wide_bbox["x0"]
+    wide_h = wide_bbox["y1"] - wide_bbox["y0"]
+    assert wide_w == pytest.approx(base_w)
+    assert wide_h == pytest.approx(base_h + delta)
+
+
 @pytest.mark.parametrize(
     "params",
-    [{"w_um": 0.1}, {"l_um": 0}, {"splits": 0}, {"flavor": "bogus"}],
+    [
+        {"w_um": 0.1},
+        {"l_um": 0},
+        {"splits": 0},
+        {"flavor": "bogus"},
+        {"ring_padding_um": -0.1},
+        {"row_spacing_um": -0.1},
+    ],
 )
 def test_diff_pair_invalid_params_rejected(tmp_path, pdk_root, params):
     with pytest.raises(GenError):

@@ -152,8 +152,10 @@ UNIT_MIN_W_UM = 0.42
 GATE_LENGTH_SAFE_MIN_UM = 0.28
 
 #: Guard ring sizing `diff_pair` uses for its own, automatically-generated
-#: ring -- not caller-adjustable at phase 2 (use the standalone `guard_ring`
-#: generator directly for a fully-parametrized ring).
+#: ring. `GUARD_RING_DEFAULT_PADDING_UM` is the default for `diff_pair`'s own
+#: `ring_padding_um` param (issue #484) -- the ring's thickness itself
+#: (`GUARD_RING_DEFAULT_WIDTH_UM`) stays fixed; use the standalone
+#: `guard_ring` generator directly for a fully-parametrized ring.
 GUARD_RING_DEFAULT_WIDTH_UM = 0.42
 GUARD_RING_DEFAULT_CONTACTS_PER_SIDE = 2
 GUARD_RING_DEFAULT_PADDING_UM = 0.5
@@ -998,6 +1000,8 @@ def _diff_pair_layout(
     ring_gap_side: str = "",
     ring_gap_um: float = 0.0,
     ring_gap_offset_um: float = 0.0,
+    ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
+    row_spacing_um: float = MIN_SAME_LAYER_SPACING_UM,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -1005,10 +1009,18 @@ def _diff_pair_layout(
     if (row + col) is even else "B"`` -- for ``splits=2`` this is exactly the
     classic differential-pair "A B / B A" layout; it generalises the same
     way for any ``splits``, each column always holding one A and one B.
+
+    ``ring_padding_um``/``row_spacing_um`` (issue #484) are the ring-to-core
+    padding and the device-row-to-device-row gap, both fixed at their
+    present-day values by default so omitting them reproduces prior geometry
+    byte-for-byte; a caller that needs more room to route both matched
+    devices' gate nets out of the block can grow either and pay the area.
+    ``col_pitch`` (the within-row gap between interleaved splits) stays
+    fixed to ``MIN_SAME_LAYER_SPACING_UM`` -- out of scope for #484.
     """
     unit = _mos_unit_layout(w_um, l_um, 1)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    row_pitch = unit["bbox_height_um"] + row_spacing_um
 
     counts = {"A": 0, "B": 0}
     cells = []
@@ -1028,12 +1040,12 @@ def _diff_pair_layout(
             )
 
     core_w = splits * col_pitch - MIN_SAME_LAYER_SPACING_UM
-    core_h = 2 * row_pitch - MIN_SAME_LAYER_SPACING_UM
+    core_h = 2 * row_pitch - row_spacing_um
 
     ring = None
     ring_offset = (0.0, 0.0)
     if add_guard_ring:
-        padding = GUARD_RING_DEFAULT_PADDING_UM
+        padding = ring_padding_um
         ring_w = GUARD_RING_DEFAULT_WIDTH_UM
         ring = _ring_layout(
             core_w + 2 * padding,
@@ -2185,6 +2197,19 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0.0,
             )
             self.param(
+                "ring_padding_um",
+                self.TypeDouble,
+                "Padding between the device core and the guard ring's inner "
+                "edge (um), when add_guard_ring is set",
+                default=GUARD_RING_DEFAULT_PADDING_UM,
+            )
+            self.param(
+                "row_spacing_um",
+                self.TypeDouble,
+                "Spacing between the two interleaved device rows (um)",
+                default=MIN_SAME_LAYER_SPACING_UM,
+            )
+            self.param(
                 "mirror",
                 self.TypeBoolean,
                 "Label devices M1/M2 (current mirror) instead of Q1/Q2 "
@@ -2258,6 +2283,8 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_side,
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
+                self.ring_padding_um,
+                self.row_spacing_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -3114,9 +3141,20 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'diff_pair': params.splits must be >= 1")
     if params["flavor"] not in ("nfet", "pfet"):
         raise GenError("generator 'diff_pair': params.flavor must be 'nfet' or 'pfet'")
+    if params["ring_padding_um"] < 0:
+        raise GenError("generator 'diff_pair': params.ring_padding_um must be >= 0")
+    if params["row_spacing_um"] < 0:
+        raise GenError("generator 'diff_pair': params.row_spacing_um must be >= 0")
 
     inner_w_um, inner_h_um = _auto_ring_inner_size_um(
-        _diff_pair_layout(params["w_um"], params["l_um"], params["splits"], True)
+        _diff_pair_layout(
+            params["w_um"],
+            params["l_um"],
+            params["splits"],
+            True,
+            ring_padding_um=params["ring_padding_um"],
+            row_spacing_um=params["row_spacing_um"],
+        )
     )
     _validate_ring_gap(
         "diff_pair",
@@ -3140,6 +3178,8 @@ def _diff_pair_describe(
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
+        params["ring_padding_um"],
+        params["row_spacing_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]

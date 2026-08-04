@@ -272,8 +272,10 @@ a true common-centroid cross-quad checkerboard over a 2-row x
 `splits`-column grid (`label(row, col) = "A"` if `row + col` is even, else
 `"B"` — for `splits=2` this is exactly the classic "A B / B A"
 differential-pair layout), optionally enclosed by an automatically-sized
-guard ring (`add_guard_ring`, fixed internal sizing — use the standalone
-`guard_ring` generator directly for a fully-parametrized ring). Ports are
+guard ring (`add_guard_ring` — the ring's own thickness and contact count are
+fixed; use the standalone `guard_ring` generator directly for a
+fully-parametrized ring, or see `ring_padding_um`/`row_spacing_um` below to
+grow the ring-to-core and inter-row bands themselves). Ports are
 named `Q1_<n>_S`/`_D`/`_G` and `Q2_<n>_S`/`_D`/`_G` (or `M1_`/`M2_` when
 `params.mirror` is `true`, for a current-mirror naming convention — geometry
 is identical either way), plus `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when
@@ -303,6 +305,8 @@ automatically-sized ring already draws its own well tie regardless of
 | `ring_gap_side`    | string | `""`    | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
 | `ring_gap_um`      | double | `0.0`   | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
 | `ring_gap_offset_um` | double | `0.0` | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
+| `ring_padding_um`  | double | `0.5`   | Padding between the device core and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. Widening this grows the band between the outermost active edge and the ring — the only room available for a gate contact's routing stub (issue #484). |
+| `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 
