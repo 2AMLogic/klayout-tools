@@ -453,6 +453,29 @@ the route layer as routing obstacles, since a port's reported `width_um` can
 under-state the real pad it draws. That read happens lazily and is cached
 once per block, only when `connectivity[]` contains a self-net.
 
+**A north/south-facing port's stub is widened past a wider pad (#496,
+fixed).** The Manhattan backbone's stub — the segment leaving a port along
+its own `direction_deg` before the perpendicular jog — used to be drawn no
+wider than `routing.width_um`, even when the port's own reported `width_um`
+(its drawn pad's extent) was larger. For a port that faces north or south,
+that left a slit between the pad's far edge and the jog's underside, outside
+the stub's own narrow footprint but inside the pad's — narrower than the
+target deck's same-layer spacing rule whenever `routing.width_um` is
+narrower than the pad (a `mos_array`/`diff_pair` gate contact's landing
+pad, a `guard_ring`/`bjt_array` ring tap, an S/D pad reached from above —
+nothing about the shape is specific to any one generator). `route_two_pin()`
+now widens just that stub segment — from the port out to wherever the
+un-widened stub already ended — to `max(routing.width_um, that port's own
+reported width_um)`, mirroring the via-drop landing pad's own precedent
+(sized independent of the route's own trace width, for the same enclosure
+reason). Purely geometric, not port-name special-cased: it fires for any
+port whose own reported `width_um` exceeds `routing.width_um`. Scoped to
+north/south-facing ports only — an east/west-facing port's horizontal stub
+is unaffected — and to an endpoint whose own reported layer *is*
+`routing.layer_role`: a port that instead needs a via-drop (its real pad
+lives on a different layer) is unaffected too, since the widened metal is
+drawn on `routing.layer_role`, which is not that pad's own layer there.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON

@@ -56,16 +56,35 @@ def pdk_root(tmp_path):
     return root
 
 
+@pytest.fixture()
+def both_pdk_root(tmp_path):
+    """Both PDK families the phase-2 generators support -- mirrors
+    `test_gen.py`'s own fixture of the same name, used by the stub-widen
+    (#496) dual-deck DRC-clean tests below."""
+    root = tmp_path / "pdk_install"
+    _make_install(root, "sky130A")
+    _make_install(root, "gf180mcuD")
+    return root
+
+
 def _gen_block(tmp_path, pdk_root, generator, cell_name, **params):
     """Run a real `klt gen` generator and return its response dict --
     building real `generator_report` fixtures the same way a caller would
     (rather than hand-writing a fake report, which risks drifting from the
     documented `klt gen` response shape)."""
+    return _gen_block_variant(
+        tmp_path, pdk_root, "sky130A", generator, cell_name, **params
+    )
+
+
+def _gen_block_variant(tmp_path, pdk_root, variant, generator, cell_name, **params):
+    """Like :func:`_gen_block`, but for an arbitrary PDK ``variant`` (e.g.
+    ``"gf180mcuD"``) -- used by the dual-deck stub-widen (#496) tests below."""
     output = tmp_path / f"{cell_name}.gds"
     request = {
         "schema": gen.REQUEST_SCHEMA,
         "generator": generator,
-        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "pdk": {"variant": variant, "root": str(pdk_root)},
         "params": params,
         "options": {"cell_name": cell_name, "output": str(output)},
     }
@@ -3060,4 +3079,345 @@ def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
     assert report["unrouted_nets"] == ["EMIT"]
     assert any(
         "closed guard/collector ring" in note for note in report["drc_hints"]["notes"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Stub-widen (#496): a north/south-facing port's *drawn* pad can be wider
+# than the route's own `width_um` -- the un-widened stub still leaves the
+# pad at `width_um`, so the pad's edge outside the stub's narrow footprint
+# sits closer to the perpendicular jog above/below it than the target
+# deck's same-layer spacing rule allows. `route_two_pin()` must widen just
+# that stub segment (from the port out to where the un-widened stub already
+# ends) to the port's own reported `width_um`, purely geometrically (no
+# port-name special-casing) -- see `_endpoint_stub_widen_um`.
+#
+# `mos_array`'s `_G` port is used throughout (not a `metal` role -- #492's
+# `gate_contact` param that promotes it is a *different*, not-yet-merged
+# issue): its poly landing pad (issue #461, already on `main`) is exactly the
+# gate-contact-shaped repro from the issue (a 0.42um-wide north-facing pad
+# whose block bbox top sits *exactly* at the pad's own top, so the pad's own
+# edge is what a narrower route leaves exposed) with no dependency on that
+# unmerged param, and gf180mcu's curated deck checks `poly2.space.1` (sky130's
+# does not check any poly spacing rule) -- so gf180mcu is where the *drawn*
+# violation and its fix are both directly checkable via `klt drc`; sky130 is
+# exercised alongside it as the required second deck (dual-deck parity,
+# mirroring #454's own worked example) and as a "no new violation" regression
+# even though it has nothing to catch here.
+# --------------------------------------------------------------------------- #
+
+
+def _mos_gate_bus_request(pdk_root, variant, m1, m2, width_um, output):
+    return {
+        "pdk": {"variant": variant, "root": str(pdk_root)},
+        "blocks": [
+            {"id": "a", "generator_report": m1},
+            {"id": "b", "generator_report": m2},
+        ],
+        "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
+        "connectivity": [
+            {
+                "net": "GNET",
+                "pins": [
+                    {"block": "a", "port": "U0_G"},
+                    {"block": "b", "port": "U0_G"},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "poly", "width_um": width_um},
+        "options": {"cell_name": "gate_bus", "output": str(output)},
+    }
+
+
+@pytest.mark.parametrize(
+    ("variant", "family", "width_um"),
+    [
+        # gf180mcu's poly2.space.1 (0.24um) is what actually catches the
+        # pre-fix gap (poly2.width.1 is 0.18um, so 0.2 clears that separately).
+        ("gf180mcuD", "gf180mcu", 0.2),
+        # sky130's curated deck checks no poly spacing rule at all -- this
+        # exercises the same fix on the second deck (dual-deck parity) and
+        # confirms it introduces no *other* violation there, even though
+        # sky130 has nothing to catch on this specific layer.
+        ("sky130A", "sky130", 0.17),
+    ],
+)
+def test_compose_widens_stub_beside_a_wide_gate_pad_is_drc_clean(
+    tmp_path, both_pdk_root, variant, family, width_um
+):
+    m1 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        variant,
+        "mos_array",
+        f"m1_{family}",
+        rows=1,
+        cols=1,
+        fingers=1,
+        dummy=0,
+    )
+    m2 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        variant,
+        "mos_array",
+        f"m2_{family}",
+        rows=1,
+        cols=1,
+        fingers=1,
+        dummy=0,
+    )
+    output = tmp_path / f"gate_bus_{family}.gds"
+    report = compose(
+        _mos_gate_bus_request(both_pdk_root, variant, m1, m2, width_um, output)
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    drc_report = run_drc(str(output), family)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_gf180mcu_gate_pad_gap_is_a_real_pre_fix_violation(
+    tmp_path, both_pdk_root
+):
+    # Companion to the DRC-clean test above: proves the gf180mcu case is a
+    # real, *pre-existing* violation the fix closes, not a scenario that was
+    # already clean regardless -- with `_endpoint_stub_widen_um` disabled
+    # (simulating pre-#496 behavior), `klt drc --deck gf180mcu` reports
+    # exactly the `poly2.space.1` gap the issue describes.
+    m1 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "m1_prefix",
+        rows=1,
+        cols=1,
+        fingers=1,
+        dummy=0,
+    )
+    m2 = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "mos_array",
+        "m2_prefix",
+        rows=1,
+        cols=1,
+        fingers=1,
+        dummy=0,
+    )
+    output = tmp_path / "gate_bus_prefix.gds"
+
+    orig = gen_compose._endpoint_stub_widen_um
+    gen_compose._endpoint_stub_widen_um = lambda *args, **kwargs: None
+    try:
+        report = compose(
+            _mos_gate_bus_request(both_pdk_root, "gf180mcuD", m1, m2, 0.2, output)
+        )
+    finally:
+        gen_compose._endpoint_stub_widen_um = orig
+
+    assert report["nets"][0]["routed"] is True
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "violations"
+    assert any(v["rule"] == "poly2.space.1" for v in drc_report["violations"])
+
+
+def test_compose_stub_widen_is_a_no_op_when_route_width_already_matches_the_pad(
+    tmp_path, pdk_root
+):
+    # Edge case: routing.width_um equal to the port's own reported width_um
+    # (the pad's width) leaves no gap to close -- no widen box is drawn, and
+    # the drawn geometry is exactly the plain backbone Path.
+    m1 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m1_eq", rows=1, cols=1, fingers=1, dummy=0
+    )
+    m2 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m2_eq", rows=1, cols=1, fingers=1, dummy=0
+    )
+    pad_width_um = next(p["width_um"] for p in m1["ports"] if p["name"] == "U0_G")
+    output = tmp_path / "gate_bus_eq.gds"
+    report = compose(
+        _mos_gate_bus_request(pdk_root, "sky130A", m1, m2, pad_width_um, output)
+    )
+    assert report["nets"][0]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("gate_bus")
+    poly = layout.layer(66, 20)
+    shapes = list(top.shapes(poly).each())
+    assert len(shapes) == 1  # only the backbone Path -- no widen box added
+    assert shapes[0].is_path()
+
+
+def test_compose_stub_widen_draws_the_pad_width_box_beside_each_endpoint(
+    tmp_path, pdk_root
+):
+    # Direct geometry check (deck-independent of any particular DRC rule):
+    # each endpoint whose pad is wider than the route gets one extra Box, on
+    # the route layer, spanning from that endpoint's own position out to
+    # where the (un-widened) stub already ends, at the pad's own width --
+    # not the route's.
+    m1 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m1_geo", rows=1, cols=1, fingers=1, dummy=0
+    )
+    m2 = _gen_block(
+        tmp_path, pdk_root, "mos_array", "m2_geo", rows=1, cols=1, fingers=1, dummy=0
+    )
+    g_port = next(p for p in m1["ports"] if p["name"] == "U0_G")
+    pad_width_um = g_port["width_um"]
+    route_width_um = 0.17
+    assert pad_width_um > route_width_um  # precondition: this must actually widen
+
+    output = tmp_path / "gate_bus_geo.gds"
+    compose(_mos_gate_bus_request(pdk_root, "sky130A", m1, m2, route_width_um, output))
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("gate_bus")
+    poly = layout.layer(66, 20)
+    boxes = [s.box for s in top.shapes(poly).each() if s.is_box()]
+    paths = [s for s in top.shapes(poly).each() if s.is_path()]
+    assert len(boxes) == 2  # one widened stub per endpoint
+    assert len(paths) == 1  # the plain (narrow) backbone, unchanged
+
+    dbu = layout.dbu
+    pad_half_dbu = int(round((pad_width_um / 2.0) / dbu))
+    for box in boxes:
+        assert box.width() == pytest.approx(2 * pad_half_dbu, abs=1)
+
+
+def test_route_two_pin_reports_no_stub_widen_for_east_west_facing_ports(
+    tmp_path, pdk_root
+):
+    # Regression (east/west unaffected, per the issue's own scope): an S/D
+    # port's real drawn pad is also wider than a narrow route (reported
+    # `width_um` is the diffusion height), but its facing direction is
+    # east/west -- `stub_widen` must stay empty, so the drawn geometry is
+    # byte-for-byte the same as before #496.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "m1_ew", rows=1, cols=1)
+    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "m2_ew", rows=1, cols=1)
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": "a", "generator_report": m1},
+            {"id": "b", "generator_report": m2},
+        ]
+    )
+    offsets = {"a": {"x": 0.0, "y": 0.0}, "b": {"x": 3.0, "y": 0.0}}
+    bboxes = {
+        "a": gen_compose._translate_bbox(blocks["a"]["bbox_um"], offsets["a"]),
+        "b": gen_compose._translate_bbox(blocks["b"]["bbox_um"], offsets["b"]),
+    }
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+    result = gen_compose.route_two_pin(
+        {"block": "a", "port": "U0_D"},
+        {"block": "b", "port": "U0_S"},
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer,
+    )
+    assert result["routed"] is True
+    assert result["stub_widen"] == []
+
+
+def test_route_two_pin_reports_no_stub_widen_when_the_pad_needs_a_via_drop(
+    tmp_path, pdk_root
+):
+    # A north-facing gate port's own layer (poly) differs from the resolved
+    # route_layer (metal) -- the port's real pad lives on a different layer
+    # entirely, so widening metal there would not correspond to any drawn
+    # geometry; stub_widen must stay empty regardless of how wide the pad's
+    # own reported width_um is.
+    m1 = _gen_block(tmp_path, pdk_root, "mos_array", "m1_layer", rows=1, cols=1)
+    m2 = _gen_block(tmp_path, pdk_root, "mos_array", "m2_layer", rows=1, cols=1)
+    blocks = gen_compose._parse_blocks(
+        [
+            {"id": "a", "generator_report": m1},
+            {"id": "b", "generator_report": m2},
+        ]
+    )
+    offsets = {"a": {"x": 0.0, "y": 0.0}, "b": {"x": 3.0, "y": 0.0}}
+    bboxes = {
+        "a": gen_compose._translate_bbox(blocks["a"]["bbox_um"], offsets["a"]),
+        "b": gen_compose._translate_bbox(blocks["b"]["bbox_um"], offsets["b"]),
+    }
+    route_layer = gen_compose._resolve_route_layer("sky130A", "metal")
+    result = gen_compose.route_two_pin(
+        {"block": "a", "port": "U0_G"},
+        {"block": "b", "port": "U0_G"},
+        blocks,
+        offsets,
+        bboxes,
+        0.17,
+        route_layer,
+    )
+    assert result["routed"] is True
+    assert result["stub_widen"] == []
+
+
+@pytest.mark.parametrize(
+    ("pad_width_um", "route_width_um", "expect_widen"),
+    [
+        (0.42, 0.17, True),  # pad wider than route -- widens
+        (0.42, 0.42, False),  # equal -- no-op (no gap to close)
+        (0.42, 0.5, False),  # route already wider than the pad -- no-op
+        (0.20, 0.17, True),  # marginally wider -- still widens
+    ],
+)
+def test_endpoint_stub_widen_um_thresholds(pad_width_um, route_width_um, expect_widen):
+    port = {
+        "width_um": pad_width_um,
+        "layer": {"layer": 67, "datatype": 20},
+    }
+    route_layer = (67, 20)
+    widen = gen_compose._endpoint_stub_widen_um(
+        port, (1.0, 2.0), 90, 0.3, route_width_um, route_layer
+    )
+    if expect_widen:
+        assert widen == {
+            "x_um": 1.0,
+            "y_um": 2.0,
+            "direction_deg": 90,
+            "length_um": 0.3,
+            "width_um": pad_width_um,
+        }
+    else:
+        assert widen is None
+
+
+@pytest.mark.parametrize("direction_deg", [0, 180])
+def test_endpoint_stub_widen_um_ignores_east_west_directions(direction_deg):
+    port = {"width_um": 0.42, "layer": {"layer": 67, "datatype": 20}}
+    assert (
+        gen_compose._endpoint_stub_widen_um(
+            port, (1.0, 2.0), direction_deg, 0.3, 0.17, (67, 20)
+        )
+        is None
+    )
+
+
+def test_endpoint_stub_widen_um_ignores_a_different_layer_port():
+    # The port's own reported layer differs from route_layer (the shape of a
+    # via-drop endpoint) -- no widen, regardless of a wide reported width_um.
+    port = {"width_um": 0.42, "layer": {"layer": 66, "datatype": 20}}
+    assert (
+        gen_compose._endpoint_stub_widen_um(port, (1.0, 2.0), 90, 0.3, 0.17, (67, 20))
+        is None
+    )
+
+
+def test_endpoint_stub_widen_um_requires_a_route_layer():
+    port = {"width_um": 0.42, "layer": {"layer": 67, "datatype": 20}}
+    assert (
+        gen_compose._endpoint_stub_widen_um(port, (1.0, 2.0), 90, 0.3, 0.17, None)
+        is None
     )
