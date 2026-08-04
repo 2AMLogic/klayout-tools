@@ -33,6 +33,33 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-04 — `klt lvs`: new `request.reference.device_bulk` field and
+  `device.bulk_reconciled` mismatch category (#506, `"engine": "klayout"`
+  only), which *reconcile* the device-class arity gap `device.class_arity`
+  (#504/#505) could only diagnose. `{"<model>": "<reference net>"}` declares
+  that the reference netlist's device class of that name carries an implicit
+  bulk/well/collector terminal on the named net — the terminal its layout-side
+  namesake declares explicitly (e.g. the `W` of a `bulk_to_substrate` resistor
+  flavour's three-terminal `RES_X`). `klt lvs` adds that one terminal to the
+  reference class and ties it to the named net on every reference-side
+  instance before `NetlistComparer.compare()` runs, so a circuit that
+  legitimately mixes a bulk-terminal device flavour on the layout side with a
+  schematic reference that does not model that terminal can now report
+  `status: "match"` at all (previously a permanent `device.class_arity`
+  mismatch). The net is resolved per instantiating circuit and created there
+  when the reference does not model that node; it composes with
+  `hints.same_nets` for the deck-synthesized-substrate case. Every reconciled
+  class emits a `severity: "warning"`, `side: "reference"`
+  `device.bulk_reconciled` entry naming the terminal, the net, whether the net
+  was created, and both terminal lists — so a match reached through the hook
+  is never silently indistinguishable from a fully independent one, the same
+  disclosure discipline `device.body_unverified` applies to an unverified MOS
+  body. A class the request does not name still reports `device.class_arity`;
+  an unresolvable model name, a reference class that is not actually missing a
+  terminal, a class two or more terminals apart, and use with
+  `"engine": "netgen"` are each an application error (exit 1). See
+  `docs/cli/lvs.md`'s `reference.device_bulk` and `device.bulk_reconciled`
+  entries.
 - 2026-08-04 — `klt lvs`: new `device.class_arity` mismatch category (#504,
   `"engine": "klayout"` only), diagnosing a layout-side and reference-side
   device class that share a name but declare a different terminal list —
