@@ -2043,22 +2043,36 @@ def test_resolve_via_drop_layer_adjacent_metals_resolves_the_via():
 
 
 def test_resolve_via_drop_layer_non_adjacent_metals_is_unresolvable():
-    # sky130's metals stack has only two levels, so no pair in it is ever
-    # more than one hop apart -- exercise the >1-hop rejection path directly
-    # against a synthetic three-level deck instead of relying on a future
-    # PDK deck to reach it.
-    real = get_extraction_deck("sky130")
-    from dataclasses import replace
-
-    deck = replace(
-        real,
-        metals=((67, 20), (68, 20), (69, 20)),
-        vias=((67, 44), (68, 44)),
-    )
+    # sky130's metals stack is now three levels deep (li1/met1/met2, issue
+    # #508's third connectivity level) -- a route on met2 (metals[2],
+    # "metal3") to a pin still on li1 (metals[0], the base "metal" role) is
+    # two via hops apart, exercising the >1-hop rejection path against the
+    # real deck (no synthetic three-level deck needed anymore, unlike before
+    # #508 extended the real one).
+    deck = get_extraction_deck("sky130")
     via_layer, error = _resolve_via_drop_layer(deck, (69, 20), (67, 20))
     assert via_layer is None
     assert error is not None
     assert "single-hop" in error
+
+
+def test_resolve_via_drop_layer_metal3_to_metal2_resolves_the_via():
+    # A route on met2 (metals[2], "metal3") to a pin on met1 (metals[1],
+    # "metal2") is exactly one via hop apart -- resolves to the met1<->met2
+    # via (issue #508).
+    deck = get_extraction_deck("sky130")
+    via_layer, error = _resolve_via_drop_layer(deck, (69, 20), (68, 20))
+    assert via_layer == (68, 44)
+    assert error is None
+
+
+def test_resolve_route_layer_metal3_and_via2_roles():
+    # `routing.layer_role`/the connecting via role resolve through the same
+    # `_PDK_ROLE_LAYERS` table `_resolve_via_drop_layer` above reads off the
+    # deck directly -- confirming the router-facing role names (#508) match
+    # the deck's own met2/via.drawing layers.
+    assert gen_compose._resolve_route_layer("sky130A", "metal3") == (69, 20)
+    assert gen_compose._resolve_route_layer("sky130A", "via2") == (68, 44)
 
 
 def test_compose_via_drop_routes_self_net_that_pure_metal_would_reject(

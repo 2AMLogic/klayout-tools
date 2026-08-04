@@ -2799,6 +2799,124 @@ def test_gf180mcu_deck_declares_full_metal_stack():
 
 
 # --------------------------------------------------------------------------- #
+# sky130's third connectivity level, met2 (issue #508, follow-up to #454/
+# #468's metal2/via1 routing roles): before this, sky130's `metals` stopped
+# at met1, so met1 -- itself already the *only* other level the curated
+# deck's connectivity graph knew about -- was the sole plane above the
+# device-pad layer a caller could route on. See `decks/sky130.py`'s own
+# `EXTRACTION_DECK.metals` comment for the full provenance.
+# --------------------------------------------------------------------------- #
+
+
+def test_sky130_deck_declares_three_level_metal_stack():
+    """The sky130 extraction deck now declares li1/met1/met2 with a
+    mcon/via.drawing chain between them (index-aligned, `len(metals) - 1`
+    vias) and a pin/label layer per metal level -- the deck-data half of
+    #508."""
+    deck = get_extraction_deck("sky130")
+    assert deck.metals == ((67, 20), (68, 20), (69, 20))
+    assert deck.vias == ((67, 44), (68, 44))
+    assert deck.metal_labels == ((67, 5), (68, 5), (69, 5))
+    assert len(deck.vias) == len(deck.metals) - 1
+
+
+def _draw_sky130_nmos(top, layout, x0, source_label, drain_label=None):
+    """Draw one minimal sky130 NMOS at ``x0`` (no tap/body geometry -- falls
+    back to the substrate-global net, matching
+    `test_sky130_nmos_body_falls_back_to_substrate_global_without_tap`
+    above) and return its drain li1 pad footprint (for stacking a met2
+    via-column on)."""
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    d(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing (active strip)
+    d(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1200))  # poly.drawing (gate)
+    # Source pad: licon1 + li1, labelled.
+    d(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1.drawing
+    d(67, 20, kdb.Box(x0, 200, x0 + 400, 800))  # li1.drawing
+    label(67, 5, source_label, x0 + 200, 500)
+    # Drain pad: licon1 + li1, optionally labelled.
+    d(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1.drawing
+    d(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1.drawing
+    if drain_label is not None:
+        label(67, 5, drain_label, x0 + 1800, 500)
+    return kdb.Box(x0 + 1600, 200, x0 + 2000, 800)  # drain li1 footprint
+
+
+# mcon/met1/via.drawing/met2 -- the stack a drain pad's own li1 footprint is
+# contacted straight up through to reach met2 (issue #508).
+_SKY130_MET2_VIA_STACK = [(67, 44), (68, 20), (68, 44), (69, 20)]
+
+
+def _make_sky130_metal_bridge_layout(*, bridge: bool) -> kdb.Layout:
+    """Two sky130 NMOS transistors whose drains are separated in li1 and
+    (when ``bridge``) joined *only* through the met2 level: a full
+    mcon/met1/via.drawing/met2 column at each drain, plus a met2 span
+    between them. The drains touch on no shared li1 shape, so they extract
+    as one net *iff* the deck reads met2 and the met1<->met2 via (the #508
+    fix); with ``bridge=False`` the met2 span is absent and the two drains
+    stay distinct -- the in-suite counterfactual (mirrors
+    `_make_gf180mcu_metal_bridge_layout`)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    fa = _draw_sky130_nmos(top, layout, 0, "S1", drain_label="OUT")
+    fb = _draw_sky130_nmos(top, layout, 8000, "S2")
+
+    if bridge:
+
+        def d(layer, datatype, box):
+            top.shapes(layout.layer(layer, datatype)).insert(box)
+
+        for layer, datatype in _SKY130_MET2_VIA_STACK:
+            d(layer, datatype, fa)
+            d(layer, datatype, fb)
+        # met2 long-haul span joining the two drain columns.
+        d(69, 20, kdb.Box(fa.left, fa.bottom, fb.right, fb.top))
+
+    return layout
+
+
+def test_sky130_met2_bridge_joins_drains_into_one_net(tmp_path):
+    """Two NMOS drains joined only through the met2/via.drawing stack extract
+    as a single connected net -- the core #508 fix. Before the deck declared
+    met2 (and the via reaching it), everything above met1 was invisible to
+    the connectivity graph and the drains extracted as two disconnected
+    nets."""
+    path = _write_gds(
+        _make_sky130_metal_bridge_layout(bridge=True), tmp_path / "met2_bridge.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "met2_bridge.spice"))
+
+    nfets = [d for d in report["devices"] if d["class"] == "nfet"]
+    assert len(nfets) == 2
+    drains = {d["nets"]["d"] for d in nfets}
+    assert drains == {"OUT"}, f"drains should share the bridged net, got {drains}"
+
+
+def test_sky130_without_met2_bridge_drains_stay_disconnected(tmp_path):
+    """Counterfactual for the test above: with the met2 bridge removed, the
+    same two drains extract as two distinct nets. Guards against a false
+    pass where the drains merged for some reason other than the met2/via
+    stack."""
+    path = _write_gds(
+        _make_sky130_metal_bridge_layout(bridge=False), tmp_path / "no_bridge.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "no_bridge.spice"))
+
+    nfets = [d for d in report["devices"] if d["class"] == "nfet"]
+    assert len(nfets) == 2
+    drains = {d["nets"]["d"] for d in nfets}
+    assert len(drains) == 2, f"drains should be disconnected without a bridge, {drains}"
+
+
+# --------------------------------------------------------------------------- #
 # ignored_layers: shapes on layers the deck's connectivity graph never reads
 # (issue #220 interim ask -- the extraction-side analogue of `klt drc`'s
 # coverage.layers_in_stream_without_rules)

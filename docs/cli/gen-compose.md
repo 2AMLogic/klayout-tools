@@ -76,7 +76,12 @@ cleanly.
   limitations" below for the exact before/after against #433's own
   reproduction, and ["Via-drop routing (metal2/via,
   #454)"](#via-drop-routing-metal2via-454) for a worked request/response
-  pair.
+  pair. sky130's curated deck exposes one level further still (#508):
+  `"metal3"` (met2 `69/20`) plus its own connecting via role (`"via2"`, the
+  met1↔met2 via, `68/44`) — usable the same way, but only from a pin already
+  on `"metal2"` (met1, one via hop away); a pin still on the base `"metal"`
+  role (li1) is two hops from `"metal3"` and the via-drop's single-hop limit
+  (below) rejects it. gf180mcu's own deck still exposes only `"metal2"`.
 - **Net labels (#200, fixed)** — every routed 2-pin net also gets one
   `kdb.Text` label, named after its own `connectivity[].net` field, on the
   PDK-family label layer that pairs with the resolved routing layer (e.g.
@@ -301,12 +306,17 @@ into the circuit.)
 Re-raising #433's Ask options 1/2 (the merged #433 fix implemented only
 option 3, "fail visibly"): a family whose curated `ExtractionDeck` already
 declares a second routing-metal level and the via that lands on it
-(sky130's `EXTRACTION_DECK.metals=((67,20),(68,20))` / `.vias=((67,44),)`;
-gf180mcu's Metal1→Metal5 stack) now exposes that second level as a second
-`routing.layer_role` (`"metal2"`) plus the via role that connects it back to
-the base `"metal"` role (`"via1"`) — sourced directly from the deck's own
-`metals`/`vias` tuples in `klayout_tools.gen._PDK_ROLE_LAYERS`, never a
-second, private layer map.
+(sky130's `EXTRACTION_DECK.metals=((67,20),(68,20),(69,20))` /
+`.vias=((67,44),(68,44))`; gf180mcu's Metal1→Metal5 stack) now exposes that
+second level as a second `routing.layer_role` (`"metal2"`) plus the via role
+that connects it back to the base `"metal"` role (`"via1"`) — sourced
+directly from the deck's own `metals`/`vias` tuples in
+`klayout_tools.gen._PDK_ROLE_LAYERS`, never a second, private layer map.
+sky130's deck now declares a third level too (met2, issue #508): `"metal3"`
+plus `"via2"` (the met1↔met2 via) work the same way one level up, but only
+between `"metal2"` and `"metal3"` themselves — see the single-hop limit
+below for why `"metal3"` cannot via-drop straight down to a pin still on the
+base `"metal"` role.
 
 Selecting `"metal2"` changes what `route_two_pin()` draws, not the
 request/response shape: the Manhattan backbone still runs between the same
@@ -369,9 +379,16 @@ drawing something that does not connect:
 
 - A pin whose layer is a *different* metals-stack level than
   `routing.layer_role`, more than one via hop away — sky130's/gf180mcu's
-  currently-exposed `"metal2"`/`"via1"` pair is always exactly one hop from
-  `"metal"`, so this only matters for a future third metal level, not
-  anything expressible today.
+  `"metal2"`/`"via1"` pair is always exactly one hop from `"metal"`, so this
+  case does not arise for either family's second level. sky130's third
+  level (`"metal3"`/`"via2"`, issue #508) is where it first becomes real: a
+  `"metal3"` route to a pin still on the base `"metal"` role (li1) is two
+  hops away and hits this rejection — only a pin already on `"metal2"`
+  (met1, one hop from met2) resolves. gf180mcu's Metal3-5 levels remain
+  unexposed as `routing.layer_role` roles at all (its curated
+  `EXTRACTION_DECK` declares the full Metal1-Metal5 stack for extraction,
+  but `klayout_tools.gen._PDK_ROLE_LAYERS["gf180mcu"]` stops at `"metal2"`),
+  so this case stays unreachable on that family.
 - A pin on the deck's bare **`poly`** layer — a `mos_array`/`diff_pair` gate
   drawn *without* [`params.gate_contact`](gen.md) (issue #492). No via in the
   metals stack lands on poly, so the backbone would end as an uncontacted
