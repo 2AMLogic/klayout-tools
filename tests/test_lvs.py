@@ -1966,6 +1966,137 @@ def test_corpus_deliberately_broken_reference_reports_mismatches(
 
 
 # --------------------------------------------------------------------------- #
+# Corpus round-trip: machine-generated macro-scale fixture (issue #389)
+# --------------------------------------------------------------------------- #
+
+# The same real sky130_fd_sc_hd GCD macro `tests/test_drc.py`/
+# `tests/test_precheck.py`/`tests/test_layout_metrics.py` already exercise --
+# produced end to end by `klt synthesize` + `klt place-and-route` (real Yosys +
+# real OpenROAD). Issue #389 extends the corpus round-trip tier above (which
+# runs a *single* hand-drawn standard-cell view) to this macro-scale target:
+# thousands of extracted devices, real routing-layer usage, one level of real
+# hierarchy -- the piece of the original "DRC/LVS-clean oracle" ask PR #443
+# (drc/precheck/layout-metrics) left uncovered. See
+# tests/corpus/place_and_route/README.md (in tests/corpus/README.md's
+# "Machine-generated macro-scale fixture" section) for full provenance and
+# docs/cli/lvs.md's "Machine-generated macro-scale fixture" section for the
+# methodology this mirrors from #456.
+PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
+
+_skip_no_pnr_fixture = pytest.mark.skipif(
+    not PLACE_AND_ROUTE_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route corpus fixture checked in",
+)
+
+
+@_skip_no_pnr_fixture
+def test_pnr_gcd_fixture_self_compare_matches_cleanly(tmp_path):
+    """The corpus round-trip tier's known-good self-compare, at macro scale:
+    the GCD macro's own extracted netlist matches the layout it came from.
+
+    This is the LVS half of the "#391/#443 GCD fixture is a DRC/LVS-clean
+    oracle" claim (issue #389). The load-bearing assertion is that extraction
+    at this scale (thousands of instances) does not silently drop devices --
+    every extracted device is matched on both sides -- and that the compare
+    reports `status: "match"` with only the deck-structural warnings the
+    hand-drawn corpus round-trip above already documents (the synthetic-
+    substrate `device.body_unverified` note plus ambiguous-net/unused-class
+    `topology` warnings), never an `error`-severity mismatch."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "gcd.spice")
+    extracted = run_extract(str(PLACE_AND_ROUTE_GDS), "sky130", output=reference_path)
+    assert extracted["top"] == "gcd"
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(PLACE_AND_ROUTE_GDS), "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+
+    # No silently-dropped devices at macro scale: every extracted device is
+    # accounted for on both sides. This is the "extraction at thousands of
+    # instances completes without dropping devices" edge case from #389's
+    # test plan -- the count is large (thousands) rather than a handful.
+    devices = report["counts"]["devices"]
+    assert devices["layout"] == devices["reference"] == devices["matched"]
+    assert devices["matched"] > 1000
+    for kind in ("nets", "devices", "pins"):
+        counts = report["counts"][kind]
+        assert counts["layout"] == counts["reference"] == counts["matched"]
+
+    # A clean self-compare carries only warnings -- the same deck-structural
+    # signal the hand-drawn corpus round-trip tier above documents, never an
+    # `error` that would break equivalence.
+    assert all(m["severity"] == "warning" for m in report["mismatches"])
+    assert "device.property" not in report["category_counts"]
+    assert lvs.CATEGORY_NET_UNMATCHED not in report["category_counts"]
+    assert lvs.CATEGORY_DEVICE_UNMATCHED not in report["category_counts"]
+
+    # Inline extraction pins the sky130 deck in the shared provenance block.
+    assert report["provenance"]["deck"]["name"] == "sky130"
+
+
+@_skip_no_pnr_fixture
+def test_pnr_gcd_fixture_device_property_corruption_is_caught(tmp_path):
+    """The corpus round-trip tier's deliberately-broken variant, at macro
+    scale and in the standard-cell region: change exactly one transistor's
+    drawn width in the reference netlist (a `device.property` corruption, the
+    same negative control #456 used for the mixed layout) and confirm `klt
+    lvs` catches it -- `status: "mismatch"`, a single `device.property` entry
+    naming that exact instance, correctly attributed rather than smeared
+    across the ~4000 other, unchanged standard-cell devices."""
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "gcd.spice")
+    extracted = run_extract(str(PLACE_AND_ROUTE_GDS), "sky130", output=reference_path)
+
+    # Corrupt exactly one standard-cell-region transistor's width: rewrite the
+    # first device line's `W=` value, leaving every other line (and all
+    # connectivity) untouched, so the injected defect is a pure parameter
+    # change on a single instance.
+    lines = Path(reference_path).read_text().splitlines(keepends=True)
+    corrupted = 0
+    for i, line in enumerate(lines):
+        if line.startswith("M") and "W=0.42U" in line:
+            lines[i] = line.replace("W=0.42U", "W=1.0U", 1)
+            corrupted += 1
+            break
+    assert corrupted == 1, "expected to corrupt exactly one device line"
+    broken_path = tmp_path / "gcd_broken.spice"
+    broken_path.write_text("".join(lines))
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(PLACE_AND_ROUTE_GDS), "deck": "sky130"},
+            "reference": {"netlist": str(broken_path), "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"].get("device.property") == 1
+
+    device_property = [
+        m for m in report["mismatches"] if m["category"] == "device.property"
+    ]
+    assert len(device_property) == 1
+    entry = device_property[0]
+    assert entry["severity"] == "error"
+    assert entry["device"]["class"] == "nfet"
+    # Correctly attributed to the one corrupted instance (its layout/reference
+    # device name), not misattributed or smeared across the fabric.
+    assert entry["device"]["layout"] == entry["device"]["reference"]
+    assert "w_um" in entry["description"]
+
+
+# --------------------------------------------------------------------------- #
 # Regression: #201 -- unused device-class registration is not a real mismatch
 # --------------------------------------------------------------------------- #
 

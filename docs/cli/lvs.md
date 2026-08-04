@@ -290,6 +290,51 @@ anchor). A clean LVS run therefore does not by itself establish that a
 top-level pinout is correct; something else (e.g. comparing `pins[]` names
 directly) has to check pin order.
 
+## Machine-generated macro-scale fixture (issue #389)
+
+`docs/cli/drc.md`'s own "Macro-scale, machine-generated (standard-cell)
+layout" section documents running `klt drc`/`klt precheck`/`klt
+layout-metrics` against a real `sky130_fd_sc_hd` GCD macro produced end to
+end by `klt synthesize` + `klt place-and-route` (real Yosys + real OpenROAD,
+see `tests/corpus/place_and_route/README.md`'s provenance note) — thousands
+of instances, one level of real hierarchy, `met1`-`met5` routing. Issue #389
+closed the one verb that macro-scale check left uncovered: `klt lvs`.
+
+Applying "Negative controls" above to that same committed fixture
+(`tests/corpus/place_and_route/gcd.gds.gz`, top cell `gcd`), via the
+corpus round-trip / self-consistency methodology `#456` established for a
+real OpenROAD-produced layout:
+
+- **Clean self-compare.** Extracting the macro's own netlist (**4355
+  devices**, 2961 nets, 1571 pins across the flattened layout) and comparing
+  the layout against it reports
+  `status: "match"`, with every device accounted for on both sides
+  (`counts.devices` layout = reference = matched = 4355 — no silently-
+  dropped devices at this scale). The only mismatches are the same deck-
+  structural **warnings** the hand-drawn corpus round-trip already carries:
+  one `device.body_unverified` (the synthetic-substrate net every NMOS body
+  lands on, since sky130 draws no distinct NMOS tap layer — see
+  [`docs/cli/extract.md`](extract.md), "Coverage") plus ambiguous-net and
+  unused-device-class `topology` warnings. None are `error` severity.
+- **Deliberately-broken variant.** Corrupting exactly one standard-cell-
+  region transistor's drawn width in the reference netlist (`W=0.42U` →
+  `W=1.0U` on a single device line, a pure `device.property` change leaving
+  all connectivity intact) is caught: `status: "mismatch"`, exit 3, a single
+  `device.property` entry (`severity: "error"`, `class: "nfet"`,
+  `description`: "matched device parameter 'w_um' differs") naming that exact
+  instance — correctly attributed to the one changed device, not smeared
+  across the ~4000 unchanged standard-cell devices.
+
+This is a **self-consistency** check (the layout's own extracted netlist as
+its own reference), not an independent-reference LVS: a true golden-reference
+check (translating `klt synthesize`'s gate-level Verilog netlist to SPICE)
+is out of scope — no Verilog→SPICE bridge exists in this repo today. What it
+establishes is that `klt lvs`'s extract-and-compare path scales to macro-
+scale, thousands-of-device input without dropping devices, and that a single-
+instance parameter defect in the standard-cell fabric is caught and correctly
+attributed. See `tests/test_lvs.py`'s "Corpus round-trip: machine-generated
+macro-scale fixture" tier for the regression pin.
+
 ## Mixed sky130_fd_sc_hd + analog-macro netlist (Epic #393 Phase 3, #456)
 
 Applying "Negative controls" above to a genuinely **mixed** design: issue
