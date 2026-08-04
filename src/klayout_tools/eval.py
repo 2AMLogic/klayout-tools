@@ -1,14 +1,17 @@
 """``klt eval``: score a candidate against a per-block descriptor, in one call.
 
-Pure orchestration -- this module never re-implements DRC/LVS/sim/metrics
-logic. It imports and calls the existing library entry points
-(:func:`~klayout_tools.drc.run_drc`, :func:`~klayout_tools.lvs.run_lvs`,
+Pure orchestration -- this module never re-implements DRC/LVS/sim/metrics/
+synthesis/place-and-route logic. It imports and calls the existing library
+entry points (:func:`~klayout_tools.drc.run_drc`, :func:`~klayout_tools.lvs.run_lvs`,
 :func:`~klayout_tools.sim.run_sim`,
 :func:`~klayout_tools.layout_metrics.layout_metrics_report`,
-:func:`~klayout_tools.functional_verification.run_functional_verification`)
+:func:`~klayout_tools.functional_verification.run_functional_verification`,
+:func:`~klayout_tools.synthesize.run_synthesize`,
+:func:`~klayout_tools.place_and_route.run_place_and_route`)
 the same way ``klt drc``/``klt lvs``/``klt sim``/``klt layout-metrics``/
-``klt functional-verification`` themselves do, and reconciles their separate
-exit-code vocabularies into one envelope:
+``klt functional-verification``/``klt synthesize``/``klt place-and-route``
+themselves do, and reconciles their separate exit-code vocabularies into one
+envelope:
 
     {
         "schema_version": 1,
@@ -36,7 +39,15 @@ without reshaping anything: ``functional-verification`` (Epic #391 Phase 3)
 joined the set as one new entry in :data:`_INVOKE_FNS` plus one in
 :data:`_DEFAULT_STATUS_FNS`, and its ``status: "pass"``/``"fail"`` collapses
 into ``valid`` exactly the way ``drc``'s ``clean``/``violations`` already
-does.
+does. ``synthesize`` and ``place-and-route`` (Epic #391 Phase 5) join the
+same way, wiring the digital synth/P&R metric surfaces -- cell count/area
+(Phase 2), and wirelength/slack/DRC (Phase 4, plus a DRC/layout-metrics gate
+run over the P&R-produced GDS) -- into the identical descriptor-driven gate/
+objective/metrics contract an analog descriptor already uses: a digital
+descriptor is not a different shape, just a different set of ``check``
+names strung together (``synthesize`` -> ``functional-verification`` ->
+``place-and-route`` -> ``drc``/``layout-metrics``), each one a new entry in
+:data:`_INVOKE_FNS` and nothing else.
 
 Descriptor shape (see ``docs/cli/eval.md`` for the full field reference)::
 
@@ -64,15 +75,21 @@ JSON object of ``${name}``-style substitution values -- ``${layout}``/
 check. This is what lets one descriptor be reused, unmodified, across many
 candidates in an optimizer loop, rather than being rewritten per turn.
 
-``layout-metrics`` has no gate semantics of its own (see
-``docs/cli/layout-metrics.md`` -- no exit code above 2), so a gate naming it
-*must* declare a ``threshold`` (a ``metric`` path plus ``min``/``max``/
-``equals``) to derive pass/fail -- it is deliberately excluded from
-:data:`_DEFAULT_STATUS_FNS`, so omitting ``threshold`` on a ``layout-metrics``
-gate raises :class:`EvalError` rather than silently always passing. Any gate
-may declare a ``threshold`` to override its check's default status derivation
-(e.g. gating ``drc`` on a violation-count ceiling instead of "any violation
-fails").
+``layout-metrics``, ``synthesize``, and ``place-and-route`` have no gate
+semantics of their own -- ``layout-metrics`` has no exit code above 2 (see
+``docs/cli/layout-metrics.md``), and ``synthesize``/``place-and-route``
+always report ``"status": "ok"`` (they either produce a netlist/DEF+GDS or
+raise :class:`~klayout_tools.synthesize.SynthesizeError`/
+:class:`~klayout_tools.place_and_route.PlaceAndRouteError`, per their own
+module docstrings -- there is no "ran but found a problem" outcome to
+default to). A gate naming any of the three *must* declare a ``threshold``
+(a ``metric`` path plus ``min``/``max``/``equals``) to derive pass/fail --
+all three are deliberately excluded from :data:`_DEFAULT_STATUS_FNS`, so
+omitting ``threshold`` on one of their gates raises :class:`EvalError`
+rather than silently always passing. Any gate may declare a ``threshold`` to
+override its check's default status derivation (e.g. gating ``drc`` on a
+violation-count ceiling instead of "any violation fails", or gating
+``place-and-route`` on ``worst_slack_ns`` >= 0 for timing closure).
 
 Exit codes (mirrored in ``cli/eval_cmd.py`` -- see ``docs/cli/eval.md``):
     0 - ran, ``valid: true``
@@ -101,7 +118,9 @@ from .functional_verification import (
 )
 from .layout_metrics import LayoutMetricsError, layout_metrics_report
 from .lvs import LvsError, run_lvs
+from .place_and_route import PlaceAndRouteError, run_place_and_route
 from .sim import SimError, run_sim
+from .synthesize import SynthesizeError, run_synthesize
 
 SCHEMA_VERSION = 1
 
@@ -111,6 +130,8 @@ _UNDERLYING_ERRORS = (
     SimError,
     LayoutMetricsError,
     FunctionalVerificationError,
+    SynthesizeError,
+    PlaceAndRouteError,
 )
 
 
@@ -266,12 +287,34 @@ def _invoke_functional_verification(
     return run_functional_verification(_resolve_request(args["request"], base_dir))
 
 
+def _invoke_synthesize(args: dict[str, Any], base_dir: str) -> dict[str, Any]:
+    """Unlike ``lvs``/``sim``/``functional-verification``, ``run_synthesize``'s
+    own ``load_request`` (see ``synthesize.py``) accepts only a file path --
+    no ``"-"``/inline-JSON form -- so ``request`` resolves via
+    :func:`_resolve_path` (the same convention as ``drc``'s ``file``/
+    ``layout-metrics``'s ``block``), not :func:`_resolve_request`."""
+    if "request" not in args:
+        raise EvalError("'synthesize' check args require 'request'")
+    return run_synthesize(_resolve_path(args["request"], base_dir, "request"))
+
+
+def _invoke_place_and_route(args: dict[str, Any], base_dir: str) -> dict[str, Any]:
+    """Same file-path-only ``request`` resolution as :func:`_invoke_synthesize`
+    -- ``run_place_and_route``'s own ``load_request`` accepts only a file
+    path (see ``place_and_route.py``)."""
+    if "request" not in args:
+        raise EvalError("'place-and-route' check args require 'request'")
+    return run_place_and_route(_resolve_path(args["request"], base_dir, "request"))
+
+
 _INVOKE_FNS: dict[str, Callable[[dict[str, Any], str], dict[str, Any]]] = {
     "drc": _invoke_drc,
     "lvs": _invoke_lvs,
     "sim": _invoke_sim,
     "layout-metrics": _invoke_layout_metrics,
     "functional-verification": _invoke_functional_verification,
+    "synthesize": _invoke_synthesize,
+    "place-and-route": _invoke_place_and_route,
 }
 
 
@@ -310,9 +353,10 @@ def _status_functional_verification(report: dict[str, Any]) -> tuple[str, int, A
     return status, (0 if status == "pass" else 3), report.get("failed_count")
 
 
-# Deliberately excludes "layout-metrics" -- it has no exit code above 2 (no
-# gate semantics of its own), so a gate naming it must declare `threshold`;
-# see `_derive_status` and this module's docstring.
+# Deliberately excludes "layout-metrics"/"synthesize"/"place-and-route" -- none
+# of the three has an exit code above 2 / a "ran but found a problem" outcome
+# of its own (see this module's docstring), so a gate naming one of them must
+# declare `threshold`; see `_derive_status`.
 _DEFAULT_STATUS_FNS: dict[str, Callable[[dict[str, Any]], tuple[str, int, Any]]] = {
     "drc": _status_drc,
     "lvs": _status_lvs,

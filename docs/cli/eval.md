@@ -23,9 +23,11 @@ klt eval <descriptor> [--candidate <candidate>] [--format text|json]
 
 `klt eval` is **pure orchestration**: it imports and calls the existing
 library entry points behind `klt drc`/`klt lvs`/`klt sim`/`klt
-layout-metrics` (`run_drc`/`run_lvs`/`run_sim`/`layout_metrics_report`) —
-never re-implements DRC/LVS/sim/metrics logic itself, per this repo's "wrap
-the proven engine" convention.
+layout-metrics`/`klt functional-verification`/`klt synthesize`/`klt
+place-and-route` (`run_drc`/`run_lvs`/`run_sim`/`layout_metrics_report`/
+`run_functional_verification`/`run_synthesize`/`run_place_and_route`) —
+never re-implements DRC/LVS/sim/metrics/synthesis/place-and-route logic
+itself, per this repo's "wrap the proven engine" convention.
 
 ## Why: one envelope instead of four
 
@@ -42,12 +44,24 @@ two candidates can be compared without domain knowledge.
 
 Which checks constitute the gate, and what the objective is, are declared in
 the **descriptor** — never a fixed check list built into `klt eval` itself.
-Five checks are implemented today (`drc`/`lvs`/`sim`/`layout-metrics`/
-`functional-verification`), and the design is check-name-agnostic by
-construction: adding the digital flow's
+Seven checks are implemented today (`drc`/`lvs`/`sim`/`layout-metrics`/
+`functional-verification`/`synthesize`/`place-and-route`), and the design is
+check-name-agnostic by construction: adding the digital flow's
 [`functional-verification`](functional-verification.md) gate (Epic #391
-Phase 3) needed no schema change here, only a new invoke/status adapter
-pair.
+Phase 3) and its [`synthesize`](synthesize.md)/
+[`place-and-route`](place-and-route.md) checks (Epic #391 Phase 5) each
+needed no schema change here, only a new invoke adapter (plus, for
+`functional-verification`, a status adapter — `synthesize`/`place-and-route`
+have no gate semantics of their own, see "`gates[]` entries" below).
+
+A digital candidate's descriptor chains the same four gate/objective/metrics
+fields an analog descriptor uses, just with digital `check` names:
+`synthesize` → `functional-verification` → `place-and-route` → `drc`/
+`layout-metrics` (the last two running over the GDS `place-and-route`
+produces). This is what lets a digital candidate evaluation produce the
+same one `valid`/`objective`/`metrics` envelope, and the same trajectory-log
+record shape (see [`klt trajectory`](trajectory.md)), that an analog
+candidate already does.
 
 ## Descriptor
 
@@ -85,14 +99,65 @@ pair.
 | `objective` | object, required | The single scalar to report — see "`objective`" below. |
 | `metrics` | array\<object\> | Optional additional checks to run and report in the response's `metrics` bag, beyond the declared objective — see "`metrics[]` entries" below. Defaults to `[]`. |
 
+### Digital flow example
+
+A digital candidate's descriptor (Epic #391 Phase 5) chains `synthesize` →
+`functional-verification` → `place-and-route` → `drc`/`layout-metrics` over
+the P&R-produced GDS — the same descriptor shape above, just with digital
+`check` names strung together:
+
+```json
+{
+  "gates": [
+    { "check": "synthesize", "args": { "request": "synth_request.json" } },
+    {
+      "check": "functional-verification",
+      "args": { "request": "fv_request.json" }
+    },
+    {
+      "check": "place-and-route",
+      "args": { "request": "pnr_request.json" },
+      "threshold": { "metric": "setup_violation_count", "max": 0 }
+    },
+    {
+      "check": "drc",
+      "args": { "file": ".klt/place-and-route/gcd.gds", "deck": "sky130hd" }
+    }
+  ],
+  "objective": {
+    "check": "place-and-route",
+    "metric": "wirelength_um",
+    "polarity": "minimize",
+    "name": "wirelength_um",
+    "args": { "request": "pnr_request.json" }
+  },
+  "metrics": [
+    {
+      "name": "synth",
+      "check": "synthesize",
+      "args": { "request": "synth_request.json" }
+    }
+  ]
+}
+```
+
+`synthesize`'s/`place-and-route`'s own `request` args are file paths only
+(never inline JSON/`-`), and each request document's own `hdl_toplevel`
+governs where its `.klt/synthesize/`/`.klt/place-and-route/` artifacts land
+— so `drc`'s `file` above can name that deterministic output path directly,
+without candidate substitution, as long as the candidate's `hdl_toplevel`
+stays fixed across turns (only the RTL/netlist inputs a request names need
+to vary per candidate). See `docs/cli/synthesize.md`/
+`docs/cli/place-and-route.md` for each request document's own schema.
+
 ### `gates[]` entries
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, `"layout-metrics"`, or `"functional-verification"`. An unknown value is an application error (exit 1). |
+| `check` | string, required | Which `klt` subcommand to run: `"drc"`, `"lvs"`, `"sim"`, `"layout-metrics"`, `"functional-verification"`, `"synthesize"`, or `"place-and-route"`. An unknown value is an application error (exit 1). |
 | `name` | string | Label for this gate in the response's `gates[].name` — disambiguates two gates of the same `check` (e.g. two DRC decks). Defaults to `check`. |
 | `args` | object | Arguments forwarded to the underlying check — see "Check `args`" below. `${name}`-style placeholders are substituted from `--candidate` before invocation. |
-| `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"` gates (it has no exit code above 2 of its own — see `docs/cli/layout-metrics.md` — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"`/`"functional-verification"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails"). |
+| `threshold` | object | Overrides this gate's pass/fail derivation: `{"metric": <dotted path>, "min": <number>, "max": <number>, "equals": <any>}`, at least one of `min`/`max`/`equals`. **Required** for `"layout-metrics"`/`"synthesize"`/`"place-and-route"` gates (none has an exit code above 2 / a "ran but found a problem" outcome of its own — `synthesize`/`place-and-route` always report `"status": "ok"`, see [`klt synthesize`](synthesize.md)/[`klt place-and-route`](place-and-route.md) — so there is no default status to derive); optional for `"drc"`/`"lvs"`/`"sim"`/`"functional-verification"` gates (e.g. gate on a violation-count ceiling instead of "any violation fails", or gate `"place-and-route"` on `worst_slack_ns` >= `0` for timing closure). |
 
 ### Check `args`
 
@@ -103,6 +168,8 @@ pair.
 | `"sim"` | `request` | Forwarded to `run_sim(request, ...)` — see [`klt sim`](sim.md). Same `request` resolution as `"lvs"` above. Optional `artifacts_dir`, `backend`, `max_workers`, `hosts` forward to `run_sim`'s matching keyword arguments. |
 | `"layout-metrics"` | `block` | Forwarded to `layout_metrics_report(block, deck=...)` — see [`klt layout-metrics`](layout-metrics.md). `block` resolves the same way as `"drc"`'s `file`. Optional `deck` forwards to the DRC-violation-count sub-field. |
 | `"functional-verification"` | `request` | Forwarded to `run_functional_verification(request)` — see [`klt functional-verification`](functional-verification.md). Same `request` resolution as `"lvs"` above. `status: "pass"` → `valid: true`, `status: "fail"` → `valid: false`; a run that never produced a `results.xml` is a `klt eval` error (exit 1), never a `false` score. |
+| `"synthesize"` | `request` | Forwarded to `run_synthesize(request)` — see [`klt synthesize`](synthesize.md). **Unlike** `"lvs"`/`"sim"`/`"functional-verification"`, `request` resolves the same way as `"drc"`'s `file` (a path only — `run_synthesize`'s own `load_request` does not accept the `"-"`/inline-JSON forms). Reports `instance_count`, `area_um2`, `sequential_area_um2`, `netlist_path`, etc.; always `"status": "ok"` (synthesis either produces a netlist or the check itself fails to run — exit 1). |
+| `"place-and-route"` | `request` | Forwarded to `run_place_and_route(request)` — see [`klt place-and-route`](place-and-route.md). Same file-path-only `request` resolution as `"synthesize"` above. Reports `wirelength_um`, `worst_slack_ns`, `total_negative_slack_ns`, `setup_violation_count`/`hold_violation_count`, `gds_path`, etc.; always `"status": "ok"` (same "produces or fails to run" posture as `"synthesize"`). A descriptor chaining `"drc"`/`"layout-metrics"` over the produced `gds_path` closes the loop from RTL candidate to a signed-off digital layout in one `klt eval` invocation. |
 
 ### `objective`
 

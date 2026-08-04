@@ -65,6 +65,21 @@ version. Not an exhaustive commit-by-commit log.
   keep its default guard/collector ring **or** be wired into the rest of a
   composed circuit, not both. See `docs/cli/gen.md` ("Ring routing
   openings") and `docs/cli/gen-compose.md`.
+- 2026-08-03 — `klt eval`: `synthesize` and `place-and-route` are now
+  first-class gate `check`s (#437, Phase 5 of Epic #391), joining
+  `drc`/`lvs`/`sim`/`layout-metrics`/`functional-verification`. Both always
+  report `"status": "ok"` (see `docs/cli/synthesize.md`/
+  `docs/cli/place-and-route.md` — a run either produces its output or
+  raises), so — like `layout-metrics` — a gate naming either one must
+  declare an explicit `threshold` to derive pass/fail; `request` resolves
+  as a path only (never inline JSON/`-`), matching each verb's own
+  `load_request`. This is what lets a digital candidate's descriptor chain
+  `synthesize` -> `functional-verification` -> `place-and-route` ->
+  `drc`/`layout-metrics` (over the P&R-produced GDS) into the same single
+  `valid`/`objective`/`metrics` verdict an analog descriptor already
+  produces, and record it as one `klt trajectory` log entry via the same
+  `gates`/`objective` shape. No schema change to `klt eval`'s own response
+  envelope. See `docs/cli/eval.md`.
 - 2026-08-03 — `klt functional-verification`: new verb (#422, Phase 3 of
   Epic #391). Runs a cocotb testbench against RTL sources through Icarus
   Verilog (default) or Verilator, reporting `status`
