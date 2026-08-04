@@ -110,6 +110,13 @@ illegal layers. The caller supplies the real whitelist explicitly instead —
 e.g. transcribed from the PDK's own `.lyp`/layer-map file for a given
 project's actual layer usage.
 
+Each reported violation's `shapes` count is weighted by placement
+multiplicity across the full cell hierarchy (see [`shapes`
+semantics](#layer_whitelist-violations) below) — not summed once per cell
+*definition* — so it reflects true placed-shape prevalence on hierarchical,
+macro-scale input (e.g. a standard-cell macro), not just how many times a
+shape appears in the source cells themselves.
+
 ### `pin_labels_over_drawing`
 
 Every text label on a deck's known label layer
@@ -136,7 +143,7 @@ exit codes).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "dbu_um": 0.001,
   "status": "fail",
@@ -169,7 +176,7 @@ exit codes).
 
 | Field            | Type             | Description                                                                 |
 | ---------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `schema_version` | integer          | Version of this command's JSON shape (starts at `1`).                       |
+| `schema_version` | integer          | Version of this command's JSON shape (starts at `1`; currently `2` — bumped for issue #452, see `layer_whitelist`'s `shapes` field below). |
 | `file`           | string           | The input path exactly as provided on the command line.                     |
 | `dbu_um`         | number (float)   | The input layout's database unit in micrometres, same semantics as `klt layers`. |
 | `status`         | `"pass"` \| `"fail"` | `"fail"` iff any check's own `status` is `"fail"`. A `"skipped"` check never causes an overall failure. |
@@ -213,7 +220,7 @@ stable across runs of the same input).
 | -------- | ------------- | ---------------------------------------------------------------- |
 | `layer`  | string        | `"<layer>/<datatype>"` of the layer not in `--allowed-layers`.   |
 | `name`   | string \| null | The layer's own GDS layer-name property, or `null` if unnamed.   |
-| `shapes` | integer       | Shape count on this layer, summed across all cell definitions.   |
+| `shapes` | integer       | Total placed-shape count on this layer, weighted by placement multiplicity across the full cell hierarchy (a shape defined once in a cell placed 10 times counts 10 times; multiplicities compose multiplicatively for nested placement, not additively). **Breaking change, `schema_version` 1 -> 2** (issue #452): previously summed each cell *definition*'s own shape count exactly once regardless of placement count, which under-reported true prevalence by orders of magnitude on hierarchical, macro-scale input (e.g. a standard-cell macro — a layer drawn 800 times across 320 real placements previously reported `10`). A top cell (or any cell reachable from a top cell) contributes its own shapes once per instantiation path multiplicity; the cell-hierarchy walk uses `Layout.each_cell_top_down()`/`Instance.size()`, not a full recursive shape flatten, so cost stays proportional to the number of instantiation edges rather than the number of shapes. |
 
 #### `pin_labels_over_drawing` violations
 

@@ -65,6 +65,24 @@ version. Not an exhaustive commit-by-commit log.
   keep its default guard/collector ring **or** be wired into the rest of a
   composed circuit, not both. See `docs/cli/gen.md` ("Ring routing
   openings") and `docs/cli/gen-compose.md`.
+- 2026-08-03 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
+  precheck`: `layer_whitelist` violations' `shapes` count is now weighted by
+  placement multiplicity across the full cell hierarchy, not summed once per
+  cell *definition* (issue #452). Previously, `layout.each_cell()` counted
+  each cell definition's own (non-recursive) shapes exactly once regardless
+  of how many times that cell was actually placed, under-reporting true
+  placed-shape prevalence by roughly two orders of magnitude on real
+  hierarchical, macro-scale input — e.g. a layer drawn 800 times across 320
+  placed `sky130_fd_sc_hd` instances reported `"shapes": 10`. The fix
+  multiplies each cell definition's own-shape count by its total placement
+  multiplicity across all instantiation paths (multiplicities compose
+  multiplicatively for nested placement — a cell placed inside a cell that
+  is itself placed multiple times gets the product, not the sum), via a
+  top-down hierarchy walk (`Layout.each_cell_top_down()`/`Instance.size()`)
+  rather than a full recursive shape flatten. Only `klt precheck`'s own
+  `schema_version` moved to `2`; every other command's `schema_version` and
+  `klt --version` (still `0.1.0`) are unaffected — per-command versioning
+  per `docs/json-contract.md`. See `docs/cli/precheck.md`.
 - 2026-08-03 — `klt eval`: `synthesize` and `place-and-route` are now
   first-class gate `check`s (#437, Phase 5 of Epic #391), joining
   `drc`/`lvs`/`sim`/`layout-metrics`/`functional-verification`. Both always

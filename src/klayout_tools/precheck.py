@@ -80,7 +80,7 @@ def run_precheck(
     ``docs/cli/precheck.md``)::
 
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "status": "pass" | "fail",
@@ -98,7 +98,13 @@ def run_precheck(
         }
 
     ``schema_version`` is versioned independently per command (see
-    ``docs/json-contract.md``); it starts at ``1``.
+    ``docs/json-contract.md``); it started at ``1`` and was bumped to ``2``
+    for issue #452: ``layer_whitelist`` violations' ``shapes`` field is now
+    weighted by placement multiplicity across the full cell hierarchy
+    (:func:`_cell_placement_weights`) rather than summed once per cell
+    *definition* -- a breaking value-semantics change to an already-shipped
+    field, not merely an additive one, so it earns the bump even though the
+    field's name and type are unchanged.
 
     ``status`` is ``"fail"`` iff any check's own ``status`` is ``"fail"`` --
     a ``"skipped"`` check (one whose optional input, e.g. ``grid_um``, was
@@ -158,7 +164,7 @@ def run_precheck(
     overall_status = "fail" if any(c["status"] == "fail" for c in checks) else "pass"
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": path,
         "dbu_um": layout.dbu,
         "status": overall_status,
@@ -202,6 +208,39 @@ def _skipped(name: str, reason: str) -> dict[str, Any]:
         "violations": [],
         "skip_reason": reason,
     }
+
+
+def _cell_placement_weights(layout: Any) -> dict[int, int]:
+    """Total placement multiplicity for every cell definition in ``layout``.
+
+    A cell can be placed multiple times, at multiple hierarchy depths, and
+    that placement count is *not* additive across an instantiation chain --
+    a cell placed 4 times inside a cell that is itself placed 10 times is
+    placed 40 times overall, not 14. This walks the hierarchy top-down
+    (``Layout.each_cell_top_down()`` guarantees every cell is visited only
+    after all of its instantiating parents have already been visited, and
+    that every top cell -- one with no parent instantiations -- is visited
+    first) accumulating, for each child instance/array, the instantiating
+    parent's own weight multiplied by that instance's placement count
+    (``Instance.size()``: 1 for a single instance, ``na * nb`` for a regular
+    array). A cell with no entry yet when visited has no instantiating
+    parent (a top cell, per ``each_cell_top_down``'s ordering guarantee) and
+    starts at weight 1: it exists standalone in the layout.
+
+    This is a hierarchy walk over instances/arrays (cost proportional to
+    the number of instantiation edges), never a full recursive shape
+    flatten -- important for macro-scale, deeply-hierarchical input where
+    literally flattening every shape (e.g. via ``begin_shapes_rec``) would
+    be far more expensive.
+    """
+    weights: dict[int, int] = {}
+    for cell_index in layout.each_cell_top_down():
+        weight = weights.setdefault(cell_index, 1)
+        cell = layout.cell(cell_index)
+        for inst in cell.each_inst():
+            child_index = inst.cell_index
+            weights[child_index] = weights.get(child_index, 0) + weight * inst.size()
+    return weights
 
 
 # --------------------------------------------------------------------------- #
@@ -333,6 +372,7 @@ def _check_layer_whitelist(
         return _skipped("layer_whitelist", "no --allowed-layers given")
 
     allowed = {tuple(entry) for entry in allowed_layers}
+    weights = _cell_placement_weights(layout)
 
     violations: list[dict[str, Any]] = []
     for layer_index in layout.layer_indexes():
@@ -340,8 +380,17 @@ def _check_layer_whitelist(
         layer_tuple = (info.layer, info.datatype)
         if layer_tuple in allowed:
             continue
+        # Weighted by placement multiplicity (issue #452), not summed once
+        # per cell *definition*: a cell's own (non-recursive) shape count on
+        # this layer is multiplied by how many times that cell definition is
+        # actually placed across the full hierarchy, so a shape drawn once
+        # in a leaf cell that is itself placed hundreds of times is counted
+        # hundreds of times -- matching true placed-shape prevalence rather
+        # than under-reporting it by orders of magnitude on hierarchical,
+        # macro-scale input (e.g. standard-cell macros).
         shape_count = sum(
-            cell.shapes(layer_index).size() for cell in layout.each_cell()
+            cell.shapes(layer_index).size() * weights.get(cell.cell_index(), 0)
+            for cell in layout.each_cell()
         )
         violations.append(
             {
