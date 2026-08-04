@@ -143,6 +143,16 @@ error otherwise.
 | `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
 | `gds` | string \| omitted | The macro's own GDS view. When given, merged into the final `gds_path` alongside the standard-cell GDS view (same "0 missing/orphan cells" check). When omitted, this instance's cell is expected to stay empty in the merged GDS — not an error — for a caller only after this issue's own DEF-level placement/obstruction verification. |
 
+**Known gap (#464):** a macro LEF pin that `klt lef-abstract` emitted with
+no `PORT` geometry (a pin whose declared layer is not a routing-type
+tech-LEF layer — e.g. a device gate pin on bare poly, see
+[`klt lef-abstract`'s "Pins"](lef-abstract.md#pins) section) is not
+validated by this command. If the netlist actually wires that pin into a
+real net, `global_route` fails with an opaque OpenROAD `GRT-0029` error
+several stages into a real run, rather than a clear `klt`-level error at
+request-validation time. Discovered during Epic #393 Phase 3 (#456); see
+#464 for the full repro and fix options.
+
 ## Request
 
 ```json

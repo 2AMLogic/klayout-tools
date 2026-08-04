@@ -322,3 +322,21 @@ version. Not an exhaustive commit-by-commit log.
   standard-cell GDS merge. Purely additive (`[]`/omitted unchanged; no
   `schema_version` bump) — see `docs/cli/place-and-route.md`'s new
   "Hard-macro placement" section.
+- 2026-08-04 — Epic #393 Phase 3 (cross-domain signoff, #456): `klt drc`,
+  `klt lvs`, and `klt extract` verified against a real mixed
+  sky130_fd_sc_hd + analog-macro layout (a `klt gen diff_pair` block placed
+  via `klt place-and-route`'s `request.macros` alongside real standard
+  cells, real Yosys + real OpenROAD). No code changes were needed in any of
+  the three verbs — each already spans both domains by construction (`klt
+  drc`/`klt extract`'s whole-layout flattening has no region concept to
+  scope by; `klt lvs`'s comparator has no macro-boundary special case).
+  Findings and the injected-violation/corrupted-reference verification
+  methodology are recorded in `docs/cli/drc.md`, `docs/cli/lvs.md`, and
+  `docs/cli/extract.md`'s new "Mixed sky130_fd_sc_hd + analog-macro
+  layout"/"...netlist" sections. One real domain-boundary gap was found and
+  filed separately (not fixed here, per this phase's own decomposition
+  precedent, #451/#452): #464, a `klt lef-abstract` macro pin with no
+  `PORT` geometry that, if wired into a real net, fails `klt
+  place-and-route` opaquely (OpenROAD `GRT-0029`) rather than with a clear
+  `klt`-level error. This is a documentation/verification-only change — no
+  `schema_version` bump for any of the three verbs.

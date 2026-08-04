@@ -206,6 +206,39 @@ of row-gap-adjacent enclosure violations — this is the curated `sky130`
 deck correctly reporting real, if flow-artifact-caused, geometry, not a
 false positive to suppress.
 
+## Mixed sky130_fd_sc_hd + analog-macro layout (Epic #393 Phase 3, #456)
+
+Extending the macro-scale check above, issue #456 ran `klt drc` against a
+genuinely **mixed** layout: a real `klt gen diff_pair` analog block,
+LEF-abstracted (`klt lef-abstract`, #438/PR #448) and placed as a hard
+macro via `klt place-and-route`'s `request.macros` field (#438/PR #448)
+alongside ~15 real `sky130_fd_sc_hd` standard-cell instances — real Yosys
+0.67 + real OpenROAD `26Q3-771-g7cfb2105c9`, merged into one top cell.
+
+Because the whole-layout-flattened design ("Limitation: whole-layout,
+flattened" below) has no region concept at all, a rule deck cannot be
+scoped to "see" only one of the two domains — every rule already runs
+against every shape in the flattened `Region`, standard-cell or macro
+alike, by construction. This was confirmed two ways, not just asserted:
+
+1. **A real, pre-existing violation** (`diff.enclosing.licon.1`, the same
+   class documented above) was found in the standard-cell region of the
+   unmodified layout — direct evidence the deck was already evaluating
+   that domain.
+2. **A known violation (`poly.width.1`, an undersized `poly.drawing` shape)
+   was injected at a caller-chosen location inside each region separately**
+   — once inside the macro's own placed footprint, once inside the
+   standard-cell core area, well outside the macro — and `klt drc` reported
+   both, each with a `bbox` matching its injection point exactly (plus a
+   third, incidental `poly.enclosing.licon.1` hit where the injected macro-
+   region shape landed adjacent to the macro's own real `licon1` contact —
+   further evidence the check engine is reasoning about real macro
+   geometry, not skipping it).
+
+No code change was needed for either domain to be checked — this is a
+verification finding, not a fix. See #456 for the full transcript
+(descriptor, LEF, synthesized netlist, and injection script).
+
 ## Reserved annotation layer
 
 Both decks read a fixed, enumerable set of `(layer, datatype)` pairs (a
