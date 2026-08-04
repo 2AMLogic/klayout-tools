@@ -244,18 +244,21 @@ class ExtractionDeck:
     label metal-level pins/power straps.
 
     ``dummy`` is an optional marker layer declaring drawn-but-non-functional
-    "dummy" devices (issue #295): matched-pair/array edge fill whose gate and
-    diffusions are tied off to a rail so the device contributes nothing to the
-    circuit, yet must be *drawn* on the real device layers next to the devices
-    it protects. Any MOS gate lying under a shape on this layer is dropped
-    before device recognition (``extract.py`` subtracts it from the
-    NMOS/PMOS gate regions), so the dummy never appears in the extracted
-    netlist and ``klt lvs`` no longer reports a spurious ``device.unmatched``
-    for it -- while the dummy's diffusions still extract as ordinary
-    interconnect (they tie to the rail as drawn). ``None`` (the default) is
-    fully backward-compatible: a deck that declares no ``dummy`` layer
-    extracts exactly as it did before the field existed. Whether a given PDK
-    draws a native dummy-marker layer is left to the deck author to declare.
+    "dummy" devices (issue #295, extended to drawn resistors and bipolars in
+    #462): matched-pair/array edge fill whose terminals are tied off to a
+    rail so the device contributes nothing to the circuit, yet must be
+    *drawn* on the real device layers next to the devices it protects. Any
+    MOS gate, drawn-resistor body, or bipolar unit lying under a shape on
+    this layer is dropped before device recognition (``extract.py``
+    subtracts it from the NMOS/PMOS gate regions, each drawn resistor's
+    candidate body, and each bipolar's base region alike), so the dummy
+    never appears in the extracted netlist and ``klt lvs`` no longer reports
+    a spurious ``device.unmatched`` for it -- while the dummy's remaining
+    geometry still extracts as ordinary interconnect (it ties to the rail as
+    drawn). ``None`` (the default) is fully backward-compatible: a deck that
+    declares no ``dummy`` layer extracts exactly as it did before the field
+    existed. Whether a given PDK draws a native dummy-marker layer is left
+    to the deck author to declare.
 
     ``poly_label`` is an optional text/label layer read directly off ``poly``
     (mirroring ``well_label``'s "label a pin on the drawn layer itself"
