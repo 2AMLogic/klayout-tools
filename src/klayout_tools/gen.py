@@ -504,7 +504,9 @@ def _grid_snapped(dbu: float, *values_um: float) -> bool:
     return any(_snapped(v) for v in values_um)
 
 
-def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
+def _mos_unit_layout(
+    w_um: float, l_um: float, fingers: int, gate_contact: bool = False
+) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
     segment (``fingers + 1`` of them) between/around the gates.
@@ -527,6 +529,20 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
     the diffusion, and the reported gate port sits at its centre. Only the
     reported (first) finger is padded, so the pad never neighbours another
     pad and no inter-pad spacing rule can bind regardless of gate length.
+
+    ``gate_contact`` (issue #492) finishes that stack: it draws a contact
+    **and** a local-metal pad on the landing pad, so the gate terminal is a
+    metal-role pad exactly like S/D and `klt gen-compose`'s router can reach
+    it with no hand-drawn licon/li1 patchwork. It also *moves* the landing
+    pad's contact region up by :data:`MIN_SAME_LAYER_SPACING_UM`: the #461
+    pad abuts the diffusion's top edge, so a ``contact_region_um`` metal
+    square centred on it would share an edge with -- and therefore merge
+    into, i.e. **short** to -- the S/D local-metal pads that fill the
+    diffusion's own height. The poly grows into a stem of the same
+    ``contact_region_um`` width across that clearance so the poly stays one
+    connected region, and the reported gate port moves to the raised
+    contact's centre. Left at ``False`` (the default) the drawn geometry and
+    the reported gate port are byte-for-byte the pre-#492 bare-poly gate.
     """
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
     seg_positions: list[tuple[float, float]] = []
@@ -565,14 +581,36 @@ def _mos_unit_layout(w_um: float, l_um: float, fingers: int) -> dict[str, Any]:
         # the sub-contact-width gate, is what encloses the contact. It abuts
         # the gate at y == w_um (keeping the poly one connected region) and
         # extends contact_region_um past it.
+        #
+        # With `gate_contact` the pad's contact region is first pushed
+        # MIN_SAME_LAYER_SPACING_UM further out (the poly simply grows into a
+        # stem of the same width across that clearance, so it stays one
+        # connected region): the metal pad drawn on it is a full
+        # contact_region_um square, and centred on the #461 pad it would
+        # share the y == w_um edge with the S/D local-metal pads either side
+        # -- merging into one polygon and shorting the gate to source/drain.
         g_cx = (poly_positions[0][0] + poly_positions[0][1]) / 2.0
         pad_half = contact_region_um / 2.0
+        stem_um = MIN_SAME_LAYER_SPACING_UM if gate_contact else 0.0
+        gate_ext_um = stem_um + contact_region_um
         boxes["poly"].append(
-            (g_cx - pad_half, w_um, g_cx + pad_half, w_um + contact_region_um)
+            (g_cx - pad_half, w_um, g_cx + pad_half, w_um + gate_ext_um)
         )
-        g_xy = (g_cx, w_um + contact_region_um / 2.0)
+        g_cy = w_um + stem_um + contact_region_um / 2.0
+        if gate_contact:
+            boxes["contact"].append(
+                (
+                    g_cx - contact_half,
+                    g_cy - contact_half,
+                    g_cx + contact_half,
+                    g_cy + contact_half,
+                )
+            )
+            boxes["metal"].append(
+                (g_cx - pad_half, g_cy - pad_half, g_cx + pad_half, g_cy + pad_half)
+            )
+        g_xy = (g_cx, g_cy)
         g_width_um = contact_region_um
-        gate_ext_um = contact_region_um
     else:
         g_xy = (total_len_um / 2.0, w_um)
         g_width_um = l_um
@@ -635,6 +673,7 @@ def _mos_array_layout(
     cols: int,
     dummy: int,
     topology: str,
+    gate_contact: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -644,7 +683,7 @@ def _mos_array_layout(
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
     used only when the caller requests ``flavor="pfet"``."""
-    unit = _mos_unit_layout(w_um, l_um, fingers)
+    unit = _mos_unit_layout(w_um, l_um, fingers, gate_contact)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
 
@@ -1002,6 +1041,7 @@ def _diff_pair_layout(
     ring_gap_offset_um: float = 0.0,
     ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
     row_spacing_um: float = MIN_SAME_LAYER_SPACING_UM,
+    gate_contact: bool = False,
 ) -> dict[str, Any]:
     """Two matched devices (``"A"``/``"B"``), each split into ``splits``
     unit sub-instances, interleaved in a true common-centroid cross-quad
@@ -1017,8 +1057,13 @@ def _diff_pair_layout(
     devices' gate nets out of the block can grow either and pay the area.
     ``col_pitch`` (the within-row gap between interleaved splits) stays
     fixed to ``MIN_SAME_LAYER_SPACING_UM`` -- out of scope for #484.
+
+    ``gate_contact`` (issue #492) is forwarded to :func:`_mos_unit_layout`;
+    it grows each unit's ``bbox_height_um``, so both the row pitch and the
+    automatically-sized guard ring follow it without any further arithmetic
+    here.
     """
-    unit = _mos_unit_layout(w_um, l_um, 1)
+    unit = _mos_unit_layout(w_um, l_um, 1, gate_contact)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
 
@@ -1770,6 +1815,16 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default="nfet",
             )
             self.param(
+                "gate_contact",
+                self.TypeBoolean,
+                "Finish the gate stack: draw a contact and a local-metal pad "
+                "on each unit device's gate landing pad and report U<i>_G on "
+                "the metal role (symmetric with U<i>_S/U<i>_D) instead of "
+                "bare poly. Raises the landing pad clear of the S/D metal, "
+                "so the unit device grows taller",
+                default=False,
+            )
+            self.param(
                 "active_layer",
                 self.TypeLayer,
                 "Active/diffusion drawing layer",
@@ -1823,6 +1878,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.cols,
                 self.dummy,
                 self.topology,
+                self.gate_contact,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -2224,6 +2280,16 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default="nfet",
             )
             self.param(
+                "gate_contact",
+                self.TypeBoolean,
+                "Finish the gate stack: draw a contact and a local-metal pad "
+                "on each unit device's gate landing pad and report *_G on the "
+                "metal role (symmetric with *_S/*_D) instead of bare poly. "
+                "Raises the landing pad clear of the S/D metal, so the unit "
+                "device (and any automatically-sized guard ring) grows taller",
+                default=False,
+            )
+            self.param(
                 "active_layer",
                 self.TypeLayer,
                 "Active/diffusion drawing layer",
@@ -2285,6 +2351,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_offset_um,
                 self.ring_padding_um,
                 self.row_spacing_um,
+                self.gate_contact,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -2708,12 +2775,18 @@ def _mos_array_describe(
         params["cols"],
         params["dummy"],
         params["topology"],
+        params["gate_contact"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     poly_layer = {"layer": poly_pair[0], "datatype": poly_pair[1], "name": None}
+    # #492: with `gate_contact` the gate terminal *is* a metal pad, so it is
+    # reported on the metal role exactly like S/D -- the whole point being
+    # that `klt gen-compose`'s router treats it identically. Without it the
+    # gate stays the bare-poly node #210 established.
+    gate_layer = metal_layer if params["gate_contact"] else poly_layer
 
     ports = []
     sx, sy = unit["s_xy"]
@@ -2747,7 +2820,7 @@ def _mos_array_describe(
             {
                 "name": f"U{idx}_G",
                 "net": None,
-                "layer": poly_layer,
+                "layer": gate_layer,
                 "x_um": c["x0_um"] + gx,
                 "y_um": c["y0_um"] + gy,
                 "width_um": unit["g_width_um"],
@@ -3154,6 +3227,7 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
             True,
             ring_padding_um=params["ring_padding_um"],
             row_spacing_um=params["row_spacing_um"],
+            gate_contact=params["gate_contact"],
         )
     )
     _validate_ring_gap(
@@ -3180,12 +3254,15 @@ def _diff_pair_describe(
         params["ring_gap_offset_um"],
         params["ring_padding_um"],
         params["row_spacing_um"],
+        params["gate_contact"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     poly_layer = {"layer": poly_pair[0], "datatype": poly_pair[1], "name": None}
+    # #492 -- see the equivalent comment in `_mos_array_describe`.
+    gate_layer = metal_layer if params["gate_contact"] else poly_layer
     prefix = "M" if params["mirror"] else "Q"
 
     ports = []
@@ -3221,7 +3298,7 @@ def _diff_pair_describe(
             {
                 "name": f"{base}_G",
                 "net": None,
-                "layer": poly_layer,
+                "layer": gate_layer,
                 "x_um": c["x0_um"] + gx,
                 "y_um": c["y0_um"] + gy,
                 "width_um": unit["g_width_um"],
@@ -3464,7 +3541,8 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         summary=(
             "Matched MOS transistor array: identical unit devices (active + "
             "poly gate; contact + local-metal landing pads on the S/D "
-            "terminals, gate exposed as bare poly) placed on a "
+            "terminals, gate exposed as bare poly unless params.gate_contact "
+            "finishes its stack too) placed on a "
             "uniform grid, with optional dummy columns at each end and a "
             "centroid-symmetric port-numbering order for common-centroid "
             "matching -- family 1 of the analog primitive generators "

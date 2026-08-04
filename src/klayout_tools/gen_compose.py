@@ -759,25 +759,52 @@ def _resolve_via_drop_layer(
     Returns ``(via_layer, error)``:
 
     * ``(None, None)`` -- no drop needed. Either ``port_layer`` already *is*
-      ``route_layer`` (the pre-#454 single-metal routing path, unchanged),
-      or one of the two layers is not itself a member of ``deck.metals`` at
-      all (e.g. a bare-poly gate port) -- via-drop only ever applies between
-      two declared routing-metal levels, so a route to any other role draws
-      directly on ``route_layer`` exactly as it always has.
+      ``route_layer`` (the pre-#454 single-metal routing path, unchanged), or
+      ``route_layer`` itself is not a member of ``deck.metals`` (a
+      ``"poly"``/``"tap"``-role backbone has no metals stack to walk, so it
+      draws directly exactly as it always has).
     * ``(via_pair, None)`` -- a drop is needed and resolved; draw a via on
       ``via_pair`` at the pin's own position.
     * ``(None, reason)`` -- a drop is needed but not resolvable (the two
-      metals-stack levels are more than one via hop apart, or the deck
-      declares no via for the hop needed) -- the caller reports the net
-      unroutable rather than drawing a disconnected short.
+      metals-stack levels are more than one via hop apart, the deck declares
+      no via for the hop needed, or the pin sits on the deck's bare ``poly``
+      layer, which no via in the metals stack reaches) -- the caller reports
+      the net unroutable rather than drawing a disconnected short.
+
+    That last case is issue #492: before it, a metal-role backbone ending on
+    a bare-poly gate port fell into the ``(None, None)`` "unrelated role,
+    nothing to do" branch and was drawn anyway -- ``"routed": true``, no
+    note, and a metal stub sitting *over* the gate poly with no contact
+    joining the two. That is an open net (or, where the stub crosses other
+    geometry, a short) that only a later ``klt drc``/``klt extract``/``klt
+    lvs`` run would surface, with nothing pointing back at the cause. It is
+    now an explicit rejection naming the fix.
     """
     if route_layer == port_layer:
         return None, None
     try:
         route_idx = deck.metals.index(route_layer)
+    except ValueError:
+        # The backbone itself is not on a declared routing-metal level (e.g.
+        # routing.layer_role "tap"): there is no metals stack to drop through,
+        # so draw directly on route_layer exactly as before #454.
+        return None, None
+    try:
         port_idx = deck.metals.index(port_layer)
     except ValueError:
-        return None, None  # not a metals-stack level -- an unrelated role
+        if port_layer == deck.poly:
+            return None, (
+                "this pin is a bare-poly gate -- gen_compose draws no poly "
+                "contact, so the backbone would end as an uncontacted metal "
+                "stub over the gate rather than connecting to it. Re-run this "
+                "block's generator with params.gate_contact=true so the gate "
+                "reports a contacted metal landing pad (issue #492), or name "
+                "the gate with pins[] instead of routing to it"
+            )
+        # Any other non-metals-stack role (e.g. a guard ring's active/tap
+        # port, which the ring's own metal already covers at that position)
+        # keeps the pre-#454 behavior: drawn directly on route_layer, no via.
+        return None, None
     if abs(route_idx - port_idx) != 1:
         return None, (
             f"routing.layer_role's metal (deck metals[{route_idx}]) is more "
@@ -1474,12 +1501,15 @@ def route_two_pin(
        whether ``extraction_deck`` connects the two with a single via hop
        (e.g. ``routing.layer_role: "metal2"`` backbone reaching a
        ``"metal"``-role li1 pad via sky130's ``mcon``). A pin whose own layer
-       *is* ``route_layer`` needs no drop; a pin on an unrelated role (e.g. a
-       bare-poly gate) is left exactly as before #454 (drawn directly on
-       ``route_layer``, no via). Only a pin whose layer is a *different*
-       ``deck.metals`` level than ``route_layer``, more than one via hop
-       away, is rejected here -- reported unroutable rather than drawing a
-       disconnected short.
+       *is* ``route_layer`` needs no drop; a pin on an unrelated role a
+       route-layer shape already covers (e.g. a guard ring's active/tap port)
+       is left exactly as before #454 (drawn directly on ``route_layer``, no
+       via). A pin whose layer is a *different* ``deck.metals`` level than
+       ``route_layer`` and more than one via hop away, **or** a pin on the
+       deck's bare ``poly`` layer (a gate drawn without
+       ``params.gate_contact``, issue #492), is rejected here -- reported
+       unroutable rather than drawing a disconnected short or an uncontacted
+       stub.
 
     Checks 1-5 report the net unroutable (spike section 2,
     ``unrouted_nets[]``) rather than silently drawing a short; check 6 does
