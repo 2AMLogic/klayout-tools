@@ -610,6 +610,151 @@ def test_duplicate_macro_instance_names_rejected(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# `request.macros` PORT-less-pin-wired-into-the-netlist cross-check
+# (issue #464): a macro pin `klt lef-abstract` emitted with no `PORT`
+# geometry, once actually wired into the netlist, must be rejected here --
+# before any OpenROAD subprocess runs -- rather than surfacing as OpenROAD's
+# own opaque `GRT-0029` mid-`route`.
+# --------------------------------------------------------------------------- #
+
+
+def _write_macro_lef_with_portless_pin(
+    path: Path, macro_name: str = "analog_block"
+) -> None:
+    """A macro LEF with one routable pin (`VOUT`, real `PORT` geometry) and
+    one PORT-less pin (`G`) -- the shape `klt lef-abstract` emits for a pin
+    whose declared layer does not resolve to a routing LEF layer (e.g. a
+    device gate pin drawn on bare poly)."""
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        f"MACRO {macro_name}\n"
+        "  CLASS BLOCK ;\n"
+        "  SIZE 5.0 BY 5.0 ;\n"
+        "  PIN VOUT\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    USE ANALOG ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 2.0 0.0 3.0 0.2 ;\n"
+        "    END\n"
+        "  END VOUT\n"
+        "  PIN G\n"
+        "    DIRECTION INPUT ;\n"
+        "    USE SIGNAL ;\n"
+        "  END G\n"
+        f"END {macro_name}\n"
+        "END LIBRARY\n",
+        encoding="utf-8",
+    )
+
+
+def test_macro_pin_with_no_port_wired_into_netlist_is_rejected(tmp_path):
+    _write_macro_lef_with_portless_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    netlist_path.write_text(
+        "module top(...);\n"
+        "  analog_block u1 (\n"
+        "    .VOUT(net_vout),\n"
+        "    .G(net_g)\n"
+        "  );\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PlaceAndRouteError, match=r"pin 'G'.*GRT-0029"):
+        place_and_route._validate_macros(
+            [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+            str(tmp_path),
+            str(netlist_path),
+        )
+
+
+def test_macro_pin_with_no_port_left_unwired_is_not_rejected(tmp_path):
+    """Edge case (issue #464 test plan): a PORT-less pin the netlist does
+    *not* actually wire (left `.G()` open) must not be spuriously rejected
+    -- only wired-and-PORT-less pins are caught."""
+    _write_macro_lef_with_portless_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    netlist_path.write_text(
+        "module top(...);\n"
+        "  analog_block u1 (\n"
+        "    .VOUT(net_vout),\n"
+        "    .G()\n"
+        "  );\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+    assert macros[0]["instance"] == "u1"
+
+
+def test_macro_pin_with_port_wired_is_not_rejected(tmp_path):
+    """Edge case (issue #464 test plan): a pin that *does* have `PORT`
+    geometry never triggers the check, however it is wired -- no
+    false-positive reject for an ordinary routable pin."""
+    _write_macro_lef_with_portless_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    netlist_path.write_text(
+        "module top(...);\n  analog_block u1 (\n    .VOUT(net_vout)\n  );\nendmodule\n",
+        encoding="utf-8",
+    )
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+    assert macros[0]["instance"] == "u1"
+
+
+def test_macro_pin_check_skipped_when_netlist_path_not_given(tmp_path):
+    """The cross-check is purely additive: omitting `netlist_path` (the
+    default, matching every existing direct `_validate_macros` caller/test)
+    performs no cross-check at all, even for a LEF with a PORT-less pin."""
+    _write_macro_lef_with_portless_pin(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1}], str(tmp_path)
+    )
+    assert macros[0]["instance"] == "u1"
+
+
+def test_macro_pin_check_skipped_for_positional_port_connections(tmp_path):
+    """Best-effort scope cut: a positional (non-named) instantiation is not
+    parsed for wiring -- the check is silently skipped rather than guessing,
+    since a missed detection is safe (skip) but a wrong one is not (a
+    false-positive reject)."""
+    _write_macro_lef_with_portless_pin(tmp_path / "m.lef")
+    netlist_path = tmp_path / "top.v"
+    netlist_path.write_text(
+        "module top(...);\n  analog_block u1 ( net_vout, net_g );\nendmodule\n",
+        encoding="utf-8",
+    )
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(netlist_path),
+    )
+    assert macros[0]["instance"] == "u1"
+
+
+def test_macro_pin_check_skipped_when_netlist_unreadable(tmp_path):
+    """A `netlist_path` that does not resolve to a readable file (e.g. an
+    already-invalid request the netlist-existence check elsewhere would
+    reject) never blocks macro validation itself -- best-effort, matches
+    this module's `read_lef_header`-style "never raise on the unexpected"
+    convention."""
+    _write_macro_lef_with_portless_pin(tmp_path / "m.lef")
+    macros = place_and_route._validate_macros(
+        [{"instance": "u1", "lef": "m.lef", "x_um": 1, "y_um": 1}],
+        str(tmp_path),
+        str(tmp_path / "does-not-exist.v"),
+    )
+    assert macros[0]["instance"] == "u1"
+
+
+# --------------------------------------------------------------------------- #
 # Stubbed OpenROAD: full `run_place_and_route` without a real `openroad`
 # binary. The stub writes the same `-metrics <file>.json` shape a real
 # per-stage run produces (verified live -- see `place_and_route.py`'s own

@@ -463,6 +463,16 @@ def test_pin_layer_with_no_lef_mapping_gets_no_geometry_and_a_warning(
     assert any(
         "does not resolve to a known routing LEF layer" in w for w in report["warnings"]
     )
+    # Issue #464: the same condition is also echoed as a top-level,
+    # programmatically-checkable `unroutable_pins[]` entry -- not just a
+    # `warnings[]` string a caller composing `lef-abstract` -> `place-and-
+    # route` would otherwise have to grep for.
+    assert report["unroutable_pins"] == [{"name": "WEIRD", "layer": [99, 99]}]
+
+
+def test_unroutable_pins_empty_when_every_pin_resolves(tmp_path, monkeypatch):
+    report = _run(tmp_path, monkeypatch)
+    assert report["unroutable_pins"] == []
 
 
 # --------------------------------------------------------------------------- #

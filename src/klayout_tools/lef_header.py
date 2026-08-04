@@ -82,6 +82,15 @@ _OFFSET_RE = re.compile(r"\bOFFSET\s+([0-9.eE+-]+)(?:\s+([0-9.eE+-]+))?\s*;")
 
 _USE_RE = re.compile(r"\bUSE\s+(\S+)\s*;")
 
+#: A top-level ``PORT`` statement inside a ``PIN`` body -- ``klt
+#: lef-abstract`` (and every real LEF writer this repo has seen) only ever
+#: emits ``PORT`` when it has geometry to put in it (see that module's own
+#: "Pins" docstring section), so keyword *presence* is a sufficient signal
+#: for :data:`_parse_pin`'s ``has_port`` field without also parsing the
+#: geometry statements inside it (this module's own deliberate geometry-
+#: parsing scope cut, see the module docstring).
+_PORT_RE = re.compile(r"^[ \t]*PORT\b", re.MULTILINE)
+
 
 def _strip_comments(text: str) -> str:
     return "\n".join(_COMMENT_RE.sub("", line) for line in text.splitlines())
@@ -143,6 +152,7 @@ def _parse_pin(name: str, body: str) -> dict[str, Any]:
         "name": name,
         "direction": direction_match.group(1) if direction_match else None,
         "use": use_match.group(1) if use_match else None,
+        "has_port": bool(_PORT_RE.search(body)),
     }
 
 
@@ -192,7 +202,8 @@ def parse_lef_header(text: str) -> dict[str, Any]:
             ],
             "macros": [
                 {"name", "class", "site", "symmetry": [...], "width_um",
-                 "height_um", "pins": [{"name", "direction", "use"}, ...]},
+                 "height_um",
+                 "pins": [{"name", "direction", "use", "has_port"}, ...]},
                 ...
             ],
         }
@@ -209,7 +220,13 @@ def parse_lef_header(text: str) -> dict[str, Any]:
 
     A field that a block does not declare is ``None`` (or ``[]`` for
     ``symmetry``/``pins``) -- never guessed, matching this repo's existing
-    ``None``-means-absent convention (see ``pdk.py``'s ``_asset_dirs``).
+    ``None``-means-absent convention (see ``pdk.py``'s ``_asset_dirs``). The
+    one exception is a pin's ``has_port`` -- always a ``bool``, never
+    ``None`` -- ``True`` when the pin's own body declares a top-level
+    ``PORT`` statement (geometry present), ``False`` otherwise (e.g. a ``klt
+    lef-abstract`` pin whose declared layer did not resolve to a routing LEF
+    layer, emitted with no ``PORT`` at all -- see that module's own "Pins"
+    docstring section and issue #464).
 
     Never raises on malformed/partial LEF text -- a statement this parser
     does not recognise is simply not extracted; this is a best-effort header

@@ -263,8 +263,8 @@ END example_cell
     header = parse_lef_header(text)
     macro = header["macros"][0]
     assert macro["pins"] == [
-        {"name": "A", "direction": "INPUT", "use": "SIGNAL"},
-        {"name": "VPWR", "direction": "INOUT", "use": "POWER"},
+        {"name": "A", "direction": "INPUT", "use": "SIGNAL", "has_port": True},
+        {"name": "VPWR", "direction": "INOUT", "use": "POWER", "has_port": True},
     ]
 
 
@@ -272,8 +272,37 @@ def test_pin_with_no_direction_or_use_is_none():
     text = "MACRO m\n  PIN X\n  END X\nEND m\n"
     header = parse_lef_header(text)
     assert header["macros"][0]["pins"] == [
-        {"name": "X", "direction": None, "use": None}
+        {"name": "X", "direction": None, "use": None, "has_port": False}
     ]
+
+
+def test_pin_with_no_port_statement_has_port_false():
+    """Issue #464: a `klt lef-abstract` pin whose declared layer did not
+    resolve to a routing LEF layer is emitted with a `PIN ... END` block and
+    no `PORT` statement at all -- `has_port` must be `False`, not merely
+    absent, so `place_and_route._validate_macros` can cross-check it."""
+    text = "MACRO m\n  PIN G\n    DIRECTION INPUT ;\n    USE SIGNAL ;\n  END G\nEND m\n"
+    header = parse_lef_header(text)
+    assert header["macros"][0]["pins"] == [
+        {"name": "G", "direction": "INPUT", "use": "SIGNAL", "has_port": False}
+    ]
+
+
+def test_pin_with_port_statement_has_port_true():
+    text = (
+        "MACRO m\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    USE SIGNAL ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.1 0.1 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "END m\n"
+    )
+    header = parse_lef_header(text)
+    assert header["macros"][0]["pins"][0]["has_port"] is True
 
 
 def test_macro_with_no_site_reference_is_none():

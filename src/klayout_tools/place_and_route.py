@@ -339,7 +339,7 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
 
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
-    macros = _validate_macros(request.get("macros"), request_dir)
+    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
@@ -588,16 +588,97 @@ def _validate_io(io_spec: Any) -> dict[str, str] | None:
     return {"layer_h": layer_h, "layer_v": layer_v}
 
 
-def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+#: One ``.PORT(NET)`` named connection inside a Verilog module
+#: instantiation's own port list -- e.g. ``.Q1_1_G(_012_)``. Matched
+#: per-connection (``findall``, not the whole port list at once) since a
+#: real instantiation's port list is a comma-separated sequence of these,
+#: not one big nested-paren expression this module needs to balance itself.
+_NAMED_PORT_CONNECTION_RE = re.compile(r"\.(\w+)\s*\(([^()]*)\)")
+
+
+def _wired_macro_pin_names(
+    netlist_text: str, cell_name: str, instance_name: str
+) -> set[str] | None:
+    """Best-effort scan of ``netlist_text`` for ``cell_name instance_name
+    ( ... );``'s own **named** port connections (issue #464), returning the
+    set of pin names actually wired to a non-empty net -- ``.PORT()``
+    (explicitly left open) and any pin the instantiation's own port list
+    does not mention at all are excluded.
+
+    This is deliberately not a real Verilog parser -- this repo already gets
+    that for free from Yosys/OpenROAD themselves at ``read_verilog``/
+    ``link_design`` time, per ``docs/ARCHITECTURE.md``'s "wrap the proven
+    engine" rule; this scan exists only to narrow
+    :func:`_validate_macros`'s PORT-less-pin check (below) to pins the
+    netlist actually wires, so a macro pin the netlist never touches is
+    never spuriously rejected. Returns ``None`` -- "skip the check" -- when
+    the instantiation is not found (module/instance name text does not
+    appear together, e.g. a positional-port-connection style this scan does
+    not attempt to resolve, or the LEF's own ``MACRO`` name does not match
+    the netlist's blackbox module name): a missed detection here silently
+    skips the check, it never causes a false rejection.
+    """
+    header_pattern = re.compile(
+        rf"\b{re.escape(cell_name)}\b\s*(?:#\s*\([^;]*?\)\s*)?"
+        rf"{re.escape(instance_name)}\b\s*\("
+    )
+    match = header_pattern.search(netlist_text)
+    if match is None:
+        return None
+
+    # Balance parens from the instantiation's own opening `(` to find its
+    # matching close -- a `.PORT(NET)` connection is itself one nested paren
+    # level, so a non-greedy regex up to the next `)` would stop too early.
+    depth = 1
+    idx = match.end()
+    while idx < len(netlist_text) and depth > 0:
+        char = netlist_text[idx]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        idx += 1
+    if depth != 0:
+        return None
+    port_list = netlist_text[match.end() : idx - 1]
+
+    connections = _NAMED_PORT_CONNECTION_RE.findall(port_list)
+    if not connections:
+        return None
+    return {pin_name for pin_name, net in connections if net.strip()}
+
+
+def _validate_macros(
+    macros: Any, request_dir: str, netlist_path: str | None = None
+) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #438). Each
     entry fixes one hard-macro instance at a caller-given location during
     the ``"floorplan"`` stage -- see this module's docstring "Hard-macro
     placement" section. Returns ``[]`` when the field is omitted/``None``
-    (unchanged behavior -- purely additive)."""
+    (unchanged behavior -- purely additive).
+
+    When ``netlist_path`` is given, also cross-checks (issue #464) each
+    macro's LEF ``PIN``s against the netlist's own port connections for that
+    instance: a pin with no ``PORT`` geometry (``klt lef-abstract`` emits
+    this for a pin whose declared layer does not resolve to a routing LEF
+    layer -- see that module's own "Pins" docstring section) that the
+    netlist *does* wire to a real net is rejected here, before any OpenROAD
+    subprocess runs, rather than surfacing as OpenROAD's own opaque
+    ``GRT-0029`` mid-``route``. Best-effort: :func:`_wired_macro_pin_names`
+    silently skips (never rejects) a netlist/instantiation shape it cannot
+    confidently parse -- see that function's own docstring."""
     if macros is None:
         return []
     if not isinstance(macros, list):
         raise PlaceAndRouteError("request.macros must be a list")
+
+    netlist_text: str | None = None
+    if netlist_path is not None:
+        try:
+            with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+                netlist_text = handle.read()
+        except OSError:
+            netlist_text = None
 
     validated: list[dict[str, Any]] = []
     for i, macro in enumerate(macros):
@@ -626,6 +707,22 @@ def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
                 f"(found {len(macro_cells)})"
             )
         macro_cell_name = macro_cells[0]["name"]
+
+        if netlist_text is not None:
+            wired_pins = _wired_macro_pin_names(netlist_text, macro_cell_name, instance)
+            if wired_pins is not None:
+                for pin in macro_cells[0]["pins"]:
+                    if not pin["has_port"] and pin["name"] in wired_pins:
+                        raise PlaceAndRouteError(
+                            f"request.macros[{i}] instance '{instance}' wires pin "
+                            f"'{pin['name']}' into the netlist, but macro LEF "
+                            f"'{lef}' declares '{pin['name']}' with no PORT "
+                            "geometry -- OpenROAD's global router cannot route "
+                            "this pin (GRT-0029). Give this pin a routable layer "
+                            "in the LEF (see `klt lef-abstract`'s 'Pins' section, "
+                            "docs/cli/lef-abstract.md), or do not wire it into "
+                            "the netlist."
+                        )
 
         for key in ("x_um", "y_um"):
             if not isinstance(macro.get(key), (int, float)) or isinstance(

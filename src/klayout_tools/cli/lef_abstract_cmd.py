@@ -77,6 +77,12 @@ def _print_text(report: dict) -> None:
         for entry in report["obs"]:
             print(f"  {entry['layer']}: {entry['shape_count']} shape(s)")
 
+    if report["unroutable_pins"]:
+        print()
+        print("unroutable_pins:")
+        for pin in report["unroutable_pins"]:
+            print(f"  {pin['name']}: layer {pin['layer'][0]}/{pin['layer'][1]}")
+
     if report["warnings"]:
         print()
         print("warnings:")

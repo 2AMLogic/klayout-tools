@@ -153,6 +153,7 @@ def run_lef_abstract(
             "pin_count": <int>,
             "obs": [{"layer": str, "shape_count": int}, ...],
             "obs_shape_count": <int>,
+            "unroutable_pins": [{"name": str, "layer": [gds_layer, gds_datatype]}, ...],
             "warnings": [...],
             "provenance": {...},
         }
@@ -211,7 +212,7 @@ def run_lef_abstract(
     height_um = outline["y1"] - outline["y0"]
 
     warnings: list[str] = []
-    pins_report, pin_boxes_by_layer = _resolve_pins(
+    pins_report, pin_boxes_by_layer, unroutable_pins = _resolve_pins(
         layout=layout,
         top_cell=top_cell,
         pins=descriptor["pins"],
@@ -283,6 +284,7 @@ def run_lef_abstract(
             for layer_name, shapes in obs_report
         ],
         "obs_shape_count": sum(len(shapes) for _layer_name, shapes in obs_report),
+        "unroutable_pins": unroutable_pins,
         "warnings": warnings,
         "provenance": provenance,
     }
@@ -407,17 +409,27 @@ def _resolve_pins(
     origin_y_dbu: int,
     dbu_um: float,
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], dict[str, list[tuple[int, int, int, int]]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[tuple[int, int, int, int]]],
+    list[dict[str, Any]],
+]:
     """Resolve each descriptor pin's LEF layer, direction/use, and port
-    geometry. Returns ``(pins_report, pin_boxes_by_lef_layer_dbu)`` -- the
-    second value (macro-local dbu boxes, keyed by LEF layer name) is reused
-    by :func:`_resolve_obs` to subtract declared pin geometry back out of
-    the obstruction region.
+    geometry. Returns ``(pins_report, pin_boxes_by_lef_layer_dbu,
+    unroutable_pins)`` -- the second value (macro-local dbu boxes, keyed by
+    LEF layer name) is reused by :func:`_resolve_obs` to subtract declared
+    pin geometry back out of the obstruction region; the third is the
+    top-level ``unroutable_pins[]`` echo (issue #464) -- a
+    programmatically-checkable promotion of the same ``geometry_source:
+    "none"``/``warnings[]`` condition below, for a caller composing this
+    command into ``klt place-and-route``'s ``request.macros`` without
+    grepping ``warnings[]`` strings.
     """
     import klayout.db as kdb
 
     pins_report: list[dict[str, Any]] = []
     pin_boxes_by_layer: dict[str, list[tuple[int, int, int, int]]] = {}
+    unroutable_pins: list[dict[str, Any]] = []
 
     for pin in pins:
         layer_tuple = pin["layer"]
@@ -427,6 +439,9 @@ def _resolve_pins(
                 f"pin '{pin['name']}': layer {layer_tuple[0]}/{layer_tuple[1]} does "
                 "not resolve to a known routing LEF layer -- emitted with no PORT "
                 "geometry"
+            )
+            unroutable_pins.append(
+                {"name": pin["name"], "layer": [layer_tuple[0], layer_tuple[1]]}
             )
             direction, use = _pin_classification(pin)
             pins_report.append(
@@ -504,7 +519,8 @@ def _resolve_pins(
         )
 
     pins_report.sort(key=lambda p: p["name"])
-    return pins_report, pin_boxes_by_layer
+    unroutable_pins.sort(key=lambda p: p["name"])
+    return pins_report, pin_boxes_by_layer, unroutable_pins
 
 
 def _pin_classification(pin: dict[str, Any]) -> tuple[str, str]:

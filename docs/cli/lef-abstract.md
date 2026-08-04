@@ -113,14 +113,25 @@ Each declared pin becomes a `PIN <name>` block:
   whose declared `layer` does not resolve to a known routing LEF layer gets
   `"none"` (no `PORT` at all) and a `warnings[]` entry.
 
-  **Known gap (#464):** a `geometry_source: "none"` pin is not itself an
-  error here — this command still writes a structurally valid LEF — but if
-  that pin is later wired into a real net and placed via `klt
-  place-and-route`'s `request.macros` (see
-  [that command's own "Known gap" note](place-and-route.md#hard-macro-placement-requestmacros)),
-  OpenROAD's global router fails with an opaque `GRT-0029` several stages
-  into a real run rather than a clear error here at abstract-emission time.
-  Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
+  A `geometry_source: "none"` pin is not itself an error here — this command
+  still writes a structurally valid LEF — but if that pin is later wired
+  into a real net and placed via `klt place-and-route`'s `request.macros`,
+  OpenROAD's global router would otherwise fail with an opaque `GRT-0029`
+  several stages into a real run rather than a clear error at
+  abstract-emission time (discovered during Epic #393 Phase 3, #456; full
+  repro in #464). Two things close that gap:
+
+  - **`unroutable_pins[]`** (issue #464) — every such pin is also echoed at
+    the top level as `{name, layer}` (see "Response" below), a
+    programmatically-checkable promotion of the same condition, for a
+    caller composing `lef-abstract` → `place-and-route` without grepping
+    `warnings[]` strings.
+  - **`klt place-and-route` itself rejects it** — `request.macros`
+    validation cross-checks each macro's LEF `PIN`s against the netlist's
+    own port connections for that instance and rejects a wired,
+    `PORT`-less pin with a clear error *before* invoking OpenROAD, rather
+    than letting it surface as `GRT-0029` mid-`route` — see
+    [that command's own "Hard-macro placement" section](place-and-route.md#hard-macro-placement-requestmacros).
 
 ### Obstructions
 
@@ -155,6 +166,7 @@ view rather than a hole-aware multi-`RECT` decomposition).
   "pin_count": 2,
   "obs": [{ "layer": "met1", "shape_count": 1 }],
   "obs_shape_count": 1,
+  "unroutable_pins": [],
   "warnings": [],
   "provenance": {
     "klt_version": "0.1.0",
@@ -182,6 +194,7 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `pin_count` | integer | `len(pins)`. |
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
+| `unroutable_pins` | array\<object\> | `{name, layer: [gds_layer, gds_datatype]}` per pin (name-sorted) whose declared `layer` did not resolve to a routing LEF layer — the same pins with `pins[].geometry_source: "none"`, echoed as its own top-level, programmatically-checkable field (issue #464). `[]` on a run with no such pins. |
 | `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names `--cell-library` and hashes the resolved tech LEF; `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `<file>`. |
 
@@ -207,3 +220,8 @@ document's "Hard-macro placement" section. Reading the resulting DEF back
 (directly, or via this repo's own `klayout.db`) confirms the placer
 respected the declared `OBS` regions: no other placed instance or routed
 wire should overlap them.
+
+If this LEF has any `unroutable_pins[]` and the caller's netlist wires one
+of them into a real net, `klt place-and-route` rejects the request with a
+clear `klt`-level error before invoking OpenROAD at all — see issue #464
+and that document's "Hard-macro placement" section.
