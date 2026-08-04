@@ -238,7 +238,26 @@ into the circuit.)
   route's own trace half-width so a wire narrower than the gap between pad
   and centerline still counts) and reports the net **unroutable** instead of
   drawing it. A port on a different physical layer than `routing.layer_role`
-  is not treated as an obstacle (it cannot short on that layer). This is
+  is not treated as an obstacle (it cannot short on that layer).
+
+  A second, **conservative** check (#453) closes a gap the square-footprint
+  model above misses. A port's reported `width_um` is roughly its contact
+  size, not the full extent of its drawn pad — an array unit's base-tie tap,
+  for instance, draws metal several times taller than its reported `width_um`
+  in its facing direction. So when a self-net joins two ports that face the
+  **same** direction and share the coordinate along that facing axis (same
+  row for a north/south-facing pair, same column for an east/west-facing
+  pair), `manhattan_backbone()` collapses to a single straight jog lifted just
+  one stub width to the ports' outward side, and a route *wider* than the
+  intervening pad's under-sized reported square still plows through that pad's
+  real drawn metal. `route_two_pin()` therefore rejects the net whenever any
+  other same-layer port that faces the **same** direction sits strictly
+  between the two pins along the perpendicular axis (on the same row/column) —
+  regardless of that port's reported `width_um`. This is the exact 8-unit
+  `common_centroid bjt_array` case where bussing two same-row north-facing
+  emitters across the intervening unit's base-tie pad previously composed
+  `routed: true` and DRC-clean while extraction showed the whole array's
+  shared base node absorbed into the emitter net. This is
   still metal-only bussing's fundamental limit, not a fix for it: the router
   has no `metal2`/via role to hop over a crossed pad, so a genuinely
   necessary intra-block bus (as opposed to a route that happens to cross one
