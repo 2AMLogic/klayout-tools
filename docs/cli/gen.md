@@ -88,7 +88,14 @@ non-default `params` set is not guaranteed to (see each generator's
 A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
 strip + poly gate(s) + contact + local-metal source/drain pads), with
 `dummy` extra unit-device columns flanking each side for etch/gradient
-matching. The first gate finger carries a **poly landing pad** that extends
+matching. On sky130 (issue #491), each dummy column's gate footprint is also
+covered by the curated `dummy` marker layer `klayout_tools.decks.sky130`
+declares, so `klt extract`'s dummy-device suppression (see "Dummy devices:
+the `dummy` marker layer" in `docs/cli/extract.md`) drops it from the
+extracted netlist instead of reporting it as a spurious unmatched device
+under `klt lvs` — gf180mcu draws no equivalent marker (its curated deck
+declares no `dummy` layer). The first gate finger carries a **poly landing
+pad** that extends
 one `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
 diffusion's gate-side edge, so a contact can land on the gate *outside* the
 channel — without it the gate poly shared the diffusion's exact extent and a
@@ -166,7 +173,12 @@ device additionally requires), so `klt gen res_array`'s output is directly
 recognised as a resistor device by `klt extract --deck <pdk>` rather than
 being absorbed into ordinary poly interconnect as a short (issue #369).
 Neither curated *DRC* deck checks any of these layers, so drawing them never
-affects `klt drc` status.
+affects `klt drc` status. On sky130 only (issue #491), each *dummy* unit's
+body segment is additionally covered by the curated `dummy` marker layer, so
+`klt extract`'s dummy-device suppression (see "Dummy devices: the `dummy`
+marker layer" in `docs/cli/extract.md`) drops it from the extracted netlist
+instead of reporting it as a spurious unmatched device under `klt lvs` —
+gf180mcu draws no equivalent marker.
 
 `flavor` selects which recognised poly-resistor *device class* the array
 draws, by covering each body segment with the implant/precision-resistor
@@ -329,6 +341,13 @@ that unit's emitter pad, not the whole array or the base-tie pad next to it:
 - **sky130**: `pnp.drawing` — no curated *DRC* rule checks this layer, but
   `klt extract --deck sky130`'s device recognition does (mirrors `res_array`'s
   `res_mark`, issue #369).
+
+On sky130 only (issue #491), each *dummy* unit's device-mark footprint is
+additionally covered by the curated `dummy` marker layer, so `klt extract`'s
+dummy-device suppression (see "Dummy devices: the `dummy` marker layer" in
+`docs/cli/extract.md`) drops it from the extracted netlist instead of
+reporting it as a spurious unmatched device under `klt lvs` — gf180mcu draws
+no equivalent marker.
 
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when

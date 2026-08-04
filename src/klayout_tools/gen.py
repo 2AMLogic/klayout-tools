@@ -99,6 +99,8 @@ _HIDDEN_PARAMS = {
     "res_implant_present",
     "res_block_layer",
     "res_block_present",
+    "dummy_layer",
+    "dummy_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -218,6 +220,13 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # exist purely for `gen_compose`'s router to resolve.
         "metal2": (68, 20),  # met1.drawing -- EXTRACTION_DECK.metals[1]
         "via1": (67, 44),  # mcon.drawing -- EXTRACTION_DECK.vias[0] (li1<->met1)
+        "dummy": (83, 20),  # curated marker, matches
+        # `klayout_tools.decks.sky130.EXTRACTION_DECK.dummy` -- see that
+        # deck's own comment for why sky130 has no native dummy-device GDS
+        # layer and why (83, 20) was chosen (issue #491). Drawn per dummy
+        # unit device by `mos_array`/`res_array`/`bjt_array` (never over a
+        # real, non-dummy unit) so `klt extract`'s existing dummy-suppression
+        # guards (issue #295/#462) actually fire on sky130.
     },
     "gf180mcu": {
         "active": (22, 0),  # Comp
@@ -359,11 +368,21 @@ def _device_layer_params(
     Resolves ``well_layer``/``well_present`` the same way
     :func:`_ring_layer_params` already does, so a ``flavor="pfet"`` request
     can enclose the unit device's active region in a well on PDK families
-    whose curated deck checks one."""
+    whose curated deck checks one.
+
+    Also resolves ``dummy_layer``/``dummy_present`` (issue #491) -- the
+    optional PDK dummy-device marker (see :data:`_PDK_ROLE_LAYERS`'s
+    ``"dummy"`` role and ``klayout_tools.decks.sky130``'s
+    ``EXTRACTION_DECK.dummy``) that ``mos_array`` draws over its
+    ``dummy_cells``' gate footprint so ``klt extract``'s existing
+    dummy-suppression guards (#295/#462) actually fire. ``None`` (e.g.
+    gf180mcu, or ``diff_pair``, which never populates ``dummy_cells``) is a
+    silent no-op, matching every other ``*_present``-gated role here."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
     well = _role_layer_info(family, "well")
+    dummy = _role_layer_info(family, "dummy")
     return {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
@@ -371,6 +390,8 @@ def _device_layer_params(
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
+        "dummy_present": dummy is not None,
     }
 
 
@@ -392,7 +413,11 @@ def _resistor_layer_params(
     while `res_high_po`/`res_xhigh_po` each need the psdm implant plus their
     own rpm/urpm mask; gf180mcu's single `ppolyf_u` flavour needs both Pplus
     and SAB. A ``None`` in the resolved pair follows the
-    `well_present`/`bjt_mark_present` precedent (the generator omits it)."""
+    `well_present`/`bjt_mark_present` precedent (the generator omits it).
+
+    Also resolves ``dummy_layer``/``dummy_present`` (issue #491), the same
+    optional PDK dummy-device marker :func:`_device_layer_params` resolves --
+    see that function's docstring."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
@@ -403,6 +428,7 @@ def _resistor_layer_params(
     block_pair = flavor_layers["res_block"]
     implant = kdb.LayerInfo(*implant_pair) if implant_pair is not None else None
     block = kdb.LayerInfo(*block_pair) if block_pair is not None else None
+    dummy = _role_layer_info(family, "dummy")
     return {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -413,6 +439,8 @@ def _resistor_layer_params(
         "res_implant_present": implant is not None,
         "res_block_layer": block if block is not None else kdb.LayerInfo(0, 0),
         "res_block_present": block is not None,
+        "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
+        "dummy_present": dummy is not None,
     }
 
 
@@ -467,12 +495,17 @@ def _bjt_layer_params(
     :data:`_PDK_ROLE_LAYERS`). ``*_present`` flags follow ``guard_ring``'s
     ``well_present`` precedent so the generator omits a role no currently
     supported family resolves to ``None`` for.
+
+    Also resolves ``dummy_layer``/``dummy_present`` (issue #491), the same
+    optional PDK dummy-device marker :func:`_device_layer_params` resolves --
+    see that function's docstring.
     """
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
     well = _role_layer_info(family, "well")
     mark = _role_layer_info(family, "bjt_mark")
+    dummy = _role_layer_info(family, "dummy")
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -482,6 +515,8 @@ def _bjt_layer_params(
         "well_present": well is not None,
         "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "bjt_mark_present": mark is not None,
+        "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
+        "dummy_present": dummy is not None,
     }
 
 
@@ -1805,6 +1840,20 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
                 default=False,
             )
+            self.param(
+                "dummy_layer",
+                self.TypeLayer,
+                "PDK dummy-device marker drawing layer, covering each dummy "
+                "unit device's gate footprint (only used when dummy_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "dummy_present",
+                self.TypeBoolean,
+                "Whether dummy_layer is a real layer this PDK's extraction "
+                "deck declares (see ExtractionDeck.dummy)",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -1839,6 +1888,25 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             if self.flavor == "pfet" and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
                 _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
+
+            # Dummy-device marker (issue #491): drawn only over
+            # dummy_cells' gate footprint (unit_boxes["poly"], the exact
+            # geometry `klt extract`'s nfet_gate/pfet_gate regions are built
+            # from) -- never over a real cell -- so the deck's existing
+            # dummy-suppression guards (#295/#462) drop these gates from the
+            # extracted netlist instead of reporting them as unmatched
+            # devices under `klt lvs`.
+            if self.dummy_present and info["dummy_cells"]:
+                li_dummy = self.layout.layer(self.dummy_layer)
+                for c in info["dummy_cells"]:
+                    _insert_boxes(
+                        self.cell,
+                        li_dummy,
+                        dbu,
+                        unit_boxes["poly"],
+                        c["x0_um"],
+                        c["y0_um"],
+                    )
 
     class _ResArrayPCell(kdb.PCellDeclarationHelper):
         """Unit resistor/capacitor array (spike section 4's family 2): a row
@@ -1955,6 +2023,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "the resolved PDK",
                 default=False,
             )
+            self.param(
+                "dummy_layer",
+                self.TypeLayer,
+                "PDK dummy-device marker drawing layer, covering each dummy "
+                "unit resistor's recognised body segment (only used when "
+                "dummy_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "dummy_present",
+                self.TypeBoolean,
+                "Whether dummy_layer is a real layer this PDK's extraction "
+                "deck declares (see ExtractionDeck.dummy)",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return (
@@ -2005,6 +2088,20 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 for c in all_cells:
                     _insert_boxes(
                         self.cell, li_mark, dbu, marker_boxes, c["x0_um"], c["y0_um"]
+                    )
+
+            # Dummy-device marker (issue #491): drawn only over
+            # dummy_cells' recognised body footprint (the same marker_boxes
+            # span the resistor-ID marker above uses) -- never over a real
+            # cell -- so `klt extract`'s existing dummy-suppression guards
+            # (#295/#462) drop these dummy resistor bodies from the
+            # extracted netlist instead of reporting them as unmatched
+            # devices under `klt lvs`.
+            if self.dummy_present and info["dummy_cells"]:
+                li_dummy = self.layout.layer(self.dummy_layer)
+                for c in info["dummy_cells"]:
+                    _insert_boxes(
+                        self.cell, li_dummy, dbu, marker_boxes, c["x0_um"], c["y0_um"]
                     )
 
     class _GuardRingPCell(kdb.PCellDeclarationHelper):
@@ -2482,6 +2579,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "deck (and, on some families, its DRC deck too) keys off",
                 default=False,
             )
+            self.param(
+                "dummy_layer",
+                self.TypeLayer,
+                "PDK dummy-device marker drawing layer, covering each dummy "
+                "unit device's recognised base-mark footprint (only used "
+                "when dummy_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "dummy_present",
+                self.TypeBoolean,
+                "Whether dummy_layer is a real layer this PDK's extraction "
+                "deck declares (see ExtractionDeck.dummy)",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"bjt_array({self.rows}x{self.cols},e={self.emitter_um})"
@@ -2561,6 +2673,25 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li_mark, dbu, marker_boxes, c["x0_um"], c["y0_um"]
                     )
+
+                # Dummy-device marker (issue #491): drawn only over
+                # dummy_cells' bipolar device-mark footprint (the same
+                # marker_boxes span the bjt_mark drawing above uses) --
+                # never over a real cell -- so `klt extract`'s existing
+                # dummy-suppression guards (#295/#462) drop these dummy
+                # bipolar units from the extracted netlist instead of
+                # reporting them as unmatched devices under `klt lvs`.
+                if self.dummy_present and info["dummy_cells"]:
+                    li_dummy = self.layout.layer(self.dummy_layer)
+                    for c in info["dummy_cells"]:
+                        _insert_boxes(
+                            self.cell,
+                            li_dummy,
+                            dbu,
+                            marker_boxes,
+                            c["x0_um"],
+                            c["y0_um"],
+                        )
 
     return {
         "resistor_strip": _ResistorStripPCell,

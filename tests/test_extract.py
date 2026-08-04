@@ -763,10 +763,15 @@ def test_bjt_array_sky130_extracts_nonzero_devices(tmp_path):
     --deck sky130` reports real devices instead of `device_count: 0` -- the
     generator now draws the per-unit bipolar device-mark (`pnp.drawing`) and
     a base-tie `tap` shape `bjt_array` previously omitted for this family
-    (see `docs/design/gen-bjt-array-spike.md`). Every drawn unit -- real
-    cells and dummy columns alike -- is geometrically identical and
-    individually marked, so `klt extract`'s device count exceeds `klt gen`'s
-    own `device_count` (real cells only) by the dummy-column count."""
+    (see `docs/design/gen-bjt-array-spike.md`).
+
+    Issue #491 (deck+generator half of the #295/#462 dummy-suppression
+    machinery, now wired up for sky130): `bjt_array` also draws the deck's
+    curated `dummy` marker over its dummy columns' own bipolar device-mark
+    footprint, so `klt extract`'s dummy-suppression guard drops them from the
+    netlist instead of extracting them as spurious real devices -- matching
+    `klt gen`'s own `device_count` (real cells only) exactly, rather than
+    exceeding it by the dummy-column count the way it did pre-#491."""
     from klayout_tools.gen import generate
 
     root = _make_pdk_install(tmp_path, "sky130A")
@@ -785,15 +790,78 @@ def test_bjt_array_sky130_extracts_nonzero_devices(tmp_path):
         str(tmp_path / "bjt_t.gds"), "sky130", output=str(tmp_path / "bjt_t.spice")
     )
 
-    expected = params["rows"] * params["cols"] + 2 * params["dummy"] * params["rows"]
-    assert report["device_count"] == expected
-    assert report["device_counts"] == {"pnp": expected}
+    real = params["rows"] * params["cols"]
+    dropped = 2 * params["dummy"] * params["rows"]
+    assert report["device_count"] == real
+    assert report["device_counts"] == {"pnp": real}
+    assert report["dummy_devices_dropped"] == dropped
 
     # Every device's base terminal shares the same net -- the array's one
     # shared base well, tied together by the per-unit `tap` shape -- rather
     # than each device's base staying a separate, per-device floating node.
     base_nets = {d["nets"]["b"] for d in report["devices"]}
     assert len(base_nets) == 1
+
+
+def test_mos_array_sky130_dummy_gates_suppressed(tmp_path):
+    """Issue #491: `klt gen mos_array` (sky130, `dummy > 0`) piped into `klt
+    extract --deck sky130` suppresses the dummy gates instead of extracting
+    them as spurious real `nfet` devices -- `dummy_devices_dropped` matches
+    `2 * rows * dummy` (the issue's own Impact-section formula) and the
+    extracted `device_count` matches `klt gen`'s own real-cell-only count."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "sky130A")
+    params = {"rows": 2, "cols": 2, "dummy": 1}
+    gen_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_t.gds")},
+        }
+    )
+    real = params["rows"] * params["cols"]
+    assert gen_report["device_count"] == real
+
+    report = run_extract(
+        str(tmp_path / "mos_t.gds"), "sky130", output=str(tmp_path / "mos_t.spice")
+    )
+
+    dropped = 2 * params["rows"] * params["dummy"]
+    assert report["device_count"] == real
+    assert report["device_counts"] == {"nfet": real}
+    assert report["dummy_devices_dropped"] == dropped
+
+
+def test_res_array_sky130_dummy_resistors_suppressed(tmp_path):
+    """Issue #491: `klt gen res_array` (sky130, `dummy > 0`) piped into `klt
+    extract --deck sky130` suppresses the dummy resistor bodies instead of
+    extracting them as spurious real `res_generic_po` devices --
+    `dummy_devices_dropped` matches `2 * rows * dummy` and the extracted
+    `device_count` matches `klt gen`'s own real-cell-only count."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "sky130A")
+    params = {"num": 4, "dummy": 2, "rows": 1}
+    gen_report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "res_t.gds")},
+        }
+    )
+    assert gen_report["device_count"] == params["num"]
+
+    report = run_extract(
+        str(tmp_path / "res_t.gds"), "sky130", output=str(tmp_path / "res_t.spice")
+    )
+
+    dropped = 2 * params["rows"] * params["dummy"]
+    assert report["device_count"] == params["num"]
+    assert report["device_counts"] == {"res_generic_po": params["num"]}
+    assert report["dummy_devices_dropped"] == dropped
 
 
 def test_sky130_bjt_coincident_marker_is_clean_error_not_traceback(tmp_path):
@@ -3558,9 +3626,14 @@ def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> Non
 
 
 def test_dummy_field_defaults_none_on_shipped_decks():
-    """The `dummy` field is opt-in: no shipped deck sets it, so existing
-    extraction is unaffected (issue #295, additive contract)."""
-    assert get_extraction_deck("sky130").dummy is None
+    """The `dummy` field is opt-in per deck (issue #295). gf180mcu still
+    declares none -- out of scope for issue #491, which only wires sky130 up
+    -- so its extraction is unaffected. sky130's curated deck now declares a
+    curated marker layer (issue #491, `(83, 20)` -- see
+    `klayout_tools.decks.sky130.EXTRACTION_DECK`'s own comment for why that
+    layer was chosen), the deck-side half of a fix whose extractor-side half
+    (this field itself) shipped in #295/#462."""
+    assert get_extraction_deck("sky130").dummy == (83, 20)
     assert get_extraction_deck("gf180mcu").dummy is None
 
 

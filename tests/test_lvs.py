@@ -2161,6 +2161,77 @@ def test_lvs_unused_device_class_mismatch_is_warning_not_error(tmp_path, monkeyp
 
 
 # --------------------------------------------------------------------------- #
+# Issue #491: array dummy-device suppression reaches `klt lvs` on sky130
+# --------------------------------------------------------------------------- #
+
+
+def test_lvs_res_array_dummy_suppression_no_unmatched_device(tmp_path, monkeypatch):
+    """A reference schematic that (correctly) omits an array's dummy units
+    must not see them reported as `device.unmatched` against the physical
+    layout, now that sky130's curated deck declares a `dummy` marker layer
+    and `res_array` draws it (issue #491) -- the deck+generator half of a fix
+    whose extractor-side dummy-suppression guard (issue #295/#462) already
+    shipped. `dummy: 0` output (the pre-#491 workaround) stands in for the
+    reference schematic's own real-cells-only topology; `dummy: 2` output is
+    the physical layout with edge fill."""
+    from klayout_tools import pdk
+    from klayout_tools.extract import run_extract
+    from klayout_tools.gen import generate
+
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+    pdk_root = tmp_path / "pdk_install"
+    (pdk_root / "sky130A" / "libs.tech").mkdir(parents=True)
+
+    reference_layout_path = tmp_path / "res_array_ref.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 4, "dummy": 0},
+            "options": {"output": str(reference_layout_path)},
+        }
+    )
+    reference_path = tmp_path / "ref.spice"
+    ref_extracted = run_extract(
+        str(reference_layout_path), "sky130", output=str(reference_path)
+    )
+
+    layout_path = tmp_path / "res_array_dummy.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 4, "dummy": 2},
+            "options": {"output": str(layout_path)},
+        }
+    )
+    layout_extracted_path = tmp_path / "lay.spice"
+    layout_extracted = run_extract(
+        str(layout_path), "sky130", output=str(layout_extracted_path)
+    )
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": str(layout_extracted_path),
+                "top": layout_extracted["top"],
+            },
+            "reference": {"netlist": str(reference_path), "top": ref_extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert not any(m["category"] == "device.unmatched" for m in report["mismatches"])
+
+
+# --------------------------------------------------------------------------- #
 # CLI: exit codes, --format text/json
 # --------------------------------------------------------------------------- #
 
