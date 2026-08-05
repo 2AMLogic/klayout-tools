@@ -1104,7 +1104,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros`` subcommands.
+    ``cells``/``macros``/``corners`` subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
     verb (kicad-tools convention for multi-operation capabilities), so it uses
@@ -1270,6 +1270,37 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text)",
     )
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
+
+    corners_parser = pdk_sub.add_parser(
+        "corners",
+        help="report SPICE process corners and which device families they skew",
+        description=(
+            "Report, for the resolved variant's golden ngspice model deck: "
+            "the available top-level SPICE process corner names, and per "
+            "corner, which curated device families (mos/bjt/diode/resistor/"
+            "mim_cap/mos_cap for gf180mcu; mos/resistor_cap for sky130) "
+            "resolve to a skewed section, a param-driven skew on a shared "
+            "model, or the typical section. `complete` flags a corner that "
+            "leaves one or more families at typical -- the silent-typical "
+            "bug this command exists to surface."
+        ),
+    )
+    corners_parser.add_argument(
+        "--pdk",
+        help="variant to resolve (e.g. gf180mcuD); overrides $PDK",
+    )
+    corners_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    corners_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    corners_parser.set_defaults(func=pdk_cmd.run_corners)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:

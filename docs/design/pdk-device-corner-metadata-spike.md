@@ -1,7 +1,20 @@
 # Spike: PDK device-name & corner-section metadata
 
-**Status:** spike / proposal. Nothing here is scheduled, and nothing here
-authorises implementation. Per
+**Status:** spike / proposal for section 2.1 (`klt pdk device`) and the
+single-corner-resolution half of section 2.2 (`klt pdk corner --pdk
+<variant> --corner <name>`) — neither is implemented. Section 2.2's
+*enumerate-every-corner-and-flag-incompleteness* framing shipped as **[`klt
+pdk corners`](../cli/pdk.md#klt-pdk-corners)** (plural; issue #538), a
+narrower first step that reuses this spike's `{family, section}` shape (with
+an additive `skew` field) and `complete` semantics, but follows the "curated
+grouping + live scan" design only for the *grouping* half of section 3's
+recommendation — see `klt pdk corners`'s own "Design choice" note in
+`docs/cli/pdk.md` for why it stops short of a full hand-curated,
+version-pinned, CI-validated table. Resolving *one* named corner (or a
+device subckt name) remains a natural follow-up, not yet built.
+
+Nothing else here is scheduled, and nothing here authorises implementation
+beyond what is cross-referenced above. Per
 [docs/ARCHITECTURE.md](../ARCHITECTURE.md) → "How capabilities arrive," a
 major capability arrives by spiking a design epic first — survey the
 source of truth, propose a JSON contract, make a wrap/build call — and

@@ -1,6 +1,6 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Five subcommands, all emitting through the shared envelope helpers in
+Six subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
@@ -8,6 +8,8 @@ Five subcommands, all emitting through the shared envelope helpers in
 - ``env``  — the resolved paths as eval-able shell ``export`` lines.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
 - ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
+- ``corners`` — per SPICE process corner, which device families skew vs.
+  resolve to typical.
 
 The discovery logic itself lives in :mod:`klayout_tools.pdk`; these handlers
 only translate flags into library calls and render the result.
@@ -21,6 +23,7 @@ from ..pdk import (
     PdkNotFoundError,
     find_pdk,
     list_cell_libraries,
+    list_corners,
     list_hard_macro_libraries,
     list_pdks,
 )
@@ -84,6 +87,16 @@ def run_macros(args: argparse.Namespace) -> int:
         return emit_error("pdk macros", str(exc), args.format)
 
     emit_success(report, args.format, _print_macros_text)
+    return 0
+
+
+def run_corners(args: argparse.Namespace) -> int:
+    try:
+        report = list_corners(variant=args.pdk, root=args.pdk_root)
+    except PdkNotFoundError as exc:
+        return emit_error("pdk corners", str(exc), args.format)
+
+    emit_success(report, args.format, _print_corners_text)
     return 0
 
 
@@ -189,3 +202,26 @@ def _print_macros_text(report: dict) -> None:
         rows.append((macro["name"], "/".join(present) or "-"))
 
     render_table(headers, rows, left_aligned={0, 1})
+
+
+def _print_corners_text(report: dict) -> None:
+    corners = report["corners"]
+
+    print(f"pdk: {report['pdk']}")
+    model_lib = report["model_lib"]
+    print(f"model_lib: {model_lib if model_lib is not None else '-'}")
+    if not corners:
+        print(f"no corners resolved ({report['resolved_via']})")
+        return
+
+    headers = ("corner", "complete", "families")
+    rows = []
+    for corner in corners:
+        families = " ".join(
+            f"{section['family']}={section['skew'] or '-'}"
+            for section in corner["sections"]
+        )
+        complete = "yes" if corner["complete"] else "no"
+        rows.append((corner["corner"], complete, families))
+
+    render_table(headers, rows, left_aligned={0, 2})

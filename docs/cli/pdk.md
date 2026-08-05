@@ -6,11 +6,12 @@ simulation, DRC, LVS, symbol lookup — imports (Python) or evaluates (shell/Tcl
 instead of re-implementing the lookup, usually twice, per repo.
 
 ```
-klt pdk find   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk list   [--pdk-root <dir>] [--format text|json]
-klt pdk env    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk cells  [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
-klt pdk macros [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk find    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk list    [--pdk-root <dir>] [--format text|json]
+klt pdk env     [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk cells   [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
+klt pdk macros  [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk corners [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
@@ -20,6 +21,8 @@ klt pdk macros [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
   nominal supply its `.lib` timing views are characterised at.
 - `macros` — per hard-macro IP library (`libs.ref` entries named
   `*_fd_ip_*`, e.g. an SRAM/ROM compiler output), which views it ships.
+- `corners` — per SPICE process corner, which curated device families skew
+  vs. resolve to typical, and whether the corner is complete.
 
 The command is fully headless (pure filesystem probing — it does not load the
 KLayout database module) and safe to run in CI.
@@ -423,7 +426,8 @@ decision-record check).
 
 ### Design choice: live-parsed, not a curated table
 
-Unlike `klt pdk device`/`klt pdk corner` (proposed in
+Unlike `klt pdk corners` (below) and the still-unimplemented `klt pdk
+device`/`klt pdk corner <name>` (proposed in
 [`docs/design/pdk-device-corner-metadata-spike.md`](../design/pdk-device-corner-metadata-spike.md),
 which recommends owning a curated per-release table because primitive-device
 and process-corner metadata require synthesising knowledge no single shipped
@@ -512,6 +516,147 @@ views: there is no PDK-wide-consistent convention across hard-macro IP
 library's) to extract from the way `klt pdk cells` extracts from
 `spice/<lib>.spice`/`lib/*.lib`.
 
+## `klt pdk corners`
+
+`klt pdk find` resolves the `ngspice` asset directory but stops there —
+nothing tells a caller *which* SPICE process corners a PDK actually ships, or
+whether a named corner (`ss`, `ff`, ...) actually skews every device family
+it should. Discovering that today means opening the golden model deck and
+reading `.LIB` section headers by hand — and the corner set is not uniform: a
+PDK can define a corner for MOSFETs but leave resistors, diodes, or a
+capacitor family bound to the *typical* section under that same corner name,
+with nothing surfacing the gap (issue #538). `klt pdk corners` answers this
+directly, for every corner the resolved variant ships at once.
+
+```
+$ klt pdk corners --pdk gf180mcuD
+pdk: gf180mcuD
+model_lib: /usr/share/pdk/gf180mcuD/libs.tech/ngspice/sm141064.ngspice
+
+corner    complete  families
+--------  --------  ------------------------------------------------------------------------------
+typical   yes       mos=typical bjt=typical diode=typical resistor=typical mim_cap=typical mos_cap=typical
+ff        yes       mos=skewed bjt=param diode=param resistor=param mim_cap=param mos_cap=param
+ss        yes       mos=skewed bjt=param diode=param resistor=param mim_cap=param mos_cap=param
+fs        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
+sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "gf180mcuD",
+  "root": "/usr/share/pdk",
+  "resolved_via": "curated family-prefix grouping (mos/bjt/diode/resistor/mim_cap/mos_cap) + live scan of sm141064.ngspice",
+  "model_lib": "/usr/share/pdk/gf180mcuD/libs.tech/ngspice/sm141064.ngspice",
+  "corner_names": ["typical", "ff", "ss", "fs", "sf"],
+  "corners": [
+    {
+      "corner": "ss",
+      "sections": [
+        { "family": "mos", "section": "ss", "skew": "skewed" },
+        { "family": "bjt", "section": "bjt_ss", "skew": "param" },
+        { "family": "diode", "section": "diode_ss", "skew": "param" },
+        { "family": "resistor", "section": "res_ss", "skew": "param" },
+        { "family": "mim_cap", "section": "mimcap_ss", "skew": "param" },
+        { "family": "mos_cap", "section": "moscap_ss", "skew": "param" }
+      ],
+      "family_count": 6,
+      "complete": true
+    },
+    {
+      "corner": "fs",
+      "sections": [
+        { "family": "mos", "section": "fs", "skew": "skewed" },
+        { "family": "bjt", "section": null, "skew": null },
+        { "family": "diode", "section": null, "skew": null },
+        { "family": "resistor", "section": null, "skew": null },
+        { "family": "mim_cap", "section": null, "skew": null },
+        { "family": "mos_cap", "section": null, "skew": null }
+      ],
+      "family_count": 6,
+      "complete": false
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `schema_version` | integer | Version of this command's JSON shape (starts at `1`). |
+| `pdk` | string | Resolved variant name (same resolution as `find`/`cells`/`macros`). |
+| `root` | string | Absolute install root. |
+| `resolved_via` | string | How the corner/family grouping was obtained — see "Design choice" below. Always explains an empty `corners` list too (unsupported PDK family, no `ngspice` asset, or the expected model deck filename is missing). |
+| `model_lib` | string \| null | Absolute path to the golden model deck the corners were scanned from, or `null` when nothing resolved. |
+| `corner_names` | array of string | The available top-level corner names, in the order they were scanned. |
+| `corners` | array | One entry per corner (see below). |
+| `corners[].corner` | string | The corner name. |
+| `corners[].sections` | array of `{family, section, skew}` | One entry per curated device family for this PDK — see "Which families are curated" below. Deliberately kept structurally consistent with `docs/design/pdk-device-corner-metadata-spike.md` section 2.2's proposed `{family, section}` shape; `skew` is an additive field. |
+| `corners[].sections[].family` | string | The curated device-family token (`mos`, `bjt`, `diode`, `resistor`, `mim_cap`, `mos_cap` for gf180mcu; `mos`, `resistor_cap` for sky130 — see below). |
+| `corners[].sections[].section` | string \| null | The section name this family actually resolves to for this corner, or `null` when the PDK ships no section for this family at this corner at all (unlisted). |
+| `corners[].sections[].skew` | `"typical"` \| `"skewed"` \| `"param"` \| null | `"skewed"` — the section differs from the family's typical section by which underlying model it includes. `"param"` — the section includes the *same* underlying model as typical, but overrides it with different `.param` values. `"typical"` — the section is the typical section itself, or (at a non-typical corner) resolves right back to an unchanged copy of it. `null` alongside `section: null`. |
+| `corners[].family_count` | integer | `len(sections)`. |
+| `corners[].complete` | boolean | **The acceptance-critical field.** `false` when, at a non-typical corner, one or more families are either unlisted (`section: null`) or present but never actually moved off typical (`skew: "typical"`) — both are the same silent-typical bug, one by omission and one by an unmoved section. `true` at the typical corner requires only that every family have a section (every family reporting `"typical"` there is correct, not a gap). |
+
+### Which families are curated
+
+`klt pdk corners` recognises two PDK families by variant-name prefix
+(`sky130A` → `sky130`, `gf180mcuC` → `gf180mcu`) and returns an **empty**
+`corners`/`corner_names` result (not an error — `resolved_via` explains why)
+for anything else, or for a recognised family whose variant ships no
+`ngspice` asset directory or no golden model deck at the expected filename:
+
+- **gf180mcu** (`sm141064.ngspice`) — six families, matching
+  `docs/design/pdk-device-corner-metadata-spike.md` section 2.1's
+  `device_class` taxonomy: `mos` (bare section names — `typical`/`ff`/`ss`/
+  `fs`/`sf`), `bjt` (`bjt_*`), `diode` (`diode_*`), `resistor` (`res_*`),
+  `mim_cap` (`mimcap_*`), `mos_cap` (`moscap_*`). Only `mos` ships `fs`/`sf`
+  cross-corners; every other family reports `section: null` there.
+- **sky130** (`sky130.lib.spice`) — two families, `mos` and `resistor_cap`,
+  derived from the leading path component of each `.lib <corner>` block's
+  own `.include` lines (`corners/...` vs. `r+c/...`) rather than a curated
+  name prefix — sky130 groups every family into a single block per corner,
+  so there is no cross-block naming convention to curate the way gf180mcu's
+  `bjt_ss`/`mimcap_ss`/... grouping requires. `resistor_cap` (not
+  gf180mcu's separate `resistor`/`mim_cap`) reflects what sky130's own deck
+  states: one shared `r+c/` include set covers both, never split further.
+  `corner_names` reports every `.lib` block the deck defines, including
+  cross-product (`sf_ll`, ...), mismatch (`*_mm`), and Monte-Carlo (`mc`)
+  variants — a block using neither the `corners/` nor `r+c/` include
+  convention (`mc`) reports both families as `section: null`.
+
+### Design choice: curated grouping + live scan (issue #538)
+
+`docs/design/pdk-device-corner-metadata-spike.md` section 3 ("Wrap or
+build?") argues that *which* sections belong to the same named corner is PDK
+convention a shipped file does not state as data, and recommends owning that
+grouping in a curated, per-release table rather than guessing it from a
+naming pattern at call time. `klt pdk corners` follows that recommendation
+for the grouping — see `_GF180MCU_FAMILY_PREFIXES` /
+`_SKY130_INCLUDE_FAMILIES` in `src/klayout_tools/pdk.py` — but does not
+go as far as the spike's full "hand-curated, version-pinned table" for the
+*skew classification*: whether a given, curated-grouping-resolved section
+actually differs from its family's typical section is derived by comparing
+the section's parsed content against the family's typical section **live**,
+against the real installed file, the same "reflect the real, installed
+state" argument `klt pdk cells` makes above for the parts of this problem a
+shipped file *does* state directly (per-section include tokens and `.param`
+values) — so this half of the answer never drifts silently against an
+upgraded PDK. A CI-validation harness that checks the curated grouping
+itself against a release (the spike's own open question) is not built here.
+
+Skew is classified **per curated family**, not per individual device flavor.
+A family reported `"skewed"` means *some* of its devices moved off the
+typical section for that corner — not that *every* device did. gf180mcu's
+own deck, for example, leaves its `nfet_06v0`/`pfet_06v0` MOSFET flavors
+bound to the same `_t`-suffixed (typical) model inside every corner while
+its `nfet_03v3`/`pfet_03v3` flavors do skew, both inside the single curated
+`mos` family — this command correctly reports `mos` as `"skewed"` for that
+corner, but does not itself flag the 06v0 sub-flavor as unmoved. Resolving
+that finer, per-flavor question is the spike's own proposed `klt pdk device`/
+`klt pdk corner --pdk <variant> --corner <name>` follow-up (section 2.2), a
+natural next issue, not this command's scope.
+
 ## Library API
 
 The importable half lives in `src/klayout_tools/pdk.py` — block repos import
@@ -523,6 +668,7 @@ from klayout_tools.pdk import (
     list_pdks,
     list_cell_libraries,
     list_hard_macro_libraries,
+    list_corners,
     PdkNotFoundError,
 )
 
@@ -544,6 +690,8 @@ cells_checked = list_cell_libraries(
 macros = list_hard_macro_libraries(
     variant="sky130A"
 )  # same dict `klt pdk macros` emits
+
+corners = list_corners(variant="gf180mcuD")  # same dict `klt pdk corners` emits
 ```
 
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
@@ -555,14 +703,19 @@ supply=None)` follows the same shape and also raises `PdkNotFoundError` when
 no PDK install resolves; `supply` is optional and adds the compatibility
 verdict fields documented above. `list_hard_macro_libraries(variant=None,
 root=None)` follows the same shape (and the same `PdkNotFoundError`
-behavior) for hard-macro IP libraries.
+behavior) for hard-macro IP libraries. `list_corners(variant=None,
+root=None)` also follows the same shape and raises `PdkNotFoundError` when no
+PDK install resolves at all — but an *unsupported* PDK family, or a
+recognised one missing its `ngspice` asset or golden model deck, returns an
+empty `corners`/`corner_names` result rather than raising (see "Which
+families are curated" above).
 
 ## Exit codes and errors
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells` with no matching library is still `0`; `cells` with `--supply` matching at least one library is `0`. |
-| `1` | `find`/`env`/`cells`/`macros` resolved no PDK install. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells` with no matching library is still `0`; `corners` with an unsupported PDK family or no resolvable model deck is still `0`; `cells` with `--supply` matching at least one library is `0`. |
+| `1` | `find`/`env`/`cells`/`macros`/`corners` resolved no PDK install. Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 
@@ -604,4 +757,11 @@ $ echo "$PDK_ROOT $PDK"
 # Gate a block's decision record: does a 1.8V core-logic supply have a
 # matching standard-cell library on this PDK? (non-zero exit if not)
 $ klt pdk cells --pdk sky130A --supply 1.8 || echo "no compatible library"
+
+# Before sweeping PVT corners on a design, check which ones the PDK ships,
+# and flag any corner that would silently leave a device family at typical:
+$ klt pdk corners --pdk gf180mcuD --format json \
+    | jq -r '.corners[] | select(.complete == false) | .corner'
+fs
+sf
 ```
