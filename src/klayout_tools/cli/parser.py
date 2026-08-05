@@ -1104,7 +1104,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells`` subcommands.
+    ``cells``/``macros`` subcommands.
 
     The other verbs are flat; ``pdk`` groups discovery operations under one
     verb (kicad-tools convention for multi-operation capabilities), so it uses
@@ -1241,6 +1241,35 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text)",
     )
     cells_parser.set_defaults(func=pdk_cmd.run_cells)
+
+    macros_parser = pdk_sub.add_parser(
+        "macros",
+        help="report hard-macro IP libraries (`*_fd_ip_*`) and their views",
+        description=(
+            "Report, per hard-macro IP library (libs.ref entries named "
+            "`*_fd_ip_*`, e.g. an SRAM/ROM compiler output) under the "
+            "resolved variant: which views it ships (GDS, LEF, Liberty "
+            "(`lib`), CDL, SPICE, Verilog). This is the sibling command to "
+            "`klt pdk cells`, which deliberately excludes these libraries -- "
+            "see `klt pdk cells --help`."
+        ),
+    )
+    macros_parser.add_argument(
+        "--pdk",
+        help="variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    macros_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        help="explicit install root; overrides $PDK_ROOT and the search order",
+    )
+    macros_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    macros_parser.set_defaults(func=pdk_cmd.run_macros)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:

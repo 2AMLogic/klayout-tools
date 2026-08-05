@@ -80,6 +80,18 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-05 — `klt pdk macros`: new sibling command to `klt pdk cells`
+  (#535) that enumerates hard-macro IP libraries — `libs_ref` entries named
+  `*_fd_ip_*` (e.g. an SRAM/ROM compiler output) — which `klt pdk cells`
+  deliberately excludes (its own scope is `*_fd_sc_*` standard-cell digital
+  libraries only). Previously there was no CLI-surfaced way to discover
+  these even when fully present on disk; `klt pdk cells` silently skipped
+  them with no indication anything was omitted. Reports each library's name
+  and which views it ships (`gds`/`lef`/`lib`/`spice`/`cdl`/`verilog`, a
+  presence check under the library directory, not content parsing). New
+  `list_hard_macro_libraries()` in the `klayout_tools.pdk` library API.
+  `klt pdk cells`'s own JSON schema and behavior are unchanged. See
+  `docs/cli/pdk.md`'s new "`klt pdk macros`" section.
 - 2026-08-04 — `klt pdk find`/`list`/`env`: resolve IHP-Open-PDK's SG13G2
   install (#522), the first non-open_pdks-shaped layout this resolver
   handles. `_probe_root` now falls back to treating an install root as its

@@ -466,11 +466,14 @@ def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -
 #: Marker substring identifying a `libs_ref` entry as an open_pdks "foundry
 #: digital, standard cell" library (`sky130_fd_sc_hd`, `sky130_fd_sc_hvl`,
 #: `gf180mcu_fd_sc_mcu9t5v0`, ...), as opposed to primitive-device libraries
-#: (`*_fd_pr`, no `.lib` timing views), I/O-pad libraries (`*_fd_io`), or
-#: macros (`*_sram_macros`). This is an open_pdks-wide naming convention
-#: (shared by sky130 and gf180mcu), not a sky130-specific hardcoded list --
-#: see docs/cli/pdk.md "klt pdk cells" scope note for the deliberate
-#: sky130_fd_io/sky130_sram_macros exclusion this implies.
+#: (`*_fd_pr`, no `.lib` timing views), I/O-pad libraries (`*_fd_io`),
+#: macros (`*_sram_macros`), or hard-macro IP libraries (`*_fd_ip_*`, see
+#: :data:`_HARD_MACRO_LIB_MARKER`/`klt pdk macros` below -- their own sibling
+#: command, not a mode of this one). This is an open_pdks-wide naming
+#: convention (shared by sky130 and gf180mcu), not a sky130-specific
+#: hardcoded list -- see docs/cli/pdk.md "klt pdk cells" scope note for the
+#: deliberate sky130_fd_io/sky130_sram_macros/sky130_fd_ip_* exclusion this
+#: implies.
 _STD_CELL_LIB_MARKER = "_fd_sc_"
 
 #: Nominal-corner selection for a library's `.lib` timing views: the
@@ -520,8 +523,10 @@ def list_cell_libraries(
     This is a deliberate, name-convention-based filter, not an accident of the
     glob used to walk `libs_ref`: it excludes primitive-device libraries
     (`*_fd_pr`, which ship no `.lib` timing views), I/O-pad libraries
-    (`*_fd_io`), and macros (`*_sram_macros`) -- none of those are the
-    "digital standard-cell library" this query answers for.
+    (`*_fd_io`), macros (`*_sram_macros`), and hard-macro IP libraries
+    (`*_fd_ip_*`, see :func:`list_hard_macro_libraries`/`klt pdk macros`) --
+    none of those are the "digital standard-cell library" this query answers
+    for.
 
     Design choice (see docs/design/pdk-device-corner-metadata-spike.md and
     issue #147): **live-parses** the shipped `spice/`/`lib/` files at call
@@ -754,3 +759,122 @@ def _read_text(path: str) -> str | None:
             return handle.read()
     except OSError:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# `klt pdk macros` -- hard-macro IP library discovery
+# --------------------------------------------------------------------------- #
+
+#: Marker substring identifying a `libs_ref` entry as an open_pdks "foundry
+#: digital, IP" (hard-macro) library -- e.g. an SRAM/ROM compiler output
+#: (`<family>_fd_ip_<name>`) -- as opposed to the standard-cell digital
+#: libraries :data:`_STD_CELL_LIB_MARKER`/`klt pdk cells` reports. Like
+#: `_STD_CELL_LIB_MARKER`, this is an open_pdks-wide naming convention
+#: (shared by sky130 and gf180mcu), not a sky130-specific hardcoded list.
+#: `klt pdk cells` deliberately excludes `*_fd_ip_*` entries (they are not a
+#: "standard-cell digital library"); `klt pdk macros` exists specifically to
+#: surface them -- see docs/cli/pdk.md "klt pdk macros".
+_HARD_MACRO_LIB_MARKER = "_fd_ip_"
+
+#: View subdirectories under a `libs_ref/<lib>` entry that
+#: :func:`list_hard_macro_libraries` reports presence of, keyed by the name
+#: surfaced in the JSON ``views`` object. Presence is a plain
+#: ``os.path.isdir`` check (the same "does this view directory exist" probe
+#: :func:`_nominal_supply` uses for `lib/`) -- this command reports what
+#: views are available, it does not parse their contents the way `klt pdk
+#: cells` parses `spice/`/`lib/` for device flavors and nominal supply.
+_MACRO_VIEW_DIRS = {
+    "gds": "gds",
+    "lef": "lef",
+    "lib": "lib",
+    "spice": "spice",
+    "cdl": "cdl",
+    "verilog": "verilog",
+}
+
+
+def list_hard_macro_libraries(
+    variant: str | None = None,
+    root: str | None = None,
+) -> dict[str, Any]:
+    """Report the hard-macro IP libraries a variant ships, and which views
+    each provides.
+
+    Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
+    ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
+    then scans its ``libs_ref`` asset for hard-macro IP libraries -- entries
+    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`).
+    This is the sibling command to `klt pdk cells`, not an alternate mode of
+    it (see docs/cli/pdk.md "klt pdk macros" for why): `klt pdk cells`
+    deliberately excludes hard-macro IP libraries, and this command's own
+    result deliberately excludes standard-cell digital libraries, primitive-
+    device libraries (`*_fd_pr`), and I/O-pad libraries (`*_fd_io`) -- none
+    of those are the "hard-macro IP library" this query answers for.
+
+    Per library, the returned dict reports ``views`` -- a bool per view kind
+    (``gds``, ``lef``, ``lib``, ``spice``, ``cdl``, ``verilog``) recording
+    whether that view subdirectory exists under the library entry (see
+    :data:`_MACRO_VIEW_DIRS`). Unlike `klt pdk cells`, this command does not
+    parse view contents -- a hard-macro IP library has no PDK-wide-consistent
+    device-flavor/nominal-supply convention to extract the way a standard-
+    cell library's `spice/`/`lib/` views do.
+
+    Returns a dict matching the documented JSON schema (see
+    ``docs/cli/pdk.md``)::
+
+        {
+            "schema_version": 1,
+            "pdk": <variant name>,
+            "root": <absolute install root>,
+            "macros": [
+                {
+                    "name": str,
+                    "views": {
+                        "gds": bool,
+                        "lef": bool,
+                        "lib": bool,
+                        "spice": bool,
+                        "cdl": bool,
+                        "verilog": bool,
+                    },
+                },
+                ...
+            ],
+        }
+
+    An empty ``macros`` list is a successful result (the variant ships no
+    `_fd_ip_`-named library), not an error.
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves.
+    """
+    info = find_pdk(variant=variant, root=root)
+    libs_ref = info["assets"]["libs_ref"]
+    macros = _scan_hard_macro_libraries(libs_ref) if libs_ref is not None else []
+
+    return {
+        "schema_version": 1,
+        "pdk": info["variant"],
+        "root": info["root"],
+        "macros": macros,
+    }
+
+
+def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
+    """Enumerate `_fd_ip_`-named entries under ``libs_ref``, name-sorted."""
+    if not os.path.isdir(libs_ref):
+        return []
+    macros: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(libs_ref)):
+        lib_dir = os.path.join(libs_ref, name)
+        if not os.path.isdir(lib_dir) or _HARD_MACRO_LIB_MARKER not in name:
+            continue
+        macros.append(
+            {
+                "name": name,
+                "views": {
+                    view: os.path.isdir(os.path.join(lib_dir, subdir))
+                    for view, subdir in _MACRO_VIEW_DIRS.items()
+                },
+            }
+        )
+    return macros
