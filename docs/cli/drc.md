@@ -132,12 +132,12 @@ primitive exists in `DrcRule`'s vocabulary today (only
 `width`/`space`/`notch`/`separation`/`enclosing`/`enclosed`/`overlap`) —
 tracked as a candidate follow-on rather than silently dropped.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 25 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 33 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
-(diffusion/active), `Contact`, `Metal1`-`Metal3`, `Metal5`, and `MetalTop`
-layers, plus a first increment of well/substrate-tap coverage (`Nwell`
-spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
-(`DRC_BJT` mark-layer separation), the MiM capacitor stack
+(diffusion/active), `Contact`, `Metal1`-`Metal3`, `Metal5`, `MetalTop`, and
+`Via1`-`Via4` layers, plus a first increment of well/substrate-tap coverage
+(`Nwell` spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device
+rule (`DRC_BJT` mark-layer separation), the MiM capacitor stack
 (`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap, plus the virtual
 bottom plate's `Via4` overlap, see "Sized/derived-layer rules" above), and
 the bond-pad chapter's one hard, coded rule (`Metal5`'s overlap of the
@@ -147,23 +147,27 @@ published GlobalFoundries 180nm MCU **Design Rule Manual**
 `docs/physical_verification/design_manual/`; Apache License 2.0),
 specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
 (`PL.*`), "7.12 Contact" (`CO.*`), "7.13 Metaln" (`Mn.*`, extended to
-`n = 2..5`), "7.15 MetalTop" (`MT.*`), "9.1 Bond Pad" (`PAD.*`), "10.4.2
-MIM Capacitor, Option B" (`MIMTM.*`), and "10.7 DRC_BJT Mark Layer"
-(`BJT.*`) sections. Unlike
+`n = 2..5`), "7.14 Vian" (`Vn.*`, `Via1`-`Via4` only, issue #546), "7.15
+MetalTop" (`MT.*`), "9.1 Bond Pad" (`PAD.*`), "10.4.2 MIM Capacitor, Option
+B" (`MIMTM.*`), and "10.7 DRC_BJT Mark Layer" (`BJT.*`) sections. Unlike
 sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), the
 companion KLayout DRC-deck repo
 ([`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`](https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv))
 does not yet open-source the core FEOL/BEOL width/space/enclosure checks as
 executable rule-deck code, so `src/klayout_tools/decks/gf180mcu.py` instead
 cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
-`"Mn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and
-numeric values directly.
+`"Mn.1"`, `"Vn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`)
+and numeric values directly.
 
-Eight of the twenty-five gf180mcu rules approximate an official DRM rule in
-some way — either a compound-layer context our single/two-layer check
+Sixteen of the thirty-three gf180mcu rules approximate an official DRM rule
+in some way — either a compound-layer context our single/two-layer check
 primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
 `nwell.enclosing.comp.1`), a bound our primitives don't support
-(`contact.width.1`'s fixed-size square, approximated as a minimum only), a
+(`contact.width.1`'s fixed-size square, approximated as a minimum only, and
+`via1.width.1`-`via4.width.1`'s identical fixed-size-square bound, issue
+#546), an array-density context our primitives have no notion of
+(`via1.space.1`-`via4.space.1`'s `Vn.2b` >=4x4-array spacing, approximated
+using the ordinary two-via `Vn.2a` value only, issue #546), a
 sized/derived-layer context our primitives can't isolate (`mim.space.1`,
 approximated as a general `Metal4`-to-`Metal4` spacing check that may
 over-flag ordinary `Metal4` routing unrelated to a MiM capacitor), or

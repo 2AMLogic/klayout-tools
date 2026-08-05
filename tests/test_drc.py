@@ -976,6 +976,182 @@ def test_run_drc_gf180mcu_bjt_separation_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- via1.width.1/via1.space.1 .. via4.width.1/via4.space.1 (#546) -------
+#
+# DRM 7.14 Vian, "Vn.1" (min/max size, 0.26um / 260 dbu) and "Vn.2a"
+# (ordinary space, 0.26um / 260 dbu) for each of Via1 (35/0), Via2 (38/0),
+# Via3 (40/0), Via4 (41/0). Before #546, none of these four layers had any
+# rule constraining their own size/spacing -- Via4 only ever appeared as the
+# `other_layer` of `mim.enclosing.via4.1` (the MiM cap's virtual-bottom-plate
+# overlap rule), and Via1-Via3 had no reference in this deck at all despite
+# being part of `EXTRACTION_DECK.vias`.
+#
+# Mirrors the metal2/metal3/metal5 (#188) violation+clean test pattern
+# above: an isolated bar narrower than the threshold trips `*.width.1`, two
+# bars closer than the threshold trip `*.space.1`, and a bar/pair at or above
+# the threshold is clean. `Vn.1`'s max-size half (a fixed 0.26 x 0.26um
+# square) is *not* exercised here -- see
+# `test_run_drc_gf180mcu_via4_reproducer_from_issue` below, which documents
+# that known, pre-existing gap (the same one `contact.width.1`/`CO.1`
+# already carries) rather than silently assuming it away.
+
+_VIA_LAYER_RULES = [
+    ("via1", (35, 0), "Via1"),
+    ("via2", (38, 0), "Via2"),
+    ("via3", (40, 0), "Via3"),
+    ("via4", (41, 0), "Via4"),
+]
+
+
+@pytest.mark.parametrize("rule_prefix,layer,layer_name", _VIA_LAYER_RULES)
+def test_run_drc_gf180mcu_via_width_violation(tmp_path, rule_prefix, layer, layer_name):
+    """A via bar narrower than the 260 dbu (0.26 um) `via{n}.width.1`
+    threshold trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer)
+    layout.set_info(via, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 260
+    path = tmp_path / f"{rule_prefix}_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    rule_id = f"{rule_prefix}.width.1"
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {rule_id: 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == rule_id
+    assert violation["check"] == "width"
+    assert violation["layer"] == layer_name
+
+
+@pytest.mark.parametrize("rule_prefix,layer,layer_name", _VIA_LAYER_RULES)
+def test_run_drc_gf180mcu_via_space_violation(tmp_path, rule_prefix, layer, layer_name):
+    """Two via bars closer than the 260 dbu `via{n}.space.1` threshold trip
+    exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer)
+    layout.set_info(via, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(via).insert(kdb.Box(2100, 0, 4000, 4000))  # 100 dbu gap < 260
+    path = tmp_path / f"{rule_prefix}_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    rule_id = f"{rule_prefix}.space.1"
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {rule_id: 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == rule_id
+    assert violation["check"] == "space"
+    assert violation["layer"] == layer_name
+
+
+@pytest.mark.parametrize("rule_prefix,layer,layer_name", _VIA_LAYER_RULES)
+def test_run_drc_gf180mcu_via_clean(tmp_path, rule_prefix, layer, layer_name):
+    """A via bar wide enough (and, in isolation, far enough from any other
+    shape) to satisfy `via{n}.width.1`/`via{n}.space.1` passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer)
+    layout.set_info(via, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 300, 2000))  # 300 >= 260
+    path = tmp_path / f"{rule_prefix}_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_via4_reproducer_from_issue(tmp_path):
+    """The issue's own reproducer (#546): two abutting 780 dbu (0.78 um)
+    Via4 cuts, each 3x the DRM's 260 dbu (0.26 um) `Vn.1` min/max size.
+
+    Because the two cuts are drawn touching (zero gap, per the issue's own
+    ``[1,1,1.78,1.78]`` / ``[1.78,1,2.56,1.78]`` geometry), `Region`'s default
+    merged semantics (used throughout this engine, see `_run_check` /
+    `run_drc`) merges them into one plain 1560 x 780 dbu rectangle before any
+    check runs -- so neither `via4.width.1` (each local width is still >=
+    260 dbu) nor `via4.space.1` (no facing edge pair remains once merged)
+    can flag it. Catching this specific case requires enforcing `Vn.1`'s
+    *max*-size half, which -- like `contact.width.1`/`CO.1` before it -- our
+    `width_check` primitive structurally cannot do (it is a minimum-width
+    lower bound only); see Via1-4's rule comments and the module docstring's
+    "Sixteen rules...approximate" note in `gf180mcu.py` for the same,
+    already-documented gap. This test pins that honestly: it is *not* a
+    regression to fix here, and a real max-size-check primitive is tracked
+    as a follow-up (see this issue's own PR description) rather than
+    silently assumed away.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("via_bad")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    via4 = layout.layer(41, 0)
+    layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
+    top.shapes(metal4).insert(kdb.Box(0, 0, 10000, 10000))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 10000, 10000))
+    top.shapes(via4).insert(kdb.Box(1000, 1000, 1780, 1780))
+    top.shapes(via4).insert(kdb.Box(1780, 1000, 2560, 1780))
+    path = tmp_path / "via_bad.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    # Documents current, known behaviour -- see the docstring above.
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_via_layers_now_covered_by_own_rules(tmp_path):
+    """The issue's own coverage acceptance criterion (#546): a stream
+    drawing genuine Via1-4 geometry shows all four via layers in
+    `coverage.layers_checked`, backed by each via's own `via{n}.width.1`/
+    `via{n}.space.1` rules -- not solely by `mim.enclosing.via4.1` (which
+    only ever referenced Via4 as a foreign-layer enclosure target, never
+    Via1-Via3, and never constrained any via's own size/spacing)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for layer, name in [
+        ((35, 0), "Via1"),
+        ((38, 0), "Via2"),
+        ((40, 0), "Via3"),
+        ((41, 0), "Via4"),
+    ]:
+        li = layout.layer(*layer)
+        layout.set_info(li, kdb.LayerInfo(layer[0], layer[1], name))
+        top.shapes(li).insert(kdb.Box(0, 0, 300, 300))  # 300 >= 260, isolated
+    path = tmp_path / "vias_covered.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    for layer_str in ("35/0", "38/0", "40/0", "41/0"):
+        assert layer_str in report["coverage"]["layers_checked"]
+        assert layer_str not in report["coverage"]["layers_in_stream_without_rules"]
+    for rule_id in (
+        "via1.width.1",
+        "via1.space.1",
+        "via2.width.1",
+        "via2.space.1",
+        "via3.width.1",
+        "via3.space.1",
+        "via4.width.1",
+        "via4.space.1",
+    ):
+        assert rule_id not in report["coverage"]["rules_skipped"]
+
+
 # --- metal2.width.1 / metal2.space.1 (#188) -----------------------------
 
 
@@ -1356,7 +1532,10 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_violation(tmp_path):
 
 def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     """A Via4 shape centred well inside the virtual bottom plate (>= 400 dbu
-    margin on every side) passes."""
+    margin on every side) passes. Sized 300x300 dbu (>= the 260 dbu
+    `via4.width.1` threshold added by #546, so this stays a clean fixture for
+    `mim.enclosing.via4.1` specifically rather than incidentally tripping the
+    via's own min-size rule too)."""
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
@@ -1368,7 +1547,7 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
     top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
     top.shapes(fusetop).insert(kdb.Box(2000, 2000, 18000, 18000))
-    top.shapes(via4).insert(kdb.Box(9900, 9900, 10100, 10100))  # centred
+    top.shapes(via4).insert(kdb.Box(9850, 9850, 10150, 10150))  # centred, 300x300
     path = tmp_path / "mim_enclosing_via4_clean.gds"
     layout.write(str(path))
 
@@ -2099,13 +2278,15 @@ def test_sky130_met2_via_extraction_levels_have_drc_width_and_space_coverage():
 
     Deliberately **not** generalised to every layer in
     `EXTRACTION_DECK.metals`/`.vias` (e.g. sky130's own `mcon.drawing`,
-    67/44, has a `mcon.space.1` rule but no `mcon.width.1` rule) or to every
-    registered deck (gf180mcu's `Metal4`/`Via1`-`Via3` have an analogous
-    pre-existing gap) -- both predate this issue and are out of scope for
+    67/44, has a `mcon.space.1` rule but no `mcon.width.1` rule, and
+    gf180mcu's own `Metal4` has a `space` rule -- `mim.space.1`, approximated
+    from the MiM capacitor's `MIMTM.1` -- but no dedicated `width` rule) or to
+    every registered deck -- both predate this issue and are out of scope for
     it; asserting the invariant that broadly would fail on those unrelated
     gaps rather than verify this issue's fix. See #513 for a candidate
     follow-on generalising this check across every layer and every
-    registered deck.
+    registered deck. (gf180mcu's own `Via1`-`Via4` closed this same class of
+    gap in #546: each now has both a `width` and a `space` rule.)
     """
     deck = get_deck("sky130")
     extraction = get_extraction_deck("sky130")
