@@ -220,7 +220,11 @@ def run_synthesize(request_path: str) -> dict[str, Any]:
         "status": "ok",
         "instance_count": module_stats["num_cells"],
         "area_um2": module_stats["area"],
-        "sequential_area_um2": module_stats["sequential_area"],
+        # ``sequential_area`` is only emitted by newer Yosys builds (0.67+);
+        # distro-packaged Yosys (e.g. Ubuntu 24.04's 0.33) omits it from
+        # `stat -json` entirely. Degrade to `None` rather than a raw
+        # `KeyError` -- see #560.
+        "sequential_area_um2": module_stats.get("sequential_area"),
         "instance_counts_by_type": dict(
             sorted((module_stats.get("num_cells_by_type") or {}).items())
         ),
