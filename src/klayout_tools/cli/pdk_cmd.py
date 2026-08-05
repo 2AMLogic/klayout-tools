@@ -14,6 +14,7 @@ only translate flags into library calls and render the result.
 """
 
 import argparse
+import math
 import shlex
 
 from ..pdk import (
@@ -121,6 +122,26 @@ def _print_env_text(report: dict) -> None:
     print(f"export PDK={shlex.quote(report['variant'])}")
 
 
+def _format_supplies(library: dict) -> str:
+    """Render a library's supply column: the nominal pick (voltage + Liberty
+    corner name), plus any *other* characterised supplies in parentheses --
+    e.g. ``1.8V @ tt_025C_1v80`` for a single-supply library, or
+    ``1.8V @ tt_025C_1v80 (+ 3.3V, 5.0V)`` for one separately characterised
+    at multiple voltages (see ``libraries[].supplies_v``, docs/cli/pdk.md)."""
+    voltage = library["nominal_supply_v"]
+    if voltage is None:
+        return "-"
+    text = f"{voltage:g}V @ {library['nominal_corner']}"
+    others = [
+        other
+        for other in library.get("supplies_v", [])
+        if not math.isclose(other, voltage, rel_tol=1e-9, abs_tol=1e-9)
+    ]
+    if others:
+        text += " (+ " + ", ".join(f"{other:g}V" for other in others) + ")"
+    return text
+
+
 def _print_cells_text(report: dict) -> None:
     libraries = report["libraries"]
     supply_given = "supply_v" in report
@@ -133,19 +154,14 @@ def _print_cells_text(report: dict) -> None:
         )
         return
 
-    headers = ("library", "devices", "lib corners")
+    headers = ("library", "devices", "supplies")
     if supply_given:
         headers = headers + ("compatible",)
 
     rows = []
     for library in libraries:
         devices = "/".join(library["device_flavors"]) or "-"
-        voltage = library["nominal_supply_v"]
-        if voltage is not None:
-            lib_corners = f"{voltage:g}V @ {library['nominal_corner']}"
-        else:
-            lib_corners = "-"
-        row = (library["name"], devices, lib_corners)
+        row = (library["name"], devices, _format_supplies(library))
         if supply_given:
             row = row + ("yes" if library["compatible"] else "no",)
         rows.append(row)

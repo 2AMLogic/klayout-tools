@@ -283,10 +283,17 @@ characterised at — instead of grepping the library's SPICE view by hand.
 $ klt pdk cells --pdk sky130A
 pdk: sky130A
 
-library           devices                                                              lib corners
-----------------  -------------------------------------------------------------------  ---------------------------
+library           devices                                                              supplies
+----------------  -------------------------------------------------------------------  -------------------------------------------------
 sky130_fd_sc_hd   nfet_01v8/pfet_01v8_hvt                                              1.8V @ tt_025C_1v80
-sky130_fd_sc_hvl  nfet_01v8/nfet_05v0_nvt/nfet_g5v0d10v5/pfet_01v8_hvt/pfet_g5v0d10v5  2.64V @ tt_025C_2v64_lv1v80
+sky130_fd_sc_hvl  nfet_01v8/nfet_05v0_nvt/nfet_g5v0d10v5/pfet_01v8_hvt/pfet_g5v0d10v5  2.64V @ tt_025C_2v64_lv1v80 (+ 2.97V, 3.3V)
+
+$ klt pdk cells --pdk gf180mcuD
+pdk: gf180mcuD
+
+library                  devices               supplies
+-----------------------  --------------------  -------------------------------------------
+gf180mcu_fd_sc_mcu9t5v0  nfet_06v0/pfet_06v0  1.8V @ tt_025C_1v80 (+ 3.3V, 5V)
 ```
 
 ```json
@@ -300,6 +307,7 @@ sky130_fd_sc_hvl  nfet_01v8/nfet_05v0_nvt/nfet_g5v0d10v5/pfet_01v8_hvt/pfet_g5v0
       "device_flavors": ["nfet_01v8", "pfet_01v8_hvt"],
       "nominal_supply_v": 1.8,
       "nominal_corner": "tt_025C_1v80",
+      "supplies_v": [1.8],
       "voltage_class": "core"
     },
     {
@@ -310,6 +318,7 @@ sky130_fd_sc_hvl  nfet_01v8/nfet_05v0_nvt/nfet_g5v0d10v5/pfet_01v8_hvt/pfet_g5v0
       ],
       "nominal_supply_v": 2.64,
       "nominal_corner": "tt_025C_2v64_lv1v80",
+      "supplies_v": [2.64, 2.97, 3.3],
       "voltage_class": "io"
     }
   ]
@@ -323,9 +332,10 @@ sky130_fd_sc_hvl  nfet_01v8/nfet_05v0_nvt/nfet_g5v0d10v5/pfet_01v8_hvt/pfet_g5v0
 | `root` | string | Absolute install root. |
 | `libraries` | array | One entry per standard-cell digital library found (see "Which libraries are reported" below). |
 | `libraries[].name` | string | The `libs.ref` entry's directory name. |
-| `libraries[].device_flavors` | array of string | Sorted, deduplicated nfet/pfet device model *suffixes* (the `<family>_fd_pr__` prefix is stripped — it repeats the PDK family and adds no information) its cells instantiate, read from `spice/<lib>.spice`'s instance lines. `[]` when the library ships no `spice/` view, or no instance line matches. |
-| `libraries[].nominal_supply_v` | float \| null | The supply the library's nominal `.lib` timing view is characterised at (its `nom_voltage` Liberty attribute). `null` when the library ships no `lib/` directory or no parseable `.lib` file. |
+| `libraries[].device_flavors` | array of string | Sorted, deduplicated nfet/pfet device model *suffixes* its cells instantiate, read from `spice/<lib>.spice`'s instance lines. An optional `<family>_fd_pr__` prefix is stripped when present (sky130's `sky130_fd_pr__nfet_01v8` shape) — the prefix repeats the PDK family and adds no information; gf180mcu's instance lines name the bare flavor with no prefix at all (`nfet_06v0`) and are matched directly. `[]` when the library ships no `spice/` view, or no instance line matches. |
+| `libraries[].nominal_supply_v` | float \| null | The **lowest** of `supplies_v` (below) — the library's nominal, baseline/minimum-operating-point `.lib` timing view (its `nom_voltage` Liberty attribute). Preserved for backward compatibility; it is *not* necessarily the library's only characterised supply — see `supplies_v`. `null` when the library ships no `lib/` directory or no parseable `.lib` file. |
 | `libraries[].nominal_corner` | string \| null | The nominal view's Liberty operating-condition name (its `default_operating_conditions`, e.g. `tt_025C_1v80`). `null` alongside `nominal_supply_v`. |
+| `libraries[].supplies_v` | array of float | **Every** distinct supply (volts) the library's nominal-corner `.lib` views are characterised at, sorted ascending — e.g. `[1.8]` for a single-supply library, or `[1.8, 3.3, 5.0]` for a library separately, fully characterised at multiple voltages (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`). `[]` alongside a `null` `nominal_supply_v`. See "Nominal supply selection" below. |
 | `libraries[].voltage_class` | `"core"` \| `"io"` \| null | `"core"` when `nominal_supply_v <= 2.5`, `"io"` above that. A documented heuristic threshold — not a field the PDK itself declares. `null` when `nominal_supply_v` is `null`. |
 | `libraries[].compatible` | boolean | **Present only when `--supply` is given.** See "Compatibility verdict (`--supply`)" below. |
 | `supply_v` | float | **Present only when `--supply` is given.** Echoes the caller-stated supply. |
@@ -359,13 +369,25 @@ is a **successful result**, not an error.
 ### Nominal supply selection
 
 A library may ship more than one `.lib` view at the typical-process,
-room-temperature (`tt`, 25°C) corner — a split/multi-rail library, e.g.
-`sky130_fd_sc_hvl`, ships `tt_025C` views at 2.64V, 2.97V, and 3.3V (with and
-without a low-voltage rail), because it supports more than one I/O-class
-supply configuration. `nominal_supply_v` reports the **lowest** of these: the
-library's baseline/minimum operating point, deterministically tie-broken by
-filename when voltages are equal. A library with only one `tt`/25°C view
-(e.g. `sky130_fd_sc_hd`) reports that view's `nom_voltage` directly.
+room-temperature (`tt`, 25°C) corner, for either of two reasons:
+
+- **A split/multi-rail library** — e.g. `sky130_fd_sc_hvl` ships `tt_025C`
+  views at 2.64V, 2.97V, and 3.3V (with and without a low-voltage rail),
+  because it supports more than one I/O-class supply configuration.
+- **A library separately, fully characterised at multiple voltages** — e.g.
+  gf180mcu's `gf180mcu_fd_sc_mcu9t5v0` is characterised at 1.8V, 3.3V, and
+  5.0V (issue #537).
+
+`supplies_v` reports **every** distinct voltage among these views, sorted
+ascending — this is the field to check (or match `--supply` against) when a
+library is characterised at more than one supply. `nominal_supply_v` /
+`nominal_corner` report the **lowest** of them (deterministically tie-broken
+by filename when voltages are equal) as a single-value "nominal" pick,
+preserved for backward compatibility: the library's baseline/minimum
+operating point, not necessarily its only characterised supply. A library
+with only one `tt`/25°C view (e.g. `sky130_fd_sc_hd`) reports a
+single-element `supplies_v` and that view's `nom_voltage` directly as
+`nominal_supply_v`.
 
 ### Compatibility verdict (`--supply`)
 
@@ -383,15 +405,21 @@ $ echo $?
 3
 ```
 
-`--supply <volts>` adds a `compatible` bool to every library entry
-(`nominal_supply_v` within 2%/0.01V of the stated supply — a tolerance so a
-caller-stated `1.8` matches a library characterised at `1.8000000000`) and an
-`any_compatible` bool at the top level. **Exit code `3`** when
-`any_compatible` is `false`, distinct from `1` (no PDK install resolved) and
-`2` (argparse usage error) — the same non-clean/non-error exit-code pattern
-`klt drc` uses for "ran fine, found violations" — so this can gate CI rather
-than being a manual check (`klt pdk cells --pdk sky130A --supply 1.8 || exit
-1` in a block repo's decision-record check).
+`--supply <volts>` adds a `compatible` bool to every library entry — `true`
+when **any** entry of that library's `supplies_v` is within 2%/0.01V of the
+stated supply (a tolerance so a caller-stated `1.8` matches a library
+characterised at `1.8000000000`) — and an `any_compatible` bool at the top
+level. Matching is against the library's **full** `supplies_v` set, not only
+its single `nominal_supply_v` pick: `klt pdk cells --pdk gf180mcuD --supply
+3.3` reports `gf180mcu_fd_sc_mcu9t5v0` compatible even though its
+`nominal_supply_v` is 1.8 — the library is separately characterised at 3.3V
+too (issue #537; previously this false-negatived because only the lowest
+supply was compared). **Exit code `3`** when `any_compatible` is `false`,
+distinct from `1` (no PDK install resolved) and `2` (argparse usage error) —
+the same non-clean/non-error exit-code pattern `klt drc` uses for "ran fine,
+found violations" — so this can gate CI rather than being a manual check
+(`klt pdk cells --pdk sky130A --supply 1.8 || exit 1` in a block repo's
+decision-record check).
 
 ### Design choice: live-parsed, not a curated table
 
