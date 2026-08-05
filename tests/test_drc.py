@@ -435,6 +435,102 @@ def test_run_drc_coverage_fully_covered_stream(tmp_path):
     assert report["coverage"]["rules_skipped"] == []
 
 
+def test_run_drc_coverage_deck_scope_matches_sky130_rule_scopes(tmp_path):
+    """`coverage.deck_scope` (#566) is every distinct non-empty `DrcRule.scope`
+    across the sky130 deck's rules, deduplicated and sorted -- a static
+    property of the deck, independent of what's actually drawn in the input
+    stream (mirrors `deck_layers`, not `layers_checked`)."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))  # poly.drawing (66/20) only
+
+    report = run_drc(str(path), "sky130")
+
+    expected_scope = sorted({rule.scope for rule in get_deck("sky130") if rule.scope})
+    assert expected_scope  # sanity: the sky130 deck does declare scopes
+    assert report["coverage"]["deck_scope"] == expected_scope
+
+
+def test_run_drc_coverage_deck_scope_matches_gf180mcu_rule_scopes(tmp_path):
+    """Same invariant as the sky130 case above, for the gf180mcu deck."""
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    path = tmp_path / "empty.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    expected_scope = sorted({rule.scope for rule in get_deck("gf180mcu") if rule.scope})
+    assert expected_scope
+    assert report["coverage"]["deck_scope"] == expected_scope
+
+
+def test_run_drc_coverage_deck_scope_static_regardless_of_input(tmp_path):
+    """`deck_scope` does not depend on what the input stream actually draws
+    (unlike `layers_checked`) -- an empty stream and a fully-covered stream
+    against the same deck report the identical `deck_scope`, and adding a
+    single seeded violation does not change it either."""
+    empty_path = tmp_path / "empty.gds"
+    empty_layout = kdb.Layout()
+    empty_layout.create_cell("TOP")
+    empty_layout.write(str(empty_path))
+
+    violation_path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(violation_path))
+
+    empty_report = run_drc(str(empty_path), "sky130")
+    violation_report = run_drc(str(violation_path), "sky130")
+
+    assert (
+        empty_report["coverage"]["deck_scope"]
+        == violation_report["coverage"]["deck_scope"]
+    )
+
+
+def test_drc_rule_scope_defaults_to_empty_string_and_is_excluded_from_deck_scope():
+    """Edge case (#566): a `DrcRule` with no assigned `scope` (the dataclass
+    default, `""`) does not contribute an entry to `coverage.deck_scope` --
+    verified directly against the dataclass default rather than a monkeypatched
+    deck, since every rule in both shipped decks already declares a scope."""
+    from klayout_tools.decks import DrcRule
+
+    unscoped = DrcRule(
+        id="unscoped.test.1",
+        description="a rule that declines to declare a DRM scope",
+        layer=(1, 0),
+        check="width",
+        threshold_dbu=100,
+    )
+    assert unscoped.scope == ""
+
+
+def test_run_drc_coverage_deck_scope_empty_for_deck_with_zero_declared_scopes(
+    tmp_path, monkeypatch
+):
+    """Edge case (#546/#566 test plan): a deck whose rules declare no `scope`
+    at all reports an empty `coverage.deck_scope`, not an error."""
+    import klayout_tools.drc as drc_module
+    from klayout_tools.decks import DrcRule
+
+    unscoped_deck = [
+        DrcRule(
+            id="poly.width.1",
+            description="minimum poly width",
+            layer=(66, 20),
+            check="width",
+            threshold_dbu=150,
+            # scope left at its default ("") -- deliberately no DRM claim.
+        ),
+    ]
+    monkeypatch.setattr(drc_module, "get_deck", lambda name: unscoped_deck)
+
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["coverage"]["deck_scope"] == []
+
+
 def test_json_contract(tmp_path, capsys):
     path = tmp_path / "violation.gds"
     _make_violation_layout().write(str(path))
@@ -524,6 +620,7 @@ def test_json_contract(tmp_path, capsys):
         "layers_in_stream_without_rules",
         "rules_skipped",
         "voltage_domain_warnings",
+        "deck_scope",
     }
     for key, field in coverage.items():
         assert isinstance(field, list)

@@ -113,6 +113,29 @@ class DrcRule:
 
     Rule ``id`` values are a stable, public contract once shipped — never
     renumber or repurpose one (see ``docs/cli/drc.md``).
+
+    ``scope`` (issue #566) is a machine-readable identifier for the *official*
+    DRM section or rule-id family this rule implements/approximates -- the
+    coverage-reporting analogue of the prose citation each rule's own comment
+    already carries (see each deck module's per-rule ``# DRM ...`` / official
+    rule-id comments). ``run_drc()`` aggregates every non-empty ``scope``
+    across a deck's rules into ``coverage.deck_scope`` (deduplicated, sorted),
+    so a caller can diff "what this curated deck claims to implement" against
+    the source DRM's own table of contents -- a coarser, section-level
+    question ``coverage.layers_in_stream_without_rules``'s per-layer view
+    cannot answer (see ``docs/cli/drc.md``'s "Coverage" section). For a deck
+    that cites numbered DRM sections in its rules' comments (e.g. gf180mcu's
+    "7.5 Comp", "7.13 Metaln"), ``scope`` is that section string, shared by
+    every rule transcribed from it. For a deck whose source has no such
+    section numbering, only a flat official rule-id namespace (e.g. sky130's
+    ``sky130.lydrc``/``sky130A_mr.drc``, whose ids are dotted like
+    ``"li.1"``/``"m1.2"``), ``scope`` is that namespace's own dotted prefix
+    (e.g. ``"li"``, ``"m1"``) shared by every rule in the same family --
+    the "rule-id prefix" alternative the issue's own proposal names. Defaults
+    to ``""`` (unscoped), which contributes nothing to ``coverage.deck_scope``
+    -- a deck rule that predates this field, or that intentionally declines to
+    claim a specific DRM scope, extracts exactly as it did before the field
+    existed.
     """
 
     id: str
@@ -122,6 +145,7 @@ class DrcRule:
     threshold_dbu: int
     other_layer: tuple[int, int] | None = None
     derived_layer: DerivedLayer | None = None
+    scope: str = ""
 
 
 class UnknownDeckError(Exception):

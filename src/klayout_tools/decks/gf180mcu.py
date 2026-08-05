@@ -328,6 +328,7 @@ DECK: list[DrcRule] = [
         # (poly2 AND comp, rule "PL.2") to a stricter 0.28um minimum; using
         # the more permissive PL.1 value across the whole poly2 layer since
         # isolating gate poly2 needs a boolean layer expression.
+        scope="7.7 Poly2",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="poly2.space.1",
@@ -339,6 +340,7 @@ DECK: list[DrcRule] = [
         # both sub-cases are 0.24 (3.3V column). Approximation: the DRM
         # splits this by context (poly2 over COMP vs. over field oxide);
         # unified into one check since both values coincide.
+        scope="7.7 Poly2",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="poly2.enclosing.contact.1",
@@ -348,6 +350,7 @@ DECK: list[DrcRule] = [
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
         # DRM 7.12 Contact, rule "CO.3": "Poly2 overlap of contact" -> 0.07um
+        scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="comp.width.1",
@@ -356,6 +359,7 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=220,  # 0.22 um
         # DRM 7.5 Comp, rule "DF.1a": "Min. COMP Width" -> 0.22 (3.3V column)
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="comp.space.1",
@@ -371,6 +375,7 @@ DECK: list[DrcRule] = [
         # layer, since isolating that context needs a boolean layer
         # expression (comp minus well/tap markers). Threshold value
         # unmodified.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="comp.enclosing.contact.1",
@@ -380,6 +385,7 @@ DECK: list[DrcRule] = [
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
         # DRM 7.12 Contact, rule "CO.4": "COMP overlap of contact" -> 0.07um
+        scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="contact.width.1",
@@ -392,6 +398,7 @@ DECK: list[DrcRule] = [
         # Approximation: our width_check enforces only a minimum-width
         # lower bound; the "max" (fixed-size) half of the rule is not
         # checked. Threshold value unmodified.
+        scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="contact.space.1",
@@ -400,6 +407,7 @@ DECK: list[DrcRule] = [
         check="space",
         threshold_dbu=250,  # 0.25 um
         # DRM 7.12 Contact, rule "CO.2a": "Space" -> 0.25um
+        scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal1.enclosing.contact.1",
@@ -432,6 +440,7 @@ DECK: list[DrcRule] = [
         # minimum-width lower bound; the "max" (fixed-size) half of the
         # rule is not checked -- same class of approximation as
         # contact.width.1's own CO.1 note above. Threshold value unmodified.
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="via1.space.1",
@@ -446,6 +455,7 @@ DECK: list[DrcRule] = [
         # -- same class of context-collapsing approximation
         # nwell.space.1/comp.space.1 already document. Threshold value
         # unmodified.
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal1.enclosing.via1.1",
@@ -487,6 +497,7 @@ DECK: list[DrcRule] = [
         # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
         # 0.26um. Approximation: see via1.width.1's note above (min-only
         # width_check; the fixed-size "max" half is not checked).
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="via2.space.1",
@@ -498,6 +509,7 @@ DECK: list[DrcRule] = [
         # Approximation: see via1.space.1's note above (no array-density
         # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
         # checked).
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal2.enclosing.via2.1",
@@ -531,6 +543,7 @@ DECK: list[DrcRule] = [
         # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
         # 0.26um. Approximation: see via1.width.1's note above (min-only
         # width_check; the fixed-size "max" half is not checked).
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="via3.space.1",
@@ -542,6 +555,7 @@ DECK: list[DrcRule] = [
         # Approximation: see via1.space.1's note above (no array-density
         # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
         # checked).
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal3.enclosing.via3.1",
@@ -577,6 +591,7 @@ DECK: list[DrcRule] = [
         # other_layer (MiM top-plate overlap, DRM "MIMTM.2"); this rule adds
         # coverage of Via4's own size, which that reference alone did not
         # provide (issue #546).
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="via4.space.1",
@@ -590,6 +605,7 @@ DECK: list[DrcRule] = [
         # checked). Via4 (41/0) was previously referenced only as
         # mim.enclosing.via4.1's other_layer; this rule adds coverage of
         # Via4's own spacing (issue #546).
+        scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal4.enclosing.via4.1",
@@ -627,6 +643,7 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=230,  # 0.23 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.23 (n = 1)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal1.space.1",
@@ -635,6 +652,7 @@ DECK: list[DrcRule] = [
         check="space",
         threshold_dbu=230,  # 0.23 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.23 (n = 1)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal2.width.1",
@@ -643,6 +661,7 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal2.space.1",
@@ -651,6 +670,7 @@ DECK: list[DrcRule] = [
         check="space",
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal3.width.1",
@@ -659,6 +679,7 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal3.space.1",
@@ -667,6 +688,7 @@ DECK: list[DrcRule] = [
         check="space",
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal5.width.1",
@@ -675,6 +697,7 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metal5.space.1",
@@ -683,6 +706,7 @@ DECK: list[DrcRule] = [
         check="space",
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
+        scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metaltop.width.1",
@@ -694,6 +718,7 @@ DECK: list[DrcRule] = [
         # value; the DRM's "0.36/0.44*" lists a second value for the 9K/11K
         # angstrom MetalTop thickness option, which -- like the 5V/6V variant
         # elsewhere in this deck -- is not modeled here).
+        scope="7.15 MetalTop",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="metaltop.space.1",
@@ -704,6 +729,7 @@ DECK: list[DrcRule] = [
         # DRM 7.15 MetalTop, rule "MT.2a": "Space" -> 0.38 (standard/
         # unstarred value; see metaltop.width.1's note on the thickness
         # option not modeled here).
+        scope="7.15 MetalTop",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="mim.space.1",
@@ -720,6 +746,7 @@ DECK: list[DrcRule] = [
         # `mim.space.1` note above (virtual-bottom-plate context our engine
         # can't isolate; over-flags ordinary Metal4 routing). Threshold value
         # unmodified.
+        scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="mim.enclosing.fusetop.1",
@@ -730,6 +757,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=600,  # 0.6 um
         # DRM 10.4.2 MIM Option B, rule "MIMTM.3": "Minimum MiM bottom plate
         # overlap of Top plate" -> 0.6um.
+        scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="mim.enclosing.via4.1",
@@ -755,6 +783,7 @@ DECK: list[DrcRule] = [
         # be actively wrong (it would flag ordinary Metal4/Via4/Metal5
         # routing throughout any layout, ordinary interconnect this deck's
         # `metals`/`vias` stack draws everywhere), not merely conservative.
+        scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="pad.enclosing.metal5.1",
@@ -769,6 +798,7 @@ DECK: list[DrcRule] = [
         # Scoped to the 5LM variant this deck already exclusively models
         # (Metal5/81,0 as top metal) -- 6LM's MetalTop/53,0 case is not
         # covered; this deck has no variant-selection mechanism today.
+        scope="9.1 Bond Pad",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="nwell.space.1",
@@ -783,6 +813,7 @@ DECK: list[DrcRule] = [
         # potential 1.4um); our engine has no connectivity/netlist
         # information, so this uses the less strict "NW.2a" value across the
         # whole Nwell drawn layer. Threshold value unmodified.
+        scope="7.4 Nwell",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="nwell.enclosing.comp.1",
@@ -798,6 +829,7 @@ DECK: list[DrcRule] = [
         # comp drawn layer, since isolating NCOMP requires the same boolean
         # layer expression our engine does not evaluate. Threshold value
         # unmodified.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
     ),
     DrcRule(
         id="bjt.separation.comp.1",
@@ -813,6 +845,7 @@ DECK: list[DrcRule] = [
         # checks against every comp shape, which may over-flag COMP that is
         # legitimately part of the same BJT structure. Threshold value
         # unmodified.
+        scope="10.7 DRC_BJT Mark Layer",  # DRM section transcribed from (#566)
         #
         # Follow-up (issue #223): `DRC_BJT` is now *also* consumed for
         # device-recognition purposes (not just this DRC mark/separation
