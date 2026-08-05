@@ -1104,7 +1104,8 @@ as nets.
       "capacitance_ff": 1.910204,
       "internal_node": "Y__par"
     }
-  ]
+  ],
+  "metals_without_coefficient": []
 }
 ```
 
@@ -1114,10 +1115,38 @@ as nets.
 | `total_resistance_ohm` | number          | Sum of the emitted series resistances (ohms).                                                     |
 | `total_capacitance_ff` | number          | Sum of the emitted ground capacitances (femtofarads).                                             |
 | `nets`                 | array\<object\> | One entry per net carrying parasitics, sorted by `net` for deterministic output. See below.       |
+| `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 
 Each `nets[]` entry: `net` (the schematic-equivalent net name), `resistance_ohm`,
 `capacitance_ff`, and `internal_node` (the injected internal parasitic node's
 name, `<net>__par`, or a collision-suffixed variant).
+
+### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
+
+The per-deck `PARASITICS.metals` table (see "The coefficients are curated
+per-PDK-family" above) is index-aligned with the extraction deck's own
+`metals` stack, but the two tuples are curated independently — a deck can
+declare more metal levels for connectivity than it has sourced RC
+coefficients for. `_compute_parasitics` walks `PARASITICS.metals`
+index-aligned against the extraction deck's `metals`, so any level past the
+end of the shorter tuple (or an explicit `None` entry) silently contributes
+zero resistance and capacitance to every net's reported parasitics — the
+level is invisible in the number, not merely approximate. This was gf180mcu's
+shape until issue #547: `PARASITICS.metals` had one entry (Metal1) against a
+5-level `EXTRACTION_DECK.metals` stack, so `--parasitics` on gf180mcu reported
+the R and C of Metal1 geometry only, with Metal2 through Metal5 contributing
+exactly zero and no signal anywhere in the response saying so.
+
+`metals_without_coefficient` surfaces this gap the same way `ignored_layers`
+surfaces geometry the connectivity graph never reads: one entry per gap,
+`{"metal_index": int, "layer": int, "datatype": int}` (`metal_index` is
+0-based, matching both tuples' shared indexing — index 0 is the deck's
+bottom-most metal level, e.g. gf180mcu's Metal1), sorted by `metal_index`.
+Empty when every declared metal level has a coefficient — true for both
+shipped decks today. A non-empty list is also mirrored as a prose entry in
+top-level `warnings[]`, e.g. `"'gf180mcu' deck's PARASITICS.metals has no R/C
+coefficient for Metal3, Metal4 -- ..."`, so a caller checking only
+`warnings[]` still sees it.
 
 ### Parasitic R/C instance names are sanitized, not literal net names
 

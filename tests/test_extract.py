@@ -4027,7 +4027,11 @@ def test_parasitics_summary_block_shape(tmp_path):
         "total_resistance_ohm",
         "total_capacitance_ff",
         "nets",
+        "metals_without_coefficient",
     }
+    # sky130's PARASITICS.metals is fully populated (issue #547's regression
+    # target was gf180mcu, not sky130) -- no gap for this deck.
+    assert para["metals_without_coefficient"] == []
     assert para["r_count"] == para["c_count"] == len(para["nets"])
     assert para["r_count"] >= 1
     assert para["total_capacitance_ff"] > 0.0
@@ -4158,6 +4162,110 @@ def test_parasitics_coefficients_sourced_from_pdk_tech():
     # double-count it (issue #226).
     assert sky130.PARASITICS.diffusion is None
     assert gf180mcu.PARASITICS.diffusion is None
+
+
+def test_gf180mcu_parasitics_metals_covers_full_stack():
+    """Regression guard for issue #547: gf180mcu.PARASITICS.metals used to
+    carry only one LayerRC (Metal1) against a 5-level EXTRACTION_DECK.metals
+    stack, so Metal2..Metal5 silently contributed zero R/C. Now curated to
+    5 entries, index-aligned with EXTRACTION_DECK.metals, sourced from
+    gf180mcu.tech's nominal (`variants ()`) corner."""
+    from klayout_tools.decks import gf180mcu
+
+    assert len(gf180mcu.PARASITICS.metals) == len(gf180mcu.EXTRACTION_DECK.metals) == 5
+    assert all(m is not None for m in gf180mcu.PARASITICS.metals)
+
+    # Metal2 (index 1): sheet from `resist (allm2)/metal2 90` (90 milliohm/sq
+    # unconditional); area/perim from `defaultareacap`/`defaultperimeter`
+    # allm2 metal2.
+    m2 = gf180mcu.PARASITICS.metals[1]
+    assert m2.sheet_res_ohm_sq == pytest.approx(0.09)
+    assert m2.cap_area_ff_um2 == pytest.approx(0.015016)
+    assert m2.cap_perim_ff_um == pytest.approx(0.033298)
+
+    # Metal5 (index 4, top metal of this 5-level stack): sheet from
+    # `resist (allm5)/metal5 40`, the THICKMET1P1 (1.1 um / 11 kA) row --
+    # matching the "11 kA top metal of a gf180mcuD build" this issue was
+    # filed against.
+    m5 = gf180mcu.PARASITICS.metals[4]
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
+    assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
+    assert m5.cap_perim_ff_um == pytest.approx(0.030386)
+
+
+def test_describe_parasitics_metal_gaps_reports_truncation_and_none_entries():
+    """Unit test for `_describe_parasitics_metal_gaps` (issue #547): a
+    ParasiticsDeck.metals tuple that is shorter than the ExtractionDeck's
+    metals stack, or carries explicit `None` entries, is reported gap-by-gap
+    rather than silently producing zero R/C."""
+    from klayout_tools.decks import LayerRC, ParasiticsDeck, gf180mcu
+    from klayout_tools.extract import _describe_parasitics_metal_gaps
+
+    coeff = LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.01, cap_perim_ff_um=0.03)
+
+    # No gap: every declared metal level has a coefficient.
+    full = ParasiticsDeck(metals=(coeff, coeff, coeff, coeff, coeff))
+    assert _describe_parasitics_metal_gaps(gf180mcu.EXTRACTION_DECK, full) == []
+
+    # Truncated tuple (the original #547 bug shape): only Metal1 present.
+    truncated = ParasiticsDeck(metals=(coeff,))
+    gaps = _describe_parasitics_metal_gaps(gf180mcu.EXTRACTION_DECK, truncated)
+    assert [g["metal_index"] for g in gaps] == [1, 2, 3, 4]
+    for gap, layer in zip(gaps, gf180mcu.EXTRACTION_DECK.metals[1:], strict=True):
+        assert (gap["layer"], gap["datatype"]) == layer
+
+    # Explicit None entries interleaved with real coefficients.
+    sparse = ParasiticsDeck(metals=(coeff, None, coeff, None, coeff))
+    gaps = _describe_parasitics_metal_gaps(gf180mcu.EXTRACTION_DECK, sparse)
+    assert [g["metal_index"] for g in gaps] == [1, 3]
+
+
+def test_run_extract_warns_on_parasitics_metal_gap(monkeypatch, tmp_path):
+    """Integration guard for issue #547's "make the truncation loud" ask: a
+    deck whose PARASITICS.metals is shorter than its declared metal stack
+    surfaces the gap in `parasitics.metals_without_coefficient` and in
+    `warnings[]`, instead of silently reporting understated R/C."""
+    import klayout_tools.extract as extract_mod
+    from klayout_tools.decks import ParasiticsDeck, gf180mcu
+
+    layout_path = CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__clkinv_1.gds"
+
+    # The current (fixed) deck reports no gap and no matching warning.
+    report_fixed = extract_mod.run_extract(
+        str(layout_path),
+        "gf180mcu",
+        output=str(tmp_path / "cell_fixed.spice"),
+        parasitics=True,
+    )
+    assert report_fixed["parasitics"]["metals_without_coefficient"] == []
+    assert not any("no R/C" in w for w in report_fixed["warnings"])
+
+    truncated = ParasiticsDeck(
+        poly=gf180mcu.PARASITICS.poly,
+        metals=gf180mcu.PARASITICS.metals[:1],  # only Metal1 -- the pre-#547 shape
+    )
+    monkeypatch.setattr(extract_mod, "get_parasitics_deck", lambda name: truncated)
+
+    report = extract_mod.run_extract(
+        str(layout_path),
+        "gf180mcu",
+        output=str(tmp_path / "cell.spice"),
+        parasitics=True,
+    )
+    gaps = report["parasitics"]["metals_without_coefficient"]
+    assert [g["metal_index"] for g in gaps] == [1, 2, 3, 4]
+    assert any(g["layer"] > 0 for g in gaps)
+    assert any("Metal2" in w and "Metal5" in w for w in report["warnings"])
+    # Never regresses below the truncated deck's total (a truncated table can
+    # only omit R/C, never add it) -- the practical understatement direction
+    # this issue reported. (This corpus cell happens to route entirely on
+    # Metal1, so the two totals are equal here rather than strictly greater;
+    # `test_gf180mcu_parasitics_metals_covers_full_stack` is what pins the
+    # actual Metal2..Metal5 coefficient values.)
+    assert (
+        report_fixed["parasitics"]["total_capacitance_ff"]
+        >= report["parasitics"]["total_capacitance_ff"]
+    )
 
 
 def _make_poly_gate_net_layout(poly_y0, poly_y1, top_name="TOP"):

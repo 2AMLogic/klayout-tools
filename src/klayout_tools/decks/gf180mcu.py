@@ -1193,5 +1193,43 @@ PARASITICS = ParasiticsDeck(
     metals=(
         # Metal1. perim from `defaultperimeter` Metal1 (39.431 aF/um).
         LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.039431),
+        # Metal2 (issue #547). sheet from `resist (allm2)/metal2 90`
+        # (unconditional -- M2 is never the top/thick metal in any gf180mcu
+        # stack option); area/perim from `defaultareacap`/`defaultperimeter`
+        # allm2 metal2 (15.016 aF/um^2, 33.298 aF/um).
+        LayerRC(
+            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.015016, cap_perim_ff_um=0.033298
+        ),
+        # Metal3 (issue #547). sheet from `resist (allm3)/metal3 90`, the
+        # `#ifdef METALS4 || METALS5 || METALS6` row -- this deck's 5-metal
+        # stack (`EXTRACTION_DECK.metals` has 5 entries) means M3 is not the
+        # top metal, so it takes the fixed 90 milliohm/sq row rather than the
+        # THICKMET-dependent one reserved for a 3-metal-only stack. area/perim
+        # from `defaultareacap`/`defaultperimeter` allm3 metal3 (10.094
+        # aF/um^2, 30.021 aF/um) -- unconditional; thickness options only vary
+        # M3's sheet resistance, never its cap coefficients.
+        LayerRC(
+            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.010094, cap_perim_ff_um=0.030021
+        ),
+        # Metal4 (issue #547). sheet from `resist (allm4)/metal4 90`, the
+        # `#ifdef METALS5 || METALS6` row (same reasoning as Metal3 -- not the
+        # top metal in a 5-level stack). area/perim from
+        # `defaultareacap`/`defaultperimeter` allm4 metal4 (7.602 aF/um^2,
+        # 28.153 aF/um).
+        LayerRC(
+            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.007602, cap_perim_ff_um=0.028153
+        ),
+        # Metal5 (issue #547), the top metal of this 5-level stack. sheet from
+        # `resist (allm5)/metal5 40`, the `#ifdef METALS5` / `THICKMET0P9 ||
+        # THICKMET1P1` row: the 1.1 um (11 kA) thick-top-metal option -- the
+        # exact "11 kA top metal of a gf180mcuD build" this issue was filed
+        # against (the other two THICKMET rows -- 10 for THICKMET3P0's 3.0 um,
+        # 60 for the non-thick default -- are noted here for context but not
+        # used). area/perim from `defaultareacap`/`defaultperimeter` allm5
+        # metal5 (5.798 aF/um^2, 30.386 aF/um) -- unconditional across every
+        # THICKMET option.
+        LayerRC(
+            sheet_res_ohm_sq=0.04, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
+        ),
     ),
 )
