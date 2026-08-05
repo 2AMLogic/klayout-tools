@@ -204,6 +204,90 @@ def test_absent_layer_set_is_empty_ring(tmp_path):
     assert violation["polygon"] is None
 
 
+# --- --ignore-enclosed: enclosed same-layer geometry (issue #550) -----------
+
+# A same-layer device drawn inside the ring's hole (well within _INNER, which
+# spans 4000..16000 in both x and y).
+_ENCLOSED_DEVICE = kdb.Box(6000, 6000, 14000, 14000)
+
+
+def test_enclosed_same_layer_device_is_fragmented_by_default(tmp_path):
+    """The reported bug (issue #550): a ring around a device on the same
+    layer merges to two disjoint polygons -- the annulus plus the device --
+    which trips the strict assertion even though the ring itself is an
+    unbroken, continuous annulus. Without --ignore-enclosed this is still
+    "broken" (backward compatible default)."""
+    path = tmp_path / "enclosed.gds"
+    ring = _ring_region()
+    _write(path, {_COMP: ring + kdb.Region(_ENCLOSED_DEVICE)})
+
+    report = run_ring_check(str(path), [_COMP])
+
+    assert report["status"] == "broken"
+    assert report["violation_count"] == 2
+    assert {v["kind"] for v in report["violations"]} == {"fragmented"}
+
+
+def test_ignore_enclosed_reports_continuous_for_enclosed_device(tmp_path):
+    """The fix: with --ignore-enclosed, the same fixture reports "continuous"
+    -- the annulus alone is asserted, and the device inside its hole is
+    excluded from the pass/fail gate."""
+    path = tmp_path / "enclosed.gds"
+    ring = _ring_region()
+    _write(path, {_COMP: ring + kdb.Region(_ENCLOSED_DEVICE)})
+
+    report = run_ring_check(str(path), [_COMP], ignore_enclosed=True)
+
+    assert report["status"] == "continuous"
+    assert report["violation_count"] == 0
+    assert report["violations"] == []
+
+
+def test_ignore_enclosed_still_catches_a_genuine_break(tmp_path):
+    """--ignore-enclosed excludes enclosed *content*, not real breaks in the
+    ring's own perimeter: a ring with an actual gap, plus an unrelated
+    same-layer device in its hole, still reports "broken"."""
+    path = tmp_path / "broken_enclosed.gds"
+    ring = _ring_region(gap=_GAP)
+    _write(path, {_COMP: ring + kdb.Region(_ENCLOSED_DEVICE)})
+
+    report = run_ring_check(str(path), [_COMP], ignore_enclosed=True)
+
+    assert report["status"] == "broken"
+    assert report["violation_count"] > 0
+
+
+def test_ignore_enclosed_is_a_noop_when_nothing_is_enclosed(tmp_path):
+    """No regression on the already-passing case: a plain closed ring with no
+    enclosed content behaves identically with and without the flag."""
+    path = tmp_path / "closed.gds"
+    _write_closed_ring(path)
+
+    without_flag = run_ring_check(str(path), [_COMP, _METAL1])
+    with_flag = run_ring_check(str(path), [_COMP, _METAL1], ignore_enclosed=True)
+
+    assert without_flag == with_flag
+    assert with_flag["status"] == "continuous"
+
+
+def test_cli_ignore_enclosed_flag_reports_continuous(tmp_path, capsys):
+    path = tmp_path / "enclosed.gds"
+    ring = _ring_region()
+    _write(path, {_COMP: ring + kdb.Region(_ENCLOSED_DEVICE)})
+
+    # Without the flag: broken (the bug).
+    exit_code = main(["ring-check", str(path), "--layers", "[[22,0]]"])
+    assert exit_code == 3
+    assert "status: broken" in capsys.readouterr().out
+
+    # With the flag: continuous (the fix).
+    exit_code = main(
+        ["ring-check", str(path), "--layers", "[[22,0]]", "--ignore-enclosed"]
+    )
+    assert exit_code == 0
+    assert "status: continuous" in capsys.readouterr().out
+
+
 # --- Region clipping and multiple top cells ----------------------------------
 
 

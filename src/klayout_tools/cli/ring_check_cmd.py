@@ -30,7 +30,13 @@ def run(args: argparse.Namespace) -> int:
     try:
         layers = _load_layers(args.layers)
         region_um = _load_region(args.region)
-        report = run_ring_check(args.file, layers, region_um=region_um, top=args.top)
+        report = run_ring_check(
+            args.file,
+            layers,
+            region_um=region_um,
+            top=args.top,
+            ignore_enclosed=args.ignore_enclosed,
+        )
     except RingCheckError as exc:
         return emit_error("ring-check", str(exc), args.format)
 
