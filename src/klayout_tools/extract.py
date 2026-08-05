@@ -740,6 +740,7 @@ def extract_netlist_from_layout(
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
     declared_pins: frozenset[str] | None = None,
+    apply_resistor_fixed_offset: bool = True,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -756,6 +757,14 @@ def extract_netlist_from_layout(
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
     voltage_domain_warnings)``.
+
+    ``apply_resistor_fixed_offset`` (issue #559): forwarded to
+    ``_extract_netlist`` -- ``True`` (the default) applies each opted-in
+    resistor device class's ``fixed_offset_ohm`` correction here, at
+    extraction time (unchanged behavior). ``klt lvs``'s
+    ``options.combine_devices`` path passes ``False`` and applies the
+    correction itself, once, after combining -- see
+    :func:`_extract_netlist` and :func:`apply_resistor_fixed_offset_corrections`.
 
     ``voltage_domain_warnings`` (issue #552) flags extracted MOS device
     geometry that overlaps a voltage-domain marker layer this deck does not
@@ -836,6 +845,7 @@ def extract_netlist_from_layout(
         parasitics_deck,
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
+        apply_resistor_fixed_offset=apply_resistor_fixed_offset,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -1662,6 +1672,7 @@ def _extract_netlist(
     parasitics_deck: ParasiticsDeck | None = None,
     top_cell_pins_only: bool = False,
     declared_pins: frozenset[str] | None = None,
+    apply_resistor_fixed_offset: bool = True,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -1677,6 +1688,27 @@ def _extract_netlist(
     single flattened ``Region``/``Texts`` collection over ``top_cell`` (via
     ``begin_shapes_rec``), the same whole-layout flattening idiom
     ``drc.py`` uses -- see ``docs/cli/extract.md``'s limitation note.
+
+    ``apply_resistor_fixed_offset`` (issue #559): when ``True`` (the
+    default -- unchanged behavior), :func:`_apply_device_parameter_corrections`
+    adds each opted-in resistor device class's
+    :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` to every
+    extracted primitive here, before ``klt lvs``'s ``options.combine_devices``
+    (if requested) folds series-connected primitives into one logical
+    device -- KLayout's native ``Netlist.combine_devices()`` then sums each
+    primitive's *already-corrected* ``R``, over-counting the fixed offset
+    once per primitive instead of once per logical device. Callers that
+    combine (``lvs.py``) pass ``False`` here and instead call
+    :func:`apply_resistor_fixed_offset_corrections` themselves *after*
+    combining, so the correction lands exactly once per surviving device
+    object. The capacitor analogue
+    (:attr:`~klayout_tools.decks.CapacitorDevice.perim_cap_f_um`) is
+    unaffected by this flag -- it is proportional to each device's own
+    perimeter, a quantity that itself sums linearly under
+    ``combine_devices()``'s parallel-combine parameter summing, so applying
+    it once per primitive is already equivalent to applying it once on the
+    combined totals; see :func:`_apply_device_parameter_corrections` for the
+    algebra.
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
     dummy_devices_dropped, unmodelled_poly)``.
@@ -2401,7 +2433,15 @@ def _extract_netlist(
     # (`lvs.py`'s inline-extraction path) -- so every consumer sees the same
     # corrected value the JSON `devices[].params` report shows. See
     # `_apply_device_parameter_corrections` for the full rationale.
-    _apply_device_parameter_corrections(netlist, deck)
+    #
+    # The resistor `fixed_offset_ohm` term is gated by
+    # `apply_resistor_fixed_offset` (issue #559): `lvs.py`'s
+    # `options.combine_devices` path passes `False` here and applies it
+    # itself, once, *after* combining -- see this function's docstring and
+    # `apply_resistor_fixed_offset_corrections`.
+    _apply_device_parameter_corrections(
+        netlist, deck, apply_resistor_fixed_offset=apply_resistor_fixed_offset
+    )
 
     # Parasitics geometry must be read *before* `l2n` (which owns the shape
     # database `polygons_of_net` reads) is garbage-collected below, so compute
@@ -2451,8 +2491,62 @@ def _parameter_id(device_class: kdb.DeviceClass, name: str) -> int | None:
     return None
 
 
-def _apply_device_parameter_corrections(
+def apply_resistor_fixed_offset_corrections(
     netlist: kdb.Netlist, deck: ExtractionDeck
+) -> None:
+    """Add each opted-in resistor device class's
+    :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` to ``R`` --
+    once per ``kdb.Device`` object currently in ``netlist`` (issue #518,
+    #559).
+
+    Public (no leading underscore): shared between
+    :func:`_apply_device_parameter_corrections`'s default apply-at-
+    extraction-time call (``_extract_netlist``, when
+    ``apply_resistor_fixed_offset=True``) and ``klt lvs``'s
+    ``options.combine_devices`` path (``lvs.py``), which instead passes
+    ``apply_resistor_fixed_offset=False`` to ``_extract_netlist`` and calls
+    this function itself *after* ``Netlist.combine_devices()`` has folded
+    series-connected primitives into one device object. Because this
+    function walks whatever devices exist in ``netlist`` *at the time it
+    runs*, calling it post-combine adds the fixed offset exactly once per
+    surviving (possibly-folded) logical device, regardless of how many
+    drawn primitives fed into it -- fixing the over-count KLayout's native
+    series fold otherwise produces by summing each primitive's
+    already-corrected ``R`` (issue #559).
+
+    A deck that has not opted in (the default ``fixed_offset_ohm=0.0``) gets
+    no write at all. Keyed by device-class *name* (``ResistorDevice.name``
+    is the same string KLayout reports back as ``DeviceClass.name``), so
+    this is a direct lookup, not a positional match. Parasitic R devices
+    (injected by ``run_extract`` *after* extraction returns) carry their own
+    generated class names and are never reached by this function -- no
+    double-application.
+    """
+    fixed_offset_lookup = {
+        resistor.name: resistor.fixed_offset_ohm
+        for resistor in deck.resistors
+        if resistor.fixed_offset_ohm
+    }
+    if not fixed_offset_lookup:
+        return
+
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            fixed_offset_ohm = fixed_offset_lookup.get(device_class.name)
+            if fixed_offset_ohm:
+                r_id = _parameter_id(device_class, "R")
+                if r_id is not None:
+                    device.set_parameter(
+                        r_id, device.parameter(r_id) + fixed_offset_ohm
+                    )
+
+
+def _apply_device_parameter_corrections(
+    netlist: kdb.Netlist,
+    deck: ExtractionDeck,
+    *,
+    apply_resistor_fixed_offset: bool = True,
 ) -> None:
     """Apply the deck's post-extraction device-parameter corrections to the
     live ``kdb.Device`` objects in ``netlist`` (issue #521).
@@ -2468,7 +2562,11 @@ def _apply_device_parameter_corrections(
       ``area_cap_f_um2 * A + perim_cap_f_um * P``.
     * :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` (issue
       #518) adds the fixed head/end-effect term, so ``R`` becomes
-      ``L / W * sheet_rho_ohm_sq + fixed_offset_ohm``.
+      ``L / W * sheet_rho_ohm_sq + fixed_offset_ohm`` -- applied here via
+      :func:`apply_resistor_fixed_offset_corrections`, gated by
+      ``apply_resistor_fixed_offset`` (issue #559, see that function's
+      docstring for why the capacitor correction below needs no equivalent
+      gate).
 
     Both corrections originally lived in :func:`_describe_devices`, which
     builds only the JSON response's ``devices[]`` array -- so the correction
@@ -2499,43 +2597,50 @@ def _apply_device_parameter_corrections(
     match. Parasitic R/C devices (injected by ``run_extract`` *after*
     extraction returns) carry their own generated class names and are never
     reached by this function -- no double-application.
+
+    Why ``perim_cap_f_um`` needs no ``apply_resistor_fixed_offset``-style
+    gate (issue #559 asked this question of the capacitor analogue):
+    KLayout's ``combine_devices()`` combines capacitors in *parallel*
+    (matching two-terminal nets) by directly summing each device's raw
+    parameters -- ``C``, ``A``, *and* ``P`` are each simple per-device sums
+    (``dbNetlistDeviceClasses.cc``'s ``CapacitorDeviceCombiner::parallel``).
+    Because ``perim_cap_f_um`` scales *with* the per-device geometric
+    quantity ``P`` (unlike the resistor's constant ``fixed_offset_ohm``),
+    applying it once per primitive and then summing is algebraically
+    identical to summing the raw primitives first and applying it once to
+    the combined totals: ``sum_i(area_i + perim_cap_f_um * P_i) ==
+    sum_i(area_i) + perim_cap_f_um * sum_i(P_i)``. So the parallel-combine
+    case this repo's decks actually produce (matched capacitor arrays) is
+    unaffected by extraction-time application, and needs no deferral. (A
+    *series*-combined capacitor pair -- rare, and not produced by any deck
+    in this repo -- combines ``C`` non-linearly (harmonic mean) while still
+    summing ``A``/``P`` linearly; that mismatch is a pre-existing
+    approximation in KLayout's own multi-term series-capacitor combine,
+    unrelated to and unaffected by whether this correction runs before or
+    after combining, so it is out of scope here.)
     """
     perim_cap_lookup = {
         capacitor.name: capacitor.perim_cap_f_um
         for capacitor in deck.capacitors
         if capacitor.perim_cap_f_um
     }
-    fixed_offset_lookup = {
-        resistor.name: resistor.fixed_offset_ohm
-        for resistor in deck.resistors
-        if resistor.fixed_offset_ohm
-    }
-    if not perim_cap_lookup and not fixed_offset_lookup:
-        return
+    if perim_cap_lookup:
+        for circuit in netlist.each_circuit():
+            for device in circuit.each_device():
+                device_class = device.device_class()
+                perim_cap_f_um = perim_cap_lookup.get(device_class.name)
+                if perim_cap_f_um:
+                    c_id = _parameter_id(device_class, "C")
+                    p_id = _parameter_id(device_class, "P")
+                    if c_id is not None and p_id is not None:
+                        device.set_parameter(
+                            c_id,
+                            device.parameter(c_id)
+                            + perim_cap_f_um * device.parameter(p_id),
+                        )
 
-    for circuit in netlist.each_circuit():
-        for device in circuit.each_device():
-            device_class = device.device_class()
-            class_name = device_class.name
-
-            perim_cap_f_um = perim_cap_lookup.get(class_name)
-            if perim_cap_f_um:
-                c_id = _parameter_id(device_class, "C")
-                p_id = _parameter_id(device_class, "P")
-                if c_id is not None and p_id is not None:
-                    device.set_parameter(
-                        c_id,
-                        device.parameter(c_id)
-                        + perim_cap_f_um * device.parameter(p_id),
-                    )
-
-            fixed_offset_ohm = fixed_offset_lookup.get(class_name)
-            if fixed_offset_ohm:
-                r_id = _parameter_id(device_class, "R")
-                if r_id is not None:
-                    device.set_parameter(
-                        r_id, device.parameter(r_id) + fixed_offset_ohm
-                    )
+    if apply_resistor_fixed_offset:
+        apply_resistor_fixed_offset_corrections(netlist, deck)
 
 
 def _n_squares(area_um2: float, perimeter_um: float) -> float:
