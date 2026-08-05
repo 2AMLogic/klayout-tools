@@ -6,9 +6,10 @@ Epic #152 landed the request/response contract and a thin
 [KLayout PCell](https://www.klayout.de/doc/programming/pcell.html) harness,
 proven end-to-end with one reference generator (`resistor_strip`). Phase 2
 adds the four analog primitive generators the accepted spike scopes:
-`mos_array`, `res_array`, `guard_ring`, and `diff_pair`. Phase 4 (Epic #152,
-this document's current state) adds `bjt_array`, a matched vertical-bipolar
-(PNP/BJT) array. See
+`mos_array`, `res_array`, `guard_ring`, and `diff_pair`. Phase 4 (Epic #152)
+adds `bjt_array`, a matched vertical-bipolar (PNP/BJT) array. Issue #568
+(this document's current state) adds `bond_pad`, the first generator
+covering the chip *boundary* rather than a core analog device. See
 [`docs/design/layout-generator-spike.md`](../design/layout-generator-spike.md)
 section 2 for the contract this command implements, and section 4 for the
 four phase-2 families' scope; see
@@ -402,6 +403,69 @@ fidelity limits that choice carries.
 | `ring_gap_um`        | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
 | `ring_gap_offset_um` | double | `0.0`              | Slide the opening off its side's midpoint (µm) — e.g. onto the column of emitter ports a route needs to reach. |
 
+### `bond_pad` (chip-boundary bond pad, issue #568)
+
+Every generator above draws a *core analog* device, on the shared `metal`
+role (li1/Metal1) every one of them uses. `bond_pad` is the first generator
+covering the chip **boundary** instead: a passivation opening (the `pad`
+role) enclosed by the resolved PDK family's own **topmost** routing metal
+(the new `top_metal` role — sky130's `met5.drawing` `(72, 20)`, gf180mcu's
+`Metal5` `(81, 0)`), overlapping the opening by `enclosure_um` on every side.
+That overlap is gf180mcu's *only* hard, DRC-coded bond-pad rule — DRM 9.1
+"PAD.4" ("Top layer metal overlap of pad opening" → 2.0µm, transcribed at
+`decks/gf180mcu.py`'s `pad.enclosing.metal5.1`) — so `enclosure_um`'s default
+and hard floor (`PAD_TOP_METAL_ENCLOSURE_MIN_UM`) is `2.0`; a request below it
+is rejected outright (`GenError`), the same treatment `guard_ring`'s
+`ring_width_um` gets against its own structural floor. sky130's curated deck
+has no equivalent hard rule (only an unrelated 1.27µm pad-to-pad *spacing*
+check) — the same constant is applied to both families as a conservative
+floor, binding only on gf180mcu today.
+
+`bond_type` (`"wedge"` default, `"ball_cup"`, or `"bump"`) selects which of
+gf180mcu's DRM 9.2 "PAD.1" **guideline** (not DRC-hard) minimum pad-opening
+sizes `opening_um` is checked against — 40µm for `wedge`/`ball_cup`, 4µm for
+`bump`. Unlike `enclosure_um`, this is only a guideline: a smaller
+`opening_um` is flagged via `drc_hints.notes`, never rejected. sky130's
+curated deck has no equivalent guideline table; the same values apply there
+too.
+
+**Known limitation — gf180mcu 6LM is out of scope.** gf180mcu ships both a
+5-metal (5LM) and 6-metal (6LM) stack; 6LM's true top metal is `MetalTop`
+`(53, 0)`, not `Metal5`. The resolved `pdk.variant` string (`gf180mcuA`-`D`)
+names voltage/process options, never the metal-stack height, so this
+generator's gf180mcu output **always** assumes 5LM and resolves `top_metal`
+to `Metal5` — matching `pad.enclosing.metal5.1`'s own scoping note. A caller
+on a real 6LM gf180mcu variant gets 5LM-shaped output; a `drc_hints.notes`
+entry says so on every gf180mcu request. Widening this to a real
+variant-selection mechanism is a documented follow-up, not silently punted.
+
+**Known limitation — `down_to`/`via_style` are forward-looking.** A bond pad
+in a real layout straps its top-metal pad down through a via/metal stack to
+wherever the core circuit routes — but neither curated deck models a via
+role between `top_metal` and any lower level this generator's sibling
+generators already expose (`metal`/`metal2`/`metal3` for sky130,
+`metal`/`metal2` for gf180mcu; see `_PDK_ROLE_LAYERS`'s `"top_metal"` entry).
+`down_to` therefore supports only its default, `"top_metal"` (no via drawn);
+any other value is rejected (`GenError`) rather than silently drawing a
+DRC-illegal via between layers that were never meant to touch directly.
+`via_style` (`"ring"` default — a peripheral ring of vias, or `"array"` — a
+filled via array) is validated as a closed set but currently has no
+geometric effect until `down_to` gains a supported lower level; a
+`drc_hints.notes` entry says so on every request.
+
+The pad reports exactly one port, `PAD`, on the `top_metal` role, centred at
+the cell origin with `width_um` equal to `opening_um`. `device_count` is
+always `1` (the pad itself). **`drc_hints.matched_group_id` is always
+`null`** — a bond pad has no matching concept, the same as `guard_ring`.
+
+| `params` field  | Type   | Default        | Description |
+| --------------- | ------ | -------------- | ----------- |
+| `opening_um`    | double | `40.0`         | Pad opening (passivation window) side length (µm). Must be `> 0`; below the `bond_type` guideline minimum is flagged via `drc_hints.notes`, not rejected. |
+| `bond_type`     | string | `"wedge"`      | Bond process: `"wedge"` (wire bond without CUP), `"ball_cup"` (wire bond with CUP), or `"bump"` (gold bump) — selects the PAD.1 guideline minimum opening size. Must be one of these three. |
+| `enclosure_um`  | double | `2.0`          | Top-metal overlap of the pad opening on every side (µm). Must be `>= 2.0` (gf180mcu's PAD.4 hard rule). |
+| `down_to`       | string | `"top_metal"`  | Lowest metal level the pad straps to. Only `"top_metal"` is supported today — see "Known limitation" above. |
+| `via_style`     | string | `"ring"`       | Via arrangement once `down_to` supports a level below `top_metal`: `"ring"` or `"array"`. Currently has no geometric effect — see "Known limitation" above. |
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -506,7 +570,7 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, etc). |
+| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, etc). |
 | `net` | string \| null | Caller-supplied net label; always `null` — no request field feeds it yet. |
 | `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
@@ -518,7 +582,7 @@ family/variant split the resolver doesn't have. The response's
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (or its own safe-margin constant, for a generator with no single caller-supplied spacing param — see each generator's section above). |
-| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip` and `guard_ring`, neither of which has a matching concept. |
+| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip`, `guard_ring`, and `bond_pad`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 

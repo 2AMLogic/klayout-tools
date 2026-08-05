@@ -101,6 +101,8 @@ _HIDDEN_PARAMS = {
     "res_block_present",
     "dummy_layer",
     "dummy_present",
+    "pad_layer",
+    "top_metal_layer",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -161,6 +163,42 @@ GATE_LENGTH_SAFE_MIN_UM = 0.28
 GUARD_RING_DEFAULT_WIDTH_UM = 0.42
 GUARD_RING_DEFAULT_CONTACTS_PER_SIDE = 2
 GUARD_RING_DEFAULT_PADDING_UM = 0.5
+
+#: Minimum top-metal overlap of a bond pad's passivation opening (um) --
+#: `bond_pad`'s (issue #568) `enclosure_um` default and hard floor. Sourced
+#: from gf180mcu's *only* hard, DRC-coded bond-pad rule: DRM 9.1 "PAD.4" ("Top
+#: layer metal overlap of pad opening" -> 2.0um), transcribed at
+#: `decks/gf180mcu.py`'s `pad.enclosing.metal5.1` rule from
+#: https://github.com/google/gf180mcu-pdk (Apache-2.0) commit `de3240d`,
+#: `docs/physical_verification/design_manual/tables_clear/29_BondPad1_70.csv`
+#: -- scoped to the 5LM variant that deck (and `bond_pad`'s own `top_metal`
+#: role, below) already exclusively models; see `_PDK_ROLE_LAYERS`'s
+#: `"top_metal"` entries. sky130's curated deck has no equivalent hard rule
+#: (only `pad.2`'s unrelated 1.27um pad-to-pad *spacing* check,
+#: `sky130.lydrc` line 695) -- like `WELL_ENCLOSURE_MARGIN_UM`, this constant
+#: is applied as a conservative floor to *both* families, binding only on
+#: gf180mcu today.
+PAD_TOP_METAL_ENCLOSURE_MIN_UM = 2.0
+
+#: Guideline (not DRC-hard) minimum pad-opening side length (um) per
+#: `bond_pad`'s `bond_type` param, from gf180mcu's DRM 9.2 "PAD.1" ("Pad
+#: opening") *guideline* table (same source/commit as
+#: `PAD_TOP_METAL_ENCLOSURE_MIN_UM` above,
+#: `tables_clear/29_BondPad2_70.csv`): wedge-type wire bond (without CUP) 40,
+#: ball-type wire bond (with CUP) 40, gold bump 4. Unlike PAD.4, this is
+#: explicitly a *guideline* (DRM section 9.2's own heading, and
+#: `decks/gf180mcu.py`'s PAD.4 docstring: "9.2's PAD.1/PAD.2/PAD.5-PAD.20 are
+#: a guideline table, out of scope") -- an `opening_um` below the value here
+#: is only flagged via `drc_hints.notes`, never rejected (see
+#: `_bond_pad_describe`). sky130's curated deck has no equivalent guideline
+#: table; the same values are applied uniformly, per this module's existing
+#: single-constant-across-both-families convention (see
+#: `PAD_TOP_METAL_ENCLOSURE_MIN_UM` above).
+PAD_OPENING_GUIDELINE_MIN_UM: dict[str, float] = {
+    "wedge": 40.0,
+    "ball_cup": 40.0,
+    "bump": 4.0,
+}
 
 #: Generic layer *roles* the phase-2 analog primitive generators draw on,
 #: resolved to each supported PDK family's curated-DRC-deck layer/datatype
@@ -245,6 +283,20 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # unit device by `mos_array`/`res_array`/`bjt_array` (never over a
         # real, non-dummy unit) so `klt extract`'s existing dummy-suppression
         # guards (issue #295/#462) actually fire on sky130.
+        # Bond-pad roles (issue #568): `bond_pad` is the first generator to
+        # draw at the chip boundary rather than in core analog -- its top
+        # metal is *not* the shared `metal`/`metal2`/`metal3` roles above
+        # (li1/met1/met2), it is the resolved family's own topmost routing
+        # metal. Both numbers below are transcribed from `sky130.lyt` (the
+        # layer-properties file cited at this module's top, same
+        # fossi-foundation/open-pdks source as `LAYER_NAMES`):
+        # `pad.drawing : 76/20`, `met5.drawing : 72/20`.
+        "pad": (76, 20),  # pad.drawing -- passivation opening (bond pad)
+        "top_metal": (72, 20),  # met5.drawing -- this curated deck models no
+        # via role between this and `metal3` (met2) above -- sky130.lyt also
+        # defines met3/met4/via3/via4, none of which this deck curates -- so
+        # `bond_pad`'s own `down_to` param only ever supports `"top_metal"`
+        # today (see `_bond_pad_validate`).
     },
     "gf180mcu": {
         "active": (22, 0),  # Comp
@@ -274,6 +326,19 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `.vias` in `klayout_tools.decks.gf180mcu`).
         "metal2": (36, 0),  # Metal2 -- EXTRACTION_DECK.metals[1]
         "via1": (35, 0),  # Via1 -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
+        # Bond-pad roles (issue #568, same rationale as sky130's pair above).
+        # `pad` matches `decks/gf180mcu.py`'s `pad.enclosing.metal5.1` (PAD.4)
+        # `other_layer`; `top_metal` matches that same rule's `layer` --
+        # scoped to the 5LM variant this deck already exclusively models
+        # (see that rule's own docstring). A 6LM variant's true top metal
+        # (`MetalTop`, 53/0) is *not* distinguishable from the resolved
+        # `pdk.variant` string today (`gf180mcuA`-`D` name voltage/process
+        # options, not the metal-stack height, per `klayout_tools.pdk`) --
+        # `bond_pad`'s gf180mcu output always assumes 5LM. A known,
+        # documented limitation (mirroring PAD.4's own scoping note), not a
+        # silent misapplication; see `docs/cli/gen.md`'s `bond_pad` section.
+        "pad": (37, 0),  # Pad -- passivation opening
+        "top_metal": (81, 0),  # Metal5
     },
 }
 
@@ -535,6 +600,22 @@ def _bjt_layer_params(
         "bjt_mark_present": mark is not None,
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
+    }
+
+
+def _bond_pad_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``bond_pad`` (issue #568): the passivation
+    opening (``pad`` role) and the family's own topmost routing metal
+    (``top_metal`` role) that must overlap it by ``params.enclosure_um`` on
+    every side. Both roles are real, always-resolved layers for every
+    currently supported family -- unlike ``well``/``bjt_mark``/``dummy``
+    above, neither is ever ``None``, so this needs no ``*_present`` flag."""
+    family = _pdk_family(pdk_info["variant"])
+    return {
+        "pad_layer": _role_layer_info(family, "pad"),
+        "top_metal_layer": _role_layer_info(family, "top_metal"),
     }
 
 
@@ -2778,6 +2859,99 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                             c["y0_um"],
                         )
 
+    class _BondPadPCell(kdb.PCellDeclarationHelper):
+        """Chip-boundary bond pad (issue #568): a passivation opening (``pad``
+        role) enclosed by the resolved PDK family's own topmost routing metal
+        (``top_metal`` role) overlapping it by ``enclosure_um`` on every side
+        -- gf180mcu's only hard, DRC-coded bond-pad rule (DRM 9.1 "PAD.4",
+        ``decks/gf180mcu.py``'s ``pad.enclosing.metal5.1``). Unlike every
+        other generator in this family, a bond pad's strap is *not* the
+        shared ``metal`` role (li1/Metal1) `mos_array`/`res_array`/
+        `guard_ring`/`diff_pair`/`bjt_array` all draw on -- see
+        :data:`_PDK_ROLE_LAYERS`'s ``"top_metal"`` entries.
+
+        ``down_to`` currently supports only its default, ``"top_metal"`` --
+        this generator does not yet draw a via stack connecting the pad down
+        to a lower metal level (a real via4/via3/.../via1 chain neither
+        curated deck models this far up the stack; see the ``"top_metal"``
+        role's own docstring). ``via_style`` is validated but has no
+        geometric effect until ``down_to`` supports a lower level -- both are
+        reported back via ``drc_hints.notes`` (see
+        :func:`_bond_pad_describe`), never silently ignored.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.param(
+                "opening_um",
+                self.TypeDouble,
+                "Pad opening (passivation window) side length (um)",
+                default=PAD_OPENING_GUIDELINE_MIN_UM["wedge"],
+            )
+            self.param(
+                "bond_type",
+                self.TypeString,
+                "Bond process: 'wedge' (default, wire bond without CUP), "
+                "'ball_cup' (wire bond with CUP) or 'bump' (gold bump) -- "
+                "selects the PAD.1 guideline minimum opening size",
+                default="wedge",
+            )
+            self.param(
+                "enclosure_um",
+                self.TypeDouble,
+                "Top-metal overlap of the pad opening on every side (um)",
+                default=PAD_TOP_METAL_ENCLOSURE_MIN_UM,
+            )
+            self.param(
+                "down_to",
+                self.TypeString,
+                "Lowest metal level the pad straps to -- only 'top_metal' "
+                "(default) is supported today",
+                default="top_metal",
+            )
+            self.param(
+                "via_style",
+                self.TypeString,
+                "Via arrangement once down_to supports a level below "
+                "top_metal: 'ring' (default, peripheral) or 'array' -- "
+                "currently has no geometric effect (see drc_hints.notes)",
+                default="ring",
+            )
+            self.param(
+                "pad_layer",
+                self.TypeLayer,
+                "Pad opening (passivation) drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "top_metal_layer",
+                self.TypeLayer,
+                "Top-metal strap drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+
+        def display_text_impl(self) -> str:
+            return f"bond_pad({self.opening_um}um,{self.bond_type})"
+
+        def produce_impl(self) -> None:
+            dbu = self.layout.dbu
+            li_pad = self.layout.layer(self.pad_layer)
+            li_top_metal = self.layout.layer(self.top_metal_layer)
+            half_open = self.opening_um / 2.0
+            half_strap = half_open + self.enclosure_um
+            _insert_boxes(
+                self.cell,
+                li_pad,
+                dbu,
+                [(-half_open, -half_open, half_open, half_open)],
+            )
+            _insert_boxes(
+                self.cell,
+                li_top_metal,
+                dbu,
+                [(-half_strap, -half_strap, half_strap, half_strap)],
+            )
+
     return {
         "resistor_strip": _ResistorStripPCell,
         "mos_array": _MosArrayPCell,
@@ -2785,6 +2959,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         "guard_ring": _GuardRingPCell,
         "diff_pair": _DiffPairPCell,
         "bjt_array": _BjtArrayPCell,
+        "bond_pad": _BondPadPCell,
     }
 
 
@@ -3661,6 +3836,108 @@ def _bjt_array_describe(
     }
 
 
+def _bond_pad_validate(params: dict[str, Any]) -> None:
+    if params["opening_um"] <= 0:
+        raise GenError("generator 'bond_pad': params.opening_um must be > 0")
+    if params["bond_type"] not in PAD_OPENING_GUIDELINE_MIN_UM:
+        raise GenError(
+            "generator 'bond_pad': params.bond_type must be one of "
+            f"{', '.join(sorted(PAD_OPENING_GUIDELINE_MIN_UM))}"
+        )
+    if params["enclosure_um"] < PAD_TOP_METAL_ENCLOSURE_MIN_UM:
+        raise GenError(
+            "generator 'bond_pad': params.enclosure_um must be >= "
+            f"{PAD_TOP_METAL_ENCLOSURE_MIN_UM} (gf180mcu's PAD.4 hard rule -- "
+            "minimum top-metal overlap of the pad opening)"
+        )
+    if params["down_to"] != "top_metal":
+        raise GenError(
+            "generator 'bond_pad': params.down_to must be 'top_metal' -- "
+            "this generator does not yet draw a via stack connecting the "
+            "pad's top-metal strap down to any lower metal level (a real "
+            "via4/via3/.../via1 chain neither curated deck models this far "
+            "up the stack); 'top_metal' is the only currently supported "
+            "value"
+        )
+    if params["via_style"] not in ("ring", "array"):
+        raise GenError(
+            "generator 'bond_pad': params.via_style must be 'ring' or 'array'"
+        )
+
+
+def _bond_pad_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    family = _pdk_family(pdk_info["variant"])
+    opening_um = params["opening_um"]
+    enclosure_um = params["enclosure_um"]
+
+    # The `pad` role (the passivation opening) is drawn by `produce_impl` via
+    # `layer_params` but not itself reported in `ports[]` below -- the pad
+    # net is the top-metal strap electrically, per PAD.4's own framing ("top
+    # layer metal overlap of pad opening"); the opening is a process step,
+    # not a separate net a `klt gen-compose` route would ever target.
+    top_metal_pair = _PDK_ROLE_LAYERS[family]["top_metal"]
+    top_metal_layer = {
+        "layer": top_metal_pair[0],
+        "datatype": top_metal_pair[1],
+        "name": None,
+    }
+
+    ports = [
+        {
+            "name": "PAD",
+            "net": None,
+            "layer": top_metal_layer,
+            "x_um": 0.0,
+            "y_um": 0.0,
+            "width_um": opening_um,
+            "direction_deg": 90,
+        }
+    ]
+
+    notes: list[str] = []
+    guideline_min = PAD_OPENING_GUIDELINE_MIN_UM[params["bond_type"]]
+    if opening_um < guideline_min:
+        notes.append(
+            f"params.opening_um ({opening_um}um) is below the "
+            f"{guideline_min}um guideline minimum pad opening for "
+            f"bond_type '{params['bond_type']}' (gf180mcu DRM 9.2 'PAD.1' -- "
+            "a guideline, not a DRC-hard rule; confirm with your assembly "
+            "house before tapeout)"
+        )
+    notes.append(
+        "params.via_style has no effect while params.down_to is fixed to "
+        "'top_metal' -- this generator does not yet draw a via stack "
+        "connecting the pad down to a lower metal level"
+    )
+    if family == "gf180mcu":
+        notes.append(
+            "gf180mcu output assumes the 5LM metal stack (top_metal = "
+            "Metal5) -- a 6LM variant's true top metal (MetalTop) is not "
+            "distinguishable from the resolved PDK variant string today; "
+            "see docs/cli/gen.md's bond_pad section"
+        )
+
+    snapped = _grid_snapped(dbu, opening_um, enclosure_um)
+
+    return {
+        "device_count": 1,
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": enclosure_um,
+            "matched_group_id": None,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
+
+
 #: Maps ``PCellParameterDeclaration`` type constants to the JSON type names
 #: reported by ``klt gen --list``.
 _PARAM_TYPE_NAMES = {
@@ -3756,5 +4033,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_bjt_array_validate,
         describe=_bjt_array_describe,
         layer_params=_bjt_layer_params,
+    ),
+    "bond_pad": _GeneratorSpec(
+        name="bond_pad",
+        summary=(
+            "Chip-boundary bond pad: a passivation opening enclosed by the "
+            "resolved PDK family's own topmost routing metal, satisfying "
+            "gf180mcu's only hard bond-pad DRC rule (PAD.4) -- the first "
+            "generator in this family covering the I/O boundary rather than "
+            "a core analog device (issue #568)."
+        ),
+        dbu=0.001,
+        validate=_bond_pad_validate,
+        describe=_bond_pad_describe,
+        layer_params=_bond_pad_layer_params,
     ),
 }

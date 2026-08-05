@@ -527,8 +527,8 @@ _SKY130_DUMMY_LAYER = (83, 20)
 
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
-    issue scopes, alongside phase 1's `resistor_strip` and phase 4's
-    `bjt_array` (acceptance criterion #1)."""
+    issue scopes, alongside phase 1's `resistor_strip`, phase 4's
+    `bjt_array`, and the chip-boundary `bond_pad` (issue #568)."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -538,6 +538,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "guard_ring",
         "diff_pair",
         "bjt_array",
+        "bond_pad",
     }
 
 
@@ -2831,3 +2832,299 @@ def test_ring_gap_invalid_params_rejected_on_composite_generators(
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+# --------------------------------------------------------------------------- #
+# `bond_pad` (issue #568): a chip-boundary bond pad -- a passivation opening
+# enclosed by the resolved PDK family's own topmost routing metal, the first
+# generator in this family covering the I/O boundary rather than a core
+# analog device.
+# --------------------------------------------------------------------------- #
+
+_BOND_PAD_DECKS = ("sky130", "gf180mcu")
+
+
+@pytest.mark.parametrize("deck", _BOND_PAD_DECKS)
+def test_bond_pad_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
+    """`bond_pad`'s documented default `params` must pass `klt drc --deck
+    <pdk>` clean on *both* sky130 and gf180mcu (mirrors the phase-2 8-way
+    DRC-clean matrix's per-generator obligation)."""
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"bond_pad_{deck}.gds"
+    report = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert output.is_file()
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    bbox = report["bbox_um"]
+    assert bbox["x1"] > bbox["x0"]
+    assert bbox["y1"] > bbox["y0"]
+    for port in report["ports"]:
+        assert set(port) == {
+            "name",
+            "net",
+            "layer",
+            "x_um",
+            "y_um",
+            "width_um",
+            "direction_deg",
+        }
+
+
+def test_bond_pad_ports_and_device_count(tmp_path, pdk_root):
+    """Mirrors `test_guard_ring_ports_and_device_count`: one `PAD` port, one
+    device (the pad itself)."""
+    output = tmp_path / "bond_pad.gds"
+    report = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    port_names = {p["name"] for p in report["ports"]}
+    assert port_names == {"PAD"}
+    (pad_port,) = report["ports"]
+    assert pad_port["width_um"] == 40.0
+    assert report["drc_hints"]["matched_group_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "top_metal_layer"),
+    [
+        ("sky130A", "sky130", (72, 20)),  # met5.drawing
+        ("gf180mcuD", "gf180mcu", (81, 0)),  # Metal5
+    ],
+)
+def test_bond_pad_reports_family_specific_top_metal_layer(
+    tmp_path, both_pdk_root, variant, deck, top_metal_layer
+):
+    """`bond_pad`'s PAD port sits on the resolved PDK family's own topmost
+    routing metal (the new `top_metal` role, issue #568) -- *not* the shared
+    `metal` role (li1/Metal1) every other generator in this family draws on
+    (acceptance criterion: a new `"pad"`-adjacent role, resolved per PDK
+    family)."""
+    output = tmp_path / f"bond_pad_{deck}.gds"
+    report = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    (pad_port,) = report["ports"]
+    assert (
+        pad_port["layer"]["layer"],
+        pad_port["layer"]["datatype"],
+    ) == top_metal_layer
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert top_metal_layer in present
+
+
+def test_bond_pad_gf180mcu_enclosure_default_matches_pad4_2um(tmp_path, pdk_root):
+    """The default `enclosure_um` reproduces gf180mcu's only hard, DRC-coded
+    bond-pad rule (DRM 9.1 "PAD.4": top-metal overlap of the pad opening,
+    2.0um) -- see `PAD_TOP_METAL_ENCLOSURE_MIN_UM`'s docstring in
+    `klayout_tools.gen`."""
+    from klayout_tools.gen import PAD_TOP_METAL_ENCLOSURE_MIN_UM
+
+    assert PAD_TOP_METAL_ENCLOSURE_MIN_UM == 2.0
+    pcell_classes = _pcell_classes_for_test()
+    decl = pcell_classes["bond_pad"]()
+    enclosure_param = next(p for p in decl.get_parameters() if p.name == "enclosure_um")
+    assert enclosure_param.default == PAD_TOP_METAL_ENCLOSURE_MIN_UM
+
+    # And the drawn geometry itself: the top-metal strap must overlap the
+    # pad opening by exactly the default enclosure on every side.
+    output = tmp_path / "bond_pad_enclosure.gds"
+    generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"opening_um": 10.0},
+            "options": {"output": str(output)},
+        }
+    )
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top_cell = layout.top_cell()
+    pad_region = kdb.Region(top_cell.begin_shapes_rec(layout.layer(76, 20)))
+    metal_region = kdb.Region(top_cell.begin_shapes_rec(layout.layer(72, 20)))
+    pad_box = pad_region.bbox()
+    metal_box = metal_region.bbox()
+    dbu = layout.dbu
+    expected_enclosure_dbu = round(PAD_TOP_METAL_ENCLOSURE_MIN_UM / dbu)
+    assert (pad_box.left - metal_box.left) == expected_enclosure_dbu
+    assert (metal_box.right - pad_box.right) == expected_enclosure_dbu
+
+
+def _pcell_classes_for_test():
+    from klayout_tools.gen import _build_pcell_classes
+
+    return _build_pcell_classes()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"opening_um": 0},
+        {"opening_um": -1.0},
+        {"bond_type": "solder"},
+        {"enclosure_um": 1.0},  # below PAD_TOP_METAL_ENCLOSURE_MIN_UM (2.0)
+        {"via_style": "hexagon"},
+    ],
+)
+def test_bond_pad_invalid_params_rejected(tmp_path, pdk_root, params):
+    """Mirrors `test_guard_ring_invalid_params_rejected`'s parametrized-table
+    pattern: structural floors and unknown enum members are all rejected via
+    `GenError`."""
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "bond_pad",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_bond_pad_down_to_below_supported_range_rejected(tmp_path, pdk_root):
+    """Edge case from the issue's test plan: `down_to` referencing a metal
+    level below this generator's supported range (today, only `"top_metal"`
+    is supported -- no via stack down to a lower level is drawn yet) is
+    rejected outright, not silently drawn wrong."""
+    with pytest.raises(GenError, match="down_to must be 'top_metal'"):
+        generate(
+            {
+                "generator": "bond_pad",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"down_to": "metal"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("bond_type", "guideline_min_um"),
+    [("wedge", 40.0), ("ball_cup", 40.0), ("bump", 4.0)],
+)
+def test_bond_pad_opening_below_guideline_notes_not_rejects(
+    tmp_path, pdk_root, bond_type, guideline_min_um
+):
+    """`bond_type`'s PAD.1 guideline minimum opening (gf180mcu DRM 9.2) is
+    advisory, not a hard rule -- a smaller `opening_um` is flagged via
+    `drc_hints.notes`, never rejected (mirrors `res_array`'s
+    `spacing_um`-below-recommended note precedent)."""
+    output = tmp_path / f"bond_pad_{bond_type}.gds"
+    report = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "bond_type": bond_type,
+                "opening_um": guideline_min_um / 2.0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert any(
+        "guideline minimum pad opening" in n for n in report["drc_hints"]["notes"]
+    )
+
+    # At (not below) the guideline minimum, no such note is emitted.
+    output2 = tmp_path / f"bond_pad_{bond_type}_at_min.gds"
+    report2 = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"bond_type": bond_type, "opening_um": guideline_min_um},
+            "options": {"output": str(output2)},
+        }
+    )
+    assert not any(
+        "guideline minimum pad opening" in n for n in report2["drc_hints"]["notes"]
+    )
+
+
+def test_bond_pad_rejects_unsupported_pdk_family(tmp_path):
+    """Mirrors `test_bjt_array_rejects_unsupported_pdk_family`."""
+    root = tmp_path / "pdk_install"
+    _make_install(root, "someOtherPdkX")
+    with pytest.raises(GenError, match="not supported"):
+        generate(
+            {
+                "generator": "bond_pad",
+                "pdk": {"variant": "someOtherPdkX", "root": str(root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_bond_pad_gf180mcu_assumes_5lm_top_metal_and_notes_the_limitation(
+    tmp_path, both_pdk_root
+):
+    """Documents (and tests, not just documents -- per the issue's test
+    plan) the 6LM scoping decision made during implementation: gf180mcu's
+    `pdk.variant` string (`gf180mcuA`-`D`) never distinguishes a 5LM from a
+    6LM metal stack (those letters name voltage/process options, see
+    `klayout_tools.pdk`), so `bond_pad`'s gf180mcu output always resolves
+    `top_metal` to Metal5 (the 5LM top metal, matching gf180mcu's curated
+    `pad.enclosing.metal5.1`/PAD.4 rule) and never to MetalTop (the 6LM top
+    metal) -- a known, documented limitation, not a silent misapplication."""
+    output = tmp_path / "bond_pad_gf180.gds"
+    report = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    (pad_port,) = report["ports"]
+    # Metal5 (81, 0), never MetalTop (53, 0).
+    assert (pad_port["layer"]["layer"], pad_port["layer"]["datatype"]) == (81, 0)
+    assert any("assumes the 5LM metal stack" in n for n in report["drc_hints"]["notes"])
+
+
+def test_bond_pad_opening_um_boundary_at_enclosure_minimum(tmp_path, pdk_root):
+    """Edge case from the issue's test plan: `opening_um` at the boundary of
+    the enclosure minimum -- a tiny (but still `> 0`) opening is legal and
+    stays DRC-clean; the pad opening and enclosure are independent params
+    (neither bounds the other structurally)."""
+    from klayout_tools.gen import PAD_TOP_METAL_ENCLOSURE_MIN_UM
+
+    output = tmp_path / "bond_pad_tiny.gds"
+    report = generate(
+        {
+            "generator": "bond_pad",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "opening_um": PAD_TOP_METAL_ENCLOSURE_MIN_UM,
+                "bond_type": "bump",
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["bbox_um"]["x1"] - report["bbox_um"]["x0"] == pytest.approx(
+        PAD_TOP_METAL_ENCLOSURE_MIN_UM + 2 * PAD_TOP_METAL_ENCLOSURE_MIN_UM
+    )
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
