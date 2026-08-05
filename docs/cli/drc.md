@@ -132,22 +132,24 @@ primitive exists in `DrcRule`'s vocabulary today (only
 `width`/`space`/`notch`/`separation`/`enclosing`/`enclosed`/`overlap`) —
 tracked as a candidate follow-on rather than silently dropped.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 24 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 25 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
 (diffusion/active), `Contact`, `Metal1`-`Metal3`, `Metal5`, and `MetalTop`
 layers, plus a first increment of well/substrate-tap coverage (`Nwell`
 spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
-(`DRC_BJT` mark-layer separation), and the MiM capacitor stack
+(`DRC_BJT` mark-layer separation), the MiM capacitor stack
 (`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap, plus the virtual
-bottom plate's `Via4` overlap, see "Sized/derived-layer rules" above) —
-transcribed from the published GlobalFoundries 180nm MCU **Design Rule
-Manual**
+bottom plate's `Via4` overlap, see "Sized/derived-layer rules" above), and
+the bond-pad chapter's one hard, coded rule (`Metal5`'s overlap of the
+`Pad` passivation opening, 5LM variant only) — transcribed from the
+published GlobalFoundries 180nm MCU **Design Rule Manual**
 ([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
 `docs/physical_verification/design_manual/`; Apache License 2.0),
 specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
 (`PL.*`), "7.12 Contact" (`CO.*`), "7.13 Metaln" (`Mn.*`, extended to
-`n = 2..5`), "7.15 MetalTop" (`MT.*`), "10.4.2 MIM Capacitor, Option B"
-(`MIMTM.*`), and "10.7 DRC_BJT Mark Layer" (`BJT.*`) sections. Unlike
+`n = 2..5`), "7.15 MetalTop" (`MT.*`), "9.1 Bond Pad" (`PAD.*`), "10.4.2
+MIM Capacitor, Option B" (`MIMTM.*`), and "10.7 DRC_BJT Mark Layer"
+(`BJT.*`) sections. Unlike
 sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), the
 companion KLayout DRC-deck repo
 ([`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`](https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv))
@@ -157,7 +159,7 @@ cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
 `"Mn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and
 numeric values directly.
 
-Eight of the twenty-four gf180mcu rules approximate an official DRM rule in
+Eight of the twenty-five gf180mcu rules approximate an official DRM rule in
 some way — either a compound-layer context our single/two-layer check
 primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
 `nwell.enclosing.comp.1`), a bound our primitives don't support
