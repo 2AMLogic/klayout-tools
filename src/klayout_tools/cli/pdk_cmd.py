@@ -133,24 +133,33 @@ def _print_cells_text(report: dict) -> None:
         )
         return
 
-    headers = ("library", "devices", "lib corners")
+    headers = ("library", "devices", "supplies (V)", "nominal")
     if supply_given:
         headers = headers + ("compatible",)
 
     rows = []
     for library in libraries:
-        devices = "/".join(library["device_flavors"]) or "-"
+        devices = "/".join(library["device_flavors"])
+        if not devices:
+            # An empty `spice/` parse is loudly reported as "unknown" (not
+            # "-") when the view has instance lines the parser failed to
+            # recognise -- "-" alone would be indistinguishable from "this
+            # library genuinely has no devices" (issue #537 AC 4).
+            devices = (
+                "unknown" if library.get("device_flavors_status") == "unknown" else "-"
+            )
+        supplies = "/".join(f"{v:g}" for v in library["supplies_v"]) or "-"
         voltage = library["nominal_supply_v"]
         if voltage is not None:
-            lib_corners = f"{voltage:g}V @ {library['nominal_corner']}"
+            nominal = f"{voltage:g}V @ {library['nominal_corner']}"
         else:
-            lib_corners = "-"
-        row = (library["name"], devices, lib_corners)
+            nominal = "-"
+        row = (library["name"], devices, supplies, nominal)
         if supply_given:
             row = row + ("yes" if library["compatible"] else "no",)
         rows.append(row)
 
-    render_table(headers, rows, left_aligned={0, 1, 2})
+    render_table(headers, rows, left_aligned={0, 1, 2, 3})
 
     if supply_given:
         verdict = "compatible library found" if report["any_compatible"] else "NO MATCH"

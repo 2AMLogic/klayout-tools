@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-05 — `klt pdk cells`: two silent-wrong-answer bugs on PDKs whose
+  device-flavor naming and voltage characterization differ from sky130's
+  shape (#537). (1) The device-model regex only recognised sky130's
+  `<family>_fd_pr__<flavor>` SPICE instance naming; gf180mcu's bare
+  `<flavor>` naming (e.g. `nfet_06v0`, no `_fd_pr__` prefix) matched nothing,
+  so `device_flavors` came back `[]` for every gf180mcu standard-cell
+  library — now generalised to recognise both shapes, and a library whose
+  `spice/` view has instance lines that still don't match any known shape
+  reports `device_flavors_status: "unknown"` (loudly) rather than an empty
+  list indistinguishable from "no devices". (2) A library characterised at
+  more than one supply for the same process/temperature corner (e.g.
+  gf180mcu_fd_sc_mcu9t5v0's separate 1.8V/3.3V/5.0V `.lib` views) reported
+  only its lowest supply and silently dropped the rest — `libraries[]` gains
+  an additive `supplies_v` array listing every characterised supply;
+  `nominal_supply_v`/`nominal_corner` keep their existing lowest-wins
+  behavior for backward compatibility. `--supply` now matches against the
+  full `supplies_v` set instead of only `nominal_supply_v`, so `--supply 3.3`
+  against a library characterised at 3.3V correctly reports compatible
+  (previously a false-negative `NO MATCH` / exit `3` even though the library
+  was characterised at the requested supply). No `schema_version` bump — both
+  changes are additive (`supplies_v`, `device_flavors_status`) or a purely
+  internal comparison-set fix (`--supply` matching); no existing field was
+  renamed, removed, or had its documented type changed.
+
 - 2026-08-04 — `klt extract`/`klt lvs`/`klt sim`: the deck's two-term
   device-parameter corrections (`CapacitorDevice.perim_cap_f_um`, #512, and
   `ResistorDevice.fixed_offset_ohm`, #518) now reach the extracted netlist
