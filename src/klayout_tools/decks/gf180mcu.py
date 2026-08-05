@@ -1407,17 +1407,21 @@ PARASITICS = ParasiticsDeck(
         LayerRC(
             sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.007602, cap_perim_ff_um=0.028153
         ),
-        # Metal5 (issue #547), the top metal of this 5-level stack. sheet from
-        # `resist (allm5)/metal5 40`, the `#ifdef METALS5` / `THICKMET0P9 ||
-        # THICKMET1P1` row: the 1.1 um (11 kA) thick-top-metal option -- the
-        # exact "11 kA top metal of a gf180mcuD build" this issue was filed
-        # against (the other two THICKMET rows -- 10 for THICKMET3P0's 3.0 um,
-        # 60 for the non-thick default -- are noted here for context but not
-        # used). area/perim from `defaultareacap`/`defaultperimeter` allm5
-        # metal5 (5.798 aF/um^2, 30.386 aF/um) -- unconditional across every
-        # THICKMET option.
+        # Metal5 (issue #547, corrected by #572), the top metal of this
+        # 5-level stack. sheet from the resolved, pre-built
+        # `gf180mcuD.tech` for the pinned PDK commit
+        # c6d73a35f524070e85faff4a6a9eef49553ebc2b (nominal `variants ()`
+        # corner block, line 3050): `resist (allm5)/metal5    60` (60
+        # milliohm/sq = 0.06 ohm/sq), the `else` (non-thick-metal) branch --
+        # not the `#ifdef METALS5` / `THICKMET0P9 || THICKMET1P1` branch of
+        # the generic templated `gf180mcu.tech` (40 milliohm/sq), which a
+        # prior curation (#571) mistakenly used by manually resolving that
+        # file's unresolved macros instead of reading the shipped,
+        # pre-resolved file for this exact pinned commit. area/perim from
+        # `defaultareacap`/`defaultperimeter` allm5 metal5 (5.798 aF/um^2,
+        # 30.386 aF/um) -- unconditional across every THICKMET option.
         LayerRC(
-            sheet_res_ohm_sq=0.04, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
+            sheet_res_ohm_sq=0.06, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
         ),
     ),
 )

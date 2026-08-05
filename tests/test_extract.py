@@ -4248,12 +4248,14 @@ def test_gf180mcu_parasitics_metals_covers_full_stack():
     assert m2.cap_area_ff_um2 == pytest.approx(0.015016)
     assert m2.cap_perim_ff_um == pytest.approx(0.033298)
 
-    # Metal5 (index 4, top metal of this 5-level stack): sheet from
-    # `resist (allm5)/metal5 40`, the THICKMET1P1 (1.1 um / 11 kA) row --
-    # matching the "11 kA top metal of a gf180mcuD build" this issue was
-    # filed against.
+    # Metal5 (index 4, top metal of this 5-level stack): sheet from the
+    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit
+    # (`resist (allm5)/metal5    60`, 60 milliohm/sq), the non-thick-metal
+    # `else` branch -- not the generic templated gf180mcu.tech's
+    # THICKMET1P1 row (40 milliohm/sq), which a prior curation (#571)
+    # mistakenly used (corrected by #572).
     m5 = gf180mcu.PARASITICS.metals[4]
-    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.06)
     assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
     assert m5.cap_perim_ff_um == pytest.approx(0.030386)
 
