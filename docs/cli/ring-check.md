@@ -6,7 +6,7 @@ does not. Purely geometric: the shapes on the given layers are merged and the
 result must be exactly one polygon with exactly one hole.
 
 ```
-klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--format text|json]
+klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--ignore-enclosed] [--format text|json]
 ```
 
 - `<file>` -- path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -26,7 +26,40 @@ klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--format
   case). `right > left` and `top > bottom` are enforced.
 - `--top` -- optional. The top cell to check when the stream has more than
   one; omit to check every top cell. A named cell that is absent exits `1`.
+- `--ignore-enclosed` -- optional, off by default. See ["A guard/tap ring
+  usually encloses geometry -- `--ignore-enclosed`"](#a-guardtap-ring-usually-encloses-geometry---ignore-enclosed)
+  below; without it, a ring that encloses same-layer geometry (the normal
+  case for a ring drawn around a real device) reports `"broken"` even though
+  the ring itself is unbroken.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
+
+## A guard/tap ring usually encloses geometry -- `--ignore-enclosed`
+
+**By default, `klt ring-check` reports a same-layer-enclosed ring as
+`"broken"`, even when the ring itself is a perfect, unbroken annulus.** A
+guard/tap ring drawn the normal way -- around a device that uses the *same*
+drawn layer as the ring -- merges to **two** disjoint polygons: the annulus,
+plus whatever sits inside its hole (the protected circuit's own
+diffusion/metal). The plain "exactly one polygon with exactly one hole"
+assertion cannot tell that apart from a genuinely fragmented ring, so it fails
+with `kind: "fragmented"` violations on the enclosed content -- on the *only*
+kind of ring anyone actually draws (issue #550).
+
+Pass `--ignore-enclosed` to fix this: after merging, any polygon that lies
+strictly inside another polygon's hole is classified as enclosed content, not
+a ring fragment, and excluded from the pass/fail gate. A guard/tap ring
+checked this way reports `"continuous"` regardless of what circuit it
+protects. A genuine break in the ring's own perimeter -- a fragment that is
+*not* inside a hole -- still fails with `--ignore-enclosed` set; the flag only
+changes how enclosed content is classified, never what counts as a break.
+
+`--ignore-enclosed` is opt-in rather than the default so that existing callers
+relying on the strict assertion see no change in behaviour. The one
+documented workaround before this flag existed -- picking a layer the ring
+holds *exclusively* (e.g. the ring-only implant layer of a substrate tap ring)
+-- still works, but depends on the enclosed circuit happening not to share
+that layer, which is a property of the design, not of the ring;
+`--ignore-enclosed` works for any layer set.
 
 ## Why this is a check `klt drc` and `klt lvs` cannot make
 
@@ -93,6 +126,12 @@ exactly one hole** -- a proper closed annulus. Every other outcome is a
 | `gap`         | one polygon, no enclosed hole, closing re-forms one  | a break in one segment opened the annulus; the reported `bbox` is the gap |
 | `no_hole`     | one polygon, no enclosed hole, no closing re-forms one | a solid, hole-less region (a filled plate drawn where a ring was meant to be), not a broken ring |
 | `extra_holes` | one polygon with more than one hole                  | not a simple annulus (e.g. two separate holes) |
+
+With `--ignore-enclosed` set, this classification runs on a reduced polygon
+list: any polygon lying strictly inside another polygon's hole is dropped
+first (see [`--ignore-enclosed`](#a-guardtap-ring-usually-encloses-geometry---ignore-enclosed)
+above), so `polygon_count`/`hole_count` in a resulting violation reflect that
+reduced set, not the raw merge.
 
 ### Locating a gap
 

@@ -35,6 +35,18 @@ caller-supplied descriptor, not a PDK deck" shape ``klt socket-check`` and
 ``klt precheck`` already have, so it lands as a sibling verb that emits the
 same ``violations[]`` envelope ``klt report`` aggregates -- not as a rule
 wedged into the deck vocabulary.
+
+Enclosed same-layer geometry (issue #550): a guard/tap ring drawn the normal
+way -- around a device that uses the *same* drawn layer -- merges to two
+disjoint polygons: the annulus, plus whatever sits inside its hole (the
+protected circuit's own diffusion/metal). By default that still reports
+``"broken"``/``"fragmented"``, since the plain assertion cannot tell "a real
+break" from "a circuit drawn inside my hole". Pass ``ignore_enclosed=True``
+(``--ignore-enclosed`` on the CLI) to make the assertion invariant to that:
+any polygon that lies strictly inside another polygon's hole is treated as
+enclosed content, not a ring fragment, and excluded from the pass/fail gate --
+while a genuine break in the ring's own perimeter (a fragment that does *not*
+lie inside a hole) still fails either way.
 """
 
 from __future__ import annotations
@@ -70,6 +82,7 @@ def run_ring_check(
     layers: list[tuple[int, int]],
     region_um: tuple[float, float, float, float] | None = None,
     top: str | None = None,
+    ignore_enclosed: bool = False,
 ) -> dict[str, Any]:
     """Assert that ``layers``' shapes form one closed annulus per top cell.
 
@@ -80,7 +93,14 @@ def run_ring_check(
     given, is a ``(left, bottom, right, top)`` clip window in **micrometres**
     used to isolate one ring in a stream that contains other geometry on the
     same layers. ``top``, when given, restricts the check to that single top
-    cell (required only to disambiguate a multi-top stream).
+    cell (required only to disambiguate a multi-top stream). ``ignore_enclosed``
+    (default ``False``, backward compatible), when set, excludes from the
+    annulus assertion any polygon that lies strictly inside another polygon's
+    hole -- the case a same-layer device enclosed by the ring produces -- so a
+    ring is not reported ``"broken"`` merely because it protects a circuit
+    drawn on the same layer set (issue #550). A genuine break in the ring's
+    own perimeter (a fragment that is not inside a hole) still fails either
+    way.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/ring-check.md``)::
@@ -166,7 +186,11 @@ def run_ring_check(
 
         region.merge()
 
-        violations.extend(_assert_annulus(kdb, region, cell.name, layer_label))
+        violations.extend(
+            _assert_annulus(
+                kdb, region, cell.name, layer_label, ignore_enclosed=ignore_enclosed
+            )
+        )
 
     # Deterministic, diff-clean ordering (mirrors drc.py): the engine's
     # per-polygon enumeration order is not guaranteed stable across builds.
@@ -230,7 +254,11 @@ def _clip_box(
 
 
 def _assert_annulus(
-    kdb: Any, region: Any, cell_name: str, layer_label: str
+    kdb: Any,
+    region: Any,
+    cell_name: str,
+    layer_label: str,
+    ignore_enclosed: bool = False,
 ) -> list[dict[str, Any]]:
     """Assert ``region`` (already merged) is one polygon with exactly one hole.
 
@@ -249,8 +277,18 @@ def _assert_annulus(
       one: a solid, hole-less region (not a broken ring but a non-ring).
     - ``"extra_holes"`` -- one polygon with more than one hole: not a simple
       annulus (e.g. two separate holes punched through a plate).
+
+    When ``ignore_enclosed`` is set and there is more than one polygon, every
+    polygon that lies strictly inside another polygon's hole is dropped
+    before the counts above are computed (see :func:`_partition_enclosed`) --
+    that is enclosed content (e.g. a same-layer device the ring protects), not
+    a broken piece of the ring, so it must not trip ``"fragmented"``. A
+    genuinely disjoint fragment (outside every hole) is never dropped, so a
+    real break in the ring's own perimeter still fails.
     """
     polygons = list(region.each())
+    if ignore_enclosed and len(polygons) > 1:
+        polygons, _enclosed = _partition_enclosed(kdb, polygons)
     polygon_count = len(polygons)
     hole_count = sum(polygon.holes() for polygon in polygons)
 
@@ -347,6 +385,47 @@ def _assert_annulus(
             polygon=polygon,
         )
     ]
+
+
+def _partition_enclosed(kdb: Any, polygons: list[Any]) -> tuple[list[Any], list[Any]]:
+    """Split ``polygons`` into ``(outer, enclosed)``.
+
+    ``enclosed`` is every polygon that lies strictly inside a hole of another
+    polygon in the same list -- the "outermost annulus" classification step
+    for ``--ignore-enclosed`` (issue #550). A guard/tap ring drawn around a
+    device that shares the ring's own drawn layer merges to two disjoint
+    polygons: the annulus, plus whatever sits inside its hole. That second
+    polygon is the protected circuit, not a ring fragment, so it belongs in
+    ``enclosed`` rather than counting toward the annulus assertion.
+
+    For each polygon that has holes, every *other* polygon whose shape is
+    fully contained in one of those holes (checked via ``Region`` boolean
+    subtraction: ``other - hole_region`` is empty) is classified as enclosed.
+    A polygon that is only partially inside a hole, or lies entirely outside
+    every hole (a genuine break in the ring's own perimeter), is never
+    reclassified -- so this cannot mask a real fragmentation.
+    """
+    enclosed_indices: set[int] = set()
+    for outer_index, outer in enumerate(polygons):
+        hole_count = outer.holes()
+        if hole_count == 0:
+            continue
+
+        hole_region = kdb.Region()
+        for hole_index in range(hole_count):
+            hole_points = list(outer.each_point_hole(hole_index))
+            hole_region += kdb.Region(kdb.SimplePolygon(hole_points))
+        hole_region.merge()
+
+        for other_index, other in enumerate(polygons):
+            if other_index == outer_index or other_index in enclosed_indices:
+                continue
+            if (kdb.Region(other) - hole_region).is_empty():
+                enclosed_indices.add(other_index)
+
+    outer_polygons = [p for i, p in enumerate(polygons) if i not in enclosed_indices]
+    enclosed_polygons = [p for i, p in enumerate(polygons) if i in enclosed_indices]
+    return outer_polygons, enclosed_polygons
 
 
 def _locate_gaps(kdb: Any, region: Any) -> list[Any]:

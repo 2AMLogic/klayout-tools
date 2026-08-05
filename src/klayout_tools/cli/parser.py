@@ -381,6 +381,20 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     ring_check_parser.add_argument(
+        "--ignore-enclosed",
+        action="store_true",
+        default=False,
+        help=(
+            "ignore polygons enclosed within the ring's own hole when "
+            "asserting the annulus -- use this when the ring encloses "
+            "geometry on the same layer set (e.g. a guard/tap ring around a "
+            "device), which otherwise merges to a second, disjoint polygon "
+            "and trips a spurious 'fragmented' violation. A genuine break in "
+            "the ring's own perimeter still fails with this flag set. "
+            "Off by default (backward compatible)."
+        ),
+    )
+    ring_check_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
