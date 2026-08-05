@@ -157,6 +157,11 @@ modules and deliberate (not oversights):
   to the correct `VPB` pin). gf180mcu's curated layer set has no distinct
   tap layer (`Comp` is shared with the transistor active layer) and no
   well-label layer, so its PMOS body terminal is a floating, anonymous net.
+  This is also a **simulation** caveat, not only an LVS-comparison one: that
+  anonymous net has no DC bias path at all, which corrupts a direct
+  resimulation of the extracted netlist — see "Parasitic (RC) extraction" →
+  "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" below
+  for the full consequence and how the JSON response surfaces it.
 
 Connecting a well region to *every* contact inside it (rather than only a
 genuinely distinct tap region) is deliberately **not** done — the well is a
@@ -1115,6 +1120,62 @@ above, and that carries no metal) — not because it lacks a label.
   supply/ground/bias rail, nor series resistance in a matched or
   high-impedance path, regardless of the computed R value.
 
+### Known gap: gf180mcu's anonymous PMOS body net has no DC bias path (issue #555)
+
+This is a **simulation**, not just an LVS-comparison, caveat — read it before
+resimulating a `--parasitics`-extracted gf180mcu netlist directly, not only
+if you are comparing it against a schematic reference.
+
+"Coverage" above documents, as a known deck limitation, that gf180mcu's
+curated layer set has no distinct well-tie/tap layer and no well-label layer,
+so a PMOS device's body terminal extracts onto a **floating, anonymous net**
+(a KLayout-synthesized `$5`-style name) rather than a real, named net — unlike
+the NMOS body, which always resolves to the deck's synthesized global
+substrate net (`vsubs`) via `connect_global`, and unlike sky130's PMOS body,
+which resolves to a real well-tie pin (e.g. `VPB`).
+
+The consequence for `--parasitics` (and for any direct resimulation of the
+extracted netlist, with or without `--parasitics`): that anonymous net has
+**no DC bias path at all** — not even the substrate/ground shunt every other
+net gets. For a real PDK MOS subcircuit model (which implements its own
+body-diode network, not a bare terminal), the body node's DC operating point
+is left to float to whatever the source/drain-body junction diodes balance
+to, rather than sitting at the real supply rail (e.g. `vdd`) every real
+single-well gf180mcu design ties its PMOS wells to. Concretely: a lone PMOS
+with its source driven to 0 V, resimulated directly against the real
+gf180mcu model library, comes back with its anonymous body net at ~0 V DC,
+not `vdd` — a full supply rail's worth of `Vsb` error, which moves every
+device's threshold voltage (body effect) and, at the wrong bias point, can
+forward-bias a source/drain-body junction outright. This makes a full-circuit
+resimulation of an extracted gf180mcu netlist with more than one PMOS
+source/drain voltage **physically wrong**, not merely imprecise — the
+netlist "simulates" (ngspice converges) but the numbers it produces are not
+comparable to a schematic-level netlist's.
+
+The anonymous net's synthesized name is not left to grepping the written
+SPICE body for a `$`-prefixed node: it is surfaced structurally in the JSON
+response two ways —
+
+- Every affected PMOS device's `devices[].nets["b"]` already carries the
+  exact net name (e.g. `"$5"`), same as any other terminal.
+- The top-level `unbiased_pmos_body_nets[]` array (see "JSON schema" below)
+  flags it explicitly, one `{"device", "net"}` entry per affected PMOS
+  device, plus a matching prose `warnings[]` entry — so a caller does not
+  have to independently discover KLayout's `$<n>` anonymous-net convention
+  to detect the gap. Present (and non-empty when applicable) whether or not
+  `--parasitics` was given, since the DC-bias gap exists either way.
+
+**This issue does not re-bias the net.** No device-physics change is made:
+the anonymous net's connectivity, and the fact that it carries no bias, are
+unchanged — this is a *reporting* fix, not a fix to the underlying gap. An
+opt-in flag that would actually tie the anonymous net to a named rail at
+extraction time (e.g. a `--tie-well-to=<net>`-style hint, mirroring how
+`klt lvs`'s `hints` accommodate deck-coverage gaps for LVS-comparison) is a
+**known, deliberately deferred follow-up** — a real API design decision
+(new CLI flag semantics plus extraction-time net-merging logic) intentionally
+out of scope here. File a follow-up issue if your workflow needs the net
+actually re-biased rather than merely flagged.
+
 ### JSON `parasitics` block
 
 `--parasitics` adds a top-level `parasitics` field (an additive, independently
@@ -1277,6 +1338,7 @@ exit codes).
   "unmodelled_poly": [],
   "merged_net_labels": [],
   "voltage_domain_warnings": [],
+  "unbiased_pmos_body_nets": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -1315,6 +1377,7 @@ exit codes).
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `merged_net_labels` | array\<object\>          | One entry per net whose KLayout-assigned name is a comma-joined merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`labels` is `net` split on `,`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
+| `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A matching prose entry is also appended to `warnings[]`. Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |

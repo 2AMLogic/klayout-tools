@@ -23,6 +23,7 @@
     "extract.nets_count": 25,
     "extract.pin_count": 2,
     "extract.schema_version": 1,
+    "extract.unbiased_pmos_body_nets_count": 0,
     "extract.unmodelled_poly_count": 0,
     "extract.voltage_domain_warnings_count": 0,
     "extract.warnings_count": 0,

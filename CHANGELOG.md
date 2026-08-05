@@ -153,6 +153,29 @@ not `klt --version`, if you need to detect this kind of drift.
   (already had `--top`) and `klt cells --top` (an unrelated, pre-existing
   boolean display filter) are unmodified. See each verb's own `docs/cli/*.md`
   for the field-by-field scoping.
+- 2026-08-05 — `klt extract`: surface gf180mcu's anonymous PMOS body net as
+  a structured JSON signal, not only discoverable by grepping the written
+  SPICE body (#555). gf180mcu's curated deck has no distinct well-tie/tap
+  layer separate from transistor active and no well-label layer, so a
+  PMOS device's body terminal already extracted onto a floating,
+  KLayout-synthesized `"$5"`-style net (a documented Coverage-section
+  limitation) -- but that net has **no DC bias path at all**, unlike the
+  NMOS body (tied to the deck's `vsubs` global via `connect_global`),
+  which silently corrupts a direct resimulation of the extracted netlist:
+  a PMOS body node that should sit at the real supply rail instead floats
+  to whatever its source/drain-body junction diodes balance to. New
+  top-level `unbiased_pmos_body_nets[]` array, one `{"device", "net"}`
+  entry per affected PMOS device, plus a matching prose `warnings[]`
+  entry; present (and populated when applicable) regardless of
+  `--parasitics`/`--pdk`. No device-physics change -- the anonymous net's
+  connectivity is unchanged, this is a reporting fix. An opt-in flag to
+  actually re-bias the net at extraction time (e.g.
+  `--tie-well-to=<net>`) is a documented, deliberately deferred follow-up,
+  not implemented here. Purely additive: the array is always present,
+  empty for any layout/deck (e.g. sky130) whose PMOS body resolves to a
+  real, named net -- no `schema_version` bump (`extract` stays `1`). See
+  `docs/cli/extract.md`'s "Parasitic (RC) extraction" section, "Known gap:
+  gf180mcu's anonymous PMOS body net has no DC bias path".
 - 2026-08-05 — `klt drc`/`klt extract`: fail-loudly coverage for unmodelled
   voltage-domain marker geometry (#552). A gf180mcu layout can carry a
   `Dualgate` (55/0) region that promotes the enclosed devices to the PDK's
