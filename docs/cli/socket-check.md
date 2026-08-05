@@ -6,7 +6,7 @@ numeric interface budgets a block's layout must fit -- and report each
 mechanically-checkable class of violation as structured data.
 
 ```
-klt socket-check <file> --socket <descriptor.json> [--format text|json]
+klt socket-check <file> --socket <descriptor.json> [--top <cell>] [--format text|json]
 ```
 
 - `<file>` -- path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -15,6 +15,12 @@ klt socket-check <file> --socket <descriptor.json> [--format text|json]
   [Descriptor schema](#descriptor-schema) below). Not validated by argparse --
   a missing, unreadable, or malformed descriptor exits `1` with a clean error
   rather than argparse's usage-error exit `2`.
+- `--top` -- top cell to check when the stream has more than one; omit to
+  check every top cell (today's default, unchanged). Every check is scoped
+  to that cell's own hierarchy -- itself plus every cell it calls, directly
+  or indirectly -- including `reserved_layers`, which otherwise walks the
+  whole stream regardless of top cell. A named cell absent from the stream
+  exits `1` with a clean error.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
 
 ## Why this is a separate verb from `klt precheck`
@@ -274,7 +280,7 @@ units), `klt socket-check` reports positions/bounding boxes in
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
 | `0`  | Ran successfully -- every check passed or was skipped, none failed. |
-| `1`  | Failed to run -- bad layout file, or a missing/unreadable/malformed `--socket` descriptor. |
+| `1`  | Failed to run -- bad layout file, `--top` names a cell absent from the stream, or a missing/unreadable/malformed `--socket` descriptor. |
 | `2`  | Usage error (missing argument, bad `--format` value) -- from argparse. |
 | `3`  | Ran successfully, at least one check failed.                 |
 

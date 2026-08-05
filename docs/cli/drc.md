@@ -4,12 +4,17 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu [--format text|json]
+klt drc <file> --deck sky130|gf180mcu [--top <cell>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
 - `--deck` — required. The DRC deck to run. Currently: `sky130`, `gf180mcu`.
+- `--top` — top cell to check when the stream has more than one; omit to
+  check every top cell (today's default, unchanged). `coverage` (see below)
+  is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
+  reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
+  absent from the stream exits `1` with a clean error.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -377,10 +382,10 @@ guarantees".
 ## Limitation: whole-layout, flattened
 
 Each rule is checked against the **whole layout**, flattened per top cell
-(via `Cell.begin_shapes_rec`) — there is no `--top <cell>` filter to scope
-the check to a single cell in this version. If a layout has multiple top
-cells, each is checked independently and the `cell` field reports the top
-cell a violation was found under.
+(via `Cell.begin_shapes_rec`). By default every top cell is checked
+independently and the `cell` field reports the top cell a violation was
+found under; pass `--top <cell>` (issue #554) to scope the run to a single
+named top cell instead — see "Usage" above.
 
 Flattening the geometry does not, however, mean the report is blind to
 hierarchy: see "Per-instance attribution" below for how each violation is
@@ -624,7 +629,7 @@ tooling for the marked domain," not as a corrected verdict.
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
 | `0`  | Ran clean — no violations.                                   |
-| `1`  | Failed to run — bad file, unknown `--deck`, or engine error. |
+| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3`  | Ran successfully, violations found.                          |
 

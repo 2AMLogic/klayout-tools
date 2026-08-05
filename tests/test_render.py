@@ -263,3 +263,110 @@ def test_no_layers_produces_empty_report(tmp_path, capsys):
     assert data["layer_count"] == 0
     assert data["rendered_count"] == 0
     assert data["layers"] == []
+
+
+# --- --top (issue #554) ------------------------------------------------------
+
+
+def _make_multi_top_layout() -> kdb.Layout:
+    """Two independent top cells, each drawing on its own, otherwise-unused
+    layer -- so a scoped ``--top`` render only picks up one of them."""
+    layout = kdb.Layout()
+
+    a = layout.create_cell("BLOCK_A")
+    la = layout.layer(1, 0)
+    a.shapes(la).insert(kdb.Box(0, 0, 1000, 1000))
+
+    b = layout.create_cell("BLOCK_B")
+    lb = layout.layer(2, 0)
+    b.shapes(lb).insert(kdb.Box(0, 0, 1000, 1000))
+
+    return layout
+
+
+def _write_multi_top(tmp_path: Path, name: str = "multi_top.gds") -> Path:
+    path = tmp_path / name
+    _make_multi_top_layout().write(str(path))
+    return path
+
+
+def test_top_scopes_layer_report_and_render(tmp_path):
+    path = _write_multi_top(tmp_path)
+
+    report_a = render_report(
+        str(path), output_dir=str(tmp_path / "out_a"), top="BLOCK_A"
+    )
+    by_pair_a = _by_pair(report_a["layers"])
+    assert by_pair_a[(1, 0)]["shapes"] == 1
+    assert by_pair_a[(1, 0)]["rendered"] is True
+    # Layer (2, 0) belongs only to BLOCK_B's hierarchy -- scoped to
+    # BLOCK_A it must report 0 shapes and not be rendered.
+    assert by_pair_a[(2, 0)]["shapes"] == 0
+    assert by_pair_a[(2, 0)]["rendered"] is False
+
+    report_all = render_report(str(path), output_dir=str(tmp_path / "out_all"))
+    by_pair_all = _by_pair(report_all["layers"])
+    assert by_pair_all[(1, 0)]["shapes"] == 1
+    assert by_pair_all[(2, 0)]["shapes"] == 1
+
+
+def test_top_unknown_cell_raises(tmp_path):
+    path = _write_multi_top(tmp_path)
+
+    with pytest.raises(RenderError, match="top cell not found in stream: NOPE"):
+        render_report(str(path), output_dir=str(tmp_path / "out"), top="NOPE")
+
+
+def test_top_on_single_top_cell_stream_renders_same_as_omitting_it(tmp_path):
+    path = _write_design(tmp_path)
+
+    with_top = render_report(str(path), output_dir=str(tmp_path / "out_top"), top="TOP")
+    without_top = render_report(str(path), output_dir=str(tmp_path / "out_default"))
+
+    # `output_dir`/per-file `path` fields differ by construction (distinct
+    # output directories); everything else -- what got rendered, and with
+    # what shape counts -- must match.
+    strip = {"output_dir", "overview", "layers"}
+    assert {k: v for k, v in with_top.items() if k not in strip} == {
+        k: v for k, v in without_top.items() if k not in strip
+    }
+    layers_with_top = [
+        {k: v for k, v in e.items() if k != "path"} for e in with_top["layers"]
+    ]
+    layers_without_top = [
+        {k: v for k, v in e.items() if k != "path"} for e in without_top["layers"]
+    ]
+    assert layers_with_top == layers_without_top
+
+
+def test_cli_top_flag_scopes_report(tmp_path, capsys):
+    path = _write_multi_top(tmp_path)
+
+    assert (
+        main(
+            [
+                "render",
+                str(path),
+                "-o",
+                str(tmp_path / "out"),
+                "--top",
+                "BLOCK_A",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    by_pair = _by_pair(data["layers"])
+    assert by_pair[(2, 0)]["shapes"] == 0
+
+
+def test_cli_unknown_top_exits_one(tmp_path, capsys):
+    path = _write_multi_top(tmp_path)
+
+    assert (
+        main(["render", str(path), "-o", str(tmp_path / "out"), "--top", "NOPE"]) == 1
+    )
+    err = capsys.readouterr().err
+    assert "top cell not found in stream: NOPE" in err

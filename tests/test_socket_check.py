@@ -402,6 +402,100 @@ def test_reserved_layers_passes_when_layer_absent(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# --top (issue #554)
+# ---------------------------------------------------------------------------
+
+
+def _make_multi_top_layout() -> kdb.Layout:
+    """Two independent top cells on the reserved layer (64, 20): only
+    ``BAD_TOP`` draws on it, so `--top` scoping is directly observable in
+    the `reserved_layers` check -- the whole-stream ``Layout.each_cell()``
+    walk `_check_reserved_layers` uses regardless of the per-cell-scoped
+    `pins`/`outline` checks."""
+    layout = kdb.Layout()
+    reserved = layout.layer(64, 20)
+    layout.set_info(reserved, kdb.LayerInfo(64, 20, "nwell.drawing"))
+
+    good = layout.create_cell("GOOD_TOP")
+    good.shapes(reserved)  # declared, no shapes
+
+    bad = layout.create_cell("BAD_TOP")
+    bad.shapes(reserved).insert(kdb.Box(0, 0, 100, 100))
+
+    return layout
+
+
+def test_top_scopes_reserved_layers_check(tmp_path):
+    layout_path = _write_layout(_make_multi_top_layout(), tmp_path)
+    socket_path = _write_socket(_basic_descriptor(), tmp_path)
+
+    report_good = run_socket_check(layout_path, socket_path, top="GOOD_TOP")
+    (reserved_good,) = [
+        c for c in report_good["checks"] if c["name"] == "reserved_layers"
+    ]
+    assert reserved_good["status"] == "pass"
+
+    report_bad = run_socket_check(layout_path, socket_path, top="BAD_TOP")
+    (reserved_bad,) = [
+        c for c in report_bad["checks"] if c["name"] == "reserved_layers"
+    ]
+    assert reserved_bad["status"] == "fail"
+    assert reserved_bad["violations"][0]["shapes"] == 1
+
+    # Default (no --top) behaviour is unchanged: every top cell is walked.
+    report_all = run_socket_check(layout_path, socket_path)
+    (reserved_all,) = [
+        c for c in report_all["checks"] if c["name"] == "reserved_layers"
+    ]
+    assert reserved_all["status"] == "fail"
+
+
+def test_top_unknown_cell_raises(tmp_path):
+    layout_path = _write_layout(_make_multi_top_layout(), tmp_path)
+    socket_path = _write_socket(_basic_descriptor(), tmp_path)
+
+    with pytest.raises(SocketCheckError, match="top cell not found in stream: NOPE"):
+        run_socket_check(layout_path, socket_path, top="NOPE")
+
+
+def test_cli_top_flag_scopes_report(tmp_path, capsys):
+    # `GOOD_TOP` carries no shapes and no `VDD` label, so the `pins` check
+    # still fails regardless of `--top` scoping -- assert the scoped field
+    # (`reserved_layers`) directly via JSON rather than the overall exit
+    # code, which the unrelated `pins` check also affects.
+    layout_path = _write_layout(_make_multi_top_layout(), tmp_path)
+    socket_path = _write_socket(_basic_descriptor(), tmp_path)
+
+    main(
+        [
+            "socket-check",
+            layout_path,
+            "--socket",
+            socket_path,
+            "--top",
+            "GOOD_TOP",
+            "--format",
+            "json",
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+    (reserved,) = [c for c in data["checks"] if c["name"] == "reserved_layers"]
+    assert reserved["status"] == "pass"
+
+
+def test_cli_unknown_top_exits_one(tmp_path, capsys):
+    layout_path = _write_layout(_make_multi_top_layout(), tmp_path)
+    socket_path = _write_socket(_basic_descriptor(), tmp_path)
+
+    assert (
+        main(["socket-check", layout_path, "--socket", socket_path, "--top", "NOPE"])
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "top cell not found in stream: NOPE" in err
+
+
+# ---------------------------------------------------------------------------
 # budgets
 # ---------------------------------------------------------------------------
 

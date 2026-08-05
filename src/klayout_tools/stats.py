@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
-from ._layout import load_layout
+from ._layout import cells_in_hierarchy, load_layout
 
 
 class StatsError(Exception):
@@ -45,19 +45,24 @@ def _shape_vertex_count(shape: Any) -> int:
     return polygon.num_points() if polygon is not None else 0
 
 
-def _accumulate(layout: Any, layer_index: int) -> tuple[int, int, int]:
+def _accumulate(cells: Any, layer_index: int) -> tuple[int, int, int]:
     """Sum (area_dbu2, polygon_count, vertex_count) for one layer.
 
-    Summed across all cell *definitions* (each shape counted once where it
-    is defined, not multiplied by instantiation) — the same convention
-    ``klt layers`` uses for shape counts. Overlapping shapes are **not**
-    merged, so area may double-count overlapping geometry; this keeps the
-    computation cheap and exactly reproducible.
+    ``cells`` is the set of cell *definitions* to sum over -- every cell in
+    the stream by default, or (with ``--top`` given, issue #554) just the
+    named top cell's own hierarchy (itself plus every cell it calls, see
+    :func:`klayout_tools._layout.cells_in_hierarchy`), so a scoped ``--top``
+    report does not silently keep summing shapes drawn only in unrelated
+    top-cell hierarchies. Each shape is counted once where it is defined,
+    not multiplied by instantiation -- the same convention ``klt layers``
+    uses for shape counts. Overlapping shapes are **not** merged, so area
+    may double-count overlapping geometry; this keeps the computation cheap
+    and exactly reproducible.
     """
     area_dbu2 = 0
     polygon_count = 0
     vertex_count = 0
-    for cell in layout.each_cell():
+    for cell in cells:
         for shape in cell.shapes(layer_index).each():
             if not _is_area_shape(shape):
                 continue
@@ -93,7 +98,9 @@ def _density(area_dbu2: int, bbox_area_dbu2: int) -> float:
     return area_dbu2 / bbox_area_dbu2
 
 
-def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
+def stats_report(
+    path: str, per_layer: bool = False, top: str | None = None
+) -> dict[str, Any]:
     """Compute area/density/polygon/vertex statistics for a GDSII or OASIS stream.
 
     KLayout auto-detects the stream format on read, so both ``.gds`` and
@@ -137,9 +144,20 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
     see ``docs/cli/drc.md`` -> "Reserved annotation layer"), matching ``klt
     layers``.
 
+    ``top`` (issue #554) names the top cell to report on when the stream has
+    more than one -- required in that case, optional otherwise (matching
+    ``klt extract --top``'s semantics). When given, both ``bbox_um`` *and*
+    every area/polygon/vertex count (``total`` and, if requested, each
+    ``layers[]`` entry) are scoped to that cell's own hierarchy -- itself
+    plus every cell it calls, directly or indirectly -- not the whole
+    stream; omitting it preserves today's whole-layout accumulation
+    (unchanged for a single-top-cell stream, since that hierarchy already is
+    the whole stream). See :func:`klayout_tools._layout.cells_in_hierarchy`.
+
     Raises :class:`StatsError` if the file is missing, unreadable, not a
-    recognisable layout stream, or has more than one top cell (ambiguous
-    bounding-box reference).
+    recognisable layout stream, ``top`` names a cell absent from the stream,
+    or (with ``top`` omitted) the stream has more than one top cell
+    (ambiguous bounding-box reference).
     """
     layout = load_layout(path, StatsError)
 
@@ -149,14 +167,22 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
 
     dbu = layout.dbu
 
-    top_cells = list(layout.top_cells())
-    if len(top_cells) > 1:
-        names = ", ".join(sorted(c.name for c in top_cells))
-        raise StatsError(
-            f"layout '{path}' has multiple top cells ({names}); "
-            "a single top cell is required for the bounding-box reference"
-        )
-    top_cell = top_cells[0] if top_cells else None
+    if top is not None:
+        top_cell = layout.cell(top)
+        if top_cell is None:
+            raise StatsError(f"top cell not found in stream: {top}")
+        scope_cells: Any = cells_in_hierarchy(layout, top_cell)
+    else:
+        top_cells = list(layout.top_cells())
+        if len(top_cells) > 1:
+            names = ", ".join(sorted(c.name for c in top_cells))
+            raise StatsError(
+                f"layout '{path}' has multiple top cells ({names}); "
+                "a single top cell is required for the bounding-box "
+                "reference. Pass --top to select one."
+            )
+        top_cell = top_cells[0] if top_cells else None
+        scope_cells = list(layout.each_cell())
 
     bbox = top_cell.bbox() if top_cell is not None else kdb.Box()
     bbox_area_dbu2 = 0 if bbox.empty() else bbox.width() * bbox.height()
@@ -167,7 +193,7 @@ def stats_report(path: str, per_layer: bool = False) -> dict[str, Any]:
     per_layer_entries: list[dict[str, Any]] | None = [] if per_layer else None
 
     for layer_index in layout.layer_indexes():
-        area_dbu2, polygon_count, vertex_count = _accumulate(layout, layer_index)
+        area_dbu2, polygon_count, vertex_count = _accumulate(scope_cells, layer_index)
         total_area_dbu2 += area_dbu2
         total_polygon_count += polygon_count
         total_vertex_count += vertex_count

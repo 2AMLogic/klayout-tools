@@ -32,6 +32,7 @@ import os
 from typing import Any
 
 from ._layout import load_layout
+from ._layout import select_top_cells as _select_top_cells
 from ._provenance import build_provenance
 from .decks import (
     DrcRule,
@@ -65,7 +66,7 @@ class DrcError(Exception):
     """
 
 
-def run_drc(path: str, deck_name: str) -> dict[str, Any]:
+def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
     Returns a dict matching the documented JSON schema (see
@@ -181,9 +182,17 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     ``nominal_dbu_um / layout.dbu`` so the same physical geometry produces
     identical violations regardless of the input stream's database unit.
 
+    ``top`` (issue #554) restricts the cells checked -- and the
+    ``coverage.layers_in_stream_without_rules``/``layers_checked``
+    denominator, which is recomputed from the same scope via
+    ``layers_report(path, top=top)`` -- to one named top cell, instead of
+    every top cell in the stream (today's default, unchanged when omitted).
+    A named cell absent from the stream is a :class:`DrcError`, matching
+    ``klt ring-check --top``.
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
-    name is unknown, or a rule is malformed (e.g. a two-layer check missing
-    ``other_layer``).
+    name is unknown, ``top`` names a cell absent from the stream, or a rule
+    is malformed (e.g. a two-layer check missing ``other_layer``).
     """
     # Checked here (ahead of deck lookup) so a missing/bad path is reported
     # before an unknown deck name, matching this command's historical error
@@ -212,7 +221,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     # kdb.Region() below.
     import klayout.db as kdb
 
-    top_cells = list(layout.top_cells())
+    top_cells = _select_top_cells(layout, top, DrcError)
 
     # Deck-static: every (layer, datatype) any rule in this deck references,
     # regardless of what's actually present in `path`.
@@ -231,9 +240,13 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
-    # `kdb.Layout` layer walk -- see #189.
+    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
+    # same cells `top_cells` above was just restricted to, so a scoped run's
+    # `coverage` reflects only what was actually checked, not the whole
+    # stream's layer usage.
     stream_layer_tuples = {
-        (entry["layer"], entry["datatype"]) for entry in layers_report(path)["layers"]
+        (entry["layer"], entry["datatype"])
+        for entry in layers_report(path, top=top)["layers"]
     }
 
     violations: list[dict[str, Any]] = []

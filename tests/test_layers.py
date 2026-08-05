@@ -190,3 +190,86 @@ def test_layers_report_annotation_range_boundaries(tmp_path, layer, datatype, ex
         e for e in report["layers"] if (e["layer"], e["datatype"]) == (layer, datatype)
     )
     assert entry["annotation"] is expected
+
+
+# --- --top (issue #554) ------------------------------------------------------
+
+
+def _make_multi_top_layout() -> kdb.Layout:
+    """Two independent top cells with different shape counts on (1, 0):
+
+    - ``BLOCK_A`` draws one shape directly and instantiates
+      ``BLOCK_A_CHILD`` (one more shape) -- 2 shapes in ``BLOCK_A``'s
+      hierarchy.
+    - ``BLOCK_B`` draws a single shape -- 1 shape in its own hierarchy.
+
+    A naive ``--top`` fix that keeps summing shapes across
+    ``Layout.each_cell()`` regardless of which top cell was asked for would
+    report 3 shapes for both.
+    """
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+
+    a = layout.create_cell("BLOCK_A")
+    a_child = layout.create_cell("BLOCK_A_CHILD")
+    a.shapes(li).insert(kdb.Box(0, 0, 10, 10))
+    a_child.shapes(li).insert(kdb.Box(0, 0, 10, 10))
+    a.insert(kdb.CellInstArray(a_child.cell_index(), kdb.Trans(20, 20)))
+
+    b = layout.create_cell("BLOCK_B")
+    b.shapes(li).insert(kdb.Box(0, 0, 10, 10))
+
+    return layout
+
+
+def test_top_scopes_shape_counts_to_named_cell_hierarchy(tmp_path):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    report_a = layers_report(str(path), top="BLOCK_A")
+    (entry_a,) = report_a["layers"]
+    assert entry_a["shapes"] == 2
+
+    report_b = layers_report(str(path), top="BLOCK_B")
+    (entry_b,) = report_b["layers"]
+    assert entry_b["shapes"] == 1
+
+    # Neither scoped count equals the whole-stream union (3 shapes) --
+    # proving the count actually re-scopes, not just accepts the flag.
+    report_all = layers_report(str(path))
+    (entry_all,) = report_all["layers"]
+    assert entry_all["shapes"] == 3
+
+
+def test_top_unknown_cell_raises(tmp_path):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    with pytest.raises(LayersError, match="top cell not found in stream: NOPE"):
+        layers_report(str(path), top="NOPE")
+
+
+def test_top_on_single_top_cell_stream_matches_omitting_it(tmp_path):
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))
+
+    assert layers_report(str(path), top="TOP") == layers_report(str(path))
+
+
+def test_cli_top_flag_scopes_multi_top_report(tmp_path, capsys):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    assert main(["layers", str(path), "--top", "BLOCK_B", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    (entry,) = data["layers"]
+    assert entry["shapes"] == 1
+
+
+def test_cli_unknown_top_exits_one(tmp_path, capsys):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    assert main(["layers", str(path), "--top", "NOPE"]) == 1
+    err = capsys.readouterr().err
+    assert "top cell not found in stream: NOPE" in err

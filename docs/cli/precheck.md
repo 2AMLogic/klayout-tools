@@ -6,7 +6,7 @@ structured data.
 
 ```
 klt precheck <file> [--grid-um <float>] [--allowed-layers <json-or-path>]
-             [--deck sky130|gf180mcu] [--format text|json]
+             [--deck sky130|gf180mcu] [--top <cell>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -21,6 +21,12 @@ klt precheck <file> [--grid-um <float>] [--allowed-layers <json-or-path>]
   layer pairs from for the `pin_labels_over_drawing` check. Not validated by
   argparse — an unknown deck name exits `1` with a clean error. Omitted by
   default, which **skips** that check.
+- `--top` — top cell to check when the stream has more than one; omit to
+  check every top cell (today's default, unchanged). Every check is scoped
+  to that cell's own hierarchy — itself plus every cell it calls, directly
+  or indirectly — including `cell_names`/`layer_whitelist`, which otherwise
+  walk the whole stream regardless of top cell. A named cell absent from the
+  stream exits `1` with a clean error.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Why a separate verb from `klt drc`
@@ -236,7 +242,7 @@ stable across runs of the same input).
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
 | `0`  | Ran successfully — every check passed or was skipped, none failed. |
-| `1`  | Failed to run — bad file, unknown `--deck`, or a bad `--grid-um`/`--allowed-layers` value. |
+| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or a bad `--grid-um`/`--allowed-layers` value. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3`  | Ran successfully, at least one check failed.                 |
 

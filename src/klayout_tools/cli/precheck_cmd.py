@@ -37,6 +37,7 @@ def run(args: argparse.Namespace) -> int:
             grid_um=args.grid_um,
             allowed_layers=allowed_layers,
             deck=args.deck,
+            top=args.top,
         )
     except PrecheckError as exc:
         return emit_error("precheck", str(exc), args.format)

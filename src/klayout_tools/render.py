@@ -54,6 +54,7 @@ def render_report(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     background: str = "#ffffff",
+    top: str | None = None,
 ) -> dict[str, Any]:
     """Render one PNG per non-empty layer of a GDSII or OASIS stream.
 
@@ -115,8 +116,20 @@ def render_report(
     reserved 990-999 range is still named as such here, even if it happens
     to carry shapes and gets rendered.
 
+    ``top`` (issue #554) restricts the render to one named top cell's own
+    hierarchy instead of the whole stream (today's default, unchanged when
+    omitted): the per-layer ``shapes``/render-or-skip decision comes from
+    ``layers_report(path, top=top)`` (already scoped, see its docstring),
+    and the offscreen ``LayoutView``'s active cellview is switched to
+    ``top`` before rendering (``CellView.set_cell_name``) so
+    ``max_hier``/``zoom_fit`` -- and therefore both the overview and every
+    per-layer PNG -- only draw geometry reachable from that cell. A named
+    cell absent from the stream is a :class:`RenderError`, matching
+    ``klt ring-check --top``.
+
     Raises :class:`RenderError` if the file is missing, unreadable, not a
-    recognisable layout stream, or ``width``/``height`` is not positive.
+    recognisable layout stream, ``top`` names a cell absent from the
+    stream, or ``width``/``height`` is not positive.
     """
     if width <= 0 or height <= 0:
         raise RenderError(f"invalid image size: {width}x{height}")
@@ -126,7 +139,7 @@ def render_report(
         )
 
     try:
-        report = layers_report(path)
+        report = layers_report(path, top=top)
     except LayersError as exc:
         raise RenderError(str(exc)) from exc
 
@@ -149,6 +162,18 @@ def render_report(
         raise RenderError(f"could not read layout '{path}': {exc}") from exc
 
     try:
+        if top is not None:
+            # `layers_report(path, top=top)` above already validated `top`
+            # exists in this same stream, so this is not expected to fail --
+            # checked anyway (`cellview.cell is None` on an unknown name)
+            # rather than trusting that invariant silently, since a render
+            # against every cell in the stream instead of a nonexistent
+            # `--top` would be a silent wrong-answer, not a loud failure.
+            cellview = view.cellview(0)
+            cellview.set_cell_name(top)
+            if cellview.cell is None:
+                raise RenderError(f"top cell not found in stream: {top}")
+
         view.add_missing_layers()
         view.max_hier()
         view.resize(width, height)

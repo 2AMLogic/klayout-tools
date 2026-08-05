@@ -133,6 +133,79 @@ def test_run_drc_raises_on_unknown_deck(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# --top (issue #554)
+# ---------------------------------------------------------------------------
+
+
+def _make_multi_top_layout() -> kdb.Layout:
+    """Two independent top cells: ``BAD`` seeds one ``poly.width.1``
+    violation, ``GOOD`` is clean -- so ``--top`` scoping is observable."""
+    layout = kdb.Layout()
+    poly = layout.layer(66, 20)
+    layout.set_info(poly, kdb.LayerInfo(66, 20, "poly.drawing"))
+
+    good = layout.create_cell("GOOD")
+    good.shapes(poly).insert(kdb.Box(0, 0, 200, 2000))  # 200 dbu -> clean
+
+    bad = layout.create_cell("BAD")
+    bad.shapes(poly).insert(kdb.Box(0, 0, 50, 2000))  # 50 dbu -> violation
+
+    return layout
+
+
+def test_top_scopes_violations_to_named_cell(tmp_path):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    report_good = run_drc(str(path), "sky130", top="GOOD")
+    assert report_good["status"] == "clean"
+    assert report_good["violation_count"] == 0
+
+    report_bad = run_drc(str(path), "sky130", top="BAD")
+    assert report_bad["status"] == "violations"
+    assert report_bad["violation_count"] == 1
+    assert {v["cell"] for v in report_bad["violations"]} == {"BAD"}
+
+
+def test_top_unknown_cell_raises(tmp_path):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    with pytest.raises(DrcError, match="top cell not found in stream: NOPE"):
+        run_drc(str(path), "sky130", top="NOPE")
+
+
+def test_top_omitted_checks_every_top_cell(tmp_path):
+    """Default (no ``--top``) behaviour is unchanged: every top cell is
+    checked, so the seeded ``BAD`` violation still surfaces."""
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+    assert report["violation_count"] == 1
+    assert {v["cell"] for v in report["violations"]} == {"BAD"}
+
+
+def test_cli_top_flag_scopes_report(tmp_path, capsys):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    assert main(["drc", str(path), "--deck", "sky130", "--top", "GOOD"]) == 0
+    capsys.readouterr()
+
+    assert main(["drc", str(path), "--deck", "sky130", "--top", "BAD"]) == 3
+
+
+def test_cli_unknown_top_exits_one(tmp_path, capsys):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    assert main(["drc", str(path), "--deck", "sky130", "--top", "NOPE"]) == 1
+    err = capsys.readouterr().err
+    assert "top cell not found in stream: NOPE" in err
+
+
+# ---------------------------------------------------------------------------
 # per-instance attribution: source_cell / source_path (#451)
 # ---------------------------------------------------------------------------
 

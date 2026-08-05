@@ -8,7 +8,7 @@ from .output import emit_error, emit_success, render_table
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = layers_report(args.file)
+        report = layers_report(args.file, top=args.top)
     except LayersError as exc:
         return emit_error("layers", str(exc), args.format)
 

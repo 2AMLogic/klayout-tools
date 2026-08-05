@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
-from ._layout import load_layout
+from ._layout import cells_in_hierarchy, load_layout
 
 
 class LayersError(Exception):
@@ -25,7 +25,7 @@ class LayersError(Exception):
     """
 
 
-def layers_report(path: str) -> dict[str, Any]:
+def layers_report(path: str, top: str | None = None) -> dict[str, Any]:
     """Enumerate the layers of a GDSII or OASIS stream.
 
     KLayout auto-detects the stream format on read, so both ``.gds`` and
@@ -66,17 +66,34 @@ def layers_report(path: str) -> dict[str, Any]:
     "this is a floorplan reservation" from "this is unrecognised real
     geometry" without opening the source that generated the GDS.
 
-    Raises :class:`LayersError` if the file is missing, unreadable, or not a
-    recognisable layout stream.
+    ``top`` (issue #554) restricts the per-layer ``shapes`` counts to one
+    named top cell's own hierarchy -- itself plus every cell it calls,
+    directly or indirectly (see
+    :func:`klayout_tools._layout.cells_in_hierarchy`) -- instead of every
+    cell definition in the stream. Optional: when omitted, today's
+    whole-stream union over every top cell is unchanged; when given, it must
+    name a cell present in the stream (like ``klt extract --top``, not
+    validated to actually be parent-less), else :class:`LayersError` is
+    raised.
+
+    Raises :class:`LayersError` if the file is missing, unreadable, not a
+    recognisable layout stream, or ``top`` names a cell absent from the
+    stream.
     """
     layout = load_layout(path, LayersError)
+
+    if top is not None:
+        top_cell = layout.cell(top)
+        if top_cell is None:
+            raise LayersError(f"top cell not found in stream: {top}")
+        scope_cells: list[Any] = cells_in_hierarchy(layout, top_cell)
+    else:
+        scope_cells = list(layout.each_cell())
 
     layers: list[dict[str, Any]] = []
     for layer_index in layout.layer_indexes():
         info = layout.get_info(layer_index)
-        shape_count = sum(
-            cell.shapes(layer_index).size() for cell in layout.each_cell()
-        )
+        shape_count = sum(cell.shapes(layer_index).size() for cell in scope_cells)
         layers.append(
             {
                 "layer": info.layer,

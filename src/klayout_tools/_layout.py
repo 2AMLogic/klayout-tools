@@ -57,6 +57,51 @@ def load_layout(path: str, error_cls: type[Exception]) -> kdb.Layout:
     return layout
 
 
+def select_top_cells(
+    layout: kdb.Layout, top: str | None, error_cls: type[Exception]
+) -> list[kdb.Cell]:
+    """Return the top cells a verb should operate on, honouring an optional
+    ``top`` filter (issue #554).
+
+    With ``top`` unset, every top cell in the stream is returned -- today's
+    default, whole-stream behaviour for verbs that can sensibly check/render
+    more than one top cell at once (``klt layers``, ``klt drc``, ``klt
+    precheck``, ``klt render``, ``klt socket-check``). With ``top`` set, only
+    that named cell is returned -- and it must exist, else ``error_cls`` is
+    raised with ``"top cell not found in stream: <top>"`` (a request the
+    caller can fix, not a silent empty result).
+
+    This is the "optional scope, default to every top cell" pattern
+    originally implemented by ``ring_check.py``'s own ``_select_top_cells``;
+    factored out here so the six verbs added in #554 share one
+    implementation instead of copying it a sixth time.
+    """
+    if top is None:
+        return list(layout.top_cells())
+
+    cell = layout.cell(top)
+    if cell is None:
+        raise error_cls(f"top cell not found in stream: {top}")
+    return [cell]
+
+
+def cells_in_hierarchy(layout: kdb.Layout, top_cell: kdb.Cell) -> list[kdb.Cell]:
+    """Every cell *definition* reachable from ``top_cell``: itself plus every
+    cell it calls, directly or indirectly (``Cell.called_cells()``).
+
+    Whole-layout shape-accumulation passes (``stats.py``'s ``_accumulate``,
+    ``layers.py``'s per-layer shape counts, ...) iterate ``Layout.each_cell()``
+    by default -- every cell definition in the *entire* stream, regardless of
+    which top cell a caller asked about. When a caller passes ``--top`` to
+    scope such a verb to one cell, restricting iteration to this function's
+    return value (rather than leaving it at ``each_cell()``) is what actually
+    re-scopes the count -- picking a top cell for the bounding box alone
+    would leave a self-inconsistent report: a bbox scoped to one cell, but
+    area/shape counts still summed across the whole library (issue #554).
+    """
+    return [top_cell] + [layout.cell(idx) for idx in top_cell.called_cells()]
+
+
 def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:
     """Write ``layout`` to ``path`` with deterministic (reproducible-build) output.
 

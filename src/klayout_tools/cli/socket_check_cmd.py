@@ -25,7 +25,7 @@ EXIT_FAIL = 3
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_socket_check(args.file, args.socket)
+        report = run_socket_check(args.file, args.socket, top=args.top)
     except SocketCheckError as exc:
         return emit_error("socket-check", str(exc), args.format)
 

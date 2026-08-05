@@ -38,7 +38,8 @@ import json
 import os
 from typing import Any
 
-from ._layout import load_layout
+from ._layout import cells_in_hierarchy, load_layout
+from ._layout import select_top_cells as _select_top_cells
 
 #: Every check name this module runs, in report order.
 CHECK_NAMES: tuple[str, ...] = ("pins", "outline", "reserved_layers")
@@ -67,7 +68,9 @@ class SocketCheckError(Exception):
     """
 
 
-def run_socket_check(layout_path: str, descriptor_path: str) -> dict[str, Any]:
+def run_socket_check(
+    layout_path: str, descriptor_path: str, top: str | None = None
+) -> dict[str, Any]:
     """Check the layout at ``layout_path`` against the socket descriptor at
     ``descriptor_path``.
 
@@ -123,20 +126,41 @@ def run_socket_check(layout_path: str, descriptor_path: str) -> dict[str, Any]:
       listed in the descriptor's ``reserved_layers``. Skipped when the
       descriptor declares no reserved layers.
 
+    ``top`` (issue #554) restricts every check to one named top cell instead
+    of every top cell in the stream (today's default, unchanged when
+    omitted): ``pins``/``outline`` scope by filtering the ``top_cells`` list
+    each already flattens per-cell (already hierarchy-inclusive via
+    ``begin_shapes_rec``); ``reserved_layers`` additionally restricts its
+    own whole-stream ``Layout.each_cell()`` shape-count walk to that cell's
+    own hierarchy (see :func:`klayout_tools._layout.cells_in_hierarchy`) --
+    it would otherwise keep reporting reserved-layer usage from *every* top
+    cell's hierarchy regardless of ``--top``. A named cell absent from the
+    stream is a :class:`SocketCheckError`, matching ``klt ring-check --top``.
+
     Raises :class:`SocketCheckError` if the layout file is missing/
-    unreadable, the descriptor file is missing/unreadable/not valid JSON, or
-    the descriptor fails the documented shape validation (see
-    :func:`_load_descriptor`).
+    unreadable, the descriptor file is missing/unreadable/not valid JSON,
+    ``top`` names a cell absent from the layout, or the descriptor fails the
+    documented shape validation (see :func:`_load_descriptor`).
     """
     layout = load_layout(layout_path, SocketCheckError)
-    top_cells = list(layout.top_cells())
+    top_cells = _select_top_cells(layout, top, SocketCheckError)
+
+    scope_cell_indices: set[int] | None = None
+    if top is not None:
+        # `_select_top_cells` above already validated `top` and returned
+        # exactly one cell.
+        scope_cell_indices = {
+            cell.cell_index() for cell in cells_in_hierarchy(layout, top_cells[0])
+        }
 
     descriptor = _load_descriptor(descriptor_path)
 
     checks = [
         _check_pins(layout, top_cells, descriptor["pins"]),
         _check_outline(layout, top_cells, descriptor["outline"]),
-        _check_reserved_layers(layout, descriptor["reserved_layers"]),
+        _check_reserved_layers(
+            layout, descriptor["reserved_layers"], scope_cell_indices
+        ),
     ]
 
     overall_status = "fail" if any(c["status"] == "fail" for c in checks) else "pass"
@@ -607,7 +631,9 @@ def _check_outline(
 
 
 def _check_reserved_layers(
-    layout: Any, reserved_layers: list[tuple[int, int]]
+    layout: Any,
+    reserved_layers: list[tuple[int, int]],
+    scope_cell_indices: set[int] | None = None,
 ) -> dict[str, Any]:
     if not reserved_layers:
         return _skipped(
@@ -615,15 +641,18 @@ def _check_reserved_layers(
         )
 
     reserved = set(reserved_layers)
+    cells = (
+        list(layout.each_cell())
+        if scope_cell_indices is None
+        else [layout.cell(i) for i in scope_cell_indices]
+    )
     violations: list[dict[str, Any]] = []
     for layer_index in layout.layer_indexes():
         info = layout.get_info(layer_index)
         layer_tuple = (info.layer, info.datatype)
         if layer_tuple not in reserved:
             continue
-        shape_count = sum(
-            cell.shapes(layer_index).size() for cell in layout.each_cell()
-        )
+        shape_count = sum(cell.shapes(layer_index).size() for cell in cells)
         if shape_count == 0:
             continue
         violations.append(

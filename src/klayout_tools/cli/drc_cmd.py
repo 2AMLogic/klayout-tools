@@ -22,7 +22,7 @@ EXIT_VIOLATIONS = 3
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_drc(args.file, args.deck)
+        report = run_drc(args.file, args.deck, top=args.top)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
 

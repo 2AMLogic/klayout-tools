@@ -159,6 +159,100 @@ def test_stats_report_multiple_top_cells_raises(tmp_path):
         stats_report(str(path))
 
 
+# --- --top (issue #554) ------------------------------------------------------
+
+
+def _make_multi_top_layout() -> kdb.Layout:
+    """A multi-top-cell stream where per-top-cell scoping is observable.
+
+    - ``BLOCK_A`` draws a 1x1 um box directly and instantiates
+      ``BLOCK_A_CHILD`` (another 1x1 um box) -- hierarchy total area 2 um^2.
+    - ``BLOCK_B`` (an unrelated, standalone top cell) draws a single 5x5 um
+      box -- area 25 um^2.
+
+    A naive ``--top`` fix that only picks the bbox but keeps summing shapes
+    across ``Layout.each_cell()`` would report the same (wrong) 27 um^2 total
+    for both ``--top BLOCK_A`` and ``--top BLOCK_B``.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li = layout.layer(1, 0)
+
+    a = layout.create_cell("BLOCK_A")
+    a_child = layout.create_cell("BLOCK_A_CHILD")
+    a.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    a_child.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    a.insert(kdb.CellInstArray(a_child.cell_index(), kdb.Trans(2000, 2000)))
+
+    b = layout.create_cell("BLOCK_B")
+    b.shapes(li).insert(kdb.Box(0, 0, 5000, 5000))
+
+    return layout
+
+
+def test_top_scopes_area_to_named_cell_hierarchy(tmp_path):
+    """``--top`` restricts area/polygon/vertex counts to that cell's own
+    hierarchy, not the whole stream (issue #554) -- the risk a naive fix
+    (scoping only the bbox) would miss."""
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    report_a = stats_report(str(path), top="BLOCK_A")
+    assert report_a["top_cell"] == "BLOCK_A"
+    assert report_a["total"]["area_um2"] == pytest.approx(2.0)
+    assert report_a["total"]["polygon_count"] == 2
+
+    report_b = stats_report(str(path), top="BLOCK_B")
+    assert report_b["top_cell"] == "BLOCK_B"
+    assert report_b["total"]["area_um2"] == pytest.approx(25.0)
+    assert report_b["total"]["polygon_count"] == 1
+
+    # Neither scoped total equals the whole-library sum (27 um^2, 3 polygons)
+    # -- proving the counts actually re-scope, not just the bbox/top_cell name.
+    assert report_a["total"]["area_um2"] < 27.0
+    assert report_b["total"]["area_um2"] < 27.0
+
+
+def test_top_unknown_cell_raises(tmp_path):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    with pytest.raises(StatsError, match="top cell not found in stream: NOPE"):
+        stats_report(str(path), top="NOPE")
+
+
+def test_top_on_single_top_cell_stream_matches_omitting_it(tmp_path):
+    """A single-top-cell stream with ``--top`` naming that cell reports
+    identically to omitting ``--top`` (issue #554 edge case)."""
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))
+
+    with_top = stats_report(str(path), per_layer=True, top="TOP")
+    without_top = stats_report(str(path), per_layer=True)
+    assert with_top == without_top
+
+
+def test_cli_top_flag_scopes_multi_top_report(tmp_path, capsys):
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    assert main(["stats", str(path), "--top", "BLOCK_A", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["top_cell"] == "BLOCK_A"
+    assert data["total"]["area_um2"] == pytest.approx(2.0)
+
+
+def test_cli_missing_top_on_multi_top_stream_exits_one(tmp_path, capsys):
+    """Without ``--top``, a multi-top-cell stream still exits 1 with a clean
+    error (not a stack trace) -- unchanged default behaviour."""
+    path = tmp_path / "multi_top.gds"
+    _make_multi_top_layout().write(str(path))
+
+    assert main(["stats", str(path)]) == 1
+    err = capsys.readouterr().err
+    assert "multiple top cells" in err
+
+
 def test_json_contract(tmp_path, capsys):
     """`--format json` emits exactly the documented schema."""
     path = tmp_path / "design.oas"

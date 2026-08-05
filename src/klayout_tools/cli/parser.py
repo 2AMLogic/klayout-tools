@@ -59,6 +59,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
     layers_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     layers_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one; omit "
+            "to report shape counts summed across every top cell"
+        ),
+    )
+    layers_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -80,6 +88,14 @@ def create_parser() -> argparse.ArgumentParser:
         "--per-layer",
         action="store_true",
         help="also report the same statistics broken down per layer",
+    )
+    stats_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
     )
     stats_parser.add_argument(
         "--format",
@@ -131,6 +147,14 @@ def create_parser() -> argparse.ArgumentParser:
             "argparse -- an unknown deck name exits 1 with a clean error, "
             "per docs/cli/drc.md's exit-code contract, rather than "
             "argparse's usage-error exit 2."
+        ),
+    )
+    drc_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
         ),
     )
     drc_parser.add_argument(
@@ -187,6 +211,14 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     precheck_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    precheck_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -225,6 +257,14 @@ def create_parser() -> argparse.ArgumentParser:
             "a missing/malformed descriptor exits 1 with a clean error, per "
             "docs/cli/socket-check.md's exit-code contract, rather than "
             "argparse's usage-error exit 2."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
         ),
     )
     socket_check_parser.add_argument(
@@ -480,6 +520,14 @@ def create_parser() -> argparse.ArgumentParser:
         "--background",
         default="#ffffff",
         help="canvas color as #rrggbb/#rgb hex (default: #ffffff)",
+    )
+    render_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to render when the stream has more than one; omit to "
+            "render every top cell"
+        ),
     )
     render_parser.add_argument(
         "--format",

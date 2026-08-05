@@ -4,7 +4,7 @@ Render one PNG image per non-empty layer of a GDSII or OASIS layout stream,
 built on the same layer enumeration as [`klt layers`](layers.md).
 
 ```
-klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrggbb] [--format text|json]
+klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrggbb] [--top <cell>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -15,6 +15,11 @@ klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrgg
   Both must be positive.
 - `--background` — canvas color as a `#rrggbb`/`#rgb` hex string (default
   `#ffffff`).
+- `--top` — top cell to render when the stream has more than one; omit to
+  render every top cell (today's default, unchanged). The underlying
+  per-layer shape counts (from `klt layers`) and the rendered geometry
+  itself are both scoped to that cell's own hierarchy. A named cell absent
+  from the stream exits `1` with a clean error.
 - `--format` — `text` (default, a human-readable table) or `json`.
 
 The command runs fully headless via KLayout's `klayout.lay.LayoutView`, which
@@ -151,7 +156,7 @@ layer  datatype  name    shapes  annotation  path
 | Exit code | Meaning                                                              |
 | --------- | --------------------------------------------------------------------- |
 | `0`       | Success — report written to stdout, PNGs written to `output_dir`.     |
-| `1`       | The file is missing, unreadable, not a recognisable layout, `--width`/`--height` is not positive, or `--background` is not a valid hex color. |
+| `1`       | The file is missing, unreadable, not a recognisable layout, `--top` names a cell absent from the stream, `--width`/`--height` is not positive, or `--background` is not a valid hex color. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 On error, a concise message is written to **stderr** and nothing is written to

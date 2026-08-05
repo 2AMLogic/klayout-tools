@@ -3,11 +3,17 @@
 Enumerate the layers of a GDSII or OASIS layout stream.
 
 ```
-klt layers <file> [--format text|json]
+klt layers <file> [--top <cell>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
+- `--top` — top cell to report on when the stream has more than one; omit to
+  report shape counts summed across every top cell (today's default,
+  unchanged). When given, `shapes` is restricted to that cell's own
+  hierarchy — itself plus every cell it calls, directly or indirectly — not
+  the whole stream. A named cell absent from the stream exits `1` with a
+  clean error.
 - `--format` — `text` (default, a human-readable aligned table) or `json`.
 
 The command runs fully headless via KLayout's batch database API
@@ -62,9 +68,15 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 - **Sort order.** `layers` is sorted by `(layer, datatype)` ascending, so
   output is deterministic across runs and platforms.
 - **Shape counts are per-cell-definition.** Each shape is counted once where it
-  is *defined*, summed over every cell in the layout. Shapes are **not**
-  multiplied by how many times their cell is instantiated. Instance-flattened
-  and area-based statistics are a separate concern (`klt stats`).
+  is *defined*. Shapes are **not** multiplied by how many times their cell is
+  instantiated. Instance-flattened and area-based statistics are a separate
+  concern (`klt stats`).
+- **`--top` scopes the summation, not just which cells are "checked."**
+  Without `--top`, counts are summed over every cell in the stream (today's
+  default, unchanged). With `--top <cell>`, counts are summed only over
+  `<cell>`'s own hierarchy — itself plus every cell it calls, directly or
+  indirectly — so a library stream with several unrelated top cells reports
+  one cell's own shape usage, not the whole library's.
 - **Empty layers.** A layer present in the stream's layer table but carrying no
   shapes is still listed, with `shapes: 0`. (Note: plain GDSII does not persist
   empty layers on write, so they typically appear only in OASIS inputs.)
@@ -111,7 +123,7 @@ whose `annotation` field is `true` renders as `yes` in the table.
 | Exit code | Meaning                                                              |
 | --------- | ------------------------------------------------------------------- |
 | `0`       | Success — report written to stdout.                                 |
-| `1`       | The file is missing, unreadable, or not a recognisable layout.      |
+| `1`       | The file is missing, unreadable, not a recognisable layout, or `--top` names a cell absent from the stream. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse.|
 
 On error, a concise message is written to **stderr** and nothing is written to
