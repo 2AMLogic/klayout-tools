@@ -723,6 +723,39 @@ uses comma-containing label text should expect (and can safely ignore) a
 `merged_net_labels[]` entry whose `labels` do not actually correspond to
 independent naming intents.
 
+### Voltage-domain markers (issue #552)
+
+Some PDKs draw **two gate-oxide/voltage domains** on the same wafer, selected
+by a marker layer — e.g. gf180mcu's `Dualgate` (55/0) selects its 5V/6V
+thick-oxide domain, whose DRM publishes a distinct set of MOS models with
+materially different characteristics from the default (thin-oxide) ones.
+This curated deck derives MOS flavour from the well layer alone
+(`nfet_active = active - nwell`) and never reads such a marker, so a
+transistor drawn entirely inside `Dualgate` still extracts bound to the
+deck's single (default) model name — e.g. `nfet_03v3` even for a device that
+is actually 5V/6V, once `--pdk` resolves a subcircuit binding. Nothing about
+the JSON response says the binding might be wrong.
+
+`klt extract` flags this rather than silently emitting a plausible-looking
+wrong model: whenever a deck-registered voltage-domain marker (today, only
+gf180mcu's `Dualgate`) is present in the input stream and its geometry
+overlaps extracted MOS device geometry (the deck's `active` region), two
+things are produced:
+
+- A structured entry in the response's `voltage_domain_warnings[]` array
+  (see "JSON schema" above): `{ "marker": "55/0", "description": str }` —
+  the same registry entry (and description text) `klt drc`'s
+  `coverage.voltage_domain_warnings` surfaces for the same deck, so the
+  wording matches across both commands for the same layout.
+- A matching prose entry in `warnings[]`.
+
+**What this field does and does not guarantee**: it flags that the bound
+model name may be wrong for this device. It does **not** correct the
+binding — that would require a per-flavour MOS marker field this deck's
+`ExtractionDeck` does not have yet (a separate, larger follow-on). The
+device still extracts, and still binds to the same (default) model name, as
+it did before this field existed; only the signal is new.
+
 ### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462 and to junction diodes in #542)
 
 Analog matching practice puts **dummy devices** on the edges of a matched
@@ -1243,6 +1276,7 @@ exit codes).
   "black_box_regions": [],
   "unmodelled_poly": [],
   "merged_net_labels": [],
+  "voltage_domain_warnings": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -1280,6 +1314,7 @@ exit codes).
 | `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `merged_net_labels` | array\<object\>          | One entry per net whose KLayout-assigned name is a comma-joined merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`labels` is `net` split on `,`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
+| `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |

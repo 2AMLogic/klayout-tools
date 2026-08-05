@@ -26,7 +26,12 @@ import pytest
 
 from klayout_tools import pdk
 from klayout_tools.cli import main
-from klayout_tools.decks import DiodeDevice, ExtractionDeck, get_extraction_deck
+from klayout_tools.decks import (
+    DiodeDevice,
+    ExtractionDeck,
+    get_extraction_deck,
+    get_unmodeled_voltage_markers,
+)
 from klayout_tools.extract import (
     ExtractError,
     _describe_devices,
@@ -3508,6 +3513,66 @@ def test_gf180mcu_without_upper_stack_drains_stay_disconnected(tmp_path):
     assert len(nfets) == 2
     drains = {d["nets"]["d"] for d in nfets}
     assert len(drains) == 2, f"drains should be disconnected without a bridge, {drains}"
+
+
+def _make_gf180mcu_dualgate_mos_layout(*, dualgate_overlap: bool) -> kdb.Layout:
+    """One gf180mcu NMOS (`_draw_gf180mcu_nmos`) with a `Dualgate` (55/0)
+    marker drawn either directly over it (``dualgate_overlap=True`` -- issue
+    #552's own extraction reproducer: a transistor drawn entirely inside the
+    5V/6V marker) or far away (``dualgate_overlap=False`` -- present in the
+    stream, but overlapping no MOS device geometry, the
+    false-positive-avoidance counterfactual)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_gf180mcu_nmos(top, layout, 0, "S", drain_label="D")
+
+    def d(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    if dualgate_overlap:
+        d(55, 0, kdb.Box(-500, -500, 3500, 1500))  # Dualgate, covers the NMOS
+    else:
+        d(55, 0, kdb.Box(100_000, 100_000, 101_000, 101_000))  # far away
+
+    return layout
+
+
+def test_gf180mcu_extract_warns_mos_inside_dualgate_marker(tmp_path):
+    """Issue #552's own extraction reproducer: a transistor drawn entirely
+    inside `Dualgate` (the 5V/6V marker) still extracts as an ordinary
+    `nfet` device -- this deck derives MOS flavour from the well layer alone
+    and never reads the marker, so the extracted class/model binding is
+    unchanged -- but `voltage_domain_warnings` is the new loud signal that
+    the model this device would bind to under `--pdk` (`nfet_03v3`) may be
+    wrong for it."""
+    path = _write_gds(
+        _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=True),
+        tmp_path / "mv_mos.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "mv_mos.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    expected_description = get_unmodeled_voltage_markers("gf180mcu")[(55, 0)]
+    assert report["voltage_domain_warnings"] == [
+        {"marker": "55/0", "description": expected_description}
+    ]
+    assert any("55/0" in warning for warning in report["warnings"])
+
+
+def test_gf180mcu_extract_no_warning_without_dualgate_overlap(tmp_path):
+    """Counterfactual: `Dualgate` present in the stream but drawn far away
+    from any MOS device geometry produces no warning -- the gate is
+    "overlaps extracted MOS device geometry", not bare presence in the
+    stream, so a marker shape with nothing behind it never produces a
+    false-positive warning."""
+    path = _write_gds(
+        _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=False),
+        tmp_path / "mv_mos_far.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "mv_mos_far.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    assert report["voltage_domain_warnings"] == []
 
 
 def test_gf180mcu_deck_declares_full_metal_stack():

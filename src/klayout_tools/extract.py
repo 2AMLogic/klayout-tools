@@ -320,6 +320,9 @@ def run_extract(
                 },
                 ...
             ],
+            "voltage_domain_warnings": [
+                {"marker": "<layer>/<datatype>", "description": str}, ...
+            ],
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
             ],
@@ -390,6 +393,24 @@ def run_extract(
     includes every layout that draws no such geometry at all) -- a consumer
     can enumerate and triage the exact flagged shapes instead of
     re-implementing the heuristic against the stream.
+
+    ``voltage_domain_warnings`` (issue #552) reports every voltage-domain
+    marker layer (registered per-deck via
+    :func:`~klayout_tools.decks.get_unmodeled_voltage_markers`, e.g.
+    gf180mcu's ``Dualgate`` 55/0) whose geometry overlaps extracted MOS
+    device geometry -- see :func:`_detect_voltage_domain_overlap`. This
+    deck's ``ExtractionDeck`` derives MOS flavour from the well layer alone
+    and never reads such a marker, so a transistor drawn inside it still
+    extracts bound to the deck's single (default) model name (e.g.
+    ``nfet_03v3``/``pfet_03v3``) -- this field is the loud signal that the
+    binding may be wrong, not a corrected one: the model name itself is
+    unchanged. One entry per flagged marker, each ``{"marker":
+    "<layer>/<datatype>", "description": str}`` -- the same registry entry
+    ``klt drc``'s ``coverage.voltage_domain_warnings`` surfaces for the same
+    deck, so the wording matches across both commands. A matching prose
+    entry is also appended to ``warnings``. Always a list, empty for a deck
+    that registers no such marker or a layout that draws none of it
+    overlapping MOS geometry.
 
     ``merged_net_labels`` (issue #470) reports every net whose KLayout-
     assigned name is a comma-joined merge of 2+ distinct labels -- see
@@ -467,6 +488,7 @@ def run_extract(
         black_box_regions,
         dummy_devices_dropped,
         unmodelled_poly,
+        voltage_domain_warnings,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -630,6 +652,11 @@ def run_extract(
         # `_detect_merged_net_labels` and the comment above where it is
         # computed for the field's full meaning.
         "merged_net_labels": merged_net_labels,
+        # Additive field (issue #552): always a list, empty when this deck
+        # registers no voltage-domain marker or none of it overlaps
+        # extracted MOS geometry -- see run_extract's docstring and
+        # `_detect_voltage_domain_overlap` for the field's full meaning.
+        "voltage_domain_warnings": voltage_domain_warnings,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -670,11 +697,21 @@ def extract_netlist_from_layout(
     list[dict[str, Any]],
     int,
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
-    black_box_regions, dummy_devices_dropped, unmodelled_poly)``.
+    black_box_regions, dummy_devices_dropped, unmodelled_poly,
+    voltage_domain_warnings)``.
+
+    ``voltage_domain_warnings`` (issue #552) flags extracted MOS device
+    geometry that overlaps a voltage-domain marker layer this deck does not
+    model the scoping of (e.g. gf180mcu's ``Dualgate`` 55/0) -- see
+    :func:`_detect_voltage_domain_overlap`. A matching prose entry is also
+    appended to ``warnings``. Always a list, empty for a deck that registers
+    no such marker or a layout that draws none of it overlapping MOS
+    geometry.
 
     ``top_cell_pins_only`` (issue #291): when ``True``, only labels drawn
     directly in the top cell are promoted to top-level pins -- a net named
@@ -748,6 +785,19 @@ def extract_netlist_from_layout(
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
     )
+
+    # Voltage-domain marker overlap (issue #552): computed after the main
+    # extraction pass, against the same `layout`/`top_cell`/`deck` it just
+    # used, so this stays a purely additive diagnostic layered on top of an
+    # otherwise-unchanged extraction -- no rule threshold or model binding
+    # changes because of it. See `_detect_voltage_domain_overlap`'s
+    # docstring for the exact interacting-geometry gate.
+    (
+        voltage_domain_prose_warnings,
+        voltage_domain_warnings,
+    ) = _detect_voltage_domain_overlap(layout, top_cell, deck, deck_name)
+    warnings = warnings + voltage_domain_prose_warnings
+
     return (
         netlist,
         top_cell.name,
@@ -757,6 +807,7 @@ def extract_netlist_from_layout(
         black_box_regions,
         dummy_devices_dropped,
         unmodelled_poly,
+        voltage_domain_warnings,
     )
 
 
@@ -1480,6 +1531,76 @@ def _detect_unmodelled_poly_bodies(
             "'Known limitation: unmodelled device geometry'."
         )
     return warnings, unmodelled_poly
+
+
+def _detect_voltage_domain_overlap(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    deck_name: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Flag extracted MOS device geometry (``deck.active``) drawn inside a
+    voltage-domain marker layer this deck does not model the scoping of
+    (issue #552).
+
+    Mirrors :func:`_detect_unmodelled_poly_bodies`'s "device carries a
+    marker this deck doesn't model" shape, but for a *different* gap: not a
+    device class this deck fails to recognise at all, but a device class
+    (MOS) it recognises and extracts with the *wrong* model. Some decks
+    (today, gf180mcu's ``Dualgate`` 55/0, registered via
+    :func:`~klayout_tools.decks.get_unmodeled_voltage_markers`) draw a
+    marker selecting a second gate-oxide/voltage domain -- e.g. a 5V/6V
+    thick-oxide flavour -- with its own correct MOS model, which this
+    deck's ``ExtractionDeck.nfet_class``/``pfet_class`` derivation (well
+    layer alone) does not read, so a transistor drawn entirely inside the
+    marker still extracts bound to the default (e.g. 3.3V) model name with
+    no signal that anything is off.
+
+    A marker/description pair is only flagged when the marker's geometry
+    actually *interacts* with ``deck.active`` (the MOS device-recognition
+    footprint, evaluated for the whole layout, both flavours combined) --
+    not merely present somewhere in the stream -- so a ``Dualgate`` shape
+    drawn only over, say, an ESD diode this deck's ``DiodeDevice`` entries
+    already scope correctly to it produces no false-positive warning here.
+
+    Returns ``(warnings, voltage_domain_warnings)``: ``warnings`` has one
+    prose string per flagged marker (empty when this deck registers no
+    marker, or none of what it registers overlaps ``deck.active``);
+    ``voltage_domain_warnings`` is the matching structured view -- one
+    ``{"marker": "<layer>/<datatype>", "description": str}`` entry per
+    flagged marker, mirroring ``klt drc``'s
+    ``coverage.voltage_domain_warnings`` shape (same registry, same
+    description text) so a caller correlating the two commands' output for
+    the same layout sees the identical wording. Always a list, empty when
+    nothing is flagged.
+    """
+    from .decks import get_unmodeled_voltage_markers
+
+    unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
+    if not unmodeled_markers:
+        return [], []
+
+    active = _region(layout, top_cell, deck.active)
+    if active.is_empty():
+        return [], []
+
+    warnings: list[str] = []
+    voltage_domain_warnings: list[dict[str, Any]] = []
+    for marker, description in sorted(unmodeled_markers.items()):
+        marker_region = _region(layout, top_cell, marker)
+        if marker_region.is_empty():
+            continue
+        if active.interacting(marker_region).is_empty():
+            continue
+        marker_label = f"{marker[0]}/{marker[1]}"
+        warnings.append(
+            f"MOS device geometry overlaps the '{marker_label}' "
+            f"voltage-domain marker: {description}"
+        )
+        voltage_domain_warnings.append(
+            {"marker": marker_label, "description": description}
+        )
+    return warnings, voltage_domain_warnings
 
 
 def _extract_netlist(

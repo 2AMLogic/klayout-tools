@@ -700,6 +700,41 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (125, 5): "plfuse",
 }
 
+# Voltage-domain marker layers this deck draws but does not model the DRC/
+# extraction *scoping* of (issue #552): `Dualgate` (55/0) selects gf180mcu's
+# 5V/6V thick-oxide domain. This deck's DRC rules above (`DF.1a`, `DF.3a`,
+# `DF.6`, `PL.5a`/`PL.5b`, ...) transcribe only the 3.3V/`_LV` column -- their
+# own descriptions say so explicitly ("minimum COMP (diffusion/active) width
+# (3.3V)") -- and never read `Dualgate`; `EXTRACTION_DECK` below likewise
+# derives `nfet`/`pfet` from `Nwell` alone (no `Dualgate` read at all), so a
+# transistor drawn entirely inside `Dualgate` is checked against the wrong
+# (3.3V) thresholds and extracted as the wrong (3.3V) model. Registered here
+# purely as a "fail loudly" diagnostic (`decks.get_unmodeled_voltage_markers`,
+# consumed by `drc.py`'s `coverage.voltage_domain_warnings` and `extract.py`'s
+# `voltage_domain_warnings`), not a corrected threshold or model binding --
+# see this issue's curator comment for why the full `_LV`/`_MV` rule-pair
+# split (option 1, blocked on a subtraction-capable `DerivedLayer`) and a
+# per-flavour MOS marker + `_06v0` model table entry (option 2) are each a
+# separate, larger follow-on rather than bundled here.
+#
+# `Dualgate` is *also* read correctly today (not part of this gap) by the
+# `DiodeDevice` entries further below, each via its own
+# `requires=(..., Dualgate)` field (issue #542) -- this registry only
+# concerns the *unscoped* paths: the DRC width/space/enclosure rules above
+# and the plain `nfet`/`pfet` MOS recognition in `EXTRACTION_DECK`.
+UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
+    (55, 0): (
+        "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
+        "This curated deck's DRC rules apply the 3.3V/_LV thresholds to "
+        "geometry regardless of Dualgate's presence (e.g. DF.1a min COMP "
+        "width 0.22 vs. the real 5V/6V DF.1a_MV 0.30, DF.3a min COMP space "
+        "0.28 vs. 0.36, DF.6 COMP extend beyond gate 0.24 vs. 0.40, "
+        "PL.5a/PL.5b field poly to COMP 0.10 vs. 0.30 -- all in um), and MOS "
+        "extraction always binds the 3.3V models (nfet_03v3/pfet_03v3) even "
+        "to a transistor drawn entirely inside Dualgate."
+    ),
+}
+
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck
 # --------------------------------------------------------------------------- #

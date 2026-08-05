@@ -5,6 +5,7 @@
     "drc.coverage.layers_checked_count": 4,
     "drc.coverage.layers_in_stream_without_rules_count": 2,
     "drc.coverage.rules_skipped_count": 10,
+    "drc.coverage.voltage_domain_warnings_count": 0,
     "drc.dbu_um": 0.001,
     "drc.schema_version": 1,
     "drc.violation_count": 0,
@@ -23,6 +24,7 @@
     "extract.pin_count": 2,
     "extract.schema_version": 1,
     "extract.unmodelled_poly_count": 0,
+    "extract.voltage_domain_warnings_count": 0,
     "extract.warnings_count": 0,
     "gen_compose.bbox_um.x0": 0.0,
     "gen_compose.bbox_um.x1": {

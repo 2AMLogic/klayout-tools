@@ -15,7 +15,11 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.decks import get_deck, get_extraction_deck
+from klayout_tools.decks import (
+    get_deck,
+    get_extraction_deck,
+    get_unmodeled_voltage_markers,
+)
 from klayout_tools.drc import DrcError, run_drc
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
@@ -445,10 +449,17 @@ def test_json_contract(tmp_path, capsys):
         "layers_checked",
         "layers_in_stream_without_rules",
         "rules_skipped",
+        "voltage_domain_warnings",
     }
-    for field in coverage.values():
+    for key, field in coverage.items():
         assert isinstance(field, list)
-        assert all(isinstance(v, str) for v in field)
+        if key == "voltage_domain_warnings":
+            for entry in field:
+                assert set(entry.keys()) == {"marker", "description"}
+                assert isinstance(entry["marker"], str)
+                assert isinstance(entry["description"], str)
+        else:
+            assert all(isinstance(v, str) for v in field)
 
 
 def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
@@ -680,6 +691,68 @@ def test_run_drc_gf180mcu_json_contract(tmp_path, capsys):
     assert data["status"] == "violations"
     assert sum(data["rule_counts"].values()) == data["violation_count"]
     assert len(data["violations"]) == data["violation_count"]
+
+
+def _make_gf180mcu_dualgate_layout(*, overlap: bool) -> kdb.Layout:
+    """Issue #552's own DRC reproducer: a 0.25um-wide `Comp` stripe (illegal
+    at 5V/6V -- `DF.1a_MV` requires 0.30um -- but legal at this deck's only
+    modelled 3.3V column) with an `Nplus` shape, both inside `Dualgate`.
+
+    ``overlap=False`` moves the `Dualgate` shape far away from the `Comp`/
+    `Nplus` geometry instead -- present in the stream, but touching no
+    checked geometry -- the false-positive-avoidance counterfactual."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        layout.set_info(li, kdb.LayerInfo(layer, datatype))
+        top.shapes(li).insert(box)
+
+    draw(22, 0, kdb.Box(0, 0, 250, 3000))  # Comp, 0.25um wide
+    draw(32, 0, kdb.Box(-400, -400, 650, 3400))  # Nplus
+    if overlap:
+        draw(55, 0, kdb.Box(-1000, -1000, 1250, 4000))  # Dualgate, overlapping
+    else:
+        draw(55, 0, kdb.Box(100_000, 100_000, 101_000, 101_000))  # far away
+    return layout
+
+
+def test_run_drc_gf180mcu_dualgate_marker_warns_when_overlapping_checked_layer(
+    tmp_path,
+):
+    """Issue #552's own reproducer: geometry drawn inside `Dualgate` (the
+    5V/6V thick-oxide marker) is checked against this deck's only modelled
+    (3.3V) thresholds and reports `status: clean` -- exactly as before this
+    fix -- but `coverage.voltage_domain_warnings` is the new loud signal
+    that the checked column may not be the right one for this geometry."""
+    path = tmp_path / "mv_bad.gds"
+    _make_gf180mcu_dualgate_layout(overlap=True).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    expected_description = get_unmodeled_voltage_markers("gf180mcu")[(55, 0)]
+    assert report["coverage"]["voltage_domain_warnings"] == [
+        {"marker": "55/0", "description": expected_description}
+    ]
+    # `Dualgate` itself carries no rules of its own -- it remains an
+    # unrecognised layer alongside the new, more specific warning above.
+    assert "55/0" in report["coverage"]["layers_in_stream_without_rules"]
+
+
+def test_run_drc_gf180mcu_dualgate_marker_no_warning_without_overlap(tmp_path):
+    """Counterfactual: `Dualgate` present in the stream but never interacting
+    with any layer this run actually checked produces no warning -- the gate
+    is "interacts with a checked layer", not bare presence, so a marker shape
+    with nothing behind it never produces a false-positive warning."""
+    path = tmp_path / "mv_no_overlap.gds"
+    _make_gf180mcu_dualgate_layout(overlap=False).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["coverage"]["voltage_domain_warnings"] == []
+    assert "55/0" in report["coverage"]["layers_in_stream_without_rules"]
 
 
 @pytest.mark.skipif(

@@ -390,6 +390,18 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (97, 44): "capm2.drawing",
 }
 
+# Voltage-domain marker layers this deck draws but does not model the DRC/
+# extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
+# the gf180mcu `Dualgate` sibling of this table). sky130's real PDK has an
+# `hvi` (high-voltage identification) layer with its own DRC column, but
+# this curated deck's `LAYER_NAMES` above does not name it as a recognised
+# layer at all yet (unlike gf180mcu's `Dualgate`, which is drawn/named here
+# just not scoped) -- so there is nothing to register in this table until a
+# follow-on issue adds `hvi` as a named layer first. Empty, not omitted, so
+# `get_unmodeled_voltage_markers("sky130")` returns `{}` explicitly rather
+# than relying on the registry's unregistered-deck fallback.
+UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {}
+
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck
 # --------------------------------------------------------------------------- #
