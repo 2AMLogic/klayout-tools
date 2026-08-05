@@ -2009,6 +2009,85 @@ def test_run_drc_sky130_met2_via_layers_now_covered(tmp_path):
     assert "69/20" not in report["coverage"]["layers_in_stream_without_rules"]
 
 
+# --- pad.enclosing.metal5.1 (PAD.4) (#545) --------------------------------
+#
+# PAD.4 ("Top layer metal overlap of pad opening", 2.0um / 2000 dbu) is
+# scoped to the 5LM variant this deck already exclusively models: Metal5
+# (81/0) must enclose Pad (37/0) -- the passivation opening -- by >= 2000
+# dbu on every side.
+
+
+def test_run_drc_gf180mcu_pad_enclosing_metal5_violation(tmp_path):
+    """The issue's own reproducer: a Pad (37/0) opening completely outside
+    its Metal5 (81/0) shape (no overlap at all) trips
+    `pad.enclosing.metal5.1` instead of reporting `status: clean`."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    pad = layout.layer(37, 0)
+    layout.set_info(pad, kdb.LayerInfo(37, 0, "Pad"))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 68000, 68000))
+    top.shapes(pad).insert(kdb.Box(-2000, -2000, 70000, 70000))
+    path = tmp_path / "pad_enclosing_metal5_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["pad.enclosing.metal5.1"] == 1
+    (violation,) = [
+        v for v in report["violations"] if v["rule"] == "pad.enclosing.metal5.1"
+    ]
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Metal5"
+
+
+def test_run_drc_gf180mcu_pad_enclosing_metal5_clean(tmp_path):
+    """A Pad opening enclosed by exactly the DRM's own 2.0um (2000 dbu)
+    minimum margin of Metal5 on every side passes -- the boundary case."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    pad = layout.layer(37, 0)
+    layout.set_info(pad, kdb.LayerInfo(37, 0, "Pad"))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 68000, 68000))
+    top.shapes(pad).insert(kdb.Box(2000, 2000, 66000, 66000))  # 2000 margin >= 2000
+    path = tmp_path / "pad_enclosing_metal5_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_pad_layer_now_covered(tmp_path):
+    """The issue's own acceptance criterion: a stream drawing well-formed
+    Metal5/Pad geometry now shows `37/0` in `coverage.layers_checked` and no
+    longer in `coverage.layers_in_stream_without_rules`."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    pad = layout.layer(37, 0)
+    layout.set_info(pad, kdb.LayerInfo(37, 0, "Pad"))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 68000, 68000))
+    top.shapes(pad).insert(kdb.Box(2000, 2000, 66000, 66000))
+    path = tmp_path / "pad_layer_covered.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert "37/0" in report["coverage"]["layers_checked"]
+    assert "37/0" not in report["coverage"]["layers_in_stream_without_rules"]
+
+
 def test_sky130_met2_via_extraction_levels_have_drc_width_and_space_coverage():
     """Narrow instance of the issue's own "more generally" invariant
     suggestion (#513): the specific connectivity level this issue adds DRC

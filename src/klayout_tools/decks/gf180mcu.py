@@ -27,6 +27,10 @@ the canonical source repository for this issue:
   - ``drm_10_07.rst`` / ``tables_clear/38_DRC_BJT_103.csv`` — 10.7 DRC_BJT Mark
     Layer (``BJT.*``), from the "10.0 Analog Device Related Rules" chapter —
     the DRM's vertical NPN/PNP bipolar rule category.
+  - ``drm_09_01.rst`` / ``tables_clear/29_BondPad1_70.csv`` — 9.1 Bond Pad
+    (``PAD.*``), section 9.0's *hard, coded* rule table (as opposed to 9.2's
+    ``tables_clear/29_BondPad2_70.csv``, a *guideline* table -- not
+    transcribed here, see the "PAD.4" rule's own docstring below).
 
 Each rule's docstring below cites the exact source rule id (e.g. ``"DF.1a"``)
 and its DRM description, so values can be re-verified against a fresh
@@ -55,8 +59,9 @@ rules across dozens of layers, plus 5V/6V variants, DFM guidelines, etc.) —
 mirrors the "curated starter subset" scope guard sky130 documents:
 width/space/enclosure checks across poly2/comp/contact/metal1 (extended, per
 #188, to metal2/metal3/metal5/metaltop and the MiM capacitor stack), plus a
-first increment of well/substrate-tap coverage (Nwell) and one bipolar
-(BJT)-specific device rule, wide enough to prove the deck-adapter shape
+first increment of well/substrate-tap coverage (Nwell), one bipolar
+(BJT)-specific device rule, and one bond-pad rule (``PAD.4``, issue #545),
+wide enough to prove the deck-adapter shape
 (:class:`~klayout_tools.decks.DrcRule`) for a second PDK. Coverage is
 expected to grow incrementally in follow-on issues (e.g. Pplus/Nplus
 implant-specific rules, LVPWELL/DNWELL, the remaining BJT rules that key off
@@ -482,6 +487,20 @@ DECK: list[DrcRule] = [
         # `metals`/`vias` stack draws everywhere), not merely conservative.
     ),
     DrcRule(
+        id="pad.enclosing.metal5.1",
+        description="minimum top-metal (Metal5) overlap of pad opening",
+        layer=(81, 0),  # Metal5 -- the enclosing layer, 5LM variant only
+        other_layer=(37, 0),  # Pad (passivation opening)
+        check="enclosing",
+        threshold_dbu=2000,  # 2.0 um
+        # DRM 9.1 Bond Pad, rule "PAD.4": "Top layer metal overlap of pad
+        # opening" -> 2.0um. The only hard, coded bond-pad rule (9.2's
+        # PAD.1/PAD.2/PAD.5-PAD.20 are a guideline table, out of scope here).
+        # Scoped to the 5LM variant this deck already exclusively models
+        # (Metal5/81,0 as top metal) -- 6LM's MetalTop/53,0 case is not
+        # covered; this deck has no variant-selection mechanism today.
+    ),
+    DrcRule(
         id="nwell.space.1",
         description="minimum Nwell spacing (equipotential, 3.3V)",
         layer=(21, 0),  # Nwell
@@ -551,6 +570,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (46, 0): "Metal4",
     (81, 0): "Metal5",
     (53, 0): "MetalTop",
+    (37, 0): "Pad",
     (75, 0): "FuseTop",
     (55, 0): "Dualgate",
     (127, 5): "DRC_BJT",
