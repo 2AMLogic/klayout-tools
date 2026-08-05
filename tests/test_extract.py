@@ -26,7 +26,7 @@ import pytest
 
 from klayout_tools import pdk
 from klayout_tools.cli import main
-from klayout_tools.decks import ExtractionDeck, get_extraction_deck
+from klayout_tools.decks import DiodeDevice, ExtractionDeck, get_extraction_deck
 from klayout_tools.extract import (
     ExtractError,
     _describe_devices,
@@ -1011,6 +1011,8 @@ def test_gf180mcu_synthetic_bjt_extracts_one_bjt_device(tmp_path):
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
         "resistor",
+        "diode_nd2ps_06v0",
+        "diode_pd2nw_06v0",
     ]
 
     (device,) = report["devices"]
@@ -1171,6 +1173,220 @@ def test_sky130_bjt_coincident_marker_is_clean_error_not_traceback(tmp_path):
     path = _write_gds(layout, tmp_path / "coincident.gds")
     with pytest.raises(ExtractError, match="unconnected terminal"):
         run_extract(path, "sky130", output=str(tmp_path / "coincident.spice"))
+
+
+# --------------------------------------------------------------------------- #
+# Junction-diode device recognition (issue #542)
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_diode_layout(
+    *,
+    unmarked_pmos: bool = False,
+    dummy_over_nd2ps: bool = False,
+) -> kdb.Layout:
+    """A minimal dual-diode ESD clamp on gf180mcu's curated diode layers --
+    the same topology the PDK's own `gf180mcu_fd_io__asig_5p0` pad cell's CDL
+    is built from (`D ... diode_nd2ps_06v0` + `D ... diode_pd2nw_06v0`, see
+    issue #542).
+
+    Two devices, each a 1 um x 1 um junction (area 1.0 um^2, perimeter
+    4.0 um):
+
+    - `diode_nd2ps_06v0` at the origin: an n+ `Comp` (`Nplus` + `Dualgate`)
+      inside a `diode_mk` mark, outside every `Nwell`, contacted up to a
+      labelled `CATH` net. Its anode is the p-substrate (no drawn mask), so
+      it must resolve to the deck's `substrate_net`.
+    - `diode_pd2nw_06v0` at x=4 um: a p+ `Comp` (`Pplus` + `Dualgate`) inside
+      a `diode_mk` mark inside an `Nwell`, contacted up to a labelled `ANOD`
+      net. Its cathode is the well itself, which this fixture leaves untapped
+      (gf180mcu's curated deck has no distinct well-tie layer -- see
+      `test_gf180mcu_synthetic_bjt_extracts_one_bjt_device`'s note), so it is
+      an anonymous net.
+
+    ``unmarked_pmos`` adds an ordinary PMOS -- p+ `Comp` under a `Poly2`
+    gate, inside the *same* `Nwell` as the pd2nw diode but carrying no
+    `diode_mk` -- to prove the marker intersection is what scopes
+    recognition: the PMOS's own p+-in-Nwell source/drain must not be
+    misrecognised as a second diode.
+
+    ``dummy_over_nd2ps`` covers the whole nd2ps junction with a shape on
+    :data:`_DUMMY_MARKER`, for the dummy-suppression tests (issue #295,
+    extended to diodes in #542); it only has an effect under a deck that
+    declares that layer as its ``dummy`` marker (see :func:`_dummy_deck`).
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # --- diode_nd2ps_06v0: n+ diffusion in the p-substrate ---
+    draw(115, 5, kdb.Box(-200, -200, 1200, 1200))  # diode_mk (device mark)
+    draw(55, 0, kdb.Box(-200, -200, 1200, 1200))  # Dualgate (the 6V flavour)
+    draw(22, 0, kdb.Box(0, 0, 1000, 1000))  # Comp (cathode)
+    draw(32, 0, kdb.Box(0, 0, 1000, 1000))  # Nplus (n+ doped)
+    draw(33, 0, kdb.Box(300, 300, 700, 700))  # Contact over the cathode
+    draw(34, 0, kdb.Box(200, 200, 800, 800))  # Metal1 over the cathode
+    label(34, 10, "CATH", 500, 500)
+
+    # --- diode_pd2nw_06v0: p+ diffusion in Nwell ---
+    draw(21, 0, kdb.Box(4000, 0, 7000, 3000))  # Nwell (cathode)
+    draw(115, 5, kdb.Box(4800, 800, 6200, 2200))  # diode_mk (device mark)
+    draw(55, 0, kdb.Box(4800, 800, 6200, 2200))  # Dualgate (the 6V flavour)
+    draw(22, 0, kdb.Box(5000, 1000, 6000, 2000))  # Comp (anode)
+    draw(31, 0, kdb.Box(5000, 1000, 6000, 2000))  # Pplus (p+ doped)
+    draw(33, 0, kdb.Box(5300, 1300, 5700, 1700))  # Contact over the anode
+    draw(34, 0, kdb.Box(5200, 1200, 5800, 1800))  # Metal1 over the anode
+    label(34, 10, "ANOD", 5500, 1500)
+
+    if unmarked_pmos:
+        # Ordinary PMOS in the same Nwell, no `diode_mk` anywhere near it.
+        draw(22, 0, kdb.Box(4200, 2400, 5400, 2900))  # Comp (source/drain)
+        draw(31, 0, kdb.Box(4200, 2400, 5400, 2900))  # Pplus
+        draw(30, 0, kdb.Box(4700, 2200, 4900, 3100))  # Poly2 (gate)
+
+    if dummy_over_nd2ps:
+        draw(*_DUMMY_MARKER, kdb.Box(-300, -300, 1300, 1300))
+
+    return layout
+
+
+def test_gf180mcu_synthetic_diode_layout_extracts_both_clamp_diodes(tmp_path):
+    """The synthetic dual-diode ESD clamp extracts exactly the two `D`
+    devices its topology describes (issue #542) -- before this, neither deck
+    recognised a diode at all, so the same layout extracted zero devices and
+    `klt lvs` could not verify any diode-based clamp.
+
+    The n+/p-substrate diode's anode resolves to the deck's `substrate_net`
+    global (gf180mcu draws no p-substrate mask, so the entry declares
+    `anode=None`); the p+/Nwell diode's cathode is the untapped well, hence
+    anonymous. Both report the junction's own area/perimeter."""
+    path = _write_gds(_make_gf180mcu_diode_layout(), tmp_path / "diode.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode.spice"))
+
+    assert report["device_counts"] == {
+        "diode_nd2ps_06v0": 1,
+        "diode_pd2nw_06v0": 1,
+    }
+
+    by_class = {device["class"]: device for device in report["devices"]}
+    nd2ps = by_class["diode_nd2ps_06v0"]
+    assert nd2ps["nets"] == {"a": "vsubs", "c": "CATH"}
+    assert nd2ps["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+
+    pd2nw = by_class["diode_pd2nw_06v0"]
+    assert pd2nw["nets"]["a"] == "ANOD"
+    assert pd2nw["nets"]["c"].startswith("$")  # untapped well, anonymous
+    assert pd2nw["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+
+
+def test_gf180mcu_diode_written_as_spice_d_card(tmp_path):
+    """A recognised diode reaches the written netlist as a SPICE `D` card
+    whose model token is the deck entry's own name -- the same
+    schematic-equivalent form the PDK's own ESD-clamp CDL uses
+    (`D0 DVSS DVDD diode_nd2ps_06v0`), and directly comparable by
+    `klt lvs`."""
+    path = _write_gds(_make_gf180mcu_diode_layout(), tmp_path / "diode.gds")
+    spice_path = tmp_path / "diode.spice"
+    run_extract(path, "gf180mcu", output=str(spice_path))
+
+    netlist = spice_path.read_text()
+    # `D<name> <anode> <cathode> <model>` -- terminal order matches the CDL.
+    assert "vsubs CATH diode_nd2ps_06v0" in netlist
+    assert "ANOD " in netlist and "diode_pd2nw_06v0" in netlist
+    assert netlist.count("\nD") == 2
+
+
+def test_gf180mcu_unmarked_pmos_in_same_well_is_not_a_diode(tmp_path):
+    """An ordinary PMOS drawn in the *same* Nwell as a marked diode -- p+
+    diffusion inside a well, geometrically indistinguishable from the diode's
+    own anode except for the missing `diode_mk` -- extracts as a `pfet` and
+    **not** as a second diode (issue #542).
+
+    This is the marker-intersection guard `extract.py` applies to both diode
+    terminals, the same one the bipolar block applies to its base: without
+    it, every p+-in-Nwell source/drain in a layout would be misrecognised."""
+    path = _write_gds(
+        _make_gf180mcu_diode_layout(unmarked_pmos=True), tmp_path / "diode_pmos.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode_pmos.spice"))
+
+    assert report["device_counts"] == {
+        "pfet": 1,
+        "diode_nd2ps_06v0": 1,
+        "diode_pd2nw_06v0": 1,
+    }
+
+
+def test_gf180mcu_diode_free_layout_extracts_no_diodes(tmp_path):
+    """A gf180mcu layout that draws no `diode_mk` at all extracts exactly as
+    it did before this feature existed: the new `diodes` entries claim
+    nothing, and no empty device layers are registered (issue #542)."""
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bjt.spice"))
+
+    assert report["device_counts"] == {"bjt": 1}
+
+
+def test_diodes_field_defaults_empty_and_is_a_no_op():
+    """The `diodes` field is additive/optional (issue #542): a deck declaring
+    none reports its pre-#542 `device_classes` unchanged, exactly as
+    `resistors`/`capacitors`/`bipolars` each did when they landed."""
+    deck = ExtractionDeck(
+        active=(65, 20), poly=(66, 20), nwell=(64, 20), contact=(66, 44), metals=()
+    )
+    assert deck.diodes == ()
+    assert deck.device_classes == ("nfet", "pfet")
+    assert get_extraction_deck("sky130").diodes == ()
+
+
+def test_diode_with_no_drawn_terminal_is_a_deck_authoring_error(tmp_path):
+    """A `DiodeDevice` declaring *both* terminals substrate-formed has
+    nothing to overlap, so it could only ever extract silently nothing --
+    rejected as a deck-authoring mistake, checked unconditionally (even on a
+    diode-free layout) like the capacitor block's own `top_plate_via`
+    pairing check."""
+    deck = dataclasses.replace(
+        get_extraction_deck("gf180mcu"),
+        diodes=(DiodeDevice(name="bad_diode", marker=(115, 5)),),
+    )
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    layout = kdb.Layout()
+    layout.read(str(path))
+
+    with pytest.raises(ExtractError, match="at most one of anode/cathode"):
+        _extract_netlist(layout, layout.top_cell(), deck, None)
+
+
+def test_dummy_marker_drops_a_whole_diode(tmp_path, monkeypatch):
+    """A junction fully covered by the deck's `dummy` marker is dropped from
+    the extracted netlist and counted once in `dummy_devices_dropped` --
+    extending #295/#462's dummy suppression to diodes (#542).
+
+    Counted **once**, not once per declared flavour: gf180mcu declares two
+    diode entries sharing the one `diode_mk` layer, so counting marker
+    components (rather than recognised junctions) would double-charge it."""
+    path = _write_gds(
+        _make_gf180mcu_diode_layout(dummy_over_nd2ps=True), tmp_path / "diode.gds"
+    )
+
+    baseline = run_extract(path, "gf180mcu", output=str(tmp_path / "base.spice"))
+    assert baseline["device_counts"]["diode_nd2ps_06v0"] == 1
+    assert baseline["dummy_devices_dropped"] == 0
+
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", _dummy_deck)
+    suppressed = run_extract(path, "gf180mcu", output=str(tmp_path / "dummy.spice"))
+
+    assert suppressed["dummy_devices_dropped"] == 1
+    assert "diode_nd2ps_06v0" not in suppressed["device_counts"]
+    # The other clamp diode is untouched by the marker and still extracts.
+    assert suppressed["device_counts"]["diode_pd2nw_06v0"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -2151,20 +2367,31 @@ def test_cli_missing_deck_flag_is_usage_error(tmp_path, capsys):
         # with no single named device cell to attribute one to; see
         # `decks/gf180mcu.py`'s `EXTRACTION_DECK` note), one MiM-capacitor
         # entry (issue #225, its own official LVS device name for the deck's
-        # Metal4/Metal5 MiM stack), and a drawn poly resistor (issue #222).
+        # Metal4/Metal5 MiM stack), a drawn poly resistor (issue #222), and
+        # the two 6V junction-diode flavours its own I/O library's ESD clamps
+        # are built from (issue #542) -- which trail the `"resistor"` role.
         (
             "gf180mcu",
-            ("nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor"),
+            (
+                "nfet",
+                "pfet",
+                "bjt",
+                "cap_mim_2f0_m4m5_noshield",
+                "resistor",
+                "diode_nd2ps_06v0",
+                "diode_pd2nw_06v0",
+            ),
         ),
     ],
 )
-def test_extraction_deck_device_classes_reports_mos_bipolar_capacitor_and_resistor(
+def test_extraction_deck_device_classes_reports_every_curated_device_family(
     deck_name, expected
 ):
     """`device_classes` reports exactly what each deck is structurally
     capable of recognising -- two-terminal-well MOS plus each deck's
-    curated bipolar (issue #223), MiM-capacitor (issue #225), and drawn
-    resistor (issue #222) entries -- independent of any particular layout."""
+    curated bipolar (issue #223), MiM-capacitor (issue #225), drawn
+    resistor (issue #222) and junction-diode (issue #542) entries --
+    independent of any particular layout."""
     deck = get_extraction_deck(deck_name)
     assert deck.device_classes == expected
 
@@ -3169,6 +3396,8 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
         "bjt",
         "cap_mim_2f0_m4m5_noshield",
         "resistor",
+        "diode_nd2ps_06v0",
+        "diode_pd2nw_06v0",
     ]
 
     devices = {d["class"]: d for d in report["devices"]}
@@ -3419,11 +3648,13 @@ def test_sky130_without_met2_bridge_drains_stay_disconnected(tmp_path):
 
 def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
     """A gf180mcu NMOS layout that also carries shapes on a layer the deck's
-    connectivity graph does not read (Dualgate 55/0) reports that layer --
-    with its shape count -- in `ignored_layers`, so a downstream LVS mismatch
-    on such geometry is diagnosable as a coverage gap rather than a phantom
-    layout bug. Nplus (32/0) is *not* ignored: the deck's drawn `ppolyf_u`
-    resistor declares it as an exclusion (#222), so it is a read layer."""
+    connectivity graph does not read (MetalTop 53/0, above this curated
+    deck's Metal1-Metal5 stack) reports that layer -- with its shape count --
+    in `ignored_layers`, so a downstream LVS mismatch on such geometry is
+    diagnosable as a coverage gap rather than a phantom layout bug. Nplus
+    (32/0) and Dualgate (55/0) are *not* ignored: the deck's drawn `ppolyf_u`
+    resistor declares Nplus as an exclusion (#222) and its junction diodes
+    require Dualgate (#542), so both are read layers."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -3435,8 +3666,9 @@ def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
     d(33, 0, kdb.Box(400, 300, 700, 700))  # Contact (read)
     d(34, 0, kdb.Box(200, 200, 900, 800))  # Metal1 (read)
     d(32, 0, kdb.Box(0, 0, 500, 500))  # Nplus (read -- resistor exclusion, #222)
-    d(55, 0, kdb.Box(0, 0, 3000, 1000))  # Dualgate (NOT read)
-    d(55, 0, kdb.Box(0, 2000, 3000, 3000))  # a second Dualgate shape
+    d(55, 0, kdb.Box(0, 0, 3000, 1000))  # Dualgate (read -- diode requires, #542)
+    d(53, 0, kdb.Box(0, 0, 3000, 1000))  # MetalTop (NOT read)
+    d(53, 0, kdb.Box(0, 2000, 3000, 3000))  # a second MetalTop shape
 
     path = _write_gds(layout, tmp_path / "ign.gds")
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "ign.spice"))
@@ -3444,10 +3676,11 @@ def test_ignored_layers_reports_undeclared_shape_bearing_layers(tmp_path):
     ignored = {
         (e["layer"], e["datatype"]): e["shapes"] for e in report["ignored_layers"]
     }
-    assert (55, 0) in ignored and ignored[(55, 0)] == 2
+    assert (53, 0) in ignored and ignored[(53, 0)] == 2
     # Layers the deck *does* read are never reported as ignored -- including
-    # Nplus (32/0), a read layer via the drawn-resistor exclusion (#222).
-    for read_layer in [(22, 0), (30, 0), (33, 0), (34, 0), (32, 0)]:
+    # Nplus (32/0), a read layer via the drawn-resistor exclusion (#222), and
+    # Dualgate (55/0), a read layer via the junction diodes' requires (#542).
+    for read_layer in [(22, 0), (30, 0), (33, 0), (34, 0), (32, 0), (55, 0)]:
         assert read_layer not in ignored
 
 
@@ -3466,14 +3699,14 @@ def test_ignored_layers_present_in_cli_json(tmp_path, capsys):
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     top.shapes(layout.layer(22, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Comp
-    top.shapes(layout.layer(55, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Dualgate
+    top.shapes(layout.layer(53, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # MetalTop
     path = _write_gds(layout, tmp_path / "cli.gds")
 
     exit_code = main(["extract", str(path), "--deck", "gf180mcu", "--format", "json"])
     assert exit_code == 0
     out = json.loads(capsys.readouterr().out)
     assert "ignored_layers" in out
-    assert {"layer": 55, "datatype": 0, "shapes": 1} in out["ignored_layers"]
+    assert {"layer": 53, "datatype": 0, "shapes": 1} in out["ignored_layers"]
 
 
 # --------------------------------------------------------------------------- #

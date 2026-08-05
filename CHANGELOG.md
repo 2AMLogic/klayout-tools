@@ -98,6 +98,27 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-05 — `klt extract`: junction-diode device recognition (#542). Neither
+  curated deck recognised a diode as a device class, so a discrete PN/ESD-clamp
+  diode — the standard pad-ring clamp primitive, and what gf180mcu's own
+  `gf180mcu_fd_io__asig_5p0` pad cell is built from — extracted as **no device
+  at all**, leaving `klt lvs` unable to verify any diode-based clamp. New
+  optional `ExtractionDeck.diodes` field (a tuple of the new `DiodeDevice`
+  dataclass: anode/cathode layer roles, a device-mark `marker` layer, and
+  per-terminal `requires`/`excludes` narrowing), wired through KLayout's native
+  `DeviceExtractorDiode`. A terminal the PDK draws no mask for — the
+  p-substrate side of an n+/p-substrate diode — is declared `None` and tied to
+  the deck's `substrate_net` global, mirroring the collector-less bipolar
+  collector. First deck wiring: gf180mcu's `diode_nd2ps_06v0` and
+  `diode_pd2nw_06v0`, transcribed from that PDK's own official KLayout LVS
+  deck. Recognised diodes appear in `devices[]` with `"a"`/`"c"` terminal keys
+  and `area_um2`/`perimeter_um` params, are appended to `device_classes`, and
+  are written as SPICE `D` cards whose model token is the deck entry's name
+  (schematic-equivalent, no I-V model — the same fidelity the MOS/BJT
+  recognisers provide). Purely additive: `diodes` defaults to `()`, so sky130
+  and any deck that declares none extracts bit-for-bit as before — no
+  `schema_version` bump (`extract` stays `1`). See `docs/cli/extract.md`'s new
+  "Junction diodes" section.
 - 2026-08-05 — `klt pdk macros`: new sibling command to `klt pdk cells`
   (#535) that enumerates hard-macro IP libraries — `libs_ref` entries named
   `*_fd_ip_*` (e.g. an SRAM/ROM compiler output) — which `klt pdk cells`

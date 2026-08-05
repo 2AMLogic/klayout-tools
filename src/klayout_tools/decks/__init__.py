@@ -333,6 +333,15 @@ class ExtractionDeck:
     default: a deck that declares none extracts exactly as it did before the
     field existed (#222), and a conductor that carries no declared resistor
     marker is never reclassified as a resistor.
+
+    ``diodes`` is an optional tuple of :class:`DiodeDevice` entries (empty by
+    default) declaring this deck's drawn junction-diode device-recognition
+    layers (issue #542), the diode sibling of ``bipolars`` above -- what lets
+    a discrete PN/ESD-clamp diode extract as a ``D`` element instead of
+    vanishing from the netlist as unrecognised diffusion geometry. Empty for
+    a deck with no curated diode recognition; non-empty decks may declare
+    more than one entry (e.g. gf180mcu's n+/p-substrate and p+/Nwell
+    junction flavours).
     """
 
     active: tuple[int, int]
@@ -352,6 +361,7 @@ class ExtractionDeck:
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()
+    diodes: tuple[DiodeDevice, ...] = ()
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -371,7 +381,10 @@ class ExtractionDeck:
         after that. Finally, a deck that declares one or more ``resistors``
         entries (#222) appends the ``"resistor"`` role after those -- a single
         role token regardless of how many drawn-resistor device classes the
-        deck declares.
+        deck declares. Last, a deck that declares one or more ``diodes``
+        entries (#542) appends each entry's ``name`` (in declaration order,
+        deduplicated) after that -- one token per declared junction-diode
+        flavour, matching how ``bipolars``/``capacitors`` name theirs.
         """
         classes = ["nfet", "pfet"]
         for bipolar in self.bipolars:
@@ -382,6 +395,9 @@ class ExtractionDeck:
                 classes.append(capacitor.name)
         if self.resistors and "resistor" not in classes:
             classes.append("resistor")
+        for diode in self.diodes:
+            if diode.name not in classes:
+                classes.append(diode.name)
         return tuple(classes)
 
     @property
@@ -401,10 +417,11 @@ class ExtractionDeck:
         Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
         ``contact``, plus optional ``tap``), the ``metals``/``vias`` stack and
         every label layer (``well_label``/``poly_label``/``metal_labels``),
-        and each ``bipolars``/``capacitors``/``resistors`` entry's own
-        recognition layers (base/emitter/marker/collector; plate +
+        and each ``bipolars``/``capacitors``/``resistors``/``diodes`` entry's
+        own recognition layers (base/emitter/marker/collector; plate +
         requires/excludes; body/marker/requires/excludes plus optional
-        terminal). ``None`` entries (an absent optional layer) are skipped.
+        terminal; anode/cathode/marker + requires/excludes). ``None`` entries
+        (an absent optional layer) are skipped.
         """
         layers: set[tuple[int, int]] = {
             self.active,
@@ -442,6 +459,16 @@ class ExtractionDeck:
             layers.update(resistor.excludes)
             if resistor.terminal is not None:
                 layers.add(resistor.terminal)
+        for diode in self.diodes:
+            layers.add(diode.marker)
+            layers.update(diode.anode_requires)
+            layers.update(diode.anode_excludes)
+            layers.update(diode.cathode_requires)
+            layers.update(diode.cathode_excludes)
+            if diode.anode is not None:
+                layers.add(diode.anode)
+            if diode.cathode is not None:
+                layers.add(diode.cathode)
         return frozenset(layers)
 
 
@@ -665,6 +692,103 @@ class CapacitorDevice:
     top_plate_via: tuple[int, int] | None = None
     top_plate_via_metal: tuple[int, int] | None = None
     perim_cap_f_um: float = 0.0
+
+
+@dataclass(frozen=True)
+class DiodeDevice:
+    """One drawn junction-diode device-recognition entry for an
+    :class:`ExtractionDeck`'s optional ``diodes`` field (issue #542),
+    consumed by ``extract.py``'s ``kdb.DeviceExtractorDiode`` wiring -- the
+    diode sibling of :class:`BipolarDevice`.
+
+    A junction diode is an ordinary doped-diffusion/well overlap the PDK
+    marks with a dedicated device-recognition layer, exactly like a vertical
+    BJT: without this declaration that geometry is either dropped from the
+    netlist entirely (nothing recognises it) or, worse, silently merged into
+    surrounding interconnect -- so any diode-based ESD clamp is unverifiable
+    by ``klt lvs``. This is the device-recognition analogue of
+    :class:`ExtractionDeck`'s ``nfet_class``/``pfet_class`` MOS wiring,
+    driving KLayout's native ``klayout.db.DeviceExtractorDiode``: the
+    recognised device is the **geometric overlap** of the two terminal
+    regions, and its extracted parameters are that overlap's area ``A``
+    (square micrometres) and perimeter ``P`` (micrometres) -- reported as
+    ``params.area_um2``/``params.perimeter_um`` in the JSON response.
+
+    Deliberately *not* modelled (issue #542's own "Non-goals"): the device's
+    saturation-current/area-scaling I-V model. A recognised diode is emitted
+    as a schematic-equivalent ``D`` card whose model token is this entry's
+    ``name``, the same fidelity level the MOS/BJT recognisers already
+    provide -- a consumer simulating the netlist supplies a matching
+    ``.model``.
+
+    Geometry (all layer fields are ``(layer, datatype)`` pairs, matching the
+    layout's own GDS numbering):
+
+    - ``anode`` -- the p-doped side's drawn layer (e.g. gf180mcu's ``Comp``
+      for a p+ diffusion diode, or its ``Nwell`` when the *cathode* is the
+      diffusion). ``extract.py`` scopes it to ``anode & marker`` before
+      extraction.
+    - ``cathode`` -- the n-doped side's drawn layer, scoped the same way.
+    - ``marker`` -- the PDK's dedicated diode device-recognition mark layer
+      (e.g. gf180mcu's ``diode_mk`` 115/5), drawn by the diode device
+      library cell over itself. It is what disambiguates "this patch of
+      diffusion inside a well is a real diode device" from the many
+      unrelated diffusion/well overlaps an ordinary MOS layout draws --
+      ``extract.py`` intersects *both* terminal layers with it before
+      extraction, the same guard the bipolar block applies to its base, so
+      an ordinary PMOS's p+-in-Nwell source/drain is never misrecognised as
+      a diode.
+    - ``anode_requires``/``anode_excludes`` and
+      ``cathode_requires``/``cathode_excludes`` -- narrow the corresponding
+      terminal region with the same requires/excludes idiom
+      :class:`ResistorDevice` (#222), :class:`CapacitorDevice` (#225) and
+      :class:`BipolarDevice` (#302) already use: every layer in ``requires``
+      must *also* cover the region (intersected in) and every layer in
+      ``excludes`` is subtracted. This is how a deck tells one junction
+      flavour apart from another drawn on the same masks -- e.g. gf180mcu's
+      n+/p-substrate ``diode_nd2ps_06v0`` requires ``Nplus`` + ``Dualgate``
+      and excludes ``Nwell``, versus the p+/Nwell ``diode_pd2nw_06v0``'s
+      ``Pplus`` + ``Dualgate``. All four default to ``()`` (no narrowing).
+
+    Exactly one of ``anode``/``cathode`` may be ``None``, meaning "this
+    terminal is formed by the substrate rather than by a drawn layer" -- the
+    n+-in-p-substrate case (gf180mcu's ``diode_nd2ps_*``), whose anode is
+    the p-substrate the PDK never draws a mask for. That terminal's region
+    is then the device's own ``marker`` footprint (narrowed by its
+    ``requires``/``excludes`` the same way a declared layer would be, e.g.
+    ``anode_excludes=(Nwell, DNWELL)`` to keep the substrate side genuinely
+    *outside* every well), and ``extract.py`` ties it to the deck's
+    ``substrate_net`` global with ``connect_global`` -- exactly the pattern
+    :class:`BipolarDevice`'s collector-less case and
+    :class:`ExtractionDeck`'s NMOS body already use. Using the marker
+    footprint rather than an empty region is load-bearing:
+    ``DeviceExtractorDiode`` forms the device from the *overlap* of its two
+    inputs, so an empty input yields no device at all.
+
+    Terminal connectivity is derived from the declared layers rather than
+    configured separately: a terminal whose layer is the owning deck's own
+    ``nwell`` joins that well's connectivity node (so a well tap/label names
+    it), a substrate-formed (``None``) terminal joins the deck's
+    ``substrate_net`` global, and any other terminal layer (i.e. a
+    diffusion) joins the deck's ``contact`` node, so ordinary
+    contact/metal routing to the diffusion names it. This mirrors the
+    bipolar block's fixed base->``nwell`` / emitter->``contact`` wiring.
+
+    ``name`` is the extracted ``DeviceClassDiode`` device class
+    (``devices[].class`` in the JSON response, the model token on the
+    written ``D`` card, and one of the values
+    :attr:`ExtractionDeck.device_classes` reports for a deck that declares
+    this entry).
+    """
+
+    name: str
+    marker: tuple[int, int]
+    anode: tuple[int, int] | None = None
+    cathode: tuple[int, int] | None = None
+    anode_requires: tuple[tuple[int, int], ...] = ()
+    anode_excludes: tuple[tuple[int, int], ...] = ()
+    cathode_requires: tuple[tuple[int, int], ...] = ()
+    cathode_excludes: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
