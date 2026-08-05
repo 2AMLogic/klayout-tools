@@ -498,10 +498,15 @@ _SUPPLY_MATCH_ABS_TOL = 0.01
 #: `X<n> ... <model> w=... l=...` SPICE instance lines name their device
 #: model as the last token; this pattern matches that token directly rather
 #: than parsing the whole instance line, and captures the "flavor" suffix
-#: (e.g. ``nfet_01v8``) separately from the `<family>_fd_pr__` prefix, since
-#: the flavor is what encodes the voltage domain -- the family repeats the
-#: library's own PDK family and adds no information.
-_DEVICE_MODEL_RE = re.compile(r"[a-z0-9]+_fd_pr__((?:n|p)fet_[a-z0-9_]+)")
+#: (e.g. ``nfet_01v8``) separately from an optional `<family>_fd_pr__`
+#: prefix, since the flavor is what encodes the voltage domain -- the family
+#: repeats the library's own PDK family and adds no information. The prefix
+#: is **optional** because it is a sky130-specific convention
+#: (`sky130_fd_pr__nfet_01v8`) -- gf180mcu's SPICE instance lines name the
+#: device model with the bare flavor and no `_fd_pr__` prefix at all
+#: (`nfet_06v0`), so a prefix-required pattern silently matched nothing on
+#: that PDK (issue #537).
+_DEVICE_MODEL_RE = re.compile(r"(?:[a-z0-9]+_fd_pr__)?((?:n|p)fet_[a-z0-9_]+)")
 _NOM_PROCESS_RE = re.compile(r"nom_process\s*:\s*([0-9.eE+-]+)")
 _NOM_TEMPERATURE_RE = re.compile(r"nom_temperature\s*:\s*(-?[0-9.eE+-]+)")
 _NOM_VOLTAGE_RE = re.compile(r"nom_voltage\s*:\s*([0-9.eE+-]+)")
@@ -551,19 +556,32 @@ def list_cell_libraries(
     - ``nominal_supply_v`` / ``nominal_corner`` -- the supply (and Liberty
       operating-condition name) its `.lib` timing views are characterised at,
       read from the nominal (typical-process, room-temperature) `.lib`
-      file's `nom_voltage` attribute -- see :func:`_nominal_supply`. Both
-      ``None`` when the library ships no `lib/` directory or no parseable
-      `.lib` file.
+      file's `nom_voltage` attribute -- see :func:`_nominal_supply`. When a
+      library is characterised at more than one supply for that corner (see
+      ``supplies_v`` below), this reports the **lowest** of them, preserved
+      for backward compatibility as "the library's baseline/minimum
+      operating point" -- it is not the *only* supply the library is
+      characterised at. Both ``None`` when the library ships no `lib/`
+      directory or no parseable `.lib` file.
+    - ``supplies_v`` -- the sorted, deduplicated list of **every** supply
+      (volts) the library's nominal-corner `.lib` views are characterised
+      at, e.g. ``[1.8]`` for a library with a single voltage-distinct view,
+      or ``[1.8, 3.3, 5.0]`` for a library separately, fully characterised
+      at multiple voltages (e.g. gf180mcu's `gf180mcu_fd_sc_mcu9t5v0`).
+      ``nominal_supply_v`` is always ``supplies_v``'s minimum (or ``None``
+      alongside an empty list). ``--supply`` matches against this full set,
+      not just ``nominal_supply_v`` -- see :func:`_supply_matches`.
     - ``voltage_class`` -- ``"core"`` when ``nominal_supply_v <= 2.5``,
       ``"io"`` above that, ``None`` when ``nominal_supply_v`` is ``None``. A
       documented heuristic threshold (see :data:`_CORE_VOLTAGE_MAX_V`), not a
       field the PDK itself declares.
 
     When ``supply`` is given (the ``--supply`` flag, volts), each library
-    additionally gets a ``"compatible"`` bool (``nominal_supply_v`` within
-    2%/0.01V of ``supply`` -- see :func:`_supply_matches`), and the returned
-    dict gets a top-level ``"supply_v"`` echo plus an ``"any_compatible"``
-    bool the CLI uses to pick the CI-gate exit code (see ``docs/cli/pdk.md``).
+    additionally gets a ``"compatible"`` bool (``True`` when **any** entry in
+    ``supplies_v`` is within 2%/0.01V of ``supply`` -- see
+    :func:`_supply_matches`), and the returned dict gets a top-level
+    ``"supply_v"`` echo plus an ``"any_compatible"`` bool the CLI uses to
+    pick the CI-gate exit code (see ``docs/cli/pdk.md``).
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pdk.md``)::
@@ -578,6 +596,7 @@ def list_cell_libraries(
                     "device_flavors": [str, ...],
                     "nominal_supply_v": float | None,
                     "nominal_corner": str | None,
+                    "supplies_v": [float, ...],
                     "voltage_class": "core" | "io" | None,
                     # "compatible": bool,   -- present only when supply= is given
                 },
@@ -606,7 +625,7 @@ def list_cell_libraries(
     if supply is not None:
         any_compatible = False
         for library in libraries:
-            compatible = _supply_matches(library["nominal_supply_v"], supply)
+            compatible = _supply_matches(library["supplies_v"], supply)
             library["compatible"] = compatible
             any_compatible = any_compatible or compatible
         result["supply_v"] = supply
@@ -631,6 +650,7 @@ def _scan_cell_libraries(libs_ref: str) -> list[dict[str, Any]]:
                 "device_flavors": _device_flavors(name, lib_dir),
                 "nominal_supply_v": nominal["voltage"],
                 "nominal_corner": nominal["corner"],
+                "supplies_v": nominal["supplies_v"],
                 "voltage_class": _voltage_class(nominal["voltage"]),
             }
         )
@@ -647,24 +667,32 @@ def _device_flavors(name: str, lib_dir: str) -> list[str]:
 
 
 def _nominal_supply(lib_dir: str) -> dict[str, Any]:
-    """Return ``{"voltage": float | None, "corner": str | None}`` for the
-    library's nominal (typical-process, room-temperature) `.lib` timing view.
+    """Return ``{"voltage": float | None, "corner": str | None, "supplies_v":
+    list[float]}`` for the library's `.lib` timing views.
 
     Selection: parse every `<lib_dir>/lib/*.lib` file's `nom_process`/
     `nom_temperature`/`nom_voltage` Liberty attributes, then prefer files
     whose process/temperature are both typical/room-temperature (within
-    tolerance). A library characterised at more than one supply for that
-    corner -- a split/multi-rail library, e.g. sky130_fd_sc_hvl ships
-    2.64V/2.97V/3.3V variants at `tt_025C` -- reports the **lowest** voltage
-    among them (deterministically tie-broken by filename): the library's
-    baseline/minimum operating point. Falls back to considering every parsed
-    `.lib` file (any process/temperature) when none matches the typical/room-
-    temperature filter, so a library using a different corner-naming
-    convention still gets a best-effort answer instead of `None`.
+    tolerance) -- this is the library's "nominal corner" candidate set.
+    Falls back to considering every parsed `.lib` file (any process/
+    temperature) when none matches the typical/room-temperature filter, so a
+    library using a different corner-naming convention still gets a
+    best-effort answer instead of `None`/`[]`.
+
+    A library may be characterised at more than one supply within that
+    candidate set -- either a split/multi-rail library sharing one process/
+    temperature point (e.g. sky130_fd_sc_hvl ships 2.64V/2.97V/3.3V variants
+    at `tt_025C`), or a library separately, fully characterised at multiple
+    voltages (e.g. gf180mcu_fd_sc_mcu9t5v0 at 1.8V/3.3V/5.0V, issue #537).
+    ``supplies_v`` reports **every** distinct voltage in the candidate set,
+    sorted ascending. ``voltage``/``corner`` report the **lowest** of them
+    (deterministically tie-broken by filename) as the single-value "nominal"
+    pick, preserved for backward compatibility: the library's baseline/
+    minimum operating point, not its only characterised supply.
     """
     lib_views_dir = os.path.join(lib_dir, "lib")
     if not os.path.isdir(lib_views_dir):
-        return {"voltage": None, "corner": None}
+        return {"voltage": None, "corner": None, "supplies_v": []}
 
     parsed = [
         _parse_lib_corner(os.path.join(lib_views_dir, filename))
@@ -673,7 +701,7 @@ def _nominal_supply(lib_dir: str) -> dict[str, Any]:
     ]
     parsed = [entry for entry in parsed if entry["voltage"] is not None]
     if not parsed:
-        return {"voltage": None, "corner": None}
+        return {"voltage": None, "corner": None, "supplies_v": []}
 
     nominal = [
         entry
@@ -691,7 +719,12 @@ def _nominal_supply(lib_dir: str) -> dict[str, Any]:
     ]
     candidates = nominal if nominal else parsed
     best = min(candidates, key=lambda entry: (entry["voltage"], entry["filename"]))
-    return {"voltage": best["voltage"], "corner": best["corner"]}
+    supplies_v = sorted({entry["voltage"] for entry in candidates})
+    return {
+        "voltage": best["voltage"],
+        "corner": best["corner"],
+        "supplies_v": supplies_v,
+    }
 
 
 def _parse_lib_corner(path: str) -> dict[str, Any]:
@@ -738,15 +771,21 @@ def _voltage_class(voltage: float | None) -> str | None:
     return "core" if voltage <= _CORE_VOLTAGE_MAX_V else "io"
 
 
-def _supply_matches(nominal_v: float | None, supply: float) -> bool:
-    """Compatibility verdict: ``nominal_v`` within 2%/0.01V of ``supply``."""
-    if nominal_v is None:
-        return False
-    return math.isclose(
-        nominal_v,
-        supply,
-        rel_tol=_SUPPLY_MATCH_REL_TOL,
-        abs_tol=_SUPPLY_MATCH_ABS_TOL,
+def _supply_matches(supplies_v: list[float], supply: float) -> bool:
+    """Compatibility verdict: ``True`` when **any** entry of ``supplies_v`` is
+    within 2%/0.01V of ``supply`` -- matches against the library's full
+    characterised-supply set (see :func:`_nominal_supply`), not only its
+    single lowest ``nominal_supply_v`` pick, so a library separately
+    characterised at multiple voltages (e.g. gf180mcu's 1.8V/3.3V/5.0V) is
+    correctly reported compatible with any of them (issue #537)."""
+    return any(
+        math.isclose(
+            voltage,
+            supply,
+            rel_tol=_SUPPLY_MATCH_REL_TOL,
+            abs_tol=_SUPPLY_MATCH_ABS_TOL,
+        )
+        for voltage in supplies_v
     )
 
 

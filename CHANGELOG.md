@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-05 — `klt pdk cells`: two silent-wrong-answer bugs on gf180mcu
+  (#537). `device_flavors` was always `[]` for a gf180mcu standard-cell
+  library — the device-model regex required a `<family>_fd_pr__` prefix
+  (sky130's `sky130_fd_pr__nfet_01v8` shape), but gf180mcu's SPICE instance
+  lines name the bare flavor with no prefix at all (`nfet_06v0`); the regex
+  now recognizes both shapes. Separately, a library fully, separately
+  characterised at more than one voltage for the same typical-process/
+  room-temperature corner (e.g. `gf180mcu_fd_sc_mcu9t5v0`'s real
+  1.8V/3.3V/5.0V split) reported only its lowest supply — the other
+  characterised voltages were silently dropped from the payload, so `--supply
+  3.3` false-negatived (exit `3`) even though the library IS characterised at
+  3.3V. `libraries[]` gains a `supplies_v` array reporting every
+  characterised supply; `--supply` now matches against the full set.
+  `nominal_supply_v`/`nominal_corner` keep reporting the lowest as a
+  documented, backward-compatible single-value pick. Purely additive JSON
+  shape change — no `schema_version` bump (`list_cell_libraries` stays `1`).
+  See `docs/cli/pdk.md`'s "`klt pdk cells`" section.
+
 - 2026-08-04 — `klt extract`/`klt lvs`/`klt sim`: the deck's two-term
   device-parameter corrections (`CapacitorDevice.perim_cap_f_um`, #512, and
   `ResistorDevice.fixed_offset_ohm`, #518) now reach the extracted netlist

@@ -43,24 +43,33 @@ def _make_cell_library(
     corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
     with_spice=True,
     with_lib=True,
+    bare_device_names=False,
 ):
     """Fabricate a `libs.ref/<name>` entry with `spice/`/`lib/` views.
 
     ``devices`` are nfet/pfet flavor suffixes embedded in one synthetic SPICE
-    instance line each (prefixed ``<family>_fd_pr__``, matching real
-    ``X<n> ... <model> w=... l=...`` instance lines). ``corners`` is an
-    iterable of ``(corner_name, nom_process, nom_temperature, nom_voltage)``
-    tuples, one `.lib` file per entry. ``with_spice``/``with_lib`` let a test
-    omit either view to exercise the missing-view fallback.
+    instance line each, matching real ``X<n> ... <model> w=... l=...``
+    instance lines. By default (``bare_device_names=False``) the model is
+    prefixed ``<family>_fd_pr__`` -- sky130's shape (`sky130_fd_pr__nfet_01v8`).
+    ``bare_device_names=True`` omits the prefix entirely -- gf180mcu's shape
+    (`nfet_06v0`), see issue #537. ``corners`` is an iterable of
+    ``(corner_name, nom_process, nom_temperature, nom_voltage)`` tuples, one
+    `.lib` file per entry. ``with_spice``/``with_lib`` let a test omit either
+    view to exercise the missing-view fallback.
     """
     lib_dir = variant_dir / "libs.ref" / name
     if with_spice:
         spice_dir = lib_dir / "spice"
         spice_dir.mkdir(parents=True)
-        lines = [
-            f"X{i} a b c d {family}_fd_pr__{device} w=1u l=1u"
-            for i, device in enumerate(devices)
-        ]
+        if bare_device_names:
+            lines = [
+                f"X{i} a b c d {device} w=1u l=1u" for i, device in enumerate(devices)
+            ]
+        else:
+            lines = [
+                f"X{i} a b c d {family}_fd_pr__{device} w=1u l=1u"
+                for i, device in enumerate(devices)
+            ]
         (spice_dir / f"{name}.spice").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
@@ -793,6 +802,85 @@ def test_cells_multi_corner_picks_lowest_nominal_voltage(tmp_path):
     library = report["libraries"][0]
     assert library["nominal_supply_v"] == 2.64
     assert library["nominal_corner"] == "tt_025C_2v64_lv1v80"
+    # All three room-temp/typical-process supplies surface in the full set --
+    # not just the lowest-wins nominal pick above.
+    assert library["supplies_v"] == [2.64, 2.97, 3.30]
+
+
+def test_cells_bare_device_name_reports_device_flavors_gf180mcu_shape(tmp_path):
+    """gf180mcu's SPICE instance lines name the device model as the bare
+    flavor (e.g. `nfet_06v0`) with no `<family>_fd_pr__` prefix at all --
+    unlike sky130's `sky130_fd_pr__nfet_01v8`. `_device_flavors()` must
+    recognize both shapes (issue #537).
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        devices=("nfet_06v0", "pfet_06v0"),
+        bare_device_names=True,
+        corners=(("tt_025C_5v00", 1.0, 25.0, 5.0),),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["device_flavors"] == ["nfet_06v0", "pfet_06v0"]
+
+
+def test_cells_reports_every_characterised_supply_gf180mcu_shape(tmp_path):
+    """A library fully, separately characterised at multiple voltages (e.g.
+    gf180mcu_fd_sc_mcu9t5v0's real 1.8V/3.3V/5.0V split) reports **every**
+    supply in ``supplies_v``, not just the lowest (issue #537).
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        devices=("nfet_06v0", "pfet_06v0"),
+        bare_device_names=True,
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("tt_025C_3v30", 1.0, 25.0, 3.3),
+            ("tt_025C_5v00", 1.0, 25.0, 5.0),
+        ),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["supplies_v"] == [1.8, 3.3, 5.0]
+    # Backward-compatible single-value field still reports the lowest.
+    assert library["nominal_supply_v"] == 1.8
+    assert library["nominal_corner"] == "tt_025C_1v80"
+
+
+def test_cells_supply_matches_against_full_supply_set_not_just_nominal(tmp_path):
+    """`--supply` must match against every characterised supply, not just the
+    single lowest `nominal_supply_v` -- a library characterised at 3.3V (in
+    addition to a lower nominal pick) must report compatible with `--supply
+    3.3` (issue #537, previously false-negatived).
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        devices=("nfet_06v0", "pfet_06v0"),
+        bare_device_names=True,
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("tt_025C_3v30", 1.0, 25.0, 3.3),
+            ("tt_025C_5v00", 1.0, 25.0, 5.0),
+        ),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root), supply=3.3)
+
+    assert report["any_compatible"] is True
+    assert report["libraries"][0]["compatible"] is True
 
 
 def test_cells_excludes_non_std_cell_libraries(tmp_path):
@@ -940,6 +1028,36 @@ def test_cli_cells_supply_exit_three_when_no_match(tmp_path, capsys):
     assert exit_code == 3
     out = capsys.readouterr().out
     assert "NO MATCH" in out
+
+
+def test_cli_cells_supply_exit_zero_for_non_nominal_characterised_voltage(
+    tmp_path, capsys
+):
+    """A library separately characterised at multiple voltages (gf180mcu's
+    1.8V/3.3V/5.0V shape) must report compatible -- and exit 0 -- for a
+    `--supply` matching any of them, not only the lowest/nominal one (issue
+    #537, previously exited 3 / "NO MATCH" for 3.3V despite the library
+    being characterised at it).
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        devices=("nfet_06v0", "pfet_06v0"),
+        bare_device_names=True,
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("tt_025C_3v30", 1.0, 25.0, 3.3),
+            ("tt_025C_5v00", 1.0, 25.0, 5.0),
+        ),
+    )
+
+    exit_code = main(["pdk", "cells", "--pdk-root", str(root), "--supply", "3.3"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "compatible library found" in out
 
 
 def test_cli_cells_no_install_error_envelope(tmp_path, capsys):
