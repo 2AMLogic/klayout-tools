@@ -1632,11 +1632,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _unmodelled_poly,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
-    capacitor_perim_cap_f_um = {
-        capacitor.name: capacitor.perim_cap_f_um
-        for capacitor in uncorrected_deck.capacitors
-    }
-    devices, _device_counts = _describe_devices(circuit, capacitor_perim_cap_f_um)
+    devices, _device_counts = _describe_devices(circuit)
 
     (device,) = devices
     assert device["params"]["c_f"] == pytest.approx(2.0e-13)  # 100um^2 * 2.0e-15
@@ -2490,17 +2486,112 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _unmodelled_poly,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
-    resistor_fixed_offset_ohm = {
-        resistor.name: resistor.fixed_offset_ohm
-        for resistor in uncorrected_deck.resistors
-    }
-    devices, _device_counts = _describe_devices(
-        circuit, None, resistor_fixed_offset_ohm
-    )
+    devices, _device_counts = _describe_devices(circuit)
 
     (device,) = devices
     assert device["class"] == "res_high_po"
     assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * 324.827244)
+
+
+# --------------------------------------------------------------------------- #
+# The deck's two-term corrections reach the *written netlist*, not just the
+# JSON report (issue #521): `klt sim` consumes the `.spice` file
+# `NetlistSpiceWriter` produces and `klt lvs`'s inline-extraction path hands
+# the same `kdb.Netlist` straight to `NetlistComparer`, so a correction that
+# only ever landed in `_describe_devices`'s returned dict was invisible to
+# both.
+# --------------------------------------------------------------------------- #
+
+
+def _spice_card_value(netlist_path, prefix: str) -> float:
+    """Return the single ``prefix``-prefixed (``R``/``C``) device card's
+    value from a written SPICE netlist.
+
+    KLayout's ``NetlistSpiceWriter`` emits e.g.
+    ``R$1 RA RB vsubs 3627.977587 res_high_po`` -- the value is the last
+    token that parses as a float (the trailing token is the device-class
+    name)."""
+    cards = [
+        line.split()
+        for line in Path(netlist_path).read_text().splitlines()
+        if line.startswith(prefix)
+    ]
+    assert len(cards) == 1, f"expected exactly one '{prefix}' card, got {cards}"
+    for token in reversed(cards[0]):
+        try:
+            return float(token)
+        except ValueError:
+            continue
+    raise AssertionError(f"no numeric value in card {cards[0]}")
+
+
+def test_written_spice_carries_res_high_po_fixed_offset_corrected_resistance(tmp_path):
+    """Issue #521's own repro: for `res_high_po` at `l=10um`/`w=1um`, the
+    `R` card in the netlist `klt extract` *writes* now carries the same
+    two-term `3627.977587` the JSON `devices[].params.r_ohm` reports -- not
+    the single-term `3248.27244` the `NetlistSpiceWriter` used to see,
+    which silently reached `klt sim` and `klt lvs` instead."""
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(10.0), tmp_path / "res_high_po.gds"
+    )
+    netlist_path = tmp_path / "res_high_po.spice"
+    report = run_extract(path, "sky130", output=str(netlist_path))
+
+    (device,) = report["devices"]
+    written_r_ohm = _spice_card_value(netlist_path, "R")
+
+    # The JSON report and the written netlist agree -- the whole point of
+    # correcting the `kdb.Device` rather than only the response dict.
+    assert written_r_ohm == pytest.approx(device["params"]["r_ohm"])
+    # ... and both match ngspice's measurement of the real two-term PDK
+    # model (`sky130_fd_pr__res_high_po`'s `rhead` + `rbody`) at this length.
+    assert written_r_ohm == pytest.approx(3627.97760, rel=1e-6)
+    # The pre-#521 written value was the single-term body term alone.
+    assert written_r_ohm > 10.0 * 324.827244
+
+
+def test_written_spice_carries_mim_perim_cap_corrected_capacitance(tmp_path):
+    """The capacitor half of issue #521: the `C` card in the written netlist
+    carries the full two-term `area_cap_f_um2 * A + perim_cap_f_um * P`, the
+    same value the JSON `devices[].params.c_f` reports -- not the area-only
+    term `NetlistSpiceWriter` used to see."""
+    side_um = 10.0
+    path = _write_gds(_make_gf180mcu_mim_square_layout(side_um), tmp_path / "mim.gds")
+    netlist_path = tmp_path / "mim.spice"
+    report = run_extract(path, "gf180mcu", output=str(netlist_path))
+
+    (device,) = report["devices"]
+    written_c_f = _spice_card_value(netlist_path, "C")
+    expected_c_f = 1.99e-15 * side_um * side_um + 2.383e-16 * 4.0 * side_um
+
+    assert written_c_f == pytest.approx(device["params"]["c_f"])
+    assert written_c_f == pytest.approx(expected_c_f, rel=1e-6)
+    # The pre-#521 written value was the area-only term alone.
+    assert written_c_f > 1.99e-15 * side_um * side_um
+
+
+def test_written_spice_unchanged_for_deck_flavour_declaring_no_corrections(tmp_path):
+    """Regression guard for issue #521's non-breaking default: a resistor
+    flavour that never opted into `fixed_offset_ohm` (`res_xhigh_po`, still
+    at the `0.0` default) writes exactly `L / W * sheet_rho_ohm_sq` -- the
+    correction pass is a no-op for every device class whose deck entry
+    leaves the coefficient at its default, so nothing about the written
+    SPICE changes for them."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "sky130",
+            extra=(
+                (79, 20, _RES_MARKED.enlarged(200, 200)),  # urpm
+                (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+            ),
+        ),
+        tmp_path / "res_xhigh_po.gds",
+    )
+    netlist_path = tmp_path / "res_xhigh_po.spice"
+    report = run_extract(path, "sky130", output=str(netlist_path))
+
+    assert report["device_counts"] == {"res_xhigh_po": 1}
+    assert _spice_card_value(netlist_path, "R") == pytest.approx(_RES_SQUARES * 2000.0)
 
 
 @pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
