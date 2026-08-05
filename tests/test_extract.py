@@ -39,6 +39,8 @@ from klayout_tools.extract import (
     _exclude_capacitor_top_via_overlap,
     _extract_netlist,
     _n_squares,
+    _promote_orphan_named_nets,
+    _purge_preserving_named_nets,
     _region,
     run_extract,
 )
@@ -3260,7 +3262,18 @@ def test_written_spice_unchanged_for_deck_flavour_declaring_no_corrections(tmp_p
 def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
     """Edge case from the issue: a resistor-*shaped* polygon carrying no
     resistor-ID marker stays ordinary connected routing -- no device, and
-    both heads remain one net."""
+    both heads remain one net.
+
+    The fixture's two labelled heads (``RA``/``RB``) both land on that one
+    continuous, device-less net, so KLayout's ``Net.expanded_name()`` joins
+    them as ``"RA,RB"`` (issue #312) -- a genuinely *named* net. Issue #539
+    requires ``_extract_netlist``'s purge step to preserve exactly this: a
+    device-less net survives when it is named/labelled, unlike
+    :func:`test_layout_with_no_devices_succeeds_with_zero_count`'s layout,
+    which draws no labels at all and legitimately purges to nothing. (Before
+    #539, `netlist.purge()` dropped this merged, labelled net -- and the
+    whole circuit with it -- exactly like the genuinely-unlabelled case;
+    that conflation was the bug.)"""
     path = _write_gds(
         _make_poly_resistor_layout(deck_name, marked=False),
         tmp_path / f"{deck_name}_bar.gds",
@@ -3269,10 +3282,81 @@ def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
 
     assert report["device_count"] == 0
     assert report["device_counts"] == {}
-    # One continuous conductor with no device on it -- `netlist.purge()`
-    # drops the whole circuit, so there is nothing left to report (contrast
-    # the marked case above, which yields a device across two named nets).
-    assert report["nets"] == []
+    # One continuous conductor with no device on it, but both heads are
+    # labelled -- the merged net survives as a single named, device-less,
+    # promoted-to-pin net (issue #539) instead of the whole circuit purging
+    # away.
+    assert report["nets"] == [{"name": "RA,RB", "pin": True, "device_count": 0}]
+
+
+def test_purge_preserving_named_nets_generalizes_to_hierarchical_circuits():
+    """Issue #539's edge case: `_promote_orphan_named_nets` +
+    `_purge_preserving_named_nets` operate on ``klayout.db`` primitives
+    directly (a ``kdb.Netlist`` built by hand, with a real subcircuit
+    instance), not just the flat single-circuit netlist `_extract_netlist`
+    itself always produces -- proving the purge-guard's condition
+    generalizes beyond the flat top-circuit-only case, per the issue's test
+    plan.
+
+    ``top`` calls ``child`` (a resistor between pins ``X``/``Y``) through a
+    subcircuit instance connecting ``child``'s pins to ``top``'s own ``P``/
+    ``Q`` nets, *and* ``top`` carries a third, wholly independent named net
+    (``ORPHAN``) with zero devices and zero subcircuit connections -- the
+    "circuit with named nets and a mix of subcircuits but zero *direct*
+    devices" case. Before promotion, `Netlist.make_top_level_pins()`
+    already promotes ``P``/``Q`` correctly (they reach `child` through the
+    subcircuit, so they are never "floating" in KLayout's own sense) but
+    silently skips `ORPHAN` (verified directly against `klayout.db`,
+    independent of this module -- issue #539's root cause). Both fix
+    functions must leave `P`/`Q` untouched and rescue `ORPHAN` alongside
+    them."""
+    netlist = kdb.Netlist()
+
+    child = kdb.Circuit()
+    child.name = "child"
+    netlist.add(child)
+    resistor_class = kdb.DeviceClassResistor()
+    resistor_class.name = "RES"
+    netlist.add(resistor_class)
+    net_x = child.create_net("X")
+    net_y = child.create_net("Y")
+    device = child.create_device(resistor_class, "R1")
+    device.connect_terminal(0, net_x)
+    device.connect_terminal(1, net_y)
+    pin_x = child.create_pin("X")
+    child.connect_pin(pin_x, net_x)
+    pin_y = child.create_pin("Y")
+    child.connect_pin(pin_y, net_y)
+
+    top = kdb.Circuit()
+    top.name = "top"
+    netlist.add(top)
+    net_p = top.create_net("P")
+    net_q = top.create_net("Q")
+    top.create_net("ORPHAN")
+    subcircuit = top.create_subcircuit(child, "I1")
+    subcircuit.connect_pin(0, net_p)
+    subcircuit.connect_pin(1, net_q)
+
+    # `make_top_level_pins()` promotes the subcircuit-connected `P`/`Q`
+    # fine on its own, but silently drops the deviceless, subcircuit-less
+    # `ORPHAN` net -- the exact root cause issue #539 reports.
+    netlist.make_top_level_pins()
+    assert top.pin_count() == 2
+    _promote_orphan_named_nets(netlist)
+    assert top.pin_count() == 3
+
+    _purge_preserving_named_nets(netlist)
+
+    top_after = netlist.circuit_by_name("top")
+    assert top_after is not None
+    assert top_after.pin_count() == 3
+    surviving_names = {net.name for net in top_after.each_net()}
+    assert surviving_names == {"P", "Q", "ORPHAN"}
+
+    child_after = netlist.circuit_by_name("child")
+    assert child_after is not None
+    assert {net.name for net in child_after.each_net()} == {"X", "Y"}
 
 
 def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_path):
@@ -3298,9 +3382,15 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
             path, "sky130", output=str(tmp_path / f"rpm_{mask[0]}.spice")
         )
         assert report["device_counts"] == {}
-        assert len(report["warnings"]) == 1
+        # A second warning (issue #539's `net 'RA,RB' merges ...` collision
+        # note) now also fires: with no device recognised, the two labelled
+        # heads (`RA`/`RB`) merge onto one continuous, device-less net that
+        # survives extraction instead of purging away -- see
+        # `test_unmarked_poly_bar_is_not_a_resistor`.
+        assert len(report["warnings"]) == 2
         assert "deck-coverage gap" in report["warnings"][0]
         assert "carry no resistor-marker layer at all" not in report["warnings"][0]
+        assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
 
 
 def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
@@ -3317,9 +3407,13 @@ def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_pa
 
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "salicided.spice"))
     assert report["device_counts"] == {}
-    assert len(report["warnings"]) == 1
+    # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
+    # now also fires -- see the matching comment in
+    # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
+    assert len(report["warnings"]) == 2
     assert "deck-coverage gap" in report["warnings"][0]
     assert "carry no resistor-marker layer at all" not in report["warnings"][0]
+    assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
 
 
 def test_marked_gate_poly_over_diffusion_stays_a_transistor(tmp_path):
@@ -3361,9 +3455,13 @@ def test_unmarked_poly_bar_triggers_unmodelled_device_warning(tmp_path, deck_nam
     )
 
     assert report["device_count"] == 0
-    assert len(report["warnings"]) == 1
+    # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
+    # now also fires -- see the matching comment in
+    # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
+    assert len(report["warnings"]) == 2
     assert _UNMODELLED_WARNING_SNIPPET in report["warnings"][0]
     assert "docs/cli/extract.md" in report["warnings"][0]
+    assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
 
 
 def test_unmodelled_poly_field_reports_bbox_and_reason_when_flagged(tmp_path):
@@ -3378,7 +3476,10 @@ def test_unmodelled_poly_field_reports_bbox_and_reason_when_flagged(tmp_path):
     )
     report = run_extract(path, "sky130", output=str(tmp_path / "unmarked_bar.spice"))
 
-    assert len(report["warnings"]) == 1
+    # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
+    # now also fires -- see the matching comment in
+    # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
+    assert len(report["warnings"]) == 2
     unmodelled_poly = report["unmodelled_poly"]
     assert len(unmodelled_poly) == 1
     entry = unmodelled_poly[0]
@@ -3488,15 +3589,23 @@ def test_unmodelled_poly_warning_distinguishes_marked_from_unmarked(tmp_path):
     report = run_extract(path, "sky130", output=str(tmp_path / "mixed.spice"))
 
     assert report["device_count"] == 0
-    assert len(report["warnings"]) == 2
+    # Two more warnings (issue #539's `net '<labels>' merges ...` collision
+    # note) now also fire, one per bar: with no device recognised on either
+    # bar, each bar's own two labelled heads merge onto one continuous,
+    # device-less net that survives extraction instead of purging away --
+    # see the matching comment in
+    # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
+    assert len(report["warnings"]) == 4
     unmarked = [
         w for w in report["warnings"] if "carry no resistor-marker layer at all" in w
     ]
     coverage_gap = [w for w in report["warnings"] if "deck-coverage gap" in w]
+    merged = [w for w in report["warnings"] if "merges 2 distinct labels" in w]
     assert len(unmarked) == 1
     assert "1 poly-layer shape" in unmarked[0]
     assert len(coverage_gap) == 1
     assert "1 poly-layer shape" in coverage_gap[0]
+    assert len(merged) == 2
 
 
 def test_unmodelled_poly_field_distinguishes_marked_from_unmarked(tmp_path):
@@ -5706,8 +5815,13 @@ def test_dummy_resistor_is_excluded_and_counted(tmp_path, monkeypatch):
     # The dummy-suppressed body's pre-dummy footprint must still count as
     # "recognised" for the unmodelled-poly diagnostic (issue #324) -- a
     # deliberately excluded dummy is not a deck-coverage gap.
-    assert report["warnings"] == []
     assert report["unmodelled_poly"] == []
+    # With the resistor device suppressed, the bar's two labelled heads
+    # (`RA`/`RB`) merge onto one continuous, device-less net that survives
+    # extraction instead of purging away (issue #539) -- the one remaining
+    # warning is that merge, not an unmodelled-device/deck-coverage-gap note.
+    assert len(report["warnings"]) == 1
+    assert "merges 2 distinct labels (RA, RB)" in report["warnings"][0]
 
 
 def test_dummy_resistor_would_extract_without_the_marker(tmp_path, monkeypatch):
