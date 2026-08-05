@@ -161,6 +161,20 @@ not `klt --version`, if you need to detect this kind of drift.
   and `extract` both stay `1`). See `docs/cli/drc.md`'s
   "`coverage.voltage_domain_warnings`" section and `docs/cli/extract.md`'s
   "Voltage-domain markers" section.
+- 2026-08-05 — `klt draw`: new optional `array` field on a shape entry (#553),
+  a `{"pitch_um": [dx, dy], "count": [nx, ny]}` repetition primitive so a
+  regular via/contact farm no longer needs one JSON shape entry per instance —
+  one real fixture needed 17134 shape entries / 1.4 MB of request JSON for
+  geometry parameterizable as origin+pitch+count. `count` is the number of
+  instances (not gaps); stepping is computed as `unit_geometry + i * pitch` in
+  **integer database units after both the unit shape and the pitch are
+  snapped to `dbu_um`**, so an array lands exactly on pitch by construction
+  rather than by the caller's float luck. Purely additive: no `array` key (or
+  `count: [1, 1]`) is byte-identical to today's output, and `shape_count` /
+  `layers[].shapes` in the response now count every expanded instance so they
+  stay meaningful for reviewing what was actually written — no
+  `schema_version` bump (`draw` stays `1`). See `docs/cli/draw.md`'s new
+  "array" subsection.
 - 2026-08-05 — `klt gen`: new `bond_pad` generator (#568), the first
   generator in this family covering the chip *boundary* rather than a core
   analog device — a passivation opening enclosed by the resolved PDK
