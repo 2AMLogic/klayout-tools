@@ -1756,6 +1756,199 @@ def test_inline_extraction_compares_fixed_offset_corrected_resistance(
     assert report["status"] == expected_status
 
 
+def _write_series_res_high_po_gds(
+    path: Path, segments: int = 3, l_um: float = 10.0
+) -> str:
+    """``segments`` sky130 ``res_high_po`` unit primitives (see
+    ``_write_res_high_po_gds``), each individually contacted and marked, wired
+    in series through *unlabelled* interior ``li1`` straps -- issue #559's
+    motivating shape: one logical resistor drawn as N separately-drawn,
+    individually-contacted primitives wired by interconnect, rather than one
+    continuous body with intermediate taps.
+
+    Only the leftmost and rightmost contacts are labelled (``RA``/``RB``), so
+    every interior net stays unlabelled -- ``make_top_level_pins()`` never
+    promotes it to a pin, and ``options.combine_devices`` can fold the whole
+    chain into one device with no ``declared_pins`` reconciliation needed
+    (contrast ``_write_series_resistor_gds``/`test_declared_pins_unblocks_
+    combine_devices_for_labelled_internal_tap`, whose interior tap *is*
+    labelled for documentation and therefore needs ``declared_pins`` to
+    unblock the fold).
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    head_um = 3.0
+    l_nm = int(round(l_um * 1000))
+    head_nm = int(round(head_um * 1000))
+    seg_span_nm = l_nm + 2 * head_nm  # one segment's own poly span (head-body-head)
+    gap_nm = 1000  # 1um gap between segments, bridged by a continuous li1 strap
+
+    left_x_by_segment = []
+    right_x_by_segment = []
+    x0 = 0
+    for _ in range(segments):
+        draw(66, 20, kdb.Box(x0, 0, x0 + seg_span_nm, 1000))  # poly.drawing
+        marked = kdb.Box(x0 + head_nm, 0, x0 + head_nm + l_nm, 1000)
+        draw(66, 13, marked)  # poly.res
+        draw(86, 20, marked.enlarged(200, 200))  # rpm
+        draw(94, 20, marked.enlarged(200, 200))  # psdm
+
+        left_x = x0 + head_nm // 2
+        right_x = x0 + seg_span_nm - head_nm // 2
+        for x in (left_x, right_x):
+            draw(66, 44, kdb.Box(x - 100, 400, x + 100, 600))  # licon1.drawing
+            draw(67, 20, kdb.Box(x - 400, 200, x + 400, 800))  # li1.drawing
+        left_x_by_segment.append(left_x)
+        right_x_by_segment.append(right_x)
+
+        x0 += seg_span_nm + gap_nm
+
+    label(67, 5, "RA", left_x_by_segment[0], 500)
+    label(67, 5, "RB", right_x_by_segment[-1], 500)
+
+    # Bridge each segment's right contact to the next segment's left contact
+    # with a continuous li1 strap -- one interior net per join, left
+    # unlabelled (never promoted to a pin).
+    for i in range(segments - 1):
+        draw(
+            67,
+            20,
+            kdb.Box(
+                right_x_by_segment[i] - 400, 200, left_x_by_segment[i + 1] + 400, 800
+            ),
+        )
+
+    layout.write(str(path))
+    return str(path)
+
+
+#: `res_high_po`'s deck constants (`sheet_rho_ohm_sq`, `fixed_offset_ohm`),
+#: transcribed from `decks/sky130.py` for the reference-SPICE values below --
+#: kept as literals (not imported) so this test fails loudly on a deck-value
+#: drift instead of silently tracking it.
+_RES_HIGH_PO_SHEET_RHO_OHM_SQ = 324.827244
+_RES_HIGH_PO_FIXED_OFFSET_OHM = 379.705147
+
+
+def _series_res_high_po_expected_r_ohm(
+    segments: int, l_um: float, *, offset_count: int
+) -> float:
+    """``total_body_R + offset_count * fixed_offset_ohm`` for ``segments``
+    `res_high_po` unit primitives (`w_um=1.0` each, per
+    `_write_series_res_high_po_gds`) wired in series.
+
+    ``offset_count=1`` is the *correct* folded-device value this issue's fix
+    restores (the fixed offset applied once for the logical device);
+    ``offset_count=segments`` is the *buggy* pre-fix value (the fixed offset
+    summed once per drawn primitive) -- both are asserted as a negative
+    control below, mirroring
+    `test_inline_extraction_compares_fixed_offset_corrected_resistance`'s
+    two-reference-netlist idiom.
+    """
+    body_r_ohm = segments * (l_um / 1.0) * _RES_HIGH_PO_SHEET_RHO_OHM_SQ
+    return body_r_ohm + offset_count * _RES_HIGH_PO_FIXED_OFFSET_OHM
+
+
+def test_combine_devices_applies_fixed_offset_once_per_folded_device(tmp_path):
+    """Issue #559: `options.combine_devices` folding N series-connected
+    `res_high_po` primitives (each carrying a nonzero `fixed_offset_ohm`)
+    into one logical device must add the fixed offset exactly once, not once
+    per drawn primitive.
+
+    Without the fix, KLayout's native series `combine_devices()` sums each
+    primitive's *already-corrected* `R` -- `total_body_R + N *
+    fixed_offset_ohm` -- so the buggy reference (`offset_count=segments`)
+    would incorrectly report `status: "match"` and the correct one
+    (`offset_count=1`) would incorrectly `"mismatch"`. Both directions are
+    asserted, mirroring
+    `test_inline_extraction_compares_fixed_offset_corrected_resistance`, so
+    the test cannot pass by the comparer merely ignoring `R`.
+    """
+    segments = 3
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / "res_high_po_series.gds", segments=segments, l_um=l_um
+    )
+
+    correct_r_ohm = _series_res_high_po_expected_r_ohm(segments, l_um, offset_count=1)
+    buggy_r_ohm = _series_res_high_po_expected_r_ohm(
+        segments, l_um, offset_count=segments
+    )
+    assert correct_r_ohm != pytest.approx(
+        buggy_r_ohm
+    )  # sanity: fixture is discriminating
+
+    def _run(reference_r_ohm: float) -> dict:
+        reference_spice = f"""
+.subckt RES RA RB vsubs
+R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
+.ends
+"""
+        reference_path = _write(tmp_path / "ref.spice", reference_spice)
+        return run_lvs(
+            _write_request(
+                tmp_path / "request.json",
+                {
+                    "layout": {"file": gds, "deck": "sky130"},
+                    "reference": {"netlist": reference_path, "top": "RES"},
+                    "options": {"combine_devices": True},
+                },
+            )
+        )
+
+    correct_report = _run(correct_r_ohm)
+    assert correct_report["counts"]["devices"]["layout"] == 1
+    assert correct_report["counts"]["devices"]["reference"] == 1
+    assert correct_report["status"] == "match"
+
+    buggy_report = _run(buggy_r_ohm)
+    assert buggy_report["counts"]["devices"]["layout"] == 1
+    assert buggy_report["status"] == "mismatch"
+
+
+def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path):
+    """Regression guard for issue #559's fix: when `options.combine_devices`
+    is `false` (or simply omitted -- the default), each of N series-wired
+    `res_high_po` primitives keeps receiving its own `fixed_offset_ohm`
+    exactly as before this issue -- the fix must not change any
+    non-combined behavior. Uses the same series fixture as
+    `test_combine_devices_applies_fixed_offset_once_per_folded_device`, but
+    without `combine_devices`, so the interior nets stay real, unfolded pins
+    -- N separate layout-side devices, each individually corrected."""
+    segments = 3
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / "res_high_po_series_uncombined.gds", segments=segments, l_um=l_um
+    )
+
+    # No reference needed to assert the per-primitive correction directly --
+    # inspect the extracted (uncombined) netlist's own `devices[]` view.
+    from klayout_tools.extract import run_extract
+
+    extracted = run_extract(
+        gds, "sky130", output=str(tmp_path / "res_high_po_series_uncombined.spice")
+    )
+    assert extracted["device_counts"].get("res_high_po") == segments
+    per_primitive_r_ohm = (l_um / 1.0) * _RES_HIGH_PO_SHEET_RHO_OHM_SQ + (
+        _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+    resistor_devices = [d for d in extracted["devices"] if d["class"] == "res_high_po"]
+    assert len(resistor_devices) == segments
+    for device in resistor_devices:
+        assert device["params"]["r_ohm"] == pytest.approx(per_primitive_r_ohm)
+
+
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
     PMOS well-tap layer either (`Comp` is shared with ordinary active,

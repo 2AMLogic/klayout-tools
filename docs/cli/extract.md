@@ -477,7 +477,12 @@ pre-#518 formula, bit-for-bit.
 As with the MiM capacitor's perimeter term, the correction is applied to the
 extracted device itself (issue #521): the `R` card in the written `.spice`
 netlist and the netlist `klt lvs` compares both carry the corrected
-resistance, not just `devices[].params.r_ohm`.
+resistance, not just `devices[].params.r_ohm`. (`klt lvs`'s
+`options.combine_devices` is the one exception: when set, it defers this
+correction until after combining series-connected primitives, so a folded
+logical device gets the fixed offset once rather than once per primitive —
+see `docs/cli/lvs.md`'s `options.combine_devices` entry, issue #559. `klt
+extract` itself — no combine step involved — is unaffected.)
 
 Three consequences worth knowing:
 
