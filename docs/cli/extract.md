@@ -502,6 +502,73 @@ Three consequences worth knowing:
   unmarked geometry; see "Known limitation: unmodelled device geometry"
   below.
 
+### Junction diodes (issue #542)
+
+The `gf180mcu` deck additionally recognises **junction-diode device classes**
+(`ExtractionDeck.diodes`, a tuple of `DiodeDevice` — see its docstring in
+`src/klayout_tools/decks/__init__.py`), run through KLayout's native
+`DeviceExtractorDiode`. A discrete PN diode is the simplest ESD-clamp
+primitive and the one every general-purpose I/O library ships as a baseline
+— gf180mcu's own `gf180mcu_fd_io__asig_5p0` analogue-signal pad cell is a
+plain dual-diode clamp (`D0 DVSS DVDD diode_nd2ps_06v0`,
+`D3 ASIG5V DVDD diode_pd2nw_06v0` in its CDL). Without this recognition that
+geometry extracts as **no device at all**, so `klt lvs` cannot verify any
+diode-based clamp.
+
+| Deck | `devices[].class` | Models | Anode | Cathode | Marker | Also requires |
+| ---- | ----------------- | ------ | ----- | ------- | ------ | ------------- |
+| `gf180mcu` | `diode_nd2ps_06v0` | `gf180mcu_fd_pr__diode_nd2ps_06v0` (n+ diffusion in p-substrate) | *substrate* (no drawn mask — tied to the deck's `substrate_net`) | `Comp` 22/0 | `diode_mk` 115/5 | `Nplus` 32/0, `Dualgate` 55/0; excludes `Nwell` 21/0, `DNWELL` 12/0 |
+| `gf180mcu` | `diode_pd2nw_06v0` | `gf180mcu_fd_pr__diode_pd2nw_06v0` (p+ diffusion in Nwell) | `Comp` 22/0 | `Nwell` 21/0 | `diode_mk` 115/5 | `Pplus` 31/0, `Dualgate` 55/0; excludes `DNWELL` 12/0 |
+
+KLayout forms the device from the two terminal regions' **geometric
+overlap** and reports that overlap's area (`A`) and perimeter (`P`), which
+`klt extract` surfaces as `devices[].params.area_um2`/`perimeter_um`. Both
+entries are transcribed from gf180mcu's own official KLayout LVS deck
+(`klayout/lvs/rule_decks/diode_derivations.lvs` /
+`diode_extraction.lvs`) — see `decks/gf180mcu.py`'s provenance note for the
+exact derivations and every approximation taken relative to them.
+
+Points worth knowing:
+
+- **Not an I-V model.** A recognised diode is emitted as a
+  schematic-equivalent `D` card whose model token is the deck entry's own
+  name (`D$1 vsubs CATH diode_nd2ps_06v0 A=1P P=4U`), exactly the fidelity
+  level the MOS/bipolar recognisers already provide — a consumer simulating
+  the netlist supplies a matching `.model`. `--pdk` model binding
+  (see "SPICE model binding" below) does **not** bind diode classes; like
+  gf180mcu's `bjt`, they keep the bare primitive form.
+- **Unmarked diffusion is never reclassified.** Both terminal regions are
+  intersected with the PDK's `diode_mk` device mark before recognition, the
+  same guard the bipolar block applies to its base — so an ordinary PMOS's
+  p+-in-Nwell source/drain, or a substrate/well tap, is never misrecognised
+  as a diode. A layout with no `diode_mk` drawn anywhere extracts
+  bit-for-bit as it did before this feature existed (the diode extractor is
+  never even invoked for an entry whose terminal regions come out empty).
+- **The substrate-side anode inherits the "NMOS body" limitation above.**
+  gf180mcu draws no p-substrate mask, so `diode_nd2ps_06v0`'s anode is tied
+  to the deck's `substrate_net` global (`vsubs` by default) rather than to a
+  drawn, routable tie — the same wiring the NMOS body and the collector-less
+  bipolar collector already use.
+- **The `Nwell`-side cathode inherits the "PMOS body (gf180mcu only)"
+  limitation above.** `diode_pd2nw_06v0`'s cathode shares the deck's own
+  `nwell` connectivity node, and gf180mcu's curated deck declares neither
+  `tap` nor `well_label` — so that terminal is a floating, anonymous net
+  unless the well node picks up a name some other way. Exactly the same gap
+  as the BJT base terminal's, documented above.
+- **Deliberately unmodelled flavours.** Only the two 6V (`Dualgate`-marked)
+  flavours are wired. The 3.3V (`_03v3`) variants, both `_dn` (deep-nwell)
+  variants, and the `diode_nw2ps_*`/`diode_pw2dw_*`/`diode_dw2ps_*`/
+  `sc_diode` families key off layers this curated deck does not model
+  (`v5_xtor`, `dnwell`, `lvpwell`, `well_diode_mk`, `schottky_diode`);
+  geometry they would claim stays **unrecognised** (a loud LVS mismatch)
+  rather than being extracted as the wrong device. See
+  `decks/gf180mcu.py`'s provenance note for the full list.
+
+**sky130 gap**: sky130's own `diode_pw2nd`/`diode_pd2nw` families are not
+modelled — out of scope for this first cut, consistent with how the
+bipolar/capacitor/resistor families each landed with one deck first, not a
+silent omission.
+
 ### Known limitation: unmodelled device geometry (issue #288, #324)
 
 Every layer this deck reads (`active`, `poly`, `nwell`, `contact`, `metals`,
@@ -509,8 +576,8 @@ Every layer this deck reads (`active`, `poly`, `nwell`, `contact`, `metals`,
 `_extract_netlist`'s connectivity block regardless of whether any device
 extractor claims the geometry drawn on it. If a layout contains geometry
 drawn for a device class the active deck does not (yet) implement — today,
-anything beyond `nfet`/`pfet` plus each deck's curated resistor/bipolar/MiM-
-cap entries above — that geometry is **not skipped**. It is absorbed into
+anything beyond `nfet`/`pfet` plus each deck's curated
+resistor/bipolar/MiM-cap/diode entries above — that geometry is **not skipped**. It is absorbed into
 ordinary interconnect exactly like a routing shape: the device's two (or
 more) terminals extract as a **single shorted net** instead of the distinct
 nets a schematic keeps them as. `klt extract` still exits `0`; nothing in the
@@ -656,7 +723,7 @@ uses comma-containing label text should expect (and can safely ignore) a
 `merged_net_labels[]` entry whose `labels` do not actually correspond to
 independent naming intents.
 
-### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462)
+### Dummy devices: the `dummy` marker layer (issue #295, extended to resistors/bipolars in #462 and to junction diodes in #542)
 
 Analog matching practice puts **dummy devices** on the edges of a matched
 pair or array so every functional device sees the same lithographic/stress
@@ -671,12 +738,13 @@ cascade) for every dummy drawn, forcing an unlayoutable choice between
 matching quality and a clean compare.
 
 A deck may now declare an optional `dummy` marker layer (see the deck-schema
-table below). Any MOS gate, drawn-resistor body, or bipolar unit lying under
-a shape on that layer is **dropped before device recognition**:
-`_extract_netlist` subtracts the marker region from the NMOS/PMOS gate
-regions, each drawn resistor's candidate body region, and each bipolar's base
-(and, transitively, its emitter/collector) region before handing any of them
-to KLayout's device extractors, so geometry fully covered by the marker is
+table below). Any MOS gate, drawn-resistor body, bipolar unit, or recognised
+diode junction lying under a shape on that layer is **dropped before device
+recognition**: `_extract_netlist` subtracts the marker region from the
+NMOS/PMOS gate regions, each drawn resistor's candidate body region, each
+bipolar's base (and, transitively, its emitter/collector) region, and each
+diode's two terminal regions before handing any of them to KLayout's device
+extractors, so geometry fully covered by the marker is
 never recognised as a device at all. The dummy therefore does not appear in
 `devices[]`, `device_count`, or `device_counts`, and `klt lvs` no longer sees
 a phantom device to mismatch.
@@ -686,7 +754,11 @@ footprint. For a MOS gate, the dummy's diffusions (source/drain) and its gate
 poly remain in the connectivity graph; for a resistor, the marker-covered
 segment of the body layer remains ordinary conductor rather than becoming a
 resistive hole; for a bipolar, the parts of its base/emitter/collector
-outside the marker (if any) are unaffected. Either way the shape still
+outside the marker (if any) are unaffected; for a diode, the parts of its
+anode/cathode regions outside the marker are unaffected (a diode covered by
+several declared flavours sharing one device-mark layer is counted **once**,
+because the count is taken against the recognised junction rather than the
+shared marker). Either way the shape still
 extracts as ordinary interconnect and ties off to the rail exactly as drawn —
 consistent with a dummy being "tied off to a rail". A marker that only
 partially covers a device's recognition-input region is a clean geometric cut
@@ -697,8 +769,8 @@ consumes is counted as dropped.
 
 For visibility (rather than a silent drop — the failure mode issue #288 was
 filed about), the JSON response carries a `dummy_devices_dropped` count of how
-many devices — MOS gates, drawn resistors, and bipolars alike — the marker
-suppressed. It is `0` when the active deck declares no `dummy` layer or the
+many devices — MOS gates, drawn resistors, bipolars, and junction diodes
+alike — the marker suppressed. It is `0` when the active deck declares no `dummy` layer or the
 layout draws no dummy geometry. Declaring `dummy` is fully opt-in and
 additive: a deck that does not set it extracts exactly as it did before the
 field existed, byte-for-byte.
@@ -1170,9 +1242,9 @@ exit codes).
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |
-| `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors, and bipolars (both issue #462) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
+| `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors and bipolars (both issue #462), and junction diodes (issue #542) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
 | `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. |
-| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; and a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above), independent of what this layout happens to contain. Both registered decks currently report `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]`. Note the trailing `"resistor"` is a role token, not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
+| `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above; and a deck that declares one or more junction diodes appends each one's class name last, e.g. gf180mcu's `"diode_nd2ps_06v0"`/`"diode_pd2nw_06v0"` — see "Junction diodes" above), independent of what this layout happens to contain. sky130 currently reports `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]` and gf180mcu `["nfet", "pfet", <bipolar>, <capacitor>, "resistor", <diode…>]`. Note the `"resistor"` role token is not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
@@ -1193,9 +1265,9 @@ consume.
 | Field    | Type                        | Description                                                                                    |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
-| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, or a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors"). |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b` and bipolar `b` can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). |
+| `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 

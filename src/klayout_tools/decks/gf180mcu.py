@@ -244,6 +244,7 @@ from . import (
     BipolarDevice,
     CapacitorDevice,
     DerivedLayer,
+    DiodeDevice,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -765,6 +766,90 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # `not(dnwell)`), so `ppolyf_u_1k` below mirrors that by requiring `SAB` +
 # `Resistor` (its own high-sheet-rho marker) without also requiring `Pplus`,
 # deliberately not adding a stricter condition the real deck does not apply.
+#
+# Junction-diode device recognition (issue #542). Additional layer numbers
+# from the same `klayout/lvs/rule_decks/layers_definitions.lvs` table cited
+# for the resistors above:
+#
+#     Dualgate    55/0    (`dualgate = get_polygons(55, 0)`)
+#     diode_mk    115/5   (`diode_mk = get_polygons(115, 5)`)
+#
+# Transcribed from the official KLayout LVS deck's own
+# `diode_derivations.lvs` / `diode_extraction.lvs` (same installed
+# `libs.tech/klayout/lvs/` source as the resistor/MiM provenance above). The
+# two 6V (`Dualgate`-marked, medium-voltage) flavours are the ones the PDK's
+# own I/O library uses for its ESD clamps -- e.g.
+# `gf180mcu_fd_io__asig_5p0`'s CDL is a plain dual-diode clamp built from
+# `diode_nd2ps_06v0` and `diode_pd2nw_06v0` -- so they are the two wired
+# here:
+#
+#     ncomp   = comp.and(nplus)          # pcomp = comp.and(pplus)
+#     ncomp_mv = ncomp.and(dualgate)     # pcomp_mv = pcomp.and(dualgate)
+#     nwell_mv = nwell.overlapping(dualgate)
+#     diode_nd2ps_exclude = nwell.join(diode_exclude)
+#     diode_pd2nw_exclude = lvpwell.join(diode_exclude)
+#
+#     diode_nd2ps_06v0_terminal_n = ncomp_mv.not(dnwell).and(diode_mk)
+#                                           .not(diode_nd2ps_exclude)
+#     diode_pd2nw_06v0_terminal_p = pcomp_mv.not(dnwell).and(diode_mk)
+#                                           .not(diode_pd2nw_exclude)
+#     diode_pd2nw_06v0_terminal_n = nwell_mv.not(dnwell).interacting(ncomp)
+#                                           .not(diode_pd2nw_exclude)
+#
+#     extract_devices(diode('diode_nd2ps_06v0'),
+#                     { 'N' => diode_nd2ps_06v0_terminal_n, 'P' => lvpwell_con })
+#     extract_devices(diode('diode_pd2nw_06v0'),
+#                     { 'N' => diode_pd2nw_06v0_terminal_n,
+#                       'P' => diode_pd2nw_06v0_terminal_p })
+#
+# Mapping onto this deck's `DiodeDevice` fields:
+#
+# - `diode_nd2ps_06v0` is an n+ diffusion in the p-substrate. Its cathode is
+#   `Comp` scoped to `diode_mk` and narrowed by `requires=(Nplus, Dualgate)`
+#   (`ncomp_mv`) / `excludes=(Nwell, DNWELL)` -- `Nwell` is upstream's own
+#   `diode_nd2ps_exclude` head term (an n+ diffusion *inside* Nwell is a well
+#   tap, not this diode) and `DNWELL` routes the deep-nwell `_dn` variant
+#   away rather than mislabelling it as this one. Its **anode is the
+#   p-substrate**, for which gf180mcu draws no mask (upstream substitutes the
+#   drawn `lvpwell_con`, which only exists inside DNWELL): declared `None`,
+#   so `extract.py` uses the device's own `diode_mk` footprint -- minus
+#   `Nwell`/`DNWELL`, keeping it genuinely outside every well -- and ties it
+#   to this deck's `substrate_net` global, exactly as the collector-less
+#   `bipolars` entry above and the NMOS body already do.
+# - `diode_pd2nw_06v0` is a p+ diffusion in Nwell. Anode = `Comp` scoped to
+#   `diode_mk`, narrowed by `requires=(Pplus, Dualgate)` (`pcomp_mv`) /
+#   `excludes=(DNWELL)`; cathode = this deck's own `Nwell` layer, scoped to
+#   the same `diode_mk` and excluding `DNWELL`. Scoping the well side to the
+#   marker replaces upstream's `nwell_mv...interacting(ncomp)` well-selection
+#   idiom: the mark is drawn over the p+ anode, which lies inside the well,
+#   so `Nwell & diode_mk` selects exactly the well the marked anode sits in
+#   and (because it is a subset of `nwell`) shares that well's net identity
+#   through `extract.py`'s well wiring.
+#
+# Deliberately **not** modelled, each an explicit gap rather than a silent
+# one -- geometry these entries do not claim stays unrecognised (no device
+# emitted, a loud LVS mismatch) rather than being extracted as the wrong
+# device:
+#
+# - The 3.3V (`_03v3`) flavours. Upstream tells them apart by the *absence*
+#   of `Dualgate` plus `.not(v5_xtor)` (112/1, not in this curated layer
+#   set); wiring them off "no Dualgate" alone would also claim every
+#   `v5_xtor`-marked shape. Both `_dn` (deep-nwell) variants are likewise
+#   excluded via `DNWELL` above rather than guessed at.
+# - `diode_nw2ps_*`, `diode_pw2dw_*`, `diode_dw2ps_*` and `sc_diode`: all key
+#   off `well_diode_mk` (153/51), `lvpwell`, `dnwell` or `schottky_diode`,
+#   none of which this curated deck models.
+# - `diode_exclude` (poly2, resistor, esd, sab, fusewindow_d, polyfuse,
+#   res_mk, drc_bjt, nat, mos_cap_mk, efuse_mk, plfuse, mvsd, mvpsd,
+#   ldmos_xtor) is only partially modelled: the three members this deck
+#   already carries as *device* markers and that could genuinely collide on
+#   the same diffusion -- `Poly2` (a marked MOS gate), `RES_MK` (a marked
+#   resistor body) and `DRC_BJT` (a marked bipolar) -- are applied to each
+#   diode's diffusion terminal. They are deliberately *not* applied to the
+#   `Nwell` cathode: subtracting `Poly2` from a well region would punch
+#   holes in the well terminal wherever poly crosses it, for no
+#   disambiguation benefit (the marked diffusion side already decides
+#   whether the device exists).
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -887,6 +972,54 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+        ),
+    ),
+    # Junction diodes (issue #542) -- see the provenance note above for the
+    # official `diode_derivations.lvs`/`diode_extraction.lvs` derivations
+    # these transcribe and for what is deliberately left unmodelled.
+    diodes=(
+        DiodeDevice(
+            name="diode_nd2ps_06v0",  # gf180mcu_fd_pr__diode_nd2ps_06v0
+            marker=(115, 5),  # diode_mk
+            # Anode = the p-substrate; gf180mcu draws no mask for it, so the
+            # device's own mark footprint (kept outside every well) stands in
+            # and is tied to `substrate_net`.
+            anode=None,
+            anode_excludes=(
+                (21, 0),  # Nwell  -- upstream's `diode_nd2ps_exclude` head term
+                (12, 0),  # DNWELL -> the `_dn` deep-nwell variant
+            ),
+            cathode=(22, 0),  # Comp (n+ diffusion)
+            cathode_requires=(
+                (32, 0),  # Nplus    -- n+ doped (`ncomp`)
+                (55, 0),  # Dualgate -- the 6V/MV flavour (`ncomp_mv`)
+            ),
+            cathode_excludes=(
+                (21, 0),  # Nwell  -- n+ inside Nwell is a well tap, not this
+                (12, 0),  # DNWELL -> the `_dn` deep-nwell variant
+                (30, 0),  # Poly2   \
+                (110, 5),  # RES_MK  | modelled subset of `diode_exclude`
+                (127, 5),  # DRC_BJT /
+            ),
+        ),
+        DiodeDevice(
+            name="diode_pd2nw_06v0",  # gf180mcu_fd_pr__diode_pd2nw_06v0
+            marker=(115, 5),  # diode_mk
+            anode=(22, 0),  # Comp (p+ diffusion)
+            anode_requires=(
+                (31, 0),  # Pplus    -- p+ doped (`pcomp`)
+                (55, 0),  # Dualgate -- the 6V/MV flavour (`pcomp_mv`)
+            ),
+            anode_excludes=(
+                (12, 0),  # DNWELL -> the `_dn` deep-nwell variant
+                (30, 0),  # Poly2   \
+                (110, 5),  # RES_MK  | modelled subset of `diode_exclude`
+                (127, 5),  # DRC_BJT /
+            ),
+            cathode=(21, 0),  # Nwell -- shares this deck's own well node
+            cathode_excludes=(
+                (12, 0),  # DNWELL -> the `_dn` deep-nwell variant
+            ),
         ),
     ),
 )

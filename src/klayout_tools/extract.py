@@ -71,6 +71,20 @@ KLayout's native ``DeviceExtractorBJT3Transistor``. See
 :func:`_extract_netlist`'s bipolar wiring block for how the marker layer
 scopes recognition to genuine device-cell instances.
 
+A deck may likewise declare one or more junction-diode device-recognition
+entries (``ExtractionDeck.diodes``, issue #542): a p-doped and an n-doped
+drawn layer, each restricted to a PDK-specific diode device-mark layer (e.g.
+gf180mcu's ``diode_mk`` 115/5) and narrowed by per-terminal
+``requires``/``excludes`` implant layers, fed to KLayout's native
+``DeviceExtractorDiode`` -- which forms the device from the two regions'
+geometric overlap and reports that overlap's area/perimeter. A terminal the
+PDK draws no mask for (the p-substrate side of an n+/p-substrate diode)
+is declared ``None`` and tied to the deck's ``substrate_net`` global,
+mirroring the collector-less bipolar case. Without such an entry a discrete
+diode -- the standard ESD-clamp primitive on every pad ring -- extracts as
+no device at all, so ``klt lvs`` cannot verify any diode-based clamp. See
+:class:`klayout_tools.decks.DiodeDevice` for the layer-role contract.
+
 A deck may also declare one or more drawn MiM-capacitor device-recognition
 entries (``ExtractionDeck.capacitors``, issue #225): two independent
 plate layers (a purpose-drawn top plate, a bottom plate on an ordinary
@@ -127,6 +141,7 @@ from ._provenance import build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
     CapacitorDevice,
+    DiodeDevice,
     ExtractionDeck,
     ParasiticsDeck,
     ResistorDevice,
@@ -1158,6 +1173,52 @@ def _capacitor_plate_regions(
     return top_region, bottom_region
 
 
+def _diode_terminal_region(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    marker: kdb.Region,
+    layer: tuple[int, int] | None,
+    requires: tuple[tuple[int, int], ...],
+    excludes: tuple[tuple[int, int], ...],
+) -> kdb.Region:
+    """The recognised region for **one** terminal of a :class:`DiodeDevice`
+    entry (issue #542), against this layout.
+
+    ``layer`` is the terminal's declared drawn layer, scoped to the device's
+    already-built ``marker`` region -- the same "intersect with the device
+    mark before recognition" guard the bipolar block applies to its base, so
+    an ordinary PMOS's p+-in-Nwell diffusion is never misrecognised as a
+    diode. ``None`` means the terminal is formed by the substrate (the PDK
+    draws no mask for it): the region is then the device's ``marker``
+    footprint itself, which the caller ties to the deck's ``substrate_net``
+    global. That footprint -- rather than an empty region -- is load-bearing:
+    ``kdb.DeviceExtractorDiode`` forms the device from the *overlap* of its
+    two inputs, so an empty input silently yields no device at all.
+
+    ``requires``/``excludes`` then narrow the result the same way
+    :func:`_capacitor_plate_regions` and ``_resolve_resistors`` narrow
+    theirs: every ``requires`` layer must also cover the region, every
+    ``excludes`` layer is subtracted. For a substrate-formed terminal this
+    is how the deck keeps the substrate side genuinely *outside* every well
+    (``anode_excludes=(Nwell, DNWELL)``).
+
+    Always returns a freshly-owned ``Region``: both terminals of the same
+    entry can derive from the one ``marker`` object, and each is registered
+    into the connectivity graph separately.
+    """
+    # `&`/`-` below already return fresh regions; the `dup()` branch covers
+    # the no-declared-layer, no-narrowing case.
+    if layer is None:
+        region = marker.dup()
+    else:
+        region = _region(layout, top_cell, layer) & marker
+    for required in requires:
+        region = region & _region(layout, top_cell, required)
+    for excluded in excludes:
+        region = region - _region(layout, top_cell, excluded)
+    return region
+
+
 def _exclude_capacitor_top_via_overlap(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -1744,6 +1805,87 @@ def _extract_netlist(
             (bipolar, bipolar_base, bipolar_emitter, bipolar_collector)
         )
 
+    # Junction-diode device recognition (issue #542): each of the deck's
+    # optional `diodes` entries (see `DiodeDevice` in `decks/__init__.py`)
+    # builds its two terminal regions -- both scoped to the PDK's diode
+    # device-mark layer and narrowed by per-terminal implant
+    # `requires`/`excludes` -- and hands them to KLayout's native
+    # `DeviceExtractorDiode`, which forms the device from their geometric
+    # overlap. Without this, a discrete PN/ESD-clamp diode extracts as no
+    # device at all (nothing recognises the diffusion-in-well junction), so
+    # `klt lvs` cannot verify any diode-based clamp.
+    #
+    # `diode_regions` carries the built regions through to the connectivity
+    # section below (registration/extraction must happen once per entry,
+    # before any layer can be used in a `connect()` call), mirroring
+    # `bipolar_regions` above.
+    diode_regions: list[tuple[DiodeDevice, kdb.Region, kdb.Region]] = []
+    for diode in deck.diodes:
+        # Deck-authoring validation, checked unconditionally (like the
+        # capacitor block's own `top_plate_via` pairing check) so a mistake
+        # in a deck module surfaces even on a diode-free layout: a diode
+        # with *no* drawn terminal at all has nothing to overlap and would
+        # silently extract nothing.
+        if diode.anode is None and diode.cathode is None:
+            raise ExtractError(
+                f"diode '{diode.name}': at most one of anode/cathode may be "
+                "None (the substrate-formed terminal) -- a diode with neither "
+                "terminal drawn cannot be recognised"
+            )
+
+        diode_marker = _region(layout, top_cell, diode.marker)
+        anode_region = _diode_terminal_region(
+            layout,
+            top_cell,
+            diode_marker,
+            diode.anode,
+            diode.anode_requires,
+            diode.anode_excludes,
+        )
+        cathode_region = _diode_terminal_region(
+            layout,
+            top_cell,
+            diode_marker,
+            diode.cathode,
+            diode.cathode_requires,
+            diode.cathode_excludes,
+        )
+
+        # Dummy-device suppression (issue #295, extended to resistors and
+        # bipolars in #462, to diodes here): count and cut whole recognised
+        # junctions covered by the deck's `dummy` marker. Counting is done
+        # against the *recognised junction* (the anode/cathode overlap --
+        # exactly what `DeviceExtractorDiode` turns into a device) rather
+        # than against the raw marker layer, because a deck may declare
+        # several diode flavours sharing one device-mark layer (gf180mcu
+        # declares two on `diode_mk`); counting marker components would
+        # then charge the same dummy device once per declared flavour.
+        # A junction only partially covered survives as a clean geometric
+        # cut, matching the MOS/bipolar behaviour.
+        if not dummy.is_empty():
+            for component in (anode_region & cathode_region).merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            anode_region = anode_region - dummy
+            cathode_region = cathode_region - dummy
+
+        if anode_region.is_empty() or cathode_region.is_empty():
+            # No diode marker (or no matching implant geometry) drawn
+            # anywhere on this layout -- the common case. Registering and
+            # extracting empty regions would be a no-op anyway, but skipping
+            # keeps a diode-free layout's extraction bit-for-bit what it was
+            # before this feature existed, the same guard the capacitor
+            # block below applies.
+            continue
+
+        l2n.register(anode_region, f"{diode.name}_anode")
+        l2n.register(cathode_region, f"{diode.name}_cathode")
+        l2n.extract_devices(
+            kdb.DeviceExtractorDiode(diode.name),
+            {"P": anode_region, "N": cathode_region},
+        )
+        diode_regions.append((diode, anode_region, cathode_region))
+
     # MiM capacitor device recognition (issue #225): each of the deck's
     # optional `capacitors` entries (see `CapacitorDevice` in
     # `decks/__init__.py`) derives its own top-plate/bottom-plate geometry --
@@ -1923,6 +2065,32 @@ def _extract_netlist(
             l2n.connect(bipolar_collector, contact)
         else:
             l2n.connect_global(bipolar_collector, deck.substrate_net)
+
+    # Diode terminal connectivity (issue #542), derived from each terminal's
+    # declared layer rather than configured separately per entry -- see
+    # `DiodeDevice`'s docstring:
+    #
+    # - a terminal drawn on the deck's own `nwell` shares that well's net
+    #   identity (its region is always a marker-scoped subset of `nwell`),
+    #   so a well tap/label elsewhere in this function names it -- the same
+    #   wiring the bipolar base gets above;
+    # - a substrate-formed terminal (declared `None`) joins the deck's
+    #   `substrate_net` global, like the collector-less bipolar collector
+    #   and `nfet_body`;
+    # - any other terminal layer is a diffusion, so it joins `contact` and
+    #   picks its net up from ordinary contact/metal routing -- the same
+    #   wiring the bipolar emitter gets above.
+    for diode, anode_region, cathode_region in diode_regions:
+        for terminal_layer, terminal_region in (
+            (diode.anode, anode_region),
+            (diode.cathode, cathode_region),
+        ):
+            if terminal_layer is None:
+                l2n.connect_global(terminal_region, deck.substrate_net)
+            elif terminal_layer == deck.nwell:
+                l2n.connect(terminal_region, nwell)
+            else:
+                l2n.connect(terminal_region, contact)
 
     try:
         l2n.extract_netlist()
@@ -2510,12 +2678,15 @@ def _describe_devices(
                     device.parameter(param.id()), _PARAM_PRECISION_FARAD
                 )
             elif param.name == "A":
-                # Capacitor plate-overlap area in square micrometres -- the
-                # geometry `c_f` above was computed from (`C = A * area_cap`,
-                # see `CapacitorDevice`'s docstring), reported alongside it so
-                # a consumer can sanity-check the extracted value without
-                # re-deriving it from the layout. `DeviceClassCapacitor`'s own
-                # area/perimeter parameters are named `A`/`P` -- distinct from
+                # Overlap area in square micrometres: the capacitor's
+                # plate-overlap area -- the geometry `c_f` above was computed
+                # from (`C = A * area_cap`, see `CapacitorDevice`'s
+                # docstring) -- or, for a `DeviceClassDiode` (issue #542),
+                # the recognised junction's own area. Reported alongside so a
+                # consumer can sanity-check the extracted value without
+                # re-deriving it from the layout. `DeviceClassCapacitor`'s and
+                # `DeviceClassDiode`'s area/perimeter parameters are both
+                # named `A`/`P` -- distinct from
                 # `DeviceClassBJT3Transistor`'s `AE`/`AB`/`AC`/`PE`/`PB`/`PC`
                 # (see "Bipolar (BJT) device recognition"), so this branch
                 # never fires for a bipolar device.
@@ -2523,13 +2694,14 @@ def _describe_devices(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
             elif param.name == "P":
-                # Capacitor plate-overlap perimeter in micrometres (issue
-                # #512): KLayout's `DeviceClassCapacitor` already computes
-                # this alongside `A`, but until #512 it was never read back.
-                # Reported for the same sanity-check reason as `area_um2`,
-                # and consumed by `_apply_device_parameter_corrections` to
-                # correct `C` for a deck that sets a nonzero
-                # `perim_cap_f_um`.
+                # Overlap perimeter in micrometres (issue #512): the
+                # capacitor's plate-overlap perimeter, or a diode junction's
+                # own perimeter (#542). KLayout's `DeviceClassCapacitor`
+                # already computed this alongside `A`, but until #512 it was
+                # never read back. Reported for the same sanity-check reason
+                # as `area_um2`, and consumed by
+                # `_apply_device_parameter_corrections` to correct `C` for a
+                # deck that sets a nonzero `perim_cap_f_um`.
                 params["perimeter_um"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
