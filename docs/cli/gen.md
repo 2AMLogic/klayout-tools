@@ -466,6 +466,78 @@ always `1` (the pad itself). **`drc_hints.matched_group_id` is always
 | `down_to`       | string | `"top_metal"`  | Lowest metal level the pad straps to. Only `"top_metal"` is supported today — see "Known limitation" above. |
 | `via_style`     | string | `"ring"`       | Via arrangement once `down_to` supports a level below `top_metal`: `"ring"` or `"array"`. Currently has no geometric effect — see "Known limitation" above. |
 
+### `esd_device` (grounded-gate multi-finger ESD protection MOS)
+
+Composes `mos_array`'s unit-device drawing and `guard_ring`'s ring drawing —
+the same composition mechanism `diff_pair` already uses for families 1 and 3
+(see `diff_pair` above): one multi-finger MOS unit device (`fingers` gate
+stripes across a shared diffusion strip, the standard ggNMOS ESD-clamp
+layout idiom), optionally enclosed by an automatically-sized tap ring
+(`add_guard_ring` — the ring's own thickness and contact count are fixed,
+same as `diff_pair`'s own automatic ring; use the standalone `guard_ring`
+generator directly for a fully-parametrized ring). Always an NMOS-style
+device — unlike `mos_array`/`diff_pair` there is no `flavor` option, and
+unlike every other ring-composing generator here, **the tap ring itself
+draws no well tie either**: a grounded-gate ESD clamp is conventionally
+NMOS, and enclosing it in an Nwell the way `guard_ring`'s own `add_well`
+default would silently misclassifies the device as `pfet` under `klt
+extract`'s `active & nwell` test — the same well `diff_pair` already
+suppresses for its own default `flavor="nfet"` case. Ports are named
+`M1_S`/`M1_D`/`M1_G`, plus
+`TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` when `add_guard_ring` is `true` (and a
+`GAP_<side>` marker when the ring carries a routing opening — see
+`guard_ring`'s "Ring routing openings" above). `device_count` is always `1`.
+`drc_hints.matched_group_id` is always `null` — a single ESD device has no
+matching concept.
+
+Two additional marker layers, neither DRC-checked by either curated deck:
+
+- **`esd_mark`** — an unconditional device-class marker, drawn whenever the
+  resolved PDK family cites one (mirrors `bjt_mark`'s own
+  always-on-when-present precedent). **gf180mcu** reuses `Dualgate` `(55,
+  0)` — the same layer the curated deck's junction-diode extraction already
+  ties to the PDK's own ESD-clamp library ("the two 6V (`Dualgate`-marked,
+  medium-voltage) flavours are the ones the PDK's own I/O library uses for
+  its ESD clamps"). **sky130** cites no numbered layer for this role in this
+  repo's curated deck (`sky130.lvs`'s own exclusion set names `hvtr`/`hvtp`
+  only, with no transcribed layer/datatype pair) — the role is simply
+  omitted there, reported via `drc_hints.notes` like every other
+  role-absent case `guard_ring`'s `add_well` note documents.
+- **`salicide_block`** (`params.salicide_block`, opt-in, default `false`) —
+  a ballast-style unsalicided region drawn over the whole finger-array
+  footprint (a "floorplan fidelity, not a process-exact cross-section"
+  approximation, the same trade-off `bjt_array`'s own device draws from base
+  layers rather than a vendor cell). **gf180mcu** reuses `SAB` `(49, 0)` —
+  the *same* salicide-block layer `res_array`'s own `"generic"` flavour
+  already cites, not a second private one. **sky130** cites none in this
+  repo's curated deck; requesting it there is a documented no-op (via
+  `drc_hints.notes`), not an error.
+
+`finger_width_um`/`fingers` are validated against this generator's own
+hardcoded, engineering-derived bounds (not a literal transcribed DRM rule id
+— see `ESD_FINGER_WIDTH_MIN_UM`/`ESD_FINGER_WIDTH_MAX_UM`/
+`ESD_MAX_FINGERS_PER_RING`'s own docstrings in `gen.py` for the full
+provenance caveat, which mirrors the `bond_pad` sibling issue's
+guideline-vs-DRC-coded-table finding): a finger narrower than
+`ESD_FINGER_WIDTH_MIN_UM` (`0.42`µm, `UNIT_MIN_W_UM`) is a structural error
+(no room for an enclosed contact); a finger wider than
+`ESD_FINGER_WIDTH_MAX_UM` (`20.0`µm) or a `fingers` count above
+`ESD_MAX_FINGERS_PER_RING` (`32`) risks the non-uniform per-finger
+current-sharing an ESD pulse depends on avoiding.
+
+| `params` field       | Type   | Default | Description |
+| --------------------- | ------ | ------- | ----------- |
+| `finger_width_um`    | double | `2.0`   | Width of each gate finger (µm). Must be `>= 0.42` and `<= 20.0`. |
+| `l_um`               | double | `0.28`  | Gate length (µm). Must be `> 0`. |
+| `fingers`            | int    | `4`     | Gate fingers. Must be `>= 1` and `<= 32`. |
+| `add_guard_ring`     | bool   | `true`  | Enclose the device in an automatically-sized tap ring. |
+| `ring_gap_side`      | string | `""`    | Cut one routing opening through the tap ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
+| `ring_gap_um`        | double | `0.0`   | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_offset_um` | double | `0.0`   | Slide the opening off its side's midpoint (µm). |
+| `ring_padding_um`    | double | `0.5`   | Padding between the finger array and the tap ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
+| `gate_contact`       | bool   | `false` | Draw a contact + local-metal pad on the gate landing pad and report `M1_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. |
+| `salicide_block`     | bool   | `false` | Draw the PDK's salicide-block layer over the finger array on families that curate one (gf180mcu only — see above). |
+
 ## JSON schema (the contract)
 
 **JSON is the API.** Human-readable text output is a courtesy; the JSON
@@ -570,7 +642,7 @@ family/variant split the resolver doesn't have. The response's
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, etc). |
+| `name` | string | Stable port/pin name — see each generator's section above for its naming convention (`P1`/`P2` for `resistor_strip`, `U<i>_S`/`_D`/`_G` for `mos_array`, `Q<i>_E`/`_B` for `bjt_array`, `PAD` for `bond_pad`, `M1_S`/`_D`/`_G` for `esd_device`, etc). |
 | `net` | string \| null | Caller-supplied net label; always `null` — no request field feeds it yet. |
 | `layer` | object | `{ layer, datatype, name }` — the same triple `klt layers` reports, resolved against the *actual* PDK-family layer for the four phase-2 generators (see `klayout_tools.gen._PDK_ROLE_LAYERS`); `resistor_strip` always reports its fixed placeholder. `name` is always `null` (no per-PDK layer-*name* lookup is wired up yet). |
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
@@ -582,7 +654,7 @@ family/variant split the resolver doesn't have. The response's
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number | The tightest design-rule spacing the generator actually used (or its own safe-margin constant, for a generator with no single caller-supplied spacing param — see each generator's section above). |
-| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip`, `guard_ring`, and `bond_pad`, none of which has a matching concept. |
+| `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip`, `guard_ring`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 
@@ -697,6 +769,12 @@ $ klt gen diff_pair --params '{"mirror": true, "splits": 2}' \
 # then verify it's DRC-clean including the bipolar mark-layer rule:
 $ klt gen bjt_array --pdk gf180mcuD -o output/bjt_array.gds --format json
 $ klt drc output/bjt_array.gds --deck gf180mcu
+
+# A grounded-gate ESD clamp on gf180mcu (draws the Dualgate device mark and
+# an unsalicided ballast region), then verify it's DRC-clean:
+$ klt gen esd_device --params '{"fingers": 8, "salicide_block": true}' \
+    --pdk gf180mcuD -o output/esd_device.gds --format json
+$ klt drc output/esd_device.gds --deck gf180mcu
 ```
 
 ## See also

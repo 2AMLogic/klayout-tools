@@ -103,6 +103,10 @@ _HIDDEN_PARAMS = {
     "dummy_present",
     "pad_layer",
     "top_metal_layer",
+    "esd_mark_layer",
+    "esd_mark_present",
+    "salicide_block_layer",
+    "salicide_block_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -199,6 +203,41 @@ PAD_OPENING_GUIDELINE_MIN_UM: dict[str, float] = {
     "ball_cup": 40.0,
     "bump": 4.0,
 }
+
+#: `esd_device` (issue #569) validation bounds for its `finger_width_um`/
+#: `fingers` params -- a grounded-gate MOS ESD clamp's finger-width and
+#: fingers-per-tap-ring limits.
+#:
+#: Provenance caveat (read this before trusting these as a literal DRM rule
+#: id, the way `PAD.4`/`BJT.3`/etc. are cited elsewhere in this codebase):
+#: neither curated deck in this repo transcribes the source PDK's own
+#: dedicated ESD-protection-device chapter (gf180mcu DRM's "ESD" rule
+#: section; sky130's own I/O-library ESD-cell sizing notes) -- the same gap
+#: the `bond_pad` sibling issue (#568) documents for `PAD.1`/`PAD.2`/
+#: `PAD.5`-`PAD.20`'s *guideline* (not DRC-coded) table. So, mirroring
+#: `UNIT_MIN_W_UM`'s own precedent above, these three constants are
+#: conservative, engineering-derived structural floors/ceilings -- not
+#: verbatim-transcribed rule ids -- documented here so a future PR that does
+#: obtain a verified per-family DRM citation has exactly one place to correct.
+#:
+#: `ESD_FINGER_WIDTH_MIN_UM` reuses `UNIT_MIN_W_UM` directly (kept as its own
+#: named constant, not just an inline reference, so a later per-family
+#: correction doesn't have to touch every other generator's own floor).
+ESD_FINGER_WIDTH_MIN_UM = UNIT_MIN_W_UM
+
+#: Individual ESD-clamp fingers are conventionally kept narrow -- rarely more
+#: than a few tens of um in bulk 130-180nm CMOS -- specifically so current
+#: shares evenly across every finger during an ESD pulse instead of
+#: localising into (and destroying) one finger first. Chosen comfortably
+#: inside that commonly-published range.
+ESD_FINGER_WIDTH_MAX_UM = 20.0
+
+#: Fingers this generator encloses in a single automatically-sized tap ring.
+#: Beyond this, the ring's own resistance from the far fingers back to a real
+#: ground/tap contact grows enough that per-finger triggering starts to skew
+#: -- the same uniform-turn-on concern `ESD_FINGER_WIDTH_MAX_UM` encodes for
+#: one finger's own width, applied across the array instead.
+ESD_MAX_FINGERS_PER_RING = 32
 
 #: Generic layer *roles* the phase-2 analog primitive generators draw on,
 #: resolved to each supported PDK family's curated-DRC-deck layer/datatype
@@ -297,6 +336,18 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # defines met3/met4/via3/via4, none of which this deck curates -- so
         # `bond_pad`'s own `down_to` param only ever supports `"top_metal"`
         # today (see `_bond_pad_validate`).
+        #
+        # No `"esd_mark"`/`"salicide_block"` entry (issue #569, `esd_device`):
+        # this repo's curated sky130 deck cites no numbered layer for either
+        # role -- sky130.py's own resistor-flavour provenance notes name
+        # `hvtr`/`hvtp` (high-voltage-transistor exclusion layers, the closest
+        # ESD/IO-voltage-domain-adjacent marks in that transcription) only as
+        # unnumbered exclusions in the official `sky130.lvs`'s exclusion set,
+        # never with a transcribed layer/datatype pair this module could cite
+        # without guessing. `esd_device` simply omits both roles on this
+        # family (`_role_layer_info` already returns `None` for a missing
+        # key), reported via `drc_hints.notes` like every other role-absent
+        # case in this table.
     },
     "gf180mcu": {
         "active": (22, 0),  # Comp
@@ -339,6 +390,31 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # silent misapplication; see `docs/cli/gen.md`'s `bond_pad` section.
         "pad": (37, 0),  # Pad -- passivation opening
         "top_metal": (81, 0),  # Metal5
+        # `esd_device`'s device-class marker (issue #569). This deck cites no
+        # single dedicated "ESD" GDS layer with a verified layer/datatype pair
+        # (`res_exclude`'s exclusion-list comment above names `esd`/`esd_mk`
+        # only, with no transcribed numbers this module could cite without
+        # guessing) -- the closest *already-verified, already-cited* marker
+        # this deck ties to ESD-clamp device recognition is `Dualgate` (55/0,
+        # see the diode-derivation note above): "the two 6V (`Dualgate`-
+        # marked, medium-voltage) flavours are the ones the PDK's own I/O
+        # library uses for its ESD clamps". Reusing it here gives a
+        # grounded-gate ESD MOSFET the same voltage-domain marking its
+        # diode-clamp counterparts already carry, distinguishing it from an
+        # ordinary core `mos_array` unit -- no curated *DRC* rule currently
+        # checks `Dualgate` in this deck (`dualgate.drc` is cited but not
+        # transcribed, see the module docstring), so drawing it never affects
+        # `klt drc --deck gf180mcu` status.
+        "esd_mark": (55, 0),  # Dualgate
+        # Salicide-block role, shared with `_PDK_RES_FLAVOR_LAYERS`'s own
+        # `"generic"` `res_block` entry -- the *same* SAB (49/0) layer, not a
+        # second private one: SAB is documented above as a general
+        # "salicide block" mask, not a resistor-specific one, so reusing it
+        # for `esd_device`'s own `salicide_block` option (a ballast-style
+        # unsalicided region over the finger array, the same "floorplan
+        # fidelity, not process-exact cross-section" approximation
+        # `_bjt_unit_layout` already documents) is not a new citation.
+        "salicide_block": (49, 0),  # SAB
     },
 }
 
@@ -616,6 +692,54 @@ def _bond_pad_layer_params(
     return {
         "pad_layer": _role_layer_info(family, "pad"),
         "top_metal_layer": _role_layer_info(family, "top_metal"),
+    }
+
+
+def _esd_device_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``esd_device`` (issue #569) -- composes a unit
+    MOS device's own layer roles (:func:`_device_layer_params`'s ``active``/
+    ``poly``/``contact``/``metal``) and ``guard_ring``'s ring ``tap`` role,
+    plus two new roles this generator introduces: ``esd_mark`` (a
+    device-class marker, only resolved for gf180mcu -- see
+    :data:`_PDK_ROLE_LAYERS`'s own comment for the citation and the sky130
+    gap) and ``salicide_block`` (only resolved for gf180mcu, reusing the same
+    SAB layer :data:`_PDK_RES_FLAVOR_LAYERS` already cites). Both follow the
+    established ``*_present``-gated precedent (``bjt_mark_present``,
+    ``dummy_present``) so the generator omits a role no currently supported
+    family resolves to a real layer for.
+
+    Deliberately **not** resolving ``guard_ring``'s own ``well`` role here
+    (unlike :func:`_ring_layer_params`, which every other ring-composing
+    generator uses): ``esd_device`` has no ``flavor`` option and is always an
+    NMOS-style device (see the ``_EsdDevicePCell`` class docstring), so
+    drawing the ring's automatic well tie the way ``guard_ring``'s own
+    ``add_well`` default does would enclose the whole device in an Nwell --
+    exactly the well ``diff_pair`` suppresses for its own default
+    ``flavor="nfet"`` case (``self.well_present and self.flavor == "pfet"``
+    in its ``produce_impl``), because it silently misclassifies the
+    enclosed active region as ``pfet`` under ``klt extract``'s ``active &
+    nwell`` test (``extract.py``'s ``pfet_active`` derivation) instead of
+    ``nfet``.
+    """
+    import klayout.db as kdb
+
+    family = _pdk_family(pdk_info["variant"])
+    esd_mark = _role_layer_info(family, "esd_mark")
+    salicide_block = _role_layer_info(family, "salicide_block")
+    return {
+        "active_layer": _role_layer_info(family, "active"),
+        "poly_layer": _role_layer_info(family, "poly"),
+        "contact_layer": _role_layer_info(family, "contact"),
+        "metal_layer": _role_layer_info(family, "metal"),
+        "tap_layer": _role_layer_info(family, "tap"),
+        "esd_mark_layer": esd_mark if esd_mark is not None else kdb.LayerInfo(0, 0),
+        "esd_mark_present": esd_mark is not None,
+        "salicide_block_layer": (
+            salicide_block if salicide_block is not None else kdb.LayerInfo(0, 0)
+        ),
+        "salicide_block_present": salicide_block is not None,
     }
 
 
@@ -1445,6 +1569,55 @@ def _bjt_array_layout(
         "col_pitch_um": col_pitch,
         "row_pitch_um": row_pitch,
         "well_box_um": well_box,
+        "ring": ring,
+        "ring_offset_um": ring_offset,
+    }
+
+
+def _esd_device_layout(
+    finger_width_um: float,
+    l_um: float,
+    fingers: int,
+    add_guard_ring: bool,
+    ring_gap_side: str = "",
+    ring_gap_um: float = 0.0,
+    ring_gap_offset_um: float = 0.0,
+    ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
+    gate_contact: bool = False,
+) -> dict[str, Any]:
+    """Grounded-gate multi-finger ESD MOS clamp (issue #569): a single
+    :func:`_mos_unit_layout` unit device with ``fingers`` gate stripes across
+    one shared diffusion strip -- the standard ggNMOS ESD-clamp layout idiom
+    -- optionally enclosed by an automatically-sized tap ring.
+
+    Composes exactly the way :func:`_diff_pair_layout` composes families 1
+    and 3: it calls :func:`_mos_unit_layout` (the same unit-device helper
+    ``mos_array``/``diff_pair`` already use, here with its own ``fingers``
+    parameter doing double duty as the ESD device's own multi-finger count)
+    and :func:`_ring_layout` (the same ring helper ``guard_ring``/
+    ``diff_pair``/``bjt_array`` already use) directly -- no second, private
+    layout mechanism, and no sub-cell instantiation of ``_GuardRingPCell``
+    itself (``diff_pair`` doesn't either; see that class's own docstring)."""
+    unit = _mos_unit_layout(finger_width_um, l_um, fingers, gate_contact)
+
+    ring = None
+    ring_offset = (0.0, 0.0)
+    if add_guard_ring:
+        padding = ring_padding_um
+        ring_w = GUARD_RING_DEFAULT_WIDTH_UM
+        ring = _ring_layout(
+            unit["total_len_um"] + 2 * padding,
+            unit["bbox_height_um"] + 2 * padding,
+            ring_w,
+            GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
+            ring_gap_side,
+            ring_gap_um,
+            ring_gap_offset_um,
+        )
+        ring_offset = (-(ring_w + padding), -(ring_w + padding))
+
+    return {
+        "unit": unit,
         "ring": ring,
         "ring_offset_um": ring_offset,
     }
@@ -2952,6 +3125,240 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 [(-half_strap, -half_strap, half_strap, half_strap)],
             )
 
+    class _EsdDevicePCell(kdb.PCellDeclarationHelper):
+        """Grounded-gate multi-finger ESD protection MOS (issue #569): one
+        multi-finger unit device (see :func:`_mos_unit_layout` -- ``fingers``
+        gate stripes across a shared diffusion, the standard ggNMOS ESD-clamp
+        layout idiom), optionally enclosed in an automatically-sized tap ring
+        composing ``guard_ring``'s own ring-drawing helper (family 3), the
+        same composition mechanism ``diff_pair`` already uses for families 1
+        and 3 (see :func:`_esd_device_layout`).
+
+        Always an NMOS-style device (no ``flavor``/well option, unlike
+        ``mos_array``/``diff_pair``, and -- unlike every other ring-composing
+        generator -- the tap ring itself draws **no** well tie either): a
+        grounded-gate ESD clamp is conventionally NMOS, and enclosing it in
+        an Nwell the way ``guard_ring``'s own ``add_well`` default would
+        silently misclassifies the device as ``pfet`` under ``klt
+        extract``'s ``active & nwell`` test (see
+        :func:`_esd_device_layer_params`'s docstring for the full
+        explanation -- the same well ``diff_pair`` suppresses for its own
+        default ``flavor="nfet"`` case).
+
+        Draws two optional marker layers, neither DRC-checked by either
+        curated deck (see :data:`_PDK_ROLE_LAYERS`'s ``esd_mark``/
+        ``salicide_block`` role comments for citations and the sky130 gap):
+        ``esd_mark`` (always drawn when the resolved family has one -- an
+        unconditional device-class marker, mirroring ``bjt_mark``'s own
+        always-on-when-present precedent) and ``salicide_block`` (drawn only
+        when ``params.salicide_block`` opts in -- a ballast-style unsalicided
+        region over the whole finger footprint, the same "floorplan
+        fidelity, not a process-exact cross-section" approximation
+        `_bjt_unit_layout` already documents for its own device).
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.param(
+                "finger_width_um",
+                self.TypeDouble,
+                "Width of each gate finger (um)",
+                default=2.0,
+            )
+            self.param(
+                "l_um",
+                self.TypeDouble,
+                "Gate length (um)",
+                default=GATE_LENGTH_SAFE_MIN_UM,
+            )
+            self.param("fingers", self.TypeInt, "Gate fingers", default=4)
+            self.param(
+                "add_guard_ring",
+                self.TypeBoolean,
+                "Enclose the device in an automatically-sized tap ring",
+                default=True,
+            )
+            self.param(
+                "ring_gap_side",
+                self.TypeString,
+                "Cut one routing opening through the tap ring on this side: "
+                "'' (default, closed ring), 'N', 'S', 'E' or 'W'",
+                default="",
+            )
+            self.param(
+                "ring_gap_um",
+                self.TypeDouble,
+                "Length of the tap-ring opening along its side (um), when "
+                "ring_gap_side is set",
+                default=0.0,
+            )
+            self.param(
+                "ring_gap_offset_um",
+                self.TypeDouble,
+                "Shift of the tap-ring opening from its side's midpoint (um): "
+                "+x on 'N'/'S', +y on 'E'/'W'",
+                default=0.0,
+            )
+            self.param(
+                "ring_padding_um",
+                self.TypeDouble,
+                "Padding between the finger array and the tap ring's inner "
+                "edge (um), when add_guard_ring is set",
+                default=GUARD_RING_DEFAULT_PADDING_UM,
+            )
+            self.param(
+                "gate_contact",
+                self.TypeBoolean,
+                "Finish the gate stack: draw a contact and a local-metal pad "
+                "on the gate landing pad and report M1_G on the metal role "
+                "instead of bare poly -- see mos_array's equivalent note",
+                default=False,
+            )
+            self.param(
+                "salicide_block",
+                self.TypeBoolean,
+                "Draw the PDK's salicide-block layer over the finger array "
+                "on families that curate one (see the esd_mark/salicide_block "
+                "role comments in _PDK_ROLE_LAYERS)",
+                default=False,
+            )
+            self.param(
+                "active_layer",
+                self.TypeLayer,
+                "Active/diffusion drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "poly_layer",
+                self.TypeLayer,
+                "Poly gate drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "contact_layer",
+                self.TypeLayer,
+                "Contact drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "metal_layer",
+                self.TypeLayer,
+                "Local routing metal drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "tap_layer",
+                self.TypeLayer,
+                "Tap ring drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "esd_mark_layer",
+                self.TypeLayer,
+                "ESD device-class marker drawing layer (only used when "
+                "esd_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "esd_mark_present",
+                self.TypeBoolean,
+                "Whether esd_mark_layer is a real layer this PDK family cites",
+                default=False,
+            )
+            self.param(
+                "salicide_block_layer",
+                self.TypeLayer,
+                "Salicide-block drawing layer (only used when "
+                "salicide_block_present and params.salicide_block)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "salicide_block_present",
+                self.TypeBoolean,
+                "Whether salicide_block_layer is a real layer this PDK family cites",
+                default=False,
+            )
+
+        def display_text_impl(self) -> str:
+            return (
+                f"esd_device(fingers={self.fingers},w={self.finger_width_um},"
+                f"l={self.l_um})"
+            )
+
+        def produce_impl(self) -> None:
+            dbu = self.layout.dbu
+            li_active = self.layout.layer(self.active_layer)
+            li_poly = self.layout.layer(self.poly_layer)
+            li_contact = self.layout.layer(self.contact_layer)
+            li_metal = self.layout.layer(self.metal_layer)
+            info = _esd_device_layout(
+                self.finger_width_um,
+                self.l_um,
+                self.fingers,
+                self.add_guard_ring,
+                self.ring_gap_side,
+                self.ring_gap_um,
+                self.ring_gap_offset_um,
+                self.ring_padding_um,
+                self.gate_contact,
+            )
+            unit_boxes = info["unit"]["boxes_um"]
+            for role, li in (
+                ("active", li_active),
+                ("poly", li_poly),
+                ("contact", li_contact),
+                ("metal", li_metal),
+            ):
+                _insert_boxes(self.cell, li, dbu, unit_boxes[role])
+
+            # ESD device-class marker (issue #569): unconditional whenever the
+            # resolved family cites one, mirroring `bjt_mark`'s own
+            # always-on-when-present precedent (`res_mark`/`bjt_mark` are
+            # never behind their own boolean opt-in -- only `salicide_block`
+            # below is, matching its own "optional process option" nature).
+            if self.esd_mark_present:
+                li_mark = self.layout.layer(self.esd_mark_layer)
+                _insert_boxes(self.cell, li_mark, dbu, unit_boxes["active"])
+
+            if self.salicide_block and self.salicide_block_present:
+                li_block = self.layout.layer(self.salicide_block_layer)
+                _insert_boxes(self.cell, li_block, dbu, unit_boxes["active"])
+
+            if info["ring"] is not None and self.add_guard_ring:
+                li_tap = self.layout.layer(self.tap_layer)
+                ox, oy = info["ring_offset_um"]
+                ring = info["ring"]
+                gap_box = (
+                    _shift_box(ring["gap"]["box_um"], ox, oy)
+                    if ring["gap"] is not None
+                    else None
+                )
+                _insert_ring(
+                    self.cell,
+                    li_tap,
+                    dbu,
+                    _shift_box(ring["outer_box_um"], ox, oy),
+                    _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
+                )
+                _insert_ring(
+                    self.cell,
+                    li_metal,
+                    dbu,
+                    _shift_box(ring["outer_box_um"], ox, oy),
+                    _shift_box(ring["inner_box_um"], ox, oy),
+                    gap_box,
+                )
+                _insert_boxes(
+                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
+                )
+                # Deliberately no well tie drawn around the ring here (unlike
+                # `_GuardRingPCell`'s own `add_well` default, and unlike
+                # `diff_pair`'s `flavor="pfet"` case) -- see this class's own
+                # docstring and `_esd_device_layer_params`'s for why: it
+                # would enclose this always-NMOS device in an Nwell and
+                # misclassify it as `pfet` under `klt extract`.
+
     return {
         "resistor_strip": _ResistorStripPCell,
         "mos_array": _MosArrayPCell,
@@ -2960,6 +3367,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         "diff_pair": _DiffPairPCell,
         "bjt_array": _BjtArrayPCell,
         "bond_pad": _BondPadPCell,
+        "esd_device": _EsdDevicePCell,
     }
 
 
@@ -3938,6 +4346,168 @@ def _bond_pad_describe(
     }
 
 
+def _esd_device_validate(params: dict[str, Any]) -> None:
+    if params["finger_width_um"] < ESD_FINGER_WIDTH_MIN_UM:
+        raise GenError(
+            f"generator 'esd_device': params.finger_width_um must be >= "
+            f"{ESD_FINGER_WIDTH_MIN_UM} (the smallest width that fits an "
+            "enclosed contact with margin -- a generator-side structural "
+            "floor, not the target PDK's own diffusion-width rule)"
+        )
+    if params["finger_width_um"] > ESD_FINGER_WIDTH_MAX_UM:
+        raise GenError(
+            f"generator 'esd_device': params.finger_width_um must be <= "
+            f"{ESD_FINGER_WIDTH_MAX_UM} -- individual ESD-clamp fingers wider "
+            "than this risk non-uniform current sharing across fingers "
+            "during an ESD pulse (see ESD_FINGER_WIDTH_MAX_UM's own "
+            "docstring)"
+        )
+    if params["l_um"] <= 0:
+        raise GenError("generator 'esd_device': params.l_um must be > 0")
+    if params["fingers"] < 1:
+        raise GenError("generator 'esd_device': params.fingers must be >= 1")
+    if params["fingers"] > ESD_MAX_FINGERS_PER_RING:
+        raise GenError(
+            f"generator 'esd_device': params.fingers must be <= "
+            f"{ESD_MAX_FINGERS_PER_RING} fingers per automatically-sized tap "
+            "ring (see ESD_MAX_FINGERS_PER_RING's own docstring)"
+        )
+    if params["ring_padding_um"] < 0:
+        raise GenError("generator 'esd_device': params.ring_padding_um must be >= 0")
+
+    inner_w_um, inner_h_um = _auto_ring_inner_size_um(
+        _esd_device_layout(
+            params["finger_width_um"],
+            params["l_um"],
+            params["fingers"],
+            True,
+            ring_padding_um=params["ring_padding_um"],
+            gate_contact=params["gate_contact"],
+        )
+    )
+    _validate_ring_gap(
+        "esd_device",
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        inner_w_um,
+        inner_h_um,
+    )
+
+
+def _esd_device_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    family = _pdk_family(pdk_info["variant"])
+    info = _esd_device_layout(
+        params["finger_width_um"],
+        params["l_um"],
+        params["fingers"],
+        params["add_guard_ring"],
+        params["ring_gap_side"],
+        params["ring_gap_um"],
+        params["ring_gap_offset_um"],
+        params["ring_padding_um"],
+        params["gate_contact"],
+    )
+    unit = info["unit"]
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
+    poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
+    metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
+    poly_layer = {"layer": poly_pair[0], "datatype": poly_pair[1], "name": None}
+    # #492 -- see the equivalent comment in `_mos_array_describe`.
+    gate_layer = metal_layer if params["gate_contact"] else poly_layer
+
+    sx, sy = unit["s_xy"]
+    dx, dy = unit["d_xy"]
+    gx, gy = unit["g_xy"]
+    ports = [
+        {
+            "name": "M1_S",
+            "net": None,
+            "layer": metal_layer,
+            "x_um": sx,
+            "y_um": sy,
+            "width_um": unit["height_um"],
+            "direction_deg": 180,
+        },
+        {
+            "name": "M1_D",
+            "net": None,
+            "layer": metal_layer,
+            "x_um": dx,
+            "y_um": dy,
+            "width_um": unit["height_um"],
+            "direction_deg": 0,
+        },
+        {
+            "name": "M1_G",
+            "net": None,
+            "layer": gate_layer,
+            "x_um": gx,
+            "y_um": gy,
+            "width_um": unit["g_width_um"],
+            "direction_deg": 90,
+        },
+    ]
+
+    ring_drawn = info["ring"] is not None and params["add_guard_ring"]
+    if ring_drawn:
+        ports.extend(
+            _ring_ports(
+                info["ring"],
+                info["ring_offset_um"],
+                "TAP_",
+                metal_layer,
+                GUARD_RING_DEFAULT_WIDTH_UM,
+                metal_layer,
+            )
+        )
+
+    notes = _ring_gap_notes(
+        info["ring"] if ring_drawn else None, params["ring_gap_side"]
+    )
+    if not params["add_guard_ring"]:
+        notes.append(
+            "no tap ring drawn (params.add_guard_ring is false) -- substrate "
+            "isolation from adjacent structures is the caller's responsibility"
+        )
+    if _PDK_ROLE_LAYERS[family].get("esd_mark") is None:
+        notes.append(
+            f"the resolved PDK family ('{family}') has no citable ESD "
+            "device-class marker layer in this repo's curated deck -- no "
+            "esd_mark shape was drawn (see the esd_mark role's own comment "
+            "in _PDK_ROLE_LAYERS)"
+        )
+    if (
+        params["salicide_block"]
+        and _PDK_ROLE_LAYERS[family].get("salicide_block") is None
+    ):
+        notes.append(
+            f"params.salicide_block is true but the resolved PDK family "
+            f"('{family}') has no citable salicide-block layer in this "
+            "repo's curated deck -- no shape was drawn"
+        )
+
+    snapped = _grid_snapped(dbu, params["finger_width_um"], params["l_um"])
+
+    return {
+        "device_count": 1,
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
+            "matched_group_id": None,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
+
+
 #: Maps ``PCellParameterDeclaration`` type constants to the JSON type names
 #: reported by ``klt gen --list``.
 _PARAM_TYPE_NAMES = {
@@ -4047,5 +4617,21 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_bond_pad_validate,
         describe=_bond_pad_describe,
         layer_params=_bond_pad_layer_params,
+    ),
+    "esd_device": _GeneratorSpec(
+        name="esd_device",
+        summary=(
+            "Grounded-gate multi-finger ESD protection MOS: one multi-finger "
+            "unit device (params.fingers gate stripes across a shared "
+            "diffusion, the standard ggNMOS ESD-clamp layout idiom), "
+            "optionally enclosed in an automatically-sized tap ring composing "
+            "guard_ring's own ring-drawing helper (family 3), the same "
+            "composition mechanism diff_pair already uses for families 1 and "
+            "3, with an optional salicide_block layer -- issue #569."
+        ),
+        dbu=0.001,
+        validate=_esd_device_validate,
+        describe=_esd_device_describe,
+        layer_params=_esd_device_layer_params,
     ),
 }
