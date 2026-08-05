@@ -513,7 +513,9 @@ cells_checked = list_cell_libraries(
     variant="sky130A", supply=1.8
 )  # + "compatible"/"any_compatible"
 
-macros = list_hard_macro_libraries(variant="sky130A")  # same dict `klt pdk macros` emits
+macros = list_hard_macro_libraries(
+    variant="sky130A"
+)  # same dict `klt pdk macros` emits
 ```
 
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
