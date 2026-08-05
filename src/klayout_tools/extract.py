@@ -326,6 +326,9 @@ def run_extract(
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
             ],
+            "unbiased_pmos_body_nets": [
+                {"device": str, "net": str}, ...
+            ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -422,6 +425,29 @@ def run_extract(
     from the string itself. A matching prose entry is also appended to
     ``warnings`` for every affected net. Always a list, empty when no net
     carries multiple labels.
+
+    ``unbiased_pmos_body_nets`` (issue #555) reports every extracted PMOS
+    (``deck.pfet_class``) device whose body (``"b"``) terminal ties to an
+    anonymous, KLayout-synthesized net -- the ``"$5"``-style placeholder
+    ``Net.expanded_name()`` assigns to a net with no drawn label, as opposed
+    to the deck's own synthesized (but *named*) global substrate net (e.g.
+    ``"vsubs"``, tied via ``connect_global``). This happens today on decks
+    whose curated layer set has no distinct well-tie/tap layer separate from
+    transistor active (gf180mcu, see ``decks/gf180mcu.py``); sky130's
+    ``well_label``/``tap`` fields mean it never fires there. Unlike
+    ``devices[].nets["b"]`` (which already carries the same net name, just
+    not flagged), this field is the structured, no-grep-required signal that
+    the reported net has **no DC bias path at all** -- see
+    ``docs/cli/extract.md``'s "Parasitic (RC) extraction" section for the
+    simulation-fidelity consequence (a floating body voltage rather than the
+    real supply rail every schematic-level netlist assumes). One entry per
+    affected device, each ``{"device": "<device instance name>", "net":
+    "<anonymous net name>"}``; a matching prose entry is also appended to
+    ``warnings``. Always a list, empty when no PMOS device's body net is
+    anonymous (which includes every deck whose layer set draws a real
+    well-tie/tap). Independent of ``--parasitics``/``--pdk`` -- present under
+    the same condition regardless of either flag, since the DC-bias gap
+    exists whether or not parasitics are requested or a PDK model is bound.
 
     ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
     stack level the deck's ``ExtractionDeck.metals`` declares that has no
@@ -570,6 +596,27 @@ def run_extract(
             "'Merged net labels' section."
         )
 
+    # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
+    # decks with no distinct well-tie/tap layer (gf180mcu) extract the PMOS
+    # body onto a KLayout-synthesized `$<n>` net with no DC bias path at
+    # all -- the net name was already readable via `devices[].nets["b"]`,
+    # but nothing flagged it as *this specific* gap. Surfaced two ways: a
+    # structured `unbiased_pmos_body_nets[]` entry (so a caller does not have
+    # to re-derive the anonymous-net convention itself) and a matching prose
+    # `warnings[]` entry, mirroring `merged_net_labels`'s own two-way pattern
+    # above.
+    unbiased_pmos_body_nets = _detect_unbiased_pmos_body_nets(devices, deck)
+    for unbiased_entry in unbiased_pmos_body_nets:
+        warnings.append(
+            f"PMOS device '{unbiased_entry['device']}' body ties to "
+            f"anonymous net '{unbiased_entry['net']}' with no DC bias path "
+            f"-- '{deck_name}' has no distinct well-tie/tap layer for this "
+            "PMOS body, so it is left floating rather than tied to a real "
+            "supply rail; resimulating this netlist directly will not "
+            "reproduce the schematic-level PMOS body bias. See "
+            "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
+        )
+
     # Layers carrying shapes the deck's connectivity graph never reads (issue
     # #220): geometry there is invisible to extraction, so surface it rather
     # than let it become a silent LVS mismatch downstream.
@@ -657,6 +704,11 @@ def run_extract(
         # extracted MOS geometry -- see run_extract's docstring and
         # `_detect_voltage_domain_overlap` for the field's full meaning.
         "voltage_domain_warnings": voltage_domain_warnings,
+        # Additive field (issue #555): always a list, empty when no PMOS
+        # device's body net is the anonymous, KLayout-synthesized kind -- see
+        # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
+        # the field's full meaning.
+        "unbiased_pmos_body_nets": unbiased_pmos_body_nets,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -2927,6 +2979,44 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         merged.append({"net": name, "labels": labels})
     return merged
+
+
+_ANONYMOUS_NET_PREFIX = "$"
+
+
+def _detect_unbiased_pmos_body_nets(
+    devices: list[dict[str, Any]], deck: ExtractionDeck
+) -> list[dict[str, Any]]:
+    """Build the response's ``unbiased_pmos_body_nets[]`` array (issue #555).
+
+    Scans the already-built ``devices[]`` array (so this reuses the exact
+    terminal-net names ``_describe_devices`` already read off the netlist)
+    for every PMOS device (``device["class"] == deck.pfet_class``) whose body
+    terminal (``nets["b"]``) is an anonymous, KLayout-synthesized net --
+    identified by ``Net.expanded_name()``'s own ``"$<n>"`` placeholder
+    convention for a net with no drawn label (the same convention
+    ``tests/test_extract.py`` already asserts against, e.g.
+    ``pfet["nets"]["b"].startswith("$")``). A *named* net -- including the
+    deck's own synthesized global substrate net (e.g. ``"vsubs"``) -- never
+    matches, so an NMOS body (tied via ``connect_global``) or a well-labelled
+    PMOS body (a deck with a real ``well_label``/``tap`` layer, e.g. sky130)
+    never appears here.
+
+    Returns one entry per affected device, ``{"device": <device instance
+    name>, "net": <anonymous net name>}``, sorted by device name for
+    deterministic output (matching ``devices[]``/``nets[]``'s own sort
+    discipline). Always a list; empty when no PMOS device's body net is
+    anonymous.
+    """
+    unbiased: list[dict[str, Any]] = []
+    for device in devices:
+        if device["class"] != deck.pfet_class:
+            continue
+        body_net = device["nets"].get("b")
+        if body_net is not None and body_net.startswith(_ANONYMOUS_NET_PREFIX):
+            unbiased.append({"device": device["name"], "net": body_net})
+    unbiased.sort(key=lambda entry: entry["device"])
+    return unbiased
 
 
 def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:

@@ -3418,6 +3418,22 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     # deck) -- present as *some* net, just not one of the named pins.
     assert pfet["nets"]["b"] not in {"VDD", "VSS", "I", "ZN"}
 
+    # Issue #555: the anonymous PMOS-body net's KLayout-synthesized name
+    # (e.g. "$5") is surfaced structurally -- not only discoverable by
+    # grepping the written SPICE body -- as an `unbiased_pmos_body_nets[]`
+    # entry naming both the affected device and its floating body net, with
+    # a matching prose `warnings[]` entry pointing at the docs caveat. The
+    # NMOS body's `vsubs` net (a real DC bias path via `connect_global`)
+    # never appears here.
+    assert pfet["nets"]["b"].startswith("$")
+    assert report["unbiased_pmos_body_nets"] == [
+        {"device": pfet["name"], "net": pfet["nets"]["b"]}
+    ]
+    assert any(
+        "no DC bias path" in warning and pfet["nets"]["b"] in warning
+        for warning in report["warnings"]
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Multi-level metal stack: routing above Metal1 extracts as connected nets
