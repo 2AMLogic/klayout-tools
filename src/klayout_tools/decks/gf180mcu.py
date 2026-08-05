@@ -43,6 +43,34 @@ checkout of that repo at any time. Unless noted otherwise, the **3.3V
 column** value is used (this deck does not model the 5V/6V high-voltage
 variants).
 
+``CO.*``/``Vn.*`` re-derivation note (issue #551): the nine
+conductor-over-cut enclosure rules below (``metal1.enclosing.contact.1``
+plus the eight ``metalN.enclosing.viaM.1`` rules) are the one family here
+whose values were re-derived from *executable* rule-deck code rather than
+from the DRM tables alone. A current PDK build ships them -- unlike the
+``999a6ff`` DRC-only snapshot the provenance note below describes -- so each
+cites both its DRM rule id and the statement it was re-derived from in
+``libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`` of a
+real fetched install (``volare enable gf180mcu
+c6d73a35f524070e85faff4a6a9eef49553ebc2b``, the same open_pdks build the
+``EXTRACTION_DECK`` MiM notes below already cite, and the same one the
+issue's own reproducer was cross-checked against). Every one of those
+statements has the form ``cut.enclosed(conductor, d, euclidian) OR
+cut.not(conductor)`` -- exactly the pair of conditions our ``"enclosing"``
+check reports (marginal facing-edge enclosure plus ``_run_check``'s
+``outside_region`` zero-overlap escape term, see ``drc.py``) -- so none of
+the nine is an approximation.
+
+Their **end-of-line** companions (``CO.6a``/``CO.6b``, ``Vn.3c``/``Vn.3d``,
+``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed: each conditions a
+0.06um margin on a narrow-metal (< 0.34um) end-of-line predicate, expressed
+in the PDK deck via ``first_edges``/``second_edges``/``extended_in``
+edge-set operations that :class:`~klayout_tools.decks.DrcRule`'s
+(layer, other_layer, check, threshold) vocabulary cannot express at all --
+the same class of gap as sky130's un-transcribed ``m2.6`` area rule, and
+left for a follow-on that extends the vocabulary rather than approximated
+with a wrong threshold.
+
 Provenance note (why this deck isn't transcribed from a ``.lydrc`` script
 the way ``sky130.py`` was): the companion KLayout-runnable DRC deck lives in
 https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv (also
@@ -63,7 +91,9 @@ This is *not* a full transcription of the official rule manual (hundreds of
 rules across dozens of layers, plus 5V/6V variants, DFM guidelines, etc.) —
 mirrors the "curated starter subset" scope guard sky130 documents:
 width/space/enclosure checks across poly2/comp/contact/metal1 (extended, per
-#188, to metal2/metal3/metal5/metaltop and the MiM capacitor stack), plus a
+#188, to metal2/metal3/metal5/metaltop and the MiM capacitor stack, per #546
+to via1-via4 size/spacing, and per #551 to the conductor-over-cut enclosures
+that tie the two together), plus a
 first increment of well/substrate-tap coverage (Nwell), one bipolar
 (BJT)-specific device rule, and one bond-pad rule (``PAD.4``, issue #545),
 wide enough to prove the deck-adapter shape
@@ -371,6 +401,25 @@ DECK: list[DrcRule] = [
         # DRM 7.12 Contact, rule "CO.2a": "Space" -> 0.25um
     ),
     DrcRule(
+        id="metal1.enclosing.contact.1",
+        description="minimum metal1 overlap of contact",
+        layer=(34, 0),  # Metal1 -- the conductor *above* the cut
+        other_layer=(33, 0),  # Contact
+        check="enclosing",
+        threshold_dbu=5,  # 0.005 um
+        # DRM 7.12 Contact, rule "CO.6": "Metal1 overlap of contact" ->
+        # 0.005um. Re-derived from the PDK's own executable rule deck (see
+        # the "CO.*/Vn.* re-derivation" note in the module docstring):
+        # `rule_decks/contact.drc`'s CO.6 is
+        # `contact.enclosed(metal1, 0.005.um, euclidian) OR
+        # contact.not(metal1)` -- exactly the pair of conditions our
+        # "enclosing" check reports (marginal facing-edge enclosure plus the
+        # zero-overlap escape term, see `_run_check`'s `outside_region` in
+        # `drc.py`), so this transcription is exact, not an approximation.
+        # The end-of-line companions "CO.6a"/"CO.6b" are *not* modeled -- see
+        # the module docstring's end-of-line coverage note (issue #551).
+    ),
+    DrcRule(
         id="via1.width.1",
         description="minimum via1 size (approximates official min/max size rule)",
         layer=(35, 0),  # Via1
@@ -398,6 +447,37 @@ DECK: list[DrcRule] = [
         # unmodified.
     ),
     DrcRule(
+        id="metal1.enclosing.via1.1",
+        description="minimum metal1 overlap of via1 (the conductor below the cut)",
+        layer=(34, 0),  # Metal1
+        other_layer=(35, 0),  # Via1
+        check="enclosing",
+        threshold_dbu=0,  # 0.0 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V1.3a": "metal1 overlap of via1"
+        # -> 0.0um, i.e. the cut must land on metal1 but needs no margin.
+        # Re-derived from `rule_decks/via1.drc`, whose V1.3a is the bare
+        # `via1.not(metal1)` -- exactly this deck's zero-threshold
+        # "enclosing" form (`enclosing_check(..., 0)` reports nothing, and
+        # the rule's whole content is carried by `_run_check`'s
+        # `outside_region` escape term, see `drc.py`). Via1 is the one via
+        # level whose *lower* conductor carries a 0.0um requirement; Via2-
+        # Via4 use 0.01um ("Vn.3b"), below.
+    ),
+    DrcRule(
+        id="metal2.enclosing.via1.1",
+        description="minimum metal2 overlap of via1 (the conductor above the cut)",
+        layer=(36, 0),  # Metal2
+        other_layer=(35, 0),  # Via1
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V1.4a": "metal2 overlap of via1"
+        # -> 0.01um. Re-derived from `rule_decks/via1.drc`, whose V1.4a is
+        # `via1.enclosed(metal2, 0.01.um, euclidian) OR via1.not(metal2)` --
+        # exactly the pair of conditions our "enclosing" check reports.
+        # The end-of-line companions "V1.4b"/"V1.4c" are not modeled (see
+        # the module docstring's end-of-line coverage note).
+    ),
+    DrcRule(
         id="via2.width.1",
         description="minimum via2 size (approximates official min/max size rule)",
         layer=(38, 0),  # Via2
@@ -419,6 +499,29 @@ DECK: list[DrcRule] = [
         # checked).
     ),
     DrcRule(
+        id="metal2.enclosing.via2.1",
+        description="minimum metal2 overlap of via2 (the conductor below the cut)",
+        layer=(36, 0),  # Metal2
+        other_layer=(38, 0),  # Via2
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V2.3b": "metal2 overlap of via2"
+        # -> 0.01um. Re-derived from `rule_decks/via2.drc`, whose V2.3b is
+        # `via2.not(metal2) OR via2.enclosed(metal2, 0.01.um, euclidian)` --
+        # exactly the pair of conditions our "enclosing" check reports.
+    ),
+    DrcRule(
+        id="metal3.enclosing.via2.1",
+        description="minimum metal3 overlap of via2 (the conductor above the cut)",
+        layer=(42, 0),  # Metal3
+        other_layer=(38, 0),  # Via2
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V2.4a": "metal3 overlap of via2"
+        # -> 0.01um. Re-derived from `rule_decks/via2.drc` (same
+        # `enclosed(...) OR not(...)` form as V2.3b above).
+    ),
+    DrcRule(
         id="via3.width.1",
         description="minimum via3 size (approximates official min/max size rule)",
         layer=(40, 0),  # Via3
@@ -438,6 +541,27 @@ DECK: list[DrcRule] = [
         # Approximation: see via1.space.1's note above (no array-density
         # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
         # checked).
+    ),
+    DrcRule(
+        id="metal3.enclosing.via3.1",
+        description="minimum metal3 overlap of via3 (the conductor below the cut)",
+        layer=(42, 0),  # Metal3
+        other_layer=(40, 0),  # Via3
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V3.3b": "metal3 overlap of via3"
+        # -> 0.01um. Re-derived from `rule_decks/via3.drc` (same
+        # `not(...) OR enclosed(...)` form as V2.3b above).
+    ),
+    DrcRule(
+        id="metal4.enclosing.via3.1",
+        description="minimum metal4 overlap of via3 (the conductor above the cut)",
+        layer=(46, 0),  # Metal4
+        other_layer=(40, 0),  # Via3
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V3.4a": "metal4 overlap of via3"
+        # -> 0.01um. Re-derived from `rule_decks/via3.drc`.
     ),
     DrcRule(
         id="via4.width.1",
@@ -465,6 +589,35 @@ DECK: list[DrcRule] = [
         # checked). Via4 (41/0) was previously referenced only as
         # mim.enclosing.via4.1's other_layer; this rule adds coverage of
         # Via4's own spacing (issue #546).
+    ),
+    DrcRule(
+        id="metal4.enclosing.via4.1",
+        description="minimum metal4 overlap of via4 (the conductor below the cut)",
+        layer=(46, 0),  # Metal4
+        other_layer=(41, 0),  # Via4
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V4.3b": "metal4 overlap of via4"
+        # -> 0.01um. Re-derived from `rule_decks/via4.drc`. Distinct from
+        # `mim.enclosing.via4.1` (MIMTM.2, 0.4um) below: that one is the MiM
+        # capacitor's *virtual bottom plate* overlap of Via4, scoped via
+        # `DerivedLayer` to Metal4 that already overlaps FuseTop; this one is
+        # the ordinary BEOL routing rule for raw Metal4, which every Via4 --
+        # MiM or routing -- must also satisfy (a genuine MiM bottom plate
+        # clears 0.01um by two orders of magnitude, so the two never
+        # conflict).
+    ),
+    DrcRule(
+        id="metal5.enclosing.via4.1",
+        description="minimum metal5 overlap of via4 (the conductor above the cut)",
+        layer=(81, 0),  # Metal5
+        other_layer=(41, 0),  # Via4
+        check="enclosing",
+        threshold_dbu=10,  # 0.01 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "V4.4a": "metal5 overlap of via4"
+        # -> 0.01um. Re-derived from `rule_decks/via4.drc`. Scoped, like
+        # `pad.enclosing.metal5.1`, to the 5LM variant this deck models
+        # (Metal5 as the conductor above Via4).
     ),
     DrcRule(
         id="metal1.width.1",

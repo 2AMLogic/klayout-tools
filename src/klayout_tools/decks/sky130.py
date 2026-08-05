@@ -22,6 +22,17 @@ poly/diff/li1/met1/licon1/mcon, wide enough to prove the deck-adapter shape
 (:class:`~klayout_tools.decks.DrcRule`) and produce a non-trivial worked
 example. Coverage is expected to grow incrementally in follow-on issues.
 
+Threshold-fidelity exception (issue #551): every rule below transcribes its
+source rule's threshold *value* unmodified, with exactly one deliberate
+exception -- ``li1.enclosing.licon1.1``, which is transcribed at its source
+rule's (``li.5``) unconditional zero-margin floor rather than at its
+published 0.08um. ``li.5`` requires that margin only on *two adjacent edges*
+of each cut, a per-edge-pair conditional this vocabulary cannot express, and
+real sky130 layout takes advantage of it (a minimum-width ``li`` strap sits
+flush with the cut on the other two edges), so an unconditional 0.08um check
+would flag correct-by-construction geometry throughout every standard cell.
+See that rule's own docstring for the measurement and the reasoning.
+
 Negative finding — bipolar (BJT) device-mark rule (issue #183): sky130's
 layer map (``sky130.lyt``) defines a ``pnp.drawing`` mark layer (82/44,
 alongside an unused ``npn.drawing`` at 82/20) that the vertical-PNP bipolar
@@ -277,6 +288,44 @@ DECK: list[DrcRule] = [
         threshold_dbu=50,  # 0.05 um
         # sky130.lydrc rule "licon.8": poly.enclosing(licon, 0.05, euclidian)
         # -> "licon.8 : min. poly enclosure of licon : 0.05um"
+    ),
+    DrcRule(
+        id="li1.enclosing.licon1.1",
+        description=(
+            "li1 (local interconnect) must cover licon1 (approximates the "
+            "official two-adjacent-edges enclosure rule as its zero-margin "
+            "floor)"
+        ),
+        layer=(67, 20),  # li1.drawing -- the conductor *above* the cut
+        other_layer=(66, 44),  # licon1.drawing
+        check="enclosing",
+        threshold_dbu=0,  # 0.0 um -- see the approximation note below
+        # sky130A_mr.drc rule "li.5":
+        #   li.enclosing(licon_peri, 0.08, projection).second_edges
+        #     -> .width(angle_limit(100.0), 1.dbu) -> licon.interacting(...)
+        # -> "li.5 : min. li enclosure of licon of 2 adjacent edges : 0.08um"
+        #
+        # Approximation (threshold *is* modified here, unlike every other
+        # rule in this deck -- see the module docstring's own li.5 note):
+        # li.5 does not require 0.08um of li enclosure on every side of a
+        # licon, only on *two adjacent* edges, which lets real layout land a
+        # minimum-width li strap flush with the cut on the other two. Our
+        # vocabulary has no way to express that per-edge-pair conditional, so
+        # transcribing 0.08um as a plain, unconditional enclosure check would
+        # be actively wrong rather than merely conservative: measured against
+        # this repo's own sky130 corpus it flags 6-56 violations per
+        # standard cell and 6566 across the OpenROAD-produced GCD macro
+        # (`tests/corpus/place_and_route/gcd.gds.gz`) -- all correct-by-
+        # construction geometry. What li.5 *unconditionally* implies, and
+        # what our vocabulary can express exactly, is the zero-margin floor:
+        # the li1 conductor must actually cover the licon1 cut it lands on.
+        # A zero threshold makes `enclosing_check` itself report nothing and
+        # carries the whole rule in `_run_check`'s `outside_region` escape
+        # term (`drc.py`) -- the same shape as gf180mcu's own zero-threshold
+        # `metal1.enclosing.via1.1` ("V1.3a"), which the gf180mcu DRM
+        # publishes as literally 0.0um. This closes the asymmetry issue #551
+        # reports (`diff`/`poly` -- the layers *below* licon1 -- were checked,
+        # the conductor *above* it was not) without the false positives.
     ),
     DrcRule(
         id="mcon.space.1",

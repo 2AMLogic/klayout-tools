@@ -99,7 +99,7 @@ expression.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 16
+design rule manual (which spans hundreds of rules). It currently covers 17
 rules — width, spacing, and enclosure checks across the `poly`, `diff`,
 `li1`, `met1`, `licon1`, `mcon`, `met2`, and `via` (met1&lt;-&gt;met2 via1)
 layers — transcribed directly from the official community sky130 KLayout
@@ -114,7 +114,7 @@ confirming it carries the same content. Each rule in
 `src/klayout_tools/decks/sky130.py` cites the exact source rule id (e.g.
 `"poly.1a"`) and comment it was transcribed from.
 
-Two of the sixteen rules approximate an official rule defined on a
+Two of the seventeen rules approximate an official rule defined on a
 *compound* layer expression (a boolean union of two mask layers, e.g.
 `diff.or(tap)`) as a check against a single drawn layer, because the native
 `Region` check primitives check one layer, or one layer against one other
@@ -126,15 +126,36 @@ corner-relaxed refinement our single-layer/two-layer check primitives don't
 support — the same class of approximation `met1.enclosing.mcon.1` and
 gf180mcu's `contact.width.1` already make. Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
-always the real, unmodified source values. The official deck's `m2.6`
+always the real, unmodified source values, with exactly one documented
+exception described next. The official deck's `m2.6`
 (minimum met2 area, 0.0676 um²) is **not** transcribed: no `"area"` check
 primitive exists in `DrcRule`'s vocabulary today (only
 `width`/`space`/`notch`/`separation`/`enclosing`/`enclosed`/`overlap`) —
 tracked as a candidate follow-on rather than silently dropped.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 25 rules —
+`li1.enclosing.licon1.1` (issue #551) is that one exception, and the only
+rule in either deck whose threshold is deliberately *not* its source value.
+It closes the same asymmetry as gf180mcu's `metal1.enclosing.contact.1`
+below — `diff` and `poly` (the layers *below* `licon1`) were checked by
+`licon.5`/`licon.8`, but `li1`, the conductor immediately *above* it, was
+not — but its source rule, `li.5`, requires its 0.08 um margin only on **two
+adjacent edges** of each cut, a per-edge-pair conditional `DrcRule`'s
+vocabulary cannot express. Real layout takes advantage of that: a
+minimum-width `li1` strap sits exactly flush with the cut on the other two
+edges, so an unconditional 0.08 um enclosure check flags correct-by-
+construction geometry (measured against this repo's own corpus: 6-56 sites
+per standard cell, 6566 across the OpenROAD-produced GCD macro). The rule is
+therefore transcribed at li.5's *unconditional floor* — a 0.0 um threshold,
+i.e. "`li1` must actually cover the `licon1` cut it lands on", carried
+entirely by the zero-overlap escape term described above. That catches the
+defect class the issue reports (a conductor missing part of its cut) with no
+false positives on correct geometry; the 0.08 um two-adjacent-edges half
+stays uncovered, like the end-of-line variants noted for gf180mcu below.
+
+The `gf180mcu` deck is likewise a **curated starter subset**: 42 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
-(diffusion/active), `Contact`, `Metal1`-`Metal3`, `Metal5`, and `MetalTop`
+(diffusion/active), `Contact`, `Via1`-`Via4`, `Metal1`-`Metal5`, and
+`MetalTop`
 layers, plus a first increment of well/substrate-tap coverage (`Nwell`
 spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
 (`DRC_BJT` mark-layer separation), the MiM capacitor stack
@@ -150,20 +171,50 @@ specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
 `n = 2..5`), "7.15 MetalTop" (`MT.*`), "9.1 Bond Pad" (`PAD.*`), "10.4.2
 MIM Capacitor, Option B" (`MIMTM.*`), and "10.7 DRC_BJT Mark Layer"
 (`BJT.*`) sections. Unlike
-sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), the
-companion KLayout DRC-deck repo
+sky130 (transcribed from a live, KLayout-runnable `.lydrc` script), most of
+this deck cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`,
+`"CO.1"`, `"Mn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`)
+and numeric values directly, because the snapshot of the companion KLayout
+DRC-deck repo
 ([`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`](https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_pv))
-does not yet open-source the core FEOL/BEOL width/space/enclosure checks as
-executable rule-deck code, so `src/klayout_tools/decks/gf180mcu.py` instead
-cites the DRM's own published rule ids (e.g. `"DF.1a"`, `"PL.1"`, `"CO.1"`,
-`"Mn.1"`, `"MT.1"`, `"MIMTM.1"`, `"NW.2a"`, `"DF.4d"`, `"BJT.3"`) and
-numeric values directly.
+originally consulted did not open-source the core FEOL/BEOL width/space/
+enclosure checks as executable rule-deck code. That is no longer true of a
+current PDK build: the conductor-over-cut enclosure rules added in issue
+#551 (`CO.6`, `V1.3a`, `Vn.3b`/`Vn.4a` — see the next paragraph) are
+re-derived from a real fetched install's own
+`libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`
+(`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same
+open_pdks build this repo already cites for gf180mcu's LVS-derived
+extraction deck), and each cites both its DRM rule id and the executable
+statement it was re-derived from.
 
-Eight of the twenty-five gf180mcu rules approximate an official DRM rule in
+The conductor *above* a cut is checked as well as the layers below it
+(issue #551). `Contact` previously had `CO.3` (Poly2) and `CO.4` (Comp) —
+both *below* the cut — and nothing above it, so a contact whose Metal1 strap
+missed one of its edges reported `status: clean`. `metal1.enclosing.contact.1`
+(`CO.6`, 0.005 um) closes that, and eight more rules do the same for every
+via level in both directions: `metal1`/`metal2` around `Via1` (`V1.3a` at a
+literal 0.0 um, `V1.4a` at 0.01 um), `metal2`/`metal3` around `Via2`
+(`V2.3b`/`V2.4a`), `metal3`/`metal4` around `Via3` (`V3.3b`/`V3.4a`), and
+`metal4`/`metal5` around `Via4` (`V4.3b`/`V4.4a`), all 0.01 um. Each maps
+exactly onto the PDK deck's own `cut.enclosed(metal, d) OR cut.not(metal)`
+form — the same pair of conditions `klt drc` reports for an `"enclosing"`
+rule (see "`"enclosing"` / `"enclosed"` also catch zero-overlap escapes"
+above) — so none of the nine is an approximation. Their **end-of-line**
+companions (`CO.6a`/`CO.6b`, `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c`) are *not*
+transcribed: each conditions a 0.06 um margin on a narrow-metal
+end-of-line predicate that `DrcRule`'s vocabulary cannot express, the same
+class of gap as sky130's `m2.6` above.
+
+Sixteen of the forty-two gf180mcu rules approximate an official DRM rule in
 some way — either a compound-layer context our single/two-layer check
 primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
 `nwell.enclosing.comp.1`), a bound our primitives don't support
-(`contact.width.1`'s fixed-size square, approximated as a minimum only), a
+(`contact.width.1`'s and `via1.width.1`-`via4.width.1`'s fixed-size squares,
+approximated as a minimum only), an array-density context our primitives
+have no notion of (`via1.space.1`-`via4.space.1`, which use the ordinary
+two-via `Vn.2a` threshold rather than the tighter `Vn.2b` one that applies
+inside a >=4x4 via array), a
 sized/derived-layer context our primitives can't isolate (`mim.space.1`,
 approximated as a general `Metal4`-to-`Metal4` spacing check that may
 over-flag ordinary `Metal4` routing unrelated to a MiM capacitor), or
