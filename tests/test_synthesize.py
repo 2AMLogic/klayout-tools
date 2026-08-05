@@ -296,7 +296,7 @@ def test_run_synthesize_no_pdk_installed(tmp_path, monkeypatch):
     _isolate_pdk(monkeypatch, tmp_path)
     _write(tmp_path / "gcd.v", _GCD_RTL)
     request_path = _write_request(tmp_path / "request.json", _base_request())
-    with pytest.raises(SynthesizeError, match="no open_pdks-layout PDK install"):
+    with pytest.raises(SynthesizeError, match="no supported-layout PDK install"):
         run_synthesize(request_path)
 
 

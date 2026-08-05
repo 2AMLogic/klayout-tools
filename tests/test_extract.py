@@ -188,7 +188,7 @@ def test_unknown_deck_raises(tmp_path):
 
 def test_unresolvable_pdk_is_application_error(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
-    with pytest.raises(ExtractError, match="no open_pdks-layout PDK install"):
+    with pytest.raises(ExtractError, match="no supported-layout PDK install"):
         run_extract(
             path,
             "sky130",

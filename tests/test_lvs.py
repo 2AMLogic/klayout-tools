@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import lvs
+from klayout_tools import lvs, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -4393,3 +4393,64 @@ def test_netgen_engine_real_binary_agrees_with_klayout_on_sky130_corpus(tmp_path
     broken_klayout = _report("klayout", broken_path)
     broken_netgen = _report("netgen", broken_path)
     assert broken_klayout["status"] == broken_netgen["status"] == "mismatch"
+
+
+# --------------------------------------------------------------------------- #
+# netgen engine against an SG13G2-shaped install (issue #522)
+#
+# `klt drc` and the default `"klayout"` `klt lvs` engine both need a curated,
+# PDK-specific device-recognition deck (`klayout_tools.decks`) that does not
+# exist for SG13G2 yet -- building one is a large, separate follow-up (a
+# from-scratch DRC/LVS deck port, not a resolver change), tracked as #524,
+# out of scope here.
+# The `"netgen"` engine is the one `klt lvs` path that does *not* need a
+# curated deck: it compares two already-built SPICE netlists, so it can be
+# exercised against SG13G2 today via `pdk.netgen_setup_file` -- the resolved
+# PDK's *own* `ihp-sg13g2_setup.tcl`, staged exactly like open_pdks stages
+# `<variant>_setup.tcl` (confirmed against a real fetched
+# `scripts/fetch-ihp-sg13g2.sh` install; see
+# `test_flat_layout_netgen_setup_file_matches_ihp_naming` in
+# `tests/test_pdk.py`). This test fabricates a minimal, flat SG13G2-shaped
+# install (same shape as a real one, but hermetic -- no multi-hundred-MB
+# fetch required) with a trivial, syntactically-valid setup script standing
+# in for the real one, and self-compares a trivial cell through the full
+# `klt pdk find` -> `netgen_setup_file` -> `klt lvs --engine netgen` path.
+# Real-binary-gated like every other test in this section: skips cleanly
+# without a local `netgen` (this dev environment has none -- see the PR this
+# issue shipped in for the documented limitation), runs for real wherever
+# `netgen` is installed.
+# --------------------------------------------------------------------------- #
+
+
+@_SKIP_NO_NETGEN
+def test_netgen_engine_real_binary_against_sg13g2_shaped_install(tmp_path):
+    pdk_root = tmp_path / "ihp-sg13g2"
+    (pdk_root / "libs.tech" / "netgen").mkdir(parents=True)
+    # A trivial, syntactically-valid Tcl script standing in for the real
+    # `ihp-sg13g2_setup.tcl` -- netgen sources it and falls back to its own
+    # built-in device recognition for anything the script does not declare,
+    # so a comment-only script is a legitimate (if minimal) netgen setup,
+    # not a fake/stubbed input.
+    (pdk_root / "libs.tech" / "netgen" / "ihp-sg13g2_setup.tcl").write_text(
+        "# minimal SG13G2 setup stand-in (test fixture, issue #522)\n"
+    )
+
+    setup_path = pdk.netgen_setup_file(root=str(pdk_root))
+    assert setup_path == str(pdk_root / "libs.tech" / "netgen" / "ihp-sg13g2_setup.tcl")
+
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "netgen",
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"netgen_setup": setup_path},
+        },
+    )
+
+    report = run_lvs(request_path)
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []

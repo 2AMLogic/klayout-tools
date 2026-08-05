@@ -387,7 +387,7 @@ def test_cli_invalid_params_is_application_error(tmp_path, pdk_root, capsys):
 
 
 def test_unresolvable_pdk_is_application_error(tmp_path):
-    with pytest.raises(GenError, match="no open_pdks-layout PDK install"):
+    with pytest.raises(GenError, match="no supported-layout PDK install"):
         generate(
             {
                 "generator": "resistor_strip",

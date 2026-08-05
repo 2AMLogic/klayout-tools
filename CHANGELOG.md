@@ -64,6 +64,27 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-04 — `klt pdk find`/`list`/`env`: resolve IHP-Open-PDK's SG13G2
+  install (#522), the first non-open_pdks-shaped layout this resolver
+  handles. `_probe_root` now falls back to treating an install root as its
+  *own* single, flat variant (named after the root's basename) whenever the
+  existing nested open_pdks-style scan finds nothing — covering both
+  real-world `$PDK_ROOT` conventions for a single-PDK repo like
+  IHP-Open-PDK (pointed at the clone root, already resolved as an ordinary
+  nested variant named `ihp-sg13g2`; or pointed directly at the
+  `ihp-sg13g2/` directory itself, the new flat case). No public JSON schema
+  change — `find`/`list`/`env`'s payload shapes are unchanged, and the
+  `PdkNotFoundError` message wording was only reworded to stop naming
+  "open_pdks-layout" as the sole supported shape. New
+  `scripts/fetch-ihp-sg13g2.sh` fetches a pinned, checksum-verified
+  IHP-Open-PDK release (Apache-2.0) into `pdks/ihp-open-pdk/`, mirroring
+  `scripts/fetch-pdks.sh`'s pattern; `pdks/README.md` documents the explicit
+  `ihp130` (lambdapdk)-vs-SG13G2 (IHP-Open-PDK) distinction. `klt drc`/`klt
+  lvs`'s default engine still need a curated SG13G2 rule/extraction deck
+  that does not exist yet (tracked separately as #524); `klt lvs`'s `"netgen"`
+  engine, which needs no curated deck, resolves and can run against a real
+  SG13G2 install's own netgen setup script today. See `docs/cli/pdk.md`'s
+  new "PDK layouts: what resolves and what doesn't" table.
 - 2026-08-04 — `klt lvs`: new `request.reference.device_bulk` field and
   `device.bulk_reconciled` mismatch category (#506, `"engine": "klayout"`
   only), which *reconcile* the device-class arity gap `device.class_arity`

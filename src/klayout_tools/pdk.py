@@ -1,4 +1,4 @@
-"""Discover and resolve an installed PDK (open_pdks layout).
+"""Discover and resolve an installed PDK.
 
 Pure library: :func:`find_pdk` / :func:`list_pdks` return plain Python data
 (``dict`` of JSON-serialisable primitives) and never print. Serialisation and
@@ -7,16 +7,57 @@ so these functions stay reusable — block repos import them instead of
 re-implementing ``PDK_ROOT`` lookup in every tool and every language (the
 friction this module exists to remove).
 
-Scope (v1): **open_pdks-layout installs** — the layout produced by open_pdks,
-volare, and ciel and consumed by every block repo::
+Scope: two supported layouts, both probed by the same ``libs.tech/``/
+``libs.ref/`` marker (see :func:`_probe_root`) so a resolved variant's
+*asset* lookup (:func:`_asset_dirs`) never needs to know which one matched —
+see ``docs/cli/pdk.md`` -> "Scope" for the authoritative, user-facing list of
+what does and does not resolve.
 
-    <root>/<variant>/libs.tech/...
-    <root>/<variant>/libs.ref/...
+1. **open_pdks-layout installs (nested)** — the layout produced by
+   open_pdks, volare, and ciel, and consumed by every sky130/gf180mcu block
+   repo::
 
-A *variant* is an immediate subdirectory of an install *root* that contains a
-``libs.tech/`` directory (``sky130A``, ``sky130B``, ``gf180mcuA``–``D``). The
-*version stamp* is read from the variant's ``SOURCES`` file when present
-(open_pdks writes one); it is ``None`` otherwise — never guessed.
+       <root>/<variant>/libs.tech/...
+       <root>/<variant>/libs.ref/...
+
+   A *variant* is an immediate subdirectory of an install *root* that
+   contains a ``libs.tech/`` directory (``sky130A``, ``sky130B``,
+   ``gf180mcuA``-``D``) -- a root may hold more than one. The *version
+   stamp* is read from the variant's ``SOURCES`` file when present
+   (open_pdks writes one); it is ``None`` otherwise -- never guessed.
+
+2. **Flat, single-PDK installs (issue #522)** -- IHP-Open-PDK's SG13G2, whose
+   own tree already ships ``libs.tech/``/``libs.ref/`` directly (verified
+   against a real fetched install, ``scripts/fetch-ihp-sg13g2.sh``)::
+
+       <root>/ihp-sg13g2/libs.tech/...      # nested form: PDK_ROOT at clone root
+       <root>/ihp-sg13g2/libs.ref/...       # (matched by the nested probe above)
+
+       <root>/libs.tech/...                 # flat form: PDK_ROOT at the PDK dir itself
+       <root>/libs.ref/...                  # (no sibling variant to disambiguate)
+
+   A single-PDK repo has no sibling variant the way a multi-process
+   open_pdks store does, so IHP's own tool configs (verified against
+   ``ihp-sg13g2/libs.tech/librelane/config.tcl``) and README/installer
+   guidance are inconsistent about which directory ``$PDK_ROOT`` should
+   name -- the clone root (nested form, already resolved by the probe
+   above) or the PDK's own directory (flat form). Rather than pick one and
+   leave the other unresolvable, :func:`_probe_root` tries the nested scan
+   first and falls back to treating ``root_path`` itself as a single
+   variant -- named after its own basename -- only when that scan finds
+   nothing, so the fallback can never shadow a real multi-variant
+   open_pdks root. This generalises to any future single-PDK, flat-layout
+   install, not just IHP's, without adding a second resolver code path
+   ("a third and fourth layout" per issue #522's own framing).
+
+**Out of scope**: the repo-local lambdapdk store fetched by
+``scripts/fetch-pdks.sh`` into ``pdks/lambdapdk/`` -- a third, distinct tree
+shape (``lambdapdk/<process>/{libs,base}``, no ``libs.tech``/``libs.ref``
+marker at all) that this resolver deliberately does not probe for; see
+``pdks/README.md``. Its bundled ``ihp130`` process tree in particular is
+**not** SG13G2 -- different process, different data -- so it is never a
+substitute for a real IHP-Open-PDK install even though both names contain
+"ihp" (see ``pdks/README.md`` for the explicit distinction).
 
 Resolution order (first hit wins; the winning step is reported as
 ``resolved_via`` so a wrong answer is debuggable):
@@ -115,7 +156,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
                 continue
         else:
             chosen = variants[0]  # variants are sorted → deterministic default
-        variant_dir = os.path.join(root_path, chosen["name"])
+        variant_dir = chosen["_dir"]
         return {
             "schema_version": 1,
             "root": root_path,
@@ -161,7 +202,14 @@ def list_pdks(root: str | None = None) -> dict[str, Any]:
             {
                 "root": root_path,
                 "resolved_via": resolved_via,
-                "variants": variants,
+                # Public payload is name/version only -- `_probe_root`'s
+                # internal `_dir` key (the resolved variant directory, needed
+                # to support the flat single-PDK layout below) never leaks
+                # into the documented `list_pdks` JSON schema.
+                "variants": [
+                    {"name": entry["name"], "version": entry["version"]}
+                    for entry in variants
+                ],
             }
         )
 
@@ -195,11 +243,20 @@ def _abspath(path: str) -> str:
 
 
 def _probe_root(root_path: str) -> list[dict[str, Any]]:
-    """Return the variants under ``root_path`` (open_pdks layout probe).
+    """Return the variants under ``root_path``, trying the nested (open_pdks)
+    layout first and falling back to the flat, single-PDK layout (issue
+    #522) when the nested scan finds nothing.
 
-    A variant is an immediate subdirectory containing a ``libs.tech/``
-    directory. Returns an empty list when ``root_path`` is missing or holds no
-    variants. Results are sorted by name for deterministic output.
+    Each entry additionally carries a private ``_dir`` key (the variant's
+    absolute directory) so :func:`find_pdk` can resolve its assets without
+    re-deriving that path -- a flat-layout variant's directory is
+    ``root_path`` itself, not ``root_path/<name>``, so the caller can no
+    longer assume that join. ``_dir`` never leaves this module (see
+    :func:`list_pdks`, which strips it before returning the public payload).
+
+    Returns an empty list when ``root_path`` is missing or holds no variant
+    of either shape. Nested results are sorted by name for deterministic
+    output; the flat fallback is always exactly zero or one entry.
     """
     if not os.path.isdir(root_path):
         return []
@@ -208,8 +265,37 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
         variant_dir = os.path.join(root_path, name)
         if not os.path.isdir(os.path.join(variant_dir, "libs.tech")):
             continue
-        variants.append({"name": name, "version": _read_version(variant_dir)})
-    return variants
+        variants.append(
+            {"name": name, "version": _read_version(variant_dir), "_dir": variant_dir}
+        )
+    if variants:
+        return variants
+    return _probe_flat_variant(root_path)
+
+
+def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
+    """Fallback probe for a *flat* single-PDK install (issue #522) --
+    IHP-Open-PDK's SG13G2 when ``--pdk-root``/``$PDK_ROOT`` names the PDK's
+    own directory directly, rather than a parent that holds it as a named
+    sibling the way a multi-process open_pdks store does (see the module
+    docstring's "Flat, single-PDK installs" section for the real-install
+    provenance).
+
+    Only called when :func:`_probe_root`'s nested subdirectory scan finds no
+    variant at all, so this can never shadow a real open_pdks-shaped root
+    (an install that ships both shapes at once does not occur in practice --
+    a variant subdirectory and a variant *at* the root are mutually
+    exclusive placements of the same tree).
+
+    Returns a single-entry list -- ``root_path`` treated as its own variant,
+    named after its own basename (mirroring every other variant's name being
+    read directly off its directory name) -- when ``root_path`` itself ships
+    a ``libs.tech/`` directory, or ``[]`` otherwise.
+    """
+    if not os.path.isdir(os.path.join(root_path, "libs.tech")):
+        return []
+    name = os.path.basename(root_path.rstrip(os.sep)) or root_path
+    return [{"name": name, "version": _read_version(root_path), "_dir": root_path}]
 
 
 def _read_version(variant_dir: str) -> str | None:
@@ -360,9 +446,10 @@ def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -
     """Build the actionable ``PdkNotFoundError`` message."""
     tried = ", ".join(f"{via} ({path})" for path, via in candidates)
     subject = (
-        f"no open_pdks-layout PDK install providing variant '{variant}'"
+        f"no supported-layout PDK install providing variant '{variant}'"
         if variant is not None
-        else "no open_pdks-layout PDK install"
+        else "no supported-layout PDK install (open_pdks, or a flat single-PDK"
+        " install like IHP-Open-PDK's SG13G2)"
     )
     return (
         f"{subject} was found. Searched, in order: {tried}. "
