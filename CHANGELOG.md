@@ -111,6 +111,23 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-05 — `klt gen`: new `bond_pad` generator (#568), the first
+  generator in this family covering the chip *boundary* rather than a core
+  analog device — a passivation opening enclosed by the resolved PDK
+  family's own topmost routing metal (a new `top_metal` layer role: sky130's
+  `met5.drawing` `(72, 20)`, gf180mcu's `Metal5` `(81, 0)`), overlapping it
+  by `enclosure_um` on every side. `enclosure_um` defaults to `2.0` and is
+  hard-floored there, transcribed from gf180mcu's only DRC-coded bond-pad
+  rule (DRM 9.1 "PAD.4", `decks/gf180mcu.py`'s `pad.enclosing.metal5.1`);
+  `bond_type` (`"wedge"`/`"ball_cup"`/`"bump"`) selects which of that same
+  DRM's 9.2 "PAD.1" *guideline* minimum opening sizes `opening_um` is
+  checked against (40/40/4 µm), flagged via `drc_hints.notes` rather than
+  rejected when smaller. Reports one `PAD` port on `top_metal`, sized to
+  `opening_um`. gf180mcu output always assumes the 5LM metal stack
+  (`pdk.variant` never distinguishes 5LM from 6LM) and `down_to` supports
+  only its default `"top_metal"` (no via-stack-down-to-a-lower-level yet) —
+  both documented, tested limitations, not silent gaps. See
+  `docs/cli/gen.md`'s new "`bond_pad`" section.
 - 2026-08-05 — `klt extract`: junction-diode device recognition (#542). Neither
   curated deck recognised a diode as a device class, so a discrete PN/ESD-clamp
   diode — the standard pad-ring clamp primitive, and what gf180mcu's own
