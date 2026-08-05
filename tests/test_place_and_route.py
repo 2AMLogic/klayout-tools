@@ -456,7 +456,7 @@ def test_run_no_pdk_installed(tmp_path, monkeypatch):
     _isolate_pdk(monkeypatch, tmp_path)
     _write(tmp_path / "gcd_synth.v", "// netlist\n")
     request_path = _write_request(tmp_path / "request.json", _base_request())
-    with pytest.raises(PlaceAndRouteError, match="no open_pdks-layout PDK install"):
+    with pytest.raises(PlaceAndRouteError, match="no supported-layout PDK install"):
         run_place_and_route(request_path)
 
 

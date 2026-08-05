@@ -21,12 +21,16 @@ klt pdk cells [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format 
 The command is fully headless (pure filesystem probing — it does not load the
 KLayout database module) and safe to run in CI.
 
-## Scope (v1)
+## Scope
 
-Targets **open_pdks-layout installs** — the layout produced by open_pdks,
-[volare](https://github.com/efabless/volare), and
-[ciel](https://github.com/fossi-foundation/ciel), and consumed by every block
-repo:
+Two install layouts resolve today (issue #522 made the list explicit and
+added the second one — see "PDK layouts: what resolves and what doesn't"
+below for the full supported/unsupported table):
+
+**1. open_pdks-layout installs (nested, possibly multi-variant)** — the
+layout produced by open_pdks, [volare](https://github.com/efabless/volare),
+and [ciel](https://github.com/fossi-foundation/ciel), and consumed by every
+sky130/gf180mcu block repo:
 
 ```
 <root>/<variant>/libs.tech/...      # ngspice, xschem, klayout, magic, netgen
@@ -34,12 +38,38 @@ repo:
 <root>/<variant>/SOURCES            # version stamp (open_pdks writes this)
 ```
 
-A **variant** is an immediate subdirectory of an install **root** that contains
-a `libs.tech/` directory (`sky130A`, `sky130B`, `gf180mcuA`–`D`). Out of scope
-for v1: the repo-local lambdapdk store fetched by
-[`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` (a
-different tree layout — a follow-up adapter if needed, not resolved by
-`find`/`list`/`env`) and siliconcompiler `PathSchema` integration.
+A **variant** is an immediate subdirectory of an install **root** that
+contains a `libs.tech/` directory (`sky130A`, `sky130B`, `gf180mcuA`–`D`) —
+a root may hold more than one sibling variant.
+
+**2. Flat, single-PDK installs (issue #522)** — IHP-Open-PDK's SG13G2, whose
+own tree already ships `libs.tech/`/`libs.ref/` directly, with no per-family
+variant nesting the way a multi-process open_pdks store has (there is only
+ever one SG13G2). Both real-world `$PDK_ROOT` conventions resolve:
+
+```
+<root>/ihp-sg13g2/libs.tech/...     # PDK_ROOT at the IHP-Open-PDK clone root
+<root>/ihp-sg13g2/libs.ref/...      # (matched by the nested probe above --
+                                     #  "ihp-sg13g2" is just an ordinary variant)
+
+<root>/libs.tech/...                # PDK_ROOT at the PDK's own directory
+<root>/libs.ref/...                 # (the flat fallback: root treated as its
+                                     #  own variant, named after its basename)
+```
+
+Fetch a pinned, checksum-verified release with
+[`scripts/fetch-ihp-sg13g2.sh`](../../pdks/README.md); see `pdks/README.md`
+for the explicit distinction from lambdapdk's bundled `ihp130` tree, which is
+**not** SG13G2.
+
+**Out of scope**: the repo-local lambdapdk store fetched by
+[`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` — a
+third, distinct tree shape (`lambdapdk/<process>/{libs,base}`, no
+`libs.tech`/`libs.ref` marker at all) this resolver deliberately does not
+probe for — and any siliconcompiler `PathSchema` integration (see
+[`docs/design/siliconcompiler-core-survey.md`](../design/siliconcompiler-core-survey.md)
+section 3 for why: a different problem, solved more simply by this module
+already).
 
 ## Resolution order
 
@@ -57,7 +87,7 @@ this list are kept identical** (`src/klayout_tools/pdk.py`).
 - `--pdk-root` disables the search: it is the *only* candidate, and a root that
   holds no install is an error (it is not silently second-guessed).
 - `$PDK_ROOT` is a *prepended* candidate, not a short-circuit: if it is unset,
-  missing, or holds no open_pdks-layout install, resolution **falls through** to
+  missing, or holds no supported-layout install, resolution **falls through** to
   steps 3–4. The failure message (when nothing resolves at all) names every
   candidate that was tried, including `$PDK_ROOT`, so a stale `$PDK_ROOT` is
   visible rather than mysterious.
@@ -79,7 +109,51 @@ candidate.
 Read from the variant's `SOURCES` file (open_pdks writes one recording the
 upstream commits it was built from). Non-empty lines are whitespace-normalised
 and joined with `"; "`. When the file is absent, unreadable, or empty, `version`
-is `null` — **never guessed**.
+is `null` — **never guessed**. Flat, single-PDK installs (below) ship no
+`SOURCES` file at all, so `version` is always `null` for those today.
+
+## PDK layouts: what resolves and what doesn't
+
+Issue #522's own framing — the resolver had only ever been exercised against
+open_pdks-shaped installs, so nothing forced an explicit answer for anything
+else — is now the standing convention this table exists to prevent
+recurring: state it here, once, instead of letting the next person
+rediscover a gap by failure.
+
+| PDK / tree | Layout | `klt pdk find`/`list`/`env` | `klt drc` | `klt lvs` |
+| ---------- | ------ | ---------------------------- | --------- | --------- |
+| sky130, gf180mcu (open_pdks / volare / ciel) | open_pdks-layout (nested) | ✅ | ✅ curated deck (`sky130`, `gf180mcu`) | ✅ `"klayout"` engine (curated deck) or `"netgen"` engine |
+| IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ❌ no curated deck yet — see below | ⚠️ `"netgen"` engine only, with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary; `"klayout"` engine needs a curated extraction deck that does not exist yet |
+| lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
+
+**Why `klt drc`/`klt lvs` don't fully run against SG13G2 yet.** `klt drc`
+only runs *this repo's own* curated Python rule decks
+(`klayout_tools.decks.sky130`/`.gf180mcu`) via KLayout's native `Region`
+check primitives — a deliberate engine choice (see `docs/cli/drc.md`) that
+never shells out to the standalone `klayout` DRC-DSL script runner, so it
+has no mechanism to execute a foreign PDK's own `.drc` ruleset (SG13G2 ships
+`ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, a KLayout DRC-DSL
+script, not this repo's curated deck format). Porting SG13G2's rule deck
+into a curated `klayout_tools.decks` module is real, standalone follow-up
+work — a from-scratch deck port comparable in size to the existing
+sky130/gf180mcu decks, not a resolver change — tracked separately from this
+issue as #524. The same gap blocks `klt lvs`'s default `"klayout"` engine,
+whose layout-side netlist extraction needs the same kind of curated device
+deck.
+`klt lvs`'s `"netgen"` engine is the one path that does *not* need a curated
+deck (it compares two already-built SPICE netlists, layout-side extraction
+supplied separately) — it resolves and can run against a real SG13G2
+install's own `libs.tech/netgen/ihp-sg13g2_setup.tcl` via
+`netgen_setup_file()` today, gated only by a local `netgen` binary (see
+`docs/cli/lvs.md`'s `"netgen"` engine section and
+`tests/test_lvs.py::test_netgen_engine_real_binary_against_sg13g2_shaped_install`).
+
+**`klt pdk cells` is also not yet SG13G2-aware**, for a narrower reason: it
+only reports `libs_ref` entries whose name contains `_fd_sc_` (the
+open_pdks-family "foundry digital, standard cell" naming convention — see
+"Which libraries are reported" below), and SG13G2's standard-cell library is
+named `sg13g2_stdcell`, which does not match. `find`/`list`/`env` (this
+issue's scope) are unaffected — the marker only gates `cells`'s own scan.
 
 ## `klt pdk find`
 
@@ -378,7 +452,7 @@ log with a mysterious path error:
   "schema_version": 1,
   "error": {
     "command": "pdk find",
-    "message": "no open_pdks-layout PDK install was found. Searched, in order: PDK_ROOT environment variable (/opt/pdk), search root: ~/.ciel (/home/u/.ciel), ... Point $PDK_ROOT (or --pdk-root) at an install, or install one, e.g. `ciel enable --pdk-family sky130 <version>` (or build open_pdks with `make install`)."
+    "message": "no supported-layout PDK install (open_pdks, or a flat single-PDK install like IHP-Open-PDK's SG13G2) was found. Searched, in order: PDK_ROOT environment variable (/opt/pdk), search root: ~/.ciel (/home/u/.ciel), ... Point $PDK_ROOT (or --pdk-root) at an install, or install one, e.g. `ciel enable --pdk-family sky130 <version>` (or build open_pdks with `make install`)."
   }
 }
 ```

@@ -275,6 +275,140 @@ def test_assets_present_and_absent(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Flat single-PDK layout (issue #522 -- IHP-Open-PDK's SG13G2)
+#
+# Layout verified against a real IHP-Open-PDK v0.3.0 release tarball
+# (`scripts/fetch-ihp-sg13g2.sh`): `ihp-sg13g2/libs.tech/...` /
+# `ihp-sg13g2/libs.ref/...` sit directly under the PDK's own directory, with
+# no further per-family variant nesting the way sky130A/gf180mcuC etc. have.
+# Both real-world `$PDK_ROOT` conventions get exercised: pointed at the
+# clone root (the *nested* open_pdks-shaped probe -- `ihp-sg13g2` is just an
+# ordinary variant subdirectory, already covered by the tests above) and
+# pointed directly at the PDK's own directory (the *flat* fallback these
+# tests add).
+# --------------------------------------------------------------------------- #
+
+
+def _make_flat_install(root, *, assets=("ngspice",)):
+    """Fabricate a *flat* single-PDK install directly at ``root`` -- no
+    variant subdirectory layer, mirroring IHP-Open-PDK's SG13G2 when
+    ``$PDK_ROOT``/``--pdk-root`` names the PDK's own directory.
+    """
+    (root / "libs.tech").mkdir(parents=True)
+    for asset in assets:
+        if asset == "libs_ref":
+            (root / "libs.ref").mkdir(parents=True, exist_ok=True)
+        else:
+            (root / "libs.tech" / asset).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_flat_layout_resolves_variant_named_after_root_basename(tmp_path):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root, assets=("ngspice", "klayout", "libs_ref"))
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["root"] == str(root)
+    assert report["variant"] == "ihp-sg13g2"
+    assert report["version"] is None  # no SOURCES stamp -- never guessed
+    assert report["assets"]["ngspice"] == str(root / "libs.tech" / "ngspice")
+    assert report["assets"]["klayout"] == str(root / "libs.tech" / "klayout")
+    assert report["assets"]["libs_ref"] == str(root / "libs.ref")
+
+
+def test_flat_layout_via_pdk_root_env(tmp_path, monkeypatch):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root)
+    monkeypatch.setenv("PDK_ROOT", str(root))
+
+    report = pdk.find_pdk()
+
+    assert report["variant"] == "ihp-sg13g2"
+    assert report["resolved_via"] == "PDK_ROOT environment variable"
+
+
+def test_flat_layout_pdk_flag_matches_root_basename(tmp_path):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root)
+
+    report = pdk.find_pdk(variant="ihp-sg13g2", root=str(root))
+
+    assert report["variant"] == "ihp-sg13g2"
+
+
+def test_flat_layout_pdk_flag_mismatch_raises(tmp_path):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root)
+
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="sky130A", root=str(root))
+
+
+def test_flat_layout_only_tried_when_nested_scan_finds_nothing(tmp_path):
+    # A root that already has a real nested variant is never reinterpreted
+    # as its own flat variant, even if it also happens to ship a top-level
+    # `libs.tech/` (an implausible combination in practice, but the nested
+    # scan must still take priority so it can never be shadowed).
+    root = tmp_path / "install"
+    _make_install(root, "sky130A")
+    (root / "libs.tech").mkdir()
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["variant"] == "sky130A"
+
+
+def test_flat_layout_netgen_setup_file_matches_ihp_naming(tmp_path):
+    # IHP-Open-PDK stages its netgen setup script as `<variant>_setup.tcl`
+    # too (`ihp-sg13g2_setup.tcl`, confirmed in a real fetched install) --
+    # the flat variant's synthesised name feeds the same convention
+    # `netgen_setup_file` already implements for open_pdks.
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root, assets=("netgen",))
+    netgen_dir = root / "libs.tech" / "netgen"
+    (netgen_dir / "ihp-sg13g2_setup.tcl").write_text("# ihp setup\n")
+
+    result = pdk.netgen_setup_file(root=str(root))
+
+    assert result == str(netgen_dir / "ihp-sg13g2_setup.tcl")
+
+
+def test_flat_layout_list_reports_single_variant(tmp_path):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root)
+
+    report = pdk.list_pdks(root=str(root))
+
+    assert len(report["installs"]) == 1
+    install = report["installs"][0]
+    assert install["root"] == str(root)
+    assert install["variants"] == [{"name": "ihp-sg13g2", "version": None}]
+
+
+def test_cli_find_flat_layout_json(tmp_path, capsys):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root)
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["variant"] == "ihp-sg13g2"
+
+
+def test_cli_env_flat_layout(tmp_path, capsys):
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root)
+
+    exit_code = main(["pdk", "env", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [f"export PDK_ROOT={root}", "export PDK=ihp-sg13g2"]
+
+
+# --------------------------------------------------------------------------- #
 # netgen_setup_file (issue #343)
 #
 # Naming convention verified against the open_pdks source tree
