@@ -477,6 +477,29 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     assert provenance["input"]["content_hash"].startswith("sha256:")
 
 
+def test_run_synthesize_missing_sequential_area_degrades_to_none(tmp_path, monkeypatch):
+    """Distro-packaged Yosys (e.g. Ubuntu 24.04's 0.33) omits `sequential_area`
+    from `stat -json` entirely -- `run_synthesize` must not raise a `KeyError`
+    (#560) and should instead report `sequential_area_um2: None`, leaving every
+    other field populated exactly as the Yosys 0.67+ shape does."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    old_yosys_stats = {
+        key: value
+        for key, value in _GCD_MODULE_STATS.items()
+        if key != "sequential_area"
+    }
+    assert "sequential_area" not in old_yosys_stats
+    _stub_yosys_success(monkeypatch, module_stats=old_yosys_stats, version="0.33")
+
+    report = run_synthesize(request_path)
+
+    assert report["engine_version"] == "0.33"
+    assert report["instance_count"] == 335
+    assert report["area_um2"] == 2951.5808
+    assert report["sequential_area_um2"] is None
+    assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
+
+
 def test_run_synthesize_stubbed_success_default_corner(tmp_path, monkeypatch):
     """The response's `provenance.deck.name` reflects the resolved nominal
     corner when `pdk.corner` is omitted from the request."""

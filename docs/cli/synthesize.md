@@ -173,7 +173,7 @@ must run STA for place-and-route signoff.
 | `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `instance_count` | integer | `stat -json`'s `num_cells` — total standard-cell instances after liberty mapping. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). |
-| `sequential_area_um2` | number | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. |
+| `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. |
 | `timing` | null | Always `null` in this contract — see "`timing` is always `null`" above. |
 | `netlist_path` | string | The mapped gate-level netlist (`write_verilog -noattr`'s output), an absolute path. Never re-derive `instance_count`/`area_um2` by parsing this file. |
