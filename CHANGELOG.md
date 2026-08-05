@@ -134,6 +134,33 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-05 — `klt drc`/`klt extract`: fail-loudly coverage for unmodelled
+  voltage-domain marker geometry (#552). A gf180mcu layout can carry a
+  `Dualgate` (55/0) region that promotes the enclosed devices to the PDK's
+  5V/6V domain — changing both the DRC width/spacing thresholds
+  (`DF.1a`/`DF.3a`/`DF.6`/`PL.5a`/`PL.5b`) and the MOS model binding
+  (`nfet_03v3`/`pfet_03v3`) — yet neither curated deck modelled the marker,
+  so `klt drc` could report `clean` and `klt extract` could bind the
+  low-voltage model on geometry the marker actually governs, both silently.
+  Rather than change any threshold or model binding (issue #552's Option 3
+  scoping — Options 1/2 are explicitly out of scope), both commands now
+  surface an additive diagnostic when a registered marker's geometry
+  interacts with checked/extracted geometry: `klt drc` gains
+  `coverage.voltage_domain_warnings[]` (each
+  `{"marker": "<layer>/<datatype>", "description": str}`, sorted by marker,
+  gated on the marker overlapping a layer in `layers_checked` — not bare
+  stream presence), and `klt extract` gains a top-level
+  `voltage_domain_warnings[]` of the same shape (gated on overlap with
+  extracted MOS geometry, `deck.active`), mirrored into `warnings[]`. New
+  `UNMODELED_VOLTAGE_MARKERS` deck registry with a
+  `get_unmodeled_voltage_markers()` accessor; gf180mcu registers `Dualgate`,
+  sky130 registers an explicit empty map (no named `hvi`-equivalent layer
+  yet — the gap is visible in the diff, not omitted). Purely additive: both
+  arrays are always present and empty for a deck that registers no marker or
+  a layout that draws none overlapping, so no `schema_version` bump (`drc`
+  and `extract` both stay `1`). See `docs/cli/drc.md`'s
+  "`coverage.voltage_domain_warnings`" section and `docs/cli/extract.md`'s
+  "Voltage-domain markers" section.
 - 2026-08-05 — `klt gen`: new `bond_pad` generator (#568), the first
   generator in this family covering the chip *boundary* rather than a core
   analog device — a passivation opening enclosed by the resolved PDK

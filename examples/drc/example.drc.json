@@ -206,6 +206,7 @@
       "met2.width.1",
       "via.space.1",
       "via.width.1"
-    ]
+    ],
+    "voltage_domain_warnings": []
   }
 }

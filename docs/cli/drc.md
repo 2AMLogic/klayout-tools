@@ -461,7 +461,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "deck_layers": ["22/0", "30/0", "33/0", "34/0"],
     "layers_checked": ["22/0", "30/0"],
     "layers_in_stream_without_rules": ["46/0", "75/0"],
-    "rules_skipped": ["metal1.width.1", "metal1.space.1"]
+    "rules_skipped": ["metal1.width.1", "metal1.space.1"],
+    "voltage_domain_warnings": []
   },
   "provenance": {
     "klt_version": "0.4.2",
@@ -509,7 +510,8 @@ On a run with findings:
     "deck_layers": ["65/20", "66/20", "66/44", "68/20"],
     "layers_checked": ["65/20", "66/20", "66/44"],
     "layers_in_stream_without_rules": [],
-    "rules_skipped": []
+    "rules_skipped": [],
+    "voltage_domain_warnings": []
   }
 }
 ```
@@ -566,6 +568,7 @@ draws" — `coverage` closes that gap. `status`'s own two-value contract
 | `layers_checked`                   | array\<string\> | The subset of `deck_layers` actually present in this stream (i.e. found via `Layout.find_layer(...)`), matching what the per-rule check loop actually ran against. Sorted ascending by `(layer, datatype)`. |
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because their `layer`/`other_layer` was absent from this stream. Sorted alphabetically. |
+| `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 
 `layers_checked` and `layers_in_stream_without_rules` are computed from the
 input stream's own layer table (reusing the same per-layer enumeration
@@ -573,6 +576,48 @@ input stream's own layer table (reusing the same per-layer enumeration
 layer present in the stream's layer table with zero shapes still counts as
 "in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
 semantics.
+
+#### `coverage.voltage_domain_warnings`
+
+A second, narrower trust gap `layers_in_stream_without_rules` alone does not
+surface: some PDKs draw two gate-oxide/voltage domains on the same wafer,
+selected by a marker layer — e.g. gf180mcu's `Dualgate` (55/0) selects its
+5V/6V thick-oxide domain, whose DRM publishes a second, materially different
+(30–60% larger) column of DRC thresholds. This curated deck's rules encode
+only the default (3.3V) column and never read the marker, so geometry drawn
+*inside* it is checked against the wrong thresholds — and, because that
+geometry sits on an ordinary checked layer (e.g. `Comp`), it shows up in
+`coverage.layers_checked`, not `layers_in_stream_without_rules`: a `"clean"`
+status with no other signal that anything is off.
+
+Whenever a deck-registered marker (today, only gf180mcu's `Dualgate`) is
+present in the input stream *and* its geometry geometrically interacts with
+at least one layer this run actually checked — a member of
+`coverage.layers_checked`, not merely present-but-unchecked — one entry is
+added, naming the marker and the concrete consequence:
+
+```json
+{
+  "marker": "55/0",
+  "description": "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. This curated deck's DRC rules apply the 3.3V/_LV thresholds to geometry regardless of Dualgate's presence (e.g. DF.1a min COMP width 0.22 vs. the real 5V/6V DF.1a_MV 0.30, ...), and MOS extraction always binds the 3.3V models (nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside Dualgate."
+}
+```
+
+A marker shape that never overlaps any checked geometry (e.g. one drawn only
+over a device this deck already scopes to it correctly, such as a
+`Dualgate`-narrowed ESD diode) produces no entry — avoiding a warning with
+nothing behind it. Always a list, empty for a deck that registers no such
+marker (sky130's curated deck registers none today — it does not yet name an
+`hvi`-equivalent layer at all) or a layout that draws none of it overlapping
+checked geometry.
+
+**What this field does and does not guarantee**: it flags that the checked
+thresholds may be the wrong column for this geometry. It does **not**
+correct `status`/`violations` against the real 5V/6V (`_MV`) thresholds —
+those are not modelled by this deck's rules at all yet (a separate, larger
+follow-on: a `_LV`/`_MV` rule-pair split). Treat a non-empty
+`voltage_domain_warnings` as "re-check this geometry against the PDK's own
+tooling for the marked domain," not as a corrected verdict.
 
 ## Exit codes
 

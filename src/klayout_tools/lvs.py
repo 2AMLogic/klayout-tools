@@ -782,7 +782,11 @@ def _resolve_layout(
             # gates never became devices, which the suppression already
             # guarantees. The 8th return (unmodelled_poly, #324) is likewise a
             # report-only structured view of `klt extract`'s own warnings,
-            # not surfaced in `klt lvs`'s response.
+            # not surfaced in `klt lvs`'s response. The 9th return
+            # (voltage_domain_warnings, #552) is likewise a report-only
+            # structured view of `klt extract`'s own warnings, not surfaced
+            # in `klt lvs`'s response -- the compare itself is unaffected by
+            # which voltage-domain model a MOS device happens to bind to.
             (
                 netlist,
                 top_cell_name,
@@ -792,6 +796,7 @@ def _resolve_layout(
                 _black_box_regions,
                 _dummy,
                 _unmodelled_poly,
+                _voltage_domain_warnings,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

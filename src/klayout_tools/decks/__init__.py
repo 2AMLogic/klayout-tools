@@ -907,6 +907,48 @@ def get_layer_names(name: str) -> dict[tuple[int, int], str]:
     return _layer_name_registry().get(name, {})
 
 
+def _unmodeled_voltage_marker_registry() -> dict[str, dict[tuple[int, int], str]]:
+    from . import gf180mcu, sky130
+
+    return {
+        "sky130": sky130.UNMODELED_VOLTAGE_MARKERS,
+        "gf180mcu": gf180mcu.UNMODELED_VOLTAGE_MARKERS,
+    }
+
+
+def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
+    """Return the ``(layer, datatype) -> description`` map of voltage-domain
+    marker layers ``name``'s deck draws but does not model the DRC/
+    extraction *scoping* of (issue #552).
+
+    Several open PDKs draw two gate-oxide/voltage domains on the same
+    wafer, selected by a marker layer -- e.g. gf180mcu's ``Dualgate``
+    (55/0) selects its 5V/6V thick-oxide domain, whose DRM publishes a
+    second, materially different (30-60% larger) column of DRC thresholds
+    and a distinct set of MOS models. This curated deck's rule/extraction
+    tables encode only the default (thin-oxide) column and never read the
+    marker, so geometry drawn *inside* it is checked against the wrong
+    thresholds and extracted with the wrong model name -- silently, with a
+    ``clean``/plausible-looking result.
+
+    A deck registers such a layer here, with a description naming the
+    concrete consequence, so ``drc.py``'s ``coverage.voltage_domain_warnings``
+    and ``extract.py``'s ``voltage_domain_warnings`` can surface a loud
+    warning whenever that marker's geometry actually interacts with checked/
+    extracted geometry, rather than leave a silent false ``clean`` /
+    unflagged wrong-model result. This is deliberately only a diagnostic
+    signal ("fail loudly" -- see this issue's "Suggested shape" option (3)):
+    it does not change any rule threshold or extracted model itself, which
+    would require the larger, separately-tracked option (1)/(2) work (a
+    subtraction-capable :class:`DerivedLayer` and a per-flavour MOS marker
+    field, respectively).
+
+    Mirrors :func:`get_layer_names`'s shape and unrecognised-deck fallback:
+    an unregistered deck name returns an empty map rather than raising.
+    """
+    return _unmodeled_voltage_marker_registry().get(name, {})
+
+
 def _nominal_dbu_registry() -> dict[str, float]:
     from . import gf180mcu, sky130
 

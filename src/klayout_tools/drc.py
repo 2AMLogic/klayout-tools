@@ -40,6 +40,7 @@ from .decks import (
     get_deck,
     get_layer_names,
     get_nominal_dbu,
+    get_unmodeled_voltage_markers,
 )
 from .layers import layers_report
 
@@ -93,6 +94,9 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
                 "layers_checked": ["<layer>/<datatype>", ...],
                 "layers_in_stream_without_rules": ["<layer>/<datatype>", ...],
                 "rules_skipped": [<rule id>, ...],
+                "voltage_domain_warnings": [
+                    {"marker": "<layer>/<datatype>", "description": str}, ...
+                ],
             },
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
@@ -149,6 +153,26 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     ``status`` with a non-empty ``layers_in_stream_without_rules`` means
     "clean, and here is exactly what was not looked at" rather than a
     fully-verified pass.
+
+    ``coverage.voltage_domain_warnings`` (issue #552) is a second, narrower
+    trust gap ``layers_in_stream_without_rules`` alone does not surface:
+    some decks (today, gf180mcu's ``Dualgate`` 55/0) draw a marker layer
+    that selects a second gate-oxide/voltage domain with materially
+    different DRC thresholds this curated deck does not encode -- so
+    geometry *inside* that marker is checked against the wrong (default)
+    column and reported as an ordinary ``layers_checked`` pass, not an
+    unchecked layer. Whenever such a marker (see
+    :func:`~klayout_tools.decks.get_unmodeled_voltage_markers`) is present
+    in ``path`` *and* its geometry interacts with at least one layer this
+    run actually checked (a member of ``coverage.layers_checked``, not
+    merely present-but-unchecked), one entry is added --
+    ``{"marker": "<layer>/<datatype>", "description": str}`` -- naming the
+    marker and the concrete consequence (the deck's own registered
+    description). A ``Dualgate`` shape that never overlaps any checked
+    geometry produces no entry, avoiding a warning with nothing behind it.
+    Always a list, empty for a deck that registers no such marker or a
+    layout that draws none of it overlapping checked geometry -- purely
+    additive, no existing rule threshold changes because of this field.
 
     Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
     deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not
@@ -362,6 +386,45 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
+    # Voltage-domain marker warnings (issue #552): a marker this deck
+    # registers via `get_unmodeled_voltage_markers` (e.g. gf180mcu's
+    # `Dualgate` 55/0) selects a second gate-oxide/voltage domain whose real
+    # DRC thresholds this deck's rules do not encode -- geometry inside it is
+    # checked against the wrong (default) column and would otherwise report
+    # an unqualified `layers_checked` pass. Gated on the marker's geometry
+    # actually *interacting* with at least one layer this run checked (not
+    # merely present in the stream), so a marker shape that never overlaps
+    # any checked geometry produces no warning with nothing behind it.
+    voltage_domain_warnings: list[dict[str, str]] = []
+    unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
+    for marker, description in sorted(unmodeled_markers.items()):
+        if marker not in stream_layer_tuples:
+            continue
+        marker_index = layout.find_layer(*marker)
+        if marker_index is None:
+            continue
+        interacts = False
+        for cell in top_cells:
+            marker_region = kdb.Region(cell.begin_shapes_rec(marker_index))
+            if marker_region.is_empty():
+                continue
+            for checked_layer in sorted(layers_checked):
+                if checked_layer == marker:
+                    continue
+                checked_index = layout.find_layer(*checked_layer)
+                if checked_index is None:
+                    continue
+                checked_region = kdb.Region(cell.begin_shapes_rec(checked_index))
+                if not marker_region.interacting(checked_region).is_empty():
+                    interacts = True
+                    break
+            if interacts:
+                break
+        if interacts:
+            voltage_domain_warnings.append(
+                {"marker": _fmt(marker), "description": description}
+            )
+
     coverage = {
         "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
@@ -369,6 +432,7 @@ def run_drc(path: str, deck_name: str) -> dict[str, Any]:
             _fmt(t) for t in sorted(layers_in_stream_without_rules)
         ],
         "rules_skipped": sorted(rules_skipped),
+        "voltage_domain_warnings": voltage_domain_warnings,
     }
 
     return {
