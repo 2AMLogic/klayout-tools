@@ -878,3 +878,448 @@ def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
             }
         )
     return macros
+
+
+# --------------------------------------------------------------------------- #
+# `klt pdk corners` -- SPICE process-corner enumeration + completeness check
+# --------------------------------------------------------------------------- #
+
+#: Known PDK families this command understands, matched by variant-name
+#: prefix (``"sky130A"`` -> ``"sky130"``, ``"gf180mcuC"`` -> ``"gf180mcu"``).
+#: Deliberately duplicates the same convention as the private
+#: ``_pdk_variant_family`` helper in ``pdk_models.py`` rather than importing
+#: it across an unrelated module boundary -- this module resolves PDKs in
+#: general, ``pdk_models`` resolves MOS device-model tables for
+#: extraction/LVS specifically, and neither imports the other today. A
+#: variant not matching any entry here is simply unsupported --
+#: :func:`list_corners` returns an explanatory empty result (see its
+#: docstring), matching this module's "empty is a valid answer" convention
+#: (:func:`list_hard_macro_libraries`), never guessed.
+_CORNER_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu")
+
+#: gf180mcu's golden ngspice model deck filename, stable across variants
+#: A-D (verified against a real volare install of each, 2026-08-05).
+_GF180MCU_MODEL_FILENAME = "sm141064.ngspice"
+
+#: sky130's unified corner-library filename, stable across sky130A/B
+#: (verified against a real volare install of each, 2026-08-05).
+_SKY130_MODEL_FILENAME = "sky130.lib.spice"
+
+#: gf180mcu's canonical top-level MOSFET corner names -- this *is* the
+#: PDK-wide corner vocabulary
+#: (docs/design/pdk-device-corner-metadata-spike.md section 1.2): every
+#: other device family's section name is one of these names behind a
+#: family-specific prefix (see :data:`_GF180MCU_FAMILY_PREFIXES`), never a
+#: name of its own. "typical" is listed first -- :func:`_scan_gf180mcu_corners`
+#: relies on the typical corner being processed before any other corner, so
+#: each family's skew baseline exists before it is needed.
+_GF180MCU_CORNER_NAMES: tuple[str, ...] = ("typical", "ff", "ss", "fs", "sf")
+
+#: The curated half of "own the grouping the PDK omits" from
+#: docs/design/pdk-device-corner-metadata-spike.md section 3: which
+#: section-name *prefix* groups one family's per-corner sections together.
+#: This is convention, not data -- nothing in ``sm141064.ngspice`` states
+#: that ``bjt_ss`` is "the BJT family's slow corner", let alone that it
+#: belongs to the same overall "ss" corner as bare ``ss`` (MOSFET) or
+#: ``mimcap_ss`` (MIM cap); see the spike's "wrap or build?" analysis. The
+#: MOSFET family's prefix is the empty string because its section names
+#: carry no prefix at all (``typical``/``ff``/``ss``/``fs``/``sf``, bare).
+#: Family tokens match docs/design/pdk-device-corner-metadata-spike.md
+#: section 2.1's proposed ``device_class`` taxonomy.
+_GF180MCU_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("mos", ""),
+    ("bjt", "bjt_"),
+    ("diode", "diode_"),
+    ("resistor", "res_"),
+    ("mim_cap", "mimcap_"),
+    ("mos_cap", "moscap_"),
+)
+
+#: sky130's per-corner device-family split, keyed by the leading path
+#: component of the `.include` lines a `.lib <corner> ... .endl` block
+#: carries (``"corners/tt.spice"`` -> family ``mos``, ``"r+c/..."`` ->
+#: family ``resistor_cap``). Unlike gf180mcu's family *prefix* table above,
+#: this is derived from data the shipped file itself states (the include
+#: path), not a curated naming convention: sky130 groups every family into
+#: a *single* `.lib <corner>` block, so there is no cross-block corner-name
+#: convention to curate the way gf180mcu's ``bjt_ss``/``mimcap_ss``/...
+#: grouping requires. ``resistor_cap`` (not gf180mcu's separate
+#: ``resistor``/``mim_cap``) reflects what sky130's own deck actually
+#: states: one shared `r+c/` include set covers both, never split further.
+_SKY130_INCLUDE_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("mos", "corners/"),
+    ("resistor_cap", "r+c/"),
+)
+
+#: sky130's typical-process corner name -- the skew baseline every other
+#: corner's per-family include set is compared against (SkyWater
+#: convention; ``tt`` = "typical-typical", see ``sky130.lib.spice``).
+_SKY130_TYPICAL_CORNER = "tt"
+
+_LIB_BLOCK_HEADER_RE = re.compile(r"^\s*\.lib\s+([A-Za-z0-9_]+)\s*$", re.IGNORECASE)
+_LIB_BLOCK_END_RE = re.compile(r"^\s*\.endl\b", re.IGNORECASE)
+_LIB_INCLUDE_TOKEN_RE = re.compile(
+    r"^\s*\.lib\s+'([^']+)'\s+(\S+)\s*$", re.IGNORECASE | re.MULTILINE
+)
+_INCLUDE_PATH_RE = re.compile(
+    r'^\s*\.include\s+"([^"]+)"', re.IGNORECASE | re.MULTILINE
+)
+#: Matches both a `.param` statement line and its `+`-prefixed ngspice
+#: line-continuations -- gf180mcu's `bjt_*`/`diode_*`/`res_*`/`moscap_*`
+#: sections write their assignments as a bare `.param` line followed by
+#: several `+name=value ...` continuation lines (see :func:`_param_lines`),
+#: not `.param name=value` on one line the way `mimcap_*` does.
+_PARAM_LINE_RE = re.compile(r"^\s*(?:\.param\b|\+)", re.IGNORECASE)
+
+
+def _param_lines(body: str) -> frozenset[str]:
+    """The normalised set of `.param` statement lines (plus their `+`
+    line-continuations, concatenated as separate set members) in ``body``,
+    for comparing whether a section's parameter overrides genuinely differ
+    from its family's typical section.
+
+    A **set** comparison of the *whole* parameter area (not "does this
+    section contain any `.param`/`+` line at all") -- both PDKs' decks carry
+    `.param` lines that are unconditional boilerplate, unrelated to
+    process-corner skew, in *every* section (gf180mcu's per-corner
+    `rsh_*_u_m` sheet-resistance restatements that happen to equal the
+    typical value at some corners; sky130's `mc_mm_switch`/`mc_pr_switch`
+    Monte-Carlo toggle, which is `0` in every non-mismatch,
+    non-statistical corner including `tt` itself). Presence alone would
+    misclassify those as ``"param"``-skewed even when every value is
+    unchanged from typical; comparing the actual line set against the
+    family's typical section correctly resolves them to ``"typical"``.
+    Internal whitespace is collapsed (``" ".join(line.split())``) so
+    incidental spacing differences between corners don't register as a
+    content difference.
+    """
+    return frozenset(
+        " ".join(line.split())
+        for line in body.splitlines()
+        if _PARAM_LINE_RE.match(line)
+    )
+
+
+def list_corners(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+    """Report the SPICE process corners a resolved PDK variant ships, and
+    which device families each one actually skews (issue #538).
+
+    Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
+    ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
+    then reports, for the resolved variant's golden ngspice model deck:
+
+    - the available top-level corner names (``corner_names``),
+    - per corner, an ordered ``sections: [{family, section, skew}, ...]``
+      list -- the shape proposed by
+      docs/design/pdk-device-corner-metadata-spike.md section 2.2, kept
+      deliberately consistent with it (``family``/``section`` keys
+      unchanged; ``skew`` is an additive field the spike's own "room to
+      grow without breaking" rule allows), and
+    - ``complete`` -- ``False`` when, for a non-typical corner, one or more
+      known device families either have no section at all
+      (``section: null``, ``skew: null`` -- unlisted) *or* have a section
+      that resolves right back to the typical one (``skew: "typical"``) --
+      both are the same silent-typical failure mode the issue reports, one
+      by omission and one by an unmoved section, made explicit and
+      machine-checkable instead of requiring a caller to hand-grep vendor
+      model files. A family with no section falls back to whatever was
+      separately bound before it (typically its typical section, if the
+      caller bound one, or nothing at all otherwise); a family with an
+      explicit but unmoved section is bound, just not to anything different
+      from typical. For the typical corner itself every family reporting
+      ``skew: "typical"`` is the *correct*, expected answer, not a gap --
+      ``complete`` there only requires every family to have a section.
+
+    Design choice -- curated family grouping + live scan, **not** a pure
+    call-time parser (see docs/design/pdk-device-corner-metadata-spike.md
+    section 3, "Wrap or build?"): the spike argues that *which* sections
+    belong to the same named corner is PDK convention, not data a shipped
+    file states, and recommends owning that grouping in a curated table
+    rather than guessing it from a naming pattern at call time -- see
+    :data:`_GF180MCU_FAMILY_PREFIXES` (gf180mcu) and
+    :data:`_SKY130_INCLUDE_FAMILIES` (sky130, derived from the shipped
+    `.include` path instead, since sky130's own file states that grouping
+    directly). This function follows that recommendation for the
+    *grouping*, but stops short of the spike's further "hand-curated,
+    version-pinned table" for the *skew classification*: whether a given,
+    curated-grouping-resolved section actually differs from the family's
+    typical section (``skew: "skewed"``), differs only via `.param`
+    overrides on an otherwise-identical shared model (``skew: "param"``),
+    or is the typical section itself (``skew: "typical"``) is derived by
+    comparing the section's parsed content against the family's typical
+    section at call time, against the real installed file -- the same
+    "reflect the real, installed state" argument `klt pdk cells` makes (see
+    its "Design choice" note in docs/cli/pdk.md) for the parts of this
+    problem a shipped file *does* state directly (per-section include
+    tokens), so neither table drifts silently against an upgraded PDK.
+
+    Granularity note: skew is classified per curated *family*
+    (mos/bjt/diode/resistor/mim_cap/mos_cap for gf180mcu; mos/resistor_cap
+    for sky130), not per individual device flavor within a family. A family
+    reported ``"skewed"`` means *some* of its devices moved off the typical
+    section for that corner -- it does not guarantee *every* device in the
+    family did. For example, gf180mcu's own model deck leaves its 06v0
+    MOSFET flavor at the typical-named section inside every corner while
+    its 03v3 flavor does skew, both inside the single curated "mos" family
+    (the issue's own worked example) -- this command correctly reports
+    "mos" as ``"skewed"`` for that corner (some devices moved), but does
+    not itself flag the 06v0 sub-flavor as unmoved. Resolving that finer,
+    per-flavor question is the spike's own proposed ``klt pdk corner --pdk
+    <variant> --corner <name>`` follow-up (section 2.2), not this command.
+
+    Returns a dict matching the documented JSON schema (see
+    ``docs/cli/pdk.md``)::
+
+        {
+            "schema_version": 1,
+            "pdk": <variant name>,
+            "root": <absolute install root>,
+            "resolved_via": <how the corner/family grouping was obtained>,
+            "model_lib": <absolute path to the golden model deck> | None,
+            "corner_names": [<corner name>, ...],
+            "corners": [
+                {
+                    "corner": str,
+                    "sections": [
+                        {"family": str, "section": str | None,
+                         "skew": "typical" | "skewed" | "param" | None},
+                        ...
+                    ],
+                    "family_count": int,
+                    "complete": bool,
+                },
+                ...
+            ],
+        }
+
+    An empty ``corners`` list is a successful result -- an unrecognised PDK
+    family (see :data:`_CORNER_PDK_FAMILIES`), a recognised family whose
+    variant ships no ``ngspice`` asset directory, or one that ships an
+    ``ngspice`` directory without the expected golden model deck filename --
+    not an error, matching this module's other list-style commands
+    (:func:`list_cell_libraries`, :func:`list_hard_macro_libraries`).
+    ``resolved_via`` always explains which of these applied.
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves at all.
+    """
+    info = find_pdk(variant=variant, root=root)
+    ngspice_dir = info["assets"]["ngspice"]
+    model_lib, corners, resolved_via = _resolve_corners(info["variant"], ngspice_dir)
+
+    return {
+        "schema_version": 1,
+        "pdk": info["variant"],
+        "root": info["root"],
+        "resolved_via": resolved_via,
+        "model_lib": model_lib,
+        "corner_names": [entry["corner"] for entry in corners],
+        "corners": corners,
+    }
+
+
+def _resolve_corners(
+    variant: str, ngspice_dir: str | None
+) -> tuple[str | None, list[dict[str, Any]], str]:
+    """Dispatch to the per-PDK-family corner scanner, or explain why not."""
+    family = _corner_pdk_family(variant)
+    if family is None:
+        return (
+            None,
+            [],
+            f"no curated corner-family grouping for PDK variant '{variant}' "
+            f"(recognised families: {', '.join(_CORNER_PDK_FAMILIES)})",
+        )
+    if ngspice_dir is None:
+        return None, [], f"variant '{variant}' ships no 'ngspice' asset directory"
+
+    if family == "gf180mcu":
+        filename, scanner = _GF180MCU_MODEL_FILENAME, _scan_gf180mcu_corners
+        grouping = (
+            "curated family-prefix grouping (mos/bjt/diode/resistor/mim_cap/mos_cap)"
+        )
+    else:
+        filename, scanner = _SKY130_MODEL_FILENAME, _scan_sky130_corners
+        grouping = "include-path family split (mos=corners/, resistor_cap=r+c/)"
+
+    model_path = os.path.join(ngspice_dir, filename)
+    if not os.path.isfile(model_path):
+        return (
+            None,
+            [],
+            f"expected model deck '{filename}' not found under {ngspice_dir}",
+        )
+
+    corners = scanner(model_path)
+    resolved_via = f"{grouping} + live scan of {filename}"
+    return model_path, corners, resolved_via
+
+
+def _corner_pdk_family(variant: str) -> str | None:
+    """The recognised corner-scanning family for ``variant``, or ``None``."""
+    for family in _CORNER_PDK_FAMILIES:
+        if variant.startswith(family):
+            return family
+    return None
+
+
+def _parse_named_lib_blocks(text: str) -> dict[str, str]:
+    """Return ``{block_name: block_body_text}`` for every top-level
+    ``.lib``/``.LIB <name> ... .endl``/``.ENDL`` block in an ngspice model
+    deck.
+
+    Only a **bare-name** header (``.lib <name>``, no quoted filename) starts
+    a block -- an *include* reference (``.lib '<file>' <name>``, always
+    quoted-filename-first) is never mistaken for one, since
+    ``[A-Za-z0-9_]+`` cannot match a leading ``'``. Blocks are flat (no
+    nesting occurs in either PDK's deck), so a single linear scan suffices.
+    A block whose terminator is missing (malformed input) runs to end of
+    file rather than raising. Later duplicate block names overwrite earlier
+    ones (never observed in a real deck; deterministic rather than
+    ambiguous if it ever occurred).
+    """
+    blocks: dict[str, str] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        header = _LIB_BLOCK_HEADER_RE.match(lines[index])
+        if header is None:
+            index += 1
+            continue
+        name = header.group(1)
+        index += 1
+        body_start = index
+        while index < len(lines) and not _LIB_BLOCK_END_RE.match(lines[index]):
+            index += 1
+        blocks[name] = "\n".join(lines[body_start:index])
+        index += 1
+    return blocks
+
+
+def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
+    """Scan gf180mcu's golden model deck for its per-family corner sections.
+
+    See :func:`list_corners` for the overall algorithm and its documented
+    granularity limits.
+    """
+    text = _read_text(model_path)
+    if text is None:
+        return []
+    blocks = _parse_named_lib_blocks(text)
+
+    typical_tokens: dict[str, set[tuple[str, str]]] = {}
+    typical_params: dict[str, frozenset[str]] = {}
+    corners: list[dict[str, Any]] = []
+    for corner in _GF180MCU_CORNER_NAMES:
+        sections: list[dict[str, Any]] = []
+        for family, prefix in _GF180MCU_FAMILY_PREFIXES:
+            section_name = f"{prefix}{corner}"
+            body = blocks.get(section_name)
+            if body is None:
+                sections.append({"family": family, "section": None, "skew": None})
+                continue
+            tokens = set(_LIB_INCLUDE_TOKEN_RE.findall(body))
+            params = _param_lines(body)
+            if corner == "typical":
+                skew = "typical"
+                typical_tokens[family] = tokens
+                typical_params[family] = params
+            else:
+                baseline_tokens = typical_tokens.get(family)
+                if baseline_tokens is not None and tokens != baseline_tokens:
+                    skew = "skewed"
+                elif params != typical_params.get(family, frozenset()):
+                    skew = "param"
+                else:
+                    skew = "typical"
+            sections.append({"family": family, "section": section_name, "skew": skew})
+        corners.append(_finish_corner(corner, sections, corner == "typical"))
+    return corners
+
+
+def _scan_sky130_corners(model_path: str) -> list[dict[str, Any]]:
+    """Scan sky130's unified corner-library deck for its per-corner,
+    per-family (mos / resistor_cap) include sets.
+
+    See :func:`list_corners` for the overall algorithm and its documented
+    granularity limits.
+    """
+    text = _read_text(model_path)
+    if text is None:
+        return []
+    blocks = _parse_named_lib_blocks(text)
+
+    typical_body = blocks.get(_SKY130_TYPICAL_CORNER, "")
+    typical_tokens = {
+        family: _sky130_family_tokens(typical_body, path_prefix)
+        for family, path_prefix in _SKY130_INCLUDE_FAMILIES
+    }
+    # sky130 has no per-family `.param` scoping the way gf180mcu's separate
+    # per-family blocks do -- every `.param` line in a `.lib <corner>` block
+    # (e.g. the `mc_mm_switch`/`mc_pr_switch` Monte-Carlo toggles) applies to
+    # the whole corner, not to `mos` or `resistor_cap` individually. Compare
+    # the whole block's param-line set for both families; see
+    # :func:`_param_lines`.
+    typical_params = _param_lines(typical_body)
+
+    corners: list[dict[str, Any]] = []
+    for corner_name, body in blocks.items():
+        sections: list[dict[str, Any]] = []
+        for family, path_prefix in _SKY130_INCLUDE_FAMILIES:
+            tokens = _sky130_family_tokens(body, path_prefix)
+            if not tokens:
+                sections.append({"family": family, "section": None, "skew": None})
+                continue
+            if corner_name == _SKY130_TYPICAL_CORNER:
+                skew = "typical"
+            else:
+                baseline = typical_tokens.get(family, set())
+                if tokens != baseline:
+                    skew = "skewed"
+                elif _param_lines(body) != typical_params:
+                    skew = "param"
+                else:
+                    skew = "typical"
+            sections.append({"family": family, "section": corner_name, "skew": skew})
+        corners.append(
+            _finish_corner(corner_name, sections, corner_name == _SKY130_TYPICAL_CORNER)
+        )
+    return corners
+
+
+def _sky130_family_tokens(body: str, path_prefix: str) -> set[str]:
+    """`.include` paths in ``body`` starting with ``path_prefix``."""
+    return {
+        path for path in _INCLUDE_PATH_RE.findall(body) if path.startswith(path_prefix)
+    }
+
+
+def _finish_corner(
+    corner: str, sections: list[dict[str, Any]], is_typical_corner: bool
+) -> dict[str, Any]:
+    """Assemble one ``corners[]`` entry from its already-classified sections.
+
+    ``complete`` is the acceptance-critical field (issue #538): for the
+    typical corner itself, every family reporting ``skew: "typical"`` is
+    correct (that *is* the baseline), so completeness there only requires
+    every family to have a section at all. For every other corner,
+    ``complete`` additionally requires every family to have actually moved
+    off ``"typical"`` (``"skewed"`` or ``"param"``) -- a family that is
+    *present* but still resolves to ``skew: "typical"`` at a non-typical
+    corner is exactly the silent-typical bug the issue reports (e.g.
+    sky130's own `ss` corner leaves its `resistor_cap` family at the
+    typical R/C section while skewing MOSFETs -- see
+    ``tests/test_pdk.py``), not merely a family with no section at all.
+    """
+    if is_typical_corner:
+        complete = all(section["section"] is not None for section in sections)
+    else:
+        complete = all(
+            section["section"] is not None and section["skew"] != "typical"
+            for section in sections
+        )
+    return {
+        "corner": corner,
+        "sections": sections,
+        "family_count": len(sections),
+        "complete": complete,
+    }

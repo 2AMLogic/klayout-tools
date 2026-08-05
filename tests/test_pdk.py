@@ -1146,3 +1146,383 @@ def test_cli_macros_no_install_error_envelope(tmp_path, capsys):
     assert captured.out == ""
     error = json.loads(captured.err)
     assert error["error"]["command"] == "pdk macros"
+
+
+# --------------------------------------------------------------------------- #
+# list_corners (`klt pdk corners`) -- issue #538
+# --------------------------------------------------------------------------- #
+
+#: A minimal gf180mcu-shaped ngspice deck exercising every skew path this
+#: command classifies, modeled on the real shape verified against a
+#: gf180mcuD volare install (2026-08-05, see the issue's own worked
+#: example): `mos` skews via a different named model per corner (`skewed`);
+#: `bjt`/`diode`/`mimcap` skew via `.param` overrides on an unchanged shared
+#: model (`param`); `res_ff`/`res_ss` deliberately restate the *same*
+#: `rsh=60` value `res_typical` uses -- a family present at a non-typical
+#: corner that never actually moved, the specific "leaves a family at
+#: typical" bug this command exists to catch (`complete: False` at `ff`/
+#: `ss`). `fs`/`sf` define only the `mos` family (matching the real deck),
+#: leaving every other family unlisted at those corners.
+_GF180MCU_FIXTURE_DECK = """\
+.LIB typical
+ .lib 'sm141064.ngspice' nfet_03v3_t
+.ENDL
+*
+.LIB ff
+ .lib 'sm141064.ngspice' nfet_03v3_f
+.ENDL
+*
+.LIB ss
+ .lib 'sm141064.ngspice' nfet_03v3_s
+.ENDL
+*
+.LIB fs
+ .lib 'sm141064.ngspice' nfet_03v3_fs
+.ENDL
+*
+.LIB sf
+ .lib 'sm141064.ngspice' nfet_03v3_sf
+.ENDL
+*
+.LIB bjt_typical
+.param
++isa=1
+.lib 'sm141064.ngspice' bjt_mc
+.ENDL
+*
+.LIB bjt_ff
+.param
++isa=1.2
+.lib 'sm141064.ngspice' bjt_mc
+.ENDL
+*
+.LIB bjt_ss
+.param
++isa=0.8
+.lib 'sm141064.ngspice' bjt_mc
+.ENDL
+*
+.LIB diode_typical
+.param jsa=1
+.lib 'sm141064.ngspice' dio
+.ENDL
+*
+.LIB diode_ff
+.param jsa=1.15
+.lib 'sm141064.ngspice' dio
+.ENDL
+*
+.LIB diode_ss
+.param jsa=0.85
+.lib 'sm141064.ngspice' dio
+.ENDL
+*
+.LIB res_typical
+.param rsh=60
+.lib 'sm141064.ngspice' res
+.ENDL
+*
+.lib res_ff
+.param rsh=60
+.lib 'sm141064.ngspice' res
+.ENDL
+*
+.LIB res_ss
+.param rsh=60
+.lib 'sm141064.ngspice' res
+.ENDL
+*
+.LIB mimcap_typical
+.param mim_corner=1
+.lib 'sm141064_mim.ngspice' cap_mim_new
+.ENDL
+*
+.LIB mimcap_ff
+.param mim_corner=0.9
+.lib 'sm141064_mim.ngspice' cap_mim_new
+.ENDL
+*
+.LIB mimcap_ss
+.param mim_corner=1.1
+.lib 'sm141064_mim.ngspice' cap_mim_new
+.ENDL
+*
+.lib moscap_typical
+.param cap_corner=1
+.lib 'sm141064.ngspice' moscap
+.ENDL
+*
+.lib moscap_ff
+.param cap_corner=0.9
+.lib 'sm141064.ngspice' moscap
+.ENDL
+*
+.lib moscap_ss
+.param cap_corner=1.1
+.lib 'sm141064.ngspice' moscap
+.ENDL
+"""
+
+#: A minimal sky130-shaped ngspice deck reproducing the real, live-verified
+#: finding (2026-08-05, sky130A via volare) that sky130's own `.lib <corner>`
+#: sections leave one of the two axes at typical depending on which corner
+#: family they actually vary: `ss` (a MOSFET process corner) skews `mos` but
+#: leaves `resistor_cap` bound to the exact same `r+c/res_typical...` include
+#: (and identical `mc_mm_switch` boilerplate param) as `tt` -- the silent-
+#: typical bug, caught here as `complete: False`. `ll` is the mirror case
+#: (skews `resistor_cap`, leaves `mos` at typical). `mc` has neither a
+#: `corners/` nor an `r+c/` include at all (a Monte-Carlo switch corner, not
+#: a process corner), so both families report ``section: null``.
+_SKY130_FIXTURE_DECK = """\
+.lib tt
+.param mc_mm_switch=0
+.include "corners/tt.spice"
+.include "r+c/res_typical__cap_typical.spice"
+.endl tt
+
+.lib ss
+.param mc_mm_switch=0
+.include "corners/ss.spice"
+.include "r+c/res_typical__cap_typical.spice"
+.endl ss
+
+.lib ll
+.param mc_mm_switch=0
+.include "corners/tt.spice"
+.include "r+c/res_low__cap_low.spice"
+.endl ll
+
+.lib mc
+.param mc_pr_switch=1
+.include "parameters/montecarlo.spice"
+.endl mc
+"""
+
+
+def _make_corner_deck(variant_dir, filename, content):
+    """Write ``content`` as ``libs.tech/ngspice/<filename>`` under
+    ``variant_dir`` (``_make_install(..., assets=("ngspice",))`` must have
+    already created the ``ngspice/`` directory)."""
+    ngspice_dir = variant_dir / "libs.tech" / "ngspice"
+    ngspice_dir.mkdir(parents=True, exist_ok=True)
+    (ngspice_dir / filename).write_text(content, encoding="utf-8")
+
+
+def test_corners_gf180mcu_classifies_skewed_param_typical_and_incomplete(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sm141064.ngspice", _GF180MCU_FIXTURE_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="gf180mcuD")
+
+    assert report["schema_version"] == 1
+    assert report["pdk"] == "gf180mcuD"
+    assert report["model_lib"] == str(
+        variant_dir / "libs.tech" / "ngspice" / "sm141064.ngspice"
+    )
+    assert report["corner_names"] == ["typical", "ff", "ss", "fs", "sf"]
+
+    by_corner = {corner["corner"]: corner for corner in report["corners"]}
+
+    typical = by_corner["typical"]
+    assert typical["complete"] is True
+    assert {s["family"]: s["skew"] for s in typical["sections"]} == {
+        "mos": "typical",
+        "bjt": "typical",
+        "diode": "typical",
+        "resistor": "typical",
+        "mim_cap": "typical",
+        "mos_cap": "typical",
+    }
+
+    ff = by_corner["ff"]
+    skews = {s["family"]: s["skew"] for s in ff["sections"]}
+    assert skews["mos"] == "skewed"  # different named model (nfet_03v3_f)
+    assert skews["bjt"] == "param"  # same shared model, differing .param
+    assert skews["diode"] == "param"
+    assert skews["mim_cap"] == "param"
+    assert skews["resistor"] == "typical"  # same model AND same rsh=60 value
+    # `resistor` never actually moved off typical at a non-typical corner:
+    # the acceptance-critical "leaves a family at typical" signal.
+    assert ff["complete"] is False
+
+    fs = by_corner["fs"]
+    fs_sections = {s["family"]: (s["section"], s["skew"]) for s in fs["sections"]}
+    assert fs_sections["mos"] == ("fs", "skewed")
+    assert fs_sections["bjt"] == (None, None)  # unlisted at this corner
+    assert fs["complete"] is False
+
+
+def test_corners_gf180mcu_boilerplate_param_not_misclassified_as_skew(tmp_path):
+    """A `.param` line present but with an unchanged value from the family's
+    typical section must classify as ``"typical"``, not ``"param"`` -- a
+    naive "any `.param` line present" check would misclassify this (see
+    :func:`klayout_tools.pdk._param_lines`'s docstring)."""
+    deck = """\
+.LIB typical
+.param rsh_nplus_u_m=60
+.lib 'sm141064.ngspice' res
+.ENDL
+*
+.LIB ff
+.param rsh_nplus_u_m=60
+.lib 'sm141064.ngspice' res
+.ENDL
+"""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuA", assets=("ngspice",))
+    # Reuse the "res" family prefix by naming sections after it directly --
+    # the fixture only needs `_GF180MCU_FAMILY_PREFIXES`'s `res_` entry, so
+    # rename the sections to match that prefix instead of "typical"/"ff".
+    deck = deck.replace(".LIB typical", ".LIB res_typical").replace(
+        ".LIB ff", ".LIB res_ff"
+    )
+    _make_corner_deck(variant_dir, "sm141064.ngspice", deck)
+
+    report = pdk.list_corners(root=str(root), variant="gf180mcuA")
+
+    by_corner = {corner["corner"]: corner for corner in report["corners"]}
+    resistor_ff = next(
+        s for s in by_corner["ff"]["sections"] if s["family"] == "resistor"
+    )
+    assert resistor_ff["section"] == "res_ff"
+    assert resistor_ff["skew"] == "typical"
+
+
+def test_corners_sky130_leaves_family_at_typical(tmp_path):
+    """Reproduces the real, live-verified sky130A finding (2026-08-05): the
+    `ss` process corner skews `mos` but leaves `resistor_cap` bound to the
+    exact same typical R/C include -- and `ll` is the mirror case."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sky130.lib.spice", _SKY130_FIXTURE_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="sky130A")
+
+    assert report["corner_names"] == ["tt", "ss", "ll", "mc"]
+    by_corner = {corner["corner"]: corner for corner in report["corners"]}
+
+    tt = by_corner["tt"]
+    assert tt["complete"] is True
+    assert {s["family"]: s["skew"] for s in tt["sections"]} == {
+        "mos": "typical",
+        "resistor_cap": "typical",
+    }
+
+    ss = by_corner["ss"]
+    ss_skews = {s["family"]: s["skew"] for s in ss["sections"]}
+    assert ss_skews["mos"] == "skewed"
+    assert ss_skews["resistor_cap"] == "typical"
+    assert ss["complete"] is False
+
+    ll = by_corner["ll"]
+    ll_skews = {s["family"]: s["skew"] for s in ll["sections"]}
+    assert ll_skews["mos"] == "typical"
+    assert ll_skews["resistor_cap"] == "skewed"
+    assert ll["complete"] is False
+
+    mc = by_corner["mc"]
+    assert {s["family"]: s["section"] for s in mc["sections"]} == {
+        "mos": None,
+        "resistor_cap": None,
+    }
+    assert mc["complete"] is False
+
+
+def test_corners_unrecognised_pdk_family_is_empty_not_error(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "foobarA", assets=("ngspice",))
+
+    report = pdk.list_corners(root=str(root), variant="foobarA")
+
+    assert report["corners"] == []
+    assert report["corner_names"] == []
+    assert report["model_lib"] is None
+    assert "no curated corner-family grouping" in report["resolved_via"]
+
+
+def test_corners_no_ngspice_asset_is_empty_not_error(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("magic",))
+
+    report = pdk.list_corners(root=str(root), variant="sky130A")
+
+    assert report["corners"] == []
+    assert report["model_lib"] is None
+    assert "ships no 'ngspice' asset directory" in report["resolved_via"]
+
+
+def test_corners_missing_model_deck_file_is_empty_not_error(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuA", assets=("ngspice",))
+
+    report = pdk.list_corners(root=str(root), variant="gf180mcuA")
+
+    assert report["corners"] == []
+    assert report["model_lib"] is None
+    assert "sm141064.ngspice" in report["resolved_via"]
+    assert "not found" in report["resolved_via"]
+
+
+def test_corners_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.list_corners(root=str(tmp_path / "nope"))
+
+
+def test_cli_corners_json_on_stdout(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sm141064.ngspice", _GF180MCU_FIXTURE_DECK)
+
+    exit_code = main(["pdk", "corners", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["pdk"] == "gf180mcuD"
+    assert payload["corner_names"] == ["typical", "ff", "ss", "fs", "sf"]
+
+
+def test_cli_corners_text_table(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sky130.lib.spice", _SKY130_FIXTURE_DECK)
+
+    exit_code = main(["pdk", "corners", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "sky130A" in out
+    assert "resistor_cap=typical" in out  # ss leaving resistor_cap at typical
+    assert "no" in out  # ss/ll/mc all render "complete: no"
+
+
+def test_cli_corners_empty_result_text(tmp_path, capsys):
+    root = tmp_path / "install"
+    _make_install(root, "foobarA", assets=("ngspice",))
+
+    exit_code = main(["pdk", "corners", "--pdk-root", str(root), "--pdk", "foobarA"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "no corners resolved" in out
+
+
+def test_cli_corners_no_install_error_envelope(tmp_path, capsys):
+    exit_code = main(
+        [
+            "pdk",
+            "corners",
+            "--pdk-root",
+            str(tmp_path / "nope"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["error"]["command"] == "pdk corners"
