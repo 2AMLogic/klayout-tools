@@ -480,29 +480,15 @@ def run_extract(
 
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
-        # Perimeter/fringe capacitance coefficients (issue #512), keyed by
-        # `CapacitorDevice.name` -- the same string KLayout reports back as
-        # `devices[].class` (see `_describe_devices`'s `class_name`), so this
-        # is a direct lookup, not a positional match. A deck's default
-        # `perim_cap_f_um=0.0` reports as `0.0` here too, so `_describe_devices`
-        # applies a no-op correction for every capacitor entry that has not
-        # opted in -- today's `c_f` stays bit-for-bit unchanged.
-        capacitor_perim_cap_f_um = {
-            capacitor.name: capacitor.perim_cap_f_um for capacitor in deck.capacitors
-        }
-        # Fixed head/end-effect resistance offset (issue #518), keyed by
-        # `ResistorDevice.name` -- the same `capacitor_perim_cap_f_um`
-        # lookup shape, one field over. A deck's default
-        # `fixed_offset_ohm=0.0` reports as `0.0` here too, so
-        # `_describe_devices` applies a no-op correction for every resistor
-        # entry that has not opted in -- today's `r_ohm` stays bit-for-bit
-        # unchanged.
-        resistor_fixed_offset_ohm = {
-            resistor.name: resistor.fixed_offset_ohm for resistor in deck.resistors
-        }
-        devices, device_counts = _describe_devices(
-            circuit, capacitor_perim_cap_f_um, resistor_fixed_offset_ohm
-        )
+        # The deck's two-term device-parameter corrections
+        # (`CapacitorDevice.perim_cap_f_um`, issue #512;
+        # `ResistorDevice.fixed_offset_ohm`, issue #518) were already applied
+        # to the `kdb.Device` objects by `_apply_device_parameter_corrections`
+        # inside `_extract_netlist` (issue #521), so `_describe_devices` just
+        # reads them back -- and the `netlist.write(...)` below therefore
+        # writes the *same* corrected values into the SPICE file that
+        # `devices[].params` reports.
+        devices, device_counts = _describe_devices(circuit)
         nets = _describe_nets(circuit)
     else:
         devices, device_counts, nets = [], {}, []
@@ -2042,6 +2028,14 @@ def _extract_netlist(
 
     netlist.purge()
 
+    # Post-extraction device-parameter corrections (issues #512, #518, #521):
+    # applied to the live `kdb.Device` objects here -- *before* the netlist is
+    # handed to `NetlistSpiceWriter` (`run_extract`) or `NetlistComparer`
+    # (`lvs.py`'s inline-extraction path) -- so every consumer sees the same
+    # corrected value the JSON `devices[].params` report shows. See
+    # `_apply_device_parameter_corrections` for the full rationale.
+    _apply_device_parameter_corrections(netlist, deck)
+
     # Parasitics geometry must be read *before* `l2n` (which owns the shape
     # database `polygons_of_net` reads) is garbage-collected below, so compute
     # it here while the graph is still live. Returned as plain data; the R/C
@@ -2072,6 +2066,109 @@ def _extract_netlist(
         dummy_devices_dropped,
         unmodelled_poly,
     )
+
+
+def _parameter_id(device_class: kdb.DeviceClass, name: str) -> int | None:
+    """Return ``device_class``'s parameter id for ``name``, or ``None``.
+
+    KLayout's ``Device.parameter(name)``/``set_parameter(name, value)``
+    string overloads *raise* for a parameter the class does not define, so
+    every read/write below is guarded by this lookup instead: a
+    ``DeviceClassMOS4Transistor`` has no ``R``, a ``DeviceClassResistor`` has
+    no ``P``, and both must be silently skipped rather than blow up
+    extraction.
+    """
+    for param in device_class.parameter_definitions():
+        if param.name == name:
+            return param.id()
+    return None
+
+
+def _apply_device_parameter_corrections(
+    netlist: kdb.Netlist, deck: ExtractionDeck
+) -> None:
+    """Apply the deck's post-extraction device-parameter corrections to the
+    live ``kdb.Device`` objects in ``netlist`` (issue #521).
+
+    KLayout's device extractors compute only the single-term forms:
+    ``DeviceExtractorCapacitor`` gives ``C = area_cap_f_um2 * A`` and
+    ``DeviceExtractorResistor``/``...ResistorWithBulk`` gives
+    ``R = L / W * sheet_rho_ohm_sq``. Two deck fields refine those into the
+    two-term forms the real PDK models use:
+
+    * :attr:`~klayout_tools.decks.CapacitorDevice.perim_cap_f_um` (issue
+      #512) adds the perimeter/fringe term, so ``C`` becomes
+      ``area_cap_f_um2 * A + perim_cap_f_um * P``.
+    * :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` (issue
+      #518) adds the fixed head/end-effect term, so ``R`` becomes
+      ``L / W * sheet_rho_ohm_sq + fixed_offset_ohm``.
+
+    Both corrections originally lived in :func:`_describe_devices`, which
+    builds only the JSON response's ``devices[]`` array -- so the correction
+    reached the report but never the ``kdb.Netlist`` itself (issue #521).
+    That left the two consumers that actually matter reading the raw
+    single-term value: ``run_extract``'s ``NetlistSpiceWriter`` (and
+    therefore ``klt sim``, which consumes the written ``.spice``) and
+    ``klt lvs``'s inline-extraction path, whose ``kdb.NetlistComparer``
+    reads ``device.parameter(...)`` directly and so reported a spurious
+    parameter mismatch against a reference netlist built from the PDK's real
+    two-term model.
+
+    Correcting the device object here -- once, inside
+    :func:`_extract_netlist`, after ``netlist.purge()`` and before the
+    netlist is returned to either consumer -- makes every downstream reader
+    agree. :func:`_describe_devices` now simply reads the corrected value
+    back rather than recomputing the correction itself, so the JSON
+    ``devices[].params`` output is unchanged.
+
+    A deck that has not opted in (the default ``perim_cap_f_um=0.0`` /
+    ``fixed_offset_ohm=0.0`` both features were designed around) gets no
+    write at all -- the netlist, the written SPICE, and the LVS comparison
+    all stay bit-for-bit what they were before this correction existed.
+
+    Corrections are keyed by device-class *name*: ``CapacitorDevice.name`` /
+    ``ResistorDevice.name`` are the same strings KLayout reports back as
+    ``DeviceClass.name``, so this is a direct lookup, not a positional
+    match. Parasitic R/C devices (injected by ``run_extract`` *after*
+    extraction returns) carry their own generated class names and are never
+    reached by this function -- no double-application.
+    """
+    perim_cap_lookup = {
+        capacitor.name: capacitor.perim_cap_f_um
+        for capacitor in deck.capacitors
+        if capacitor.perim_cap_f_um
+    }
+    fixed_offset_lookup = {
+        resistor.name: resistor.fixed_offset_ohm
+        for resistor in deck.resistors
+        if resistor.fixed_offset_ohm
+    }
+    if not perim_cap_lookup and not fixed_offset_lookup:
+        return
+
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            class_name = device_class.name
+
+            perim_cap_f_um = perim_cap_lookup.get(class_name)
+            if perim_cap_f_um:
+                c_id = _parameter_id(device_class, "C")
+                p_id = _parameter_id(device_class, "P")
+                if c_id is not None and p_id is not None:
+                    device.set_parameter(
+                        c_id,
+                        device.parameter(c_id)
+                        + perim_cap_f_um * device.parameter(p_id),
+                    )
+
+            fixed_offset_ohm = fixed_offset_lookup.get(class_name)
+            if fixed_offset_ohm:
+                r_id = _parameter_id(device_class, "R")
+                if r_id is not None:
+                    device.set_parameter(
+                        r_id, device.parameter(r_id) + fixed_offset_ohm
+                    )
 
 
 def _n_squares(area_um2: float, perimeter_um: float) -> float:
@@ -2361,36 +2458,24 @@ def _unique_net_name(base: str, existing: set[str]) -> str:
 
 def _describe_devices(
     circuit: kdb.Circuit,
-    capacitor_perim_cap_f_um: dict[str, float] | None = None,
-    resistor_fixed_offset_ohm: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Build the response's ``devices[]`` array and ``device_counts`` map.
 
-    ``capacitor_perim_cap_f_um`` (issue #512) is an optional
-    ``CapacitorDevice.name`` -> ``perim_cap_f_um`` lookup (the caller passes
-    the owning deck's own ``capacitors`` table). When a device's class name
-    is present with a nonzero coefficient, the raw ``c_f`` KLayout computed
-    (``area_cap_f_um2 * A`` only -- see ``CapacitorDevice``'s docstring) is
-    corrected to ``area_cap_f_um2 * A + perim_cap_f_um * P`` once both ``A``
-    and ``P`` have been read back. Omitted (or a `0.0`/absent coefficient)
-    reproduces today's area-only ``c_f`` bit-for-bit -- the non-breaking
-    default this feature is designed around.
-
-    ``resistor_fixed_offset_ohm`` (issue #518) is the resistor analogue: an
-    optional ``ResistorDevice.name`` -> ``fixed_offset_ohm`` lookup (the
-    caller passes the owning deck's own ``resistors`` table). When a
-    device's class name is present with a nonzero coefficient, the raw
-    ``r_ohm`` KLayout computed (``L / W * sheet_rho_ohm_sq`` only -- see
-    ``ResistorDevice``'s docstring) is corrected to ``L / W *
-    sheet_rho_ohm_sq + fixed_offset_ohm`` once ``R`` has been read back.
-    Omitted (or a `0.0`/absent coefficient) reproduces today's ``r_ohm``
-    bit-for-bit -- the same non-breaking default `capacitor_perim_cap_f_um`
-    is designed around.
+    Every reported parameter is read straight off the ``kdb.Device`` object
+    -- including ``c_f`` and ``r_ohm``, whose deck-declared two-term
+    corrections (``CapacitorDevice.perim_cap_f_um``, issue #512, and
+    ``ResistorDevice.fixed_offset_ohm``, issue #518) have already been
+    applied to the device itself by
+    :func:`_apply_device_parameter_corrections` inside
+    :func:`_extract_netlist`. Those corrections used to be computed *here*,
+    into the returned dict only, which left the written SPICE netlist and
+    ``klt lvs``'s ``NetlistComparer`` reading the uncorrected value (issue
+    #521); reading the already-corrected device back keeps this function's
+    output identical while making it a report of the netlist rather than a
+    second, independent computation.
     """
     devices: list[dict[str, Any]] = []
     device_counts: dict[str, int] = {}
-    perim_cap_lookup = capacitor_perim_cap_f_um or {}
-    fixed_offset_lookup = resistor_fixed_offset_ohm or {}
 
     for device in circuit.each_device():
         device_class = device.device_class()
@@ -2404,9 +2489,6 @@ def _describe_devices(
             )
 
         params: dict[str, float] = {}
-        raw_c_f: float | None = None
-        raw_perimeter_um: float | None = None
-        raw_r_ohm: float | None = None
         for param in device_class.parameter_definitions():
             if param.name == "W":
                 params["w_um"] = round(
@@ -2420,12 +2502,13 @@ def _describe_devices(
                 # Drawn-capacitor device classes only (#225): KLayout's
                 # `DeviceClassCapacitor` reports capacitance in farads. MOS/
                 # bipolar classes have no `C` parameter, so this branch never
-                # fires for them. Kept unrounded until the `P`-based
-                # perimeter correction below (issue #512) has had a chance
-                # to run, so the correction is applied to the full-precision
-                # value rather than an already-rounded one.
-                raw_c_f = device.parameter(param.id())
-                params["c_f"] = round(raw_c_f, _PARAM_PRECISION_FARAD)
+                # fires for them. Already carries the deck's
+                # `perim_cap_f_um * P` perimeter/fringe term when the deck
+                # opted in (issue #512), applied at full precision to the
+                # device itself by `_apply_device_parameter_corrections`.
+                params["c_f"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_FARAD
+                )
             elif param.name == "A":
                 # Capacitor plate-overlap area in square micrometres -- the
                 # geometry `c_f` above was computed from (`C = A * area_cap`,
@@ -2442,47 +2525,25 @@ def _describe_devices(
             elif param.name == "P":
                 # Capacitor plate-overlap perimeter in micrometres (issue
                 # #512): KLayout's `DeviceClassCapacitor` already computes
-                # this alongside `A`, but until now it was never read back.
+                # this alongside `A`, but until #512 it was never read back.
                 # Reported for the same sanity-check reason as `area_um2`,
-                # and consumed below to correct `c_f` for a deck that sets a
-                # nonzero `perim_cap_f_um`.
-                raw_perimeter_um = device.parameter(param.id())
-                params["perimeter_um"] = round(raw_perimeter_um, _PARAM_PRECISION_UM)
+                # and consumed by `_apply_device_parameter_corrections` to
+                # correct `C` for a deck that sets a nonzero
+                # `perim_cap_f_um`.
+                params["perimeter_um"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_UM
+                )
             elif param.name == "R":
                 # Drawn-resistor device classes only (#222): KLayout's
                 # `R = L / W * sheet_rho`, in ohms. MOS classes have no `R`
-                # parameter, so this branch never fires for them. Kept
-                # unrounded until the fixed head/end-effect offset
-                # correction below (issue #518) has had a chance to run, so
-                # the correction is applied to the full-precision value
-                # rather than an already-rounded one.
-                raw_r_ohm = device.parameter(param.id())
-                params["r_ohm"] = round(raw_r_ohm, _PARAM_PRECISION_OHM)
-
-        # Perimeter/fringe capacitance correction (issue #512): only fires
-        # for a capacitor device (both `raw_c_f`/`raw_perimeter_um` were set
-        # above) whose owning deck declared a nonzero `perim_cap_f_um` for
-        # this class. `raw_c_f` already carries `area_cap_f_um2 * A` (that is
-        # what KLayout's `DeviceExtractorCapacitor` computed it from), so
-        # adding `perim_cap_f_um * P` here reproduces the full two-term
-        # `CapacitorDevice` formula without re-deriving the area term.
-        perim_cap_f_um = perim_cap_lookup.get(class_name, 0.0)
-        if perim_cap_f_um and raw_c_f is not None and raw_perimeter_um is not None:
-            corrected_c_f = raw_c_f + perim_cap_f_um * raw_perimeter_um
-            params["c_f"] = round(corrected_c_f, _PARAM_PRECISION_FARAD)
-
-        # Fixed head/end-effect resistance offset correction (issue #518):
-        # only fires for a resistor device (`raw_r_ohm` was set above) whose
-        # owning deck declared a nonzero `fixed_offset_ohm` for this class.
-        # `raw_r_ohm` already carries `L / W * sheet_rho_ohm_sq` (that is
-        # what KLayout's `DeviceExtractorResistor`/`...ResistorWithBulk`
-        # computed it from), so adding `fixed_offset_ohm` here reproduces
-        # the full two-term `ResistorDevice` formula without re-deriving the
-        # length-scaling body term.
-        fixed_offset_ohm = fixed_offset_lookup.get(class_name, 0.0)
-        if fixed_offset_ohm and raw_r_ohm is not None:
-            corrected_r_ohm = raw_r_ohm + fixed_offset_ohm
-            params["r_ohm"] = round(corrected_r_ohm, _PARAM_PRECISION_OHM)
+                # parameter, so this branch never fires for them. Already
+                # carries the deck's fixed head/end-effect
+                # `fixed_offset_ohm` term when the deck opted in (issue
+                # #518), applied at full precision to the device itself by
+                # `_apply_device_parameter_corrections`.
+                params["r_ohm"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_OHM
+                )
 
         devices.append(
             {

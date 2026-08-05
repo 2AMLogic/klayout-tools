@@ -1647,6 +1647,115 @@ def test_declared_pins_unblocks_combine_devices_for_labelled_internal_tap(tmp_pa
     assert with_declared_pins["counts"]["devices"]["reference"] == 1
 
 
+def _write_res_high_po_gds(path: Path, l_um: float = 10.0) -> str:
+    """A `w=1um` sky130 `res_high_po`-marked poly bar with an `l_um`-long
+    marked (resistive) segment and a contacted, labelled 3um head at each
+    end -- `tests/test_extract.py`'s `_make_sky130_res_high_po_layout`
+    reproduced here so the LVS tier does not import another test module.
+
+    `res_high_po` is the one sky130 flavour that declares a nonzero
+    `ResistorDevice.fixed_offset_ohm` (issue #518), which is what makes it
+    the fixture for issue #521's LVS half.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    head_um = 3.0
+    l_nm = int(round(l_um * 1000))
+    head_nm = int(round(head_um * 1000))
+    total_nm = l_nm + 2 * head_nm
+
+    draw(66, 20, kdb.Box(0, 0, total_nm, 1000))  # poly.drawing
+    marked = kdb.Box(head_nm, 0, head_nm + l_nm, 1000)
+    draw(66, 13, marked)  # poly.res
+    draw(86, 20, marked.enlarged(200, 200))  # rpm
+    draw(94, 20, marked.enlarged(200, 200))  # psdm
+
+    for x, name in ((head_nm // 2, "RA"), (total_nm - head_nm // 2, "RB")):
+        draw(66, 44, kdb.Box(x - 100, 400, x + 100, 600))  # licon1.drawing
+        draw(67, 20, kdb.Box(x - 400, 200, x + 400, 800))  # li1.drawing
+        label(67, 5, name, x, 500)  # li1.pin
+
+    layout.write(str(path))
+    return str(path)
+
+
+#: The reference schematic for `_write_res_high_po_gds` at `l=10um`, written
+#: from the *real* two-term PDK model: ngspice's own measurement of
+#: `sky130_fd_pr__res_high_po` (`rhead` + `rbody`) at `w=1um`, the value
+#: `decks/sky130.py`'s `sheet_rho_ohm_sq`/`fixed_offset_ohm` pair was fitted
+#: to. Formatted the way `NetlistSpiceReader` parses a deck-flavoured
+#: resistor (two terminals + bulk node + model name).
+_RES_HIGH_PO_PDK_MODEL_SPICE = """
+.subckt RES RA RB vsubs
+R1 RA RB vsubs 3627.97760 res_high_po
+.ends
+"""
+
+#: The same schematic written from the *pre-correction* single-term value
+#: (`L / W * sheet_rho_ohm_sq` alone, no `fixed_offset_ohm`) -- the negative
+#: control: whichever of the two references matches, the other must not.
+_RES_HIGH_PO_BODY_ONLY_SPICE = """
+.subckt RES RA RB vsubs
+R1 RA RB vsubs 3248.27244 res_high_po
+.ends
+"""
+
+
+@pytest.mark.parametrize(
+    ("reference_spice", "expected_status"),
+    [
+        (_RES_HIGH_PO_PDK_MODEL_SPICE, "match"),
+        (_RES_HIGH_PO_BODY_ONLY_SPICE, "mismatch"),
+    ],
+)
+def test_inline_extraction_compares_fixed_offset_corrected_resistance(
+    tmp_path, reference_spice, expected_status
+):
+    """Issue #521: `klt lvs`'s inline-extraction path feeds the *corrected*
+    device parameter to `NetlistComparer`.
+
+    `NetlistComparer` reads `device.parameter(...)` straight off the
+    `kdb.Device` object, never through `klt extract`'s JSON `devices[]`
+    view -- so while the deck's two-term corrections (issue #512's
+    `perim_cap_f_um`, issue #518's `fixed_offset_ohm`) lived only in
+    `_describe_devices`, a reference netlist carrying the PDK's real
+    two-term value compared against the raw single-term extracted value and
+    reported a spurious parameter mismatch.
+
+    Both directions are asserted, so the test cannot pass by the comparer
+    simply ignoring `R`: the real PDK-model reference matches (it did not
+    before this fix), and the pre-correction body-only reference -- what the
+    extractor used to hand the comparer -- now does not.
+    """
+    gds = _write_res_high_po_gds(tmp_path / "res_high_po.gds")
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": gds, "deck": "sky130"},
+                "reference": {"netlist": reference_path, "top": "RES"},
+            },
+        )
+    )
+
+    assert report["counts"]["devices"]["layout"] == 1
+    assert report["counts"]["devices"]["reference"] == 1
+    assert report["status"] == expected_status
+
+
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
     PMOS well-tap layer either (`Comp` is shared with ordinary active,

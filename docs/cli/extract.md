@@ -346,6 +346,14 @@ routing, not a purpose-drawn cap layer the way sky130's `capm`/`capm2`
 are) — clipping the bottom conductor to the sized top-plate outline so an
 unrelated `Metal4` trace 1.06µm away from a real MiM cap is not swept in.
 
+The correction is applied to the extracted device itself (issue #521), not
+only to this command's JSON report: the `C` card in the written `.spice`
+netlist — the file `klt sim` consumes — carries the same corrected value
+`devices[].params.c_f` reports, and so does the netlist `klt lvs`'s
+inline-extraction path hands to its comparer. A deck that leaves
+`perim_cap_f_um` at its `0.0` default is unaffected in every one of those
+places.
+
 Two consequences worth knowing:
 
 - **Unmarked conductor is never reclassified.** An ordinary
@@ -460,6 +468,11 @@ every approximation taken relative to it. A deck entry that leaves
 `fixed_offset_ohm` at its `0.0` default (every row above except
 `res_high_po`) reports `r_ohm` exactly as `L / W * sheet_rho` — the
 pre-#518 formula, bit-for-bit.
+
+As with the MiM capacitor's perimeter term, the correction is applied to the
+extracted device itself (issue #521): the `R` card in the written `.spice`
+netlist and the netlist `klt lvs` compares both carry the corrected
+resistance, not just `devices[].params.r_ohm`.
 
 Three consequences worth knowing:
 

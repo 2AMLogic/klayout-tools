@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-04 — `klt extract`/`klt lvs`/`klt sim`: the deck's two-term
+  device-parameter corrections (`CapacitorDevice.perim_cap_f_um`, #512, and
+  `ResistorDevice.fixed_offset_ohm`, #518) now reach the extracted netlist
+  itself, not only `klt extract`'s JSON `devices[]` report (#521). Both
+  corrections used to be computed while building the response array, so the
+  `kdb.Netlist` handed to `NetlistSpiceWriter` (and therefore the `.spice`
+  file `klt sim` consumes) and to `klt lvs`'s `NetlistComparer` still
+  carried KLayout's raw single-term value — e.g. a 10µm × 1µm sky130
+  `res_high_po` reported `r_ohm: 3627.977587` in JSON while writing
+  `R$1 ... 3248.27244` to disk, and comparing it against a reference netlist
+  built from the PDK's real two-term model reported a spurious
+  `device.property` mismatch. The correction is now applied once to the
+  `kdb.Device` during extraction, and the JSON report reads the corrected
+  value back — `devices[].params` output is unchanged, and a deck that
+  leaves both coefficients at their `0.0` default is unaffected everywhere.
+
 - 2026-08-04 — `klt extract`: sky130's `res_high_po` precision poly
   resistor now includes a fixed per-instance head/end-effect resistance
   term, correcting a systematic, one-sided undercount (previously

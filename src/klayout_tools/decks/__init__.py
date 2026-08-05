@@ -193,9 +193,11 @@ class ResistorDevice:
     ``CapacitorDevice.perim_cap_f_um``'s post-extraction correction using
     the already-computed ``A``/``P`` device parameters -- this is *not*
     threaded into that constructor call: ``extract.py``'s
-    ``_describe_devices`` reads the already-computed ``L``/``W`` device
-    parameters back and applies ``R = L / W * sheet_rho_ohm_sq +
-    fixed_offset_ohm`` after extraction. Defaults to ``0.0``, which
+    ``_apply_device_parameter_corrections`` reads the already-computed ``R``
+    device parameter back and rewrites it in place to ``L / W *
+    sheet_rho_ohm_sq + fixed_offset_ohm`` after extraction, before the
+    netlist reaches the SPICE writer or ``klt lvs``'s comparer (issue
+    #521). Defaults to ``0.0``, which
     reproduces ``R = L / W * sheet_rho_ohm_sq`` only -- today's behaviour,
     bit-for-bit -- for every deck entry that does not set it. A deck that
     transcribes (or, as for sky130's ``res_high_po``, measures via ngspice
@@ -616,8 +618,10 @@ class CapacitorDevice:
     ``c_f`` becomes ``area_cap_f_um2 * A + perim_cap_f_um * P`` -- ``A``/``P``
     are the same overlap area/perimeter KLayout's own
     ``DeviceClassCapacitor`` already computes and exposes as its ``A``/``P``
-    device parameters (``extract.py``'s ``_describe_devices`` reads both back
-    and applies this correction after extraction; KLayout's
+    device parameters (``extract.py``'s
+    ``_apply_device_parameter_corrections`` reads both back and rewrites
+    ``C`` in place after extraction, before the netlist reaches the SPICE
+    writer or ``klt lvs``'s comparer -- issue #521; KLayout's
     ``DeviceExtractorCapacitor`` constructor itself takes only one
     coefficient, so this is *not* threaded into that call). Defaults to
     ``0.0``, which reproduces ``C = area_cap_f_um2 * A`` only -- today's
