@@ -1949,6 +1949,142 @@ def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path
         assert device["params"]["r_ohm"] == pytest.approx(per_primitive_r_ohm)
 
 
+def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
+    """Issue #585: `apply_resistor_fixed_offset_corrections` must match a
+    device class read back from SPICE via `kdb.NetlistSpiceReader` -- which
+    uppercases class names to `RES_HIGH_PO` -- against the sky130 deck's own
+    lowercase `res_high_po` name.
+
+    Extract a single `res_high_po` primitive with the fixed-offset correction
+    *deferred*, write it to SPICE, read it back (uppercased class name),
+    confirm the correction is missing, then apply it via the public helper
+    and confirm it lands exactly once. Before the fix the case-sensitive
+    lookup silently missed `RES_HIGH_PO` and added nothing.
+    """
+    import klayout.db as kdb
+
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.extract import (
+        apply_resistor_fixed_offset_corrections,
+        run_extract,
+    )
+
+    segments = 1
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / "res_high_po_one.gds", segments=segments, l_um=l_um
+    )
+    spice_path = str(tmp_path / "res_high_po_one.spice")
+    extracted = run_extract(
+        gds, "sky130", output=spice_path, apply_resistor_fixed_offset=False
+    )
+    # Deferred: the written primitive carries only its raw body R (no offset).
+    raw_body_r_ohm = (l_um / 1.0) * _RES_HIGH_PO_SHEET_RHO_OHM_SQ
+    resistor_devices = [d for d in extracted["devices"] if d["class"] == "res_high_po"]
+    assert len(resistor_devices) == segments
+    assert resistor_devices[0]["params"]["r_ohm"] == pytest.approx(raw_body_r_ohm)
+
+    # Read the SPICE back: NetlistSpiceReader uppercases the class name.
+    netlist = kdb.Netlist()
+    netlist.read(spice_path, kdb.NetlistSpiceReader())
+    class_names = {
+        device.device_class().name
+        for circuit in netlist.each_circuit()
+        for device in circuit.each_device()
+    }
+    assert "RES_HIGH_PO" in class_names  # the uppercased name the bug missed
+
+    def _only_resistor_r() -> float:
+        rs = [
+            device.parameter("R")
+            for circuit in netlist.each_circuit()
+            for device in circuit.each_device()
+            if device.device_class().name.lower() == "res_high_po"
+        ]
+        assert len(rs) == segments
+        return rs[0]
+
+    assert _only_resistor_r() == pytest.approx(raw_body_r_ohm)
+
+    # The public helper must fire despite the case mismatch, exactly once.
+    apply_resistor_fixed_offset_corrections(netlist, get_extraction_deck("sky130"))
+    assert _only_resistor_r() == pytest.approx(
+        raw_body_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+
+
+def test_pre_extracted_netlist_with_deck_applies_fixed_offset_once(tmp_path):
+    """Issue #585: the `layout.netlist` + `layout.deck` +
+    `options.combine_devices: true` request shape must apply the resistor
+    `fixed_offset_ohm` correction exactly once per post-combine device --
+    the pre-extracted sibling of
+    `test_combine_devices_applies_fixed_offset_once_per_folded_device`.
+
+    A pre-extracted netlist produced with the correction *deferred*
+    (`run_extract(..., apply_resistor_fixed_offset=False)`) carries only raw
+    per-primitive body `R`. Reading it back through `run_lvs` with a
+    `layout.deck` and `combine_devices` must fold the series chain into one
+    device and add the fixed offset once (`offset_count=1`), not once per
+    drawn primitive (`offset_count=segments`). Both reference directions are
+    asserted so the test cannot pass by the comparer merely ignoring `R`.
+    """
+    from klayout_tools.extract import run_extract
+
+    segments = 3
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / "res_high_po_series_pre.gds", segments=segments, l_um=l_um
+    )
+    spice_path = str(tmp_path / "res_high_po_series_pre.spice")
+    extracted = run_extract(
+        gds, "sky130", output=spice_path, apply_resistor_fixed_offset=False
+    )
+    top = extracted["top"]
+    # Deferred: each primitive carries only its raw body R (no offset baked in).
+    raw_body_r_ohm = (l_um / 1.0) * _RES_HIGH_PO_SHEET_RHO_OHM_SQ
+    resistor_devices = [d for d in extracted["devices"] if d["class"] == "res_high_po"]
+    assert len(resistor_devices) == segments
+    for device in resistor_devices:
+        assert device["params"]["r_ohm"] == pytest.approx(raw_body_r_ohm)
+
+    correct_r_ohm = _series_res_high_po_expected_r_ohm(segments, l_um, offset_count=1)
+    buggy_r_ohm = _series_res_high_po_expected_r_ohm(
+        segments, l_um, offset_count=segments
+    )
+    assert correct_r_ohm != pytest.approx(buggy_r_ohm)  # fixture is discriminating
+
+    def _run(reference_r_ohm: float) -> dict:
+        reference_spice = f"""
+.subckt {top} RA RB vsubs
+R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
+.ends
+"""
+        reference_path = _write(tmp_path / "ref.spice", reference_spice)
+        return run_lvs(
+            _write_request(
+                tmp_path / "request.json",
+                {
+                    "layout": {
+                        "netlist": spice_path,
+                        "deck": "sky130",
+                        "top": top,
+                    },
+                    "reference": {"netlist": reference_path, "top": top},
+                    "options": {"combine_devices": True},
+                },
+            )
+        )
+
+    correct_report = _run(correct_r_ohm)
+    assert correct_report["counts"]["devices"]["layout"] == 1
+    assert correct_report["counts"]["devices"]["reference"] == 1
+    assert correct_report["status"] == "match"
+
+    buggy_report = _run(buggy_r_ohm)
+    assert buggy_report["counts"]["devices"]["layout"] == 1
+    assert buggy_report["status"] == "mismatch"
+
+
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
     PMOS well-tap layer either (`Comp` is shared with ordinary active,
