@@ -16,6 +16,11 @@ the canonical source repository for this issue:
   - ``drm_07_13.rst`` / ``tables_clear/21_Contact_56.csv`` — 7.12 Contact (``CO.*``)
   - ``drm_07_14.rst`` / ``tables_clear/22_Metaln_58.csv`` — 7.13 Metaln (``Mn.*``,
     ``n = 1 to 5``, i.e. ``Metal1``-``Metal5``)
+  - ``drm_07_15.rst`` / ``tables_clear/23_Vian_59.csv`` — 7.14 Vian (``Vn.*``,
+    ``n = 1 to 5`` in the DRM; only ``n = 1 to 4`` (``Via1``-``Via4``) are
+    modeled here, matching this deck's existing ``Via1``-``Via4`` layer
+    coverage (issue #220) -- this deck's curated layer set has no drawn
+    ``Via5``/``n = 5`` layer (issue #546)
   - ``drm_07_16.rst`` / ``tables_clear/24_MetalTop_61.csv`` — 7.15 MetalTop
     (``MT.*``) — **not** part of the 7.13 Metaln table above: ``MetalTop`` is
     a separate drawn layer with its own DRM section and its own rule ids/
@@ -112,7 +117,7 @@ LVS-extraction script's separately-rounded restatement of them -- keeps
 ``klt extract``'s reported ``c_f`` consistent with what the same drawn
 geometry simulates as.
 
-Eight rules below approximate the official DRM rule in some way (each is
+Sixteen rules below approximate the official DRM rule in some way (each is
 called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
 
@@ -133,6 +138,21 @@ are always the real, unmodified DRM values:
   square (a min **and** max bound); our ``width_check`` primitive only
   supports a minimum-width lower bound, so only the min half of the rule is
   enforced here.
+- ``via1.width.1``/``via2.width.1``/``via3.width.1``/``via4.width.1``: the
+  official ``Vn.1`` specifies each via as a fixed 0.26 x 0.26um square (a min
+  **and** max bound) -- the same shape of rule as ``contact.width.1``'s
+  ``CO.1`` above; our ``width_check`` primitive only supports a
+  minimum-width lower bound, so only the min half of the rule is enforced
+  here.
+- ``via1.space.1``/``via2.space.1``/``via3.space.1``/``via4.space.1``: the
+  official ``Vn.2a``/``Vn.2b`` split via-to-via spacing by array density
+  (``Vn.2a`` 0.26um for an ordinary two-via space, ``Vn.2b`` a tighter 0.36um
+  inside a >=4x4 via array); our engine's ``space_check`` primitive has no
+  array-density context, so this is approximated using only the less strict
+  ``Vn.2a`` value across the whole via drawn layer -- this means vias inside
+  a genuine >=4x4 array, spaced between 0.26um and 0.36um apart, will **not**
+  be flagged even though the real DRM's ``Vn.2b`` would flag them (the same
+  class of context-collapsing approximation as ``nwell.space.1`` below).
 - ``nwell.space.1``: the official ``NW.2a``/``NW.2b`` split Nwell-to-Nwell
   spacing by net-potential context (``NW.2a`` 0.6um for equipotential wells
   that may later be merged, ``NW.2b`` 1.4um for wells at different
@@ -351,6 +371,102 @@ DECK: list[DrcRule] = [
         # DRM 7.12 Contact, rule "CO.2a": "Space" -> 0.25um
     ),
     DrcRule(
+        id="via1.width.1",
+        description="minimum via1 size (approximates official min/max size rule)",
+        layer=(35, 0),  # Via1
+        check="width",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
+        # 0.26um (each via is a fixed 0.26 x 0.26um square in the real
+        # deck). Approximation: our width_check enforces only a
+        # minimum-width lower bound; the "max" (fixed-size) half of the
+        # rule is not checked -- same class of approximation as
+        # contact.width.1's own CO.1 note above. Threshold value unmodified.
+    ),
+    DrcRule(
+        id="via1.space.1",
+        description="minimum via1 spacing (approximates official 4x4-array rule)",
+        layer=(35, 0),  # Via1
+        check="space",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.2a": "Space" -> 0.26um.
+        # Approximation: the DRM tightens this to 0.36um ("Vn.2b") inside a
+        # >=4x4 via array; our space_check primitive has no array-density
+        # context, so this uses the ordinary two-via "Vn.2a" threshold only
+        # -- same class of context-collapsing approximation
+        # nwell.space.1/comp.space.1 already document. Threshold value
+        # unmodified.
+    ),
+    DrcRule(
+        id="via2.width.1",
+        description="minimum via2 size (approximates official min/max size rule)",
+        layer=(38, 0),  # Via2
+        check="width",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
+        # 0.26um. Approximation: see via1.width.1's note above (min-only
+        # width_check; the fixed-size "max" half is not checked).
+    ),
+    DrcRule(
+        id="via2.space.1",
+        description="minimum via2 spacing (approximates official 4x4-array rule)",
+        layer=(38, 0),  # Via2
+        check="space",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.2a": "Space" -> 0.26um.
+        # Approximation: see via1.space.1's note above (no array-density
+        # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
+        # checked).
+    ),
+    DrcRule(
+        id="via3.width.1",
+        description="minimum via3 size (approximates official min/max size rule)",
+        layer=(40, 0),  # Via3
+        check="width",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
+        # 0.26um. Approximation: see via1.width.1's note above (min-only
+        # width_check; the fixed-size "max" half is not checked).
+    ),
+    DrcRule(
+        id="via3.space.1",
+        description="minimum via3 spacing (approximates official 4x4-array rule)",
+        layer=(40, 0),  # Via3
+        check="space",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.2a": "Space" -> 0.26um.
+        # Approximation: see via1.space.1's note above (no array-density
+        # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
+        # checked).
+    ),
+    DrcRule(
+        id="via4.width.1",
+        description="minimum via4 size (approximates official min/max size rule)",
+        layer=(41, 0),  # Via4
+        check="width",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
+        # 0.26um. Approximation: see via1.width.1's note above (min-only
+        # width_check; the fixed-size "max" half is not checked). Via4
+        # (41/0) was previously referenced only as mim.enclosing.via4.1's
+        # other_layer (MiM top-plate overlap, DRM "MIMTM.2"); this rule adds
+        # coverage of Via4's own size, which that reference alone did not
+        # provide (issue #546).
+    ),
+    DrcRule(
+        id="via4.space.1",
+        description="minimum via4 spacing (approximates official 4x4-array rule)",
+        layer=(41, 0),  # Via4
+        check="space",
+        threshold_dbu=260,  # 0.26 um
+        # DRM 7.14 Vian (n = 1 to 5), rule "Vn.2a": "Space" -> 0.26um.
+        # Approximation: see via1.space.1's note above (no array-density
+        # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
+        # checked). Via4 (41/0) was previously referenced only as
+        # mim.enclosing.via4.1's other_layer; this rule adds coverage of
+        # Via4's own spacing (issue #546).
+    ),
+    DrcRule(
         id="metal1.width.1",
         description="minimum metal1 width",
         layer=(34, 0),  # Metal1
@@ -565,9 +681,13 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (32, 0): "Nplus",
     (33, 0): "Contact",
     (34, 0): "Metal1",
+    (35, 0): "Via1",
     (36, 0): "Metal2",
+    (38, 0): "Via2",
     (42, 0): "Metal3",
+    (40, 0): "Via3",
     (46, 0): "Metal4",
+    (41, 0): "Via4",
     (81, 0): "Metal5",
     (53, 0): "MetalTop",
     (37, 0): "Pad",

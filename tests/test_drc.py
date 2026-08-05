@@ -1356,7 +1356,13 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_violation(tmp_path):
 
 def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     """A Via4 shape centred well inside the virtual bottom plate (>= 400 dbu
-    margin on every side) passes."""
+    margin on every side) passes.
+
+    Sized 300x300 dbu (>= the 260 dbu `via4.width.1` minimum added by #546)
+    rather than the smaller placeholder size used before that rule existed,
+    so this fixture stays genuinely `"clean"` under the now-fuller via4 rule
+    coverage, not just under `mim.enclosing.via4.1` alone.
+    """
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
@@ -1368,7 +1374,7 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
     top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
     top.shapes(fusetop).insert(kdb.Box(2000, 2000, 18000, 18000))
-    top.shapes(via4).insert(kdb.Box(9900, 9900, 10100, 10100))  # centred
+    top.shapes(via4).insert(kdb.Box(9850, 9850, 10150, 10150))  # centred, 300x300
     path = tmp_path / "mim_enclosing_via4_clean.gds"
     layout.write(str(path))
 
@@ -1422,6 +1428,201 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_ordinary_routing_clean(tmp_path):
 
     assert "mim.enclosing.via4.1" not in report["coverage"]["rules_skipped"]
     assert report["rule_counts"].get("mim.enclosing.via4.1", 0) == 0
+
+
+# --- via1.width.1/space.1 .. via4.width.1/space.1 (Vn.1/Vn.2a, #546) ------
+#
+# Before #546, `DECK` had no `width`/`space` rule at all for Via1 (35/0),
+# Via2 (38/0), Via3 (40/0), or Via4 (41/0) -- Via4 was referenced only as
+# `mim.enclosing.via4.1`'s `other_layer` (the MiM cap's top-plate via), which
+# made `coverage.layers_checked` misreport it as "checked" even though
+# nothing constrained its own size or spacing (see the issue's own repro).
+# Via1-Via3 were not deck layers at all. One parametrized violation/clean
+# pair per via layer below (mirroring the metal2/metal3/metal5 pattern
+# above), plus the structural coverage assertion and the issue's own
+# reproducer.
+
+_GF180MCU_VIA_LAYERS = [
+    ("via1", (35, 0), "Via1"),
+    ("via2", (38, 0), "Via2"),
+    ("via3", (40, 0), "Via3"),
+    ("via4", (41, 0), "Via4"),
+]
+
+
+@pytest.mark.parametrize("rule_prefix,layer_tuple,layer_name", _GF180MCU_VIA_LAYERS)
+def test_run_drc_gf180mcu_via_width_violation(
+    rule_prefix, layer_tuple, layer_name, tmp_path
+):
+    """A via square narrower than the 260 dbu (0.26 um) `<via>.width.1`
+    threshold trips exactly one violation (the minimum-width half of the
+    official "Vn.1" min/max size rule -- see `via1.width.1`'s docstring in
+    `gf180mcu.py` for why only the minimum half is enforced)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer_tuple)
+    layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 260
+    path = tmp_path / f"{rule_prefix}_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == f"{rule_prefix}.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == layer_name
+
+
+@pytest.mark.parametrize("rule_prefix,layer_tuple,layer_name", _GF180MCU_VIA_LAYERS)
+def test_run_drc_gf180mcu_via_space_violation(
+    rule_prefix, layer_tuple, layer_name, tmp_path
+):
+    """Two via squares closer than the 260 dbu `<via>.space.1` threshold
+    (but not touching -- see the module docstring's note on why this deck's
+    engine cannot distinguish an ordinary two-via gap from a >=4x4 via
+    array's tighter "Vn.2b" spacing) trip exactly one violation."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer_tuple)
+    layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 300, 300))
+    top.shapes(via).insert(kdb.Box(400, 0, 700, 300))  # 100 dbu gap < 260
+    path = tmp_path / f"{rule_prefix}_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {f"{rule_prefix}.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == f"{rule_prefix}.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == layer_name
+
+
+@pytest.mark.parametrize("rule_prefix,layer_tuple,layer_name", _GF180MCU_VIA_LAYERS)
+def test_run_drc_gf180mcu_via_clean(rule_prefix, layer_tuple, layer_name, tmp_path):
+    """A single, properly-sized (>= 260 dbu), properly-isolated via square
+    passes both `<via>.width.1` and `<via>.space.1`."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer_tuple)
+    layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 300, 300))  # 300 >= 260
+    path = tmp_path / f"{rule_prefix}_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_gf180mcu_via_layers_have_drc_width_and_space_coverage():
+    """Structural check (mirrors #513's own
+    `test_sky130_met2_via_extraction_levels_have_drc_width_and_space_coverage`):
+    each of Via1-Via4 -- the same four via layers `EXTRACTION_DECK.vias`
+    already routes connectivity through -- has at least one `"width"` and one
+    `"space"` rule in `DECK`, verified structurally rather than only via the
+    violation-triggering fixtures above."""
+    deck = get_deck("gf180mcu")
+    for _rule_prefix, layer_tuple, _layer_name in _GF180MCU_VIA_LAYERS:
+        width_rules = [r for r in deck if r.layer == layer_tuple and r.check == "width"]
+        space_rules = [r for r in deck if r.layer == layer_tuple and r.check == "space"]
+        assert len(width_rules) >= 1, f"no width rule for via layer {layer_tuple}"
+        assert len(space_rules) >= 1, f"no space rule for via layer {layer_tuple}"
+
+
+def test_run_drc_gf180mcu_via_layers_now_covered_by_their_own_rules(tmp_path):
+    """The #546 reproducer's coverage claim: a layout drawing well-formed
+    Via1-Via4 geometry shows all four via layers in `coverage.layers_checked`
+    (previously true for none of them -- Via1-Via3 were not deck layers at
+    all, and Via4 (41/0) was a deck layer only via `mim.enclosing.via4.1`'s
+    `other_layer`), and each is now backed by its own `<via>.width.1`/
+    `<via>.space.1` rule, not solely by `mim.enclosing.via4.1`."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for _rule_prefix, layer_tuple, layer_name in _GF180MCU_VIA_LAYERS:
+        li = layout.layer(*layer_tuple)
+        layout.set_info(li, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
+        top.shapes(li).insert(kdb.Box(0, 0, 300, 300))  # legally sized, isolated
+    path = tmp_path / "via_layers_covered.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    for _rule_prefix, layer_tuple, _layer_name in _GF180MCU_VIA_LAYERS:
+        formatted = f"{layer_tuple[0]}/{layer_tuple[1]}"
+        assert formatted in report["coverage"]["layers_checked"]
+        assert formatted not in report["coverage"]["layers_in_stream_without_rules"]
+
+    deck = get_deck("gf180mcu")
+    via4_rule_ids = {r.id for r in deck if r.layer == (41, 0)}
+    assert via4_rule_ids != {"mim.enclosing.via4.1"}, (
+        "via4 (41/0) must be backed by its own via4.width.1/via4.space.1 "
+        "rules, not solely by mim.enclosing.via4.1's other_layer reference"
+    )
+    assert "via4.width.1" in via4_rule_ids
+    assert "via4.space.1" in via4_rule_ids
+
+
+def test_run_drc_gf180mcu_via4_reproducer_from_issue_546(tmp_path):
+    """A close variant of issue #546's own reproducer (two Via4 cuts drawn at
+    ~3x the legal 0.26 um size, per `Vn.1`) now reports a violation instead
+    of `status: clean`.
+
+    The issue's literal geometry draws the two cuts exactly *abutting* (a
+    shared edge, zero gap) -- `kdb.Region` merges touching same-layer shapes
+    by default (its `merged_semantics` default), so those two 780x780 dbu
+    squares become a single 1560x780 dbu merged rectangle whose minimum width
+    (780 dbu) is well above the 260 dbu minimum, and `space_check` sees one
+    polygon, not two, so it reports no space violation either -- the same
+    "our width_check enforces only a minimum, never the official rule's
+    fixed-size maximum" approximation `contact.width.1`/`via1.width.1` (etc.)
+    already document, just triggered by two abutting oversized cuts merging
+    into one shape rather than by a single one. Widening the gap to 100 dbu
+    (<< the 260 dbu `via4.space.1` minimum) keeps every dimension from the
+    issue's own reproducer (each cut still 780x780 dbu, ~3x the legal size)
+    while producing two genuinely separate polygons that `via4.space.1`
+    catches -- the same underlying "illegal via geometry reports clean" bug
+    the issue reports, demonstrated through the one approximation
+    (`space_check`) this deck's rules can enforce rather than the one
+    (a min/max `width_check`) the curator's own implementation guidance
+    said not to add as part of this issue.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("via_bad")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    metal5 = layout.layer(81, 0)
+    layout.set_info(metal5, kdb.LayerInfo(81, 0, "Metal5"))
+    via4 = layout.layer(41, 0)
+    layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
+
+    top.shapes(metal4).insert(kdb.Box(0, 0, 10000, 10000))
+    top.shapes(metal5).insert(kdb.Box(0, 0, 10000, 10000))
+    top.shapes(via4).insert(kdb.Box(1000, 1000, 1780, 1780))
+    # 100 dbu gap (not the issue's literal 0 dbu abutment -- see docstring
+    # above) so the two cuts stay distinct polygons for via4.space.1.
+    top.shapes(via4).insert(kdb.Box(1880, 1000, 2660, 1780))
+
+    path = tmp_path / "via_bad.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["violation_count"] > 0
+    assert report["rule_counts"].get("via4.space.1", 0) >= 1
 
 
 # --- #318: enclosing_check/enclosed_check silently pass on zero overlap --
