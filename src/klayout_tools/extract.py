@@ -1240,6 +1240,18 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
     recreating the owning circuit if it was dropped entirely, the net if
     it was dropped, and the pin (reconnected to the recreated net).
 
+    A recreated circuit/net also carries its predecessor's
+    ``Circuit.cell_index``/``Net.cluster_id`` across the purge. That pair is
+    the key ``LayoutToNetlist`` uses to find a net's shapes, so a rescued net
+    stays fully queryable -- ``polygons_of_net`` (and therefore
+    :func:`_compute_parasitics`, which runs *after* this pass and iterates
+    every surviving net) returns its real geometry instead of faulting inside
+    KLayout's hierarchical network processor on the default cluster id ``0``.
+    Without it, ``klt extract --parasitics`` crashed with an unhandled
+    internal ``RuntimeError`` on exactly the device-less labelled layouts this
+    function exists to preserve (bond pads, seal rings, RDL segments,
+    power-mesh straps -- all plausible parasitic-extraction targets).
+
     A circuit with genuinely no devices *and* no named/labelled nets finds
     no survivors to snapshot here, so it purges to nothing exactly as
     before -- this function only ever *adds back* pinned nets ``purge()``
@@ -1248,27 +1260,47 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
     """
     import klayout.db as kdb
 
-    survivors: list[tuple[str, str]] = []
+    survivors: list[tuple[str, int, str, int]] = []
     for circuit in netlist.each_circuit():
         for net in circuit.each_net():
             if not net.name or net.pin_count() == 0:
                 continue
             if net.terminal_count() or net.subcircuit_pin_count():
                 continue
-            survivors.append((circuit.name, net.name))
+            survivors.append(
+                (circuit.name, circuit.cell_index, net.name, net.cluster_id)
+            )
 
     netlist.purge()
 
-    for circuit_name, net_name in survivors:
+    for circuit_name, cell_index, net_name, cluster_id in survivors:
         circuit = netlist.circuit_by_name(circuit_name)
         if circuit is None:
             circuit = kdb.Circuit()
             circuit.name = circuit_name
+            # Re-link the recreated circuit to the layout cell it was
+            # extracted from (issue #563): `LayoutToNetlist`'s shape queries
+            # (`polygons_of_net`, used by `_compute_parasitics`) look the
+            # net's cluster up in the per-cell cluster store keyed by
+            # `Circuit.cell_index`. A bare `kdb.Circuit()` leaves that at its
+            # default, so every later shape query against a net it owns would
+            # fault inside KLayout's hierarchical network processor.
+            circuit.cell_index = cell_index
             netlist.add(circuit)
 
         net = next((n for n in circuit.each_net() if n.name == net_name), None)
         if net is None:
             net = circuit.create_net(net_name)
+            # Same rationale as `cell_index` above, for the other half of the
+            # (cell, cluster) key: `Net.cluster_id` is what ties a net back to
+            # the connectivity cluster `LayoutToNetlist` extracted it from. A
+            # freshly created net starts at cluster 0 -- the sentinel KLayout
+            # asserts against (`id > 0 was not true in
+            # LayoutToNetlist.polygons_of_net`) -- so a rescued net must carry
+            # the id its purged predecessor had, or `klt extract --parasitics`
+            # crashes on exactly the device-less labelled layouts (bond pads,
+            # seal rings, RDL, power straps) issue #539 exists to preserve.
+            net.cluster_id = cluster_id
 
         if net.pin_count() == 0:
             pin = circuit.create_pin(net_name)
@@ -3047,6 +3079,20 @@ def _compute_parasitics(
     for net in circuit.each_net():
         name = net.expanded_name()
         if name == deck.substrate_net:
+            continue
+        if net.cluster_id == 0:
+            # Belt-and-braces (issue #563): `cluster_id` is the key
+            # `LayoutToNetlist` uses to find a net's shapes, and `0` is the
+            # sentinel for "not tied to a layout cluster". Passing such a net
+            # to `polygons_of_net` faults inside KLayout's hierarchical
+            # network processor with an unhandled internal `RuntimeError`
+            # rather than returning an empty region.
+            # `_purge_preserving_named_nets` restores the real cluster id on
+            # every net it rescues, so no net reaching here from
+            # `_extract_netlist` should hit this branch -- but a net with no
+            # cluster has no geometry to measure by definition, so skipping
+            # it is the correct (and crash-free) answer for any future caller
+            # that hands us a synthesised net.
             continue
         r_ohm = 0.0
         c_ff = 0.0

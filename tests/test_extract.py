@@ -3359,6 +3359,84 @@ def test_purge_preserving_named_nets_generalizes_to_hierarchical_circuits():
     assert {net.name for net in child_after.each_net()} == {"X", "Y"}
 
 
+@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
+def test_rescued_named_net_survives_parasitics_extraction(tmp_path, deck_name):
+    """Issue #563: a net rescued by `_purge_preserving_named_nets` must stay
+    queryable through ``LayoutToNetlist``, so `--parasitics` still works on
+    exactly the device-less labelled layouts issue #539 exists to preserve
+    (bond pads, seal rings, RDL segments, power-mesh straps -- all plausible
+    parasitic-extraction targets).
+
+    This is the issue's own primary repro (unmarked poly bar, two labelled
+    heads, zero devices) with `parasitics=True`: `purge()` drops the whole
+    circuit, so the restore path recreates the ``kdb.Circuit`` *and* the
+    ``kdb.Net``. A bare recreation loses the `(cell_index, cluster_id)` key
+    `LayoutToNetlist.polygons_of_net` looks the net's shapes up by, and
+    `_compute_parasitics` -- which runs after the purge and iterates every
+    surviving net -- then faulted inside KLayout's hierarchical network
+    processor with an unhandled internal ``RuntimeError`` (`id > 0 was not
+    true in LayoutToNetlist.polygons_of_net`) instead of raising a clean
+    `ExtractError` or returning a result."""
+    path = _write_gds(
+        _make_poly_resistor_layout(deck_name, marked=False),
+        tmp_path / f"{deck_name}_bar_para.gds",
+    )
+    report = run_extract(
+        path,
+        deck_name,
+        output=str(tmp_path / "bar_para.spice"),
+        parasitics=True,
+    )
+
+    # Same schematic-equivalent view as the non-parasitics run.
+    assert report["device_count"] == 0
+    assert report["nets"] == [{"name": "RA,RB", "pin": True, "device_count": 0}]
+
+    # The rescued net's geometry is genuinely reachable, not merely
+    # not-crashing: the poly bar's real R/C is reported for it.
+    para = report["parasitics"]
+    assert para is not None
+    assert [entry["net"] for entry in para["nets"]] == ["RA,RB"]
+    assert para["nets"][0]["capacitance_ff"] > 0.0
+    assert para["nets"][0]["resistance_ohm"] > 0.0
+
+
+def test_rescued_net_beside_real_device_survives_parasitics_extraction(tmp_path):
+    """Issue #563's second shape: the crash was never limited to the
+    "whole circuit purged and got recreated" branch -- restoring *any* single
+    net into a still-alive circuit hit it too.
+
+    Here a normal inverter (two real devices, so the circuit itself survives
+    `purge()` untouched) carries one extra, wholly separate labelled ``PAD``
+    li1 island with no device on it. Only that one net goes through the
+    rescue path; every other net is KLayout's own. With `--parasitics` set,
+    the rescued net must be measured alongside the rest rather than faulting
+    the whole extraction."""
+    layout = _make_inverter_layout()
+    top = layout.cell("TOP")
+    # An isolated li1 pad well clear of the inverter, labelled but touching
+    # no device -- a stand-in for a bond pad / RDL stub.
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(6000, 6000, 7000, 7000))
+    top.shapes(layout.layer(67, 5)).insert(kdb.Text("PAD", kdb.Trans(6500, 6500)))
+    path = _write_gds(layout, tmp_path / "inv_pad.gds")
+
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv_pad.spice"), parasitics=True
+    )
+
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert {"name": "PAD", "pin": True, "device_count": 0} in report["nets"]
+
+    para = report["parasitics"]
+    assert para is not None
+    pad_entries = [entry for entry in para["nets"] if entry["net"] == "PAD"]
+    assert len(pad_entries) == 1
+    assert pad_entries[0]["capacitance_ff"] > 0.0
+    # The device-bearing nets are still measured exactly as before -- the
+    # rescued net is additive, not a replacement.
+    assert {"A", "VGND", "VPWR", "Y"} <= {entry["net"] for entry in para["nets"]}
+
+
 def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_path):
     """sky130's `rpm`/`urpm` masks select the 319.8 ohm/sq and 2 kohm/sq poly
     resistor flavours (`res_high_po`/`res_xhigh_po`, issue #299). Such a
