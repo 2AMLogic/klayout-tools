@@ -1,12 +1,13 @@
 """``klt pdk`` command: discover/resolve an installed PDK.
 
-Four subcommands, all emitting through the shared envelope helpers in
+Five subcommands, all emitting through the shared envelope helpers in
 :mod:`.output` (see ``docs/json-contract.md``):
 
 - ``find`` — resolve one install/variant and report its paths.
 - ``list`` — enumerate every install/variant discovered.
 - ``env``  — the resolved paths as eval-able shell ``export`` lines.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
+- ``macros`` — per hard-macro IP library (`*_fd_ip_*`), which views it ships.
 
 The discovery logic itself lives in :mod:`klayout_tools.pdk`; these handlers
 only translate flags into library calls and render the result.
@@ -15,7 +16,13 @@ only translate flags into library calls and render the result.
 import argparse
 import shlex
 
-from ..pdk import PdkNotFoundError, find_pdk, list_cell_libraries, list_pdks
+from ..pdk import (
+    PdkNotFoundError,
+    find_pdk,
+    list_cell_libraries,
+    list_hard_macro_libraries,
+    list_pdks,
+)
 from .output import emit_error, emit_success, render_table
 
 #: Stable order for rendering the ``assets`` object in text output.
@@ -66,6 +73,16 @@ def run_cells(args: argparse.Namespace) -> int:
 
     if args.supply is not None and not report["any_compatible"]:
         return EXIT_NO_COMPATIBLE_LIBRARY
+    return 0
+
+
+def run_macros(args: argparse.Namespace) -> int:
+    try:
+        report = list_hard_macro_libraries(variant=args.pdk, root=args.pdk_root)
+    except PdkNotFoundError as exc:
+        return emit_error("pdk macros", str(exc), args.format)
+
+    emit_success(report, args.format, _print_macros_text)
     return 0
 
 
@@ -139,3 +156,20 @@ def _print_cells_text(report: dict) -> None:
         verdict = "compatible library found" if report["any_compatible"] else "NO MATCH"
         print()
         print(f"supply {report['supply_v']:g}V: {verdict}")
+
+
+def _print_macros_text(report: dict) -> None:
+    macros = report["macros"]
+
+    print(f"pdk: {report['pdk']}")
+    if not macros:
+        print("no hard-macro IP libraries found (no `_fd_ip_` entry under libs.ref)")
+        return
+
+    headers = ("library", "views")
+    rows = []
+    for macro in macros:
+        present = [view for view, has in macro["views"].items() if has]
+        rows.append((macro["name"], "/".join(present) or "-"))
+
+    render_table(headers, rows, left_aligned={0, 1})

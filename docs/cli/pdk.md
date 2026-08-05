@@ -6,10 +6,11 @@ simulation, DRC, LVS, symbol lookup — imports (Python) or evaluates (shell/Tcl
 instead of re-implementing the lookup, usually twice, per repo.
 
 ```
-klt pdk find  [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk list  [--pdk-root <dir>] [--format text|json]
-klt pdk env   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
-klt pdk cells [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
+klt pdk find   [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk list   [--pdk-root <dir>] [--format text|json]
+klt pdk env    [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
+klt pdk cells  [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format text|json]
+klt pdk macros [--pdk <variant>] [--pdk-root <dir>] [--format text|json]
 ```
 
 - `find` — resolve **one** install/variant and emit its paths.
@@ -17,6 +18,8 @@ klt pdk cells [--pdk <variant>] [--pdk-root <dir>] [--supply <volts>] [--format 
 - `env` — the resolved paths as eval-able shell `export` lines.
 - `cells` — per standard-cell digital library, its device flavor(s) and the
   nominal supply its `.lib` timing views are characterised at.
+- `macros` — per hard-macro IP library (`libs.ref` entries named
+  `*_fd_ip_*`, e.g. an SRAM/ROM compiler output), which views it ships.
 
 The command is fully headless (pure filesystem probing — it does not load the
 KLayout database module) and safe to run in CI.
@@ -345,6 +348,10 @@ accident of the glob used to walk `libs_ref`:
   drive/tolerate") than "what voltage domain is this logic library built on".
 - **`sky130_sram_macros`** (SRAM macros) is excluded — it is a macro library,
   not a standard-cell library, even though it ships both `spice/` and `lib/`.
+- **`*_fd_ip_*`** (hard-macro IP libraries — e.g. an SRAM/ROM compiler output)
+  are excluded for the same reason as `sky130_sram_macros` above. This is not
+  a silent gap: [`klt pdk macros`](#klt-pdk-macros) is the dedicated sibling
+  command for discovering these.
 
 An empty `libraries` list (a variant with no `_fd_sc_`-named `libs_ref` entry)
 is a **successful result**, not an error.
@@ -401,13 +408,95 @@ what the install already says, and would silently drift on a PDK upgrade
 instead of reflecting what is actually installed. Reflecting the real,
 installed state is the point of `--supply` being usable as a CI gate.
 
+## `klt pdk macros`
+
+`klt pdk cells` only reports **standard-cell digital** libraries
+(`*_fd_sc_*`) — it deliberately excludes hard-macro IP libraries
+(`libs.ref` entries named `*_fd_ip_*`, e.g. an SRAM/ROM compiler output),
+the same way it excludes `*_fd_pr`/`*_fd_io`/`*_sram_macros` (see "Which
+libraries are reported" above). `klt pdk macros` is the dedicated sibling
+command that surfaces those: a downstream SRAM/ROM-compiler or I/O-macro
+workflow otherwise has no CLI-surfaced way to discover them and is forced
+back to raw filesystem inspection under a resolved `libs_ref`.
+
+```
+$ klt pdk macros --pdk sky130A
+pdk: sky130A
+
+library              views
+--------------------  -----------------------------------
+sky130_fd_ip_sram_1k  gds/lef/lib/spice/verilog
+```
+
+```json
+{
+  "schema_version": 1,
+  "pdk": "sky130A",
+  "root": "/usr/share/pdk",
+  "macros": [
+    {
+      "name": "sky130_fd_ip_sram_1k",
+      "views": {
+        "gds": true,
+        "lef": true,
+        "lib": true,
+        "spice": true,
+        "cdl": false,
+        "verilog": true
+      }
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `schema_version` | integer | Version of this command's JSON shape (starts at `1`). |
+| `pdk` | string | Resolved variant name (same resolution as `find`/`env`/`cells`). |
+| `root` | string | Absolute install root. |
+| `macros` | array | One entry per hard-macro IP library found (see "Which libraries are reported" below). |
+| `macros[].name` | string | The `libs.ref` entry's directory name. |
+| `macros[].views` | object | A bool per view kind (`gds`, `lef`, `lib`, `spice`, `cdl`, `verilog`) recording whether that view subdirectory exists under the library entry. |
+
+### Which libraries are reported
+
+Only `libs_ref` entries whose name contains `_fd_ip_` — the open_pdks
+"foundry digital, IP" (hard-macro) naming convention — are reported. Like
+`klt pdk cells`, this is a **deliberate** name-convention filter, not an
+accident of the glob used to walk `libs_ref`: standard-cell digital
+libraries (`*_fd_sc_*`), primitive-device libraries (`*_fd_pr`), I/O-pad
+libraries (`*_fd_io`), and other macro libraries that don't match the
+`*_fd_ip_*` convention are all excluded — they are `klt pdk cells`'s domain
+(or neither command's), not this one's.
+
+An empty `macros` list (a variant with no `_fd_ip_`-named `libs_ref` entry)
+is a **successful result**, not an error — mirroring `klt pdk cells`'s
+empty-`libraries` convention.
+
+### View detection
+
+`views` reports whether each view **subdirectory** exists under the library
+entry (`gds/`, `lef/`, `lib/`, `spice/`, `cdl/`, `verilog/`) — a presence
+check, not content parsing. Unlike `klt pdk cells`, this command does not
+extract device flavors or a nominal supply from a hard-macro IP library's
+views: there is no PDK-wide-consistent convention across hard-macro IP
+(an SRAM compiler's `.lib`/`.spice` shape differs from a standard-cell
+library's) to extract from the way `klt pdk cells` extracts from
+`spice/<lib>.spice`/`lib/*.lib`.
+
 ## Library API
 
 The importable half lives in `src/klayout_tools/pdk.py` — block repos import
 these instead of re-implementing the lookup in Python:
 
 ```python
-from klayout_tools.pdk import find_pdk, list_pdks, list_cell_libraries, PdkNotFoundError
+from klayout_tools.pdk import (
+    find_pdk,
+    list_pdks,
+    list_cell_libraries,
+    list_hard_macro_libraries,
+    PdkNotFoundError,
+)
 
 info = find_pdk(variant="sky130A")  # same dict `klt pdk find` emits
 models = info["assets"]["ngspice"]
@@ -423,6 +512,8 @@ cells = list_cell_libraries(variant="sky130A")  # same dict `klt pdk cells` emit
 cells_checked = list_cell_libraries(
     variant="sky130A", supply=1.8
 )  # + "compatible"/"any_compatible"
+
+macros = list_hard_macro_libraries(variant="sky130A")  # same dict `klt pdk macros` emits
 ```
 
 `find_pdk(variant=None, root=None)` and `list_pdks(root=None)` return the exact
@@ -432,14 +523,16 @@ resolves. The `env` verb covers the shell/Tcl/rc-file side by exporting into the
 process environment. `list_cell_libraries(variant=None, root=None,
 supply=None)` follows the same shape and also raises `PdkNotFoundError` when
 no PDK install resolves; `supply` is optional and adds the compatibility
-verdict fields documented above.
+verdict fields documented above. `list_hard_macro_libraries(variant=None,
+root=None)` follows the same shape (and the same `PdkNotFoundError`
+behavior) for hard-macro IP libraries.
 
 ## Exit codes and errors
 
 | Exit code | Meaning |
 | --------- | ------- |
-| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `cells` with `--supply` matching at least one library is `0`. |
-| `1` | `find`/`env`/`cells` resolved no PDK install. Actionable error on stderr; stdout empty. |
+| `0` | Success — payload (or `export` lines) on stdout. `list` with no installs is still `0`; `macros`/`cells` with no matching library is still `0`; `cells` with `--supply` matching at least one library is `0`. |
+| `1` | `find`/`env`/`cells`/`macros` resolved no PDK install. Actionable error on stderr; stdout empty. |
 | `2` | Usage error (bad `--format`, or `klt pdk` with no subcommand) — from argparse. |
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 

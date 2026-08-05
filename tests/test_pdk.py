@@ -959,3 +959,190 @@ def test_cli_cells_no_install_error_envelope(tmp_path, capsys):
     assert captured.out == ""
     error = json.loads(captured.err)
     assert error["error"]["command"] == "pdk cells"
+
+
+# --------------------------------------------------------------------------- #
+# list_hard_macro_libraries (`klt pdk macros`) -- issue #535
+# --------------------------------------------------------------------------- #
+
+
+def _make_macro_library(variant_dir, name, *, views=("gds", "lef", "lib", "spice")):
+    """Fabricate a `libs.ref/<name>` hard-macro IP entry with the given view
+    subdirectories present (each containing one placeholder file, mirroring
+    a real SRAM/ROM-compiler-output library's shape)."""
+    lib_dir = variant_dir / "libs.ref" / name
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    for view in views:
+        view_dir = lib_dir / view
+        view_dir.mkdir(parents=True, exist_ok=True)
+        (view_dir / f"{name}.{view}").write_text("", encoding="utf-8")
+    return lib_dir
+
+
+def test_macros_reports_fd_ip_library_and_its_views(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(
+        variant_dir,
+        "sky130_fd_ip_sram_1k",
+        views=("gds", "lef", "lib", "spice", "verilog"),
+    )
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert report["schema_version"] == 1
+    assert report["pdk"] == "sky130A"
+    assert len(report["macros"]) == 1
+    macro = report["macros"][0]
+    assert macro["name"] == "sky130_fd_ip_sram_1k"
+    assert macro["views"] == {
+        "gds": True,
+        "lef": True,
+        "lib": True,
+        "spice": True,
+        "cdl": False,
+        "verilog": True,
+    }
+
+
+def test_macros_excludes_std_cell_and_other_libraries(tmp_path):
+    """`klt pdk macros` reports only `_fd_ip_`-named entries -- `_fd_sc_`/
+    `_fd_pr`/`_fd_io`/`_sram_macros` entries are the domain of `klt pdk
+    cells` (or neither command), not this one. This is also the flip side of
+    the regression this issue reports: `klt pdk cells` must keep excluding
+    `_fd_ip_` entries (see test_cells_excludes_fd_ip_hard_macro_library
+    below) while `klt pdk macros` now reports them.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k")
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+    _make_cell_library(variant_dir, "sky130_fd_io", devices=("nfet_g5v0d10v5",))
+    _make_cell_library(variant_dir, "sky130_sram_macros", devices=("nfet_01v8",))
+    (variant_dir / "libs.ref" / "sky130_fd_pr").mkdir(parents=True)
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [macro["name"] for macro in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_cells_excludes_fd_ip_hard_macro_library(tmp_path):
+    """Regression test for issue #535: `klt pdk cells` must keep excluding
+    `*_fd_ip_*` hard-macro IP libraries even though `klt pdk macros` now
+    reports them -- the two commands' result sets do not overlap.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k")
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    assert [lib["name"] for lib in report["libraries"]] == ["sky130_fd_sc_hd"]
+
+
+def test_macros_only_hard_macro_ip_present_no_std_cell(tmp_path):
+    """A variant shipping only hard-macro IP (no `_fd_sc_` standard-cell
+    library at all) is not an error for either command -- `klt pdk macros`
+    reports the macro, `klt pdk cells` reports an empty list.
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k")
+
+    macros_report = pdk.list_hard_macro_libraries(root=str(root))
+    cells_report = pdk.list_cell_libraries(root=str(root))
+
+    assert [macro["name"] for macro in macros_report["macros"]] == [
+        "sky130_fd_ip_sram_1k"
+    ]
+    assert cells_report["libraries"] == []
+
+
+def test_macros_no_libs_ref_is_empty_list(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert report["macros"] == []
+
+
+def test_macros_neither_kind_present_is_empty_list(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd")
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert report["macros"] == []
+
+
+def test_macros_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.list_hard_macro_libraries(root=str(tmp_path / "nope"))
+
+
+# --------------------------------------------------------------------------- #
+# CLI envelope conformance (via klt main()) -- `klt pdk macros`
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_macros_json_on_stdout(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k")
+
+    exit_code = main(["pdk", "macros", "--pdk-root", str(root), "--format", "json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["pdk"] == "sky130A"
+    assert payload["macros"][0]["name"] == "sky130_fd_ip_sram_1k"
+
+
+def test_cli_macros_text_table(tmp_path, capsys):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(
+        variant_dir, "sky130_fd_ip_sram_1k", views=("gds", "lef", "lib")
+    )
+
+    exit_code = main(["pdk", "macros", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "sky130_fd_ip_sram_1k" in out
+    assert "gds/lef/lib" in out
+
+
+def test_cli_macros_empty_result_text(tmp_path, capsys):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("libs_ref",))
+
+    exit_code = main(["pdk", "macros", "--pdk-root", str(root)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "no hard-macro IP libraries found" in out
+
+
+def test_cli_macros_no_install_error_envelope(tmp_path, capsys):
+    exit_code = main(
+        [
+            "pdk",
+            "macros",
+            "--pdk-root",
+            str(tmp_path / "nope"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["error"]["command"] == "pdk macros"
