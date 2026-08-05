@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-05 — `klt drc`: both curated decks checked the layers *below* a
+  contact/via but never the conductor *above* it, so a cut whose landing
+  metal missed one of its edges reported `status: clean` (#551) — a DRC
+  false negative on real, script-placeable geometry. gf180mcu gains nine
+  conductor-over-cut enclosure rules: `metal1.enclosing.contact.1` (`CO.6`,
+  0.005 um) and a below-cut/above-cut pair for every via level
+  (`metal1`/`metal2` around `Via1` at `V1.3a`'s literal 0.0 um and `V1.4a`'s
+  0.01 um; `metal2`/`metal3` around `Via2`, `metal3`/`metal4` around `Via3`,
+  `metal4`/`metal5` around `Via4`, all 0.01 um). Values are re-derived from a
+  real gf180mcuD install's own executable
+  `rule_decks/{contact,via1..via4}.drc`, whose
+  `cut.enclosed(metal, d) OR cut.not(metal)` form maps exactly onto this
+  engine's `"enclosing"` check, so none of the nine is an approximation.
+  sky130 gains `li1.enclosing.licon1.1`, closing the analogous
+  `li1`-over-`licon1` gap. The end-of-line variants (`CO.6a`/`CO.6b`,
+  `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c`) remain untranscribed — their narrow-metal
+  conditional is outside `DrcRule`'s vocabulary. **Behavior change**: a
+  layout with a genuinely under-enclosed cut that previously reported
+  `clean` now correctly reports `violations` (exit `3`). See
+  `docs/cli/drc.md`'s "Coverage" section, including why
+  `li1.enclosing.licon1.1` is transcribed at `li.5`'s zero-margin floor
+  rather than its published 0.08 um.
+
 - 2026-08-05 — `klt extract --parasitics`: gf180mcu's `PARASITICS.metals`
   table carried only one `LayerRC` (Metal1) against the deck's 5-level
   `EXTRACTION_DECK.metals` stack, so Metal2 through Metal5 silently

@@ -27,6 +27,7 @@ _GF180MCU_POLY2_WIDTH_THRESHOLD_DBU = 180
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
+SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
 
 REPO_ROOT = Path(__file__).parent.parent
 # The literal, relative path baked into examples/drc/example.drc.json's "file"
@@ -1623,6 +1624,339 @@ def test_run_drc_gf180mcu_via4_reproducer_from_issue_546(tmp_path):
     assert report["status"] == "violations"
     assert report["violation_count"] > 0
     assert report["rule_counts"].get("via4.space.1", 0) >= 1
+
+
+# --- conductor-over-cut enclosure (CO.6, V1.3a, Vn.3b/Vn.4a, #551) --------
+#
+# Before #551 the deck checked the layers *below* a cut but never the
+# conductor *above* it: Contact (33/0) had `poly2.enclosing.contact.1` and
+# `comp.enclosing.contact.1` but no Metal1 rule, and Via1-Via4 had size and
+# spacing rules (#544/#546) but no metal-enclosure rule in either direction.
+# A contact whose landing metal missed one of its edges therefore reported
+# `status: clean` (the issue's own reproducer, exercised verbatim by
+# `test_run_drc_gf180mcu_co6_reproducer_from_issue_551` below).
+#
+# One parametrized escape/marginal/clean set below covers all nine new
+# rules, reusing the `_GF180MCU_VIA_LAYERS` fixture pattern (#544/#546)
+# rather than one hand-written test per level. Entry shape:
+# (rule id, conductor layer, conductor name, cut layer, cut name, threshold).
+
+_GF180MCU_CUT_ENCLOSURE_RULES = [
+    ("metal1.enclosing.contact.1", (34, 0), "Metal1", (33, 0), "Contact", 5),
+    ("metal1.enclosing.via1.1", (34, 0), "Metal1", (35, 0), "Via1", 0),
+    ("metal2.enclosing.via1.1", (36, 0), "Metal2", (35, 0), "Via1", 10),
+    ("metal2.enclosing.via2.1", (36, 0), "Metal2", (38, 0), "Via2", 10),
+    ("metal3.enclosing.via2.1", (42, 0), "Metal3", (38, 0), "Via2", 10),
+    ("metal3.enclosing.via3.1", (42, 0), "Metal3", (40, 0), "Via3", 10),
+    ("metal4.enclosing.via3.1", (46, 0), "Metal4", (40, 0), "Via3", 10),
+    ("metal4.enclosing.via4.1", (46, 0), "Metal4", (41, 0), "Via4", 10),
+    ("metal5.enclosing.via4.1", (81, 0), "Metal5", (41, 0), "Via4", 10),
+]
+
+# Only the non-zero-threshold rules can produce a *marginal* (covered, but
+# by less than the threshold) violation; V1.3a's 0.0 um requirement has no
+# marginal case by construction.
+_GF180MCU_CUT_ENCLOSURE_RULES_WITH_MARGIN = [
+    entry for entry in _GF180MCU_CUT_ENCLOSURE_RULES if entry[5] > 0
+]
+
+
+def _gf180mcu_cut_stack(tmp_path, name, conductor, cut, conductor_box, cut_box):
+    """Write a two-layer conductor-over-cut layout and return its path."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    cond_layer = layout.layer(*conductor)
+    layout.set_info(cond_layer, kdb.LayerInfo(conductor[0], conductor[1], "conductor"))
+    cut_layer = layout.layer(*cut)
+    layout.set_info(cut_layer, kdb.LayerInfo(cut[0], cut[1], "cut"))
+    top.shapes(cond_layer).insert(conductor_box)
+    top.shapes(cut_layer).insert(cut_box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return path
+
+
+@pytest.mark.parametrize(
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    _GF180MCU_CUT_ENCLOSURE_RULES,
+    ids=[entry[0] for entry in _GF180MCU_CUT_ENCLOSURE_RULES],
+)
+def test_run_drc_gf180mcu_cut_enclosure_escape_violation(
+    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+):
+    """The defect class #551 reports: a legally-sized cut whose conductor
+    misses one of its edges entirely (100 dbu of the cut escapes to the
+    left) trips exactly one violation of the conductor-over-cut rule.
+
+    This is the only failure mode `metal1.enclosing.via1.1` can have (its
+    "V1.3a" threshold is a literal 0.0 um), and it is the mode the issue's
+    own reproducer exhibits, so it is exercised for every rule."""
+    path = _gf180mcu_cut_stack(
+        tmp_path,
+        f"{rule_id}_escape",
+        conductor,
+        cut,
+        kdb.Box(1100, 800, 1600, 1600),  # misses the cut's left 100 dbu
+        kdb.Box(1000, 1000, 1300, 1300),  # 300 dbu, legal for Contact and Vian
+    )
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {rule_id: 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == rule_id
+    assert violation["check"] == "enclosing"
+    # The reporting identity of an enclosure rule is its *enclosing* layer.
+    assert violation["layer"] == conductor_name
+
+
+@pytest.mark.parametrize(
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    _GF180MCU_CUT_ENCLOSURE_RULES_WITH_MARGIN,
+    ids=[entry[0] for entry in _GF180MCU_CUT_ENCLOSURE_RULES_WITH_MARGIN],
+)
+def test_run_drc_gf180mcu_cut_enclosure_marginal_violation(
+    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+):
+    """The subtler failure mode: the conductor *does* cover the cut, but by
+    one dbu less than the rule's threshold on one side -- caught by
+    `Region.enclosing_check`'s facing-edge measurement rather than by the
+    zero-overlap escape term the test above exercises."""
+    margin = threshold_dbu - 1
+    path = _gf180mcu_cut_stack(
+        tmp_path,
+        f"{rule_id}_marginal",
+        conductor,
+        cut,
+        kdb.Box(1000 - margin, 800, 1600, 1600),
+        kdb.Box(1000, 1000, 1300, 1300),
+    )
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {rule_id: 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == rule_id
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == conductor_name
+
+
+@pytest.mark.parametrize(
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    _GF180MCU_CUT_ENCLOSURE_RULES,
+    ids=[entry[0] for entry in _GF180MCU_CUT_ENCLOSURE_RULES],
+)
+def test_run_drc_gf180mcu_cut_enclosure_clean(
+    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+):
+    """A properly-landed cut -- 200 dbu of conductor on every side, far above
+    every threshold in this family (0-10 dbu) -- reports clean."""
+    path = _gf180mcu_cut_stack(
+        tmp_path,
+        f"{rule_id}_clean",
+        conductor,
+        cut,
+        kdb.Box(800, 800, 1600, 1600),
+        kdb.Box(1000, 1000, 1300, 1300),
+    )
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_gf180mcu_via_layers_have_drc_enclosure_coverage():
+    """Structural check (mirrors
+    `test_gf180mcu_via_layers_have_drc_width_and_space_coverage` above, per
+    #551's own test plan): each of Via1-Via4 is now the `other_layer` of at
+    least one `"enclosing"` rule *in both directions* -- one conductor below
+    the cut and one above it -- in addition to its existing `"width"`/
+    `"space"` rules. Before #551 every via level had size and spacing rules
+    but nothing constraining the metal that lands on it."""
+    deck = get_deck("gf180mcu")
+    # Which drawn conductor sits below / above each via level (5LM variant).
+    stack = {
+        (35, 0): ((34, 0), (36, 0)),  # Via1: Metal1 -> Metal2
+        (38, 0): ((36, 0), (42, 0)),  # Via2: Metal2 -> Metal3
+        (40, 0): ((42, 0), (46, 0)),  # Via3: Metal3 -> Metal4
+        (41, 0): ((46, 0), (81, 0)),  # Via4: Metal4 -> Metal5
+    }
+    for _rule_prefix, via_layer, _layer_name in _GF180MCU_VIA_LAYERS:
+        enclosing = [
+            r
+            for r in deck
+            if r.check == "enclosing"
+            and r.other_layer == via_layer
+            and r.derived_layer is None
+        ]
+        assert len(enclosing) >= 1, f"no enclosing rule for via layer {via_layer}"
+        below, above = stack[via_layer]
+        conductors = {r.layer for r in enclosing}
+        assert below in conductors, f"no below-cut enclosure rule for {via_layer}"
+        assert above in conductors, f"no above-cut enclosure rule for {via_layer}"
+
+
+def test_gf180mcu_contact_has_conductor_above_enclosure_coverage():
+    """The narrower half of #551: the Contact layer (33/0) was already the
+    `other_layer` of two *below*-the-cut enclosure rules (`CO.3` Poly2 and
+    `CO.4` Comp) and of none above it. `CO.6` (Metal1) closes that."""
+    deck = get_deck("gf180mcu")
+    contact_enclosers = {
+        r.layer for r in deck if r.check == "enclosing" and r.other_layer == (33, 0)
+    }
+    assert (30, 0) in contact_enclosers  # Poly2, CO.3 (pre-existing)
+    assert (22, 0) in contact_enclosers  # Comp, CO.4 (pre-existing)
+    assert (34, 0) in contact_enclosers  # Metal1, CO.6 (#551)
+
+
+def test_run_drc_gf180mcu_co6_reproducer_from_issue_551(tmp_path):
+    """Issue #551's own reproducer, verbatim: a legally-sized 0.22 um contact
+    on COMP whose Metal1 strap misses its left edge by 0.1 um. The PDK's own
+    KLayout deck reports `CO.6` on this stream; before #551 `klt drc --deck
+    gf180mcu` reported `status: clean`."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("co6_bad")
+    for layer_tuple, name, box in (
+        ((22, 0), "Comp", kdb.Box(0, 0, 3000, 3000)),
+        ((32, 0), "Nplus", kdb.Box(-400, -400, 3400, 3400)),
+        ((33, 0), "Contact", kdb.Box(1000, 1000, 1220, 1220)),
+        ((34, 0), "Metal1", kdb.Box(1100, 800, 1500, 1500)),
+    ):
+        li = layout.layer(*layer_tuple)
+        layout.set_info(li, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], name))
+        top.shapes(li).insert(box)
+
+    path = tmp_path / "co6_bad.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"].get("metal1.enclosing.contact.1", 0) >= 1
+
+
+@pytest.mark.parametrize(
+    "layout_path", GF180MCU_CORPUS_FILES, ids=[p.name for p in GF180MCU_CORPUS_FILES]
+)
+def test_gf180mcu_corpus_no_false_conductor_over_cut_violations(layout_path: Path):
+    """Regression guard (#551's own test plan): the new conductor-over-cut
+    rules must not fire against correct-by-construction geometry. Real
+    gf180mcu standard cells land Metal1 on Contact with exactly the `CO.6`
+    0.005 um margin -- one dbu of over-transcription (0.01 um) would flag
+    every contact in every one of these cells."""
+    report = run_drc(str(layout_path), "gf180mcu")
+
+    for rule_id, *_ in _GF180MCU_CUT_ENCLOSURE_RULES:
+        assert report["rule_counts"].get(rule_id, 0) == 0, (
+            f"{rule_id} false-positives on corpus cell {layout_path.name}"
+        )
+
+
+# --- sky130 li1.enclosing.licon1.1 (li.5's zero-margin floor, #551) -------
+
+
+def _sky130_li_licon_stack(tmp_path, name, li_box, licon_box):
+    """Write a two-layer li1-over-licon1 layout and return its path."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    li1 = layout.layer(67, 20)
+    layout.set_info(li1, kdb.LayerInfo(67, 20, "li1.drawing"))
+    licon1 = layout.layer(66, 44)
+    layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
+    top.shapes(li1).insert(li_box)
+    top.shapes(licon1).insert(licon_box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_sky130_li1_enclosing_licon1_violation(tmp_path):
+    """sky130's half of #551: `diff`/`poly` (the layers *below* licon1) were
+    already checked by `licon.5`/`licon.8`, but nothing checked li1 -- the
+    conductor immediately *above* it. A licon1 cut whose li1 strap misses its
+    left edge entirely now trips `li1.enclosing.licon1.1`."""
+    path = _sky130_li_licon_stack(
+        tmp_path,
+        "li1_licon1_escape",
+        kdb.Box(1100, 800, 1600, 1600),  # misses the cut's left 100 dbu
+        kdb.Box(1000, 1000, 1170, 1170),  # 170 dbu, the licon.1 size
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"li1.enclosing.licon1.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "li1.enclosing.licon1.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "li1.drawing"
+
+
+def test_run_drc_sky130_li1_enclosing_licon1_clean(tmp_path):
+    """A licon1 cut fully covered by its li1 strap reports clean."""
+    path = _sky130_li_licon_stack(
+        tmp_path,
+        "li1_licon1_clean",
+        kdb.Box(800, 800, 1600, 1600),
+        kdb.Box(1000, 1000, 1170, 1170),
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_li1_enclosing_licon1_flush_edges_clean(tmp_path):
+    """The reason `li1.enclosing.licon1.1` is transcribed at li.5's
+    zero-margin floor rather than its published 0.08 um: li.5 only requires
+    that margin on *two adjacent* edges, so real layout routinely lands a
+    minimum-width li1 strap exactly flush with the cut on the other two. That
+    geometry is legal and must stay clean -- an unconditional 0.08 um check
+    would flag it (and, measured against this repo's own corpus, 6-56 sites
+    per standard cell)."""
+    path = _sky130_li_licon_stack(
+        tmp_path,
+        "li1_licon1_flush",
+        kdb.Box(1000, 1000, 1600, 1600),  # flush on the left and bottom edges
+        kdb.Box(1000, 1000, 1170, 1170),
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_sky130_licon1_has_conductor_above_enclosure_coverage():
+    """Structural half of the sky130 fix: licon1 (66/44) is now the
+    `other_layer` of an enclosure rule on the conductor above it (li1), not
+    only of the two below it (`diff`, `poly`)."""
+    deck = get_deck("sky130")
+    licon_enclosers = {
+        r.layer for r in deck if r.check == "enclosing" and r.other_layer == (66, 44)
+    }
+    assert (65, 20) in licon_enclosers  # diff.drawing, licon.5 (pre-existing)
+    assert (66, 20) in licon_enclosers  # poly.drawing, licon.8 (pre-existing)
+    assert (67, 20) in licon_enclosers  # li1.drawing, li.5 floor (#551)
+
+
+@pytest.mark.parametrize(
+    "layout_path", SKY130_CORPUS_FILES, ids=[p.name for p in SKY130_CORPUS_FILES]
+)
+def test_sky130_corpus_no_false_li1_over_licon1_violations(layout_path: Path):
+    """Regression guard (#551's own test plan): `li1.enclosing.licon1.1` must
+    not fire against real sky130 standard cells, whose li1 straps sit flush
+    with licon1 on two edges by design (see the rule's own docstring)."""
+    report = run_drc(str(layout_path), "sky130")
+
+    assert report["rule_counts"].get("li1.enclosing.licon1.1", 0) == 0
 
 
 # --- #318: enclosing_check/enclosed_check silently pass on zero overlap --

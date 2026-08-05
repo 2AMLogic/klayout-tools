@@ -195,6 +195,7 @@
     ],
     "layers_in_stream_without_rules": [],
     "rules_skipped": [
+      "li1.enclosing.licon1.1",
       "li1.space.1",
       "li1.width.1",
       "mcon.space.1",
