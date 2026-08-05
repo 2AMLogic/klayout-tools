@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-05 — `klt extract --parasitics`: gf180mcu's `PARASITICS.metals`
+  table carried only one `LayerRC` (Metal1) against the deck's 5-level
+  `EXTRACTION_DECK.metals` stack, so Metal2 through Metal5 silently
+  contributed zero resistance and capacitance to every net's reported
+  parasitics (#547) — a driver sized against `--parasitics` output on
+  gf180mcu was sizing against roughly the wrong, optimistically-understated
+  answer. `PARASITICS.metals` is now curated to all 5 entries, sourced from
+  gf180mcu.tech's public nominal (`variants ()`) corner (Metal5 uses the
+  THICKMET1P1 / 11 kA top-metal row, matching the reported gf180mcuD build).
+  Additive `parasitics.metals_without_coefficient[]` (mirrored in
+  `warnings[]` when non-empty) now also surfaces any future gap of this
+  shape loudly instead of silently, for either shipped deck.
+
 - 2026-08-05 — `klt pdk cells`: two silent-wrong-answer bugs on gf180mcu
   (#537). `device_flavors` was always `[]` for a gf180mcu standard-cell
   library — the device-model regex required a `<family>_fd_pr__` prefix

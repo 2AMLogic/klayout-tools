@@ -402,6 +402,18 @@ def run_extract(
     ``warnings`` for every affected net. Always a list, empty when no net
     carries multiple labels.
 
+    ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
+    stack level the deck's ``ExtractionDeck.metals`` declares that has no
+    matching entry in the deck's ``ParasiticsDeck.metals`` -- the
+    extraction-side analogue of ``ignored_layers``, but for the parasitics
+    pass's *own* coefficient table rather than the input stream. A metal
+    level in this list silently contributes zero resistance and capacitance
+    to every net's parasitics; see :func:`_describe_parasitics_metal_gaps`
+    for the exact gap definition. Present only inside the ``parasitics``
+    block (so only when ``--parasitics`` was given); a matching prose entry
+    is also appended to ``warnings`` when the list is non-empty. Always a
+    list, empty when every declared metal level has a coefficient.
+
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, the PDK (when given) does not resolve, the top cell is
     missing/ambiguous, or the output path's parent directory cannot be
@@ -556,6 +568,20 @@ def run_extract(
                 "total_capacitance_ff": 0.0,
                 "nets": [],
             }
+        # `parasitics_deck` is only non-None when `--parasitics` was given
+        # (see above), which is exactly when `parasitic_nets is not None`.
+        assert parasitics_deck is not None
+        metal_gaps = _describe_parasitics_metal_gaps(deck, parasitics_deck)
+        parasitics_report["metals_without_coefficient"] = metal_gaps
+        if metal_gaps:
+            levels = ", ".join(f"Metal{gap['metal_index'] + 1}" for gap in metal_gaps)
+            warnings.append(
+                f"'{deck_name}' deck's PARASITICS.metals has no R/C "
+                f"coefficient for {levels} -- --parasitics reports zero "
+                "resistance and capacitance for that metal level on every "
+                "net, understating the true value. See docs/cli/extract.md's "
+                "'Parasitic (RC) extraction' section."
+            )
 
     writer = (
         kdb.NetlistSpiceWriter(create_model_binding_delegate(model_bindings))
@@ -2812,6 +2838,36 @@ def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, 
         )
     ignored.sort(key=lambda e: (e["layer"], e["datatype"]))
     return ignored
+
+
+def _describe_parasitics_metal_gaps(
+    deck: ExtractionDeck, parasitics_deck: ParasiticsDeck
+) -> list[dict[str, Any]]:
+    """Build the ``parasitics.metals_without_coefficient[]`` array (issue #547).
+
+    ``_compute_parasitics`` walks ``parasitics_deck.metals`` index-aligned
+    against ``deck.metals`` (the extraction deck's declared metal stack,
+    index 0 = the bottom level) and silently contributes zero R/C for any
+    stack level that has no coefficient -- either because
+    ``parasitics_deck.metals`` is shorter than ``deck.metals`` (truncation)
+    or the entry at that index is explicitly ``None``. Both are the same gap
+    from a caller's perspective: the level's R and C are missing from every
+    net's reported parasitics, with nothing else in the JSON to say so.
+
+    Returns one entry per gap, ``{"metal_index": int, "layer": int,
+    "datatype": int}`` (``metal_index`` is 0-based, matching ``deck.metals``
+    and ``parasitics_deck.metals``' shared indexing -- index 0 is the deck's
+    bottom-most metal level, e.g. gf180mcu's Metal1), sorted by
+    ``metal_index``. Empty when every declared metal level has a coefficient
+    -- the common case, and always true when ``--parasitics`` was not
+    requested (callers only invoke this when ``parasitics_deck is not
+    None``).
+    """
+    gaps: list[dict[str, Any]] = []
+    for i, layer in enumerate(deck.metals):
+        if i >= len(parasitics_deck.metals) or parasitics_deck.metals[i] is None:
+            gaps.append({"metal_index": i, "layer": layer[0], "datatype": layer[1]})
+    return gaps
 
 
 def _each_pin_net(circuit: kdb.Circuit) -> list[kdb.Net]:
