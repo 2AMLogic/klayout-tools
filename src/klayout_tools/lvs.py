@@ -301,15 +301,17 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``device_classes`` (issue #221) echoes the layout-side
     :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` -- what that
     deck can structurally recognise, not what this particular compare found
-    -- when ``layout.file`` + ``layout.deck`` (inline extraction) was given;
-    ``null`` when ``layout.netlist`` (pre-extracted, no deck involved) was
-    given instead.
+    -- whenever a ``layout.deck`` is given: always for ``layout.file``
+    (inline extraction, where the deck is required), and also for the
+    pre-extracted ``layout.netlist`` shape when a ``layout.deck`` is supplied
+    alongside it (issue #585). ``null`` only when no ``layout.deck`` was given
+    (the bare ``layout.netlist`` form).
 
     The response also carries the shared ``provenance`` block (see
     :func:`klayout_tools._provenance.build_provenance`); its ``deck`` is the
-    layout-side extraction deck (``null`` for the pre-extracted-netlist form,
-    matching ``device_classes``), and ``pdk`` is ``null`` (LVS is topological
-    and resolves no PDK).
+    layout-side extraction deck (``null`` only when no ``layout.deck`` was
+    given, matching ``device_classes``), and ``pdk`` is ``null`` (LVS is
+    topological and resolves no PDK).
 
     Same inline-extraction condition also gates ``device.body_unverified``
     (issue #281, see :func:`_body_net_warnings`): non-blocking
@@ -394,15 +396,18 @@ def run_lvs(request: str) -> dict[str, Any]:
     _prune_extra_top_circuits(reference_netlist, reference_circuit)
 
     # What the layout-side deck can structurally recognise
-    # (`ExtractionDeck.device_classes`, issue #221) -- `null` when
-    # `layout.netlist` (pre-extracted) was given instead of `layout.file` +
-    # `layout.deck`, since no deck is involved in that shape. Already
-    # validated by `_resolve_layout` above (an unknown deck would have
-    # raised `LvsError` before reaching this point), so re-fetching it here
-    # cannot itself raise. Resolved here (rather than just before
-    # `device_classes` further down) so the `combine_devices` block below can
-    # also use it to apply the deferred resistor `fixed_offset_ohm`
-    # correction post-combine (issue #559).
+    # (`ExtractionDeck.device_classes`, issue #221) -- `null` when no
+    # `layout.deck` was supplied. `layout.deck` is meaningful for *both*
+    # layout shapes: it is required for `layout.file` (it drives inline
+    # extraction), and it is optional-but-honored for the pre-extracted
+    # `layout.netlist` shape, where it does not trigger extraction but still
+    # names the deck whose resistor `fixed_offset_ohm` the `combine_devices`
+    # block below applies post-combine (issue #559/#585). Already validated by
+    # `_resolve_layout` above (an unknown deck would have raised `LvsError`
+    # before reaching this point), so re-fetching it here cannot itself raise.
+    # Resolved here (rather than just before `device_classes` further down) so
+    # the `combine_devices` block below can also use it to apply the deferred
+    # resistor `fixed_offset_ohm` correction post-combine (issue #559).
     layout_deck_name = layout_spec.get("deck")
     layout_deck = get_extraction_deck(layout_deck_name) if layout_deck_name else None
 
@@ -461,25 +466,40 @@ def run_lvs(request: str) -> dict[str, Any]:
         _purge_emptied_nets(reference_netlist)
 
         if layout_deck is not None:
-            # Issue #559: `_resolve_layout` deferred the resistor
-            # `fixed_offset_ohm` correction (passing
-            # `apply_resistor_fixed_offset=False` to inline extraction)
-            # specifically so it could be applied here, after
-            # `combine_devices()` has folded series-connected drawn
-            # primitives into one device object. Because
-            # `apply_resistor_fixed_offset_corrections` walks whatever
-            # devices exist in `layout_netlist` right now, this adds the
-            # fixed offset exactly once per surviving (possibly-folded)
-            # logical device -- never once per original primitive -- fixing
-            # the over-count KLayout's native series fold otherwise produces
-            # by summing each primitive's already-corrected `R`. Only the
-            # inline-extraction shape has a `layout_deck` (a pre-extracted
-            # `layout.netlist` has none, so is intentionally left alone --
-            # any correction it carries was already baked in when it was
-            # written and cannot be selectively un-summed here). The
-            # reference netlist never receives this correction: it is a
-            # layout-deck-specific geometric correction, not a property of
-            # the schematic reference.
+            # Issue #559/#585: apply the deferred resistor `fixed_offset_ohm`
+            # correction here, after `combine_devices()` has folded
+            # series-connected drawn primitives into one device object.
+            # Because `apply_resistor_fixed_offset_corrections` walks whatever
+            # devices exist in `layout_netlist` right now, this adds the fixed
+            # offset exactly once per surviving (possibly-folded) logical
+            # device -- never once per original primitive -- fixing the
+            # over-count KLayout's native series fold otherwise produces by
+            # summing each primitive's already-corrected `R`.
+            #
+            # Reached by *both* layout shapes whenever a `layout.deck` is
+            # present (issue #585):
+            #   * `layout.file` (inline extraction): `_resolve_layout` deferred
+            #     the correction by passing `apply_resistor_fixed_offset=False`
+            #     to inline extraction, so the primitives here carry only their
+            #     raw body `R` -- the offset is added once, here, post-combine.
+            #   * `layout.netlist` (pre-extracted): honored only when the
+            #     supplied SPICE was itself extracted with the correction
+            #     *deferred* (`run_extract(..., apply_resistor_fixed_offset=
+            #     False)`). Then the pre-extracted primitives likewise carry
+            #     only raw body `R`, and this call is what applies the offset
+            #     once per post-combine device. (A netlist extracted the
+            #     default way already has the offset baked into each primitive;
+            #     feeding that through `combine_devices` is the caller's own
+            #     double-count to avoid -- there is no way to selectively
+            #     un-sum an already-applied per-primitive offset here.)
+            #
+            # The device-class-name lookup inside
+            # `apply_resistor_fixed_offset_corrections` is case-insensitive, so
+            # it matches both the in-process (`res_high_po`) and
+            # SpiceReader-uppercased (`RES_HIGH_PO`) class names identically
+            # (issue #585). The reference netlist never receives this
+            # correction: it is a layout-deck-specific geometric correction,
+            # not a property of the schematic reference.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
 
     bulk_warnings: list[dict[str, Any]] = []
@@ -770,10 +790,19 @@ def _resolve_layout(
     device, so the fixed offset lands exactly once per logical device
     instead of once per drawn primitive. When ``False`` (the default,
     unchanged behavior), the correction is applied here as before -- there
-    is no combine step for it to be over-counted by. Only meaningful for the
-    inline-extraction (``layout.file``) shape; a pre-extracted
-    ``layout.netlist`` carries whatever correction (if any) was already
-    baked in when it was written and is unaffected by this flag.
+    is no combine step for it to be over-counted by.
+
+    For the inline-extraction (``layout.file``) shape this flag drives inline
+    extraction's own deferral (``apply_resistor_fixed_offset=False``). For the
+    pre-extracted (``layout.netlist``) shape there is no extraction to defer
+    here, but the deferred-correction path in ``run_lvs`` still applies once
+    ``layout.deck`` is supplied alongside ``layout.netlist`` (issue #585):
+    ``run_lvs`` calls ``apply_resistor_fixed_offset_corrections`` post-combine
+    for that shape too. That correction is only *correct* if the supplied
+    SPICE was extracted with the offset deferred (``run_extract(...,
+    apply_resistor_fixed_offset=False)``); a netlist extracted the default way
+    already carries a per-primitive offset that cannot be selectively un-summed
+    after the series fold.
     """
     import klayout.db as kdb
 

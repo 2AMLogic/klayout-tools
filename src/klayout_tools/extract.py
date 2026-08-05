@@ -213,6 +213,7 @@ def run_extract(
     parasitics: bool = False,
     top_cell_pins_only: bool = False,
     declared_pins: frozenset[str] | None = None,
+    apply_resistor_fixed_offset: bool = True,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -259,6 +260,22 @@ def run_extract(
     ``top_cell_pins_only``'s own reconciliation, and only ever *further*
     demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
     kept internal.
+
+    ``apply_resistor_fixed_offset`` (issue #559/#585): when ``True`` (the
+    default, the behavior every ``klt extract`` invocation and every existing
+    caller gets), each opted-in resistor device class's
+    :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` head/end
+    term is added to ``R`` once per drawn primitive at extraction time --
+    baked into both the written SPICE and the JSON ``devices[].params``.
+    Passing ``False`` **defers** that correction: the returned netlist (and
+    the written SPICE) carry only the raw per-primitive body ``R``. This is
+    for a caller who intends to read the netlist back through ``klt lvs``'s
+    ``layout.netlist`` + ``layout.deck`` + ``options.combine_devices: true``
+    shape, where the correction must be applied exactly *once per
+    post-combine logical device* rather than once per primitive -- applying
+    it here first would double-count it after the series fold (issue #585).
+    Mirrors how ``lvs.py``'s inline-extraction path already defers the
+    correction internally via ``extract_netlist_from_layout``.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags) are
     optional: when either is given, the PDK is resolved via
@@ -522,6 +539,7 @@ def run_extract(
         parasitics_deck=parasitics_deck,
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
+        apply_resistor_fixed_offset=apply_resistor_fixed_offset,
     )
 
     import klayout.db as kdb
@@ -2516,14 +2534,22 @@ def apply_resistor_fixed_offset_corrections(
 
     A deck that has not opted in (the default ``fixed_offset_ohm=0.0``) gets
     no write at all. Keyed by device-class *name* (``ResistorDevice.name``
-    is the same string KLayout reports back as ``DeviceClass.name``), so
-    this is a direct lookup, not a positional match. Parasitic R devices
-    (injected by ``run_extract`` *after* extraction returns) carry their own
-    generated class names and are never reached by this function -- no
-    double-application.
+    is the string KLayout reports back as ``DeviceClass.name``), so this is a
+    direct lookup, not a positional match. The lookup is **case-insensitive**
+    (issue #585): the in-process ``kdb.Netlist`` an inline extraction builds
+    reports the deck's name verbatim (lowercase, e.g. ``res_high_po``), but a
+    netlist read back from a SPICE file via ``kdb.NetlistSpiceReader`` (the
+    ``layout.netlist`` pre-extracted shape in ``lvs.py``) reports every
+    device-class name **uppercased** (``RES_HIGH_PO``). A verbatim lookup
+    would silently miss the correction for the pre-extracted shape -- no
+    error, no warning. Normalizing both sides to lowercase makes the
+    post-combine correction fire identically regardless of how the netlist
+    was produced. Parasitic R devices (injected by ``run_extract`` *after*
+    extraction returns) carry their own generated class names and are never
+    reached by this function -- no double-application.
     """
     fixed_offset_lookup = {
-        resistor.name: resistor.fixed_offset_ohm
+        resistor.name.lower(): resistor.fixed_offset_ohm
         for resistor in deck.resistors
         if resistor.fixed_offset_ohm
     }
@@ -2533,7 +2559,7 @@ def apply_resistor_fixed_offset_corrections(
     for circuit in netlist.each_circuit():
         for device in circuit.each_device():
             device_class = device.device_class()
-            fixed_offset_ohm = fixed_offset_lookup.get(device_class.name)
+            fixed_offset_ohm = fixed_offset_lookup.get(device_class.name.lower())
             if fixed_offset_ohm:
                 r_id = _parameter_id(device_class, "R")
                 if r_id is not None:
