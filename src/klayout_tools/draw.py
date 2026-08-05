@@ -114,6 +114,8 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
                     {"layer": [66, 20], "name": "poly.drawing",
                      "rect_um": [0, 0, 1, 0.15]},
                     {"layer": [65, 20], "polygon_um": [[0, 0], [1, 0], [0, 1]]},
+                    {"layer": [41, 0], "rect_um": [0, 0, 0.26, 0.26],
+                     "array": {"pitch_um": [0.86, 0.86], "count": [71, 71]}},
                 ],
                 "labels": [               # optional
                     {"layer": [66, 20], "text": "IN", "at_um": [0.5, 0.5]},
@@ -199,8 +201,18 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         pair, name = _shape_layer(shape, i)
         idx = _layer_index(pair, name)
         geom = _build_shape_geometry(shape, i, _to_dbu, kdb)
-        top.shapes(idx).insert(geom)
-        layer_counts[pair] += 1
+        array_spec = _parse_array(shape, i, _to_dbu)
+        target = top.shapes(idx)
+        if array_spec is None:
+            target.insert(geom)
+            layer_counts[pair] += 1
+        else:
+            (pitch_x_dbu, pitch_y_dbu), (count_x, count_y) = array_spec
+            for xi in range(count_x):
+                for yi in range(count_y):
+                    offset = kdb.Vector(xi * pitch_x_dbu, yi * pitch_y_dbu)
+                    target.insert(geom.moved(offset))
+            layer_counts[pair] += count_x * count_y
 
     for i, label in enumerate(labels):
         pair, name = _shape_layer(label, i, kind="label")
@@ -236,7 +248,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         "gds_path": output_path,
         "cell_name": cell_name,
         "dbu_um": dbu_um,
-        "shape_count": len(shapes),
+        "shape_count": sum(layer_counts.values()),
         "label_count": len(labels),
         "layers": layers_report,
         "bbox_um": bbox_um,
@@ -323,6 +335,49 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
             raise DrawError(f"shape[{index}].polygon_um[{j}] must be an [x, y] pair")
         kdb_points.append(kdb.Point(to_dbu(point[0]), to_dbu(point[1])))
     return kdb.Polygon(kdb_points)
+
+
+def _parse_array(
+    shape: dict[str, Any], index: int, to_dbu
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Validate and resolve an optional ``array`` field on a shape entry.
+
+    ``None`` when the shape has no ``array`` key -- the caller then draws the
+    unit geometry exactly once, matching pre-#553 behaviour byte for byte.
+    Otherwise returns ``((pitch_x_dbu, pitch_y_dbu), (count_x, count_y))``:
+    the pitch is snapped to database units via the same ``to_dbu`` rounding
+    used for every other coordinate (so instance ``i`` lands at
+    ``unit_geometry + i * pitch_dbu`` exactly, never accumulated float
+    drift), and ``count`` is the number of instances per axis (``[1, 1]`` is
+    equivalent to omitting ``array`` entirely).
+    """
+    array = shape.get("array")
+    if array is None:
+        return None
+    if not isinstance(array, dict):
+        raise DrawError(f"shape[{index}].array must be a JSON object when present")
+
+    pitch = array.get("pitch_um")
+    if (
+        not isinstance(pitch, list)
+        or len(pitch) != 2
+        or any(not _is_number(v) for v in pitch)
+    ):
+        raise DrawError(f"shape[{index}].array.pitch_um must be [dx, dy] of numbers")
+
+    count = array.get("count")
+    if (
+        not isinstance(count, list)
+        or len(count) != 2
+        or any(isinstance(v, bool) or not isinstance(v, int) for v in count)
+        or any(v <= 0 for v in count)
+    ):
+        raise DrawError(
+            f"shape[{index}].array.count must be [nx, ny] of positive integers"
+        )
+
+    pitch_dbu = (to_dbu(pitch[0]), to_dbu(pitch[1]))
+    return pitch_dbu, (count[0], count[1])
 
 
 def _build_label(label: dict[str, Any], index: int, to_dbu, kdb) -> Any:

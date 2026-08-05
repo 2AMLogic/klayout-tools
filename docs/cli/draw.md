@@ -69,6 +69,33 @@ in CI.
     reversed `[1, 1, 0, 0]` produces the same box as `[0, 0, 1, 1]` rather than
     an empty one.
   - `polygon_um`: a list of at least three `[x, y]` points in microns.
+- `array` (object, optional) — steps the shape's geometry into a regular grid
+  of instances instead of drawing it once, so a via/contact farm on a uniform
+  pitch does not need one JSON shape entry per cut:
+
+  ```json
+  { "layer": [41, 0],
+    "rect_um": [7.0, 1.5, 7.26, 1.76],
+    "array": { "pitch_um": [0.86, 0.86], "count": [71, 71] } }
+  ```
+
+  - `pitch_um` (**required**) — `[dx, dy]` step between adjacent instances, in
+    microns.
+  - `count` (**required**) — `[nx, ny]` number of *instances* per axis (not
+    gaps), each a positive integer. `[1, 1]` is equivalent to omitting `array`
+    entirely — output is unchanged.
+  - Instance `(i, j)` is placed at `unit_geometry + (i * pitch_x, j *
+    pitch_y)`, computed in **integer database units after the unit shape (and
+    the pitch) are snapped to `dbu_um`** — not by accumulating
+    `origin_um + i * pitch_um` in floating point before conversion — so every
+    instance lands exactly on pitch, by construction, regardless of whether
+    `pitch_um` is exactly representable in binary float.
+  - The response's `shape_count` and the matching `layers[].shapes` entry
+    count every expanded instance (`count: [71, 71]` contributes 5041), not 1
+    per `shapes` array entry — see "Response" below.
+  - Out of scope for this key: a `bounds_um` ("fill this window") alternative
+    to `count`, and cell/instancing (`AREF`) — an array of shapes only, no
+    hierarchy.
 
 ### Label entry
 
@@ -99,9 +126,14 @@ in CI.
 }
 ```
 
+- `shape_count` — the total number of shapes actually written, i.e. every
+  `array`-expanded instance counted individually, not the number of entries in
+  `params.shapes` (a single entry with `array.count: [71, 71]` contributes
+  5041, matching what the same command with no `array` key would have needed
+  5041 entries to produce).
 - `layers` — one entry per `(layer, datatype)` pair written, in first-seen
   order, with the resolved `name` (or `null`) and the count of **shapes** placed
-  on it (labels are not counted here).
+  on it, likewise expanded per-instance (labels are not counted here).
 - `bbox_um` — the top cell's bounding box in microns, or `null` if nothing was
   drawn (impossible in practice, since `shapes` must be non-empty).
 - `warnings` — always carries the loud not-design-legal marker, so a caller can
@@ -128,3 +160,16 @@ klt drc bad.gds --deck sky130 --format json   # -> status "violations", poly.wid
 This is the missing write-side half of the read/write pair the toolchain
 otherwise has: the one thing that proves a DRC flow is honest is now something
 `klt` itself can produce.
+
+## Example: an array of via cuts
+
+A 71x71 via farm on a 0.86 um pitch, as one shape entry instead of 5041:
+
+```bash
+klt draw --params '{"shapes": [{"layer": [41, 0], "rect_um": [7.0, 1.5, 7.26, 1.76], "array": {"pitch_um": [0.86, 0.86], "count": [71, 71]}}]}' -o vias.gds --format json
+# -> "shape_count": 5041, "layers": [{"layer": 41, "datatype": 0, "name": null, "shapes": 5041}]
+```
+
+See [issue #553](https://github.com/2AMLogic/klayout-tools/issues/553) for the
+motivating real-world fixture (17134 shape entries / 1.4 MB of JSON for a small
+cell of via/contact arrays) that `array` was added to compress.

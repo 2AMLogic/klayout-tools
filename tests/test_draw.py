@@ -193,6 +193,227 @@ def test_layer_not_in_any_pdk_still_writes(tmp_path):
     assert layout.layer(999, 7) is not None
 
 
+# --------------------------------------------------------------------------- #
+# `array`: repetition primitive on a shape entry (#553)
+# --------------------------------------------------------------------------- #
+
+
+def test_array_expands_rect_on_pitch(tmp_path):
+    report, output = _draw(
+        tmp_path,
+        {
+            "shapes": [
+                {
+                    "layer": [41, 0],
+                    "rect_um": [0.0, 0.0, 0.2, 0.2],
+                    "array": {"pitch_um": [1.0, 1.0], "count": [2, 3]},
+                }
+            ]
+        },
+    )
+
+    # 2 x 3 = 6 instances -- both the top-level and per-layer counts must
+    # reflect the expanded total, not the single JSON shape entry.
+    assert report["shape_count"] == 6
+    assert report["layers"] == [{"layer": 41, "datatype": 0, "name": None, "shapes": 6}]
+
+    layout = kdb.Layout()
+    layout.read(output)
+    idx = layout.layer(41, 0)
+    boxes = {s.box for s in layout.top_cell().shapes(idx).each() if s.is_box()}
+    assert len(boxes) == 6
+    expected = {
+        kdb.Box(xi * 1000, yi * 1000, xi * 1000 + 200, yi * 1000 + 200)
+        for xi in range(2)
+        for yi in range(3)
+    }
+    assert boxes == expected
+
+
+def test_array_expands_polygon_on_pitch(tmp_path):
+    report, output = _draw(
+        tmp_path,
+        {
+            "shapes": [
+                {
+                    "layer": [34, 0],
+                    "polygon_um": [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]],
+                    "array": {"pitch_um": [0.86, 0.86], "count": [3, 2]},
+                }
+            ]
+        },
+    )
+    assert report["shape_count"] == 6
+
+    layout = kdb.Layout()
+    layout.read(output)
+    idx = layout.layer(34, 0)
+    bboxes = {p.polygon.bbox() for p in layout.top_cell().shapes(idx).each()}
+    assert len(bboxes) == 6
+    pitch_dbu = 860  # round(0.86 / 0.001)
+    expected = {
+        kdb.Box(
+            xi * pitch_dbu, yi * pitch_dbu, xi * pitch_dbu + 500, yi * pitch_dbu + 500
+        )
+        for xi in range(3)
+        for yi in range(2)
+    }
+    assert bboxes == expected
+
+
+def test_array_count_one_is_equivalent_to_no_array(tmp_path):
+    """A `count: [1, 1]` array must produce byte-identical output to omitting
+    `array` entirely -- the additive field must not change existing
+    behaviour (#553 acceptance criteria)."""
+    base_shape = {"layer": [1, 0], "rect_um": [0, 0, 1, 1]}
+
+    _, output_no_array = _draw(
+        tmp_path, {"shapes": [dict(base_shape)]}, name="no_array.gds"
+    )
+    _, output_with_array = _draw(
+        tmp_path,
+        {
+            "shapes": [
+                {**base_shape, "array": {"pitch_um": [5.0, 5.0], "count": [1, 1]}}
+            ]
+        },
+        name="with_array.gds",
+    )
+
+    from pathlib import Path
+
+    assert Path(output_no_array).read_bytes() == Path(output_with_array).read_bytes()
+
+
+def test_array_omitted_shape_count_matches_pre_553_behaviour(tmp_path):
+    report, _ = _draw(
+        tmp_path,
+        {
+            "shapes": [
+                {"layer": [1, 0], "rect_um": [0, 0, 1, 1]},
+                {"layer": [2, 0], "rect_um": [0, 0, 1, 1]},
+            ]
+        },
+    )
+    assert report["shape_count"] == 2
+
+
+def test_array_lands_exactly_on_pitch_regardless_of_float_accumulation(tmp_path):
+    """Stepping is `origin + i * pitch` computed in integer database units
+    after the unit shape is snapped -- not accumulated float `origin_um +
+    i*pitch_um` before conversion -- so a pitch that is not exactly
+    representable in binary float still lands exactly on `round(pitch_um /
+    dbu_um)` dbu per step for every instance (#553)."""
+    report, output = _draw(
+        tmp_path,
+        {
+            "shapes": [
+                {
+                    "layer": [41, 0],
+                    "rect_um": [0.0, 0.0, 0.26, 0.26],
+                    "array": {"pitch_um": [0.86, 0.86], "count": [10, 1]},
+                }
+            ]
+        },
+    )
+    assert report["shape_count"] == 10
+
+    layout = kdb.Layout()
+    layout.read(output)
+    idx = layout.layer(41, 0)
+    xs = sorted(s.box.left for s in layout.top_cell().shapes(idx).each() if s.is_box())
+    pitch_dbu = 860  # round(0.86 / 0.001)
+    assert xs == [i * pitch_dbu for i in range(10)]
+
+
+def test_array_not_object_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"shape\[0\]\.array must be a JSON object"):
+        _draw(
+            tmp_path,
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "array": [1, 2]}]},
+        )
+
+
+def test_array_missing_pitch_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"array\.pitch_um must be"):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"count": [2, 2]},
+                    }
+                ]
+            },
+        )
+
+
+def test_array_bad_pitch_length_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"array\.pitch_um must be"):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0], "count": [2, 2]},
+                    }
+                ]
+            },
+        )
+
+
+def test_array_missing_count_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"array\.count must be"):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0, 1.0]},
+                    }
+                ]
+            },
+        )
+
+
+def test_array_non_positive_count_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"array\.count must be"):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0, 1.0], "count": [0, 2]},
+                    }
+                ]
+            },
+        )
+
+
+def test_array_non_integer_count_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"array\.count must be"):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [1.0, 1.0], "count": [2.5, 2]},
+                    }
+                ]
+            },
+        )
+
+
 def test_oasis_output_by_extension(tmp_path):
     _, output = _draw(
         tmp_path,
