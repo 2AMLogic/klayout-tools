@@ -653,6 +653,112 @@ def test_cli_allowed_layers_bad_json_is_application_error(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# --top (issue #554)
+# --------------------------------------------------------------------------- #
+
+
+def _make_multi_top_layout() -> kdb.Layout:
+    """Two independent top cells:
+
+    - ``GOOD_TOP`` is entirely clean.
+    - ``BAD_TOP`` instantiates a sub-cell with a forbidden character in its
+      name (``cell_names``) and draws one shape on a layer that is never in
+      any ``--allowed-layers`` set below (``layer_whitelist``).
+
+    ``cell_names``/``layer_whitelist`` both walk ``Layout.each_cell()``
+    directly rather than an already-per-cell-scoped ``top_cells`` list, so
+    this is the multi-top fixture that exercises the "picks the cell, not
+    the accumulation" risk for `klt precheck` specifically.
+    """
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+
+    good = layout.create_cell("GOOD_TOP")
+    good.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+
+    bad = layout.create_cell("BAD_TOP")
+    bad_child = layout.create_cell("weird#name")
+    bad_child.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    bad.insert(kdb.CellInstArray(bad_child.cell_index(), kdb.Trans()))
+
+    return layout
+
+
+def test_top_scopes_cell_names_check(tmp_path):
+    path = _write(_make_multi_top_layout(), tmp_path)
+
+    report_good = run_precheck(path, top="GOOD_TOP")
+    (cell_names_good,) = [c for c in report_good["checks"] if c["name"] == "cell_names"]
+    assert cell_names_good["status"] == "pass"
+
+    report_bad = run_precheck(path, top="BAD_TOP")
+    (cell_names_bad,) = [c for c in report_bad["checks"] if c["name"] == "cell_names"]
+    assert cell_names_bad["status"] == "fail"
+    assert cell_names_bad["violations"][0]["cell"] == "weird#name"
+
+    # Default (no --top) behaviour is unchanged: both top cells are walked,
+    # so the forbidden name still surfaces.
+    report_all = run_precheck(path)
+    (cell_names_all,) = [c for c in report_all["checks"] if c["name"] == "cell_names"]
+    assert cell_names_all["status"] == "fail"
+
+
+def test_top_scopes_layer_whitelist_check(tmp_path):
+    path = _write(_make_multi_top_layout(), tmp_path)
+
+    report_good = run_precheck(path, top="GOOD_TOP", allowed_layers=[(2, 0)])
+    (whitelist_good,) = [
+        c for c in report_good["checks"] if c["name"] == "layer_whitelist"
+    ]
+    assert whitelist_good["status"] == "fail"
+    # GOOD_TOP's own hierarchy has exactly one shape on the disallowed layer.
+    assert whitelist_good["violations"] == [{"layer": "1/0", "name": None, "shapes": 1}]
+
+    report_bad = run_precheck(path, top="BAD_TOP", allowed_layers=[(2, 0)])
+    (whitelist_bad,) = [
+        c for c in report_bad["checks"] if c["name"] == "layer_whitelist"
+    ]
+    # BAD_TOP's own hierarchy also has exactly one shape -- not the
+    # whole-stream total of two, proving the scoping actually happened.
+    assert whitelist_bad["violations"] == [{"layer": "1/0", "name": None, "shapes": 1}]
+
+    report_all = run_precheck(path, allowed_layers=[(2, 0)])
+    (whitelist_all,) = [
+        c for c in report_all["checks"] if c["name"] == "layer_whitelist"
+    ]
+    assert whitelist_all["violations"] == [{"layer": "1/0", "name": None, "shapes": 2}]
+
+
+def test_top_unknown_cell_raises(tmp_path):
+    path = _write(_make_multi_top_layout(), tmp_path)
+
+    with pytest.raises(PrecheckError, match="top cell not found in stream: NOPE"):
+        run_precheck(path, top="NOPE")
+
+
+def test_top_on_single_top_cell_stream_matches_omitting_it(tmp_path):
+    path = _write(_clean_layout(), tmp_path)
+
+    with_top = run_precheck(path, grid_um=0.005, top="TOP")
+    without_top = run_precheck(path, grid_um=0.005)
+    assert with_top == without_top
+
+
+def test_cli_top_flag_scopes_report(tmp_path, capsys):
+    path = _write(_make_multi_top_layout(), tmp_path)
+
+    assert main(["precheck", str(path), "--top", "GOOD_TOP", "--format", "json"]) == 0
+
+
+def test_cli_unknown_top_exits_one(tmp_path, capsys):
+    path = _write(_make_multi_top_layout(), tmp_path)
+
+    assert main(["precheck", str(path), "--top", "NOPE"]) == 1
+    err = capsys.readouterr().err
+    assert "top cell not found in stream: NOPE" in err
+
+
+# --------------------------------------------------------------------------- #
 # OpenROAD-produced, macro-scale standard-cell fixture (issue #436)
 # --------------------------------------------------------------------------- #
 

@@ -134,6 +134,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-05 — `klt stats`/`klt layers`/`klt drc`/`klt precheck`/`klt render`/
+  `klt socket-check`: new `--top <cell>` flag (#554), extending the
+  cell-selector `klt extract`/`klt ring-check`/`klt lef-abstract` already had
+  to the rest of the read-side verbs, so a multi-top-cell library stream
+  (the normal shape of a vendor-supplied I/O or standard-cell library GDS)
+  can be read one cell at a time instead of only as a whole-stream union.
+  `klt stats --top <cell>` now succeeds on a multi-top-cell stream instead of
+  hard-erroring (its documented "ambiguous bounding-box reference" error is
+  unchanged when `--top` is omitted); the other five verbs default to
+  today's whole-stream behaviour (`klt layers`' shape-count union, every top
+  cell checked for `drc`/`precheck`/`socket-check`, every top cell rendered)
+  when `--top` is omitted, and restrict to one cell's own hierarchy — itself
+  plus every cell it calls, directly or indirectly, not just the whole
+  stream's bounding box/top-cell label — when given. `--top <name>` naming a
+  cell absent from the stream exits `1` with a clean error, matching
+  `klt ring-check --top`'s existing message style. `klt lef-abstract`
+  (already had `--top`) and `klt cells --top` (an unrelated, pre-existing
+  boolean display filter) are unmodified. See each verb's own `docs/cli/*.md`
+  for the field-by-field scoping.
 - 2026-08-05 — `klt drc`/`klt extract`: fail-loudly coverage for unmodelled
   voltage-domain marker geometry (#552). A gf180mcu layout can carry a
   `Dualgate` (55/0) region that promotes the enclosed devices to the PDK's

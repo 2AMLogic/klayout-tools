@@ -28,7 +28,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._layout import load_layout
+from ._layout import cells_in_hierarchy, load_layout
+from ._layout import select_top_cells as _select_top_cells
 from ._provenance import build_provenance
 from .decks import (
     UnknownExtractionDeckError,
@@ -73,6 +74,7 @@ def run_precheck(
     grid_um: float | None = None,
     allowed_layers: list[tuple[int, int]] | None = None,
     deck: str | None = None,
+    top: str | None = None,
 ) -> dict[str, Any]:
     """Run the layout-hygiene check battery against the layout at ``path``.
 
@@ -146,18 +148,41 @@ def run_precheck(
       pairing to check against) or when the resolved deck declares no label
       layers at all.
 
+    ``top`` (issue #554) restricts every check to one named top cell instead
+    of every top cell in the stream (today's default, unchanged when
+    omitted): ``offgrid``/``zero_area``/``pin_labels_over_drawing`` scope by
+    filtering the ``top_cells`` list each already flattens per-cell (each
+    already hierarchy-inclusive via ``begin_shapes_rec``); ``cell_names`` and
+    ``layer_whitelist`` additionally restrict their own whole-stream
+    ``Layout.each_cell()`` walk to that cell's own hierarchy (see
+    :func:`klayout_tools._layout.cells_in_hierarchy`) -- both would otherwise
+    keep reporting on cell names/layer-whitelist shape counts from *every*
+    top cell's hierarchy regardless of ``--top``, the same "picks the bbox,
+    not the accumulation" risk ``klt stats``/``klt layers`` have. A named
+    cell absent from the stream is a :class:`PrecheckError`, matching
+    ``klt ring-check --top``.
+
     Raises :class:`PrecheckError` if the file is missing/unreadable,
-    ``deck`` names an unregistered extraction deck, or ``grid_um`` is given
-    but not representable as a positive integer number of database units.
+    ``deck`` names an unregistered extraction deck, ``top`` names a cell
+    absent from the stream, or ``grid_um`` is given but not representable as
+    a positive integer number of database units.
     """
     layout = load_layout(path, PrecheckError)
-    top_cells = list(layout.top_cells())
+    top_cells = _select_top_cells(layout, top, PrecheckError)
+
+    scope_cell_indices: set[int] | None = None
+    if top is not None:
+        # `_select_top_cells` above already validated `top` and returned
+        # exactly one cell.
+        scope_cell_indices = {
+            cell.cell_index() for cell in cells_in_hierarchy(layout, top_cells[0])
+        }
 
     checks = [
         _check_offgrid(layout, top_cells, grid_um),
         _check_zero_area(layout, top_cells),
-        _check_cell_names(layout),
-        _check_layer_whitelist(layout, allowed_layers),
+        _check_cell_names(layout, scope_cell_indices),
+        _check_layer_whitelist(layout, allowed_layers, scope_cell_indices),
         _check_pin_labels_over_drawing(layout, top_cells, deck),
     ]
 
@@ -210,7 +235,9 @@ def _skipped(name: str, reason: str) -> dict[str, Any]:
     }
 
 
-def _cell_placement_weights(layout: Any) -> dict[int, int]:
+def _cell_placement_weights(
+    layout: Any, scope_cell_indices: set[int] | None = None
+) -> dict[int, int]:
     """Total placement multiplicity for every cell definition in ``layout``.
 
     A cell can be placed multiple times, at multiple hierarchy depths, and
@@ -232,13 +259,27 @@ def _cell_placement_weights(layout: Any) -> dict[int, int]:
     flatten -- important for macro-scale, deeply-hierarchical input where
     literally flattening every shape (e.g. via ``begin_shapes_rec``) would
     be far more expensive.
+
+    ``scope_cell_indices`` (issue #554), when given, restricts both the
+    walk and the resulting weights to that set of cell indices -- the
+    ``--top`` cell's own hierarchy (see
+    :func:`klayout_tools._layout.cells_in_hierarchy`). A cell outside the
+    scope contributes no weight to anything, and is itself skipped when
+    visited, so a shared cell definition placed under both the chosen top
+    cell *and* an unrelated one is only weighted for placements reachable
+    from the chosen top cell. ``None`` (the default) preserves today's
+    whole-layout walk exactly.
     """
     weights: dict[int, int] = {}
     for cell_index in layout.each_cell_top_down():
+        if scope_cell_indices is not None and cell_index not in scope_cell_indices:
+            continue
         weight = weights.setdefault(cell_index, 1)
         cell = layout.cell(cell_index)
         for inst in cell.each_inst():
             child_index = inst.cell_index
+            if scope_cell_indices is not None and child_index not in scope_cell_indices:
+                continue
             weights[child_index] = weights.get(child_index, 0) + weight * inst.size()
     return weights
 
@@ -340,9 +381,16 @@ def _check_zero_area(layout: Any, top_cells: list[Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _check_cell_names(layout: Any) -> dict[str, Any]:
+def _check_cell_names(
+    layout: Any, scope_cell_indices: set[int] | None = None
+) -> dict[str, Any]:
     violations: list[dict[str, Any]] = []
-    for cell in layout.each_cell():
+    cells = (
+        layout.each_cell()
+        if scope_cell_indices is None
+        else (layout.cell(i) for i in scope_cell_indices)
+    )
+    for cell in cells:
         name = cell.name
         bad_chars = sorted({c for c in name if c in _CELL_NAME_FORBIDDEN_CHARS})
         if bad_chars:
@@ -366,13 +414,20 @@ def _check_cell_names(layout: Any) -> dict[str, Any]:
 
 
 def _check_layer_whitelist(
-    layout: Any, allowed_layers: list[tuple[int, int]] | None
+    layout: Any,
+    allowed_layers: list[tuple[int, int]] | None,
+    scope_cell_indices: set[int] | None = None,
 ) -> dict[str, Any]:
     if allowed_layers is None:
         return _skipped("layer_whitelist", "no --allowed-layers given")
 
     allowed = {tuple(entry) for entry in allowed_layers}
-    weights = _cell_placement_weights(layout)
+    weights = _cell_placement_weights(layout, scope_cell_indices)
+    cells = (
+        list(layout.each_cell())
+        if scope_cell_indices is None
+        else [layout.cell(i) for i in scope_cell_indices]
+    )
 
     violations: list[dict[str, Any]] = []
     for layer_index in layout.layer_indexes():
@@ -387,10 +442,12 @@ def _check_layer_whitelist(
         # in a leaf cell that is itself placed hundreds of times is counted
         # hundreds of times -- matching true placed-shape prevalence rather
         # than under-reporting it by orders of magnitude on hierarchical,
-        # macro-scale input (e.g. standard-cell macros).
+        # macro-scale input (e.g. standard-cell macros). Restricted to
+        # `scope_cell_indices` (issue #554) when a `--top` cell is chosen --
+        # both `cells` and `weights` above are already scoped to it.
         shape_count = sum(
             cell.shapes(layer_index).size() * weights.get(cell.cell_index(), 0)
-            for cell in layout.each_cell()
+            for cell in cells
         )
         violations.append(
             {

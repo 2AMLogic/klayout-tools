@@ -54,6 +54,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._layout import load_layout
+from ._layout import select_top_cells as _select_top_cells_shared
 
 #: Stable rule id carried by every ring-continuity violation this module
 #: emits -- the same contract guarantee a ``klt drc`` rule id or a ``klt lvs``
@@ -224,14 +225,13 @@ def _select_top_cells(layout: Any, top: str | None) -> list[Any]:
     flatten-per-top-cell idiom ``drc.py`` uses). With ``top`` set, only that
     named cell is checked -- and it must exist, else a :class:`RingCheckError`
     (a request the caller can fix, not a silent empty pass).
-    """
-    if top is None:
-        return list(layout.top_cells())
 
-    cell = layout.cell(top)
-    if cell is None:
-        raise RingCheckError(f"top cell not found in stream: {top}")
-    return [cell]
+    Delegates to the shared ``_layout.select_top_cells`` helper (issue #554),
+    which now backs the same "optional scope, default to every top cell"
+    pattern for ``klt layers``/``drc``/``precheck``/``render``/
+    ``socket-check`` too, so this module keeps its own error type.
+    """
+    return _select_top_cells_shared(layout, top, RingCheckError)
 
 
 def _clip_box(

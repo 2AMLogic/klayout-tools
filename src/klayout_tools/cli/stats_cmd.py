@@ -12,7 +12,7 @@ from .output import emit_error, emit_success, render_table
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = stats_report(args.file, per_layer=args.per_layer)
+        report = stats_report(args.file, per_layer=args.per_layer, top=args.top)
     except StatsError as exc:
         return emit_error("stats", str(exc), args.format)
 

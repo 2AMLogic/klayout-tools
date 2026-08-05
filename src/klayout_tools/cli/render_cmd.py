@@ -14,6 +14,7 @@ def run(args: argparse.Namespace) -> int:
             width=args.width,
             height=args.height,
             background=args.background,
+            top=args.top,
         )
     except RenderError as exc:
         return emit_error("render", str(exc), args.format)

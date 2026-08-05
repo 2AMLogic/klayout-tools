@@ -4,7 +4,7 @@ Report bounding box, drawn area, density, and polygon/vertex counts of a
 GDSII or OASIS layout stream, in total and optionally per layer.
 
 ```
-klt stats <file> [--per-layer] [--format text|json]
+klt stats <file> [--per-layer] [--top <cell>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -12,6 +12,13 @@ klt stats <file> [--per-layer] [--format text|json]
 - `--per-layer` — also report the same statistics broken down per layer.
   Without this flag, only the `total` figures are computed (`layers` is
   `null`).
+- `--top` — top cell to report on when the stream has more than one
+  (required in that case; optional otherwise), matching `klt extract --top`.
+  When given, **both** `bbox_um` and every area/polygon/vertex count
+  (`total` and, with `--per-layer`, each `layers[]` entry) are scoped to that
+  cell's own hierarchy — itself plus every cell it calls, directly or
+  indirectly — not the whole stream. A named cell absent from the stream
+  exits `1` with a clean error.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command runs fully headless via KLayout's batch database API
@@ -132,15 +139,21 @@ All zero if the layout has no cells.
 - **Single top cell required.** `klt stats` reports a single bounding-box
   reference frame shared by `total` and every `layers[]` entry, taken from
   the layout's one top cell. A layout with more than one top cell is
-  ambiguous and raises an error (exit code `1`). A layout with zero cells
-  reports `top_cell: null` and an all-zero `bbox_um`.
+  ambiguous and raises an error (exit code `1`) unless `--top` names which
+  one to report on. A layout with zero cells reports `top_cell: null` and an
+  all-zero `bbox_um`.
 - **Bounding box is hierarchy-inclusive.** `bbox_um` covers the top cell and
   everything instantiated beneath it, not just shapes drawn directly in the
   top cell.
 - **Area/vertex counts are per-cell-definition**, exactly like `klt layers`'
-  shape counts: each shape is counted once where it is *defined*, summed
-  over every cell in the layout — **not** multiplied by how many times its
-  cell is instantiated.
+  shape counts: each shape is counted once where it is *defined* — **not**
+  multiplied by how many times its cell is instantiated. Without `--top`,
+  this is summed over every cell in the stream (today's default,
+  unchanged). With `--top <cell>`, it is summed only over `<cell>`'s own
+  hierarchy — itself plus every cell it calls, directly or indirectly — so
+  the count stays consistent with `bbox_um`'s own scope rather than a bbox
+  scoped to one cell sitting next to totals still summed across the whole
+  library.
 - **Overlapping shapes are not merged.** `area_um2` is the sum of individual
   shape areas; overlapping geometry is double-counted. This keeps the
   computation cheap and exactly reproducible (no polygon-merge dependency on
@@ -189,7 +202,7 @@ A layer whose `annotation` field is `true` renders as `yes` in the table.
 | Exit code | Meaning                                                              |
 | --------- | ------------------------------------------------------------------- |
 | `0`       | Success — report written to stdout.                                 |
-| `1`       | The file is missing, unreadable, not a recognisable layout, or the layout has more than one top cell. |
+| `1`       | The file is missing, unreadable, not a recognisable layout, `--top` names a cell absent from the stream, or the layout has more than one top cell and `--top` was not given. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse.|
 
 On error, a concise message is written to **stderr** and nothing is written to
