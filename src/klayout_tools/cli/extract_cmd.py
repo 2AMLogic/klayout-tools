@@ -54,6 +54,12 @@ def run(args: argparse.Namespace) -> int:
             parasitics=args.parasitics,
             top_cell_pins_only=args.top_cell_pins,
             declared_pins=declared_pins,
+            # `--defer-resistor-fixed-offset` (issue #588) is the CLI half of
+            # the deferred-correction contract `docs/cli/lvs.md` describes:
+            # the flag is phrased as "defer" (opt in to omitting the
+            # correction), `run_extract`'s kwarg as "apply" (default `True`),
+            # so the CLI default stays today's always-applied behavior.
+            apply_resistor_fixed_offset=not args.defer_resistor_fixed_offset,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)

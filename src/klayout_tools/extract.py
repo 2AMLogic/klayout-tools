@@ -261,9 +261,11 @@ def run_extract(
     demotes -- it cannot re-promote a net ``top_cell_pins_only`` already
     kept internal.
 
-    ``apply_resistor_fixed_offset`` (issue #559/#585): when ``True`` (the
-    default, the behavior every ``klt extract`` invocation and every existing
-    caller gets), each opted-in resistor device class's
+    ``apply_resistor_fixed_offset`` (issue #559/#585, exposed on the CLI as
+    ``klt extract --defer-resistor-fixed-offset`` by issue #588): when
+    ``True`` (the default, the behavior every existing caller and every
+    ``klt extract`` invocation without that flag gets), each opted-in
+    resistor device class's
     :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` head/end
     term is added to ``R`` once per drawn primitive at extraction time --
     baked into both the written SPICE and the JSON ``devices[].params``.

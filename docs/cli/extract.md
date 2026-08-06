@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--defer-resistor-fixed-offset] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -59,6 +59,19 @@ two disagree, this document (and the code) win.
   documentation without blocking `klt lvs`'s `options.combine_devices` from
   folding the series chain. When unset, every named net still promotes to a
   pin, byte-for-byte unchanged. See "Declared pin set" below.
+- `--defer-resistor-fixed-offset` — optional, off by default. Omit each
+  opted-in resistor device class's `ResistorDevice.fixed_offset_ohm`
+  head/end-resistance term from the extracted `R`, leaving only the raw
+  per-primitive body resistance in both the written SPICE and the JSON
+  `devices[].params.r_ohm` (issue #588). Use this when the netlist will be
+  read back through `klt lvs`'s pre-extracted `layout.netlist` +
+  `layout.deck` + `options.combine_devices: true` path, which applies the
+  offset once per *post-combine* logical device — baking it in per drawn
+  primitive here first would double-count it across a series fold. When
+  omitted, the correction is applied at extraction time exactly as before,
+  byte-for-byte unchanged; and for a deck with no `fixed_offset_ohm`-opted-in
+  resistor class (everything except sky130's `res_high_po` today) the flag is
+  a no-op either way. See "Deferring the fixed resistor offset" below.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -482,7 +495,9 @@ resistance, not just `devices[].params.r_ohm`. (`klt lvs`'s
 correction until after combining series-connected primitives, so a folded
 logical device gets the fixed offset once rather than once per primitive —
 see `docs/cli/lvs.md`'s `options.combine_devices` entry, issue #559. `klt
-extract` itself — no combine step involved — is unaffected.)
+extract` itself — no combine step involved — applies the correction unless
+`--defer-resistor-fixed-offset` asks it not to; see "Deferring the fixed
+resistor offset" below.)
 
 Three consequences worth knowing:
 
@@ -511,6 +526,53 @@ Three consequences worth knowing:
   — but is flagged by a **different** `warnings[]` string than fully
   unmarked geometry; see "Known limitation: unmodelled device geometry"
   below.
+
+#### Deferring the fixed resistor offset (`--defer-resistor-fixed-offset`, issue #588)
+
+The `fixed_offset_ohm` term is a **per-logical-device** head/end effect, not a
+per-square one: a resistor drawn as N series-connected primitives has one pair
+of heads, not N. `klt extract` cannot know which drawn primitives a downstream
+consumer will fold together, so by default it applies the correction where it
+can see it — once per drawn primitive, at extraction time.
+
+`klt lvs`'s `options.combine_devices: true` is the consumer that *does* know:
+it folds the series chain and must add the offset exactly once afterwards. For
+the **inline** shape (`layout.file` + `layout.deck`) it handles both halves
+itself — it extracts with the correction deferred internally and re-applies it
+post-combine. For the **pre-extracted** shape (`layout.netlist` +
+`layout.deck` + `combine_devices: true`, issue #585) it can only do the second
+half; the netlist it is handed must already have been written with the
+correction deferred, or the two additions double-count (the per-primitive
+offsets are summed by the fold and cannot be un-summed afterwards).
+
+`--defer-resistor-fixed-offset` is the extraction-time half of that contract,
+for a flow that drives `klt` as a subprocess and never imports the package (it
+is exactly `run_extract(..., apply_resistor_fixed_offset=False)`):
+
+```sh
+# Write a body-R-only netlist for klt lvs's post-combine correction.
+klt extract ladder.gds --deck sky130 --defer-resistor-fixed-offset -o ladder.spice
+
+# ... then compare it with the correction applied once per folded device:
+#   {"layout": {"netlist": "ladder.spice", "deck": "sky130", "top": "RES"},
+#    "reference": {...}, "options": {"combine_devices": true}}
+klt lvs request.json --format json
+```
+
+Rules of thumb:
+
+- Pair `--defer-resistor-fixed-offset` with `combine_devices: true` **and** a
+  `layout.deck`. Deferring without a `layout.deck` (the bare
+  `{"netlist": ..., "top": ...}` shape, which attempts no correction at all)
+  leaves the offset missing entirely.
+- Do **not** defer for any other consumer. A netlist headed for `klt sim`, or
+  for `klt lvs` without `combine_devices`, wants the corrected `R` — that is
+  the default, so simply omit the flag.
+- The flag changes only `R` on `fixed_offset_ohm`-opted-in resistor classes
+  (today: sky130's `res_high_po`). Every other device, net, pin, and warning
+  in the report — and every byte of the written netlist outside those `R`
+  values — is identical either way; on a layout with no such resistors, the
+  two outputs are byte-for-byte equal.
 
 ### Junction diodes (issue #542)
 
