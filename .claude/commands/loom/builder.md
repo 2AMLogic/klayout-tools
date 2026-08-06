@@ -13,6 +13,14 @@ You help with general development tasks including:
 - Refactoring code
 - Improving documentation
 
+## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
+
+If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
+comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
+posts the literal string `@path`, not the file's contents. **Full pitfall,
+incident citation, and fixes**:
+[`comment-body-literal-path.md`](comment-body-literal-path.md).
+
 ## CRITICAL: Scope Discipline
 
 **NEVER modify files or code unrelated to the issue you are working on.**
@@ -310,6 +318,25 @@ work. This is not hypothetical — it happened in production (kicad-tools PRs
 writes your WIP as a patch file under
 `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to your own
 worktree, so there is no shared stack to collide on.
+
+**For a "clean baseline vs. my diff" comparison** — temporarily clearing your
+WIP to run a clippy/shellcheck/test baseline, then restoring it — `snapshot`
+is *not* enough (it captures a patch but does not reset the working tree).
+Use the clean-and-restore pair instead of `git stash` / `git stash pop`
+(#5217):
+
+```bash
+./.loom/scripts/worktree.sh stash-push <issue-number>   # capture WIP, reset to clean HEAD
+<run the baseline check>                                # e.g. cargo clippy > /tmp/baseline.txt
+./.loom/scripts/worktree.sh stash-pop <issue-number>    # restore exactly what was captured
+```
+
+It anchors your WIP to a **per-issue** ref (`refs/loom/stash-baseline/issue-<N>`),
+never `refs/stash`, so another builder's concurrent stash cannot land "in
+between" your push and pop. Add `--include-untracked` to move untracked files
+out too. Because it never runs `git stash pop|drop|clear`, it does not trip
+the `stash-scope` ask that would stall a headless sweep — whereas raw
+`git stash pop` from a worktree still asks, correctly, and always will.
 
 This does **not** apply to the `check-main-clean.sh --quarantine` recovery
 flow below (§"If it exits 3…") — that flow's use of `git stash` operates on
@@ -680,6 +707,26 @@ Before opening a PR that touches build-time code:
 - If the design is fundamentally N-bound, **profile, batch, or cache** before pushing (e.g., one `git log` invocation for all paths instead of N invocations).
 
 If no downstream cap is documented, ask in the PR description rather than assuming there is none.
+
+### Your Environment Is Not a Clean Shell — Check Before Trusting Test Failures
+
+**A dispatched sweep/daemon child inherits `LOOM_FORCE_SCOPE=protected` and `LOOM_GUARD_DECISION_LOG=1`** from the dispatcher's own process environment (set in `loom-daemon-start.sh` to let a headless agent force-push/reset-hard its own branch without stalling on an unanswerable guard ASK). These are agent-wide — inherited by *every* subprocess you run, not just your own git operations.
+
+**Consequence**: if the repo you are working in ships its own guard-hook test suite that asserts the guard's *factory-default* behavior (default force-push/reset-hard `ask` tier, decision-log off by default — e.g. a suite named like `test-guard-destructive*.sh`), your ambient environment overrides exactly the defaults that suite is testing. Running that suite as a dispatched agent can produce dozens of failures that do **not** reproduce in a clean human shell on the identical commit — this has already caused a Builder to misread the failures as "main is broken" and close a valid, unrelated issue as a false duplicate (#5388).
+
+**Before drawing any conclusion from a failing test suite** (especially one where the failures don't match what the issue/PR under investigation would plausibly cause), check your own environment first:
+
+```bash
+env | grep -E '^LOOM_(FORCE_SCOPE|GUARD_DECISION_LOG)='
+```
+
+If either is set and the suite exercises guard-hook / force-push / reset-hard behavior, re-run it with the ambient overrides stripped before trusting the result:
+
+```bash
+env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <test-suite-command>
+```
+
+Full background: `.loom/docs/guard-hooks.md` → "Known consequence".
 
 ## Guidelines
 
