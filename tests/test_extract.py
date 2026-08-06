@@ -2782,6 +2782,140 @@ def test_written_spice_carries_res_high_po_fixed_offset_corrected_resistance(tmp
     assert written_r_ohm > 10.0 * 324.827244
 
 
+# --------------------------------------------------------------------------- #
+# `--defer-resistor-fixed-offset` (issue #588): the CLI half of the
+# deferred-correction contract `docs/cli/lvs.md` describes. The Python API's
+# `run_extract(..., apply_resistor_fixed_offset=False)` is exercised by
+# `tests/test_lvs.py` (issue #585) end-to-end through `options.combine_devices`;
+# these tests cover the CLI flag's own wiring and its default.
+# --------------------------------------------------------------------------- #
+
+#: `res_high_po`'s deck constants, transcribed (not imported) from
+#: `decks/sky130.py` so a deck-value drift fails loudly here rather than being
+#: silently tracked -- same idiom as `tests/test_lvs.py`'s own copies.
+_RES_HIGH_PO_SHEET_RHO_OHM_SQ = 324.827244
+_RES_HIGH_PO_FIXED_OFFSET_OHM = 379.705147
+
+
+def test_cli_defer_resistor_fixed_offset_omits_offset(tmp_path, capsys):
+    """Issue #588: `klt extract --defer-resistor-fixed-offset` forwards
+    `apply_resistor_fixed_offset=False` to `run_extract`, so the reported and
+    written `R` carry only the raw per-primitive body resistance.
+
+    This is what `klt lvs`'s pre-extracted `layout.netlist` + `layout.deck` +
+    `options.combine_devices: true` path needs (issue #585): it adds the
+    fixed offset once per *post-combine* device, so baking it in per primitive
+    here would double-count it after the series fold. Before the fix the flag
+    did not exist and a subprocess-only flow could not produce this netlist.
+    """
+    l_um = 10.0
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(l_um), tmp_path / "res_high_po.gds"
+    )
+    netlist_path = tmp_path / "deferred.spice"
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(netlist_path),
+            "--defer-resistor-fixed-offset",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    raw_body_r_ohm = l_um / 1.0 * _RES_HIGH_PO_SHEET_RHO_OHM_SQ
+    (device,) = out["devices"]
+    assert device["class"] == "res_high_po"
+    assert device["params"]["r_ohm"] == pytest.approx(raw_body_r_ohm)
+    # ... and the written netlist agrees (the correction is deferred on the
+    # `kdb.Device` itself, not just in the response dict).
+    assert _spice_card_value(netlist_path, "R") == pytest.approx(raw_body_r_ohm)
+    # Negative control: the default (corrected) value is a different number,
+    # so this cannot pass by the offset merely being small.
+    assert raw_body_r_ohm != pytest.approx(
+        raw_body_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+
+
+def test_cli_without_defer_flag_still_applies_fixed_offset(tmp_path, capsys):
+    """The default half of issue #588: omitting
+    `--defer-resistor-fixed-offset` leaves today's behavior exactly as it was
+    -- the fixed offset is applied once per drawn primitive at extraction
+    time, in both the JSON report and the written netlist, and the written
+    netlist is byte-identical to what `run_extract`'s default produces."""
+    l_um = 10.0
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(l_um), tmp_path / "res_high_po.gds"
+    )
+    netlist_path = tmp_path / "default.spice"
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(netlist_path),
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    corrected_r_ohm = (
+        l_um / 1.0 * _RES_HIGH_PO_SHEET_RHO_OHM_SQ + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+    (device,) = out["devices"]
+    assert device["params"]["r_ohm"] == pytest.approx(corrected_r_ohm)
+    assert _spice_card_value(netlist_path, "R") == pytest.approx(corrected_r_ohm)
+
+    # Byte-identical to the library default -- the flag's absence adds nothing.
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "baseline.spice"))
+    assert out["netlist_sha256"] == baseline["netlist_sha256"]
+    assert netlist_path.read_bytes() == (tmp_path / "baseline.spice").read_bytes()
+
+
+def test_cli_defer_flag_is_a_noop_without_an_opted_in_resistor(tmp_path, capsys):
+    """Edge case from issue #588's test plan: on a layout with no
+    `fixed_offset_ohm`-opted-in resistor class (every deck row except sky130's
+    `res_high_po` leaves the field at its `0.0` default), the flag changes
+    nothing -- the two written netlists are byte-for-byte equal."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    def _extract(netlist_path: Path, *flags: str) -> dict:
+        exit_code = main(
+            [
+                "extract",
+                path,
+                "--deck",
+                "sky130",
+                "-o",
+                str(netlist_path),
+                *flags,
+                "--format",
+                "json",
+            ]
+        )
+        assert exit_code == 0
+        return json.loads(capsys.readouterr().out)
+
+    default = _extract(tmp_path / "default.spice")
+    deferred = _extract(tmp_path / "deferred.spice", "--defer-resistor-fixed-offset")
+
+    assert default["device_counts"] == {"nfet": 1, "pfet": 1}  # no resistor at all
+    assert default["netlist_sha256"] == deferred["netlist_sha256"]
+    assert (tmp_path / "default.spice").read_bytes() == (
+        tmp_path / "deferred.spice"
+    ).read_bytes()
+
+
 def test_written_spice_carries_mim_perim_cap_corrected_capacitance(tmp_path):
     """The capacitor half of issue #521: the `C` card in the written netlist
     carries the full two-term `area_cap_f_um2 * A + perim_cap_f_um * P`, the

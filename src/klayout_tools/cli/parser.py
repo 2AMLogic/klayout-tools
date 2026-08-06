@@ -639,6 +639,27 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--defer-resistor-fixed-offset",
+        dest="defer_resistor_fixed_offset",
+        action="store_true",
+        help=(
+            "omit each opted-in resistor device class's "
+            "`fixed_offset_ohm` head/end-resistance term from the extracted "
+            "`R` (issue #588), leaving only the raw per-primitive body "
+            "resistance in both the written SPICE and the JSON "
+            "`devices[].params.r_ohm`. Use this when the netlist will be "
+            "read back through `klt lvs`'s pre-extracted `layout.netlist` + "
+            "`layout.deck` + `options.combine_devices: true` path, which "
+            "applies the offset once per *post-combine* logical device -- "
+            "extracting it per drawn primitive first would double-count it "
+            "across a series fold. Off by default: the offset is applied at "
+            "extraction time, byte-identical to today's behavior. A deck "
+            "with no `fixed_offset_ohm`-opted-in resistor class (everything "
+            "except sky130's res_high_po today) is unaffected either way. "
+            "See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

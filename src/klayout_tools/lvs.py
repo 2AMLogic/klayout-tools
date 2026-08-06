@@ -800,7 +800,9 @@ def _resolve_layout(
     ``run_lvs`` calls ``apply_resistor_fixed_offset_corrections`` post-combine
     for that shape too. That correction is only *correct* if the supplied
     SPICE was extracted with the offset deferred (``run_extract(...,
-    apply_resistor_fixed_offset=False)``); a netlist extracted the default way
+    apply_resistor_fixed_offset=False)``, or its CLI equivalent ``klt extract
+    --defer-resistor-fixed-offset``, issue #588); a netlist extracted the
+    default way
     already carries a per-primitive offset that cannot be selectively un-summed
     after the series fold.
     """
