@@ -3131,6 +3131,89 @@ def test_build_mismatches_ambiguous_net_is_warning_topology():
     assert entry["category"] == lvs.CATEGORY_TOPOLOGY
     assert entry["severity"] == "warning"
     assert entry["net"] == {"layout": "N1", "reference": "N2"}
+    # A `_FakeNamed` stand-in has no `terminal_count()`/`pin_count()` --
+    # the single-terminal-both-sides check (issue #596, below) must not
+    # error against an object that only implements `expanded_name()`, and
+    # falls back to the generic ambiguous-pairing wording.
+    assert entry["description"] == (
+        "nets were paired ambiguously; the comparer resolved it "
+        "structurally (consider a hints.same_nets entry to pin this down)"
+    )
+
+
+class _FakeNetWithCounts(_FakeNamed):
+    """Extends `_FakeNamed` with `terminal_count()`/`pin_count()` -- the
+    two `kdb.Net` methods issue #596's single-terminal-both-sides check
+    reads (`lvs._build_mismatches`'s `logger.ambiguous_net_matches` loop)."""
+
+    def __init__(self, name: str, terminal_count: int = 1, pin_count: int = 0) -> None:
+        super().__init__(name)
+        self._terminal_count = terminal_count
+        self._pin_count = pin_count
+
+    def terminal_count(self) -> int:
+        return self._terminal_count
+
+    def pin_count(self) -> int:
+        return self._pin_count
+
+
+def test_build_mismatches_ambiguous_net_both_single_terminal_is_distinct_finding():
+    """Issue #596: when both paired nets have exactly one device terminal
+    and no declared pin, the `topology`/`"warning"` entry's `description`
+    reads as a real connectivity finding, not the routine "resolved it
+    structurally" ambiguous-pairing wording -- so a caller checking
+    `mismatches[].description` (or a human reading it) does not mistake it
+    for a naming nit."""
+    logger = _FakeLogger()
+    logger.ambiguous_net_matches.append(
+        (_FakeNetWithCounts("N1"), _FakeNetWithCounts("N2"))
+    )
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["category"] == lvs.CATEGORY_TOPOLOGY
+    assert entry["severity"] == "warning"
+    assert entry["net"] == {"layout": "N1", "reference": "N2"}
+    assert "not a routine ambiguous-pairing" in entry["description"]
+    assert "single_terminal_nets" in entry["description"]
+    assert "resolved it structurally" not in entry["description"]
+
+
+def test_build_mismatches_ambiguous_net_multi_terminal_stays_generic():
+    """A net with 2+ device terminals on either side is a genuinely
+    ambiguous structural pairing -- the generic wording is unchanged."""
+    logger = _FakeLogger()
+    logger.ambiguous_net_matches.append(
+        (
+            _FakeNetWithCounts("N1", terminal_count=2),
+            _FakeNetWithCounts("N2", terminal_count=2),
+        )
+    )
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["description"] == (
+        "nets were paired ambiguously; the comparer resolved it "
+        "structurally (consider a hints.same_nets entry to pin this down)"
+    )
+
+
+def test_build_mismatches_ambiguous_net_declared_pin_stays_generic():
+    """A single-terminal net that is *also* a declared pin is not this
+    finding -- a top-level pin with one device terminal is an ordinary,
+    expected interface node, not a floating internal net."""
+    logger = _FakeLogger()
+    logger.ambiguous_net_matches.append(
+        (
+            _FakeNetWithCounts("N1", pin_count=1),
+            _FakeNetWithCounts("N2", pin_count=1),
+        )
+    )
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["description"] == (
+        "nets were paired ambiguously; the comparer resolved it "
+        "structurally (consider a hints.same_nets entry to pin this down)"
+    )
 
 
 def test_build_mismatches_param_diff_reports_only_differing_parameter():

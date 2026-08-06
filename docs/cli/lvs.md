@@ -917,11 +917,23 @@ despite a name/identity conflict. Six classification sites inside
   polarity, so an all-`nfet` layout compared against an all-`nfet`
   reference is not a real defect); `"error"` when the class has one or
   more real instances.
-- **Ambiguous net pairing** (`lvs.py:1194-1207`, from
+- **Ambiguous net pairing** (`lvs.py:2191-2235`, from
   `logger.ambiguous_net_matches`) — nets were paired ambiguously and the
   comparer resolved it structurally on its own (consider adding a
   `hints.same_nets` entry to pin the pairing down explicitly). Always
-  `"warning"`; never changes `status`.
+  `"warning"`; never changes `status`. **Issue #596:** when the paired net
+  on *both* sides has exactly one device terminal (`Net.terminal_count() ==
+  1`) and no declared pin (`Net.pin_count() == 0`), the `description` is
+  distinct — it reads as a real connectivity finding ("there is no DC path
+  through this node on either side... not a routine ambiguous-pairing/
+  hints.same_nets nit") rather than the generic "resolved it structurally"
+  wording, since a net with only one device terminal on each side is almost
+  always an undriven device input reproduced identically on the layout and
+  the reference (see `klt extract`'s "Single-device-terminal nets" for the
+  layout-side detail, `docs/cli/extract.md`). Both cases stay
+  `category: "topology"`, `severity: "warning"` — only `description`
+  differs; a caller that needs to filter on this distinction programmatically
+  should match the `description` text rather than `category`.
 - **Net identity conflict with no leftover** (`lvs.py:1539-1549`, inside
   `_classify_net_mismatches`) — two nets were paired despite a name/identity
   conflict, and neither side has an accompanying one-sided leftover net

@@ -35,6 +35,7 @@ from klayout_tools.decks import (
 from klayout_tools.extract import (
     ExtractError,
     _describe_devices,
+    _detect_single_terminal_nets,
     _exclude_capacitor_top_via_overlap,
     _extract_netlist,
     _n_squares,
@@ -168,6 +169,42 @@ def _make_inverter_layout(
 def _write_gds(layout: kdb.Layout, path: Path) -> str:
     layout.write(str(path))
     return str(path)
+
+
+def _make_floating_gate_nmos_layout(top_name: str = "TOP") -> kdb.Layout:
+    """One NMOS whose poly gate carries no label and touches nothing else --
+    reproducing issue #596's motivating case: an undriven MOS gate that is
+    DRC-clean and reads as an ordinary, plausible net. The gate net's only
+    device terminal is this NMOS's own gate (``device_count == 1``), and
+    since it is never labelled, ``make_top_level_pins()`` never promotes it
+    to a pin (``pin: False``) -- exactly the condition
+    :func:`_detect_single_terminal_nets` flags.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Text(text, kdb.Trans(x, y)))
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (nmos active)
+    # poly.drawing gate bar -- deliberately unlabeled and not contacted
+    # anywhere else, so it forms a net with exactly one device terminal.
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))
+
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (S side)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (D side)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (S side)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (D side)
+
+    label(67, 5, "VGND", 200, 500)
+    label(67, 5, "Y", 1800, 500)
+
+    return layout
 
 
 # --------------------------------------------------------------------------- #
@@ -3324,7 +3361,18 @@ def test_poly_routing_between_gates_does_not_trigger_unmodelled_warning(tmp_path
     report = run_extract(path, "sky130", output=str(tmp_path / "routing.spice"))
 
     assert report["device_counts"] == {"nfet": 2}
-    assert report["warnings"] == []
+    assert not any("unmodelled" in warning for warning in report["warnings"])
+    # Issue #596: this fixture deliberately leaves every source/drain net
+    # unlabeled (it exercises poly-gate-tie routing only, not a full
+    # circuit), so each of the two devices' source and drain nets now
+    # legitimately reports as a single-terminal, non-pin net -- confirms
+    # the new diagnostic coexists with the unmodelled-poly heuristic under
+    # test rather than that it silences new, correctly-detected findings.
+    assert len(report["single_terminal_nets"]) == 4
+    assert {entry["terminal_kind"] for entry in report["single_terminal_nets"]} == {
+        "source",
+        "drain",
+    }
 
 
 def test_resistor_free_layout_extracts_byte_identically(tmp_path):
@@ -3565,6 +3613,171 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     ]
     assert any(
         "no DC bias path" in warning and pfet["nets"]["b"] in warning
+        for warning in report["warnings"]
+    )
+
+    # Issue #596: the same anonymous PMOS body net is also exactly the
+    # "legitimate single-terminal tie" case -- device_count == 1 (only the
+    # PMOS body terminal), not a declared pin -- so it appears in
+    # `single_terminal_nets[]` too, classified `terminal_kind == "body"`
+    # (not `"gate"`), with the softer "can be a legitimate single-terminal
+    # tie" warning wording rather than the gate-specific "almost certainly
+    # an unconnected input" wording (see the floating-gate test below).
+    body_net_name = pfet["nets"]["b"]
+    single_terminal_by_net = {
+        entry["net"]: entry for entry in report["single_terminal_nets"]
+    }
+    assert body_net_name in single_terminal_by_net
+    body_entry = single_terminal_by_net[body_net_name]
+    assert body_entry["device"] == pfet["name"]
+    assert body_entry["terminal"] == "b"
+    assert body_entry["terminal_kind"] == "body"
+    assert any(
+        "legitimate single-terminal tie" in warning and body_net_name in warning
+        for warning in report["warnings"]
+    )
+    assert not any(
+        "almost certainly an unconnected input" in warning and body_net_name in warning
+        for warning in report["warnings"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Single-device-terminal nets (issue #596): a net with exactly one device
+# terminal and no declared pin is structurally almost always a defect (a
+# floating MOS gate above all), and is not discoverable today except by a
+# downstream simulator's singular-matrix failure.
+# --------------------------------------------------------------------------- #
+
+
+def test_detect_single_terminal_nets_direct():
+    """Unit-level coverage of `_detect_single_terminal_nets` against
+    fabricated `devices[]`/`nets[]` arrays, mirroring the shape
+    `_describe_devices`/`_describe_nets` actually produce -- covers the MOS
+    gate/source/drain/body classification, the non-MOS "raw terminal key"
+    fallback, the pin exclusion, and the device_count != 1 exclusion
+    without needing a real layout for every case."""
+    devices = [
+        {
+            "name": "M1",
+            "class": "nfet",
+            "nets": {"s": "VGND", "g": "FLOAT_G", "d": "Y", "b": "vsubs"},
+            "params": {},
+        },
+        {
+            "name": "R1",
+            "class": "resistor",
+            "nets": {"a": "RA", "b": "FLOAT_RB", "w": "vsubs"},
+            "params": {},
+        },
+    ]
+    nets = [
+        {"name": "VGND", "pin": True, "device_count": 1},
+        {"name": "FLOAT_G", "pin": False, "device_count": 1},
+        {"name": "Y", "pin": True, "device_count": 1},
+        {"name": "vsubs", "pin": True, "device_count": 2},
+        {"name": "RA", "pin": True, "device_count": 1},
+        {"name": "FLOAT_RB", "pin": False, "device_count": 1},
+    ]
+
+    result = _detect_single_terminal_nets(devices, nets)
+
+    by_net = {entry["net"]: entry for entry in result}
+    # The gate net: single device terminal, not a pin -> flagged, kind "gate".
+    assert by_net["FLOAT_G"] == {
+        "net": "FLOAT_G",
+        "device": "M1",
+        "terminal": "g",
+        "terminal_kind": "gate",
+    }
+    # The resistor's "b" terminal: not MOS-like (no "g" terminal on R1), so
+    # `terminal_kind` is the raw terminal key, not confused with a MOS body.
+    assert by_net["FLOAT_RB"] == {
+        "net": "FLOAT_RB",
+        "device": "R1",
+        "terminal": "b",
+        "terminal_kind": "b",
+    }
+    # Declared pins (VGND, Y, RA) and the shared vsubs net (device_count ==
+    # 2) are never flagged, even though VGND/Y/RA each have exactly one
+    # device terminal.
+    assert set(by_net) == {"FLOAT_G", "FLOAT_RB"}
+
+
+def test_detect_single_terminal_nets_source_drain_body_kinds():
+    """MOS `s`/`d`/`b` terminals classify as `source`/`drain`/`body` (not
+    the raw letter) once the owning device also has a `g` terminal."""
+    devices = [
+        {
+            "name": "M1",
+            "class": "nfet",
+            "nets": {"s": "FLOAT_S", "g": "A", "d": "FLOAT_D", "b": "FLOAT_B"},
+            "params": {},
+        },
+    ]
+    nets = [
+        {"name": "FLOAT_S", "pin": False, "device_count": 1},
+        {"name": "A", "pin": True, "device_count": 1},
+        {"name": "FLOAT_D", "pin": False, "device_count": 1},
+        {"name": "FLOAT_B", "pin": False, "device_count": 1},
+    ]
+
+    result = _detect_single_terminal_nets(devices, nets)
+    kinds = {entry["net"]: entry["terminal_kind"] for entry in result}
+    assert kinds == {
+        "FLOAT_S": "source",
+        "FLOAT_D": "drain",
+        "FLOAT_B": "body",
+    }
+
+
+def test_floating_gate_nmos_reports_single_terminal_net(tmp_path):
+    """End-to-end reproduction of issue #596's motivating case: an NMOS
+    whose poly gate carries no label and touches nothing else. DRC-clean,
+    device-recognisable geometry -- the only signal this is a defect is the
+    new `single_terminal_nets[]` entry and its `warnings[]` prose."""
+    path = _write_gds(_make_floating_gate_nmos_layout(), tmp_path / "floating_gate.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "floating_gate.spice"))
+
+    (nfet,) = report["devices"]
+    assert nfet["class"] == "nfet"
+    gate_net = nfet["nets"]["g"]
+    # Unlabeled -> KLayout's anonymous "$n" placeholder, not a declared pin.
+    assert gate_net.startswith("$")
+
+    single_terminal_by_net = {
+        entry["net"]: entry for entry in report["single_terminal_nets"]
+    }
+    assert gate_net in single_terminal_by_net
+    gate_entry = single_terminal_by_net[gate_net]
+    assert gate_entry["device"] == nfet["name"]
+    assert gate_entry["terminal"] == "g"
+    assert gate_entry["terminal_kind"] == "gate"
+
+    assert any(
+        "almost certainly an unconnected input" in warning and gate_net in warning
+        for warning in report["warnings"]
+    )
+
+    # The real interface (source/drain/body) is unaffected -- each of those
+    # is a declared pin (VGND/Y) or the named substrate global (vsubs), so
+    # none of them appear in `single_terminal_nets[]` despite also having
+    # exactly one device terminal.
+    interface_nets = {"VGND", "Y", "vsubs"}
+    assert interface_nets.isdisjoint(single_terminal_by_net)
+
+
+def test_inverter_layout_reports_no_single_terminal_nets_by_default(tmp_path):
+    """`_make_inverter_layout()`'s default fixture has no defect of this
+    kind: every net either has 2+ device terminals (the shared gate/drain)
+    or is a declared pin (VGND/VPWR/VPB/vsubs) -- `single_terminal_nets[]`
+    is empty and no matching warning fires."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["single_terminal_nets"] == []
+    assert not any(
+        "connects to exactly one device terminal" in warning
         for warning in report["warnings"]
     )
 

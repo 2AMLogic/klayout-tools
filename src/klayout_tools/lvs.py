@@ -2189,12 +2189,44 @@ def _build_mismatches(
             )
 
     for a, b in logger.ambiguous_net_matches:
+        # Issue #596: an ambiguous pairing where *both* sides are a
+        # single-device-terminal, non-pin net is not a routine naming nit --
+        # it is a real finding (a net with no other connectivity, most often
+        # an undriven MOS gate on both sides at once, since a
+        # generator-driven flow that draws both the layout and the reference
+        # from the same source reproduces the same defect on each). Detected
+        # structurally from the paired `kdb.Net` objects themselves
+        # (`terminal_count() == 1` and `pin_count() == 0` on each side) --
+        # `getattr` guards keep this a no-op against a stand-in object (e.g.
+        # a test double) that only implements `expanded_name()`.
+        single_terminal_both_sides = (
+            a is not None
+            and b is not None
+            and getattr(a, "terminal_count", lambda: None)() == 1
+            and getattr(b, "terminal_count", lambda: None)() == 1
+            and getattr(a, "pin_count", lambda: None)() == 0
+            and getattr(b, "pin_count", lambda: None)() == 0
+        )
+        if single_terminal_both_sides:
+            description = (
+                "both sides pair a net that touches exactly one device "
+                "terminal and carries no declared pin -- there is no DC "
+                "path through this node on either side, so this is a real "
+                "connectivity finding (e.g. an undriven MOS gate), not a "
+                "routine ambiguous-pairing/hints.same_nets nit; see klt "
+                "extract's single_terminal_nets[] for the layout-side "
+                "terminal detail"
+            )
+        else:
+            description = (
+                "nets were paired ambiguously; the comparer resolved it "
+                "structurally (consider a hints.same_nets entry to pin this down)"
+            )
         mismatches.append(
             _mismatch(
                 CATEGORY_TOPOLOGY,
                 "warning",
-                "nets were paired ambiguously; the comparer resolved it "
-                "structurally (consider a hints.same_nets entry to pin this down)",
+                description,
                 "both",
                 net={
                     "layout": _name_or_none(a),
