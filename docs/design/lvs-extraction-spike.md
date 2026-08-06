@@ -1074,3 +1074,79 @@ criteria, without either engine's exact `mismatches[]` shape needing to be
 identical -- the `"netgen"` engine's coarser bucketing on a topology-level
 defect is the one documented, expected divergence (see the contract-gap
 section above).
+
+## Addendum (2026-08-06, #592): parasitics topology moves from a shunt Γ-section to a star
+
+**Status:** implementation note, resolving the topology gap #338 documented
+and explicitly deferred as a follow-up ("recommend filing a separate
+follow-up issue if/when there's appetite to implement Option 2 or 3"). #592
+is that follow-up, scoped by its curator enhancement to Option 1 only
+(Option 2, a full distributed per-segment RC ladder, remains out of scope).
+
+### The gap this closes
+
+The `--parasitics` topology the #216 addendum above shipped (one series
+resistor per net into a fresh internal node, with a capacitor from that node
+to ground) put every device terminal on the *original* net, never the
+internal node -- so the resistor carried no DC current and never sat in
+series between two terminals on the same net, independent of the net's
+drawn geometry. #338's own structural audit (cited in #592) found this held
+for every net across three real extractions (332 nets, 0 in-path); a 45-PVT
+DC R_on measurement of a real extracted switch cell found the pre/post
+extraction results numerically identical across all 1125 corner-cells --
+confirming the gap was not a precision issue but an absent mechanism.
+
+### What was built instead: the net becomes its own star hub
+
+Rather than inventing a new hub node, the net itself keeps the hub role. Every
+device terminal that was connected to the net is moved (via KLayout's
+`Device.disconnect_terminal`/`connect_terminal`, addressed by terminal ID
+from `NetTerminalRef.terminal_def()`) onto its own fresh "leg" net, and a
+resistor bridges each leg back to the net. The net's existing pin/subcircuit
+connectivity is untouched -- it stays directly on the net (now the hub), at
+zero resistance, since nothing moves those. The net's lumped ground
+capacitance keeps hanging directly off the net too, unchanged in total value.
+A net with zero device terminals (routed geometry nothing is electrically
+attached to) has nothing to fan a star out to, so it falls back to exactly
+the pre-#592 Γ-section through a fresh internal `<net>__par` node.
+
+Each leg's share of the net's total computed resistance is weighted by that
+terminal's approximate distance from the centroid of the net's own terminal
+positions -- farther terminals get more of the total, equal terminals get an
+equal split, and a single-terminal net's one leg gets exactly the net's
+whole total (mathematically identical to the pre-#592 Γ-section's one
+resistor, not a smaller or larger value). "Terminal position" itself is
+read from `Device.trans` -- KLayout records one placement transform per
+device (its recognition shape's center in real micrometres, `DCplxTrans`,
+no `dbu` conversion needed), not a distinct location per terminal, so this
+is a **coarse**, deliberately Option-1-scoped proxy: good enough to make
+IR-drop-style and terminal-to-terminal resistance measurements *exist* and
+respond to real layout changes, not a substitute for a true per-segment
+routed-copper measurement (Option 2, still deferred).
+
+### Why this required new plumbing, not a rewire
+
+The original issue text assumed terminal positions were already available to
+the extractor (it believed they drove the existing per-net R/C sum); a
+curator verification against the pre-#592 `extract.py` found this false --
+`_net_area_perim_um` sums a net's whole `Region` (`polygons_of_net`), never a
+per-terminal position, and the file had zero calls to `each_terminal`,
+`terminal_id`, `Device.location`, or `Device.trans` anywhere. Reading each
+device terminal's location is therefore genuine new plumbing against
+`kdb.Net`/`kdb.Device`, exercised for the first time by this addendum's
+`_terminal_star_positions_um`/`_terminal_star_weights` (see
+`src/klayout_tools/extract.py`).
+
+### Schema/contract verdict: breaking change, `schema_version` 1 -> 2
+
+Unlike the additive changes elsewhere in this document, this one redefines
+an already-shipped field's shape: `parasitics.nets[].internal_node` (always
+a freshly created node) is replaced by `hub_net` (usually the net itself
+now) plus a new `terminals[]` array, and `parasitics.r_count` changes from
+"always equal to `c_count`, one resistor per net" to "one resistor per
+`terminals[]` entry, `>= c_count` in general." Per `docs/json-contract.md`'s
+redefinition precedent (issue #452's `precheck` bump), this earns `klt
+extract`'s own `SCHEMA_VERSION` bump, 1 -> 2 -- scoped to `extract` alone,
+per-command versioning, no other verb's `schema_version` moves. See
+`docs/cli/extract.md`'s "Parasitic (RC) extraction" section for the shipped
+JSON shape.

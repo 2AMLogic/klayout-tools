@@ -134,6 +134,33 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-06 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
+  extract --parasitics`: each net's extracted resistance is now distributed
+  as a **star topology** from the net (the star's hub) to each of its device
+  terminals, instead of one shunt resistor into a dead-end internal node
+  (#592). The pre-#592 Γ-section topology (`net --R--> net__par --C-->
+  <substrate_net>`) left every device terminal on the original net, so the
+  emitted resistor carried no DC current and never sat in series between two
+  terminals on the same net — #338 documented this precisely and closed it
+  as a doc-only fix, deferring the model change to a follow-up; #592 is that
+  follow-up (scoped to Option 1, star-topology, per its curator enhancement
+  — the full distributed per-segment RC ladder, Option 2, remains
+  deliberately out of scope). Now, every device terminal that was on the net
+  is moved onto its own fresh "leg" net with a series resistor back to the
+  net (the net's pins/subcircuit connections stay directly on it, at zero
+  resistance), so two terminals on the same net sit in series through two
+  resistors — non-zero, in-path resistance that responds to real layout
+  geometry, where before it was always exactly zero. Each leg's share of the
+  net's total resistance is weighted by that terminal's approximate distance
+  (via `Device.trans`, a coarse per-device rather than per-terminal
+  location) from the net's terminal centroid; a single-terminal net
+  degenerates to exactly the old Γ-section's one resistor. `parasitics.
+  nets[].internal_node` is replaced by `hub_net` (usually the net itself now)
+  and a new `terminals[]` array, and `parasitics.r_count` now counts every
+  emitted resistor rather than always equalling `c_count`. Only `klt
+  extract`'s own `schema_version` moved to `2`; every other command's is
+  unaffected. See `docs/cli/extract.md`'s "Parasitic (RC) extraction"
+  section and `docs/design/lvs-extraction-spike.md`'s new #592 addendum.
 - 2026-08-06 — `klt lvs`: new `options.parameter_tolerance` (#589), an opt-in
   relative tolerance for numeric device parameters, expressed as a fraction
   (`0.001` is 0.1%). Extraction is geometrically exact against the curated
