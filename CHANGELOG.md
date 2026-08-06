@@ -134,6 +134,28 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-06 — `klt extract`/`klt lvs`: flag a net that touches exactly one
+  device terminal and is not a declared pin -- there is no DC path through
+  such a node, so a downstream resimulation either fails with a singular
+  matrix or lands on a self-consistent-but-wrong operating point (#596). New
+  top-level `extract`'s `single_terminal_nets[]` array, one `{"net",
+  "device", "terminal"}` entry per affected net (`terminal` is `"gate"` /
+  `"source"` / `"drain"` / `"body"` for a MOS device, cross-referenced from
+  `devices[]`, or `"resistor-equivalent"` for any other device class), plus
+  a matching prose `warnings[]` entry -- worded more strongly for a `"gate"`
+  hit (essentially always a bug) than for the others (a single-terminal
+  body/diffusion tie can be a legitimate dummy-tie pattern). `klt lvs`
+  carries the same distinction into its own `mismatches[]`: an ambiguous net
+  pairing (`topology` category) where *both* sides' nets are single-terminal
+  now gets distinguishing wording plus a `details: {"layout_terminal_count":
+  1, "reference_terminal_count": 1}` disclosure, instead of the generic
+  "resolved it structurally" text every other ambiguous pairing still gets
+  -- reused category, not a new one, since nothing filters `mismatches[]` by
+  category yet. Purely additive on both commands: `single_terminal_nets[]`
+  is always present, empty when every net either touches 2+ device
+  terminals or is a declared pin -- no `schema_version` bump on either
+  command. See `docs/cli/extract.md`'s "Single-terminal nets" section and
+  `docs/cli/lvs.md`'s `topology` category section.
 - 2026-08-06 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
   extract --parasitics`: each net's extracted resistance is now distributed
   as a **star topology** from the net (the star's hub) to each of its device

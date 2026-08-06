@@ -1451,6 +1451,23 @@ R2 VDD $2 1k
     assert no_hint["category_counts"] == {"topology": 2}
     assert all(m["severity"] == "warning" for m in no_hint["mismatches"])
 
+    # Issue #596: `P1`/`P2` (and their layout-side counterparts `$1`/`$2`)
+    # each touch exactly one device terminal (`R1`/`R2`'s own second
+    # terminal) -- this real end-to-end example is exactly the "both sides
+    # single-terminal" ambiguous pairing the issue targets, distinguished
+    # from a routine naming/symmetry resolution via `details` and wording.
+    assert all(
+        m["details"]
+        == {
+            "layout_terminal_count": 1,
+            "reference_terminal_count": 1,
+        }
+        for m in no_hint["mismatches"]
+    )
+    assert all(
+        "single_terminal_nets" in m["description"] for m in no_hint["mismatches"]
+    )
+
     with_hint_path = _write_request(
         tmp_path / "with_hint.json",
         {
@@ -2965,10 +2982,19 @@ def test_lvs_partial_match_combine_devices_runtimeerror_degrades_gracefully(
 
 
 class _FakeNamed:
-    """Stands in for a `klayout.db.Net`/`Device` object: `.expanded_name()`."""
+    """Stands in for a `klayout.db.Net`/`Device` object: `.expanded_name()`.
 
-    def __init__(self, name: str) -> None:
+    ``terminal_count`` (issue #596) is optional and defaults to unset --
+    when omitted, this fake has no `.terminal_count()` method at all
+    (matching `hasattr(obj, "terminal_count")` being `False` for a plain
+    `Device`/other non-`Net` object `_build_mismatches` may see here), so
+    `lvs._terminal_count_or_none` degrades to `None` exactly as it would for
+    a real engine event whose objects do not expose it."""
+
+    def __init__(self, name: str, terminal_count: int | None = None) -> None:
         self._name = name
+        if terminal_count is not None:
+            self.terminal_count = lambda: terminal_count  # type: ignore[method-assign]
 
     def expanded_name(self) -> str:
         return self._name
@@ -3131,6 +3157,52 @@ def test_build_mismatches_ambiguous_net_is_warning_topology():
     assert entry["category"] == lvs.CATEGORY_TOPOLOGY
     assert entry["severity"] == "warning"
     assert entry["net"] == {"layout": "N1", "reference": "N2"}
+    assert entry["description"] == (
+        "nets were paired ambiguously; the comparer resolved it "
+        "structurally (consider a hints.same_nets entry to pin this down)"
+    )
+    assert entry["details"] is None
+
+
+def test_build_mismatches_ambiguous_net_both_single_terminal_is_distinguished():
+    """Issue #596: when *both* paired nets in an ambiguous match touch
+    exactly one device terminal (`terminal_count() == 1` on each side), the
+    entry gets distinct wording and a structured `details` disclosure --
+    not the generic "resolved it structurally" text a routine naming/
+    symmetry ambiguity gets (see the plain
+    `test_build_mismatches_ambiguous_net_is_warning_topology` case above).
+    Still `category: "topology"`/`severity: "warning"` -- reused, not a new
+    category."""
+    logger = _FakeLogger()
+    logger.ambiguous_net_matches.append(
+        (_FakeNamed("$1", terminal_count=1), _FakeNamed("$2", terminal_count=1))
+    )
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["category"] == lvs.CATEGORY_TOPOLOGY
+    assert entry["severity"] == "warning"
+    assert entry["net"] == {"layout": "$1", "reference": "$2"}
+    assert entry["details"] == {
+        "layout_terminal_count": 1,
+        "reference_terminal_count": 1,
+    }
+    assert "exactly one device terminal" in entry["description"]
+    assert "single_terminal_nets" in entry["description"]
+    assert "resolved it structurally" not in entry["description"]
+
+
+def test_build_mismatches_ambiguous_net_one_sided_single_terminal_is_generic():
+    """Only one side being single-terminal (not both) must NOT trigger the
+    distinguished wording -- it stays the generic, routine-resolution
+    message (non-false-positive guard)."""
+    logger = _FakeLogger()
+    logger.ambiguous_net_matches.append(
+        (_FakeNamed("$1", terminal_count=1), _FakeNamed("N2", terminal_count=3))
+    )
+
+    (entry,) = lvs._build_mismatches(logger)
+    assert entry["details"] is None
+    assert "resolved it structurally" in entry["description"]
 
 
 def test_build_mismatches_param_diff_reports_only_differing_parameter():

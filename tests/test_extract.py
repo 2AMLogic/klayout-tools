@@ -3317,14 +3317,22 @@ def test_poly_routing_between_gates_does_not_trigger_unmodelled_warning(tmp_path
     """Edge case from the issue: ordinary poly routing between two recognised
     transistor gates must not trigger the new warning, even with two
     separate contact clusters landing on the connecting run -- the whole
-    bar is one merged polygon touching both gates."""
+    bar is one merged polygon touching both gates.
+
+    This fixture's source/drain pads are deliberately left unlabelled (only
+    ``GATE_TIE`` is a pin), so each is its own anonymous, single-terminal,
+    non-pin net -- issue #596's (weakly-worded, non-gate) diagnostic fires
+    for those, unrelated to the unmodelled-poly check this test targets."""
     path = _write_gds(
         _make_poly_routing_between_gates_layout(), tmp_path / "routing.gds"
     )
     report = run_extract(path, "sky130", output=str(tmp_path / "routing.spice"))
 
     assert report["device_counts"] == {"nfet": 2}
-    assert report["warnings"] == []
+    assert not any("unmodelled" in w.lower() for w in report["warnings"])
+    assert all(
+        "connects to exactly one device terminal" in w for w in report["warnings"]
+    ), report["warnings"]
 
 
 def test_resistor_free_layout_extracts_byte_identically(tmp_path):
@@ -3565,6 +3573,22 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     ]
     assert any(
         "no DC bias path" in warning and pfet["nets"]["b"] in warning
+        for warning in report["warnings"]
+    )
+
+    # Issue #596: that same anonymous, single-terminal PMOS body net is also
+    # exactly the "single terminal, not a pin" condition -- it appears in
+    # `single_terminal_nets[]` classified as a "body" terminal (not "gate"),
+    # with a matching, more softly-worded `warnings[]` entry (this is a real
+    # example of the "legitimate single-terminal case" the issue calls out,
+    # not the strongly-worded floating-gate one).
+    assert {"net": pfet["nets"]["b"], "device": pfet["name"], "terminal": "body"} in (
+        report["single_terminal_nets"]
+    )
+    assert any(
+        pfet["nets"]["b"] in warning
+        and "body" in warning
+        and "floating gate" not in warning
         for warning in report["warnings"]
     )
 
@@ -4949,6 +4973,126 @@ def test_merged_net_labels_lists_all_three_plus_labels(tmp_path):
         {"net": "Y,Y2,Y3", "labels": ["Y", "Y2", "Y3"]}
     ]
     assert any("Y,Y2,Y3" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Single-terminal nets (issue #596)
+# --------------------------------------------------------------------------- #
+
+
+def _make_single_nmos_layout(
+    gate_label: str | None = None, top_name: str = "TOP"
+) -> kdb.Layout:
+    """A minimal, single NMOS on the sky130 deck's layers: source/drain pads
+    always labelled/pinned (``S``/``D``), gate poly labelled (and thereby
+    contacted/promoted to a pin) only when ``gate_label`` is given.
+
+    With ``gate_label=None`` (the default) the gate poly carries no label and
+    no contact of its own -- it forms its own, KLayout-synthesized anonymous
+    net (``"$<n>"``) that touches exactly one device terminal (this NMOS's
+    gate) and is not a pin: precisely issue #596's floating-gate condition.
+    With ``gate_label`` set, the same poly is contacted and labelled, so the
+    gate net is instead a declared, named pin -- the "declared pin" acceptance
+    case that must *not* warn even though it still has ``device_count == 1``.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Text(text, kdb.Trans(x, y)))
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (nmos active)
+    # Poly gate bar: crosses the active strip with a generous margin above
+    # and below (mirroring `_make_inverter_layout`'s shared gate bar), but
+    # touches nothing else -- no contact, no label, unless `gate_label`.
+    draw(66, 20, kdb.Box(800, -400, 1200, 1400))  # poly.drawing
+
+    # Source/drain contacts + li1, both pinned -- so only the gate net is
+    # ever the single-terminal, non-pin condition under test.
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (S side)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (S side)
+    label(67, 5, "S", 200, 500)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (D side)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (D side)
+    label(67, 5, "D", 1800, 500)
+
+    if gate_label is not None:
+        draw(66, 44, kdb.Box(900, 900, 1100, 1100))  # licon1 (gate)
+        draw(67, 20, kdb.Box(850, 850, 1150, 1150))  # li1 (gate)
+        label(67, 5, gate_label, 1000, 1000)
+
+    return layout
+
+
+def test_single_terminal_nets_flags_floating_gate(tmp_path):
+    """A gate poly with no contact and no label forms its own anonymous,
+    single-terminal, non-pin net -- issue #596's motivating case (a floating
+    gate reads as `device_count == 1` and `pin: False` in `nets[]`). It is
+    surfaced structurally in `single_terminal_nets[]` classified as
+    `"gate"`, with a strongly-worded matching prose entry in `warnings[]`."""
+    path = _write_gds(_make_single_nmos_layout(), tmp_path / "floating_gate.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "floating_gate.spice"))
+
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    gate_net = nfet["nets"]["g"]
+    assert gate_net.startswith("$")
+
+    gate_net_entry = next(n for n in report["nets"] if n["name"] == gate_net)
+    assert gate_net_entry["device_count"] == 1
+    assert gate_net_entry["pin"] is False
+
+    assert report["single_terminal_nets"] == [
+        {"net": gate_net, "device": nfet["name"], "terminal": "gate"}
+    ]
+    assert any(
+        gate_net in warning and "floating gate" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
+
+
+def test_single_terminal_nets_declared_pin_does_not_warn(tmp_path):
+    """The same gate net, this time contacted and labelled -- a declared
+    pin -- still has `device_count == 1`, but must NOT appear in
+    `single_terminal_nets[]` or trigger a matching warning (the
+    non-false-positive acceptance case: a net that is itself a declared
+    pin)."""
+    path = _write_gds(
+        _make_single_nmos_layout(gate_label="G"), tmp_path / "pinned_gate.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "pinned_gate.spice"))
+
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    gate_net = nfet["nets"]["g"]
+    assert gate_net == "G"
+
+    gate_net_entry = next(n for n in report["nets"] if n["name"] == gate_net)
+    assert gate_net_entry["device_count"] == 1
+    assert gate_net_entry["pin"] is True
+
+    assert report["single_terminal_nets"] == []
+    assert not any(
+        "connects to exactly one device terminal" in w for w in report["warnings"]
+    )
+
+
+def test_single_terminal_nets_empty_for_plain_inverter(tmp_path):
+    """The plain inverter fixture's only single-terminal net (`VPB`, the
+    PMOS well tap) is itself a declared pin, so `single_terminal_nets[]` is
+    present and empty -- no existing fixture starts warning under the new
+    detector (regression guard for the detection condition being too
+    broad)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["single_terminal_nets"] == []
+    assert not any(
+        "connects to exactly one device terminal" in w for w in report["warnings"]
+    )
 
 
 # --------------------------------------------------------------------------- #

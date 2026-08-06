@@ -795,6 +795,51 @@ uses comma-containing label text should expect (and can safely ignore) a
 `merged_net_labels[]` entry whose `labels` do not actually correspond to
 independent naming intents.
 
+### Single-terminal nets (issue #596)
+
+A net that touches **exactly one** device terminal and is not a declared pin
+has no DC path through it — most often a MOS gate with nothing driving it.
+Resimulating the extracted netlist directly either fails outright (ngspice's
+`singular matrix: check node <net>` error) or lands on a
+self-consistent-but-wrong operating point; nothing about `klt drc` (clean —
+the geometry is legal) or `klt lvs` (if the same generator drew the identical
+unconnected net on both the layout and its reference, the comparer just pairs
+the two anonymous nets, reporting a routine-sounding ambiguous-match warning —
+see `docs/cli/lvs.md`'s `topology` category) calls this out on its own. It is,
+however, **structurally detectable from the extracted netlist alone**: the
+response's `nets[]` array already reports `device_count` (`Net.terminal_count()`)
+and `pin` per net (see "JSON schema" below), so `device_count == 1 and pin ==
+false` is precisely the diagnosable condition.
+
+`klt extract` flags every such net two ways, mirroring `merged_net_labels[]`'s
+own two-way pattern above:
+
+- A structured entry in the response's `single_terminal_nets[]` array: `{
+  "net": "<net name>", "device": "<device instance name>", "terminal": "gate"
+  | "source" | "drain" | "body" | "resistor-equivalent" }` — `terminal` names
+  the MOS terminal kind for a MOS device (cross-referenced from `devices[]`'s
+  own terminal keys, `{"s", "g", "d", "b"}`), or `"resistor-equivalent"` for
+  any other device class (drawn resistor, capacitor, diode, BJT).
+- A matching prose entry in `warnings[]`. A `gate` hit is phrased more
+  strongly than the others — a floating gate is essentially always a bug — a
+  `source`/`drain`/`body`/`resistor-equivalent` hit still warns, but with
+  softer wording, since a single-terminal body/diffusion tie (e.g. an
+  intentionally unterminated dummy device) can be a legitimate layout
+  pattern.
+
+Always present, empty when every net either touches 2+ device terminals or is
+a declared pin — the common case for a real, fully-wired circuit. A net that
+*is* a declared pin (e.g. a top-level interface signal that happens not to be
+used inside this particular block) never appears here regardless of its
+`device_count`, matching the issue's own "does not false-positive on a
+declared pin" acceptance bar.
+
+`klt lvs` carries the same distinction through to its own `mismatches[]`: an
+ambiguous net pairing where *both* sides' nets are single-terminal gets
+distinguishing wording and a structured `details` disclosure rather than the
+generic "resolved it structurally" text — see `docs/cli/lvs.md`'s `topology`
+category section.
+
 ### Voltage-domain markers (issue #552)
 
 Some PDKs draw **two gate-oxide/voltage domains** on the same wafer, selected
@@ -1479,6 +1524,7 @@ exit codes).
   "merged_net_labels": [],
   "voltage_domain_warnings": [],
   "unbiased_pmos_body_nets": [],
+  "single_terminal_nets": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -1518,6 +1564,7 @@ exit codes).
 | `merged_net_labels` | array\<object\>          | One entry per net whose KLayout-assigned name is a comma-joined merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`labels` is `net` split on `,`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A matching prose entry is also appended to `warnings[]`. Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
+| `single_terminal_nets` | array\<object\>     | One entry per net that touches exactly one device terminal and is not a declared pin (issue #596 — see "Single-terminal nets" below), each `{ "net": "<net name>", "device": "<device instance name>", "terminal": "gate" \| "source" \| "drain" \| "body" \| "resistor-equivalent" }`. A matching prose entry is also appended to `warnings[]`, worded more strongly for a `"gate"` terminal than for the others. Always present, empty when every net either touches 2+ device terminals or is a declared pin. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |

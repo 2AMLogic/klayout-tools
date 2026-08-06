@@ -917,11 +917,30 @@ despite a name/identity conflict. Six classification sites inside
   polarity, so an all-`nfet` layout compared against an all-`nfet`
   reference is not a real defect); `"error"` when the class has one or
   more real instances.
-- **Ambiguous net pairing** (`lvs.py:1194-1207`, from
-  `logger.ambiguous_net_matches`) — nets were paired ambiguously and the
-  comparer resolved it structurally on its own (consider adding a
-  `hints.same_nets` entry to pin the pairing down explicitly). Always
-  `"warning"`; never changes `status`.
+- **Ambiguous net pairing** (from `logger.ambiguous_net_matches`) — nets
+  were paired ambiguously and the comparer resolved it structurally on its
+  own (consider adding a `hints.same_nets` entry to pin the pairing down
+  explicitly). Always `"warning"`; never changes `status`. Issue #596: when
+  *both* paired nets touch exactly one device terminal each
+  (`kdb.Net.terminal_count() == 1` on both sides — the same condition `klt
+  extract`'s `single_terminal_nets[]` flags), the entry's `description` is
+  the distinct, more pointed wording below instead of the generic
+  "resolved it structurally" text, and `details` discloses
+  `{"layout_terminal_count": 1, "reference_terminal_count": 1}` so a
+  caller can also detect the distinction structurally without parsing the
+  message:
+
+  > nets were paired ambiguously, and both sides touch exactly one device
+  > terminal -- this is not a routine naming/symmetry resolution, it is a
+  > real single-terminal-net finding on both sides (see `klt extract`'s
+  > `single_terminal_nets[]`); confirm the terminal is actually meant to be
+  > unconnected before adding a hints.same_nets entry to pin this pairing
+  > down
+
+  Still `category: "topology"` and `severity: "warning"` — reused rather
+  than a new category, since nothing in this module filters mismatches by
+  category yet and the distinction is fully recoverable from `description`/
+  `details` alone.
 - **Net identity conflict with no leftover** (`lvs.py:1539-1549`, inside
   `_classify_net_mismatches`) — two nets were paired despite a name/identity
   conflict, and neither side has an accompanying one-sided leftover net

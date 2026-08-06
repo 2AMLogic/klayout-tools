@@ -357,6 +357,14 @@ def run_extract(
             "unbiased_pmos_body_nets": [
                 {"device": str, "net": str}, ...
             ],
+            "single_terminal_nets": [
+                {
+                    "net": str, "device": str,
+                    "terminal": "gate" | "source" | "drain" | "body"
+                                | "resistor-equivalent",
+                },
+                ...
+            ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -476,6 +484,27 @@ def run_extract(
     well-tie/tap). Independent of ``--parasitics``/``--pdk`` -- present under
     the same condition regardless of either flag, since the DC-bias gap
     exists whether or not parasitics are requested or a PDK model is bound.
+
+    ``single_terminal_nets`` (issue #596) reports every net that touches
+    **exactly one** device terminal (``nets[].device_count == 1``, itself
+    ``Net.terminal_count()``) and is not a declared pin
+    (``nets[].pin is False``) -- there is no DC path through such a node, so
+    resimulating the extracted netlist directly either fails outright
+    (ngspice's ``singular matrix`` error) or lands on a
+    self-consistent-but-wrong operating point. See
+    :func:`_detect_single_terminal_nets` for the exact detection and
+    terminal-kind classification. One entry per affected net, each
+    ``{"net": "<net name>", "device": "<device instance name>", "terminal":
+    "gate" | "source" | "drain" | "body" | "resistor-equivalent"}`` --
+    ``terminal`` names the MOS terminal kind for a MOS device (``"gate"``,
+    ``"source"``, ``"drain"``, ``"body"``), or ``"resistor-equivalent"`` for
+    any other device class (drawn resistor, capacitor, diode, BJT). A
+    matching prose entry is also appended to ``warnings``, with a ``gate``
+    hit phrased more strongly than the others -- a floating gate is
+    essentially always a bug, while a single-terminal body/diffusion tie
+    (e.g. an intentionally unterminated dummy device) can be legitimate.
+    Always a list, empty when every net either touches 2+ device terminals
+    or is a declared pin.
 
     ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
     stack level the deck's ``ExtractionDeck.metals`` declares that has no
@@ -646,6 +675,43 @@ def run_extract(
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
 
+    # Nets that touch exactly one device terminal and are not a declared pin
+    # (issue #596): `_describe_nets` already reports `device_count` (from
+    # `Net.terminal_count()`) and `pin` per net, so "device_count == 1 and
+    # not pin" is precisely the diagnosable condition -- there is no DC path
+    # through such a node, so a downstream simulator either fails with a
+    # singular matrix or lands on a self-consistent-but-wrong operating
+    # point, several stages removed from the extracted netlist that already
+    # said so. Surfaced two ways, mirroring `unbiased_pmos_body_nets`'s own
+    # two-way pattern above: a structured `single_terminal_nets[]` entry
+    # (terminal kind included, so a caller does not have to re-derive it
+    # from `devices[].nets`) and a matching prose `warnings[]` entry, with a
+    # `gate` hit phrased more strongly than a `source`/`drain`/`body`/
+    # `resistor-equivalent` one -- a floating gate is essentially always a
+    # bug, while a single-terminal body/diffusion tie (an intentionally
+    # unterminated dummy, say) can be a legitimate case.
+    single_terminal_nets = _detect_single_terminal_nets(devices, nets)
+    for single_entry in single_terminal_nets:
+        terminal_desc = f"'{single_entry['device']}' {single_entry['terminal']}"
+        if single_entry["terminal"] == "gate":
+            warnings.append(
+                f"net '{single_entry['net']}' connects to exactly one "
+                f"device terminal ({terminal_desc}) and is not a pin -- "
+                "this is almost always a floating gate with no DC bias "
+                "path; resimulating this netlist will likely fail with a "
+                "singular matrix at this node, or land on a "
+                "self-consistent-but-wrong operating point. See "
+                "docs/cli/extract.md's 'Single-terminal nets' section."
+            )
+        else:
+            warnings.append(
+                f"net '{single_entry['net']}' connects to exactly one "
+                f"device terminal ({terminal_desc}) and is not a pin -- "
+                "this can be a legitimate unterminated tie (e.g. a dummy "
+                "device's body/diffusion), but confirm it is intentional. "
+                "See docs/cli/extract.md's 'Single-terminal nets' section."
+            )
+
     # Layers carrying shapes the deck's connectivity graph never reads (issue
     # #220): geometry there is invisible to extraction, so surface it rather
     # than let it become a silent LVS mismatch downstream.
@@ -738,6 +804,11 @@ def run_extract(
         # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
         # the field's full meaning.
         "unbiased_pmos_body_nets": unbiased_pmos_body_nets,
+        # Additive field (issue #596): always a list, empty when every net
+        # either touches 2+ device terminals or is a declared pin -- see
+        # run_extract's docstring and `_detect_single_terminal_nets` for the
+        # field's full meaning.
+        "single_terminal_nets": single_terminal_nets,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -3276,6 +3347,80 @@ def _detect_unbiased_pmos_body_nets(
             unbiased.append({"device": device["name"], "net": body_net})
     unbiased.sort(key=lambda entry: entry["device"])
     return unbiased
+
+
+# MOS terminal keys (``_describe_devices``'s already-lowercased
+# ``device_class.terminal_definitions()`` names) and the human-readable
+# terminal kind each maps to. A device's ``nets`` dict is only classified
+# this way when it carries *all four* of these keys -- the MOS terminal
+# shape -- so a two-terminal device (e.g. a drawn resistor's ``"a"``/``"b"``
+# ends, or a BJT's ``"b"`` base) is never misread as a MOS body terminal
+# just because its own terminal key happens to collide with ``"b"``.
+_MOS_TERMINAL_KINDS = {"s": "source", "g": "gate", "d": "drain", "b": "body"}
+_MOS_TERMINAL_KEYS = frozenset(_MOS_TERMINAL_KINDS)
+_NON_MOS_TERMINAL_KIND = "resistor-equivalent"
+
+
+def _detect_single_terminal_nets(
+    devices: list[dict[str, Any]], nets: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Build the response's ``single_terminal_nets[]`` array (issue #596).
+
+    Scans the already-built ``nets[]`` array (so this reuses the exact
+    ``device_count``/``pin`` fields ``_describe_nets`` already computed --
+    ``device_count`` is literally ``Net.terminal_count()``) for every net
+    that touches **exactly one** device terminal and is not a declared pin.
+    There is no DC path through such a node: resimulating the extracted
+    netlist directly either fails outright (ngspice's ``singular matrix``)
+    or lands on a self-consistent-but-wrong operating point, several stages
+    removed from the extracted netlist that already carried the signal.
+
+    Cross-references the already-built ``devices[]`` array (mirroring
+    ``_detect_unbiased_pmos_body_nets``'s own reuse of it) to find which
+    device instance and terminal owns the flagged net, so the caller (and
+    the matching prose ``warnings[]`` entry appended alongside this
+    function's call site) can name the terminal *kind* -- ``"gate"``,
+    ``"source"``, ``"drain"``, or ``"body"`` for a MOS device (a device
+    whose ``nets`` dict carries all four of ``{"s", "g", "d", "b"}``,
+    matching ``_describe_devices``'s own lowercased
+    ``terminal_definitions()`` naming), or ``"resistor-equivalent"`` for any
+    other device class (drawn resistor, capacitor, diode, BJT --
+    two/three-terminal devices whose own terminal keys are not MOS
+    terminals, even where one happens to collide with the letter ``"b"``,
+    e.g. a BJT's base). A gate hit is the strongest form of this defect (a
+    floating gate is essentially always a bug); a body/diffusion tie or
+    other non-gate terminal can be a legitimate unterminated tie (e.g. a
+    deliberately unterminated dummy device) -- see the call site's
+    differently-worded ``warnings[]`` entry for the two cases.
+
+    Returns one entry per affected net, ``{"net": <net name>, "device":
+    <device instance name>, "terminal": <terminal kind>}``, sorted by net
+    name (matching ``nets[]``'s own sort discipline). Always a list; empty
+    when every net either touches 2+ device terminals or is a declared pin.
+    """
+    single_terminal_names = {
+        net["name"] for net in nets if net["device_count"] == 1 and not net["pin"]
+    }
+    if not single_terminal_names:
+        return []
+
+    single: list[dict[str, Any]] = []
+    for device in devices:
+        is_mos = _MOS_TERMINAL_KEYS.issubset(device["nets"].keys())
+        for terminal_key, net_name in device["nets"].items():
+            if net_name is None or net_name not in single_terminal_names:
+                continue
+            terminal_kind = (
+                _MOS_TERMINAL_KINDS[terminal_key]
+                if is_mos and terminal_key in _MOS_TERMINAL_KINDS
+                else _NON_MOS_TERMINAL_KIND
+            )
+            single.append(
+                {"net": net_name, "device": device["name"], "terminal": terminal_kind}
+            )
+
+    single.sort(key=lambda entry: entry["net"])
+    return single
 
 
 def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:

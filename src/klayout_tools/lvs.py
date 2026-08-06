@@ -1611,6 +1611,20 @@ def _name_or_none(obj: Any) -> str | None:
     return None
 
 
+def _terminal_count_or_none(obj: Any) -> int | None:
+    """``obj.terminal_count()`` (a real ``kdb.Net``'s device-terminal count,
+    the same value ``extract.py``'s ``nets[].device_count`` reports) when
+    ``obj`` carries the method, else ``None`` (issue #596). Mirrors
+    :func:`_name_or_none`'s own graceful-degradation shape so a test double
+    without ``terminal_count()`` -- or a future engine event whose objects
+    do not expose it -- falls through to the generic classification rather
+    than raising.
+    """
+    if obj is None or not hasattr(obj, "terminal_count"):
+        return None
+    return obj.terminal_count()
+
+
 def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     """Turn ``logger.net_matches`` (every successful net pairing the
     comparer produced -- unambiguous and ambiguous alike) into the
@@ -2189,19 +2203,57 @@ def _build_mismatches(
             )
 
     for a, b in logger.ambiguous_net_matches:
-        mismatches.append(
-            _mismatch(
-                CATEGORY_TOPOLOGY,
-                "warning",
-                "nets were paired ambiguously; the comparer resolved it "
-                "structurally (consider a hints.same_nets entry to pin this down)",
-                "both",
-                net={
-                    "layout": _name_or_none(a),
-                    "reference": _name_or_none(b),
-                },
+        # Issue #596: an ambiguous pairing where *both* sides' nets touch
+        # exactly one device terminal is not a naming/symmetry nit the
+        # comparer resolved structurally -- it is a real finding on both
+        # sides (e.g. a generator-driven flow drawing the same unconnected
+        # gate on both the layout and the reference it wrote), and the
+        # generic "resolved it structurally" wording reads like a routine
+        # hints-tuning suggestion rather than "this device's terminal is not
+        # connected to anything on either side". `_terminal_count_or_none`
+        # degrades to the generic message when either side is not a real
+        # `kdb.Net` (e.g. a test double, or an engine that never populates
+        # `terminal_count()`), matching this loop's own tolerance for
+        # partial fakes elsewhere in this function.
+        layout_terminal_count = _terminal_count_or_none(a)
+        reference_terminal_count = _terminal_count_or_none(b)
+        if layout_terminal_count == 1 and reference_terminal_count == 1:
+            mismatches.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "warning",
+                    "nets were paired ambiguously, and both sides touch "
+                    "exactly one device terminal -- this is not a routine "
+                    "naming/symmetry resolution, it is a real single-"
+                    "terminal-net finding on both sides (see `klt extract`'s "
+                    "`single_terminal_nets[]`); confirm the terminal is "
+                    "actually meant to be unconnected before adding a "
+                    "hints.same_nets entry to pin this pairing down",
+                    "both",
+                    net={
+                        "layout": _name_or_none(a),
+                        "reference": _name_or_none(b),
+                    },
+                    details={
+                        "layout_terminal_count": layout_terminal_count,
+                        "reference_terminal_count": reference_terminal_count,
+                    },
+                )
             )
-        )
+        else:
+            mismatches.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY,
+                    "warning",
+                    "nets were paired ambiguously; the comparer resolved it "
+                    "structurally (consider a hints.same_nets entry to pin this down)",
+                    "both",
+                    net={
+                        "layout": _name_or_none(a),
+                        "reference": _name_or_none(b),
+                    },
+                )
+            )
 
     # Issue #499: a `hints.same_nets` pairing is a hard assertion --
     # `_apply_hints` calls `comparer.same_nets(..., must_match=True)` for
