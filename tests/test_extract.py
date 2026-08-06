@@ -2726,6 +2726,52 @@ def test_cli_deck_option_malformed_entry_is_a_clean_error(tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
+    ("value", "expected_subckt"),
+    [
+        ("1k", "ppolyf_u_1k"),
+        ("2k", "ppolyf_u_2k"),
+        ("3k", "ppolyf_u_3k"),
+    ],
+)
+def test_pdk_resolved_binds_selected_poly_res_flavour(tmp_path, value, expected_subckt):
+    """`--deck-option poly_res=<value>` combined with `--pdk` binds the
+    *selected* flavour's own real subcircuit (`ppolyf_u_{1k,2k,3k}`, all three
+    confirmed in `sm141064.ngspice` on the same three-terminal
+    `r_length`/`r_width` convention as `ppolyf_u_1k`) -- not a bare, value-only
+    `R` card.
+
+    Regression-locks the gap where `_RESISTOR_MODEL_TABLE` only carried the
+    `1k` entry, so selecting `2k`/`3k` produced a correct resistance but
+    silently lost the model binding under `--pdk` (issue #595 review)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / f"ppolyf_u_{value}_pdk.gds",
+    )
+    out = str(tmp_path / f"ppolyf_u_{value}_pdk.spice")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=_make_pdk_install(tmp_path, "gf180mcuA"),
+        output=out,
+        deck_options={"poly_res": value},
+    )
+    assert report["device_counts"] == {expected_subckt: 1}
+
+    (card,) = _device_cards(out)
+    assert card.startswith("X"), card
+    assert f" {expected_subckt} " in card
+    # No bare `R`-card value-only primitive leaks in.
+    assert not card.startswith("R")
+    substrate = get_extraction_deck("gf180mcu").substrate_net
+    # Three terminals: the two contacted heads plus the substrate-tied bulk.
+    assert card.split()[1:4] == ["RA", "RB", substrate]
+    assert "r_length=6U" in card and "r_width=1U" in card
+
+
+@pytest.mark.parametrize(
     ("mask", "device_class", "sheet_rho", "fixed_offset_ohm"),
     [
         # res_high_po's sheet_rho/offset are the issue #518 pair, measured

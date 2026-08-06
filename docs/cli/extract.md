@@ -631,6 +631,14 @@ Rules of thumb:
   is reported as — never *whether* a segment is recognised, and never how
   many devices a drawn segment produces (still exactly one, whichever flavour
   is selected).
+- Combining `--deck-option` with `--pdk` binds the *selected* flavour's own
+  simulation subcircuit (`X … ppolyf_u_2k r_length=… r_width=…`), not the
+  default one and not a bare `R` card — every value the key accepts has a
+  curated model-binding entry. See "SPICE model binding" below.
+- `klt lvs` does **not** yet accept this flag: its layout-side extraction
+  always uses the deck's default flavour (`poly_res=1k` on gf180mcu), so a
+  2k/3k design must compare its `klt extract` netlist by other means until
+  that gap is closed.
 
 ### Junction diodes (issue #542)
 
@@ -1073,9 +1081,19 @@ recognised analog device classes):
 | Device class | sky130 | gf180mcu | Geometry on the `X` card |
 |---|---|---|---|
 | MOS (`nfet`/`pfet`) | ✅ | ✅ | `L`/`W`, read off the device |
-| Resistor | ✅ | ✅ | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
+| Resistor | ✅ | ✅ (all flavours) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | none — a geometry-named variant selected by emitter area |
+
+Resistor note: the binding is **flavour-complete** on gf180mcu — every value
+`--deck-option poly_res=` accepts binds its own real subcircuit
+(`ppolyf_u_1k` / `ppolyf_u_2k` / `ppolyf_u_3k`, all three confirmed in
+`sm141064.ngspice` on the identical three-terminal `r_length`/`r_width`
+convention), so combining `--pdk` with a non-default flavour emits
+`X … ppolyf_u_2k r_length=… r_width=…`, not a bare `R` card. Selecting a
+flavour changes *which* subcircuit is called; it never changes
+`devices[].class` handling or the extracted resistance, which the deck
+computes from that flavour's own sheet rho either way.
 
 Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
 (`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer

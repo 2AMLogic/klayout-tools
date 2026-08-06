@@ -153,6 +153,13 @@ not `klt --version`, if you need to detect this kind of drift.
   is echoed as the new `provenance.deck.options` key (present only when
   non-empty) so a record can pin exactly which flavour a run selected — see
   `docs/cli/extract.md`'s "Selecting a shared-geometry resistor flavour".
+  Under `--pdk`, the *selected* flavour binds its own real simulation
+  subcircuit — `pdk_models.py`'s resistor table now carries `ppolyf_u_2k` and
+  `ppolyf_u_3k` alongside `ppolyf_u_1k` (all three confirmed in
+  `sm141064.ngspice`), so `--pdk` + `--deck-option poly_res=2k` emits `X …
+  ppolyf_u_2k r_length=… r_width=…` rather than falling back to a bare `R`
+  card. Known gap: `klt lvs` has no `--deck-option` equivalent yet, so its
+  layout-side extraction still uses the deck default (`poly_res=1k`).
   Purely additive JSON shape change — no `schema_version` bump.
 - 2026-08-06 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
   extract --parasitics`: each net's extracted resistance is now distributed

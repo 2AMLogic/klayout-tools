@@ -104,7 +104,10 @@ def _print_text(report: dict) -> None:
     print(f"deck: {report['deck']}")
     # Present only when `--deck-option` selected a non-default flavour
     # (issue #595) -- mirrors `provenance.deck.options` in the JSON report.
-    deck_options = report.get("provenance", {}).get("deck", {}).get("options")
+    # `or {}` at each hop, not just a `.get` default: a present-but-`null`
+    # `provenance`/`deck` would otherwise chain a `.get()` onto `None`.
+    deck_provenance = (report.get("provenance") or {}).get("deck") or {}
+    deck_options = deck_provenance.get("options")
     if deck_options:
         print(f"deck_options: {deck_options}")
     print(f"top: {report['top']}")
