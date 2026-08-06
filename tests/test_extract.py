@@ -207,6 +207,59 @@ def _make_floating_gate_nmos_layout(top_name: str = "TOP") -> kdb.Layout:
     return layout
 
 
+def _make_multi_single_terminal_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Three independent NMOS instances at non-overlapping x offsets,
+    engineered to exercise both `single_terminal_nets[]` buckets at once in
+    a single run (issue #599's multi-instance `warnings[]` aggregation
+    test): the first two each have an unlabeled, uncontacted-elsewhere gate
+    (``terminal_kind == "gate"``, 2 entries total), and the third has a
+    normally driven/labeled gate but an unlabeled, uncontacted-elsewhere
+    drain pad (``terminal_kind == "drain"``, 1 entry) -- so the run produces
+    2 gate-bucket entries and 1 non-gate-bucket entry, letting a test assert
+    two separate aggregate `warnings[]` lines (counts 2 and 1) rather than
+    one line per net (3 lines) or a single conflated line.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Text(text, kdb.Trans(x, y)))
+
+    # Two floating-gate NMOS instances (x offset 0 and 3000) -- each an
+    # independent copy of `_make_floating_gate_nmos_layout`'s shapes.
+    for i, x0 in enumerate((0, 3000)):
+        draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing
+        draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1200))  # floating gate
+        draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
+        draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D)
+        draw(67, 20, kdb.Box(x0 + 0, 200, x0 + 400, 800))  # li1 (S)
+        draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D)
+        label(67, 5, f"VGND{i}", x0 + 200, 500)
+        label(67, 5, f"Y{i}", x0 + 1800, 500)
+
+    # Third NMOS: normal, driven/labeled gate ("B"), but an unlabeled drain
+    # pad touched by no other geometry -- a single-terminal, non-gate net.
+    x0 = 6000
+    draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1200))  # gate poly
+    draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
+    draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D, unlabeled)
+    draw(67, 20, kdb.Box(x0 + 0, 200, x0 + 400, 800))  # li1 (S)
+    draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D, unlabeled)
+    label(67, 5, "VGND2", x0 + 200, 500)
+    # Gate contact so this gate is driven (not itself single-terminal).
+    draw(66, 44, kdb.Box(x0 + 900, 900, x0 + 1100, 1100))
+    draw(67, 20, kdb.Box(x0 + 850, 850, x0 + 1150, 1150))
+    label(67, 5, "B", x0 + 1000, 1000)
+
+    return layout
+
+
 # --------------------------------------------------------------------------- #
 # Error paths
 # --------------------------------------------------------------------------- #
@@ -3817,8 +3870,11 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     assert report["unbiased_pmos_body_nets"] == [
         {"device": pfet["name"], "net": pfet["nets"]["b"]}
     ]
+    # Issue #599: the `warnings[]` mirror is a single aggregate line with the
+    # count baked in (not one line per device naming its specific net) --
+    # see the multi-instance aggregation tests below for the scaling case.
     assert any(
-        "no DC bias path" in warning and pfet["nets"]["b"] in warning
+        "no DC bias path" in warning and "1 PMOS device" in warning
         for warning in report["warnings"]
     )
 
@@ -3838,14 +3894,39 @@ def test_gf180mcu_clkinv_1_spot_check(tmp_path):
     assert body_entry["device"] == pfet["name"]
     assert body_entry["terminal"] == "b"
     assert body_entry["terminal_kind"] == "body"
+    # Issue #599: the `warnings[]` mirror is a single aggregate line per
+    # `terminal_kind` bucket (gate vs. non-gate), with the count baked in --
+    # not one line per net naming its specific net name.
     assert any(
-        "legitimate single-terminal tie" in warning and body_net_name in warning
+        "legitimate single-terminal tie" in warning and "1 net" in warning
         for warning in report["warnings"]
     )
-    assert not any(
-        "almost certainly an unconnected input" in warning and body_net_name in warning
-        for warning in report["warnings"]
+    assert not any("almost certainly" in warning for warning in report["warnings"])
+
+
+def test_multi_pmos_unbiased_body_nets_produce_one_aggregate_warning(tmp_path):
+    """Issue #599: a layout with 2+ PMOS devices whose bodies are all
+    anonymous produces exactly **one** `warnings[]` entry naming the count,
+    not one line per device -- `unbiased_pmos_body_nets[]` itself still has
+    one entry per device. Uses the real gf180mcu AND2 standard cell (3 PMOS,
+    all bodies anonymous on this deck -- see the clkinv_1 spot-check above
+    for the single-device case)."""
+    layout_path = CORPUS_DIR / "gf180mcu" / "gf180mcu_fd_sc_mcu9t5v0__and2_1.gds"
+    report = run_extract(
+        str(layout_path), "gf180mcu", output=str(tmp_path / "and2_1.spice")
     )
+
+    assert report["device_counts"]["pfet"] == 3
+    unbiased = report["unbiased_pmos_body_nets"]
+    assert len(unbiased) == 3
+    assert {entry["device"] for entry in unbiased} == {
+        d["name"] for d in report["devices"] if d["class"] == "pfet"
+    }
+
+    pmos_warnings = [w for w in report["warnings"] if "no DC bias path" in w]
+    assert len(pmos_warnings) == 1
+    assert "3 PMOS devices" in pmos_warnings[0]
+    assert "unbiased_pmos_body_nets[]" in pmos_warnings[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -3960,8 +4041,11 @@ def test_floating_gate_nmos_reports_single_terminal_net(tmp_path):
     assert gate_entry["terminal"] == "g"
     assert gate_entry["terminal_kind"] == "gate"
 
+    # Issue #599: the `warnings[]` mirror is a single aggregate line for the
+    # gate bucket, with the count baked in -- not one line per net naming
+    # its specific net name.
     assert any(
-        "almost certainly an unconnected input" in warning and gate_net in warning
+        "almost certainly" in warning and "1 net" in warning
         for warning in report["warnings"]
     )
 
@@ -3986,6 +4070,44 @@ def test_inverter_layout_reports_no_single_terminal_nets_by_default(tmp_path):
         "connects to exactly one device terminal" in warning
         for warning in report["warnings"]
     )
+
+
+def test_multi_single_terminal_nets_produce_two_aggregate_warnings(tmp_path):
+    """Issue #599: a layout with 2+ undriven MOS gates produces exactly
+    **one** aggregate `warnings[]` entry for the gate bucket (count baked
+    in), separate from a second aggregate line for any non-gate single-
+    terminal-net hits in the same run -- not one line per net.
+    `single_terminal_nets[]` itself is unaffected: still one entry per net,
+    3 total (2 gate, 1 drain) for this fixture."""
+    path = _write_gds(
+        _make_multi_single_terminal_layout(), tmp_path / "multi_single.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "multi_single.spice"))
+
+    single_terminal = report["single_terminal_nets"]
+    assert len(single_terminal) == 3
+    kinds = [entry["terminal_kind"] for entry in single_terminal]
+    assert kinds.count("gate") == 2
+    assert kinds.count("drain") == 1
+
+    gate_warnings = [w for w in report["warnings"] if "almost certainly" in w]
+    assert len(gate_warnings) == 1
+    assert "2 nets" in gate_warnings[0]
+    assert "single_terminal_nets[]" in gate_warnings[0]
+
+    other_warnings = [
+        w for w in report["warnings"] if "legitimate single-terminal tie" in w
+    ]
+    assert len(other_warnings) == 1
+    assert "1 net" in other_warnings[0]
+    assert "single_terminal_nets[]" in other_warnings[0]
+
+    # No per-instance duplication: exactly 2 aggregate lines total, not 3
+    # (one per net) or more.
+    single_terminal_warnings = [
+        w for w in report["warnings"] if "connect to exactly one device terminal" in w
+    ]
+    assert len(single_terminal_warnings) == 2
 
 
 # --------------------------------------------------------------------------- #

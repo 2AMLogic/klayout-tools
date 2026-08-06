@@ -14,6 +14,31 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-06 — `klt extract`: `warnings[]` no longer duplicates
+  `unbiased_pmos_body_nets[]`/`single_terminal_nets[]` one line per instance
+  (#599) — a design with many affected devices/nets (e.g. 148 floating PMOS
+  bodies on one real top cell) inflated `warnings[]` from a handful of
+  entries to 150+ near-identical lines, defeating literal `warnings[]`
+  pinning for any caller (a golden-file/regression test, or a human skimming
+  CLI output for anything unexpected) at scale. Each finding class now
+  mirrors `unmodelled_poly[]`'s existing aggregate pattern: one `warnings[]`
+  line per class with the count baked in (e.g. `"148 PMOS devices tie their
+  body to an anonymous net..."`), pointing at the structured array for the
+  full per-instance list — `single_terminal_nets` emits two such lines (one
+  for the `terminal_kind == "gate"` bucket, one for every other terminal
+  kind combined), matching its existing two-message-class split.
+  `unbiased_pmos_body_nets[]`/`single_terminal_nets[]` themselves are
+  unchanged — still one entry per device/net; only their `warnings[]`
+  mirror is aggregated. `merged_net_labels[]`/`voltage_domain_warnings[]`
+  keep their existing one-line-per-entry `warnings[]` mirror unchanged —
+  their cardinality is bounded by label-collision/marker-registry size
+  rather than raw device/net count, so they don't reproduce this scaling
+  problem; left as a lower-priority follow-up rather than blocking this fix.
+  **Behavior change**: a caller matching a specific per-instance net/device
+  name inside a `warnings[]` string for either of the two changed fields
+  must now read the structured array instead — see `docs/cli/extract.md`'s
+  "JSON schema" table.
+
 - 2026-08-05 — `klt drc`: both curated decks checked the layers *below* a
   contact/via but never the conductor *above* it, so a cut whose landing
   metal missed one of its edges reported `status: clean` (#551) — a DRC
