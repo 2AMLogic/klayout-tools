@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--defer-resistor-fixed-offset] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -59,6 +59,13 @@ two disagree, this document (and the code) win.
   documentation without blocking `klt lvs`'s `options.combine_devices` from
   folding the series chain. When unset, every named net still promotes to a
   pin, byte-for-byte unchanged. See "Declared pin set" below.
+- `--deck-option` — optional, unset by default, repeatable. `<key>=<value>`
+  selects which caller-visible flavour of a deck's shared-geometry device
+  family this run wires (issue #595) — today's only recognised key is
+  gf180mcu's `poly_res` (values `1k` (the PDK's own default), `2k`, `3k`).
+  An unrecognised key or value is an application error, not a silently-kept
+  default. Omitting the flag resolves every deck exactly as before it
+  existed. See "Selecting a shared-geometry resistor flavour" below.
 - `--defer-resistor-fixed-offset` — optional, off by default. Omit each
   opted-in resistor device class's `ResistorDevice.fixed_offset_ohm`
   head/end-resistance term from the extracted `R`, leaving only the raw
@@ -450,7 +457,9 @@ starter subset, not a silent omission.
 
 Both decks additionally recognise **drawn precision-resistor device
 classes** (issue #222, extended to cover each deck's other selectable
-sheet-rho flavour by issue #299). A drawn resistor is a deliberately-marked
+sheet-rho flavour by issue #299, and to make gf180mcu's shared-geometry
+flavours caller-selectable via `--deck-option` by issue #595). A drawn
+resistor is a deliberately-marked
 segment of an ordinary conductor: the designer draws poly, then covers the
 resistive part with the PDK's resistor-ID layer. Without this recognition
 that segment extracts as a plain conductor — a **short** between the
@@ -463,7 +472,7 @@ passes LVS silently.
 | `sky130`   | `res_high_po` | `sky130_fd_pr__res_high_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `rpm` 86/20 | **324.827244 Ω/□** | **379.705147 Ω** |
 | `sky130`   | `res_xhigh_po` | `sky130_fd_pr__res_xhigh_po_*` | `poly.drawing` 66/20 | `poly.res` 66/13 | `psdm` 94/20, `urpm` 79/20 | **2000 Ω/□** | — |
 | `gf180mcu` | `ppolyf_u` | `gf180mcu_fd_pr__ppolyf_u` (P+ poly, unsalicided) | `Poly2` 30/0 | `RES_MK` 110/5 | `Pplus` 31/0, `SAB` 49/0 | **350 Ω/□** | — |
-| `gf180mcu` | `ppolyf_u_1k` | `gf180mcu_fd_pr__ppolyf_u_1k` (`POLY_RES='1k'` default) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000 Ω/□** | — |
+| `gf180mcu` | `ppolyf_u_1k`/`_2k`/`_3k` | `gf180mcu_fd_pr__ppolyf_u_{1k,2k,3k}` (`POLY_RES` default `1k`, caller-selectable via `--deck-option poly_res=`) | `Poly2` 30/0 | `RES_MK` 110/5 | `SAB` 49/0, `Resistor` 62/0 | **1000/2000/3000 Ω/□** | — |
 
 KLayout computes `R = L / W * sheet_rho` from the recognised segment's own
 geometry, corrected by `klt extract` itself (issue #518) to
@@ -511,13 +520,15 @@ Three consequences worth knowing:
   implant masks each select their *own* wired device class above (so a
   segment marked with one is never mistaken for the other, nor for the
   48.2 Ω/□ generic flavour); gf180mcu's `Resistor` 62/0 high-sheet-rho mark
-  selects `ppolyf_u_1k` (only the PDK's own `POLY_RES='1k'` default — its
-  `_2k`/`_3k` siblings share *identical* drawn geometry with `_1k`,
-  selected only by a build-time option no drawn layer distinguishes, so
-  they remain deliberately unmodelled). gf180mcu's `SAB` is *required* on
-  both `ppolyf_u` entries (without it the real device is the ~48×
-  lower-resistance salicided `ppolyf_s`). A wrong resistance passing LVS
-  with high confidence is worse than a known-unmodelled short.
+  selects one of `ppolyf_u_1k`/`_2k`/`_3k` — all three share *identical*
+  drawn geometry, disambiguated only by the upstream PDK's build-time
+  `POLY_RES` option, which `--deck-option poly_res=<value>` now lets a
+  caller select explicitly (issue #595; `1k`, the PDK's own default, when
+  the flag is omitted) — see "Selecting a shared-geometry resistor flavour"
+  below. gf180mcu's `SAB` is *required* on both `ppolyf_u` entries (without
+  it the real device is the ~48× lower-resistance salicided `ppolyf_s`). A
+  wrong resistance passing LVS with high confidence is worse than a
+  known-unmodelled short.
 - **A "deck-coverage gap" warns differently from unmarked geometry.** A
   segment that carries a resistor-marker layer this deck knows about, but
   whose `requires`/`excludes` conditions it does not satisfy (e.g. a
@@ -573,6 +584,53 @@ Rules of thumb:
   in the report — and every byte of the written netlist outside those `R`
   values — is identical either way; on a layout with no such resistors, the
   two outputs are byte-for-byte equal.
+
+#### Selecting a shared-geometry resistor flavour (`--deck-option`, issue #595)
+
+Some drawn-resistor families have two or more sheet-rho **flavours that share
+identical recognition geometry** — the same body/marker/`requires`/`excludes`
+region — disambiguated only by a build-time variable in the *official* PDK
+LVS deck this tool's deck is transcribed from, not by any drawn layer. There
+is nothing a curated deck could key off to tell them apart on its own, so it
+recognises exactly one flavour by default (the PDK's own default) and leaves
+the others unmodelled — a design actually built against a different flavour
+of that same geometry previously had **no way to select it**: its resistor
+still extracted, but as the wrong device (a 2x/3x-off resistance), or (if the
+default entry were narrowed away for any reason) as an unmodelled short.
+
+`--deck-option <key>=<value>` (repeatable) picks the flavour explicitly for
+this run. Today's one wired case is gf180mcu's `poly_res`, the curated-deck
+counterpart of the upstream `POLY_RES` deck variable cited in
+`decks/gf180mcu.py`'s own `ppolyf_u_1k` provenance note:
+
+| Deck | Key | Values | Selects |
+| ---- | --- | ------ | ------- |
+| `gf180mcu` | `poly_res` | `1k` (default), `2k`, `3k` | Which of `ppolyf_u_1k`/`ppolyf_u_2k`/`ppolyf_u_3k` (1000/2000/3000 Ω/□) a `Resistor` (62/0)-marked poly segment extracts as. |
+
+```sh
+# A design drawn against gf180mcu's 2000-ohm/sq POLY_RES='2k' flavour:
+klt extract cell.gds --deck gf180mcu --deck-option poly_res=2k -o cell.spice --format json
+```
+
+Rules of thumb:
+
+- Selecting the flavour that already matches the deck's default (`poly_res=1k`
+  today) is byte-for-byte identical to omitting `--deck-option` entirely,
+  other than the additive `provenance.deck.options` echo below.
+- An unrecognised key (one no resistor entry in this deck declares) or an
+  unrecognised value (not one of the entry's declared flavours) is an
+  application error (exit 1), never a silently-kept default and never a
+  guessed resistance — the same "known-unmodelled short beats a silently
+  wrong value" discipline the deck's own `requires`/`excludes` narrowing
+  already applies.
+- The resolved mapping is echoed verbatim as `provenance.deck.options` in the
+  JSON response (present only when `--deck-option` was given), so a record
+  can pin exactly which flavour a run selected alongside the deck's own
+  `content_hash`.
+- This changes only *which* device class/sheet-rho a matched resistor segment
+  is reported as — never *whether* a segment is recognised, and never how
+  many devices a drawn segment produces (still exactly one, whichever flavour
+  is selected).
 
 ### Junction diodes (issue #542)
 
@@ -1520,7 +1578,7 @@ exit codes).
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A matching prose entry is also appended to `warnings[]`. Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
-| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
+| `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want
 structure without re-parsing SPICE; the **netlist file at `netlist_path` is

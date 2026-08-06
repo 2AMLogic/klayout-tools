@@ -20,6 +20,30 @@ from ..extract import ExtractError, run_extract
 from .output import emit_error, emit_success
 
 
+def _parse_deck_options(raw: list[str] | None) -> dict[str, str] | None:
+    """Parse the ``--deck-option`` flag's ``KEY=VALUE`` entries (issue #595,
+    repeatable) into a ``dict``, or ``None`` when the flag was never given.
+
+    Raises :class:`ExtractError` for a malformed entry (no ``=``, or a blank
+    key) -- a likely typo, not a meaningful "no options" request. A later
+    ``KEY`` overrides an earlier one with the same key (last-one-wins,
+    matching how argparse's own ``append`` action preserves given order).
+    """
+    if raw is None:
+        return None
+    options: dict[str, str] = {}
+    for entry in raw:
+        key, sep, value = entry.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise ExtractError(
+                f"--deck-option entry {entry!r} is not KEY=VALUE -- "
+                "e.g. --deck-option poly_res=2k"
+            )
+        options[key] = value.strip()
+    return options
+
+
 def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
     """Parse the ``--pins`` flag's comma-separated value (issue #514) into a
     ``frozenset`` of declared pin names, or ``None`` when the flag was
@@ -44,6 +68,7 @@ def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
 def run(args: argparse.Namespace) -> int:
     try:
         declared_pins = _parse_declared_pins(args.pins)
+        deck_options = _parse_deck_options(args.deck_options)
         report = run_extract(
             args.file,
             args.deck,
@@ -60,6 +85,11 @@ def run(args: argparse.Namespace) -> int:
             # correction), `run_extract`'s kwarg as "apply" (default `True`),
             # so the CLI default stays today's always-applied behavior.
             apply_resistor_fixed_offset=not args.defer_resistor_fixed_offset,
+            # `--deck-option` (issue #595): selects a caller-visible flavour
+            # of a shared-geometry device family (e.g. gf180mcu's
+            # `poly_res`). `None` when the flag was never given, unchanged
+            # from every call site that predates it.
+            deck_options=deck_options,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -72,6 +102,11 @@ def run(args: argparse.Namespace) -> int:
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"deck: {report['deck']}")
+    # Present only when `--deck-option` selected a non-default flavour
+    # (issue #595) -- mirrors `provenance.deck.options` in the JSON report.
+    deck_options = report.get("provenance", {}).get("deck", {}).get("options")
+    if deck_options:
+        print(f"deck_options: {deck_options}")
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")

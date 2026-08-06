@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -90,13 +91,29 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def _deck_block(name: str | None, path: str | None) -> dict[str, Any] | None:
+def _deck_block(
+    name: str | None,
+    path: str | None,
+    deck_options: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
     """The provenance ``deck`` shape ``{name, content_hash}``; ``None`` when
     no rule/model deck was involved (e.g. LVS against a pre-extracted
-    netlist)."""
+    netlist).
+
+    ``deck_options`` (issue #595, ``klt extract --deck-option``) is echoed
+    verbatim as an additional ``options`` key when non-empty -- e.g. gf180mcu's
+    caller-selectable resistor sheet-rho flavour (``{"poly_res": "2k"}``) --
+    so a record can pin exactly which flavour of a shared-geometry device
+    family a run resolved. Omitted entirely when ``deck_options`` is
+    ``None``/empty, keeping the block byte-identical to before this
+    parameter existed for every call site that does not pass it.
+    """
     if name is None:
         return None
-    return {"name": name, "content_hash": _content_hash(path)}
+    block: dict[str, Any] = {"name": name, "content_hash": _content_hash(path)}
+    if deck_options:
+        block["options"] = dict(deck_options)
+    return block
 
 
 def _input_block(path: str | None) -> dict[str, Any] | None:
@@ -113,6 +130,7 @@ def build_provenance(
     deck_path: str | None = None,
     pdk: dict[str, Any] | None = None,
     input_path: str | None = None,
+    deck_options: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
@@ -127,12 +145,14 @@ def build_provenance(
     (the default) when the verb has no single input layout to pin (or already
     covers this itself, as ``klt lvs`` does via
     ``environment.layout_sha256``/``reference_sha256``).
+    ``deck_options`` (issue #595) is echoed onto ``provenance.deck.options``
+    via :func:`_deck_block` when non-empty -- see that function's docstring.
     ``klt_version``/``klayout_version`` are read at call time.
     """
     return {
         "klt_version": _klt_version(),
         "klayout_version": _klayout_version(),
         "pdk": _pdk_block(pdk),
-        "deck": _deck_block(deck_name, deck_path),
+        "deck": _deck_block(deck_name, deck_path, deck_options),
         "input": _input_block(input_path),
     }

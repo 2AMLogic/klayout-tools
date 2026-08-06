@@ -2565,6 +2565,166 @@ def test_gf180mcu_high_sheet_rho_poly_extracts_as_ppolyf_u_1k(tmp_path):
     assert device["nets"]["w"] == get_extraction_deck("gf180mcu").substrate_net
 
 
+# --------------------------------------------------------------------------- #
+# Caller-selectable sheet-rho flavour (issue #595): the `2k`/`3k` siblings
+# `ppolyf_u_1k` shares *identical* recognition geometry with, previously
+# unselectable and therefore still collapsing to a short.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("value", "device_class", "sheet_rho"),
+    [
+        ("1k", "ppolyf_u_1k", 1000.0),
+        ("2k", "ppolyf_u_2k", 2000.0),
+        ("3k", "ppolyf_u_3k", 3000.0),
+    ],
+)
+def test_gf180mcu_poly_res_deck_option_selects_flavour(
+    tmp_path, value, device_class, sheet_rho
+):
+    """`klt extract`'s `deck_options={"poly_res": <value>}` (`--deck-option
+    poly_res=<value>` on the CLI) selects which of the identically-drawn
+    `ppolyf_u_{1k,2k,3k}` sheet-rho interpretations a `Resistor`-marked poly
+    segment extracts as -- still exactly one recognised device per drawn
+    segment, never a duplicate, and never a short."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / f"ppolyf_u_{value}.gds",
+    )
+    report = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / f"ppolyf_u_{value}.spice"),
+        deck_options={"poly_res": value},
+    )
+
+    assert report["device_counts"] == {device_class: 1}
+    (device,) = report["devices"]
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * sheet_rho)
+    assert device["nets"]["w"] == get_extraction_deck("gf180mcu").substrate_net
+    assert report["provenance"]["deck"]["options"] == {"poly_res": value}
+
+
+def test_gf180mcu_poly_res_deck_option_1k_matches_omitted_default(tmp_path):
+    """Selecting `poly_res=1k` explicitly reproduces the PDK's own default --
+    the same netlist `run_extract` writes when `deck_options` is omitted
+    entirely, byte-for-byte (issue #595's backward-compatibility guarantee)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "ppolyf_u.gds",
+    )
+    baseline = run_extract(path, "gf180mcu", output=str(tmp_path / "baseline.spice"))
+    explicit = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "explicit.spice"),
+        deck_options={"poly_res": "1k"},
+    )
+
+    assert baseline["netlist_sha256"] == explicit["netlist_sha256"]
+    assert baseline["device_counts"] == explicit["device_counts"]
+    # The only difference is the additive `provenance.deck.options` echo.
+    assert "options" not in baseline["provenance"]["deck"]
+    assert explicit["provenance"]["deck"]["options"] == {"poly_res": "1k"}
+
+
+def test_gf180mcu_poly_res_deck_option_invalid_value_is_extract_error(tmp_path):
+    """An unrecognised `poly_res` value is a loud `ExtractError`, not a
+    silently-kept default or a guessed resistance (issue #595)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "ppolyf_u_bad.gds",
+    )
+    with pytest.raises(ExtractError, match="poly_res=4k"):
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "bad.spice"),
+            deck_options={"poly_res": "4k"},
+        )
+
+
+@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
+def test_deck_option_unrecognised_key_is_extract_error(tmp_path, deck_name):
+    """A `deck_options` key no `ResistorDevice.flavour_option` matches is an
+    error -- both for a deck that declares no selectable flavour at all
+    (sky130) and for gf180mcu, which declares `poly_res` but not this key
+    (issue #595)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(deck_name), tmp_path / f"{deck_name}_res.gds"
+    )
+    with pytest.raises(ExtractError, match="no selectable option"):
+        run_extract(
+            path,
+            deck_name,
+            output=str(tmp_path / "bad.spice"),
+            deck_options={"mim_cap": "x"},
+        )
+
+
+def test_cli_deck_option_selects_flavour(tmp_path, capsys):
+    """`klt extract --deck-option poly_res=2k` end-to-end: parsed by the CLI,
+    forwarded to `run_extract`, and echoed in `provenance.deck.options`
+    (issue #595)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "ppolyf_u_2k.gds",
+    )
+    netlist_path = tmp_path / "res2k.spice"
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "gf180mcu",
+            "-o",
+            str(netlist_path),
+            "--deck-option",
+            "poly_res=2k",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["device_counts"] == {"ppolyf_u_2k": 1}
+    assert out["provenance"]["deck"]["options"] == {"poly_res": "2k"}
+
+
+def test_cli_deck_option_malformed_entry_is_a_clean_error(tmp_path, capsys):
+    """A `--deck-option` entry with no `=` exits 1 with a clean message, not
+    a traceback (issue #595)."""
+    path = _write_gds(_make_poly_resistor_layout("gf180mcu"), tmp_path / "res.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "gf180mcu",
+            "-o",
+            str(tmp_path / "out.spice"),
+            "--deck-option",
+            "poly_res",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "KEY=VALUE" in err["error"]["message"]
+
+
 @pytest.mark.parametrize(
     ("mask", "device_class", "sheet_rho", "fixed_offset_ohm"),
     [
@@ -4961,18 +5121,25 @@ def test_merged_net_labels_lists_all_three_plus_labels(tmp_path):
 _DUMMY_MARKER = (100, 0)
 
 
-def _dummy_deck(name: str = "sky130") -> ExtractionDeck:
+def _dummy_deck(
+    name: str = "sky130", deck_options: dict[str, str] | None = None
+) -> ExtractionDeck:
     """The registered ``name`` extraction deck (sky130 by default), with the
     optional ``dummy`` marker layer set to :data:`_DUMMY_MARKER` (issue #295).
     Everything else is identical, so a layout with no shapes on that layer
     extracts exactly as it does under the shipped deck.
 
-    Written to accept the ``name`` argument so it can stand in for
-    ``get_extraction_deck`` under ``monkeypatch.setattr``. The
-    ``get_extraction_deck`` it calls is this test module's own import from
-    ``klayout_tools.decks`` -- distinct from the ``klayout_tools.extract``
-    reference the tests patch -- so there is no recursion."""
-    return dataclasses.replace(get_extraction_deck(name), dummy=_DUMMY_MARKER)
+    Written to accept the same ``(name, deck_options)`` positional signature
+    as ``get_extraction_deck`` (issue #595) so it can stand in for it under
+    ``monkeypatch.setattr`` -- ``deck_options`` is forwarded, not ignored, so
+    a test that combines dummy-suppression with a `deck_options` override
+    still sees it applied. The ``get_extraction_deck`` it calls is this test
+    module's own import from ``klayout_tools.decks`` -- distinct from the
+    ``klayout_tools.extract`` reference the tests patch -- so there is no
+    recursion."""
+    return dataclasses.replace(
+        get_extraction_deck(name, deck_options), dummy=_DUMMY_MARKER
+    )
 
 
 def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> None:
