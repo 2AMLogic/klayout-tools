@@ -383,7 +383,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == path
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
@@ -3457,7 +3457,7 @@ def test_sky130_corpus_extraction_produces_well_formed_report(layout_path, tmp_p
         str(layout_path), "sky130", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -3476,7 +3476,7 @@ def test_gf180mcu_corpus_extraction_produces_well_formed_report(layout_path, tmp
         str(layout_path), "gf180mcu", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -4247,7 +4247,10 @@ def test_parasitics_summary_block_shape(tmp_path):
     # sky130's PARASITICS.metals is fully populated (issue #547's regression
     # target was gf180mcu, not sky130) -- no gap for this deck.
     assert para["metals_without_coefficient"] == []
-    assert para["r_count"] == para["c_count"] == len(para["nets"])
+    # r_count now counts every emitted resistor (one *or more* per net, issue
+    # #592's star topology), so it is >= c_count (one capacitor per net,
+    # unchanged) rather than always equal to it.
+    assert para["r_count"] >= para["c_count"] == len(para["nets"])
     assert para["r_count"] >= 1
     assert para["total_capacitance_ff"] > 0.0
 
@@ -4258,14 +4261,28 @@ def test_parasitics_summary_block_shape(tmp_path):
             "net",
             "resistance_ohm",
             "capacitance_ff",
-            "internal_node",
+            "hub_net",
+            "terminals",
         }
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
-        assert entry["internal_node"].startswith(f"{entry['net']}__par")
-    # Internal parasitic node names are unique (collision-suffixed if needed).
-    internal_nodes = [n["internal_node"] for n in para["nets"]]
-    assert len(internal_nodes) == len(set(internal_nodes))
+        for term in entry["terminals"]:
+            assert set(term) == {"device", "terminal", "leg_net", "resistance_ohm"}
+            assert term["resistance_ohm"] >= 0.0
+            assert term["leg_net"].startswith(f"{entry['net']}__t")
+        # A net with >= 1 real device terminal uses the net itself as the
+        # star's hub (issue #592); the fallback `<net>__par` node only
+        # appears for a net with zero terminals (none in this fixture).
+        if entry["terminals"]:
+            assert entry["hub_net"] == entry["net"]
+        else:
+            assert entry["hub_net"].startswith(f"{entry['net']}__par")
+    # Every net here has real device terminals to fan a star out to.
+    assert all(entry["terminals"] for entry in para["nets"])
+    # r_count is exactly the sum of each net's emitted resistor count.
+    assert para["r_count"] == sum(
+        max(1, len(entry["terminals"])) for entry in para["nets"]
+    )
     # Ground net never gets its own parasitic stub.
     assert "vsubs" not in names
 
@@ -4638,13 +4655,77 @@ def test_parasitics_covers_internal_unlabelled_nets_with_real_geometry(tmp_path)
     assert internal_name in para_nets
     assert para_nets[internal_name]["capacitance_ff"] > 0.0
     assert para_nets[internal_name]["resistance_ohm"] > 0.0
-    assert para_nets[internal_name]["internal_node"].startswith(f"{internal_name}__par")
+    # This internal net has real device terminals (T1's drain, T2's source),
+    # so it stars off itself as the hub (issue #592) rather than falling back
+    # to a fresh `__par` node.
+    assert para_nets[internal_name]["hub_net"] == internal_name
+    assert len(para_nets[internal_name]["terminals"]) == 2
 
     # The labelled nets on either side of the series pair are unaffected.
     assert "VGND" in para_nets
     assert "Y" in para_nets
     assert para_nets["VGND"]["capacitance_ff"] > 0.0
     assert para_nets["Y"]["capacitance_ff"] > 0.0
+
+
+def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
+    tmp_path,
+):
+    """Acceptance bar (issue #592): unlike the pre-#592 Gamma-shunt topology
+    (#338), a resistor now sits in series between two device terminals on
+    the same net -- the automated analog of the issue's own "positive
+    control" (a non-zero, in-path resistance measurement that changes
+    between the schematic and extracted netlist).
+
+    Uses the same internal, unlabelled, two-terminal net as
+    `test_parasitics_covers_internal_unlabelled_nets_with_real_geometry`
+    (T1's drain / T2's source, joined by a long li1 run) -- real routed
+    geometry between two real device terminals, exactly the shape #338's
+    structural audit found universally absent."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "series.spice"), parasitics=True
+    )
+
+    internal_nets = [
+        n for n in report["nets"] if not n["pin"] and n["device_count"] == 2
+    ]
+    assert len(internal_nets) == 1
+    internal_name = internal_nets[0]["name"]
+
+    para_entry = next(
+        n for n in report["parasitics"]["nets"] if n["net"] == internal_name
+    )
+    terminals = para_entry["terminals"]
+    assert len(terminals) == 2
+    # Both terminals belong to distinct devices (T1's drain, T2's source) --
+    # not the same device connected twice.
+    assert terminals[0]["device"] != terminals[1]["device"]
+    # Each leg carries a distinct, real net name and a strictly positive
+    # resistance -- neither leg degenerates to a zero-length short.
+    assert terminals[0]["leg_net"] != terminals[1]["leg_net"]
+    for term in terminals:
+        assert term["resistance_ohm"] > 0.0
+
+    # The in-path, terminal-to-terminal resistance is the sum of the two
+    # legs (a star: leg_a --R--> hub --R--> leg_b) -- strictly positive,
+    # i.e. non-zero, unlike the schematic-equivalent view (`nets[]`, built
+    # *before* parasitics injection) where the same two terminals share one
+    # node with zero resistance between them by construction.
+    terminal_to_terminal_ohm = sum(term["resistance_ohm"] for term in terminals)
+    assert terminal_to_terminal_ohm > 0.0
+    # The net's own reported total resistance is preserved as the star's
+    # total budget (legs sum back to it, modulo the negligible per-leg
+    # minimum-resistance clamp).
+    assert terminal_to_terminal_ohm == pytest.approx(
+        para_entry["resistance_ohm"], rel=1e-6
+    )
+
+    # The written SPICE netlist emits exactly two resistor cards for this
+    # net's star (plus whatever other nets contribute) and one capacitor.
+    netlist_text = Path(report["netlist_path"]).read_text()
+    r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
+    assert len(r_lines) == report["parasitics"]["r_count"]
 
 
 # --------------------------------------------------------------------------- #

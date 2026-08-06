@@ -132,6 +132,7 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from typing import TYPE_CHECKING, Any
@@ -164,7 +165,15 @@ if TYPE_CHECKING:
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: 2 (issue #592): the `parasitics.nets[]` entry's shape changed from one
+#: shunt resistor (`internal_node`) to a star topology -- `internal_node` is
+#: replaced by `hub_net` (usually the net itself now, not a fresh node) and a
+#: new `terminals[]` array (one entry per device terminal moved onto the
+#: star). `parasitics.r_count` also changed meaning: it now counts every
+#: emitted resistor (one or more per net), not one per net, so
+#: `r_count == c_count` no longer holds in general.
+SCHEMA_VERSION = 2
 
 #: Decimal places `devices[].params` (`w_um`/`l_um`) are rounded to -- clears
 #: floating-point noise from KLayout's internal dbu -> um conversion (e.g.
@@ -2832,23 +2841,87 @@ def _compute_parasitics(
     return results
 
 
+def _terminal_star_positions_um(terminal_refs: list[Any]) -> list[tuple[float, float]]:
+    """The approximate ``(x_um, y_um)`` location of each of ``terminal_refs``,
+    read from its owning device's ``Device.trans`` (already reported in real
+    micrometres -- unlike most of this module, no ``dbu`` scaling is needed).
+
+    This is a **coarse** proxy for a terminal's true physical location
+    (issue #592): KLayout's connectivity extraction records one placement
+    transform per *device* (typically the center of its recognition shape),
+    not a distinct position per terminal, so every terminal on the same
+    device instance shares that device's single location. Good enough to
+    rank a net's terminals by their approximate spread for the star-topology
+    resistance split; not a substitute for true per-segment routing
+    measurement (out of scope -- issue #592's deferred Option 2)."""
+    positions: list[tuple[float, float]] = []
+    for ref in terminal_refs:
+        disp = ref.device().trans.disp
+        positions.append((disp.x, disp.y))
+    return positions
+
+
+def _terminal_star_weights(positions: list[tuple[float, float]]) -> list[float]:
+    """Normalized (sum to ``1.0``) per-terminal resistance-split weights for
+    the star topology: proportional to each position's Euclidean distance
+    from the centroid of ``positions``, so a terminal placed farther from a
+    net's other terminals is assigned more of that net's total resistance --
+    a coarse, position-aware stand-in for "farther terminals see more
+    interconnect" without a full per-segment routing model (issue #592).
+
+    Degenerates to an equal ``1/N`` split when every position coincides
+    (including ``N == 1``, where the lone terminal necessarily sits at the
+    "centroid") -- this is what makes a single-terminal net's star reduce to
+    exactly the pre-#592 Gamma-shunt's one lumped resistor: same total value,
+    not a smaller or larger one."""
+    n = len(positions)
+    if n == 0:
+        return []
+    cx = sum(p[0] for p in positions) / n
+    cy = sum(p[1] for p in positions) / n
+    distances = [math.hypot(x - cx, y - cy) for x, y in positions]
+    total = sum(distances)
+    if total <= 0.0:
+        return [1.0 / n] * n
+    return [d / total for d in distances]
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
     parasitic_nets: list[dict[str, Any]],
     ground_net_name: str,
 ) -> dict[str, Any]:
-    """Inject one lumped-RC ``Gamma``-section per net into ``circuit`` and
-    return the JSON ``parasitics`` summary block.
+    """Inject a star-topology parasitic RC per net into ``circuit`` and
+    return the JSON ``parasitics`` summary block (issue #592).
 
-    For each entry, a series resistor connects the net to a fresh internal
-    parasitic node, and a capacitor connects that node to the deck's ground
-    net (created if absent): ``net --R--> net.par --C--> ground``. This is
-    purely additive -- no existing device instance, net name, or pin is
-    touched -- so the schematic-equivalent connectivity `devices[]`/`nets[]`
-    reported (built before this call) is unchanged, and the written SPICE
-    stays a `.SUBCKT` body directly consumable by ``klt sim`` (the parasitic
-    nodes are internal; the subcircuit's pin interface is untouched).
+    For each entry, the net itself becomes the star's **hub**. Every device
+    terminal that was connected directly to the net is moved onto a fresh
+    per-terminal "leg" net, and a series resistor bridges each leg back to
+    the hub -- so two terminals on the same net now sit in series through
+    two resistors (``leg_a --R--> hub --R--> leg_b``), instead of sharing one
+    node with no resistance between them (the pre-#592 topology this
+    replaces). A single capacitor still hangs the net's total lumped ground
+    capacitance off the hub (``hub --C--> <substrate_net>``), created if
+    absent. Each leg's resistance is the net's total computed resistance
+    distributed across its terminals by
+    :func:`_terminal_star_weights` -- a terminal farther from the net's
+    other connections gets more of the total, and the weights always sum to
+    ``1.0`` so a net's leg resistances sum back to its total. A net with no
+    device terminal at all (real geometry with nothing electrically
+    attached) falls back to exactly the pre-#592 Gamma-shunt: one resistor
+    from the net to a fresh internal node, with the capacitor on that node.
+
+    This is purely additive from the perspective of the schematic-equivalent
+    view built *before* this call (`devices[]`/`nets[]`, see `run_extract`):
+    no existing device instance is removed, no pin is touched, and the
+    written SPICE stays a `.SUBCKT` body directly consumable by ``klt sim``
+    (every new node is internal; the subcircuit's pin interface is
+    untouched). It is *not* additive to the circuit object's own internal
+    wiring the way the old shunt topology was: moving a device terminal onto
+    a leg net changes which SPICE node that device's `R`/`C`/`M` card names,
+    even though the electrical net it represents -- and everything
+    `devices[]`/`nets[]` reports about it -- is unchanged.
 
     The resistor and capacitor device classes are added unnamed so KLayout's
     ``NetlistSpiceWriter`` emits bare ``R``/``C`` cards with no trailing model
@@ -2878,41 +2951,89 @@ def _inject_parasitics(
     report_nets: list[dict[str, Any]] = []
     total_r = 0.0
     total_c_ff = 0.0
+    total_r_count = 0
     for entry in parasitic_nets:
         net = nets_by_name.get(entry["net"])
         if net is None:
             continue
-        internal_name = _unique_net_name(entry["net"], existing_names)
-        existing_names.add(internal_name)
-        internal = circuit.create_net(internal_name)
-
-        r_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
-        c_farad = entry["capacitance_ff"] * 1e-15
 
         instance_name = _sanitize_instance_name(entry["net"])
-        r_dev = circuit.create_device(res_class, instance_name)
-        r_dev.connect_terminal("A", net)
-        r_dev.connect_terminal("B", internal)
-        r_dev.set_parameter("R", r_ohm)
+        r_total_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
+        c_farad = entry["capacitance_ff"] * 1e-15
+
+        # Snapshot before mutating: moving a terminal off `net` below changes
+        # what `net.each_terminal()` would yield mid-iteration.
+        terminal_refs = list(net.each_terminal())
+
+        terminal_reports: list[dict[str, Any]] = []
+        if terminal_refs:
+            hub = net
+            hub_name = entry["net"]
+            positions = _terminal_star_positions_um(terminal_refs)
+            weights = _terminal_star_weights(positions)
+            for i, (term_ref, weight) in enumerate(
+                zip(terminal_refs, weights, strict=True)
+            ):
+                leg_name = _unique_net_name(
+                    entry["net"], existing_names, suffix=f"__t{i}"
+                )
+                existing_names.add(leg_name)
+                leg = circuit.create_net(leg_name)
+
+                device = term_ref.device()
+                terminal_def = term_ref.terminal_def()
+                device.disconnect_terminal(terminal_def.id())
+                device.connect_terminal(terminal_def.id(), leg)
+
+                leg_r_ohm = max(r_total_ohm * weight, _MIN_PARASITIC_R_OHM)
+                r_dev = circuit.create_device(res_class, f"{instance_name}_t{i}")
+                r_dev.connect_terminal("A", leg)
+                r_dev.connect_terminal("B", hub)
+                r_dev.set_parameter("R", leg_r_ohm)
+                total_r_count += 1
+
+                terminal_reports.append(
+                    {
+                        "device": device.expanded_name(),
+                        "terminal": terminal_def.name,
+                        "leg_net": leg_name,
+                        "resistance_ohm": round(leg_r_ohm, 4),
+                    }
+                )
+        else:
+            # No device terminal to fan a star out to (e.g. real routed
+            # geometry with nothing electrically attached) -- fall back to
+            # the pre-#592 Gamma-shunt so the net's capacitance still has
+            # somewhere to attach.
+            hub_name = _unique_net_name(entry["net"], existing_names)
+            existing_names.add(hub_name)
+            hub = circuit.create_net(hub_name)
+
+            r_dev = circuit.create_device(res_class, instance_name)
+            r_dev.connect_terminal("A", net)
+            r_dev.connect_terminal("B", hub)
+            r_dev.set_parameter("R", r_total_ohm)
+            total_r_count += 1
 
         c_dev = circuit.create_device(cap_class, instance_name)
-        c_dev.connect_terminal("A", internal)
+        c_dev.connect_terminal("A", hub)
         c_dev.connect_terminal("B", ground)
         c_dev.set_parameter("C", c_farad)
 
-        total_r += r_ohm
+        total_r += r_total_ohm
         total_c_ff += entry["capacitance_ff"]
         report_nets.append(
             {
                 "net": entry["net"],
                 "resistance_ohm": entry["resistance_ohm"],
                 "capacitance_ff": entry["capacitance_ff"],
-                "internal_node": internal_name,
+                "hub_net": hub_name,
+                "terminals": terminal_reports,
             }
         )
 
     return {
-        "r_count": len(report_nets),
+        "r_count": total_r_count,
         "c_count": len(report_nets),
         "total_resistance_ohm": round(total_r, 4),
         "total_capacitance_ff": round(total_c_ff, 6),
@@ -2943,17 +3064,22 @@ def _sanitize_instance_name(name: str) -> str:
     return _INSTANCE_NAME_UNSAFE_RE.sub("_", name)
 
 
-def _unique_net_name(base: str, existing: set[str]) -> str:
+def _unique_net_name(base: str, existing: set[str], suffix: str = "__par") -> str:
     """A SPICE-safe internal parasitic-node name derived from ``base`` that
     does not collide with any already-present net name (an underscore suffix,
-    not a dot, so ngspice never mistakes it for a hierarchy separator)."""
-    candidate = f"{base}__par"
+    not a dot, so ngspice never mistakes it for a hierarchy separator).
+
+    ``suffix`` defaults to the original ``__par`` shunt-node suffix (issue
+    #216/#283); the star topology (issue #592) also derives per-terminal
+    "leg" net names from this same collision-avoidance logic with a
+    ``__t<i>``-style suffix."""
+    candidate = f"{base}{suffix}"
     if candidate not in existing:
         return candidate
     counter = 2
-    while f"{base}__par{counter}" in existing:
+    while f"{base}{suffix}{counter}" in existing:
         counter += 1
-    return f"{base}__par{counter}"
+    return f"{base}{suffix}{counter}"
 
 
 def _describe_devices(
