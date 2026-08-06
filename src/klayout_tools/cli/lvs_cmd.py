@@ -40,6 +40,11 @@ def _print_text(report: dict) -> None:
     print(f"reference: {report['reference']}")
     print(f"top: {report['top']}")
     print(f"engine: {report['engine']}")
+    # Issue #589: only printed when opted in, so the default human output is
+    # unchanged -- but a verdict reached under a caller-supplied design
+    # tolerance always says so, right next to `status`.
+    if report.get("parameter_tolerance") is not None:
+        print(f"parameter_tolerance: {report['parameter_tolerance']}")
     print(f"status: {report['status']}")
     print(f"mismatches: {report['mismatch_count']}")
 

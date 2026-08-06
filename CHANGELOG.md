@@ -134,6 +134,38 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-06 — `klt lvs`: new `options.parameter_tolerance` (#589), an opt-in
+  relative tolerance for numeric device parameters, expressed as a fraction
+  (`0.001` is 0.1%). Extraction is geometrically exact against the curated
+  deck's own device model while a schematic reference's values routinely come
+  from a rounded design-level model, so the two differ by well under 0.1% —
+  far inside any manufacturing tolerance, not a design error — yet the
+  `"engine": "klayout"` path compared parameters against a fixed float-noise
+  epsilon (`1e-6` relative) with no request-level knob, so a physically clean
+  compare could never report `match`. Implemented as **snap-and-recompare**,
+  not as a widened epsilon: `status` is always `NetlistComparer.compare()`'s
+  own boolean and `compare()` decides parameter equality with its own,
+  tighter, non-configurable tolerance *before* this command classifies
+  anything, so a wider epsilon could only ever suppress a `device.property`
+  entry, never move the verdict. Instead each in-tolerance reference-side value
+  is snapped to its layout-side counterpart and a second, real `compare()` is
+  run — covering both the clean device pairing and the minimal-cell degraded
+  pairing (#282) that real extracted layouts hit whenever a body/well net is
+  not shorted to a rail. New `severity: "warning"`,
+  `category: "device.parameter_tolerated"` mismatch entries disclose every
+  absorbed difference with **both original values**, the observed relative
+  delta and the effective tolerance, and the new top-level
+  `parameter_tolerance` field echoes it — a tolerance-assisted `"match"` is
+  never indistinguishable from one where the numbers actually agreed.
+  All-or-nothing per device pair (a pair with any out-of-tolerance parameter
+  is left completely alone), never applied to structural findings, and
+  **default unchanged**: omitting the option is byte-identical to before.
+  `"engine": "klayout"` only — netgen's own per-property tolerances are
+  absolute per-device-class values in its setup file, which a single relative
+  tolerance has no faithful translation into, so the combination is an
+  application error (exit 1) pointing at `options.netgen_setup` rather than a
+  silent no-op. Purely additive JSON shape change — no `schema_version` bump.
+  See `docs/cli/lvs.md`'s "`device.parameter_tolerated`" section.
 - 2026-08-05 — `klt stats`/`klt layers`/`klt drc`/`klt precheck`/`klt render`/
   `klt socket-check`: new `--top <cell>` flag (#554), extending the
   cell-selector `klt extract`/`klt ring-check`/`klt lef-abstract` already had

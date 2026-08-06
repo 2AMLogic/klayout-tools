@@ -971,6 +971,354 @@ def test_minimal_cell_identical_netlists_still_match(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# options.parameter_tolerance (issue #589): an opted-in *design* tolerance,
+# implemented as snap-and-recompare rather than by widening the float-noise
+# epsilon (`status` is always `compare()`'s own boolean)
+# --------------------------------------------------------------------------- #
+
+
+def _tolerance_report(
+    tmp_path,
+    layout_text: str,
+    reference_text: str,
+    tolerance=None,
+    top: str = "inv",
+    **request_extra,
+):
+    """Run a two-netlist compare, optionally with `options.parameter_tolerance`.
+
+    `tolerance=None` omits the option entirely (the default path), so the same
+    helper drives both the opted-in cases and their default-behaviour
+    regression controls.
+    """
+    layout_path = _write(tmp_path / "layout.spice", layout_text)
+    reference_path = _write(tmp_path / "ref.spice", reference_text)
+    request = {
+        "layout": {"netlist": layout_path, "top": top},
+        "reference": {"netlist": reference_path, "top": top},
+    }
+    if tolerance is not None:
+        request["options"] = {"parameter_tolerance": tolerance}
+    request.update(request_extra)
+    return run_lvs(_write_request(tmp_path / "request.json", request))
+
+
+# The issue's own motivating shape: a curated deck's resistor value is a
+# 5-6-significant-figure SPICE-model fit, while the schematic reference's card
+# was computed from the same model rounded to four figures. The drawn geometry
+# is exactly right; the two numbers differ by ~0.04%.
+_RESISTOR_LAYOUT_SPICE = """
+.subckt rblock A Y
+R1 A Y 1234.5
+.ends
+"""
+
+_RESISTOR_REFERENCE_SPICE = """
+.subckt rblock A Y
+R1 A Y 1235.0
+.ends
+"""
+
+
+def test_parameter_tolerance_omitted_is_echoed_as_null(tmp_path):
+    """Default: the field is always present (null-not-omitted, this contract's
+    convention) and the verdict is untouched."""
+    report = _tolerance_report(tmp_path, _INVERTER_SPICE, _INVERTER_SPICE)
+    assert report["parameter_tolerance"] is None
+    assert report["status"] == "match"
+
+
+def test_parameter_tolerance_default_leaves_a_small_delta_a_mismatch(tmp_path):
+    """Regression guard for "default unchanged": the same 0.09% width delta
+    that the opt-in below absorbs is still a hard `device.property` mismatch
+    when the option is omitted."""
+    report = _tolerance_report(
+        tmp_path, _INVERTER_SPICE, _INVERTER_SPICE.replace("W=1.0U", "W=1.0009U")
+    )
+
+    assert report["parameter_tolerance"] is None
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 1}
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
+def test_parameter_tolerance_absorbs_an_in_tolerance_delta(tmp_path):
+    """The core case: a 0.09% width delta inside a 0.1% tolerance reports
+    `status: "match"` -- asserted on `status` directly, not merely on the
+    absence of a `device.property` entry, since only a real second
+    `NetlistComparer.compare()` can move the verdict."""
+    report = _tolerance_report(
+        tmp_path,
+        _INVERTER_SPICE,
+        _INVERTER_SPICE.replace("W=1.0U", "W=1.0009U"),
+        tolerance=0.001,
+    )
+
+    assert report["status"] == "match"
+    assert report["parameter_tolerance"] == 0.001
+    assert "device.property" not in report["category_counts"]
+
+
+def test_parameter_tolerance_discloses_every_absorbed_parameter(tmp_path):
+    """No silent absorption: the tolerated difference is reported in-band as a
+    `severity: "warning"` entry carrying *both* original values (the reference
+    side's pre-snap number, not the snapped one)."""
+    report = _tolerance_report(
+        tmp_path,
+        _INVERTER_SPICE,
+        _INVERTER_SPICE.replace("W=1.0U", "W=1.0009U"),
+        tolerance=0.001,
+    )
+
+    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1}
+    (entry,) = report["mismatches"]
+    assert entry["category"] == lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "both"
+    assert entry["device"]["class"] == "PFET"
+    assert entry["property"] == {
+        "name": "w_um",
+        "layout": pytest.approx(1.0),
+        "reference": pytest.approx(1.0009),
+    }
+    assert entry["details"]["tolerance"] == 0.001
+    assert entry["details"]["relative_delta"] == pytest.approx(0.0008992, rel=1e-3)
+    # A warning never changes the verdict, but it is still counted.
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 1
+
+
+def test_parameter_tolerance_does_not_absorb_an_out_of_tolerance_delta(tmp_path):
+    """Negative control -- the tolerance must not be a rubber stamp. An 8%
+    delta with the same 0.1% tolerance set reports exactly what it reports
+    today."""
+    report = _tolerance_report(
+        tmp_path,
+        _INVERTER_SPICE,
+        _INVERTER_SPICE.replace("W=1.0U", "W=1.08U"),
+        tolerance=0.001,
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 1}
+    (entry,) = report["mismatches"]
+    assert entry["severity"] == "error"
+    assert entry["property"]["reference"] == pytest.approx(1.08)
+
+
+def test_parameter_tolerance_absorbs_the_minimal_cell_degraded_pairing(tmp_path):
+    """Issue #282's degraded path participates too: on the minimal cell the
+    comparer never emits a parameter event at all (it reports one unmatched
+    device per side plus collateral net mismatches), so a tolerance wired only
+    into the clean-pairing path would leave this -- the shape real extracted
+    layouts hit whenever a body/well net is not shorted to a rail -- stuck at
+    `mismatch` however wide the tolerance."""
+    report = _tolerance_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE,
+        _MINIMAL_INVERTER_SPICE.replace("W=2U", "W=2.0018U"),
+        tolerance=0.001,
+    )
+
+    assert report["status"] == "match"
+    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1}
+    (entry,) = report["mismatches"]
+    assert entry["property"]["layout"] == pytest.approx(2.0)
+    assert entry["property"]["reference"] == pytest.approx(2.0018)
+    # The collateral `device.unmatched`/`net.unmatched` cascade the default
+    # path reports for this fixture is gone -- the second compare pairs
+    # everything.
+    assert "device.unmatched" not in report["category_counts"]
+    assert "net.unmatched" not in report["category_counts"]
+
+
+def test_parameter_tolerance_minimal_cell_out_of_tolerance_still_mismatches(tmp_path):
+    """Negative control for the degraded path: a 100% delta is untouched, and
+    the issue #282 recovery still reports it the way it does today."""
+    report = _tolerance_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE,
+        _MINIMAL_INVERTER_SPICE.replace("W=2U", "W=4U"),
+        tolerance=0.001,
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"]["device.property"] == 1
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
+def test_parameter_tolerance_never_masks_a_connectivity_defect(tmp_path):
+    """The one genuinely harmful outcome: a rewired device (no parameter
+    change at all) must stay a hard connectivity finding with the tolerance
+    set."""
+    report = _tolerance_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE,
+        _MINIMAL_INVERTER_SPICE.replace("M2 Y A VDD NW1", "M2 Y A VSS NW1"),
+        tolerance=0.5,
+    )
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+    assert all(m["severity"] == "error" for m in report["mismatches"])
+
+
+def test_parameter_tolerance_leaves_a_pair_alone_when_one_parameter_is_too_far(
+    tmp_path,
+):
+    """All-or-nothing per device pair: a pair whose `W` is in tolerance but
+    whose `L` is not is left completely alone, so it reports both parameters
+    exactly as it does today rather than dropping the in-tolerance one from a
+    report that still says `mismatch`."""
+    report = _tolerance_report(
+        tmp_path,
+        _INVERTER_SPICE,
+        _INVERTER_SPICE.replace("W=1.0U L=0.15U", "W=1.0009U L=0.30U"),
+        tolerance=0.001,
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 2}
+    names = sorted(m["property"]["name"] for m in report["mismatches"])
+    assert names == ["l_um", "w_um"]
+
+
+def test_parameter_tolerance_absorbs_a_rounded_resistor_value(tmp_path):
+    """The issue's own motivating case, end to end: a resistor whose extracted
+    value is a model fit (`1234.5`) against a reference card rounded to four
+    figures (`1235.0`) -- ~0.04%, far inside any manufacturing tolerance."""
+    report = _tolerance_report(
+        tmp_path,
+        _RESISTOR_LAYOUT_SPICE,
+        _RESISTOR_REFERENCE_SPICE,
+        tolerance=0.001,
+        top="rblock",
+    )
+
+    assert report["status"] == "match"
+    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1}
+    (entry,) = report["mismatches"]
+    assert entry["property"]["name"] == "r"
+    assert entry["property"]["layout"] == pytest.approx(1234.5)
+    assert entry["property"]["reference"] == pytest.approx(1235.0)
+
+
+def test_parameter_tolerance_inherits_the_single_degraded_pair_limit(tmp_path):
+    """Known limitation, pinned so it is explicit rather than surprising: the
+    tolerance rides on `_degraded_param_pair`'s recovery for the minimal-cell
+    shape, and that recovery is deliberately scoped to a *single* unmatched
+    device pair (issue #282). Two devices whose values are both in tolerance on
+    a circuit small enough to degrade therefore still report `mismatch` -- the
+    same verdict the default path reports for that input today. Circuits big
+    enough for the comparer to pair devices structurally (the ordinary case)
+    go through the clean-pairing path, which handles any number of pairs."""
+    layout = """
+.subckt rdiv A MID Y
+R1 A MID 1234.5
+R2 MID Y 2469.0
+.ends
+"""
+    reference = """
+.subckt rdiv A MID Y
+R1 A MID 1235.0
+R2 MID Y 2470.0
+.ends
+"""
+    report = _tolerance_report(tmp_path, layout, reference, tolerance=0.001, top="rdiv")
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
+def test_parameter_tolerance_of_zero_changes_nothing(tmp_path):
+    """An explicit `0` is a valid (if pointless) tolerance: nothing is
+    absorbed, and the verdict matches the omitted-option path exactly."""
+    report = _tolerance_report(
+        tmp_path,
+        _INVERTER_SPICE,
+        _INVERTER_SPICE.replace("W=1.0U", "W=1.0009U"),
+        tolerance=0,
+    )
+
+    assert report["parameter_tolerance"] == 0.0
+    assert report["status"] == "mismatch"
+    assert report["category_counts"] == {"device.property": 1}
+
+
+def test_parameter_tolerance_on_a_clean_compare_adds_nothing(tmp_path):
+    """The option never manufactures a disclosure: an identical self-compare
+    with a tolerance set is still a bare, empty `match`."""
+    report = _tolerance_report(
+        tmp_path, _INVERTER_SPICE, _INVERTER_SPICE, tolerance=0.01
+    )
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert report["parameter_tolerance"] == 0.01
+
+
+def test_parameter_tolerance_composes_with_hints_same_nets(tmp_path):
+    """The second `compare()` runs on a fresh `NetlistComparer`, so the
+    caller's hints have to be re-declared on it -- otherwise a tolerance-
+    assisted compare would silently drop them."""
+    reference = _MINIMAL_INVERTER_SPICE.replace("W=2U", "W=2.0018U").replace(
+        "VSS vsubs", "VSS SUBSTRATE"
+    )
+    report = _tolerance_report(
+        tmp_path,
+        _MINIMAL_INVERTER_SPICE,
+        reference.replace(".SUBCKT inv A Y VDD VSS vsubs", ".SUBCKT inv A Y VDD VSS"),
+        tolerance=0.001,
+        hints={"same_nets": [["VSUBS", "SUBSTRATE"]]},
+    )
+
+    assert report["status"] == "match"
+    assert "hints.rejected" not in report["category_counts"]
+    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1}
+
+
+@pytest.mark.parametrize("value", ["0.001", True, [0.001], {"W": 0.001}])
+def test_parameter_tolerance_non_numeric_raises(tmp_path, value):
+    """Malformed request, not a silent fallback to the default -- a tolerance
+    the caller believes is in force but is not is the worst failure mode this
+    option has."""
+    with pytest.raises(LvsError, match="options.parameter_tolerance must be a number"):
+        _tolerance_report(tmp_path, _INVERTER_SPICE, _INVERTER_SPICE, tolerance=value)
+
+
+def test_parameter_tolerance_negative_raises(tmp_path):
+    with pytest.raises(LvsError, match="must not be negative"):
+        _tolerance_report(tmp_path, _INVERTER_SPICE, _INVERTER_SPICE, tolerance=-0.1)
+
+
+def test_parameter_tolerance_at_or_above_one_raises(tmp_path):
+    """A relative tolerance of 1.0 would call almost any two values equal --
+    rejected rather than honoured as a rubber stamp."""
+    with pytest.raises(LvsError, match="must be below 1.0"):
+        _tolerance_report(tmp_path, _INVERTER_SPICE, _INVERTER_SPICE, tolerance=1.0)
+
+
+def test_parameter_tolerance_explicit_null_is_the_default(tmp_path):
+    """`"parameter_tolerance": null` is indistinguishable from omitting it."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice", _INVERTER_SPICE.replace("W=1.0U", "W=1.0009U")
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"parameter_tolerance": None},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["parameter_tolerance"] is None
+    assert report["status"] == "mismatch"
+
+
+# --------------------------------------------------------------------------- #
 # net.merged / net.split (curator negative control #1: topology short/split)
 # --------------------------------------------------------------------------- #
 
@@ -3722,8 +4070,35 @@ def test_cli_text_default_format(tmp_path, capsys):
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "status: match" in out
+    # Issue #589: the tolerance line is only printed when opted in, so the
+    # default human output is unchanged.
+    assert "parameter_tolerance" not in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
+
+
+def test_cli_text_reports_an_opted_in_parameter_tolerance(tmp_path, capsys):
+    """Issue #589: a verdict reached under a caller-supplied design tolerance
+    says so in the human output too, right next to `status`, and exits `0`
+    like any other match."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.spice", _INVERTER_SPICE.replace("W=1.0U", "W=1.0009U")
+    )
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "options": {"parameter_tolerance": 0.001},
+        },
+    )
+    exit_code = main(["lvs", request_path])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "parameter_tolerance: 0.001" in out
+    assert "status: match" in out
+    assert "[warning] device.parameter_tolerated" in out
 
 
 def test_cli_error_exits_one_with_json_error(tmp_path, capsys):
@@ -4684,6 +5059,31 @@ def test_netgen_engine_device_bulk_unsupported_raises(tmp_path, monkeypatch):
 
     with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
         run_lvs(path)
+
+
+def test_netgen_engine_parameter_tolerance_unsupported_raises(tmp_path, monkeypatch):
+    """Issue #589: netgen's own per-property tolerances are declared in its
+    setup file as *absolute* per-device-class values, so a single relative
+    tolerance has no faithful translation into one. Rejected (pointing at
+    `options.netgen_setup`) rather than silently ignored -- an opted-in
+    tolerance the caller believes is in force but is not would be worse than
+    not supporting it at all."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path, options={"parameter_tolerance": 0.001})
+
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_netgen_engine_parameter_tolerance_null_is_accepted(tmp_path, monkeypatch):
+    """An explicitly-null tolerance is the default, not an opt-in -- so it
+    must not trip the engine boundary above."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path, options={"parameter_tolerance": None})
+
+    report = run_lvs(path)
+    assert report["status"] == "match"
+    assert report["parameter_tolerance"] is None
 
 
 def test_netgen_engine_passes_setup_file_argument(tmp_path, monkeypatch):
