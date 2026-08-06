@@ -1074,3 +1074,81 @@ criteria, without either engine's exact `mismatches[]` shape needing to be
 identical -- the `"netgen"` engine's coarser bucketing on a topology-level
 defect is the one documented, expected divergence (see the contract-gap
 section above).
+
+## Addendum (#592): parasitic resistance topology -- star split, realized
+
+**Status:** implementation note, not a fresh design decision -- the "#216
+Addendum" above already committed `--parasitics` to a first-order, lumped
+reduction and explicitly deferred the question of *how the resistor sits in
+the netlist graph* to a follow-on. #338 named that gap precisely (the
+original Γ-section resistor terminates at a dangling internal node no device
+terminal ever reaches, so it never carries current) and closed
+documentation-only, enumerating three options in increasing effort: (1) a
+star split from a reference point to each device terminal, (2) a full
+distributed RC (PEX-style) ladder, (3) something in between. #592 is the
+follow-on #338 deferred, scoped to option (1) only -- option (2) remains
+out of scope, to be filed separately if pursued.
+
+### Reference point: the net itself, not a synthesized centroid
+
+Option (1)'s "reference point" is realized as **the net's own electrical
+node**, not a newly-synthesized geometric centroid coordinate. Two reasons:
+
+- A star topology's injection target is a *netlist* graph node, not a
+  physical XY point -- nothing downstream (the written SPICE, `klt sim`,
+  `klt lvs`) reads or needs a geometric centroid, only a node identity to
+  radiate arms from. Reusing the net itself as the hub needs no new node at
+  all for that role, and keeps a pin net's `.SUBCKT` pin identity exactly
+  where it already was (the pin declaration never moves).
+- A true geometric centroid would only matter if arm *lengths* were
+  weighted by each terminal's physical distance from it -- which this
+  increment deliberately does not do (see "Even split, not
+  distance-weighted" below). Computing a centroid with nothing to weight
+  against it would be dead code.
+
+### Even split across arms, not distance-weighted
+
+Each net's total resistance (computed exactly as before -- `_compute_
+parasitics` is unchanged) is divided evenly across one arm per device
+terminal. For the common two-terminal case this has a clean property: the
+in-path resistance between the two terminals is `arm + arm` = the net's
+full total, the same number the pre-#592 model reported but now actually
+reachable by device current. For more than two terminals, any pair of
+terminals sees `2 * total / n`, less than the full total -- consistent with
+a real multi-terminal net offering more than one parallel current path.
+
+Weighting each arm by that terminal's physical distance from the reference
+point was the original issue text's framing ("terminal positions are
+already available... they drive the existing per-net R/C sum") -- refuted
+during curation: `_net_area_perim_um` sums each net's *whole* polygon
+region, not per-terminal positions, and getting a terminal's physical
+position is new plumbing this pass does not otherwise need. Distance
+weighting is deferred to option (2) (full distributed RC), where it
+belongs alongside modelling resistance *along a route* rather than only at
+its resolved endpoints -- pursuing it inside option (1) would blur the two
+options' effort/accuracy line #338 drew.
+
+### Degenerate case: nets with fewer than two device terminals
+
+A net with 0 or 1 device terminals has no second terminal to place a
+resistor in series *between*, so the pass keeps the pre-#592 shunt shape
+unchanged for exactly that net (a single resistor to a fresh dangling node,
+capacitor off that node) -- not a special case bolted on, but the natural
+`n == 1` (or `n == 0`) instance of the same star construction (a "star"
+with one arm and no other arm to pair it with is indistinguishable from a
+shunt stub). This keeps a supply/ground/bias rail whose only device
+connection is a single tie exactly as uninformative about IR drop as
+before -- there is genuinely nothing more to model with the geometry this
+pass has, matching option (1)'s own scope.
+
+### Schema/contract verdict: `schema_version` bump, `extract` 1 -> 2
+
+Per `docs/json-contract.md`'s precedent (`klt precheck`'s `layer_whitelist[]
+.shapes` redefinition, issue #452): redefining what an already-shipped
+field's value *means* is a breaking change even when its name and type stay
+the same. `parasitics.nets[].resistance_ohm`/`.capacitance_ff` keep their
+exact prior meaning, but the single `internal_node` field is replaced by
+`topology`/`capacitor_node`/`arms[]` -- a genuine shape change (a `"star"`
+net now injects more than one resistor), not merely an additive one. `klt
+extract`'s `SCHEMA_VERSION` moves `1` -> `2`; see `docs/cli/extract.md` →
+"JSON `parasitics` block" for the full new shape.

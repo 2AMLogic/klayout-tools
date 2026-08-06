@@ -33,10 +33,11 @@ two disagree, this document (and the code) win.
   given).
 - `--pdk` / `--pdk-root` — optional. See "PDK resolution" below.
 - `--parasitics` — optional, off by default. Additionally extract first-order
-  lumped RC interconnect parasitics (one series R + one ground C per net) as
-  extra `R`/`C` cards in the written netlist and a `parasitics` block in the
-  JSON. When omitted, the output is byte-identical to a schematic-equivalent
-  extraction. See "Parasitic (RC) extraction" below.
+  lumped RC interconnect parasitics (a star of series resistors -- one per
+  device terminal on the net -- plus one ground C per net) as extra `R`/`C`
+  cards in the written netlist and a `parasitics` block in the JSON. When
+  omitted, the output is byte-identical to a schematic-equivalent extraction.
+  See "Parasitic (RC) extraction" below.
 - `--top-cell-pins` — optional, off by default. Promote **only** labels drawn
   directly in the top cell to top-level pins. Because extraction is flat
   (`begin_shapes_rec`), the default behaviour promotes *every* named net to a
@@ -1100,11 +1101,8 @@ per-PDK sheet-resistance / area-perimeter-capacitance coefficient tables.
 ### The model
 
 For each net (except the deck's substrate/ground net, and nets with no
-eligible interconnect geometry) the pass emits a single lumped-RC **Γ-section**:
-
-```
-net --R--> net__par --C--> <substrate_net>
-```
+eligible interconnect geometry) the pass computes one lumped total resistance
+and one lumped total ground capacitance from the net's per-layer geometry:
 
 - **C to ground** (femtofarads) = Σ over conductor roles of
   `area_um2 * cap_area + perimeter_um * cap_perim`, the net's lumped ground
@@ -1147,6 +1145,57 @@ data, calibrating parasitic-extraction *accuracy* against silicon is an
 explicit non-goal of this first cut (#216 "Non-goals"). The model is fixed,
 not tunable — there is no `fast`/`accurate` mode selector.
 
+### Topology: a star across device terminals (issue #592)
+
+How that lumped total resistance is *wired into the netlist* depends on how
+many device terminals sit on the net (`net.each_terminal()` in KLayout's
+netlist graph — a MOSFET's `S`/`G`/`D`/`B`, a resistor's two leads, etc.; a
+`.SUBCKT` pin declaration by itself is not a device terminal):
+
+- **Two or more device terminals**: the net's total resistance is split
+  evenly across one series-resistor **arm** per terminal, radiating out from
+  the net itself (the star's reference point — no new node needed there) to
+  a fresh, internal leaf node that terminal is moved onto. The net's ground
+  capacitance stays lumped at that same reference point:
+
+  ```
+                    ┌──R(net/n)──> leaf_0 (device_0 terminal_0)
+  net --C--> vsubs ─┤
+                    └──R(net/n)──> leaf_1 (device_1 terminal_1)
+                    ... one arm per terminal ...
+  ```
+
+  A resistor now genuinely sits in series between any two terminals on the
+  net: the in-path resistance between terminal `i` and terminal `j` is
+  `arm_i + arm_j`. For the common two-terminal case (e.g. two transistors'
+  channels joined by a routed diffusion-to-diffusion strap) the two arms are
+  equal and their sum is exactly the net's full `resistance_ohm` — the same
+  total the pre-#592 model reported, but now actually reachable by the net's
+  own device current instead of terminating at a dead end.
+- **Fewer than two device terminals** (a net with a single device
+  connection, or none — e.g. a supply/ground rail whose only device is one
+  transistor's bulk tie): there is nothing to radiate a star to, so the pass
+  keeps the original, pre-#592 shunt shape unchanged — a single resistor from
+  the net to a fresh dangling node, and the ground capacitor off that same
+  node: `net --R--> net__par --C--> vsubs`. The net's (0 or 1) device
+  terminal stays exactly where it was, wired directly to the net. This is a
+  deliberate, documented degenerate case, not a gap: with only one terminal
+  (or none) there is no second terminal on the net for a resistor to sit *in
+  series between*, so a shunt stub carries exactly as much information as a
+  star would.
+
+Splitting evenly across arms (rather than weighting by each terminal's
+physical distance from a true geometric centroid) is this increment's
+explicit scope: getting each terminal's *identity* — which device and
+terminal ID sit on the net at all — is genuinely new plumbing this pass adds
+(`kdb.Net.each_terminal()` / `kdb.Device.disconnect_terminal()` /
+`connect_terminal()`), but weighting each arm by that terminal's drawn
+geometric position is full distributed-RC (PEX-style ladder) territory,
+explicitly out of scope here (see #592's Option 2, deferred). The even split
+still turns "no distributed model at all" into a first, coarse in-path model
+usable for R_on / IR-drop / RC-settling / EM style post-layout questions —
+see "Known limitation" below for what it still does not capture.
+
 ### Coverage: every net with interconnect, not just labelled pins (#283)
 
 Every net with eligible interconnect geometry gets a `parasitics.nets[]`
@@ -1170,22 +1219,35 @@ above, and that carries no metal) — not because it lacks a label.
   first increment (ground capacitance only). Coupling needs spacing-aware
   neighbor geometry the lumped-to-ground model does not capture; it is a
   credible second increment once a friction log demands it.
-- **Device connectivity is untouched.** The parasitic elements are additive:
-  no existing device instance, net name, or pin is modified, and the internal
-  `net__par` parasitic nodes never surface in `devices[]`/`nets[]` (see below)
-  or on the `.SUBCKT` pin interface. The netlist stays a drop-in `klt sim`
-  `netlist`.
-- **Series R between device terminals is not modelled.** The emitted resistor
-  is a shunt, not a through element: it runs from `net` to the internal
-  `net__par` node, and the *only* thing attached to `net__par` is the grounded
-  parasitic capacitor (`net --R--> net__par --C--> <substrate_net>`, per the
-  topology above). Every device terminal on the net stays wired to the original
-  `net` name, never to `net__par`, so the resistor carries no DC current and
-  never appears in series between two terminals on the same net — not between a
-  driver and its receivers, and not between two receivers. The practical
-  consequence: `--parasitics` does **not** model IR drop on a shared
-  supply/ground/bias rail, nor series resistance in a matched or
-  high-impedance path, regardless of the computed R value.
+- **The reported schematic-equivalent connectivity is untouched.** No
+  existing device *instance* is added or removed, and the `.SUBCKT` pin
+  interface is unmodified — `devices[]`/`nets[]` (built from the netlist
+  before parasitics are injected) report the exact same connectivity whether
+  or not `--parasitics` was given, and the internal parasitic nodes never
+  surface there. The netlist stays a drop-in `klt sim` `netlist`. What *can*
+  change, only past that reported boundary and only for a net with two or
+  more device terminals, is which internal node each of that net's device
+  terminals is wired to (issue #592 — see "Topology" above): a terminal
+  originally wired straight to `net` moves onto its own leaf node, reachable
+  from `net` through that terminal's star arm. A device's terminal *count*
+  and *which net it electrically belongs to* never change — only the literal
+  node name one hop past the net, for a terminal on a >=2-terminal net.
+- **Series R between device terminals is now modelled — but only as an even
+  split across each net's terminals, not a distributed, geometry-weighted
+  ladder.** As of issue #592, a net with two or more device terminals injects
+  one resistor arm per terminal in a star (see "Topology" above), so a
+  resistor genuinely sits in series between any two terminals on the net —
+  including on a shared supply/ground/bias rail. What it does *not* do:
+  weight each arm by that terminal's physical distance from the reference
+  point (an even split across arms, regardless of where each terminal
+  actually sits on the drawn net), or model resistance *along* the route
+  between two non-terminal points (e.g. two taps on the same long rail that
+  are not themselves device terminals). Both are full distributed-RC
+  (PEX-style ladder) territory, explicitly deferred (#592's Option 2). A net
+  with fewer than two device terminals still gets the original shunt-stub
+  shape (no in-path resistance at all — see "Topology" above's degenerate
+  case), so `--parasitics` still contributes nothing to IR drop on a rail
+  whose only device connection is a single tie.
 
 ### Known gap: gf180mcu's anonymous PMOS body net has no DC bias path (issue #555)
 
@@ -1254,7 +1316,7 @@ as nets.
 
 ```json
 "parasitics": {
-  "r_count": 4,
+  "r_count": 5,
   "c_count": 4,
   "total_resistance_ohm": 3050.7818,
   "total_capacitance_ff": 5.400116,
@@ -1263,7 +1325,22 @@ as nets.
       "net": "Y",
       "resistance_ohm": 1169.7827,
       "capacitance_ff": 1.910204,
-      "internal_node": "Y__par"
+      "topology": "star",
+      "capacitor_node": "Y",
+      "arms": [
+        {
+          "node": "Y__t0",
+          "resistance_ohm": 584.89135,
+          "device": "$1",
+          "terminal": "D"
+        },
+        {
+          "node": "Y__t1",
+          "resistance_ohm": 584.89135,
+          "device": "$2",
+          "terminal": "D"
+        }
+      ]
     }
   ],
   "metals_without_coefficient": []
@@ -1272,15 +1349,27 @@ as nets.
 
 | Field                  | Type            | Description                                                                                     |
 | ---------------------- | --------------- | ------------------------------------------------------------------------------------------------- |
-| `r_count` / `c_count`  | integer         | Number of parasitic resistors / capacitors emitted (one Γ-section per net, so these are equal).   |
-| `total_resistance_ohm` | number          | Sum of the emitted series resistances (ohms).                                                     |
+| `r_count`              | integer         | Total number of parasitic resistors emitted -- the sum of every net's `arms[]` length (one arm per device terminal for a `"star"` net, one for a `"shunt"` net). Since issue #592, this is **not** generally equal to `c_count` -- a `"star"` net contributes as many resistors as it has device terminals, but still exactly one capacitor. |
+| `c_count`              | integer         | Number of parasitic capacitors emitted -- exactly one per `nets[]` entry (every net gets exactly one ground capacitor, regardless of topology). |
+| `total_resistance_ohm` | number          | Sum of every net's *emitted* (post-floor-clamped) arm resistances -- ohms.                        |
 | `total_capacitance_ff` | number          | Sum of the emitted ground capacitances (femtofarads).                                             |
 | `nets`                 | array\<object\> | One entry per net carrying parasitics, sorted by `net` for deterministic output. See below.       |
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 
-Each `nets[]` entry: `net` (the schematic-equivalent net name), `resistance_ohm`,
-`capacitance_ff`, and `internal_node` (the injected internal parasitic node's
-name, `<net>__par`, or a collision-suffixed variant).
+Each `nets[]` entry (issue #592's star-topology shape):
+
+| Field             | Type                | Description                                                                                                    |
+| ----------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `net`              | string              | The schematic-equivalent net name.                                                                                |
+| `resistance_ohm`   | number              | The net's total lumped resistance, as computed from its geometry (before the per-arm floor clamp; see "The model"). |
+| `capacitance_ff`   | number              | The net's total lumped ground capacitance (femtofarads).                                                          |
+| `topology`         | `"star"` \| `"shunt"` | `"star"` when the net has two or more device terminals (an arm per terminal, in-path resistance available); `"shunt"` for the degenerate 0-or-1-terminal case (see "Topology" above). |
+| `capacitor_node`   | string               | The node the ground capacitor's non-ground terminal attaches to -- the net's own name for `"star"` (the capacitor sits at the star's reference point), or a fresh internal node (`<net>__par`, or a collision-suffixed variant) for `"shunt"`. |
+| `arms`             | array\<object\>      | One entry per emitted resistor: `{"node", "resistance_ohm", "device", "terminal"}`. `node` is the far end of that arm (a fresh leaf node for `"star"`, the same node as `capacitor_node` for `"shunt"`); `resistance_ohm` is that arm's actual emitted (floor-clamped) value; `device`/`terminal` identify which device terminal moved onto that leaf node (the extracted device's name and its terminal's name, e.g. `"D"`/`"S"`/`"G"`/`"B"` for a MOSFET) -- both `null` for the `"shunt"` case's single, deviceless dangling arm. |
+
+A single-terminal or zero-terminal net's `arms[]` has exactly one entry whose
+`node` doubles as `capacitor_node` -- the same shape the pre-#592 model always
+emitted (its `internal_node` field is now `arms[0].node`).
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 
@@ -1312,24 +1401,32 @@ coefficient for Metal3, Metal4 -- ..."`, so a caller checking only
 ### Parasitic R/C instance names are sanitized, not literal net names
 
 The `R`/`C` cards `--parasitics` injects into the written SPICE are named
-after each net's own `net` value above (e.g. net `Y` gets an `RY`/`CY` pair),
-but with every character outside `[A-Za-z0-9_]` mapped to `_` first (issue
-#312). This matters because a net's name can carry characters a SPICE reader
-treats as syntax rather than an opaque token — `$` (KLayout's placeholder for
-an unlabelled/anonymous net, e.g. `$12`) and `,` (KLayout's join character
-when multiple text labels land on one net, e.g. `Y,Y2`). ngspice does not
-reject either: it silently splits the comma-joined form at the comma into an
-extra positional node, corrupting the card's arity and erroring against an
+after each net's own `net` value above, but with every character outside
+`[A-Za-z0-9_]` mapped to `_` first (issue #312) — e.g. net `Y` gets a `CY`
+capacitor and, for a `"shunt"` net, a matching `RY` resistor. This matters
+because a net's name can carry characters a SPICE reader treats as syntax
+rather than an opaque token — `$` (KLayout's placeholder for an
+unlabelled/anonymous net, e.g. `$12`) and `,` (KLayout's join character when
+multiple text labels land on one net, e.g. `Y,Y2`). ngspice does not reject
+either: it silently splits the comma-joined form at the comma into an extra
+positional node, corrupting the card's arity and erroring against an
 unrelated node instead of a clean syntax error.
+
+A `"star"` net (issue #592) emits one resistor **per arm**, so the sanitized
+base name is suffixed with that arm's 0-based index to keep every instance
+name unique: net `Y` with two device terminals gets `RY_0`/`RY_1`, matching
+`parasitics.nets[].arms[]`'s order (`arms[0]` -> `RY_0`, `arms[1]` -> `RY_1`,
+and so on) — still one `CY` capacitor, since every net gets exactly one
+ground capacitor regardless of topology.
 
 The sanitization applies to the **instance name only** — a cosmetic handle
 nothing downstream keys off of. The `net` field in the `parasitics.nets[]`
-JSON above, the `internal_node` name, and the `.SUBCKT` pin interface are all
-unaffected and still carry the literal net identity (further escaped by
-KLayout's own `NetlistSpiceWriter` where node syntax requires it). If you need
-to map an emitted `R`/`C` card back to the net it parasitizes, use
-`parasitics.nets[].net` (or the netlist's own node names on that card), not
-the sanitized instance name.
+JSON above, the `arms[].node`/`capacitor_node` names, and the `.SUBCKT` pin
+interface are all unaffected and still carry the literal net/node identity
+(further escaped by KLayout's own `NetlistSpiceWriter` where node syntax
+requires it). If you need to map an emitted `R`/`C` card back to the net it
+parasitizes, use `parasitics.nets[].net` (or the netlist's own node names on
+that card), not the sanitized instance name.
 
 ## Verified compatible with `klt sim`'s netlist convention
 
@@ -1370,7 +1467,7 @@ exit codes).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "deck": "sky130",
   "top": "ota_5t",
@@ -1422,7 +1519,7 @@ exit codes).
 
 | Field              | Type                       | Description                                                                                          |
 | ------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `schema_version`   | integer                    | Version of this command's JSON shape (starts at `1`; per-command, per `docs/json-contract.md`).        |
+| `schema_version`   | integer                    | Version of this command's JSON shape (starts at `1`; currently `2` — bumped for issue #592, see the `parasitics.nets[]` shape above). Per-command, per `docs/json-contract.md`. |
 | `file`             | string                     | The input path exactly as provided on the command line.                                                |
 | `deck`             | string                     | Extraction deck used (`"sky130"` / `"gf180mcu"`).                                                      |
 | `top`              | string                     | Top cell the netlist was extracted from.                                                               |
@@ -1508,14 +1605,18 @@ above, issue #217). The following remain out of scope:
   deliberately deferred (it needs spacing-aware neighbor geometry the
   lumped-to-ground model does not capture) and is a credible second
   increment. Without `--parasitics`, no interconnect R/C is extracted at all.
-- **Series resistance between device terminals.** `--parasitics` emits each
-  net's resistor as a shunt to a grounded capacitor, not as a through element
-  between terminals (see "Parasitic (RC) extraction" → "What it does *not*
-  do"); every device terminal stays on the original net, so the emitted R
-  never carries DC current between two terminals on the same net. It therefore
-  does not model IR drop on a shared supply/ground/bias rail, nor series
-  resistance in a matched or high-impedance path, regardless of the computed R
-  value.
+- **Geometry-weighted (distributed) series resistance between device
+  terminals.** Since issue #592, a net with two or more device terminals
+  injects one resistor arm per terminal in a star, so a resistor genuinely
+  sits in series between any two terminals on the net (see "Parasitic (RC)
+  extraction" → "Topology" and "What it does *not* do"). What remains out of
+  scope is *weighting* each arm by that terminal's physical distance from the
+  reference point (today's split is even across arms, not geometry-aware) and
+  resistance *along a route* between two non-terminal points on the same net
+  — both are full distributed-RC (PEX-style ladder) territory, deferred as
+  #592's Option 2. A net with fewer than two device terminals still gets no
+  in-path resistance at all (the shunt-stub degenerate case), so a
+  single-tie supply/ground/bias rail still reads no IR drop.
 - **Parasitic-extraction accuracy calibration.** The `--parasitics`
   coefficients are now sourced and cited from each PDK's public magic
   technology file (see "Parasitic (RC) extraction"), but they remain

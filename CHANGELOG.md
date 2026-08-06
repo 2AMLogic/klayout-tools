@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-06 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
+  extract --parasitics` injected every net's series resistor as a shunt to a
+  dangling internal node -- `net --R--> net__par --C--> <substrate_net>` --
+  that no device terminal was ever wired to, so the resistor could never
+  carry a net's own device current and never sat in series between two
+  terminals on the same net, however much interconnect geometry was drawn
+  between them (#338, closed documentation-only, deferred as a follow-up;
+  #592 is that follow-up). Any resistance-sensitive post-layout question --
+  switch/routing R_on, IR drop on a shared rail, RC settling, EM current
+  density -- read back numerically identical to the schematic value
+  regardless of layout. A net with two or more device terminals now injects
+  a **star**: one resistor arm per terminal, radiating from the net itself
+  to a fresh leaf node that terminal moves onto, so `arm_i + arm_j` is a
+  real in-path resistance between any two terminals on the net (for the
+  common two-terminal case, exactly the net's previously-reported total).
+  The split is even across arms, not weighted by each terminal's physical
+  distance from the net (full distributed RC / PEX-style ladder, deferred as
+  #592's Option 2, out of scope here). A net with fewer than two device
+  terminals keeps the pre-#592 shunt shape unchanged -- there is nothing to
+  radiate a star to. `parasitics.nets[]` entries drop the single
+  `internal_node` field for `topology` (`"star"`/`"shunt"`), `capacitor_node`,
+  and `arms[]` (one `{node, resistance_ohm, device, terminal}` per emitted
+  resistor); `r_count` is now the total arm count across all nets rather
+  than always equal to `c_count`. Device connectivity (`devices[]`/`nets[]`)
+  and the non-`--parasitics` code path are untouched. See
+  `docs/cli/extract.md`'s "Parasitic (RC) extraction" section and
+  `docs/design/lvs-extraction-spike.md`'s "Addendum (#592)" for the full
+  topology and the reference-point/even-split design tradeoffs.
+
 - 2026-08-05 — `klt drc`: both curated decks checked the layers *below* a
   contact/via but never the conductor *above* it, so a cut whose landing
   metal missed one of its edges reported `status: clean` (#551) — a DRC

@@ -163,8 +163,12 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
 #: Bumped only on a non-additive (breaking) change to this command's own
-#: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#: JSON shape -- see docs/json-contract.md. Moved 1 -> 2 for issue #592:
+#: `--parasitics`' per-net `parasitics.nets[]` entries dropped the single
+#: `internal_node` field for `topology`/`capacitor_node`/`arms[]` (a star
+#: topology can inject more than one resistor per net; see
+#: docs/cli/extract.md's "Parasitic (RC) extraction" section).
+SCHEMA_VERSION = 2
 
 #: Decimal places `devices[].params` (`w_um`/`l_um`) are rounded to -- clears
 #: floating-point noise from KLayout's internal dbu -> um conversion (e.g.
@@ -290,7 +294,7 @@ def run_extract(
     section 2a)::
 
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "file": <path as provided>,
             "deck": <deck name>,
             "top": <top cell name>,
@@ -2838,17 +2842,28 @@ def _inject_parasitics(
     parasitic_nets: list[dict[str, Any]],
     ground_net_name: str,
 ) -> dict[str, Any]:
-    """Inject one lumped-RC ``Gamma``-section per net into ``circuit`` and
-    return the JSON ``parasitics`` summary block.
+    """Inject a first-order lumped RC **star** per net into ``circuit`` and
+    return the JSON ``parasitics`` summary block (issue #592).
 
-    For each entry, a series resistor connects the net to a fresh internal
-    parasitic node, and a capacitor connects that node to the deck's ground
-    net (created if absent): ``net --R--> net.par --C--> ground``. This is
-    purely additive -- no existing device instance, net name, or pin is
-    touched -- so the schematic-equivalent connectivity `devices[]`/`nets[]`
-    reported (built before this call) is unchanged, and the written SPICE
-    stays a `.SUBCKT` body directly consumable by ``klt sim`` (the parasitic
-    nodes are internal; the subcircuit's pin interface is untouched).
+    For a net with two or more device terminals, the net's total resistance
+    is split evenly across one series-resistor *arm* per terminal, radiating
+    out from the net itself (the star's reference/hub point) to a fresh leaf
+    node that terminal is moved onto -- so a resistor genuinely sits in
+    series between any two terminals on the same net (``arm_i + arm_j``),
+    unlike the pre-#592 Gamma-section, whose resistor terminated at a
+    dangling node no device ever reached. The net's ground capacitance stays
+    lumped at the hub (the net itself), matching a standard star-RC
+    reduction. A net with fewer than two device terminals has nothing to
+    radiate a star to, so it keeps the original Gamma-section behavior
+    unchanged: ``net --R--> net__par --C--> ground``, with the (0 or 1)
+    terminal left exactly where it was.
+
+    This is purely additive to the *reported* schematic-equivalent
+    connectivity: `devices[]`/`nets[]` (built from the netlist before this
+    call runs) are unchanged, and the `.SUBCKT` pin interface is untouched --
+    only a net's *internal* device-terminal wiring past that boundary can
+    move. The written SPICE stays a `.SUBCKT` body directly consumable by
+    ``klt sim``.
 
     The resistor and capacitor device classes are added unnamed so KLayout's
     ``NetlistSpiceWriter`` emits bare ``R``/``C`` cards with no trailing model
@@ -2875,44 +2890,140 @@ def _inject_parasitics(
     nets_by_name = {net.expanded_name(): net for net in circuit.each_net()}
     existing_names = set(nets_by_name)
 
+    # Two genuinely distinct `kdb.Net` objects can share one `expanded_name()`
+    # (e.g. two physically disjoint nets that both happen to carry the same
+    # layout label) -- `nets_by_name` above can then only retain one of them
+    # per name, so more than one `parasitic_nets` entry can resolve to the
+    # *same* net object. That pre-existing name-collision quirk was
+    # relatively harmless against the old shunt-only injection (a second pass
+    # just added a second, redundant Gamma-section next to the first, never
+    # touching any existing wiring) -- but the star topology below actively
+    # *moves* a net's existing device terminals onto fresh leaf nodes, so a
+    # second pass over the same net object would see -- and try to
+    # star-split -- the resistor/capacitor devices the *first* pass just
+    # injected, mistaking this pass's own artifacts for real device
+    # terminals. Track already-processed net objects by identity and skip a
+    # second entry that resolves to one, exactly like the `net is None` skip
+    # above (both are "this entry's geometry cannot be safely/uniquely
+    # attributed to a distinct net object" cases).
+    processed_net_ids: set[int] = set()
+
     report_nets: list[dict[str, Any]] = []
     total_r = 0.0
     total_c_ff = 0.0
+    total_r_count = 0
     for entry in parasitic_nets:
         net = nets_by_name.get(entry["net"])
         if net is None:
             continue
-        internal_name = _unique_net_name(entry["net"], existing_names)
-        existing_names.add(internal_name)
-        internal = circuit.create_net(internal_name)
+        if id(net) in processed_net_ids:
+            continue
+        processed_net_ids.add(id(net))
 
-        r_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
         c_farad = entry["capacitance_ff"] * 1e-15
+        instance_base = _sanitize_instance_name(entry["net"])
 
-        instance_name = _sanitize_instance_name(entry["net"])
-        r_dev = circuit.create_device(res_class, instance_name)
-        r_dev.connect_terminal("A", net)
-        r_dev.connect_terminal("B", internal)
-        r_dev.set_parameter("R", r_ohm)
+        # Snapshot the terminal refs *before* any mutation -- reassigning a
+        # device's terminal while iterating `net.each_terminal()` invalidates
+        # the live iterator (the reassigned terminal drops out from under
+        # it). Sorted by (device name, terminal id) rather than left in
+        # `each_terminal()`'s own order, so arm assignment -- and therefore
+        # every leaf node name and R card -- is deterministic across runs
+        # independent of KLayout's internal terminal-list ordering.
+        terminals = sorted(
+            net.each_terminal(),
+            key=lambda t: (t.device().expanded_name(), t.terminal_id()),
+        )
 
-        c_dev = circuit.create_device(cap_class, instance_name)
-        c_dev.connect_terminal("A", internal)
+        arms: list[dict[str, Any]] = []
+        if len(terminals) >= 2:
+            # Star: one arm per device terminal, radiating from the net
+            # itself (the hub -- no new node needed there) to a fresh leaf
+            # node that terminal moves onto. The net's total resistance is
+            # split evenly across the arms; between any two terminals i, j
+            # the in-path resistance is exactly `arm_i + arm_j` -- for the
+            # common 2-terminal case this reduces to the net's full
+            # `resistance_ohm`, the same total the pre-#592 Gamma-section
+            # reported but, unlike it, now actually in the current path.
+            n_arms = len(terminals)
+            r_arm = max(entry["resistance_ohm"] / n_arms, _MIN_PARASITIC_R_OHM)
+            for i, term_ref in enumerate(terminals):
+                device = term_ref.device()
+                terminal_id = term_ref.terminal_id()
+                terminal_name = term_ref.terminal_def().name
+                leaf_name = _unique_net_name(
+                    entry["net"], existing_names, suffix=f"__t{i}"
+                )
+                existing_names.add(leaf_name)
+                leaf = circuit.create_net(leaf_name)
+
+                device.disconnect_terminal(terminal_id)
+                device.connect_terminal(terminal_id, leaf)
+
+                r_dev = circuit.create_device(res_class, f"{instance_base}_{i}")
+                r_dev.connect_terminal("A", net)
+                r_dev.connect_terminal("B", leaf)
+                r_dev.set_parameter("R", r_arm)
+
+                arms.append(
+                    {
+                        "node": leaf_name,
+                        "resistance_ohm": round(r_arm, 6),
+                        "device": device.expanded_name(),
+                        "terminal": terminal_name,
+                    }
+                )
+            topology = "star"
+            capacitor_node = net
+            capacitor_node_name = entry["net"]
+        else:
+            # 0 or 1 terminal: nothing to radiate a star to -- keep the
+            # original Gamma-section shape unchanged (issue #592's
+            # documented degenerate case). The (at most one) terminal stays
+            # exactly where it was, wired directly to `net`.
+            r_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
+            internal_name = _unique_net_name(entry["net"], existing_names)
+            existing_names.add(internal_name)
+            internal = circuit.create_net(internal_name)
+
+            r_dev = circuit.create_device(res_class, instance_base)
+            r_dev.connect_terminal("A", net)
+            r_dev.connect_terminal("B", internal)
+            r_dev.set_parameter("R", r_ohm)
+
+            arms.append(
+                {
+                    "node": internal_name,
+                    "resistance_ohm": round(r_ohm, 6),
+                    "device": None,
+                    "terminal": None,
+                }
+            )
+            topology = "shunt"
+            capacitor_node = internal
+            capacitor_node_name = internal_name
+
+        c_dev = circuit.create_device(cap_class, instance_base)
+        c_dev.connect_terminal("A", capacitor_node)
         c_dev.connect_terminal("B", ground)
         c_dev.set_parameter("C", c_farad)
 
-        total_r += r_ohm
+        total_r += sum(arm["resistance_ohm"] for arm in arms)
         total_c_ff += entry["capacitance_ff"]
+        total_r_count += len(arms)
         report_nets.append(
             {
                 "net": entry["net"],
                 "resistance_ohm": entry["resistance_ohm"],
                 "capacitance_ff": entry["capacitance_ff"],
-                "internal_node": internal_name,
+                "topology": topology,
+                "capacitor_node": capacitor_node_name,
+                "arms": arms,
             }
         )
 
     return {
-        "r_count": len(report_nets),
+        "r_count": total_r_count,
         "c_count": len(report_nets),
         "total_resistance_ohm": round(total_r, 4),
         "total_capacitance_ff": round(total_c_ff, 6),
@@ -2943,17 +3054,21 @@ def _sanitize_instance_name(name: str) -> str:
     return _INSTANCE_NAME_UNSAFE_RE.sub("_", name)
 
 
-def _unique_net_name(base: str, existing: set[str]) -> str:
+def _unique_net_name(base: str, existing: set[str], suffix: str = "__par") -> str:
     """A SPICE-safe internal parasitic-node name derived from ``base`` that
-    does not collide with any already-present net name (an underscore suffix,
-    not a dot, so ngspice never mistakes it for a hierarchy separator)."""
-    candidate = f"{base}__par"
+    does not collide with any already-present net name (an underscore-led
+    suffix, not a dot, so ngspice never mistakes it for a hierarchy
+    separator). ``suffix`` defaults to the original single-shunt-node form
+    (``__par``); the star topology's per-arm leaf nodes pass a distinguishing
+    ``__t<i>`` suffix instead (issue #592) so each arm gets its own unique
+    node."""
+    candidate = f"{base}{suffix}"
     if candidate not in existing:
         return candidate
     counter = 2
-    while f"{base}__par{counter}" in existing:
+    while f"{base}{suffix}{counter}" in existing:
         counter += 1
-    return f"{base}__par{counter}"
+    return f"{base}{suffix}{counter}"
 
 
 def _describe_devices(

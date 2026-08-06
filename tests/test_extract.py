@@ -383,7 +383,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == path
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
@@ -3457,7 +3457,7 @@ def test_sky130_corpus_extraction_produces_well_formed_report(layout_path, tmp_p
         str(layout_path), "sky130", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -3476,7 +3476,7 @@ def test_gf180mcu_corpus_extraction_produces_well_formed_report(layout_path, tmp
         str(layout_path), "gf180mcu", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -4230,9 +4230,14 @@ def test_parasitics_adds_rc_without_changing_schematic_view(tmp_path):
 
 
 def test_parasitics_summary_block_shape(tmp_path):
-    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    """`_make_series_nmos_layout()` exercises both topologies at once (issue
+    #592): net `$2` (T1 drain / T2 source, real routed geometry between them)
+    has two device terminals and gets a `"star"` entry with two arms; every
+    other net (`A1`/`A2`/`VGND`/`Y`, each with exactly one device terminal)
+    gets the degenerate `"shunt"` entry, unchanged from the pre-#592 shape."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
     report = run_extract(
-        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+        path, "sky130", output=str(tmp_path / "series.spice"), parasitics=True
     )
     para = report["parasitics"]
     assert para is not None
@@ -4247,25 +4252,74 @@ def test_parasitics_summary_block_shape(tmp_path):
     # sky130's PARASITICS.metals is fully populated (issue #547's regression
     # target was gf180mcu, not sky130) -- no gap for this deck.
     assert para["metals_without_coefficient"] == []
-    assert para["r_count"] == para["c_count"] == len(para["nets"])
+    assert para["c_count"] == len(para["nets"])
+    # Issue #592: r_count is the total arm count across every net, so it is
+    # no longer generally equal to c_count -- a "star" net contributes more
+    # than one resistor but still exactly one capacitor.
+    assert para["r_count"] >= para["c_count"]
     assert para["r_count"] >= 1
     assert para["total_capacitance_ff"] > 0.0
 
     names = [n["net"] for n in para["nets"]]
     assert names == sorted(names)  # deterministic, sorted by net name
+
+    by_net = {entry["net"]: entry for entry in para["nets"]}
+    total_arms = 0
     for entry in para["nets"]:
         assert set(entry) == {
             "net",
             "resistance_ohm",
             "capacitance_ff",
-            "internal_node",
+            "topology",
+            "capacitor_node",
+            "arms",
         }
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
-        assert entry["internal_node"].startswith(f"{entry['net']}__par")
-    # Internal parasitic node names are unique (collision-suffixed if needed).
-    internal_nodes = [n["internal_node"] for n in para["nets"]]
-    assert len(internal_nodes) == len(set(internal_nodes))
+        assert entry["topology"] in ("star", "shunt")
+        assert len(entry["arms"]) >= 1
+        total_arms += len(entry["arms"])
+        for arm in entry["arms"]:
+            assert set(arm) == {"node", "resistance_ohm", "device", "terminal"}
+            assert arm["resistance_ohm"] >= 0.0
+    assert total_arms == para["r_count"]
+
+    # "$2" (the internal net between T1's drain and T2's source): a real
+    # star with two arms, one per device terminal; the capacitor sits at the
+    # net itself (the star's reference point), not a fresh internal node.
+    star_entry = by_net["$2"]
+    assert star_entry["topology"] == "star"
+    assert star_entry["capacitor_node"] == "$2"
+    assert len(star_entry["arms"]) == 2
+    arm_nodes = {arm["node"] for arm in star_entry["arms"]}
+    assert len(arm_nodes) == 2  # unique leaf nodes, one per arm
+    assert all(arm["device"] is not None for arm in star_entry["arms"])
+    assert all(arm["terminal"] is not None for arm in star_entry["arms"])
+    # Even split: for the 2-arm case the arms sum to the net's full
+    # resistance_ohm (rounding aside).
+    arm_sum = sum(arm["resistance_ohm"] for arm in star_entry["arms"])
+    assert arm_sum == pytest.approx(star_entry["resistance_ohm"], rel=1e-6)
+
+    # Every other net (single device terminal) keeps the pre-#592 shunt
+    # shape: one arm, no device/terminal attribution, capacitor at a fresh
+    # `<net>__par`-suffixed node that doubles as the arm's own node.
+    for net_name in ("A1", "A2", "VGND", "Y"):
+        shunt_entry = by_net[net_name]
+        assert shunt_entry["topology"] == "shunt"
+        assert len(shunt_entry["arms"]) == 1
+        arm = shunt_entry["arms"][0]
+        assert arm["device"] is None
+        assert arm["terminal"] is None
+        assert arm["node"] == shunt_entry["capacitor_node"]
+        assert arm["node"].startswith(f"{net_name}__par")
+
+    # Every *fresh* node this pass creates is unique. A shunt entry's single
+    # arm node already *is* its `capacitor_node` (one and the same node), and
+    # a star entry's `capacitor_node` is the net's own (pre-existing) name
+    # rather than a fresh one -- so `arms[].node` alone covers every fresh
+    # node this pass creates, with no double-count.
+    fresh_nodes = [arm["node"] for entry in para["nets"] for arm in entry["arms"]]
+    assert len(fresh_nodes) == len(set(fresh_nodes))
     # Ground net never gets its own parasitic stub.
     assert "vsubs" not in names
 
@@ -4638,13 +4692,124 @@ def test_parasitics_covers_internal_unlabelled_nets_with_real_geometry(tmp_path)
     assert internal_name in para_nets
     assert para_nets[internal_name]["capacitance_ff"] > 0.0
     assert para_nets[internal_name]["resistance_ohm"] > 0.0
-    assert para_nets[internal_name]["internal_node"].startswith(f"{internal_name}__par")
+    # Two device terminals on this net (issue #592): a real star, not the
+    # old shunt-to-a-dangling-node shape -- the capacitor now sits at the
+    # net itself rather than a fresh `<net>__par` node.
+    assert para_nets[internal_name]["topology"] == "star"
+    assert para_nets[internal_name]["capacitor_node"] == internal_name
+    assert len(para_nets[internal_name]["arms"]) == 2
 
     # The labelled nets on either side of the series pair are unaffected.
     assert "VGND" in para_nets
     assert "Y" in para_nets
     assert para_nets["VGND"]["capacitance_ff"] > 0.0
     assert para_nets["Y"]["capacitance_ff"] > 0.0
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitics_star_topology_puts_resistance_in_the_current_path(tmp_path):
+    """Acceptance bar (issue #592): a non-zero, in-path DC resistance
+    measurement changes between the schematic-equivalent extraction and the
+    `--parasitics` one, for a net with real interconnect geometry -- the
+    inverse of the pre-#592 null result (#338's own finding: the emitted
+    resistor sat off the current path, so a resimulated resistance-sensitive
+    measurement read back numerically identical to the schematic value
+    regardless of layout).
+
+    `_make_series_nmos_layout()`'s two series NMOS share an internal,
+    unlabelled net (`$2`) with real routed li1 interconnect between T1's
+    drain and T2's source -- exactly the shape `--parasitics` now splits into
+    a 2-arm star (see `test_parasitics_summary_block_shape`). With both
+    gates biased on and a small DC test current forced into the external
+    `Y` pin (so it must flow back through T2's channel, across the `$2` net,
+    and through T1's channel to the grounded `VGND` pin), the voltage that
+    settles at `Y` for a fixed forced current is a direct proxy for the
+    total series resistance in that path:
+
+    - Pre-`--parasitics` (schematic-equivalent): no interconnect resistance
+      is extracted at all, so `V(Y)` reflects only the two transistors'
+      channel resistance.
+    - Pre-#592's `--parasitics` (not reproduced here -- the shunt topology
+      no longer exists in this codebase -- but recorded for context): the
+      emitted resistor terminated at a dangling node with nothing but a
+      capacitor on it, which draws no DC current, so `V(Y)` would have been
+      *identical* to the schematic-equivalent case -- #338/#592's null
+      result.
+    - Post-#592's `--parasitics` (this test): the star's two arms sit
+      genuinely in series between T1's drain terminal and T2's source
+      terminal, so `V(Y)` measurably shifts by (approximately) the net's own
+      reported `resistance_ohm` times the forced test current -- a real,
+      non-zero, in-path resistance the schematic-equivalent baseline cannot
+      show at all.
+    """
+    import subprocess
+
+    layout_path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+
+    def _v_y(netlist_path: Path, deck_path: Path, title: str) -> float:
+        deck_path.write_text(
+            f"* {title}\n"
+            f'.include "{netlist_path}"\n'
+            ".model nfet nmos level=1\n"
+            ".param vdd=1.8\n"
+            "VA1 A1 0 DC {vdd}\n"
+            "VA2 A2 0 DC {vdd}\n"
+            "VGND VGND 0 DC 0\n"
+            "Vvsubs vsubs 0 DC 0\n"
+            # Force a small, known DC current *into* Y from the outside, so
+            # it must flow back through the whole T2-channel -> $2 -> T1-
+            # channel -> VGND path to reach ground.
+            "Iforce 0 Y DC 1u\n"
+            "Xtop A1 A2 VGND Y vsubs TOP\n"
+            ".control\n"
+            "op\n"
+            "print v(y)\n"
+            "quit\n"
+            ".endc\n"
+            ".end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(deck_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        for line in completed.stdout.splitlines():
+            if line.strip().startswith("v(y)"):
+                return float(line.split("=")[1])
+        raise AssertionError(f"v(y) not found in ngspice output:\n{completed.stdout}")
+
+    test_current_a = 1e-6
+
+    plain_netlist = tmp_path / "plain.spice"
+    run_extract(layout_path, "sky130", output=str(plain_netlist))
+    v_plain = _v_y(plain_netlist, tmp_path / "plain_deck.cir", "schematic-equivalent")
+
+    para_netlist = tmp_path / "para.spice"
+    report = run_extract(
+        layout_path, "sky130", output=str(para_netlist), parasitics=True
+    )
+    v_para = _v_y(para_netlist, tmp_path / "para_deck.cir", "--parasitics (star)")
+
+    star_entry = next(
+        n for n in report["parasitics"]["nets"] if n["net"].startswith("$")
+    )
+    assert star_entry["topology"] == "star"
+    net_resistance_ohm = star_entry["resistance_ohm"]
+    assert net_resistance_ohm > 0.0
+
+    delta_v = v_para - v_plain
+    implied_r_ohm = delta_v / test_current_a
+
+    # Non-zero, in-path resistance appears post-extraction where the
+    # schematic-equivalent baseline has none at all -- the core assertion.
+    assert delta_v > 0.0
+    # The implied resistance is in the right ballpark of the net's own
+    # reported total (a generous tolerance: the forced test current nudges
+    # each transistor's operating point slightly, a second-order nonlinear
+    # effect the even-split star model does not need to track exactly).
+    assert implied_r_ohm == pytest.approx(net_resistance_ohm, rel=0.5)
 
 
 # --------------------------------------------------------------------------- #
