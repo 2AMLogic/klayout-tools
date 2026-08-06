@@ -101,7 +101,12 @@ above): adopting it required no `schema_version` bump on any verb.
 - `deck` — the rule (or model) deck the run used, as `{name, content_hash}`.
   `content_hash` is a `sha256:`-prefixed hex digest of the deck file actually
   used, so "clean against *this exact* rule set" is a checkable claim. `null`
-  when no deck was involved (e.g. `lvs` against a pre-extracted netlist).
+  when no deck was involved (e.g. `lvs` against a pre-extracted netlist). `klt
+  extract` additionally carries an `options` key (issue #595) when
+  `--deck-option` selected a non-default flavour of a shared-geometry device
+  family (e.g. gf180mcu's `{"poly_res": "2k"}`) — omitted entirely when no
+  such option was given, so the block is otherwise unchanged. See
+  `docs/cli/extract.md`'s "Selecting a shared-geometry resistor flavour".
 - `input` — the input layout stream the run was made against, as
   `{content_hash}` (same shape as `deck`). `content_hash` is a
   `sha256:`-prefixed hex digest of the file, so a stale committed report is a

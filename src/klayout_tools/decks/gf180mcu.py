@@ -305,6 +305,7 @@ from . import (
     LayerRC,
     ParasiticsDeck,
     ResistorDevice,
+    ResistorFlavour,
 )
 
 # This deck's rule thresholds below are authored assuming database units are
@@ -1077,16 +1078,25 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # `ResistorDevice` entries would therefore have every one of them recognise
 # the *same* drawn shape and each cut it out of `poly` in turn -- three
 # duplicate `R` devices across one physical resistor, not three selectable
-# flavours a layout can actually distinguish between. So only **one** entry
-# is added here, using the PDK's own default: `gf180mcu.lvs` sets
+# flavours a layout can actually distinguish between. So exactly **one**
+# `ResistorDevice` entry is wired below, mirroring the upstream deck's own
+# structure (one region, one `case POLY_RES` selection at build time, never
+# three simultaneous devices) -- but, unlike before issue #595, that one
+# entry now carries all three named flavours via `flavour_option="poly_res"`/
+# `flavours=(...)`, so a caller who knows their design was built against the
+# `2k`/`3k` interpretation can select it explicitly
+# (`klt extract --deck-option poly_res=2k`) instead of being stuck with
+# whichever flavour the deck happens to default to. The **default** stays the
+# PDK's own default absent an override: `gf180mcu.lvs` sets
 # `POLY_RES = $poly_res || '1k'` when the invoking flow does not override it,
 # and (like the MiM density default cited above) this is independently
 # confirmed as the default *this specific PDK build* ships by open_pdks'
 # `gf180mcu.json` variant-description string, `"...2fF MiM + 1k high sheet
-# rho poly"`. The `_2k`/`_3k` flavours remain deliberately unmodelled (today's
-# short, not a guessed-wrong resistance) -- picking up either of them
-# requires a deck-level option this curated deck does not have, tracked as a
-# known, explicit gap rather than a silent one (see #299's own "Non-goals").
+# rho poly"`. Selecting `2k`/`3k` only ever changes this entry's *reported*
+# name/sheet-rho -- it is still exactly one recognised device per drawn
+# segment, never three, and a caller who never passes `--deck-option
+# poly_res=...` sees the identical `ppolyf_u_1k`-at-1000-ohm/sq extraction
+# this deck reported before #595, byte-for-byte.
 #
 # Unlike the base `ppolyf_u` entry, `ppolyf_u_h` above does **not** `.and()`
 # `Pplus`: the official H-POLY-RES derivation recognises this flavour off
@@ -1281,10 +1291,17 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
         ),
-        # High-sheet-rho flavour (issue #299), see the module docstring's
-        # `ppolyf_u_1k` note above for the full derivation and why only the
-        # PDK's own '1k' default (of the three POLY_RES-selectable options)
-        # is wired here.
+        # High-sheet-rho flavour (issue #299, made caller-selectable by
+        # #595), see the module docstring's `ppolyf_u_1k` note above for the
+        # full derivation. `sheet_rho_ohm_sq`/`name` below are the PDK's own
+        # '1k' default (used whenever a caller passes no `poly_res`
+        # `deck_options` override); `flavours` additionally declares the
+        # `2k`/`3k` siblings selectable via `flavour_option="poly_res"`
+        # (`klt extract --deck-option poly_res=2k`) -- see
+        # `ResistorDevice.flavour_option`'s own docstring for why this is a
+        # deck-option selection rather than a `requires`/`excludes` split:
+        # all three share *identical* drawn geometry, so there is no layer a
+        # deck could key off to tell them apart on its own.
         ResistorDevice(
             name="ppolyf_u_1k",  # gf180mcu_fd_pr__ppolyf_u_1k (POLY_RES='1k' default)
             body=(30, 0),  # Poly2
@@ -1300,6 +1317,18 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            flavour_option="poly_res",
+            flavours=(
+                ResistorFlavour(
+                    value="1k", name="ppolyf_u_1k", sheet_rho_ohm_sq=1000.0
+                ),
+                ResistorFlavour(
+                    value="2k", name="ppolyf_u_2k", sheet_rho_ohm_sq=2000.0
+                ),
+                ResistorFlavour(
+                    value="3k", name="ppolyf_u_3k", sheet_rho_ohm_sq=3000.0
+                ),
+            ),
         ),
     ),
     # Junction diodes (issue #542) -- see the provenance note above for the

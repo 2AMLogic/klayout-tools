@@ -135,6 +135,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
@@ -144,6 +145,7 @@ from .decks import (
     CapacitorDevice,
     DiodeDevice,
     ExtractionDeck,
+    InvalidDeckOptionError,
     ParasiticsDeck,
     ResistorDevice,
     UnknownExtractionDeckError,
@@ -223,6 +225,7 @@ def run_extract(
     top_cell_pins_only: bool = False,
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
+    deck_options: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -233,6 +236,24 @@ def run_extract(
     ``klt render``/``klt sim`` already use). ``top`` selects the top cell
     when the stream has more than one (required in that case; otherwise
     optional and must name the sole top cell if given).
+
+    ``deck_options`` (``klt extract --deck-option <key>=<value>``, repeatable;
+    issue #595) selects which caller-visible **sheet-rho flavour** of a
+    resistor family whose members share *identical* recognition geometry is
+    wired for this run -- e.g. gf180mcu's ``Resistor``-marked poly family,
+    whose real PDK LVS deck selects one of ``1k``/``2k``/``3k`` via a
+    build-time ``POLY_RES`` variable rather than any drawn layer. ``None`` or
+    an empty mapping (the default) resolves the deck exactly as before this
+    parameter existed. See
+    :func:`~klayout_tools.decks.get_extraction_deck`'s and
+    :class:`~klayout_tools.decks.ResistorDevice`'s own docstrings for the
+    full mechanism, and ``docs/cli/extract.md``'s "Selecting a shared-geometry
+    resistor flavour" section for the CLI contract. A key/value this deck's
+    declared resistors do not recognise is an :class:`ExtractError` (wrapping
+    :class:`~klayout_tools.decks.InvalidDeckOptionError`), not a silent no-op
+    or a silently-kept default. The resolved mapping is echoed verbatim in
+    the response's ``provenance.deck.options`` so a record can pin exactly
+    which flavour a run selected.
 
     ``top_cell_pins_only`` (the ``--top-cell-pins`` flag) controls how
     labelled nets become top-level pins (issue #291). Extraction is flat, so
@@ -370,7 +391,13 @@ def run_extract(
                 "klt_version": <str | None>,
                 "klayout_version": <str | None>,
                 "pdk": {"name", "source", "version"} | None,
-                "deck": {"name": <deck name>, "content_hash": "sha256:..."},
+                # "options" is present only when `deck_options` was given
+                # (issue #595) -- omitted entirely otherwise.
+                "deck": {
+                    "name": <deck name>,
+                    "content_hash": "sha256:...",
+                    "options": {<deck option key>: <value>, ...},
+                },
             },
         }
 
@@ -522,11 +549,12 @@ def run_extract(
     list, empty when every declared metal level has a coefficient.
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
-    name is unknown, the PDK (when given) does not resolve, the top cell is
-    missing/ambiguous, or the output path's parent directory cannot be
-    created (e.g. it exists as a non-directory file). The output path's
-    parent directory is created automatically when missing (matching ``klt
-    render``/``klt lvs``), including any missing intermediate directories.
+    name is unknown, ``deck_options`` names an unrecognised key/value, the
+    PDK (when given) does not resolve, the top cell is missing/ambiguous, or
+    the output path's parent directory cannot be created (e.g. it exists as
+    a non-directory file). The output path's parent directory is created
+    automatically when missing (matching ``klt render``/``klt lvs``),
+    including any missing intermediate directories.
     """
     pdk_info: dict[str, Any] | None = None
     # Populated only when a PDK resolves: `{<deck's device class name>:
@@ -543,8 +571,8 @@ def run_extract(
             raise ExtractError(str(exc)) from exc
 
         try:
-            deck_for_models = get_extraction_deck(deck_name)
-        except UnknownExtractionDeckError as exc:
+            deck_for_models = get_extraction_deck(deck_name, deck_options)
+        except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
             raise ExtractError(str(exc)) from exc
         try:
             model_bindings = resolve_device_bindings(
@@ -583,6 +611,7 @@ def run_extract(
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
+        deck_options=deck_options,
     )
 
     import klayout.db as kdb
@@ -608,11 +637,13 @@ def run_extract(
     # parasitic nodes never appear in `net_count`/`nets[]` -- they live only
     # in the written SPICE and in the separate `parasitics` block below.
     # Already validated by `extract_netlist_from_layout` above (it would have
-    # raised `ExtractError` on an unknown deck before reaching this point),
-    # so re-fetching it here to read its static device-class coverage
+    # raised `ExtractError` on an unknown deck or an invalid `deck_options`
+    # entry before reaching this point), so re-fetching it here (with the
+    # same `deck_options`, so a selected resistor flavour's name is reflected
+    # consistently) to read its static device-class coverage
     # (`device_classes`, issue #221) and its `substrate_net` cannot itself
     # raise.
-    deck = get_extraction_deck(deck_name)
+    deck = get_extraction_deck(deck_name, deck_options)
 
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
@@ -823,6 +854,7 @@ def run_extract(
         deck_path=deck_source_path(deck_name),
         pdk=pdk_info,
         input_path=path,
+        deck_options=deck_options,
     )
 
     # Additive, independently-optional field (issue #216 addendum): `null`
@@ -840,6 +872,7 @@ def extract_netlist_from_layout(
     top_cell_pins_only: bool = False,
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
+    deck_options: Mapping[str, str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -856,6 +889,12 @@ def extract_netlist_from_layout(
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
     voltage_domain_warnings)``.
+
+    ``deck_options`` (issue #595): forwarded to
+    :func:`~klayout_tools.decks.get_extraction_deck` -- selects a
+    caller-visible sheet-rho flavour for any resistor family whose
+    ``flavour_option`` it names. ``None``/empty resolves the deck unchanged.
+    See :func:`run_extract`'s docstring for the full contract.
 
     ``apply_resistor_fixed_offset`` (issue #559): forwarded to
     ``_extract_netlist`` -- ``True`` (the default) applies each opted-in
@@ -905,8 +944,9 @@ def extract_netlist_from_layout(
     with ``NetlistComparer`` instead of ``NetlistSpiceWriter`` -- no need to
     round-trip through a written SPICE file just to compare it.
 
-    Raises :class:`ExtractError` for a bad file, unknown deck, or missing/
-    ambiguous top cell -- identical error semantics to ``run_extract``.
+    Raises :class:`ExtractError` for a bad file, unknown deck, invalid
+    ``deck_options`` entry, or missing/ambiguous top cell -- identical error
+    semantics to ``run_extract``.
     """
     if not os.path.exists(path):
         raise ExtractError(f"file not found: {path}")
@@ -914,8 +954,8 @@ def extract_netlist_from_layout(
         raise ExtractError(f"not a file: {path}")
 
     try:
-        deck = get_extraction_deck(deck_name)
-    except UnknownExtractionDeckError as exc:
+        deck = get_extraction_deck(deck_name, deck_options)
+    except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
         raise ExtractError(str(exc)) from exc
 
     # Imported lazily (after the cheap checks above) so `klt --version` and

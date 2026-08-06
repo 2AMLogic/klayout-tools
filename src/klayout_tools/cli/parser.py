@@ -639,6 +639,29 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--deck-option",
+        dest="deck_options",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "select a caller-visible flavour of a deck's shared-geometry "
+            "device family (issue #595), as KEY=VALUE; repeatable. Today's "
+            "only recognised key is gf180mcu's `poly_res` (values `1k` "
+            "(default), `2k`, `3k`), which selects which of the "
+            "identically-drawn `ppolyf_u_{1k,2k,3k}` sheet-rho "
+            "interpretations a `Resistor`-marked poly segment extracts as -- "
+            "mirroring the upstream PDK LVS deck's own build-time `POLY_RES` "
+            "variable, which the drawn geometry alone cannot distinguish. "
+            "An unrecognised key or value is an error, not a silently-kept "
+            "default. Omitted by default, which resolves every deck exactly "
+            "as before this flag existed. The resolved mapping is echoed in "
+            "the JSON response's `provenance.deck.options`. See "
+            "docs/cli/extract.md's 'Selecting a shared-geometry resistor "
+            "flavour' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--defer-resistor-fixed-offset",
         dest="defer_resistor_fixed_offset",
         action="store_true",

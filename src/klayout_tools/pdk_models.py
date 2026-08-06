@@ -132,12 +132,17 @@ comment):
   ``bulk_to_substrate`` flag matches the two-vs-three-terminal split exactly
   (``res_generic_po`` is two-terminal, the ``rpm``/``urpm`` flavours carry the
   bulk tie).
-- **gf180mcu resistors** -- ``ppolyf_u`` / ``ppolyf_u_1k`` (three terminals),
+- **gf180mcu resistors** -- ``ppolyf_u`` / ``ppolyf_u_1k`` / ``ppolyf_u_2k`` /
+  ``ppolyf_u_3k`` (three terminals),
   geometry-parameterized by ``r_length``/``r_width`` (**not** ``l``/``w``) in
   metres, no ``gf180mcu_fd_pr__`` name prefix (same no-prefix convention the
   MOS table's ``nfet_03v3`` uses). Confirmed in
   ``~/.volare/gf180mcuA/libs.tech/ngspice/sm141064.ngspice``
-  (``.subckt ppolyf_u 1 2 3 r_length=l r_width=w dtemp=0 par=1 s=1``) and a
+  (``.subckt ppolyf_u 1 2 3 r_length=l r_width=w dtemp=0 par=1 s=1``, plus
+  ``.subckt ppolyf_u_1k 1 2 3 r_length=l r_width=w ...`` and its ``_2k`` /
+  ``_3k`` siblings on the identical terminal/parameter convention -- all
+  three high-sheet-rho flavours are real, separately-modelled subcircuits,
+  which is why ``--deck-option poly_res=2k`` can bind one) and a
   real analog-IP instantiation
   (``... ppolyf_u r_width=800e-9 r_length=1.6e-6 m=1.0 r=907.859 par=1``). The
   per-family parameter-name difference (``l``/``w`` vs ``r_length``/
@@ -410,7 +415,13 @@ _RESISTOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
     },
     ("gf180mcu", "gf180mcu"): {
         "ppolyf_u": "ppolyf_u",
+        # All three high-sheet-rho flavours (issue #595): which one a given
+        # extraction reports is chosen by `--deck-option poly_res={1k,2k,3k}`,
+        # so every selectable flavour needs its own binding entry or the
+        # selected device class silently falls through to a bare `R` card.
         "ppolyf_u_1k": "ppolyf_u_1k",
+        "ppolyf_u_2k": "ppolyf_u_2k",
+        "ppolyf_u_3k": "ppolyf_u_3k",
     },
 }
 

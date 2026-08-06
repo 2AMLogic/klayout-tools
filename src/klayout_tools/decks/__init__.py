@@ -14,6 +14,8 @@ this module only aggregates them into a name -> deck registry.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -220,6 +222,40 @@ class ResistorDevice:
     outside every ``nwell`` and contacted up to a named net resolves the
     bulk terminal to that real net; only a layout with no such ring falls
     back to the deck's synthesized ``substrate_net`` global.
+
+    ``flavour_option``/``flavours`` (issue #595) declare an optional,
+    caller-selectable **sheet-rho flavour set** for a resistor family whose
+    members share *identical* recognition geometry -- the same
+    ``body``/``marker``/``requires``/``excludes`` region, disambiguated only
+    by a build-time deck variable in the official PDK LVS deck this is
+    transcribed from (e.g. gf180mcu's ``POLY_RES``, which selects one of
+    ``'1k'``/``'2k'``/``'3k'`` for the *same* drawn ``ppolyf_u_h`` region --
+    see #299's own note on why wiring all three as separate
+    :class:`ResistorDevice` entries would instead recognise the *same* drawn
+    shape three times over). This is a different problem from
+    ``requires``/``excludes`` (which tell two *geometrically distinguishable*
+    flavours apart): there is no drawn layer here a deck could key off, so
+    the deck itself keeps recognising and wiring exactly one entry -- this
+    entry's own ``name``/``sheet_rho_ohm_sq`` are simply *which* flavour that
+    is -- and a caller who knows their design draws a different flavour of
+    the same geometry selects it via ``get_extraction_deck``'s
+    ``deck_options`` (``klt extract --deck-option <flavour_option>=<value>``).
+
+    ``flavour_option`` is the deck-option key this entry's flavour is chosen
+    by (``None``, the default, means this entry has no caller-selectable
+    flavour -- today's behaviour, unaffected either way). ``flavours`` is the
+    tuple of every :class:`ResistorFlavour` selectable through that key,
+    typically including one entry that matches this ``ResistorDevice``'s own
+    default ``name``/``sheet_rho_ohm_sq`` (the value used when no
+    ``deck_options`` override is given) plus the previously-unmodelled
+    siblings. :func:`get_extraction_deck` validates a given ``deck_options``
+    value against this list and raises :class:`InvalidDeckOptionError` for an
+    unrecognised key or value rather than silently keeping the default or
+    guessing -- the same "known-unmodelled short beats a silently wrong
+    value" discipline ``excludes`` already applies. A deck entry that leaves
+    ``flavours`` at its empty default has no selectable flavour: passing
+    ``deck_options`` naming a key no entry declares is itself an
+    :class:`InvalidDeckOptionError`, not a silent no-op.
     """
 
     name: str
@@ -231,6 +267,30 @@ class ResistorDevice:
     terminal: tuple[int, int] | None = None
     bulk_to_substrate: bool = False
     fixed_offset_ohm: float = 0.0
+    flavour_option: str | None = None
+    flavours: tuple[ResistorFlavour, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResistorFlavour:
+    """One caller-selectable ``(value, name, sheet_rho_ohm_sq)`` choice for a
+    :class:`ResistorDevice` whose ``flavours`` field declares more than one
+    sheet-rho interpretation of the *same* recognised geometry (issue #595).
+
+    ``value`` is the string a caller passes via ``deck_options`` (e.g.
+    gf180mcu's ``"1k"``/``"2k"``/``"3k"``, matching the PDK's own upstream
+    ``POLY_RES`` deck-variable spelling so a record can cite it directly).
+    ``name``/``sheet_rho_ohm_sq`` are the ``ResistorDevice.name``/
+    ``sheet_rho_ohm_sq`` the owning entry is rewritten to when this flavour is
+    selected -- everything else about the entry (``body``, ``marker``,
+    ``requires``, ``excludes``, ``terminal``, ``bulk_to_substrate``,
+    ``fixed_offset_ohm``) is unchanged, since flavour selection never changes
+    *which* geometry is recognised, only what device it is reported as.
+    """
+
+    value: str
+    name: str
+    sheet_rho_ohm_sq: float
 
 
 @dataclass(frozen=True)
@@ -849,6 +909,19 @@ class UnknownExtractionDeckError(Exception):
     """Raised by :func:`get_extraction_deck` for an unknown deck name."""
 
 
+class InvalidDeckOptionError(Exception):
+    """Raised by :func:`get_extraction_deck` for a ``deck_options`` entry
+    that names a key no declared :class:`ResistorDevice.flavour_option`
+    matches, or a value not among that entry's declared
+    :class:`ResistorFlavour.value` set (issue #595).
+
+    ``extract.py`` turns this into an
+    :class:`~klayout_tools.extract.ExtractError` (a clean exit-1 message, not
+    a traceback), the same treatment it already gives
+    :class:`UnknownExtractionDeckError`.
+    """
+
+
 def deck_source_path(name: str) -> str | None:
     """Absolute path to the Python module source that defines deck ``name``.
 
@@ -984,8 +1057,11 @@ def _extraction_registry() -> dict[str, ExtractionDeck]:
     }
 
 
-def get_extraction_deck(name: str) -> ExtractionDeck:
-    """Return the registered :class:`ExtractionDeck` for ``name``.
+def get_extraction_deck(
+    name: str, deck_options: Mapping[str, str] | None = None
+) -> ExtractionDeck:
+    """Return the registered :class:`ExtractionDeck` for ``name``, optionally
+    resolved against ``deck_options`` (issue #595).
 
     Raises :class:`UnknownExtractionDeckError` (which ``extract.py`` turns
     into an :class:`~klayout_tools.extract.ExtractError`) if ``name`` is not
@@ -994,15 +1070,74 @@ def get_extraction_deck(name: str) -> ExtractionDeck:
     overlap (``"sky130"``/``"gf180mcu"``) -- DRC and extraction decks are
     different rule tables that happen to share PDK-family names, not the
     same object reused for two purposes.
+
+    ``deck_options`` (``klt extract --deck-option <key>=<value>``, repeatable)
+    selects, per key, which caller-visible flavour of a
+    :class:`ResistorDevice` whose ``flavour_option`` matches that key is
+    wired for this call -- see :class:`ResistorDevice`'s own
+    ``flavour_option``/``flavours`` docstring for why this exists (a
+    shared-geometry sheet-rho family the upstream PDK LVS deck selects with a
+    build-time variable, e.g. gf180mcu's ``POLY_RES``). ``None`` or an empty
+    mapping (the default) returns the registered deck completely unchanged --
+    byte-identical to every call site that predates this parameter. A
+    non-empty mapping naming a key no resistor entry declares, or a value not
+    among a matched entry's declared :class:`ResistorFlavour.value` set,
+    raises :class:`InvalidDeckOptionError` rather than silently keeping the
+    default or ignoring the override.
     """
     decks = _extraction_registry()
     try:
-        return decks[name]
+        deck = decks[name]
     except KeyError:
         available = ", ".join(sorted(decks))
         raise UnknownExtractionDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None
+    if not deck_options:
+        return deck
+    return _resolve_resistor_flavours(name, deck, deck_options)
+
+
+def _resolve_resistor_flavours(
+    name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
+) -> ExtractionDeck:
+    """Apply ``deck_options`` to ``deck``'s ``resistors`` (issue #595) --
+    see :func:`get_extraction_deck` for the contract.
+    """
+    selectable_keys = {
+        resistor.flavour_option
+        for resistor in deck.resistors
+        if resistor.flavour_option is not None
+    }
+    unknown_keys = sorted(set(deck_options) - selectable_keys)
+    if unknown_keys:
+        available = ", ".join(sorted(selectable_keys)) or "none"
+        raise InvalidDeckOptionError(
+            f"deck '{name}' has no selectable option(s) named "
+            f"{', '.join(unknown_keys)} (available: {available})"
+        )
+
+    resolved_resistors = []
+    for resistor in deck.resistors:
+        option_key = resistor.flavour_option
+        if option_key is None or option_key not in deck_options:
+            resolved_resistors.append(resistor)
+            continue
+        value = deck_options[option_key]
+        flavour = next((f for f in resistor.flavours if f.value == value), None)
+        if flavour is None:
+            available = ", ".join(f.value for f in resistor.flavours) or "none"
+            raise InvalidDeckOptionError(
+                f"deck '{name}' option '{option_key}={value}' is not one of "
+                f"this deck's declared flavours for '{resistor.name}' "
+                f"(available: {available})"
+            )
+        resolved_resistors.append(
+            dataclasses.replace(
+                resistor, name=flavour.name, sheet_rho_ohm_sq=flavour.sheet_rho_ohm_sq
+            )
+        )
+    return dataclasses.replace(deck, resistors=tuple(resolved_resistors))
 
 
 def _parasitics_registry() -> dict[str, ParasiticsDeck]:

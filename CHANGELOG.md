@@ -134,6 +134,33 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-06 — `klt extract`: new `--deck-option <key>=<value>` flag
+  (repeatable, #595), the "other half" of #299's base-vs-high-rho poly
+  resistor split. `Resistor`-marked poly on gf180mcu recognises one shared
+  region three different ways in the official PDK LVS deck, selected by a
+  build-time `POLY_RES` variable (`1k`/`2k`/`3k` -> 1000/2000/3000 Ω/□) that
+  no drawn layer distinguishes; #299 wired only the PDK's own `'1k'` default,
+  leaving a design actually drawn against the `2k`/`3k` interpretation with
+  no way to select it — its resistor extracted at the wrong value (or, if the
+  matching entry were narrowed away, an unmodelled short). `--deck-option
+  poly_res=2k`/`=3k` now selects the caller's intended flavour explicitly; an
+  unrecognised key or value is a clean exit-1 error, never a silently-kept
+  default. New `ResistorDevice.flavour_option`/`flavours` fields
+  (`decks/__init__.py`) declare a resistor family's selectable flavours;
+  `get_extraction_deck(name, deck_options)` resolves them, raising the new
+  `InvalidDeckOptionError` for an unrecognised entry. Default behavior
+  (`--deck-option` omitted) is byte-for-byte unchanged. The resolved mapping
+  is echoed as the new `provenance.deck.options` key (present only when
+  non-empty) so a record can pin exactly which flavour a run selected — see
+  `docs/cli/extract.md`'s "Selecting a shared-geometry resistor flavour".
+  Under `--pdk`, the *selected* flavour binds its own real simulation
+  subcircuit — `pdk_models.py`'s resistor table now carries `ppolyf_u_2k` and
+  `ppolyf_u_3k` alongside `ppolyf_u_1k` (all three confirmed in
+  `sm141064.ngspice`), so `--pdk` + `--deck-option poly_res=2k` emits `X …
+  ppolyf_u_2k r_length=… r_width=…` rather than falling back to a bare `R`
+  card. Known gap: `klt lvs` has no `--deck-option` equivalent yet, so its
+  layout-side extraction still uses the deck default (`poly_res=1k`).
+  Purely additive JSON shape change — no `schema_version` bump.
 - 2026-08-06 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
   extract --parasitics`: each net's extracted resistance is now distributed
   as a **star topology** from the net (the star's hub) to each of its device
