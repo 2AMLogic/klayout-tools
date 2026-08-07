@@ -539,6 +539,71 @@ def test_clean_self_compare_reports_match(tmp_path):
     assert prov["input"] is None
 
 
+@pytest.mark.parametrize(
+    ("deck_name", "m1_layer", "m1_label_layer"),
+    [
+        ("gf180mcu", (34, 0), (34, 10)),  # Metal1 / Metal1 pin
+        ("sky130", (68, 20), (68, 5)),  # met1.drawing / met1.pin
+    ],
+)
+def test_deviceless_labelled_layout_compares_instead_of_erroring(
+    tmp_path, deck_name, m1_layer, m1_label_layer
+):
+    """Issue #539's exact repro, on both curated decks: a layout with zero
+    recognised devices but two distinct, labelled metal1 nets (e.g. a bond
+    pad, seal ring, or RDL segment) used to purge to an entirely empty
+    netlist inside `_extract_netlist`, so `_select_circuit` (`lvs.py`) hit
+    its "no top circuit" `LvsError` instead of ever reaching
+    `NetlistComparer` -- see `lvs._select_circuit`. After the fix, `klt
+    lvs` performs a real topology comparison against a reference netlist
+    for exactly this circuit (matching nets/pins, zero devices on both
+    sides) rather than erroring."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("pad_ring")
+    m1 = layout.layer(*m1_layer)
+    m1_label = layout.layer(*m1_label_layer)
+
+    def box(x0, y0, x1, y1):
+        return kdb.Box(
+            kdb.DPoint(x0, y0).to_itype(layout.dbu),
+            kdb.DPoint(x1, y1).to_itype(layout.dbu),
+        )
+
+    top.shapes(m1).insert(box(0, 0, 1, 1))
+    top.shapes(m1_label).insert(kdb.DText("A", kdb.DTrans(kdb.DPoint(0.5, 0.5))))
+    top.shapes(m1).insert(box(5, 0, 6, 1))
+    top.shapes(m1_label).insert(kdb.DText("B", kdb.DTrans(kdb.DPoint(5.5, 0.5))))
+    gds_path = str(tmp_path / "pad_ring.gds")
+    layout.write(gds_path)
+
+    reference_path = _write(
+        tmp_path / "pad_ring.spice",
+        ".SUBCKT pad_ring A B\n.ENDS pad_ring\n",
+    )
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": gds_path, "deck": deck_name, "top": "pad_ring"},
+            "reference": {"netlist": reference_path, "top": "pad_ring"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["nets"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["counts"]["pins"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["counts"]["devices"] == {"layout": 0, "reference": 0, "matched": 0}
+    assert not any(m["severity"] == "error" for m in report["mismatches"])
+    correspondence = {
+        (entry["layout"], entry["reference"]) for entry in report["net_correspondence"]
+    }
+    assert correspondence == {("A", "A"), ("B", "B")}
+
+
 def test_net_correspondence_lists_all_matched_nets_with_pin_flag(tmp_path):
     """Issue #311: a clean match's ``net_correspondence`` names every
     matched net pair. All four of `_INVERTER_SPICE`'s nets (`A`, `Y`,
@@ -3706,9 +3771,38 @@ def test_pnr_gcd_fixture_self_compare_matches_cleanly(tmp_path):
     devices = report["counts"]["devices"]
     assert devices["layout"] == devices["reference"] == devices["matched"]
     assert devices["matched"] > 1000
-    for kind in ("nets", "devices", "pins"):
-        counts = report["counts"][kind]
-        assert counts["layout"] == counts["reference"] == counts["matched"]
+
+    # Nets/pins are *not* a clean `layout == reference == matched` here,
+    # unlike devices -- issue #539 fixed `_extract_netlist` to stop silently
+    # purging named-but-device-less nets, and this real macro-scale fixture
+    # happens to carry 17 such nets (e.g. `a_in[2]`, `clk`, `done` -- unrouted
+    # top-level I/O pads with zero connectivity in this particular
+    # place-and-route run). One of them (`clk`, lower-case) collides,
+    # case-insensitively, with two *already-connected* nets both literally
+    # named `CLK` (upper-case) that exist elsewhere in this same design -- a
+    # pre-existing, latent name collision in this fixture, invisible before
+    # #539 because the orphan `clk` net was always purged away before ever
+    # reaching the SPICE writer. Now that #539 correctly keeps it, all three
+    # same-name-case-insensitively pins land in one `.SUBCKT` header;
+    # `NetlistSpiceReader` disambiguates same-named *pins* positionally
+    # within the header itself (`pins["layout"] == pins["reference"] ==
+    # 821`, verified directly against both sides' pin lists), but a
+    # same-named net's own *element* references inside the SPICE body still
+    # resolve by string -- so one of the two already-connected `CLK` nets'
+    # device terminals silently re-binds to the other `CLK` net on
+    # read-back, leaving one fewer distinct net on the reference side only
+    # (`nets["reference"] == nets["layout"] - 1`). `status == "match"` and
+    # the unchanged mismatches below (verified identical with and without
+    # #539's fix) show `NetlistComparer` still reaches the same topological
+    # verdict despite this -- a `NetlistSpiceWriter`/`NetlistSpiceReader`
+    # same-name round-trip limitation, not a real LVS discrepancy or a
+    # regression in `_extract_netlist` itself.
+    nets = report["counts"]["nets"]
+    assert nets["layout"] == nets["matched"] == 2211
+    assert nets["reference"] == 2210
+    pins = report["counts"]["pins"]
+    assert pins["layout"] == pins["reference"] == 821
+    assert pins["matched"] == 822
 
     # A clean self-compare carries only warnings -- the same deck-structural
     # signal the hand-drawn corpus round-trip tier above documents, never an

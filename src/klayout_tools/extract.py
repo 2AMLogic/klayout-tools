@@ -630,11 +630,14 @@ def run_extract(
     except OSError as exc:
         raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
 
-    # `netlist.purge()` (in `_extract_netlist`) drops a circuit entirely when
-    # it has no devices, no pins, and no subcircuits -- e.g. a layout with no
-    # extractable devices and no named nets. That is a legitimate "nothing
-    # extracted" result, not an error: report zero devices/nets rather than
-    # dereferencing a `None` circuit.
+    # `_purge_preserving_named_nets()` (in `_extract_netlist`) still drops a
+    # circuit entirely when it has no devices, no named/labelled nets, and no
+    # subcircuits -- e.g. a layout with no extractable devices and no named
+    # nets. That is a legitimate "nothing extracted" result, not an error:
+    # report zero devices/nets rather than dereferencing a `None` circuit. A
+    # circuit with named/labelled nets but zero devices survives with those
+    # nets/pins intact instead (issue #539) -- `circuit` below is only ever
+    # `None` for the genuinely-empty case.
     #
     # `devices[]`/`nets[]` are built from the schematic-equivalent netlist
     # *before* any parasitic R/C is injected, so they carry their exact
@@ -1171,6 +1174,137 @@ def _reconcile_top_pins(
         circuit.remove_pin(pin_id)
 
     return sorted(affected)
+
+
+def _promote_orphan_named_nets(netlist: kdb.Netlist) -> None:
+    """Promote to pins the top-circuit named nets ``make_top_level_pins()``
+    silently skips (issue #539).
+
+    ``Netlist.make_top_level_pins()``'s docstring says it "will turn all
+    named nets of top-level circuits ... into pins", but empirically
+    (verified directly against ``klayout.db``, independent of this module)
+    it only promotes a named net that already has at least one device
+    terminal or subcircuit pin attached -- the same internal "not floating"
+    test ``Net.is_floating()``/``purge()`` use. A net that is *only* named
+    (e.g. a bond pad, seal ring, or RDL segment carrying a pin-purpose
+    label but touching zero recognised devices) is skipped entirely, even
+    though it is real, distinct, and correctly labelled.
+
+    Called right after ``netlist.make_top_level_pins()`` and *before* the
+    below-top-label/declared-pins demotion passes, so a net this function
+    promotes is still subject to exactly the same demotion rules as a
+    "normally" promoted one -- no separate code path for orphan nets to
+    silently diverge from.
+    """
+    for circuit in netlist.top_circuits():
+        for net in circuit.each_net():
+            if not net.name:
+                continue
+            if net.pin_count() > 0:
+                continue
+            if net.terminal_count() or net.subcircuit_pin_count():
+                continue
+            pin = circuit.create_pin(net.name)
+            circuit.connect_pin(pin, net)
+
+
+def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
+    """Run ``Netlist.purge()`` without discarding named/labelled nets that
+    are currently exposed as a pin but have no device terminal and no
+    subcircuit pin attached (issue #539).
+
+    ``Netlist.purge()``'s own floating-net definition -- "no device and no
+    subcircuit on it" -- does *not* treat a pin connection as exempting a
+    net: verified directly against ``klayout.db`` that manually creating
+    and connecting a pin to such a net and then calling ``purge()`` still
+    removes the net *and* its pin, and (when nothing else keeps the owning
+    circuit alive) the circuit itself. A circuit whose nets are only ever
+    named/labelled -- zero recognised devices -- would otherwise purge to
+    an empty netlist even though its nets are real, distinct, and
+    correctly labelled (the bug this issue reports).
+
+    Snapshots every currently-*pinned* net that would otherwise be treated
+    as floating -- name, owning circuit -- *before* calling the real
+    ``purge()``, so every other case is still cleaned up exactly as
+    before: genuinely floating unnamed junk nets, genuinely empty
+    circuits, *and* a named-but-never-promoted internal net (e.g. one the
+    below-top-label/declared-pins reconciliation passes deliberately left
+    unpinned) -- the latter has no SPICE representation at all (no pin, no
+    element references it), so preserving it in the in-memory netlist
+    would silently diverge from what a round trip through
+    ``NetlistSpiceWriter``/``NetlistSpiceReader`` (as `klt lvs`'s
+    pre-extracted-reference path does) can actually reproduce. Restricting
+    this guard to pinned nets keeps every consumer's view consistent.
+
+    Restores whatever ``purge()`` removed from the pinned survivors:
+    recreating the owning circuit if it was dropped entirely, the net if
+    it was dropped, and the pin (reconnected to the recreated net).
+
+    A recreated circuit/net also carries its predecessor's
+    ``Circuit.cell_index``/``Net.cluster_id`` across the purge. That pair is
+    the key ``LayoutToNetlist`` uses to find a net's shapes, so a rescued net
+    stays fully queryable -- ``polygons_of_net`` (and therefore
+    :func:`_compute_parasitics`, which runs *after* this pass and iterates
+    every surviving net) returns its real geometry instead of faulting inside
+    KLayout's hierarchical network processor on the default cluster id ``0``.
+    Without it, ``klt extract --parasitics`` crashed with an unhandled
+    internal ``RuntimeError`` on exactly the device-less labelled layouts this
+    function exists to preserve (bond pads, seal rings, RDL segments,
+    power-mesh straps -- all plausible parasitic-extraction targets).
+
+    A circuit with genuinely no devices *and* no named/labelled nets finds
+    no survivors to snapshot here, so it purges to nothing exactly as
+    before -- this function only ever *adds back* pinned nets ``purge()``
+    would otherwise silently drop, never changes behaviour for the
+    legitimate "nothing extracted" case.
+    """
+    import klayout.db as kdb
+
+    survivors: list[tuple[str, int, str, int]] = []
+    for circuit in netlist.each_circuit():
+        for net in circuit.each_net():
+            if not net.name or net.pin_count() == 0:
+                continue
+            if net.terminal_count() or net.subcircuit_pin_count():
+                continue
+            survivors.append(
+                (circuit.name, circuit.cell_index, net.name, net.cluster_id)
+            )
+
+    netlist.purge()
+
+    for circuit_name, cell_index, net_name, cluster_id in survivors:
+        circuit = netlist.circuit_by_name(circuit_name)
+        if circuit is None:
+            circuit = kdb.Circuit()
+            circuit.name = circuit_name
+            # Re-link the recreated circuit to the layout cell it was
+            # extracted from (issue #563): `LayoutToNetlist`'s shape queries
+            # (`polygons_of_net`, used by `_compute_parasitics`) look the
+            # net's cluster up in the per-cell cluster store keyed by
+            # `Circuit.cell_index`. A bare `kdb.Circuit()` leaves that at its
+            # default, so every later shape query against a net it owns would
+            # fault inside KLayout's hierarchical network processor.
+            circuit.cell_index = cell_index
+            netlist.add(circuit)
+
+        net = next((n for n in circuit.each_net() if n.name == net_name), None)
+        if net is None:
+            net = circuit.create_net(net_name)
+            # Same rationale as `cell_index` above, for the other half of the
+            # (cell, cluster) key: `Net.cluster_id` is what ties a net back to
+            # the connectivity cluster `LayoutToNetlist` extracted it from. A
+            # freshly created net starts at cluster 0 -- the sentinel KLayout
+            # asserts against (`id > 0 was not true in
+            # LayoutToNetlist.polygons_of_net`) -- so a rescued net must carry
+            # the id its purged predecessor had, or `klt extract --parasitics`
+            # crashes on exactly the device-less labelled layouts (bond pads,
+            # seal rings, RDL, power straps) issue #539 exists to preserve.
+            net.cluster_id = cluster_id
+
+        if net.pin_count() == 0:
+            pin = circuit.create_pin(net_name)
+            circuit.connect_pin(pin, net)
 
 
 def _resolve_black_box_regions(
@@ -2524,6 +2658,7 @@ def _extract_netlist(
     below_top_labels = all_label_strings - top_label_strings
 
     netlist.make_top_level_pins()
+    _promote_orphan_named_nets(netlist)
     demoted = _reconcile_top_pins(
         netlist, top_cell.name, below_top_labels, demote=top_cell_pins_only
     )
@@ -2585,7 +2720,7 @@ def _extract_netlist(
                 f"layout: {joined}"
             )
 
-    netlist.purge()
+    _purge_preserving_named_nets(netlist)
 
     # Post-extraction device-parameter corrections (issues #512, #518, #521):
     # applied to the live `kdb.Device` objects here -- *before* the netlist is
@@ -2944,6 +3079,20 @@ def _compute_parasitics(
     for net in circuit.each_net():
         name = net.expanded_name()
         if name == deck.substrate_net:
+            continue
+        if net.cluster_id == 0:
+            # Belt-and-braces (issue #563): `cluster_id` is the key
+            # `LayoutToNetlist` uses to find a net's shapes, and `0` is the
+            # sentinel for "not tied to a layout cluster". Passing such a net
+            # to `polygons_of_net` faults inside KLayout's hierarchical
+            # network processor with an unhandled internal `RuntimeError`
+            # rather than returning an empty region.
+            # `_purge_preserving_named_nets` restores the real cluster id on
+            # every net it rescues, so no net reaching here from
+            # `_extract_netlist` should hit this branch -- but a net with no
+            # cluster has no geometry to measure by definition, so skipping
+            # it is the correct (and crash-free) answer for any future caller
+            # that hands us a synthesised net.
             continue
         r_ohm = 0.0
         c_ff = 0.0
