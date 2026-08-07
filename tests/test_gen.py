@@ -528,7 +528,8 @@ _SKY130_DUMMY_LAYER = (83, 20)
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
     issue scopes, alongside phase 1's `resistor_strip`, phase 4's
-    `bjt_array`, and the chip-boundary `bond_pad` (issue #568)."""
+    `bjt_array`, the chip-boundary `bond_pad` (issue #568), and `esd_device`
+    (issue #569) (acceptance criterion #1)."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -539,6 +540,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "diff_pair",
         "bjt_array",
         "bond_pad",
+        "esd_device",
     }
 
 
@@ -2810,7 +2812,7 @@ def test_bjt_array_collector_ring_gap_reports_gap_port_and_stays_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
-@pytest.mark.parametrize("generator", ["diff_pair", "bjt_array"])
+@pytest.mark.parametrize("generator", ["diff_pair", "bjt_array", "esd_device"])
 def test_ring_gap_invalid_params_rejected_on_composite_generators(
     tmp_path, pdk_root, generator
 ):
@@ -3128,3 +3130,368 @@ def test_bond_pad_opening_um_boundary_at_enclosure_minimum(tmp_path, pdk_root):
     )
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# esd_device -- grounded-gate multi-finger ESD protection MOS (issue #569).
+# Composes `_mos_unit_layout` (family 1) and `_ring_layout` (family 3) the
+# same way `diff_pair` composes both, per this generator's own docstring.
+# --------------------------------------------------------------------------- #
+
+#: gf180mcu's `Dualgate` layer, reused here as `esd_device`'s `esd_mark` role
+#: (see `klayout_tools.gen._PDK_ROLE_LAYERS`'s own citation).
+_GF180_ESD_MARK_LAYER = (55, 0)
+
+#: gf180mcu's `SAB` (salicide block) layer, reused here as `esd_device`'s
+#: `salicide_block` role -- the same layer `_PDK_RES_FLAVOR_LAYERS` already
+#: cites as `res_array`'s own `res_block` for the `"generic"` flavour.
+_GF180_SALICIDE_BLOCK_LAYER = (49, 0)
+
+
+@pytest.mark.parametrize("deck", _PHASE2_DECKS)
+def test_esd_device_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
+    """`esd_device`'s documented defaults must pass `klt drc --deck <pdk>`
+    clean on *both* curated decks."""
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"esd_device_{deck}.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert output.is_file()
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    bbox = report["bbox_um"]
+    assert bbox["x1"] > bbox["x0"]
+    assert bbox["y1"] > bbox["y0"]
+    assert report["device_count"] == 1
+    for port in report["ports"]:
+        assert set(port) == {
+            "name",
+            "net",
+            "layer",
+            "x_um",
+            "y_um",
+            "width_um",
+            "direction_deg",
+        }
+
+
+def test_esd_device_composes_mos_unit_and_guard_ring(tmp_path, pdk_root):
+    """`esd_device` composes families 1 and 3 the same way `diff_pair` does
+    (mirrors `test_diff_pair_composes_mos_array_unit_and_guard_ring`): one
+    multi-finger MOS unit device (`M1`) plus an automatically-sized tap ring."""
+    output = tmp_path / "esd_device.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    port_names = {p["name"] for p in report["ports"]}
+    assert {"M1_S", "M1_D", "M1_G"} <= port_names
+    assert {"TAP_N", "TAP_S", "TAP_E", "TAP_W"} <= port_names
+
+
+def test_esd_device_no_guard_ring_when_disabled(tmp_path, pdk_root):
+    output = tmp_path / "esd_device_no_ring.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"add_guard_ring": False},
+            "options": {"output": str(output)},
+        }
+    )
+    port_names = {p["name"] for p in report["ports"]}
+    assert not port_names & {"TAP_N", "TAP_S", "TAP_E", "TAP_W"}
+    assert any("no tap ring drawn" in n for n in report["drc_hints"]["notes"])
+
+
+def test_esd_device_ring_matches_standalone_ring_layout_helper():
+    """The composed tap ring must not diverge from the shared `_ring_layout`
+    helper `guard_ring` itself calls (issue #569's own test-plan bullet:
+    "confirm the composed tap ring's device count/ports match a standalone
+    guard_ring call with equivalent params")."""
+    finger_width_um = 2.0
+    l_um = gen.GATE_LENGTH_SAFE_MIN_UM
+    fingers = 4
+    ring_padding_um = gen.GUARD_RING_DEFAULT_PADDING_UM
+
+    esd_info = gen._esd_device_layout(
+        finger_width_um, l_um, fingers, True, ring_padding_um=ring_padding_um
+    )
+    unit = esd_info["unit"]
+    expected_ring = gen._ring_layout(
+        unit["total_len_um"] + 2 * ring_padding_um,
+        unit["bbox_height_um"] + 2 * ring_padding_um,
+        gen.GUARD_RING_DEFAULT_WIDTH_UM,
+        gen.GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
+    )
+    assert esd_info["ring"] == expected_ring
+
+
+def test_esd_device_gf180_draws_esd_mark_and_no_fidelity_note(tmp_path, both_pdk_root):
+    """gf180mcu resolves a real `esd_mark` layer (`Dualgate`, reused from the
+    diode-derivation citation), so no absence note fires."""
+    import klayout.db as kdb
+
+    output = tmp_path / "esd_gf180.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_ESD_MARK_LAYER in present
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_esd_device_sky130_has_no_esd_mark_layer_and_notes_it(tmp_path, both_pdk_root):
+    """sky130's curated deck cites no numbered `esd_mark` layer (see the
+    `_PDK_ROLE_LAYERS` role comment) -- nothing is drawn on that role and the
+    absence is reported via `drc_hints.notes`, not silently dropped."""
+    import klayout.db as kdb
+
+    output = tmp_path / "esd_sky130.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_ESD_MARK_LAYER not in present
+    assert any("esd_mark" in n for n in report["drc_hints"]["notes"])
+
+
+@pytest.mark.parametrize(
+    "variant,deck,expect_layer",
+    [("gf180mcuD", "gf180mcu", True), ("sky130A", "sky130", False)],
+)
+def test_esd_device_salicide_block_option(
+    tmp_path, both_pdk_root, variant, deck, expect_layer
+):
+    """`params.salicide_block` draws the PDK's salicide-block layer on
+    families that cite one (gf180mcu's `SAB`) and is a documented no-op
+    (reported via `drc_hints.notes`) on families that don't (sky130)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"esd_sab_{deck}.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {"salicide_block": True},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (_GF180_SALICIDE_BLOCK_LAYER in present) == expect_layer
+    if expect_layer:
+        drc_report = run_drc(str(output), deck)
+        assert drc_report["status"] == "clean", drc_report["violations"]
+    else:
+        assert any("salicide_block" in n for n in report["drc_hints"]["notes"])
+
+
+def test_esd_device_salicide_block_off_by_default(tmp_path, both_pdk_root):
+    import klayout.db as kdb
+
+    output = tmp_path / "esd_no_sab.gds"
+    generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_SALICIDE_BLOCK_LAYER not in present
+
+
+def test_esd_device_fingers_1_boundary(tmp_path, pdk_root):
+    """Edge case (issue #569 test plan): `fingers=1` is the lower boundary,
+    still a valid single-finger ESD device."""
+    output = tmp_path / "esd_1finger.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"fingers": 1},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+    port_names = {p["name"] for p in report["ports"]}
+    assert {"M1_S", "M1_D", "M1_G"} <= port_names
+
+
+@pytest.mark.parametrize(
+    "finger_width_um", [gen.ESD_FINGER_WIDTH_MIN_UM, gen.ESD_FINGER_WIDTH_MAX_UM]
+)
+def test_esd_device_finger_width_at_drm_boundary(tmp_path, pdk_root, finger_width_um):
+    """Edge case (issue #569 test plan): `finger_width_um` at the generator's
+    own documented minimum/maximum is accepted (not rejected as out of
+    range)."""
+    output = tmp_path / f"esd_w{finger_width_um}.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"finger_width_um": finger_width_um},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"finger_width_um": 0.1},  # below ESD_FINGER_WIDTH_MIN_UM
+        {"finger_width_um": 25.0},  # above ESD_FINGER_WIDTH_MAX_UM
+        {"fingers": 0},
+        {"fingers": 100},  # above ESD_MAX_FINGERS_PER_RING
+        {"l_um": 0},
+        {"ring_padding_um": -1.0},
+    ],
+)
+def test_esd_device_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "esd_device",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_esd_device_rejects_unsupported_pdk_family(tmp_path):
+    root = tmp_path / "pdk_install"
+    _make_install(root, "someOtherPdkX")
+    with pytest.raises(GenError, match="not supported"):
+        generate(
+            {
+                "generator": "esd_device",
+                "pdk": {"variant": "someOtherPdkX", "root": str(root)},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_esd_device_params_schema_has_no_hidden_layer_fields():
+    report = list_generators()
+    generator = next(g for g in report["generators"] if g["name"] == "esd_device")
+    param_names = {p["name"] for p in generator["params"]}
+    assert param_names == {
+        "finger_width_um",
+        "l_um",
+        "fingers",
+        "add_guard_ring",
+        "ring_gap_side",
+        "ring_gap_um",
+        "ring_gap_offset_um",
+        "ring_padding_um",
+        "gate_contact",
+        "salicide_block",
+    }
+    assert not param_names & {
+        "active_layer",
+        "poly_layer",
+        "contact_layer",
+        "metal_layer",
+        "tap_layer",
+        "well_layer",
+        "well_present",
+        "esd_mark_layer",
+        "esd_mark_present",
+        "salicide_block_layer",
+        "salicide_block_present",
+    }
+
+
+def test_esd_device_ring_gap_reports_gap_port_and_stays_drc_clean(
+    tmp_path, both_pdk_root
+):
+    """`esd_device`'s tap ring behaves symmetrically to `diff_pair`'s guard
+    ring and `bjt_array`'s collector ring: same params, a `GAP_<side>` port
+    on the metal role, still DRC clean on gf180mcu's curated deck."""
+    output = tmp_path / "esd_gap.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "ring_gap_side": "N",
+                "ring_gap_um": 1.0,
+                "ring_gap_offset_um": 0.0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_N"
+    assert gap["direction_deg"] == 90
+    assert gap["width_um"] == 1.0
+    assert any("routing opening" in n for n in report["drc_hints"]["notes"])
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck"),
+    [("sky130A", "sky130"), ("gf180mcuD", "gf180mcu")],
+)
+def test_esd_device_extracts_as_nfet_not_pfet(tmp_path, both_pdk_root, variant, deck):
+    """The generator draws no well tie around its own tap ring (unlike
+    `guard_ring`'s own `add_well` default) -- an automatically-drawn Nwell
+    enclosing this always-NMOS device would silently misclassify it as
+    `pfet` under `klt extract`'s `active & nwell` test, the same failure
+    class `flavor='pfet'` mislabelling as `nfet` was for `mos_array`
+    (issue #208)."""
+    gds_path = tmp_path / f"esd_device_{deck}.gds"
+    generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "options": {"output": str(gds_path)},
+        }
+    )
+
+    report = run_extract(str(gds_path), deck)
+
+    assert report["device_counts"].get("nfet", 0) > 0
+    assert report["device_counts"].get("pfet", 0) == 0
