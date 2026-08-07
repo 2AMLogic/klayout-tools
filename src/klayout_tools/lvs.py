@@ -108,10 +108,16 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._provenance import build_provenance, sha256_file
-from .decks import deck_source_path, get_extraction_deck
+from .decks import (
+    InvalidDeckOptionError,
+    UnknownExtractionDeckError,
+    deck_source_path,
+    get_extraction_deck,
+)
 from .extract import (
     ExtractError,
     apply_resistor_fixed_offset_corrections,
@@ -353,6 +359,20 @@ def run_lvs(request: str) -> dict[str, Any]:
     given, matching ``device_classes``), and ``pdk`` is ``null`` (LVS is
     topological and resolves no PDK).
 
+    ``layout.deck_options`` (issue #600) is the JSON-request-document
+    counterpart of ``klt extract --deck-option``: a ``{key: value}`` object
+    of string pairs selecting a caller-visible flavour of a shared-geometry
+    resistor family (e.g. gf180mcu's ``poly_res``), honored for both layout
+    shapes wherever ``layout.deck`` is meaningful -- see
+    :func:`~klayout_tools.decks.get_extraction_deck`'s own ``deck_options``
+    docstring for the resolution mechanism. Omitting it resolves every deck
+    exactly as before this field existed. An unrecognised key/value is a
+    clean :class:`LvsError`, not a traceback; giving it without
+    ``layout.deck`` is likewise a clean :class:`LvsError` (there is no deck
+    to apply it to). The resolved mapping is echoed under
+    ``provenance.deck.options`` when non-empty, matching ``klt extract``'s
+    own shape.
+
     Same inline-extraction condition also gates ``device.body_unverified``
     (issue #281, see :func:`_body_net_warnings`): non-blocking
     ``severity: "warning"`` ``mismatches[]`` entries noting that some MOS
@@ -396,6 +416,31 @@ def run_lvs(request: str) -> dict[str, Any]:
     if not isinstance(reference_spec, dict):
         raise LvsError("request.reference must be a JSON object")
 
+    # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
+    # resolved `{key: value}` mapping, one layer down: this is a JSON object
+    # already, not a `KEY=VALUE` CLI token to parse. Validated the same way
+    # `declared_pins` is validated as a list -- a wrong-shaped value is a
+    # clean request error, not a silent no-op or a traceback further down in
+    # `get_extraction_deck`/`extract_netlist_from_layout`.
+    deck_options = layout_spec.get("deck_options")
+    if deck_options is not None:
+        if not isinstance(deck_options, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in deck_options.items()
+        ):
+            raise LvsError(
+                "request.layout.deck_options must be a JSON object mapping "
+                "string keys to string values"
+            )
+        if deck_options and not layout_spec.get("deck"):
+            # Meaningless without a deck to resolve against -- mirrors how
+            # `top_cell_pins`/`declared_pins` are only honored alongside
+            # inline extraction, except `deck_options` is also honored for
+            # the pre-extracted `layout.netlist` + `layout.deck` shape
+            # (issue #585), so the real requirement is `layout.deck`, not
+            # `layout.file` specifically.
+            raise LvsError("request.layout.deck_options requires request.layout.deck")
+
     options = request.get("options") or {}
     keep_extracted = bool(options.get("keep_extracted", False))
     combine_devices = bool(options.get("combine_devices", False))
@@ -408,7 +453,9 @@ def run_lvs(request: str) -> dict[str, Any]:
         layout_echo,
         layout_hash_source,
         extracted_netlist_path,
-    ) = _resolve_layout(layout_spec, request_dir, keep_extracted, combine_devices)
+    ) = _resolve_layout(
+        layout_spec, request_dir, keep_extracted, combine_devices, deck_options
+    )
 
     reference_netlist_path = _require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -456,13 +503,27 @@ def run_lvs(request: str) -> dict[str, Any]:
     # `layout.netlist` shape, where it does not trigger extraction but still
     # names the deck whose resistor `fixed_offset_ohm` the `combine_devices`
     # block below applies post-combine (issue #559/#585). Already validated by
-    # `_resolve_layout` above (an unknown deck would have raised `LvsError`
-    # before reaching this point), so re-fetching it here cannot itself raise.
-    # Resolved here (rather than just before `device_classes` further down) so
-    # the `combine_devices` block below can also use it to apply the deferred
-    # resistor `fixed_offset_ohm` correction post-combine (issue #559).
+    # `_resolve_layout` above (an unknown deck name or an invalid
+    # `deck_options` entry would have raised `LvsError` before reaching this
+    # point) *for the `layout.file` shape only* -- re-fetching it here with
+    # the same `deck_options` cannot itself raise in that case. For the
+    # pre-extracted `layout.netlist` shape, `_resolve_layout` never touches
+    # the deck at all (no extraction happens), so this is the first -- and
+    # only -- place a bad `deck` name or `deck_options` entry on that shape
+    # surfaces; wrapped below the same way `extract_netlist_from_layout`
+    # wraps it (issue #600). Resolved here (rather than just before
+    # `device_classes` further down) so the `combine_devices` block below can
+    # also use it to apply the deferred resistor `fixed_offset_ohm`
+    # correction post-combine (issue #559).
     layout_deck_name = layout_spec.get("deck")
-    layout_deck = get_extraction_deck(layout_deck_name) if layout_deck_name else None
+    try:
+        layout_deck = (
+            get_extraction_deck(layout_deck_name, deck_options)
+            if layout_deck_name
+            else None
+        )
+    except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
+        raise LvsError(str(exc)) from exc
 
     combine_warnings: list[dict[str, Any]] = []
     if combine_devices:
@@ -868,6 +929,11 @@ def run_lvs(request: str) -> dict[str, Any]:
             deck_path=(
                 deck_source_path(layout_deck_name) if layout_deck_name else None
             ),
+            # Issue #600: echo the resolved `layout.deck_options` mapping
+            # under `provenance.deck.options`, matching `klt extract`'s
+            # shape exactly (`_deck_block` omits the key entirely when
+            # `deck_options` is `None`/empty).
+            deck_options=deck_options,
         ),
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,
@@ -903,6 +969,7 @@ def _resolve_layout(
     request_dir: str,
     keep_extracted: bool,
     combine_devices: bool = False,
+    deck_options: Mapping[str, str] | None = None,
 ) -> tuple[kdb.Netlist, str, str, str | None]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
     extracted_netlist_path_or_none)``.
@@ -911,6 +978,20 @@ def _resolve_layout(
     inline extraction (composing ``extract.py``'s core function); ``{"netlist",
     "top"}`` reads a pre-extracted SPICE file directly. Exactly one of
     ``file``/``netlist`` must be given.
+
+    ``deck_options`` (issue #600, ``request.layout.deck_options``): forwarded
+    to :func:`~klayout_tools.extract.extract_netlist_from_layout` for the
+    ``layout.file`` shape only -- it selects a caller-visible sheet-rho
+    flavour of a shared-geometry resistor family exactly the way ``klt
+    extract --deck-option`` does (see that function's own ``deck_options``
+    docstring). Already validated by ``run_lvs`` (a JSON object of string
+    pairs) before this call; an unrecognised key/value raises
+    :class:`~klayout_tools.extract.ExtractError`, caught below and re-raised
+    as :class:`LvsError` the same way an unknown deck name already is. The
+    pre-extracted ``layout.netlist`` shape has no extraction step to forward
+    ``deck_options`` into here -- ``run_lvs`` applies it directly to its own
+    ``get_extraction_deck`` call instead (for ``device_classes`` and the
+    deferred resistor ``fixed_offset_ohm`` correction).
 
     ``combine_devices`` (issue #559): when ``True`` (``options.combine_devices``
     in the caller's request), inline extraction defers each opted-in
@@ -1024,6 +1105,12 @@ def _resolve_layout(
                 # once, right after combining (see the `combine_devices`
                 # block below).
                 apply_resistor_fixed_offset=not combine_devices,
+                # Issue #600: `request.layout.deck_options` -- selects a
+                # caller-visible flavour of a shared-geometry device family
+                # (e.g. gf180mcu's `poly_res`), mirroring `klt extract
+                # --deck-option`. `None` when the field was never given,
+                # unchanged from every request that predates it.
+                deck_options=deck_options,
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc

@@ -183,9 +183,34 @@ not `klt --version`, if you need to detect this kind of drift.
   `ppolyf_u_3k` alongside `ppolyf_u_1k` (all three confirmed in
   `sm141064.ngspice`), so `--pdk` + `--deck-option poly_res=2k` emits `X …
   ppolyf_u_2k r_length=… r_width=…` rather than falling back to a bare `R`
-  card. Known gap: `klt lvs` has no `--deck-option` equivalent yet, so its
-  layout-side extraction still uses the deck default (`poly_res=1k`).
-  Purely additive JSON shape change — no `schema_version` bump.
+  card. `klt lvs`'s equivalent request field (`layout.deck_options`) landed
+  separately — see #600 below. Purely additive JSON shape change — no
+  `schema_version` bump.
+- 2026-08-07 — `klt lvs`: new `layout.deck_options` request field (#600),
+  the JSON-request-document counterpart of `klt extract --deck-option`
+  (#595) — `klt lvs` takes a request document rather than per-flag CLI args,
+  so there was no way to select a shared-geometry resistor flavour (e.g.
+  gf180mcu's `poly_res`) for the layout-side extraction: a design drawn
+  against the `2k`/`3k` `POLY_RES` flavour had its layout netlist extracted
+  at the deck's `1k` default regardless, producing a spurious resistance
+  mismatch (or, worse, a silent pass under a loose
+  `options.parameter_tolerance`) against a schematic reference sized for the
+  actual flavour. `layout.deck_options: {"poly_res": "2k"}` resolves the
+  same `get_extraction_deck(name, deck_options)` mapping `klt extract`
+  already uses, forwarded to both `_resolve_layout`'s inline-extraction call
+  and `run_lvs`'s own `get_extraction_deck` call (the latter also drives
+  `device_classes` and the deferred resistor `fixed_offset_ohm` correction
+  for the pre-extracted `layout.netlist` + `layout.deck` shape, #585). An
+  unrecognised key/value raises a clean `LvsError` (wrapping
+  `InvalidDeckOptionError`), never a traceback or a silently-kept default;
+  giving `deck_options` without `layout.deck` is likewise a clean request
+  error. The resolved mapping is echoed as the new `provenance.deck.options`
+  key (present only when non-empty), matching `klt extract`'s shape exactly.
+  Omitting `layout.deck_options` entirely is byte-for-byte unchanged from
+  before this field existed. See `docs/cli/lvs.md`'s `layout.deck_options`
+  field and `docs/cli/extract.md`'s "Selecting a shared-geometry resistor
+  flavour" (its `klt lvs` caveat is now resolved). Purely additive JSON
+  shape change — no `schema_version` bump.
 - 2026-08-06 — **Breaking (per-command `schema_version` bump 1 -> 2):** `klt
   extract --parasitics`: each net's extracted resistance is now distributed
   as a **star topology** from the net (the star's hub) to each of its device
