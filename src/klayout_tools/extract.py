@@ -504,12 +504,16 @@ def run_extract(
     simulation-fidelity consequence (a floating body voltage rather than the
     real supply rail every schematic-level netlist assumes). One entry per
     affected device, each ``{"device": "<device instance name>", "net":
-    "<anonymous net name>"}``; a matching prose entry is also appended to
-    ``warnings``. Always a list, empty when no PMOS device's body net is
-    anonymous (which includes every deck whose layer set draws a real
-    well-tie/tap). Independent of ``--parasitics``/``--pdk`` -- present under
-    the same condition regardless of either flag, since the DC-bias gap
-    exists whether or not parasitics are requested or a PDK model is bound.
+    "<anonymous net name>"}``; a single aggregate prose entry (count baked
+    in, e.g. ``"148 PMOS devices tie their body to an anonymous net..."``)
+    is also appended to ``warnings`` when this field is non-empty -- not one
+    line per device (issue #599), so ``warnings`` does not scale with the
+    device count on a large design. Always a list, empty when no PMOS
+    device's body net is anonymous (which includes every deck whose layer
+    set draws a real well-tie/tap). Independent of ``--parasitics``/
+    ``--pdk`` -- present under the same condition regardless of either flag,
+    since the DC-bias gap exists whether or not parasitics are requested or
+    a PDK model is bound.
 
     ``single_terminal_nets`` (issue #596) reports every net whose
     ``nets[]`` entry has ``device_count == 1`` (``Net.terminal_count()``,
@@ -528,13 +532,16 @@ def run_extract(
     ``terminal_kind`` is the MOS terminal name for a MOS-like device (a
     device with a ``"g"`` terminal), else the raw terminal key itself (the
     "resistor-equivalent" case, e.g. a drawn resistor/capacitor's ``"a"``/
-    ``"b"``/``"w"``). A matching prose entry is also appended to
-    ``warnings``, phrased more strongly for ``terminal_kind == "gate"`` (an
-    undriven MOS input is essentially always a bug) than for any other
-    terminal kind (a single-terminal source/drain/body/resistor-style tie
-    can be a legitimate deliberately-unterminated dummy). Always a list,
-    empty when every net either has zero or 2+ device terminals, or is a
-    declared pin.
+    ``"b"``/``"w"``). One aggregate prose entry per ``terminal_kind`` bucket
+    (count baked in) is also appended to ``warnings`` when that bucket is
+    non-empty -- not one line per net (issue #599), so ``warnings`` does not
+    scale with the affected net count on a large design. Up to two such
+    entries: one for ``terminal_kind == "gate"``, phrased more strongly (an
+    undriven MOS input is essentially always a bug), and one for every other
+    terminal kind combined (a single-terminal source/drain/body/resistor-
+    style tie can be a legitimate deliberately-unterminated dummy). Always a
+    list, empty when every net either has zero or 2+ device terminals, or is
+    a declared pin.
 
     ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
     stack level the deck's ``ExtractionDeck.metals`` declares that has no
@@ -695,17 +702,22 @@ def run_extract(
     # but nothing flagged it as *this specific* gap. Surfaced two ways: a
     # structured `unbiased_pmos_body_nets[]` entry (so a caller does not have
     # to re-derive the anonymous-net convention itself) and a matching prose
-    # `warnings[]` entry, mirroring `merged_net_labels`'s own two-way pattern
-    # above.
+    # `warnings[]` entry. The `warnings[]` entry is a single aggregate line
+    # with the count baked in, mirroring `_detect_unmodelled_poly_bodies`'s
+    # aggregate pattern (issue #599) -- one line per device would blow up
+    # `warnings[]` at scale (e.g. 148 entries for 148 floating PMOS bodies)
+    # and defeat literal-list pinning by a caller.
     unbiased_pmos_body_nets = _detect_unbiased_pmos_body_nets(devices, deck)
-    for unbiased_entry in unbiased_pmos_body_nets:
+    if unbiased_pmos_body_nets:
+        device_word = "device" if len(unbiased_pmos_body_nets) == 1 else "devices"
         warnings.append(
-            f"PMOS device '{unbiased_entry['device']}' body ties to "
-            f"anonymous net '{unbiased_entry['net']}' with no DC bias path "
-            f"-- '{deck_name}' has no distinct well-tie/tap layer for this "
+            f"{len(unbiased_pmos_body_nets)} PMOS {device_word} tie their "
+            "body to an anonymous net with no DC bias path -- "
+            f"'{deck_name}' has no distinct well-tie/tap layer for this "
             "PMOS body, so it is left floating rather than tied to a real "
             "supply rail; resimulating this netlist directly will not "
-            "reproduce the schematic-level PMOS body bias. See "
+            "reproduce the schematic-level PMOS body bias -- see "
+            "unbiased_pmos_body_nets[] for the full list. See "
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
 
@@ -713,34 +725,43 @@ def run_extract(
     # #596): there is no DC path through such a node from anywhere else in
     # the netlist, so a downstream simulator hits a singular matrix on it --
     # several stages past where this is structurally detectable from the
-    # extracted netlist alone. Surfaced two ways, mirroring
-    # `unbiased_pmos_body_nets`'s own two-way pattern above: a structured
+    # extracted netlist alone. Surfaced two ways: a structured
     # `single_terminal_nets[]` entry (so a caller does not have to
     # cross-reference `nets[]`/`devices[]` itself) and a matching prose
     # `warnings[]` entry, phrased more strongly for a gate terminal (almost
     # never intentional) than for source/drain/body/resistor-equivalent
-    # terminals (can be a legitimate unterminated dummy tie).
+    # terminals (can be a legitimate unterminated dummy tie). Each bucket
+    # gets its own single aggregate `warnings[]` line with the count baked
+    # in (issue #599), mirroring `_detect_unmodelled_poly_bodies`'s
+    # two-message-class aggregate pattern -- one line per net would blow up
+    # `warnings[]` at scale.
     single_terminal_nets = _detect_single_terminal_nets(devices, nets)
-    for single_entry in single_terminal_nets:
-        if single_entry["terminal_kind"] == "gate":
-            warnings.append(
-                f"net '{single_entry['net']}' connects to exactly one "
-                f"device terminal -- '{single_entry['device']}' gate -- and "
-                "is not a declared pin: this MOS gate has no DC path from "
-                "anywhere else in the netlist, so it is almost certainly an "
-                "unconnected input rather than a legitimate floating node; "
-                "resimulating this netlist directly will hit a singular "
-                "matrix on this net."
-            )
-        else:
-            warnings.append(
-                f"net '{single_entry['net']}' connects to exactly one "
-                f"device terminal -- '{single_entry['device']}' "
-                f"{single_entry['terminal_kind']} -- and is not a declared "
-                "pin; this can be a legitimate single-terminal tie (e.g. an "
-                "intentionally unterminated dummy's diffusion tie), but "
-                "confirm this net has no other intended connectivity."
-            )
+    single_terminal_gate_count = sum(
+        1 for entry in single_terminal_nets if entry["terminal_kind"] == "gate"
+    )
+    single_terminal_other_count = len(single_terminal_nets) - single_terminal_gate_count
+    if single_terminal_gate_count:
+        net_word = "net" if single_terminal_gate_count == 1 else "nets"
+        warnings.append(
+            f"{single_terminal_gate_count} {net_word} connect to exactly "
+            "one device terminal -- a MOS gate -- and are not a declared "
+            "pin: these gates have no DC path from anywhere else in the "
+            "netlist, so they are almost certainly unconnected inputs "
+            "rather than legitimate floating nodes; resimulating this "
+            "netlist directly will hit a singular matrix on these nets -- "
+            "see single_terminal_nets[] for the full list."
+        )
+    if single_terminal_other_count:
+        net_word = "net" if single_terminal_other_count == 1 else "nets"
+        warnings.append(
+            f"{single_terminal_other_count} {net_word} connect to exactly "
+            "one device terminal -- source/drain/body/resistor-equivalent, "
+            "not a gate -- and are not a declared pin; this can be a "
+            "legitimate single-terminal tie (e.g. an intentionally "
+            "unterminated dummy's diffusion tie), but confirm these nets "
+            "have no other intended connectivity -- see "
+            "single_terminal_nets[] for the full list."
+        )
 
     # Layers carrying shapes the deck's connectivity graph never reads (issue
     # #220): geometry there is invisible to extraction, so surface it rather
