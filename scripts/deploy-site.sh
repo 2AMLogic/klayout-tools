@@ -92,14 +92,60 @@ export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
 
 # Identity guard (mirrors kicad-tools/scripts/deploy-site.sh's
 # assert_cloudflare_account, adapted for API-token auth): refuse to deploy
-# unless CLOUDFLARE_ACCOUNT_ID matches the expected personal account. This
-# is an account identifier, not a secret — the real secret is
-# CLOUDFLARE_API_TOKEN, which is never logged or hardcoded.
-EXPECTED_CLOUDFLARE_ACCOUNT_ID="${EXPECTED_CLOUDFLARE_ACCOUNT_ID:-251e6e8626d921603fdc3f0d75576bc6}"
-if [ "${CLOUDFLARE_ACCOUNT_ID}" != "${EXPECTED_CLOUDFLARE_ACCOUNT_ID}" ]; then
+# unless CLOUDFLARE_ACCOUNT_ID is the account this project belongs to.
+#
+# The expected account is pinned here as a SHA-256 digest rather than the
+# literal identifier. The identifier is not a secret — the real secret is
+# CLOUDFLARE_API_TOKEN, which is never logged or hardcoded — but this is a
+# public repository, and an account identifier is still a fact about our
+# infrastructure that does not need publishing.
+#
+# Why a digest and not simply reading the expected value from the
+# environment: CLOUDFLARE_ACCOUNT_ID *already* comes from the environment.
+# If the value it is checked against came from there too, both sides would
+# move together — sourcing a different account's env would satisfy the
+# comparison and the guard would pass on exactly the mistake it exists to
+# catch. Pinning the digest in-repo keeps the check anchored to something
+# the environment cannot move. The account ID is 128 bits of hex, so the
+# digest does not expose it to brute force.
+#
+# Override for a fork/other account by exporting EXPECTED_CLOUDFLARE_ACCOUNT_ID
+# (compared literally) or EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256.
+EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256="${EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256:-04e8eb2a99d37a555c87220b1d4cd1c018afbe5b65360bdd2224eb8e9f6b69c2}"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_account_sha256="$(printf '%s' "${CLOUDFLARE_ACCOUNT_ID}" | sha256sum | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  actual_account_sha256="$(printf '%s' "${CLOUDFLARE_ACCOUNT_ID}" | shasum -a 256 | awk '{print $1}')"
+else
+  err "Neither sha256sum nor shasum found — cannot verify the Cloudflare account."
+  err "Refusing to deploy rather than skipping the identity guard."
+  exit 1
+fi
+
+if [ -n "${EXPECTED_CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+  # Explicit literal override wins, for operators who prefer to supply it.
+  account_matches=$([ "${CLOUDFLARE_ACCOUNT_ID}" = "${EXPECTED_CLOUDFLARE_ACCOUNT_ID}" ] && echo yes || echo no)
+else
+  account_matches=$([ "${actual_account_sha256}" = "${EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256}" ] && echo yes || echo no)
+fi
+
+if [ "${account_matches}" != "yes" ]; then
   err "WRONG Cloudflare account! Refusing to deploy."
-  err "  CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}"
-  err "  expected:             ${EXPECTED_CLOUDFLARE_ACCOUNT_ID}"
+  # Digests only: this runs in CI, where stderr is world-readable on a
+  # public repo. A prefix is enough to tell two accounts apart by eye.
+  # Report against whichever expectation was actually applied, or the two
+  # would print identically when a literal override rejects an account
+  # whose digest happens to match the pinned one.
+  if [ -n "${EXPECTED_CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+    err "  checked against: EXPECTED_CLOUDFLARE_ACCOUNT_ID (literal override)"
+    err "  CLOUDFLARE_ACCOUNT_ID sha256: ${actual_account_sha256:0:12}…"
+    err "  override sha256:              $(printf '%s' "${EXPECTED_CLOUDFLARE_ACCOUNT_ID}" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print substr($1,1,12)}')…"
+  else
+    err "  checked against: pinned EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256"
+    err "  CLOUDFLARE_ACCOUNT_ID sha256: ${actual_account_sha256:0:12}…"
+    err "  expected sha256:              ${EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256:0:12}…"
+  fi
   exit 1
 fi
 
