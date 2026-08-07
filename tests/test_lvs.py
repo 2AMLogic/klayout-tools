@@ -2433,6 +2433,262 @@ R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
     assert buggy_report["status"] == "mismatch"
 
 
+# --------------------------------------------------------------------------- #
+# `layout.deck_options` (issue #600): the request-document counterpart of
+# `klt extract --deck-option`, threading gf180mcu's caller-selectable
+# `poly_res` sheet-rho flavour (issue #595, `tests/test_extract.py`'s
+# `test_gf180mcu_poly_res_deck_option_*` tests) into `klt lvs`'s layout-side
+# extraction and its own `get_extraction_deck` call (the latter also drives
+# `device_classes`/the deferred resistor `fixed_offset_ohm` correction for
+# the pre-extracted `layout.netlist` + `layout.deck` shape).
+# --------------------------------------------------------------------------- #
+
+#: `L=6um / W=1um` -> exactly 6 squares, the same nominal geometry
+#: `test_extract.py`'s `_make_poly_resistor_layout` uses.
+_GF180_POLY_RES_SQUARES = 6.0
+
+
+def _write_gf180mcu_poly_res_gds(path: Path) -> str:
+    """A single gf180mcu `Resistor` (62/0)-marked poly bar -- the
+    shared-geometry family whose `1k`/`2k`/`3k` sheet-rho siblings are only
+    selectable via `deck_options={"poly_res": ...}` (issue #595), mirroring
+    `test_extract.py`'s `_make_poly_resistor_layout(..., extra=((62, 0,
+    ...),))` fixture (kept self-contained here rather than imported, per this
+    test module's existing convention of not cross-importing test fixtures --
+    see `_write_series_res_high_po_gds` above for the sky130 analogue)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    bar = kdb.Box(0, 0, 12000, 1000)
+    marked = kdb.Box(3000, 0, 9000, 1000)
+
+    draw(30, 0, bar)  # Poly2
+    draw(110, 5, marked)  # RES_MK
+    draw(31, 0, marked.enlarged(500, 500))  # Pplus
+    draw(49, 0, marked.enlarged(500, 500))  # SAB
+    draw(62, 0, marked.enlarged(500, 500))  # Resistor -> selects a poly_res flavour
+
+    for x, name in ((1500, "RA"), (10500, "RB")):
+        draw(33, 0, kdb.Box(x - 100, 400, x + 100, 600))  # Contact
+        draw(34, 0, kdb.Box(x - 400, 200, x + 400, 800))  # Metal1
+        label(34, 10, name, x, 500)  # Metal1 pin
+
+    layout.write(str(path))
+    return str(path)
+
+
+def _gf180mcu_poly_res_reference_spice(
+    top: str, r_ohm: float, substrate_net: str
+) -> str:
+    """A plain-element reference netlist for one `_write_gf180mcu_poly_res_gds`
+    resistor -- terminal order `(a, b, w)` matches gf180mcu's
+    `DeviceExtractorResistorWithBulk`-emitted `R$1 RA RB <substrate> ...`
+    (verified against a real extraction's own written SPICE)."""
+    return f"""
+.subckt {top} RA RB {substrate_net}
+R1 RA RB {substrate_net} {r_ohm:.5f} ppolyf_u_2k
+.ends
+"""
+
+
+def test_deck_options_selects_gf180mcu_poly_res_flavour_for_inline_extraction(
+    tmp_path,
+):
+    """`layout.deck_options={"poly_res": "2k"}` on an inline `layout.file` +
+    `layout.deck: "gf180mcu"` request resolves the layout side's `Resistor`
+    -marked poly segment as `ppolyf_u_2k` (2000 ohm/sq), matching a reference
+    netlist sized for that flavour -- and echoes the resolved mapping in
+    `provenance.deck.options` (issue #600, mirroring `test_extract.py`'s
+    `test_gf180mcu_poly_res_deck_option_selects_flavour`)."""
+    from klayout_tools.decks import get_extraction_deck
+
+    gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
+    substrate_net = get_extraction_deck("gf180mcu").substrate_net
+    r_ohm = _GF180_POLY_RES_SQUARES * 2000.0
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _gf180mcu_poly_res_reference_spice("RES", r_ohm, substrate_net),
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "file": gds,
+                    "deck": "gf180mcu",
+                    "deck_options": {"poly_res": "2k"},
+                },
+                "reference": {"netlist": reference_path, "top": "RES"},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"]["layout"] == 1
+    assert report["provenance"]["deck"]["options"] == {"poly_res": "2k"}
+
+
+def test_deck_options_omitted_falls_back_to_1k_default_and_mismatches_2k_reference(
+    tmp_path,
+):
+    """The bug this issue fixes: without `layout.deck_options`, the same 2k
+    -flavour-drawn layout used above extracts at the deck's `1k` default
+    (1000 ohm/sq) instead -- a spurious resistance mismatch against a
+    reference sized for the actual (2k) flavour, and `provenance.deck` omits
+    `options` entirely (issue #600)."""
+    from klayout_tools.decks import get_extraction_deck
+
+    gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
+    substrate_net = get_extraction_deck("gf180mcu").substrate_net
+    r_ohm = _GF180_POLY_RES_SQUARES * 2000.0
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _gf180mcu_poly_res_reference_spice("RES", r_ohm, substrate_net),
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": gds, "deck": "gf180mcu"},
+                "reference": {"netlist": reference_path, "top": "RES"},
+            },
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert "options" not in report["provenance"]["deck"]
+
+
+def test_deck_options_unrecognised_value_raises_lvs_error(tmp_path):
+    """An unrecognised `poly_res` value is a clean `LvsError` wrapping
+    `InvalidDeckOptionError`, not a traceback and not a silently-kept default
+    (issue #600, mirroring `test_extract.py`'s
+    `test_gf180mcu_poly_res_deck_option_invalid_value_is_extract_error`)."""
+    gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "file": gds,
+                "deck": "gf180mcu",
+                "deck_options": {"poly_res": "4k"},
+            },
+            "reference": {"netlist": reference_path},
+        },
+    )
+    with pytest.raises(LvsError, match="poly_res=4k"):
+        run_lvs(path)
+
+
+def test_deck_options_unrecognised_key_raises_lvs_error(tmp_path):
+    """A `deck_options` key no `ResistorDevice.flavour_option` matches is a
+    clean `LvsError` (issue #600)."""
+    gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "file": gds,
+                "deck": "gf180mcu",
+                "deck_options": {"mim_cap": "x"},
+            },
+            "reference": {"netlist": reference_path},
+        },
+    )
+    with pytest.raises(LvsError, match="no selectable option"):
+        run_lvs(path)
+
+
+def test_deck_options_wrong_type_raises(tmp_path):
+    """`layout.deck_options` must be a JSON object of string pairs -- a
+    string (or any other non-object) is a clean request error, mirroring
+    `test_declared_pins_wrong_type_raises`'s pattern for a sibling field
+    (issue #600)."""
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "file": gds,
+                "deck": "sky130",
+                "deck_options": "poly_res=2k",  # must be an object, not a string
+            },
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    with pytest.raises(LvsError, match="must be a JSON object"):
+        run_lvs(path)
+
+
+def test_deck_options_without_deck_raises(tmp_path):
+    """`layout.deck_options` given without `layout.deck` -- meaningless, since
+    there is no deck to apply it to -- is a clean request error, not silently
+    ignored (issue #600), whether or not extraction would even be attempted
+    (exercised here via the pre-extracted `layout.netlist` shape, which never
+    resolves a deck at all unless one is given)."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": layout_path,
+                "deck_options": {"poly_res": "2k"},
+            },
+            "reference": {"netlist": reference_path},
+        },
+    )
+    with pytest.raises(LvsError, match="requires request.layout.deck"):
+        run_lvs(path)
+
+
+def test_deck_options_invalid_value_on_pre_extracted_netlist_shape_raises(tmp_path):
+    """The pre-extracted `layout.netlist` + `layout.deck` shape (issue #585)
+    never triggers extraction, so `run_lvs`'s own `get_extraction_deck` call
+    is the *only* place `deck_options` is resolved for it -- must raise a
+    clean `LvsError`, not an unhandled `InvalidDeckOptionError` traceback
+    (issue #600)."""
+    from klayout_tools.extract import run_extract
+
+    gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
+    spice_path = str(tmp_path / "poly_res.spice")
+    extracted = run_extract(
+        gds, "gf180mcu", output=spice_path, deck_options={"poly_res": "2k"}
+    )
+    top = extracted["top"]
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": spice_path,
+                "deck": "gf180mcu",
+                "top": top,
+                "deck_options": {"poly_res": "4k"},
+            },
+            "reference": {"netlist": reference_path},
+        },
+    )
+    with pytest.raises(LvsError, match="poly_res=4k"):
+        run_lvs(path)
+
+
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer *and* no distinct
     PMOS well-tap layer either (`Comp` is shared with ordinary active,

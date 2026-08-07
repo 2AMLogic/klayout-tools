@@ -635,10 +635,12 @@ Rules of thumb:
   simulation subcircuit (`X … ppolyf_u_2k r_length=… r_width=…`), not the
   default one and not a bare `R` card — every value the key accepts has a
   curated model-binding entry. See "SPICE model binding" below.
-- `klt lvs` does **not** yet accept this flag: its layout-side extraction
-  always uses the deck's default flavour (`poly_res=1k` on gf180mcu), so a
-  2k/3k design must compare its `klt extract` netlist by other means until
-  that gap is closed.
+- `klt lvs` accepts the same override as `request.layout.deck_options` (issue
+  #600) — the JSON-request-document counterpart of this flag, since `klt lvs`
+  takes a request document rather than per-flag CLI args. A 2k/3k design's
+  layout-side extraction is resolved with the matching flavour instead of
+  silently falling back to the deck's default. See
+  [`docs/cli/lvs.md`](lvs.md)'s `layout.deck_options` field.
 
 ### Junction diodes (issue #542)
 
