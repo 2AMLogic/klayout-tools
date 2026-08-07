@@ -1,0 +1,20 @@
+# Pins intentional per-repo customizations to installed Loom surfaces so
+# `resync-installed.sh` (a routine `chore(loom): resync installed surfaces`
+# commit) never overwrites them with upstream Loom's template. One relative
+# path per line (relative to .loom/, e.g. "hooks/foo.sh", "roles/bar.md",
+# "commands/loom/mine.md"); blank lines and `#` comments are ignored. See
+# resync-installed.sh's header comment ("Local-override convention") for the
+# full path-shape reference.
+
+# #606: champion-epic.md carries a local-only "Re-approval Guard and Rejection
+# Idempotency" section (originally #532/#533) that stops duplicate Phase 1
+# issue creation on an already-approved epic (epic #375 had its Phase 1
+# created three times — #379-381, #376-378, #529-531 — before this guard
+# existed) and caps unrevised-rejection loops (#520, rejected 3x with
+# identical feedback) with an N=2 escalation to loom:operator-only. This
+# section was never upstreamed into rjwalters/loom's own champion-epic.md
+# template, so an unpinned resync silently reverted it once already (commit
+# 71d46d0, 2026-08-05) — this pin is what prevents a recurrence. If the
+# upstream Loom project ever adopts an equivalent mechanism, this pin can be
+# dropped and the file resynced normally.
+commands/loom/champion-epic.md
