@@ -467,7 +467,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "layers_checked": ["22/0", "30/0"],
     "layers_in_stream_without_rules": ["46/0", "75/0"],
     "rules_skipped": ["metal1.width.1", "metal1.space.1"],
-    "voltage_domain_warnings": []
+    "voltage_domain_warnings": [],
+    "deck_scope": ["7.13 Metaln"]
   },
   "provenance": {
     "klt_version": "0.4.2",
@@ -516,7 +517,8 @@ On a run with findings:
     "layers_checked": ["65/20", "66/20", "66/44"],
     "layers_in_stream_without_rules": [],
     "rules_skipped": [],
-    "voltage_domain_warnings": []
+    "voltage_domain_warnings": [],
+    "deck_scope": ["licon", "m1", "poly"]
   }
 }
 ```
@@ -574,6 +576,7 @@ draws" — `coverage` closes that gap. `status`'s own two-value contract
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because their `layer`/`other_layer` was absent from this stream. Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
+| `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 
 `layers_checked` and `layers_in_stream_without_rules` are computed from the
 input stream's own layer table (reusing the same per-layer enumeration
@@ -623,6 +626,45 @@ those are not modelled by this deck's rules at all yet (a separate, larger
 follow-on: a `_LV`/`_MV` rule-pair split). Treat a non-empty
 `voltage_domain_warnings` as "re-check this geometry against the PDK's own
 tooling for the marked domain," not as a corrected verdict.
+
+#### `coverage.deck_scope`
+
+`layers_in_stream_without_rules` answers a **per-layer** question — "what
+geometry did I draw that the deck ignored entirely" — but cannot answer a
+**per-rule** one: a layer can report as `"checked"` because one unrelated
+rule references it, even though the specific DRM rule/section a caller
+actually cares about was never evaluated. `deck_scope` closes that gap with a
+coarser, section-level statement of intent: every distinct DRM section (e.g.
+gf180mcu's `"7.5 Comp"`, `"10.4.2 MIM Option B"`) or official rule-id prefix
+(e.g. sky130's `"li"`, `"m1"`, whose source `sky130.lydrc`/`sky130A_mr.drc`
+has no numbered-section structure to cite) the selected deck's rules claim to
+implement, populated per rule via
+[`DrcRule.scope`](../../src/klayout_tools/decks/__init__.py) and aggregated
+here deduplicated and sorted. A caller building a signoff gate on top of
+`klt drc` can diff `coverage.deck_scope` against the DRM's own table of
+contents to see which chapters this curated deck does not attempt at all —
+something no per-layer field can express, since one layer (e.g. gf180mcu's
+`Metal4`) can be referenced by rules spanning several different DRM sections.
+
+`deck_scope` is purely additive (see
+[`docs/json-contract.md`](../json-contract.md)): the existing
+`layers_in_stream_without_rules` field is unchanged, byte-identical output
+for any input that predates this field. `deck_scope` is a static property of
+the deck (like `deck_layers`), not filtered by what a given run's input
+stream actually contains — running the same deck against two different
+layouts reports the same `deck_scope`. A rule with no `scope` set (the
+`DrcRule` default, `""`) contributes nothing to this list; a deck where every
+rule leaves `scope` unset (none of the two shipped decks today) reports an
+empty `deck_scope` rather than raising.
+
+Worked example: on the `gf180mcu` deck, `coverage.deck_scope` includes
+`"7.4 Nwell"` and `"7.5 Comp"`, but the MIM Option-A rule set and the
+`LVPWELL`/`DNWELL`-keyed `BJT.1`/`BJT.2` rules — both called out as *not*
+covered in "Coverage" above — contribute no entry at all, since no curated
+rule references them. A caller asserting "this deck claims the Nwell
+chapter" checks `"7.4 Nwell" in coverage.deck_scope`, distinct from (and a
+strictly coarser question than) "did this run actually check any Nwell
+geometry" (`coverage.layers_checked`).
 
 ## Exit codes
 

@@ -207,6 +207,16 @@
       "via.space.1",
       "via.width.1"
     ],
-    "voltage_domain_warnings": []
+    "voltage_domain_warnings": [],
+    "deck_scope": [
+      "ct",
+      "difftap",
+      "li",
+      "licon",
+      "m1",
+      "m2",
+      "poly",
+      "via"
+    ]
   }
 }

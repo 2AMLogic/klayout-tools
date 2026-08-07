@@ -207,6 +207,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=150,  # 0.15 um
         # sky130.lydrc rule "poly.1a": poly.width(0.15, euclidian)
         # -> "poly.1a : min. poly width : 0.15um"
+        scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
     ),
     DrcRule(
         id="diff.width.1",
@@ -219,6 +220,7 @@ DECK: list[DrcRule] = [
         # evaluate; approximated here by checking diff.drawing alone. The
         # threshold value (0.15um) is the real, unmodified source value.
         # -> "difftap.1 : min. difftap width : 0.15um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
     ),
     DrcRule(
         id="li1.width.1",
@@ -230,6 +232,7 @@ DECK: list[DrcRule] = [
         # -> "li.1 : min. li width : 0.17um"
         # (the "not_in_cell5_li" exclusion covers a handful of named analog
         # macro cells not modelled here; general-case threshold is used.)
+        scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
     ),
     DrcRule(
         id="li1.space.1",
@@ -239,6 +242,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=170,  # 0.17 um
         # sky130.lydrc rule "li.3": not_in_cell5_li.space(0.17, euclidian)
         # -> "li.3 : min. li spacing : 0.17um"
+        scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
     ),
     DrcRule(
         id="met1.width.1",
@@ -248,6 +252,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=140,  # 0.14 um
         # sky130.lydrc rule "m1.1": m1.width(0.14, euclidian)
         # -> "m1.1 : min. m1 width : 0.14um"
+        scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
     ),
     DrcRule(
         id="met1.space.1",
@@ -258,6 +263,7 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "m1.2": non_huge_m1.space(0.14, euclidian)
         # -> "m1.2 : min. m1 spacing : 0.14um"
         # (the wide-metal 0.28um exception, "m1.3ab", is not modelled here.)
+        scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
     ),
     DrcRule(
         id="met1.enclosing.mcon.1",
@@ -268,6 +274,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=30,  # 0.03 um
         # sky130.lydrc rule "m1.4": not_in_cell6_m1.enclosing(mcon, 0.03, euclidian)
         # -> "m1.4 : min. m1 enclosure of mcon : 0.03um"
+        scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
     ),
     DrcRule(
         id="diff.enclosing.licon.1",
@@ -278,6 +285,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=40,  # 0.04 um
         # sky130.lydrc rule "licon.5": diff.enclosing(licon, 0.04, euclidian)
         # -> "licon.5 : min. diff enclosure of licon : 0.04um"
+        scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
     ),
     DrcRule(
         id="poly.enclosing.licon.1",
@@ -288,6 +296,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=50,  # 0.05 um
         # sky130.lydrc rule "licon.8": poly.enclosing(licon, 0.05, euclidian)
         # -> "licon.8 : min. poly enclosure of licon : 0.05um"
+        scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
     ),
     DrcRule(
         id="li1.enclosing.licon1.1",
@@ -335,6 +344,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=190,  # 0.19 um
         # sky130.lydrc rule "ct.2": mcon.space(0.19, euclidian)
         # -> "ct.2 : min. mcon spacing : 0.19um"
+        scope="ct",  # sky130.lydrc "ct.*" rule-id family (#566)
     ),
     # met2/via rule coverage (issue #513), mirroring the met1/mcon rule
     # shapes just above -- see the module docstring's own #513 note for
@@ -347,6 +357,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=140,  # 0.14 um
         # sky130A_mr.drc rule "m2.1": m2.width(0.14, euclidian)
         # -> "m2.1 : min. m2 width : 0.14um"
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
     ),
     DrcRule(
         id="met2.space.1",
@@ -359,6 +370,7 @@ DECK: list[DrcRule] = [
         # (the wide-metal 0.28um exception, "m2.3ab", is not modelled here --
         # the same approximation met1.space.1 above already makes for its
         # own wide-metal exception, "m1.3ab".)
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
     ),
     DrcRule(
         id="via.width.1",
@@ -378,6 +390,7 @@ DECK: list[DrcRule] = [
         # capped at the same 0.15um length ("via.1a_b") -- our width_check
         # primitive only supports a minimum-width lower bound, so only the
         # min-size half of the rule is enforced here.)
+        scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
     ),
     DrcRule(
         id="via.space.1",
@@ -387,6 +400,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=170,  # 0.17 um
         # sky130A_mr.drc rule "via.2": via.space(0.17, euclidian)
         # -> "via.2 : min. via spacing : 0.17um"
+        scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
     ),
     DrcRule(
         id="met1.enclosing.via.1",
@@ -401,6 +415,7 @@ DECK: list[DrcRule] = [
         # is not modelled here -- the same "primary rule only" approximation
         # met1.enclosing.mcon.1 above already makes for its own sibling
         # refinement, "m1.5".)
+        scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
     ),
     DrcRule(
         id="met2.enclosing.via.1",
@@ -416,6 +431,7 @@ DECK: list[DrcRule] = [
         # "m2.5" (0.085um), are not modelled -- this curated deck does not
         # model areaid.* layers elsewhere either; same "primary rule only"
         # approximation as met1.enclosing.via.1 above.)
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
     ),
 ]
 

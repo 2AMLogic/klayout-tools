@@ -98,6 +98,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
+                "deck_scope": [<scope identifier>, ...],
             },
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
@@ -174,6 +175,21 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
     Always a list, empty for a deck that registers no such marker or a
     layout that draws none of it overlapping checked geometry -- purely
     additive, no existing rule threshold changes because of this field.
+
+    ``coverage.deck_scope`` (issue #566) is a third, coarser-grained
+    "what was not looked at" answer, additive alongside the layer-level
+    fields above: every distinct non-empty :attr:`~klayout_tools.decks.DrcRule.scope`
+    across ``deck_name``'s rules (deduplicated, sorted) -- the DRM sections
+    or official rule-id prefixes this deck claims to implement, static per
+    deck and independent of ``path`` (like ``deck_layers``, not filtered by
+    what a given run actually found present). Where ``layers_in_stream_without_rules``
+    answers "what geometry did I draw that the deck ignored entirely",
+    ``deck_scope`` answers "which of the DRM's own chapters does this deck
+    even attempt" -- a layer can be ``"checked"`` because one unrelated rule
+    references it, even though the specific DRM section/rule a caller cares
+    about was never curated at all; diffing ``deck_scope`` against the DRM's
+    own table of contents surfaces that gap. A deck rule with no ``scope``
+    set (the default, ``""``) contributes nothing to this list.
 
     Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
     deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not
@@ -399,6 +415,11 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
+    # Deck-static, like `deck_layers` above: every distinct non-empty
+    # DrcRule.scope this deck's rules declare, regardless of what's actually
+    # present in `path` (#566).
+    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
+
     # Voltage-domain marker warnings (issue #552): a marker this deck
     # registers via `get_unmodeled_voltage_markers` (e.g. gf180mcu's
     # `Dualgate` 55/0) selects a second gate-oxide/voltage domain whose real
@@ -446,6 +467,7 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
         ],
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
+        "deck_scope": deck_scope,
     }
 
     return {
