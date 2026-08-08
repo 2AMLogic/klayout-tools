@@ -25,7 +25,9 @@ from .output import emit_error, emit_success
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_place_and_route(args.request)
+        report = run_place_and_route(
+            args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+        )
     except PlaceAndRouteError as exc:
         return emit_error("place-and-route", str(exc), args.format)
 

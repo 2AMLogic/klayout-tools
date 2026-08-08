@@ -1,13 +1,13 @@
 # `klt synthesize`
 
-Synthesize RTL sources against a resolved sky130 standard-cell liberty via
+Synthesize RTL sources against a resolved standard-cell liberty via
 Yosys + bundled ABC — Phase 2 of
 [Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391) ("adopt the
 digital engine class — Yosys + OpenROAD — RTL→GDS as a first-class `klt`
 flow").
 
 ```
-klt synthesize <request> [--format text|json]
+klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -30,6 +30,10 @@ flag line carries cleanly — not positional RTL file args.
 - `<request>` — a path to a request JSON file, e.g. `klt synthesize request.json`.
   Relative paths inside the request (`sources`) resolve against the
   **request file's own directory**.
+- `--pdk` — PDK variant to resolve (e.g. `sky130A`); overrides `$PDK`.
+  Optional — omit to use `find_pdk()`'s own default search order.
+- `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
+  search order.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -82,13 +86,17 @@ liberty comes from a volare/open_pdks install, **not** this repo's fetched
 `sky130sram`, not the digital standard-cell library).
 
 `request.pdk` carries only `cell_library`/`corner` — no `variant`/`root`
-selector. The resolved PDK install is whatever `find_pdk()`'s own default
-search order finds (`$PDK_ROOT`/`$PDK` environment variables, then the
-ciel/volare stores, then the conventional install prefixes) — exactly as
-`klt pdk find` with no flags would resolve.
+selector of its own. The resolved PDK install is whatever `find_pdk()`'s own
+default search order finds (`$PDK_ROOT`/`$PDK` environment variables, then
+the ciel/volare stores, then the conventional install prefixes) — exactly as
+`klt pdk find` with no flags would resolve — unless the CLI's own `--pdk`/
+`--pdk-root` flags (mirroring `klt extract`'s identical pair) pin a specific
+installed variant/root instead.
 
-- `pdk.cell_library` — a standard-cell library name (`sky130_fd_sc_hd`
-  today).
+- `pdk.cell_library` — a standard-cell library name. Not restricted to a
+  single PDK family: any standard-cell library the resolved install ships a
+  `libs_ref` entry for resolves the same way (`sky130_fd_sc_hd` and
+  `gf180mcu_fd_sc_mcu9t5v0` both verified end to end).
 - `pdk.corner` — a liberty corner selector (e.g. `tt_025C_1v80`); when
   omitted, the nominal (typical-process, room-temperature) corner
   `klt pdk cells`'s own `nominal_corner` selection already picks is used.

@@ -24,7 +24,9 @@ from .output import emit_error, emit_success
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_synthesize(args.request)
+        report = run_synthesize(
+            args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+        )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 

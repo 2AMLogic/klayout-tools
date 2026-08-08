@@ -482,6 +482,56 @@ def test_run_lef_not_found(tmp_path, monkeypatch):
         run_place_and_route(request_path)
 
 
+def test_run_unknown_cell_library_rejects_cts_stage(tmp_path, monkeypatch):
+    """A `cell_library` with liberty/LEF assets but no
+    `_CTS_BUFFER_CELLS` entry still fails with the existing clear error once
+    a run reaches the `cts` stage -- never a silent guess (issue #629)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_fd_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": "acme_fd_sc_hd", "corner": "tt_025C_1v80"},
+            target_stage="cts",
+        ),
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=(
+            "no clock-tree buffer cell known for standard-cell library 'acme_fd_sc_hd'"
+        ),
+    ):
+        run_place_and_route(request_path)
+
+
+def test_run_unknown_cell_library_rejects_route_stage(tmp_path, monkeypatch):
+    """Same as above, one stage further -- a `cell_library` with a known CTS
+    buffer but no `_ROUTING_LAYER_RANGE` entry still fails clearly when a run
+    reaches `route` (issue #629). The CTS table is patched with a fake entry
+    so the earlier `cts`-stage check does not mask the routing-layer check
+    this test targets."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    monkeypatch.setitem(
+        place_and_route._CTS_BUFFER_CELLS, "acme_fd_sc_hd", "acme_fd_sc_hd__buf_4"
+    )
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_fd_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "acme_fd_sc_hd", "corner": "tt_025C_1v80"}),
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match="no routing-layer range known for standard-cell library 'acme_fd_sc_hd'",
+    ):
+        run_place_and_route(request_path)
+
+
 # --------------------------------------------------------------------------- #
 # `request.macros` validation (issue #438, Epic #393 Phase 2 Capability A)
 # --------------------------------------------------------------------------- #
@@ -1229,6 +1279,76 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
 
     report = run_place_and_route(request_path)
     assert report["engine_version"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Non-sky130 cell library + `--pdk`/`--pdk-root` (issue #629)
+# --------------------------------------------------------------------------- #
+
+
+def test_stubbed_full_route_success_gf180mcu(tmp_path, monkeypatch):
+    """A second, non-sky130 cell library reaches the `route` stage the same
+    way sky130 does -- the liberty/LEF resolver was never sky130-specific,
+    and `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE` now carry a real, verified
+    `gf180mcu_fd_sc_mcu9t5v0` entry alongside sky130's (issue #629)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuC",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        corner="tt_025C_1v80",
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": "gf180mcu_fd_sc_mcu9t5v0", "corner": "tt_025C_1v80"},
+            io={"layer_h": "Metal3", "layer_v": "Metal2"},
+        ),
+    )
+    _stub_openroad_success(monkeypatch)
+    merge_calls = _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert len(merge_calls) == 1
+
+    provenance = report["provenance"]
+    assert provenance["pdk"]["name"] == "gf180mcuC"
+    assert provenance["deck"]["name"] == "gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80"
+
+
+def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
+    """`--pdk` (issue #629) selects a specific installed variant, beating
+    `$PDK` -- mirroring `klt extract`'s identical flag."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    _make_pdk_install(install_root, "sky130B")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    monkeypatch.setenv("PDK", "sky130A")
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(target_stage="floorplan", constraints=None, io=None),
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    exit_code = main(
+        ["place-and-route", request_path, "--pdk", "sky130B", "--format", "json"]
+    )
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["provenance"]["pdk"]["name"] == "sky130B"
 
 
 # --------------------------------------------------------------------------- #
