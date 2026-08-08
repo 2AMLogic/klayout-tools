@@ -3366,15 +3366,10 @@ def _extract_netlist(
         # parent-level well/tap shape (e.g. a guard ring) overlapping a
         # LEF-fallback pin's footprint would silently win over the metal net
         # the pin is actually routed to, since `_probe_abstract_pin_net`
-        # takes the first hit.
-        # Metals bottom-up first, then poly/nwell/tap -- matches
-        # `_probe_abstract_pin_net`'s own documented fallback order (a
-        # standard cell's pins land on the lowest metal available). Getting
-        # this backwards is a confirmed correctness bug (PR #622 review): a
-        # parent-level well/tap shape (e.g. a guard ring) overlapping a
-        # LEF-fallback pin's footprint would silently win over the metal net
-        # the pin is actually routed to, since `_probe_abstract_pin_net`
-        # takes the first hit.
+        # takes the first hit. The abstracted cell's *own* nwell/poly/tap
+        # cannot cause this -- `_abstract_cell_mask_layers` erases those
+        # inside its definition before probing runs -- so the exposure is
+        # specifically parent-level geometry.
         probe_layers: list[tuple[str, kdb.Region]] = [
             (f"metal{index}", region) for index, region in enumerate(metals)
         ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
