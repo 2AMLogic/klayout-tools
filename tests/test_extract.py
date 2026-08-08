@@ -5295,6 +5295,89 @@ def test_abstract_cells_falls_back_to_lef_abstract_when_no_in_cell_labels(tmp_pa
     assert "OUT" in x_line
 
 
+def test_abstract_cells_lef_fallback_warns_on_pin_with_no_port_geometry(tmp_path):
+    """Issue #624: a LEF macro where one declared `PIN` (`VDD`) is drawn only
+    via `PATH` geometry -- a statement shape `parse_lef_macro_pin_ports`
+    deliberately never reads -- resolves zero port boxes for that pin. The
+    macro as a whole still succeeds (its other two pins resolve normally
+    from `RECT`), so this must not raise, but the dropped pin must surface a
+    `warnings[]` entry naming it, and must not appear in the resolved pin
+    set/`.SUBCKT` pin list at all -- before this fix, it was silently
+    dropped with no signal anywhere in the response."""
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LEF_BUF_MIXED")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(leaf, 65, 20, kdb.Box(0, 0, 2000, 1000))
+    draw(leaf, 66, 20, kdb.Box(800, -200, 1200, 1200))
+    draw(leaf, 66, 44, kdb.Box(100, 300, 300, 700))
+    draw(leaf, 66, 44, kdb.Box(1700, 300, 1900, 700))
+    draw(leaf, 67, 20, kdb.Box(0, 200, 400, 800))
+    draw(leaf, 67, 20, kdb.Box(1600, 200, 2000, 800))
+    # Deliberately no li1 labels -- forces the LEF fallback.
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    _wire_abstract_instance_pins(top, layout, kdb.Trans(0, 0), "IN", "OUT")
+    path = _write_gds(layout, tmp_path / "lef_buf_mixed.gds")
+
+    lef_path = tmp_path / "lef_buf_mixed.lef"
+    lef_path.write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO LEF_BUF_MIXED\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 2.000 BY 1.000 ;\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.000 0.200 0.400 0.800 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 1.600 0.200 2.000 0.800 ;\n"
+        "    END\n"
+        "  END A\n"
+        "  PIN VDD\n"
+        "    DIRECTION INOUT ;\n"
+        "    USE POWER ;\n"
+        "    PORT\n"
+        "      LAYER met1 ;\n"
+        "        PATH 0.000 1.000 2.000 1.000 ;\n"
+        "    END\n"
+        "  END VDD\n"
+        "END LEF_BUF_MIXED\n"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lef_buf_mixed.spice"),
+        abstract_cell_patterns=("LEF_BUF_MIXED",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "LEF_BUF_MIXED"
+    assert entry["resolution_source"] == "lef_abstract"
+    # Only A/Y resolved -- VDD (PATH-only geometry) is dropped, not counted.
+    assert entry["pin_count"] == 2
+
+    warnings = report["warnings"]
+    assert any("LEF_BUF_MIXED" in w and "VDD" in w for w in warnings), warnings
+
+    spice = Path(report["netlist_path"]).read_text()
+    (subckt_line,) = [
+        line for line in spice.splitlines() if line.startswith(".SUBCKT LEF_BUF_MIXED")
+    ]
+    assert "VDD" not in subckt_line
+
+
 def test_abstract_cells_lef_fallback_prefers_metal_over_parent_nwell(tmp_path):
     """A LEF-resolved pin (no ``role``, so `_probe_abstract_pin_net` falls
     back to `probe_layers` order) must probe metals *before* poly/nwell/tap

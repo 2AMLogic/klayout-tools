@@ -17,7 +17,12 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import pdk as pdk_module
-from klayout_tools.lef_header import parse_lef_header, read_lef_header
+from klayout_tools.lef_header import (
+    parse_lef_header,
+    parse_lef_macro_pin_ports,
+    read_lef_header,
+    read_lef_macro_pin_ports,
+)
 
 # --------------------------------------------------------------------------- #
 # SITE
@@ -341,6 +346,212 @@ def test_read_lef_header_reads_a_file(tmp_path):
 def test_read_lef_header_missing_file_raises_oserror(tmp_path):
     with pytest.raises(OSError):
         read_lef_header(str(tmp_path / "nope.tlef"))
+
+
+# --------------------------------------------------------------------------- #
+# parse_lef_macro_pin_ports / read_lef_macro_pin_ports (issue #620's pin
+# access-point reader, direct unit coverage per issue #624 -- previously only
+# exercised indirectly via two `test_extract.py` integration tests using
+# trivial single-RECT-per-pin LEF text)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_lef_macro_pin_ports_single_rect():
+    text = (
+        "MACRO LEF_BUF\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.1 0.2 0.3 0.4 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END LEF_BUF\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros == {
+        "LEF_BUF": {
+            "A": [{"layer": "li1", "bbox_um": [0.1, 0.2, 0.3, 0.4]}],
+        }
+    }
+
+
+def test_parse_lef_macro_pin_ports_multiple_port_blocks_per_pin():
+    """A pin with two separate `PORT ... END` blocks (a real LEF shape -- a
+    pin drawn as more than one disjoint access shape) unions every box from
+    every block, in source order."""
+    text = (
+        "MACRO m\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.1 0.1 ;\n"
+        "    END\n"
+        "    PORT\n"
+        "      LAYER met1 ;\n"
+        "        RECT 1.0 1.0 1.1 1.1 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END m\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros["m"]["A"] == [
+        {"layer": "li1", "bbox_um": [0.0, 0.0, 0.1, 0.1]},
+        {"layer": "met1", "bbox_um": [1.0, 1.0, 1.1, 1.1]},
+    ]
+
+
+def test_parse_lef_macro_pin_ports_polygon_reduced_to_bounding_box():
+    text = (
+        "MACRO m\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        POLYGON 0.0 0.0  0.5 0.2  0.3 0.9  0.0 0.5 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END m\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    (box,) = macros["m"]["A"]
+    assert box["layer"] == "li1"
+    assert box["bbox_um"] == [0.0, 0.0, 0.5, 0.9]
+
+
+def test_parse_lef_macro_pin_ports_malformed_polygon_odd_coords_skipped():
+    """A `POLYGON` with an odd coordinate count (a malformed x,y pair list)
+    is skipped rather than raising or guessing -- never-raise-on-malformed
+    convention (issue #624)."""
+    text = (
+        "MACRO m\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        POLYGON 0.0 0.0  0.5 0.2  0.3 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END m\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros["m"]["A"] == []
+
+
+def test_parse_lef_macro_pin_ports_path_only_pin_resolves_empty():
+    """Issue #624: a pin drawn only via `PATH` geometry (some real PDK LEFs
+    use this for thin-layer pins) is deliberately out of this reader's scope
+    -- it resolves to `[]`, not omitted, so a caller can tell "declared but
+    unroutable" apart from "not declared"."""
+    text = (
+        "MACRO m\n"
+        "  PIN VDD\n"
+        "    PORT\n"
+        "      LAYER met1 ;\n"
+        "        PATH 0.0 0.0 1.0 0.0 ;\n"
+        "    END\n"
+        "  END VDD\n"
+        "END m\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros["m"]["VDD"] == []
+
+
+def test_parse_lef_macro_pin_ports_mixed_rect_and_path_pins():
+    """The exact combined scenario from issue #624: one pin (`A`) drawn with
+    `RECT` resolves normally, a second pin (`VDD`) drawn only via `PATH`
+    resolves empty -- both keys are present, distinguishing the two cases."""
+    text = (
+        "MACRO MIXED\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.2 0.2 ;\n"
+        "    END\n"
+        "  END A\n"
+        "  PIN VDD\n"
+        "    PORT\n"
+        "      LAYER met1 ;\n"
+        "        PATH 0.0 1.0 1.0 1.0 ;\n"
+        "    END\n"
+        "  END VDD\n"
+        "END MIXED\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros["MIXED"]["A"] != []
+    assert macros["MIXED"]["VDD"] == []
+
+
+def test_parse_lef_macro_pin_ports_pin_with_no_port_is_empty_list():
+    text = "MACRO m\n  PIN A\n  END A\nEND m\n"
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros["m"]["A"] == []
+
+
+def test_parse_lef_macro_pin_ports_statement_before_layer_skipped():
+    """A `RECT` before any `LAYER` statement (malformed LEF) is skipped
+    rather than attributed to a guessed layer."""
+    text = (
+        "MACRO m\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "        RECT 0.0 0.0 0.1 0.1 ;\n"
+        "      LAYER li1 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END m\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert macros["m"]["A"] == []
+
+
+def test_parse_lef_macro_pin_ports_multiple_macros_keyed_separately():
+    text = (
+        "MACRO first\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.1 0.1 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END first\n"
+        "\n"
+        "MACRO second\n"
+        "  PIN B\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 1.0 1.0 1.1 1.1 ;\n"
+        "    END\n"
+        "  END B\n"
+        "END second\n"
+    )
+    macros = parse_lef_macro_pin_ports(text)
+    assert set(macros.keys()) == {"first", "second"}
+    assert macros["first"]["A"][0]["bbox_um"] == [0.0, 0.0, 0.1, 0.1]
+    assert macros["second"]["B"][0]["bbox_um"] == [1.0, 1.0, 1.1, 1.1]
+
+
+def test_parse_lef_macro_pin_ports_no_macros_returns_empty_dict():
+    assert parse_lef_macro_pin_ports("") == {}
+    assert parse_lef_macro_pin_ports("SITE unithd\n  CLASS CORE ;\nEND unithd\n") == {}
+
+
+def test_read_lef_macro_pin_ports_reads_a_file(tmp_path):
+    path = tmp_path / "buf.lef"
+    path.write_text(
+        "MACRO BUF\n"
+        "  PIN A\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.0 0.0 0.1 0.1 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END BUF\n"
+    )
+    macros = read_lef_macro_pin_ports(str(path))
+    assert macros["BUF"]["A"][0]["bbox_um"] == [0.0, 0.0, 0.1, 0.1]
+
+
+def test_read_lef_macro_pin_ports_missing_file_raises_oserror(tmp_path):
+    with pytest.raises(OSError):
+        read_lef_macro_pin_ports(str(tmp_path / "nope.lef"))
 
 
 # --------------------------------------------------------------------------- #
