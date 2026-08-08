@@ -3359,10 +3359,25 @@ def _extract_netlist(
         assert top_circuit is not None, (
             "top circuit must exist immediately after l2n.extract_netlist()"
         )
+        # Metals bottom-up first, then poly/nwell/tap -- matches
+        # `_probe_abstract_pin_net`'s own documented fallback order (a
+        # standard cell's pins land on the lowest metal available). Getting
+        # this backwards is a confirmed correctness bug (PR #622 review): a
+        # parent-level well/tap shape (e.g. a guard ring) overlapping a
+        # LEF-fallback pin's footprint would silently win over the metal net
+        # the pin is actually routed to, since `_probe_abstract_pin_net`
+        # takes the first hit.
+        # Metals bottom-up first, then poly/nwell/tap -- matches
+        # `_probe_abstract_pin_net`'s own documented fallback order (a
+        # standard cell's pins land on the lowest metal available). Getting
+        # this backwards is a confirmed correctness bug (PR #622 review): a
+        # parent-level well/tap shape (e.g. a guard ring) overlapping a
+        # LEF-fallback pin's footprint would silently win over the metal net
+        # the pin is actually routed to, since `_probe_abstract_pin_net`
+        # takes the first hit.
         probe_layers: list[tuple[str, kdb.Region]] = [
-            ("nwell", nwell),
-            ("poly", poly),
-        ] + [(f"metal{index}", region) for index, region in enumerate(metals)]
+            (f"metal{index}", region) for index, region in enumerate(metals)
+        ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
         abstracted_cells, abstract_cell_warnings = _wire_abstract_cells(
             layout,
             deck,

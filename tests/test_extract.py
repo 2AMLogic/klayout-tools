@@ -5116,6 +5116,80 @@ def test_abstract_cells_falls_back_to_lef_abstract_when_no_in_cell_labels(tmp_pa
     assert "OUT" in x_line
 
 
+def test_abstract_cells_lef_fallback_prefers_metal_over_parent_nwell(tmp_path):
+    """A LEF-resolved pin (no ``role``, so `_probe_abstract_pin_net` falls
+    back to `probe_layers` order) must probe metals *before* poly/nwell/tap
+    (PR #622 review): a parent-level nwell shape (e.g. a guard ring) that
+    happens to overlap the pin's footprint must never win over the metal net
+    the pin is actually routed to. Before the fix, `probe_layers` checked
+    nwell first and the pin silently bound to the well strap's net instead
+    of its real metal net."""
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LEF_BUF_PROBE")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(leaf, 65, 20, kdb.Box(0, 0, 2000, 1000))
+    draw(leaf, 66, 20, kdb.Box(800, -200, 1200, 1200))
+    draw(leaf, 66, 44, kdb.Box(100, 300, 300, 700))
+    draw(leaf, 66, 44, kdb.Box(1700, 300, 1900, 700))
+    draw(leaf, 67, 20, kdb.Box(0, 200, 400, 800))
+    draw(leaf, 67, 20, kdb.Box(1600, 200, 2000, 800))
+    # Deliberately no li1 labels -- forces the LEF fallback.
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    _wire_abstract_instance_pins(top, layout, kdb.Trans(0, 0), "IN", "OUT")
+
+    # A parent-level nwell strap (e.g. a guard ring) drawn directly at TOP,
+    # overlapping both LEF pin footprints -- exactly the case that used to
+    # win the probe race against the real met1 routing.
+    top.shapes(layout.layer(64, 20)).insert(kdb.Box(-500, -500, 2500, 1500))
+    top.shapes(layout.layer(64, 5)).insert(kdb.Text("VNWSTRAP", kdb.Trans(1000, -300)))
+
+    path = _write_gds(layout, tmp_path / "lef_buf_probe.gds")
+
+    lef_path = tmp_path / "lef_buf_probe.lef"
+    lef_path.write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO LEF_BUF_PROBE\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 2.000 BY 1.000 ;\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.000 0.200 0.400 0.800 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 1.600 0.200 2.000 0.800 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END LEF_BUF_PROBE\n"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lef_buf_probe.spice"),
+        abstract_cell_patterns=("LEF_BUF_PROBE",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    # Before the fix: both pins probed the overlapping nwell first and
+    # silently bound to "VNWSTRAP" instead of their real metal nets.
+    assert "IN" in x_line
+    assert "OUT" in x_line
+    assert "VNWSTRAP" not in x_line
+
+
 def test_abstract_cells_present_in_cli_json(tmp_path, capsys):
     """`abstracted_cells` is part of the JSON contract and is emitted by the
     CLI, via the repeatable `--abstract-cells` flag."""
