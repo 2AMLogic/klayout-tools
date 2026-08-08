@@ -618,6 +618,11 @@ def _make_launcher(manifest_path, aws, **overrides):
         launcher_cidr="203.0.113.4/32",
         manifest_path=manifest_path,
         aws_runner=aws,
+        # A no-op sleep so a test that happens to exercise the
+        # delete-security-group retry loop (issue #617) never pays real
+        # wall-clock backoff time. Individual tests that care about the
+        # sleep calls themselves override this.
+        sleep_fn=lambda seconds: None,
     )
     kwargs.update(overrides)
     return rl.RemoteLauncher(**kwargs)
@@ -1084,12 +1089,15 @@ def test_terminate_is_a_noop_when_never_provisioned(manifest_path):
 
 
 def test_terminate_security_group_cleanup_is_best_effort(manifest_path):
+    # Every delete-security-group attempt fails -- exhausts the full bounded
+    # retry window (issue #617) and still must not raise.
     aws = _FakeAws(manifest_path)
     aws.respond("ec2", "create-security-group", "sg-new")
     aws.respond("ec2", "run-instances", "i-abc123")
     aws.respond("ec2", "delete-security-group", rl.RemoteLaunchError("still in use"))
+    sleeps: list[float] = []
 
-    # Must not raise even though delete-security-group fails.
+    # Must not raise even though delete-security-group fails every attempt.
     with rl.RemoteLauncher(
         region="us-east-1",
         pdk="sky130A",
@@ -1098,11 +1106,248 @@ def test_terminate_security_group_cleanup_is_best_effort(manifest_path):
         launcher_cidr="203.0.113.4/32",
         manifest_path=manifest_path,
         aws_runner=aws,
+        sleep_fn=sleeps.append,
     ) as launcher:
         launcher.provision()
 
     terminate_calls = [c for c in aws.calls if c[:2] == ["ec2", "terminate-instances"]]
     assert len(terminate_calls) == 1
+
+    delete_calls = [c for c in aws.calls if c[:2] == ["ec2", "delete-security-group"]]
+    assert len(delete_calls) == rl._SECURITY_GROUP_DELETE_ATTEMPTS
+    # One sleep between each pair of attempts -- attempts - 1 sleeps total.
+    assert len(sleeps) == rl._SECURITY_GROUP_DELETE_ATTEMPTS - 1
+    assert all(s == rl._SECURITY_GROUP_DELETE_BACKOFF_S for s in sleeps)
+
+
+def test_terminate_security_group_delete_retries_then_succeeds(manifest_path):
+    # The common real-world case: the ENI is still attached for the first
+    # couple of attempts (terminate-instances hasn't fully released it yet),
+    # then the delete succeeds within the retry window -- no wait-latency
+    # was paid, and the group does not end up orphaned.
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+    aws.respond(
+        "ec2",
+        "delete-security-group",
+        [
+            rl.RemoteLaunchError("DependencyViolation: still attached"),
+            rl.RemoteLaunchError("DependencyViolation: still attached"),
+            "",
+        ],
+    )
+
+    with rl.RemoteLauncher(
+        region="us-east-1",
+        pdk="sky130A",
+        corner_count=5,
+        job_id="job-1",
+        launcher_cidr="203.0.113.4/32",
+        manifest_path=manifest_path,
+        aws_runner=aws,
+        sleep_fn=lambda seconds: None,
+    ) as launcher:
+        launcher.provision()
+
+    delete_calls = [c for c in aws.calls if c[:2] == ["ec2", "delete-security-group"]]
+    assert len(delete_calls) == 3  # gave up retrying once it succeeded
+
+
+def test_delete_security_group_helper_gives_up_after_attempts_and_returns_false():
+    aws = _FakeAws(manifest_path=None)
+    aws.respond("ec2", "delete-security-group", rl.RemoteLaunchError("nope"))
+    sleeps: list[float] = []
+
+    ok = rl._delete_security_group(
+        aws, "us-east-1", "sg-1", attempts=3, backoff_s=0.5, sleep_fn=sleeps.append
+    )
+
+    assert ok is False
+    delete_calls = [c for c in aws.calls if c[:2] == ["ec2", "delete-security-group"]]
+    assert len(delete_calls) == 3
+    assert sleeps == [0.5, 0.5]
+
+
+def test_delete_security_group_helper_succeeds_without_exhausting_attempts():
+    aws = _FakeAws(manifest_path=None)
+    aws.respond(
+        "ec2",
+        "delete-security-group",
+        [rl.RemoteLaunchError("nope"), ""],
+    )
+    sleeps: list[float] = []
+
+    ok = rl._delete_security_group(
+        aws, "us-east-1", "sg-1", attempts=5, backoff_s=0.5, sleep_fn=sleeps.append
+    )
+
+    assert ok is True
+    delete_calls = [c for c in aws.calls if c[:2] == ["ec2", "delete-security-group"]]
+    assert len(delete_calls) == 2
+    assert sleeps == [0.5]
+
+
+# --------------------------------------------------------------------------- #
+# reap_orphaned_security_groups (issue #617's independent backstop)
+# --------------------------------------------------------------------------- #
+
+
+def _fake_describe_response(group_ids: list[str]) -> str:
+    # aws --output text renders a list of scalars whitespace-separated.
+    return "\t".join(group_ids)
+
+
+def test_reap_orphaned_security_groups_deletes_only_unattached_groups():
+    aws = _FakeAws(manifest_path=None)
+    aws.respond(
+        "ec2",
+        "describe-security-groups",
+        _fake_describe_response(["sg-orphan-1", "sg-still-attached", "sg-orphan-2"]),
+    )
+
+    def describe_enis(args):
+        group_id = args[args.index("--filters") + 1].split("Values=")[-1]
+        if group_id == "sg-still-attached":
+            return _fake_describe_response(["eni-123"])
+        return ""
+
+    # _FakeAws only keys on argv[:2], which is identical for every
+    # describe-network-interfaces call -- route through a small wrapper aws
+    # runner instead so the response can depend on the filter value.
+    calls: list[list[str]] = []
+
+    def aws_runner(args):
+        calls.append(args)
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return aws(args)
+        if args[:2] == ["ec2", "describe-network-interfaces"]:
+            return describe_enis(args)
+        if args[:2] == ["ec2", "delete-security-group"]:
+            return ""
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    deleted = rl.reap_orphaned_security_groups(
+        "us-east-1", aws_runner=aws_runner, sleep_fn=lambda seconds: None
+    )
+
+    assert sorted(deleted) == ["sg-orphan-1", "sg-orphan-2"]
+    delete_calls = [c for c in calls if c[:2] == ["ec2", "delete-security-group"]]
+    assert sorted(c[c.index("--group-id") + 1] for c in delete_calls) == [
+        "sg-orphan-1",
+        "sg-orphan-2",
+    ]
+
+
+def test_reap_orphaned_security_groups_no_candidates_deletes_nothing():
+    calls: list[list[str]] = []
+
+    def aws_runner(args):
+        calls.append(args)
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return ""  # no groups matched the name-prefix filter
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    deleted = rl.reap_orphaned_security_groups("us-east-1", aws_runner=aws_runner)
+
+    assert deleted == []
+    # No describe-network-interfaces or delete-security-group calls at all
+    # -- nothing to check or delete.
+    assert [c[:2] for c in calls] == [["ec2", "describe-security-groups"]]
+
+
+def test_reap_orphaned_security_groups_delete_failure_is_excluded_not_raised():
+    def aws_runner(args):
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return "sg-1"
+        if args[:2] == ["ec2", "describe-network-interfaces"]:
+            return ""
+        if args[:2] == ["ec2", "delete-security-group"]:
+            raise rl.RemoteLaunchError("still in use")
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    deleted = rl.reap_orphaned_security_groups(
+        "us-east-1", aws_runner=aws_runner, sleep_fn=lambda seconds: None
+    )
+
+    assert deleted == []  # gave up on sg-1 but did not raise
+
+
+def test_reap_orphaned_security_groups_uses_name_prefix_filter():
+    seen_filters = []
+
+    def aws_runner(args):
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            seen_filters.append(args[args.index("--filters") + 1])
+            return ""
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    rl.reap_orphaned_security_groups("us-west-2", aws_runner=aws_runner)
+
+    assert seen_filters == [
+        f"Name=group-name,Values={rl._PER_JOB_SECURITY_GROUP_NAME_PREFIX}*"
+    ]
+
+
+def test_provision_reaps_orphans_before_creating_its_own_group_by_default(
+    manifest_path,
+):
+    calls: list[list[str]] = []
+
+    def aws_runner(args):
+        calls.append(args)
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return ""
+        if args[:2] == ["ec2", "create-security-group"]:
+            return "sg-new"
+        if args[:2] == ["ec2", "run-instances"]:
+            return "i-abc123"
+        return ""
+
+    launcher = _make_launcher(manifest_path, aws_runner)
+    launcher.provision()
+    launcher.instance_id = None  # avoid a real terminate call in fixture teardown
+    launcher._created_security_group = False
+
+    call_pairs = [c[:2] for c in calls]
+    assert ["ec2", "describe-security-groups"] in call_pairs
+    # The reap happened before this job's own group was created.
+    assert call_pairs.index(["ec2", "describe-security-groups"]) < call_pairs.index(
+        ["ec2", "create-security-group"]
+    )
+
+
+def test_provision_skips_reap_when_disabled(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+
+    launcher = _make_launcher(manifest_path, aws, reap_orphans_on_provision=False)
+    launcher.provision()
+    launcher.instance_id = None
+
+    assert all(c[:2] != ["ec2", "describe-security-groups"] for c in aws.calls)
+
+
+def test_provision_reap_failure_does_not_block_provisioning(manifest_path):
+    # The opportunistic reap is best-effort: a failure resolving/listing
+    # security groups (e.g. a permissions gap) must never stop this job's
+    # own provisioning.
+    def aws_runner(args):
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            raise rl.RemoteLaunchError("AccessDenied")
+        if args[:2] == ["ec2", "create-security-group"]:
+            return "sg-new"
+        if args[:2] == ["ec2", "run-instances"]:
+            return "i-abc123"
+        return ""
+
+    launcher = _make_launcher(manifest_path, aws_runner)
+    info = launcher.provision()
+
+    assert info["instance_id"] == "i-abc123"
+    launcher.instance_id = None
+    launcher._created_security_group = False
 
 
 # --------------------------------------------------------------------------- #

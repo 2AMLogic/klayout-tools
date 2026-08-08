@@ -41,6 +41,18 @@ credential host profile and IAM shape", and "Guardrail mechanics" SS2-3):
   ``InstanceInitiatedShutdownBehavior=terminate`` is always set at launch
   (see :func:`build_run_instances_args`) as a host-side backstop independent
   of whether (a)'s explicit ``terminate-instances`` call ever arrives.
+- **The per-job security group's teardown gets the same belt-and-braces
+  discipline (issue #617)**: (a) :meth:`RemoteLauncher.terminate` retries its
+  ``delete-security-group`` call with bounded backoff (see
+  :data:`_SECURITY_GROUP_DELETE_ATTEMPTS`) rather than the single attempt
+  that used to reliably lose the race against ``terminate-instances``'s
+  asynchronous ENI release; (b) :func:`reap_orphaned_security_groups` is an
+  independent backstop -- run opportunistically from
+  :meth:`RemoteLauncher._resolve_security_group` before a new job creates its
+  own group, and separately callable as a standalone maintenance routine --
+  that lists and deletes any ``klt-remote-sim-klt-sim-*`` group with no
+  attached network interface, closing the gap for a run that never reaches
+  ``terminate()`` at all (killed process, interrupted provisioning).
 
 Scope note: this module provisions and tears down the instance and resolves
 the AMI/sizing/cost inputs to do so, plus (:meth:`RemoteLauncher.get_public_ip`)
@@ -191,6 +203,35 @@ _SPOT_CAPACITY_ERROR_MARKERS: tuple[str, ...] = (
     "MaxSpotInstanceCountExceeded",
     "Unsupported",  # e.g. spot not offered for this type/AZ combination
 )
+
+#: Bounded retry window for :meth:`RemoteLauncher.terminate`'s
+#: ``delete-security-group`` call (issue #617, implementation option 2):
+#: ``terminate-instances`` is asynchronous, so the ENI backing this job's
+#: security group is typically still attached for a few seconds after the
+#: call returns -- AWS refuses ``DeleteSecurityGroup`` with a
+#: dependency-violation error until the instance actually reaches
+#: ``terminated`` and releases it. A single attempt (the pre-#617 behavior)
+#: reliably loses this race; a handful of short-backoff retries catches the
+#: common case cheaply, without paying the 30-60s+ latency of an explicit
+#: ``ec2 wait instance-terminated`` (the rejected option 1) on every job's
+#: teardown.
+_SECURITY_GROUP_DELETE_ATTEMPTS = 5
+
+#: Linear backoff between :data:`_SECURITY_GROUP_DELETE_ATTEMPTS` retries, in
+#: seconds. 5 attempts x 2s = up to 10s of extra teardown latency in the
+#: worst case -- a small, bounded cost against the 30-60s+ of option 1.
+_SECURITY_GROUP_DELETE_BACKOFF_S = 2.0
+
+#: Name prefix per-job security groups are created under (see
+#: :meth:`RemoteLauncher._resolve_security_group`'s
+#: ``--group-name klt-remote-sim-{job_id}``, with ``job_id`` always
+#: ``klt-sim-<hex>`` per ``sim.py``'s ``_run_remote``). Deliberately includes
+#: the trailing ``-`` so :func:`reap_orphaned_security_groups`'s default
+#: never matches the bare ``klt-remote-sim`` base group -- a long-lived,
+#: shared group an operator can reuse via an explicit
+#: ``security_group_id``/``remote.security_group_id`` -- which must never be
+#: swept up by the reaper.
+_PER_JOB_SECURITY_GROUP_NAME_PREFIX = "klt-remote-sim-klt-sim-"
 
 
 class RemoteLaunchError(Exception):
@@ -744,6 +785,137 @@ def _run_aws_cli(args: list[str]) -> str:
     return completed.stdout.strip()
 
 
+# --------------------------------------------------------------------------- #
+# Security-group teardown: bounded retry + independent reaper (issue #617)
+# --------------------------------------------------------------------------- #
+
+#: Signature of the injectable sleep function used between
+#: :data:`_SECURITY_GROUP_DELETE_ATTEMPTS` retries. Defaults to
+#: :func:`time.sleep`; tests inject a no-op so the retry loop's worst case
+#: doesn't cost real wall-clock time.
+SleepFn = Callable[[float], None]
+
+
+def _delete_security_group(
+    aws: AwsRunner,
+    region: str,
+    group_id: str,
+    *,
+    attempts: int = _SECURITY_GROUP_DELETE_ATTEMPTS,
+    backoff_s: float = _SECURITY_GROUP_DELETE_BACKOFF_S,
+    sleep_fn: SleepFn = time.sleep,
+) -> bool:
+    """Best-effort ``delete-security-group``, retried up to ``attempts``
+    times with ``backoff_s`` linear backoff between attempts, instead of the
+    single shot :meth:`RemoteLauncher.terminate` used before #617.
+
+    Returns whether the delete ultimately succeeded. Never raises -- matches
+    the existing "must not raise" discipline for this call (an orphaned,
+    harmless-when-empty security group is a much smaller problem than an
+    exception here masking the fact that the instance itself *was* torn
+    down); callers that need to know about a still-attached group after
+    exhausting the window rely on this return value or on
+    :func:`reap_orphaned_security_groups` catching it on a later run.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            aws(
+                [
+                    "ec2",
+                    "delete-security-group",
+                    "--region",
+                    region,
+                    "--group-id",
+                    group_id,
+                ]
+            )
+            return True
+        except RemoteLaunchError:
+            if attempt == attempts:
+                return False
+            sleep_fn(backoff_s)
+    return False  # pragma: no cover -- loop always returns above
+
+
+def reap_orphaned_security_groups(
+    region: str,
+    *,
+    aws_runner: AwsRunner | None = None,
+    name_prefix: str = _PER_JOB_SECURITY_GROUP_NAME_PREFIX,
+    sleep_fn: SleepFn = time.sleep,
+) -> list[str]:
+    """Independent backstop for per-job security-group teardown
+    (implementation option 3, issue #617): list every security group named
+    ``<name_prefix>*`` with **no attached network interface**, delete each
+    (bounded-retried the same way :meth:`RemoteLauncher.terminate` is), and
+    return the group IDs actually deleted.
+
+    This closes the gap :meth:`RemoteLauncher.terminate`'s own retry cannot:
+    a run that never reaches ``terminate()`` at all -- the launcher process
+    is killed uncatchably (``SIGKILL``), or ``_resolve_security_group``
+    creates the group but the following ``run-instances`` call never
+    completes -- leaks a group with nothing left to retry the delete for.
+    Callable standalone as a maintenance routine, and called opportunistically
+    from :meth:`RemoteLauncher._resolve_security_group` before a new job
+    creates its own group (see that method).
+
+    A group still attached to a network interface (in use by a running, or a
+    `terminating`-but-not-yet-released, instance) is left alone -- the same
+    dependency-violation condition that makes a single-shot
+    ``delete-security-group`` fail, checked up front here instead of
+    discovered via a failed delete, so a group genuinely still in use is
+    never even attempted.
+
+    Never raises for an individual group's failed delete (best-effort, folded
+    into the returned list simply omitting it); the ``describe-*`` calls
+    themselves *do* propagate :class:`RemoteLaunchError` -- a caller invoking
+    this directly as a maintenance tool should see a listing failure, while
+    the opportunistic call site inside :meth:`RemoteLauncher.provision`
+    catches and swallows it so a reaper hiccup never blocks provisioning.
+    """
+    aws = aws_runner if aws_runner is not None else _run_aws_cli
+
+    raw_ids = aws(
+        [
+            "ec2",
+            "describe-security-groups",
+            "--region",
+            region,
+            "--filters",
+            f"Name=group-name,Values={name_prefix}*",
+            "--query",
+            "SecurityGroups[].GroupId",
+            "--output",
+            "text",
+        ]
+    )
+    candidate_ids = raw_ids.split()
+
+    deleted: list[str] = []
+    for group_id in candidate_ids:
+        raw_enis = aws(
+            [
+                "ec2",
+                "describe-network-interfaces",
+                "--region",
+                region,
+                "--filters",
+                f"Name=group-id,Values={group_id}",
+                "--query",
+                "NetworkInterfaces[].NetworkInterfaceId",
+                "--output",
+                "text",
+            ]
+        )
+        if raw_enis.strip():
+            continue  # still attached -- not an orphan, leave it alone
+
+        if _delete_security_group(aws, region, group_id, sleep_fn=sleep_fn):
+            deleted.append(group_id)
+
+    return deleted
+
+
 class RemoteLauncher:
     """Provision one cold, per-job spot (default) or on-demand EC2 instance
     sized for ``corner_count``, guaranteeing teardown on every exit path.
@@ -807,6 +979,14 @@ class RemoteLauncher:
         manifest_path: str | Path | None = None,
         aws_runner: AwsRunner | None = None,
         retry_on_demand_on_spot_failure: bool = True,
+        # issue #617: bounded-retry the security-group delete in terminate()
+        # (sleep_fn is the injectable backoff sleep -- tests pass a no-op so
+        # the retry window costs no real wall-clock time), and opportunistically
+        # reap other jobs' orphaned groups before creating this one's own (set
+        # False to disable, e.g. a caller that already reaps on its own
+        # cadence and wants to avoid the extra describe-* calls per job).
+        sleep_fn: SleepFn | None = None,
+        reap_orphans_on_provision: bool = True,
     ) -> None:
         self.region = region
         self.pdk = pdk
@@ -823,6 +1003,8 @@ class RemoteLauncher:
         self.manifest_path = manifest_path
         self._aws = aws_runner if aws_runner is not None else _run_aws_cli
         self.retry_on_demand_on_spot_failure = retry_on_demand_on_spot_failure
+        self._sleep: SleepFn = sleep_fn if sleep_fn is not None else time.sleep
+        self.reap_orphans_on_provision = reap_orphans_on_provision
 
         self.instance_id: str | None = None
         self.instance_type: str | None = None
@@ -951,6 +1133,22 @@ class RemoteLauncher:
                 "network posture needs one of these to build the ingress "
                 "rule(s)"
             )
+
+        if self.reap_orphans_on_provision:
+            # Independent backstop (issue #617, implementation option 3):
+            # opportunistically clean up other jobs' orphaned groups before
+            # this job creates its own, so a run that never reached
+            # terminate() (killed process, interrupted provisioning) doesn't
+            # accumulate indefinitely. Best-effort -- a reaper hiccup (e.g. a
+            # permissions gap on describe-network-interfaces) must never
+            # block this job's own provisioning.
+            try:
+                reap_orphaned_security_groups(
+                    self.region, aws_runner=self._aws, sleep_fn=self._sleep
+                )
+            except RemoteLaunchError:
+                pass
+
         group_id = self._aws(
             [
                 "ec2",
@@ -1119,31 +1317,30 @@ class RemoteLauncher:
         exception, or caught signal all reach the same teardown call" path
         guardrail mechanics SS3(a) requires.
 
-        Never raises on the security-group cleanup step failing (best-effort
-        -- an orphaned, harmless-when-empty security group is a much smaller
-        problem than an exception here masking the fact that the instance
-        itself *was* torn down); the instance-terminate call's own failure
-        does raise, since a caller needs to know teardown may not have
-        happened.
+        The security-group delete is bounded-retried (issue #617; see
+        :func:`_delete_security_group`) rather than attempted once --
+        ``terminate-instances`` is asynchronous, so the ENI backing this
+        group is often still attached immediately after this call returns,
+        and a single attempt reliably lost that race. Still best-effort at
+        the end of the retry window: an orphaned, harmless-when-empty
+        security group is a much smaller problem than an exception here
+        masking the fact that the instance itself *was* torn down, and
+        :func:`reap_orphaned_security_groups` is the independent backstop
+        for whatever the retry window doesn't catch. The instance-terminate
+        call's own failure does raise, since a caller needs to know teardown
+        may not have happened.
         """
         if self.instance_id is not None:
             self._aws(build_terminate_instances_args(self.instance_id, self.region))
             self.instance_id = None
 
         if self._created_security_group and self.security_group_id:
-            try:
-                self._aws(
-                    [
-                        "ec2",
-                        "delete-security-group",
-                        "--region",
-                        self.region,
-                        "--group-id",
-                        self.security_group_id,
-                    ]
-                )
-            except RemoteLaunchError:
-                pass  # best-effort; see docstring
+            _delete_security_group(
+                self._aws,
+                self.region,
+                self.security_group_id,
+                sleep_fn=self._sleep,
+            )
             self._created_security_group = False
 
 
