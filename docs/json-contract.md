@@ -107,6 +107,11 @@ above): adopting it required no `schema_version` bump on any verb.
   family (e.g. gf180mcu's `{"poly_res": "2k"}`) — omitted entirely when no
   such option was given, so the block is otherwise unchanged. See
   `docs/cli/extract.md`'s "Selecting a shared-geometry resistor flavour".
+  A pinned `content_hash` can be turned back into the klayout-tools git
+  tag/PyPI version that shipped it with `klt deck resolve --content-hash
+  <hash>` (issue #623) — a resolve-only lookup against a generated
+  hash/version history table, not an in-process fetch of the historical
+  deck; see `docs/cli/deck.md`.
 - `input` — the input layout stream the run was made against, as
   `{content_hash}` (same shape as `deck`). `content_hash` is a
   `sha256:`-prefixed hex digest of the file, so a stale committed report is a

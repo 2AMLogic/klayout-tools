@@ -12,6 +12,7 @@ from .. import __version__
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     cells_cmd,
+    deck_cmd,
     draw_cmd,
     drc_cmd,
     eval_cmd,
@@ -538,6 +539,7 @@ def create_parser() -> argparse.ArgumentParser:
     render_parser.set_defaults(func=render_cmd.run)
 
     _add_pdk_parser(subparsers)
+    _add_deck_parser(subparsers)
 
     extract_parser = subparsers.add_parser(
         "extract",
@@ -1445,6 +1447,75 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text)",
     )
     corners_parser.set_defaults(func=pdk_cmd.run_corners)
+
+
+def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``deck`` verb with a nested ``resolve`` subcommand
+    (issue #623), mirroring ``pdk``/``kb``'s grouped-verb pattern (see
+    ``_add_pdk_parser``) so future deck-history operations (e.g. listing the
+    full table) have a natural home alongside ``resolve``.
+    """
+    deck_parser = subparsers.add_parser(
+        "deck",
+        help="resolve a built-in rule deck by content hash or version",
+        description=(
+            "Resolve one of klt's built-in DRC/LVS rule decks (sky130, "
+            "gf180mcu) against klayout-tools' own release history, so a "
+            "pinned `provenance.deck.content_hash` (docs/json-contract.md) "
+            "or a `deck name + version` can be turned back into the "
+            "klayout-tools git tag/commit and PyPI version that shipped it "
+            "-- without hand-bisecting this repo's git history to reproduce "
+            "against an older deck revision. Resolve-only: this does not "
+            "fetch, check out, or build the historical revision -- install "
+            "the reported version yourself to reproduce against it."
+        ),
+    )
+    deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
+
+    def _no_subcommand(_args: argparse.Namespace) -> int:
+        deck_parser.print_help(sys.stderr)
+        return 2
+
+    deck_parser.set_defaults(func=_no_subcommand)
+
+    resolve_parser = deck_sub.add_parser(
+        "resolve",
+        help="resolve a deck's content hash or (name, version) to a release",
+        description=(
+            "Look up a deck query against the generated hash/version -> "
+            "release history table. Give either --content-hash (optionally "
+            "narrowed with --deck), or both --deck and --version together."
+        ),
+    )
+    resolve_parser.add_argument(
+        "--content-hash",
+        dest="content_hash",
+        default=None,
+        help=(
+            "sha256:<hex> deck content hash to resolve, e.g. as reported by "
+            "`klt drc --deck sky130`'s provenance.deck.content_hash"
+        ),
+    )
+    resolve_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "deck name (e.g. sky130, gf180mcu); narrows a --content-hash "
+            "query, or combines with --version for an exact lookup"
+        ),
+    )
+    resolve_parser.add_argument(
+        "--version",
+        default=None,
+        help="klayout-tools package version to look up (requires --deck)",
+    )
+    resolve_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    resolve_parser.set_defaults(func=deck_cmd.run_resolve)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -188,6 +188,23 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-08 — new `klt deck resolve` verb (#623): resolves one of klt's
+  built-in DRC/LVS rule decks (sky130, gf180mcu) by content hash
+  (`--content-hash sha256:<hex>`, matching `provenance.deck.content_hash`'s
+  shape) or by name + package version (`--deck <name> --version <X.Y.Z>`)
+  against a generated hash/version -> release lookup table
+  (`src/klayout_tools/decks/_history.json`), returning the klayout-tools git
+  tag/commit and PyPI version that shipped that exact deck revision. Fixes
+  the friction of needing to hand-bisect this repo's own git history to
+  reproduce a pinned `content_hash` once a newer `klt` build shadows an
+  older, pinned one on `PATH`. Resolve-only by design: it never fetches,
+  checks out, or builds the historical revision in-process — the caller
+  still installs the reported version themselves. The table is generated
+  (never hand-maintained) by the new `scripts/generate_deck_history.py`,
+  which walks this repo's own `v*` git tags and records one entry per
+  `(deck, release)` pair; an unresolvable hash or a deck/version combo that
+  never shipped is a clean error-envelope response, never a silent
+  empty/null result. See `docs/cli/deck.md`.
 - 2026-08-08 — `klt extract`: new `--abstract-cells <glob>` flag
   (repeatable, #620), a **cell-level black-box + pins** abstraction mode,
   additive to (and independent of) the existing region-based
