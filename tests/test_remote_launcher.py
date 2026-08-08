@@ -1387,6 +1387,67 @@ def test_provision_reaps_orphans_before_creating_its_own_group_by_default(
     )
 
 
+def test_provision_tags_its_own_security_group_with_its_creation_time(
+    manifest_path,
+):
+    # PR #618 review: the reaper's min-age check is only load-bearing if the
+    # group is actually stamped at creation -- an untagged group falls back to
+    # the bare ENI check, which is exactly the racy behaviour the min-age
+    # check exists to prevent. Assert both halves round-trip: the create call
+    # carries the tag, and a *sibling* job's reaper reading that same stamp
+    # leaves the group alone while it is still between create-security-group
+    # and run-instances.
+    now = 1_000_000.0
+    calls: list[list[str]] = []
+
+    def aws_runner(args):
+        calls.append(args)
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return ""
+        if args[:2] == ["ec2", "create-security-group"]:
+            return "sg-new"
+        if args[:2] == ["ec2", "run-instances"]:
+            return "i-abc123"
+        return ""
+
+    launcher = _make_launcher(manifest_path, aws_runner, now_fn=lambda: now)
+    launcher.provision()
+    launcher.instance_id = None  # avoid a real terminate call in fixture teardown
+    launcher._created_security_group = False
+
+    create = next(c for c in calls if c[:2] == ["ec2", "create-security-group"])
+    tag_spec = create[create.index("--tag-specifications") + 1]
+    assert tag_spec == (
+        "ResourceType=security-group,"
+        f"Tags=[{{Key={rl._SECURITY_GROUP_CREATED_AT_TAG_KEY},Value={now}}}]"
+    )
+
+    # Round-trip the stamp this job actually wrote through the reaper a
+    # sibling job would run 5s later: too young to touch, and no
+    # delete-security-group call is even attempted (the runner below raises
+    # on one).
+    created_at = tag_spec.split("Value=")[1].rstrip("}]")
+
+    def sibling_reaper_aws(args):
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return _fake_describe_response(
+                [{"GroupId": "sg-new", "CreatedAt": created_at}]
+            )
+        if args[:2] == ["ec2", "describe-network-interfaces"]:
+            return ""  # not yet attached -- this job hasn't run run-instances
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    assert (
+        rl.reap_orphaned_security_groups(
+            "us-east-1",
+            aws_runner=sibling_reaper_aws,
+            sleep_fn=lambda seconds: None,
+            now_fn=lambda: now + 5.0,
+        )
+        == []
+    )
+
+
 def test_provision_skips_reap_when_disabled(manifest_path):
     aws = _FakeAws(manifest_path)
     aws.respond("ec2", "create-security-group", "sg-new")
