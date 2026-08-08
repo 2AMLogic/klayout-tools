@@ -370,6 +370,31 @@ def test_random_seed_must_be_an_integer(tmp_path, random_seed):
         run_functional_verification(request_path)
 
 
+def test_parameters_must_be_object(tmp_path):
+    """A list (or any non-object) `request.parameters` is a clear validation
+    error -- not a raw exception surfacing from the cocotb runner."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(parameters=["WIDTH", 16])
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="request.parameters must be a JSON object"
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("value", [[16], {"nested": 1}, None])
+def test_parameters_values_must_be_scalars(tmp_path, value):
+    """Each `request.parameters` value must be a scalar (int/float/string/
+    bool) -- an array, object, or null is rejected up front."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(parameters={"WIDTH": value})
+    )
+    with pytest.raises(FunctionalVerificationError, match="must be a scalar"):
+        run_functional_verification(request_path)
+
+
 def test_missing_cocotb_is_an_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "cocotb_tools", None)
     with pytest.raises(FunctionalVerificationError, match="cocotb is not installed"):
@@ -658,6 +683,40 @@ def test_stubbed_run_without_random_seed_leaves_seed_kwarg_unset(tmp_path, monke
     run_functional_verification(request_path)
 
     assert runner.test_kwargs["seed"] is None
+
+
+def test_stubbed_run_forwards_parameters_to_build_and_test(tmp_path, monkeypatch):
+    """`request.parameters` -> both `Runner.build(parameters=...)` and
+    `Runner.test(parameters=...)`, forwarded verbatim -- cocotb's own
+    per-simulator backend (Icarus `-P`, Verilator `-G`) does the flag
+    translation, so this module only needs to pass the mapping through."""
+    _setup_inputs(tmp_path)
+    parameters = {"WIDTH": 8, "ENABLE": True, "NAME": "x", "RATIO": 1.5}
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(parameters=parameters)
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["parameters"] == parameters
+    assert runner.test_kwargs["parameters"] == parameters
+
+
+def test_stubbed_run_without_parameters_forwards_an_empty_mapping(
+    tmp_path, monkeypatch
+):
+    """No `request.parameters` in the request -- an empty mapping is
+    forwarded to both calls, matching today's no-override behavior exactly
+    (fully backward compatible with existing committed requests)."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["parameters"] == {}
+    assert runner.test_kwargs["parameters"] == {}
 
 
 def test_stubbed_run_swallows_the_simulators_exit_code(tmp_path, monkeypatch):
@@ -1143,6 +1202,32 @@ def test_integration_real_icarus_testcase_filter_passes(tmp_path):
     # `get_results()` undercount the contract's own counts avoid.
     assert report["skipped_count"] == 1
     assert report["test_count"] == 3
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_parameters_override_reaches_elaboration(tmp_path):
+    """`request.parameters` end to end against real cocotb + Icarus: the
+    `modexp` core elaborates at `WIDTH=8` (its RTL default is `WIDTH=16`),
+    and the companion testbench's own `len(dut.result) == 8` assertion
+    confirms the override reached the simulator, not just the request/
+    response envelope -- issue #610's own acceptance criterion."""
+    for name in (
+        "modexp.v",
+        "test_modexp.py",
+        "test_modexp_parameters.py",
+        "request-modexp-parameters.json",
+    ):
+        shutil.copy(EXAMPLE_DIR / name, tmp_path / name)
+    request_path = str(tmp_path / "request-modexp-parameters.json")
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    assert report["failed_count"] == 0
+    assert report["test_count"] == 1
 
 
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")

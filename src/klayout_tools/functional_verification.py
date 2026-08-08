@@ -342,6 +342,38 @@ def _resolve_options(
     return coverage, resolved_timescale, random_seed
 
 
+def _resolve_parameters(parameters: Any) -> dict[str, Any]:
+    """Validate the optional ``request.parameters`` object and return it
+    unchanged (or ``{}`` when omitted).
+
+    Forwarded verbatim to both ``Runner.build(parameters=...)`` and
+    ``Runner.test(parameters=...)`` -- cocotb's own per-simulator backends
+    already translate the mapping into the elaboration-time override syntax
+    (Icarus: ``-P<toplevel>.<name>=<value>``; Verilator: ``-G<name>=<value>``),
+    so this module never needs to know that syntax itself.
+    """
+    if parameters is None:
+        return {}
+    if not isinstance(parameters, dict):
+        raise FunctionalVerificationError(
+            "request.parameters must be a JSON object (string key -> scalar value)"
+        )
+
+    for key, value in parameters.items():
+        if not isinstance(key, str) or not key:
+            raise FunctionalVerificationError(
+                "request.parameters keys must be non-empty strings"
+            )
+        if not isinstance(value, (bool, int, float, str)):
+            raise FunctionalVerificationError(
+                f"request.parameters[{key!r}] must be a scalar (integer, "
+                "float, string, or boolean) -- got a "
+                f"{type(value).__name__}"
+            )
+
+    return parameters
+
+
 # ---------------------------------------------------------------------------
 # `results.xml` parsing -- the only source of truth for the verdict
 # ---------------------------------------------------------------------------
@@ -490,12 +522,15 @@ def _run_build(
     build_dir: str,
     build_args: list[str],
     timescale: tuple[str, str],
+    parameters: dict[str, Any],
     log_path: str,
 ):
     """``Runner.build()``, with every failure mode collapsed into
     :class:`FunctionalVerificationError`. Returns the constructed ``Runner``
     so the caller can reuse it for the test step. ``timescale`` is passed
     here *and* in :func:`_run_test` -- see this module's docstring, gotcha 3.
+    ``parameters``, when non-empty, overrides Verilog ``parameter``/VHDL
+    ``generic`` values at elaboration time (see :func:`_resolve_parameters`).
     """
     try:
         # `get_runner` raises ValueError for an unknown name; an engine
@@ -515,6 +550,7 @@ def _run_build(
             build_args=build_args,
             always=True,
             timescale=timescale,
+            parameters=parameters,
             log_file=log_path,
         )
     except subprocess.CalledProcessError as exc:
@@ -552,6 +588,7 @@ def _run_test(
     test_dir: str,
     results_xml: str,
     timescale: tuple[str, str],
+    parameters: dict[str, Any],
     log_path: str,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
@@ -576,6 +613,11 @@ def _run_test(
     ``<property name="random_seed">`` element (see
     :func:`_extract_random_seed_property`) so every run's effective seed is
     echoed in the response regardless of whether the request pinned one.
+
+    ``parameters``, when non-empty, is forwarded unchanged -- see
+    :func:`_resolve_parameters` and :func:`_run_build` (the same mapping is
+    passed to both the build and test steps, matching cocotb's own
+    ``Runner`` contract).
     """
     inserted = module_dir not in sys.path
     if inserted:
@@ -591,6 +633,7 @@ def _run_test(
             test_dir=test_dir,
             results_xml=results_xml,
             timescale=timescale,
+            parameters=parameters,
             log_file=log_path,
         )
     except (SystemExit, subprocess.CalledProcessError):
@@ -770,6 +813,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     coverage_requested, timescale, random_seed = _resolve_options(
         request_doc.get("options"), engine
     )
+    parameters = _resolve_parameters(request_doc.get("parameters"))
 
     output_dir = os.path.join(request_dir, ".klt", "functional-verification")
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
@@ -814,6 +858,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         build_dir=build_dir,
         build_args=list(COVERAGE_BUILD_ARGS) if coverage_requested else [],
         timescale=timescale,
+        parameters=parameters,
         log_path=build_log,
     )
     _run_test(
@@ -828,6 +873,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         test_dir=output_dir,
         results_xml=results_xml,
         timescale=timescale,
+        parameters=parameters,
         log_path=test_log,
     )
 

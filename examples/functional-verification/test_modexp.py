@@ -10,11 +10,13 @@ before any gate-count optimization begins.
 The testbench is **width-adaptive**: it reads the DUT's operand width from
 `len(dut.result)` and constrains every random stimulus to that width, so the
 identical module verifies a 4-, 6-, 8-, or 16-bit elaboration of `modexp`
-without edits. (The `klt functional-verification` request does not yet plumb a
-Verilog parameter override, so the checked-in request elaborates the default
-`WIDTH=16`; the same design's bit-exactness at WIDTH=4/6/8/16 is additionally
-pinned by the deterministic Icarus cross-check recorded in
-`docs/design/rsa-modexp-baseline.md`.)
+without edits. `request-modexp.json` (this module's own request) elaborates
+the RTL default `WIDTH=16`; `request-modexp-parameters.json` demonstrates
+overriding it to `WIDTH=8` via `request.parameters` (issue #610), reusing
+this same width-adaptive stimulus through a companion testbench module
+(`test_modexp_parameters.py`). The same design's bit-exactness at
+WIDTH=4/6/8/16 is additionally pinned by the deterministic Icarus cross-check
+recorded in `docs/design/rsa-modexp-baseline.md`.
 
 This file is *input* to `klt functional-verification` (the testbench module
 named by `request.testbench.module`), not a pytest module -- pytest never
