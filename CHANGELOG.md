@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-08 — `klt extract`: sky130's `EXTRACTION_DECK.metals`/`.vias`
+  connectivity stack stopped at met2, one full level short of
+  `place_and_route.py`'s `_ROUTING_LAYER_RANGE["sky130_fd_sc_hd"]`
+  (`"met1-met5"`) — so a net `klt place-and-route` told OpenROAD it could
+  route through met3-or-higher silently split into two disconnected nets on
+  extraction, with `ignored_layers: []` (#619, since met3/met4 were already
+  read as `capacitors[].bottom_plate`, just never merged). `metals`/
+  `metal_labels`/`vias` now cover the full li1-through-met5 stack
+  (met3/met4/met5's `70/20`/`71/20`/`72/20`, connecting `via2`/`via3`/`via4`
+  at `69/44`/`70/44`/`71/44`), following #508's met1→met2 extension pattern
+  and re-verified against the same real sky130A `.lyt`/`.lydrc` sources.
+  `PARASITICS.metals` gained matching met3/met4/met5 `LayerRC` entries
+  (sourced from the same nominal `sky130.tech` corner as met1/met2) so this
+  extension does not regress `--parasitics` into gf180mcu's pre-#547
+  zero-R/C-above-the-covered-stack gap. Additive `ExtractionDeck`
+  `device_recognition_only_layers`/`merge_layers`/`device_recognition_layers`
+  properties and the response's new `device_recognition_only_layers[]` field
+  distinguish "read for device recognition, never a `metals`/`vias` level"
+  from `ignored_layers`'s "never read at all" — the gap that let met3/met4
+  hide this routing-connectivity ceiling behind a clean `ignored_layers`
+  report before this fix. It intentionally does **not** mirror into
+  `warnings[]`: a deck's own marker/mask geometry (a resistor's marker
+  layer, a bipolar's ID mark, a MiM cap's top-plate mark) is expected to be
+  device-recognition-only by PDK design, not a coverage gap, so warning on
+  every occurrence would fire on nearly any layout using one of these device
+  classes. **Behavior change**: a sky130 layout with real routing on
+  met3/met4/met5 now merges nets it previously extracted as disconnected;
+  see `docs/cli/extract.md`'s "Device-recognition-only layers" section.
+
 - 2026-08-06 — `klt extract`: `warnings[]` no longer duplicates
   `unbiased_pmos_body_nets[]`/`single_terminal_nets[]` one line per instance
   (#599) — a design with many affected devices/nets (e.g. 148 floating PMOS

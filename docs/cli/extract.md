@@ -402,17 +402,28 @@ Two consequences worth knowing:
     declare `Via4`/`Metal5` (the official deck's own `main.drc` connectivity,
     `top_via = via4` landing on `top_metal = metal5` for this stack), so the
     top terminal is tied in the same way.
-  - **sky130**: neither plate is wired. `met3`/`met4` (the two stacks'
-    `bottom_plate` layers) are not among this curated deck's own `metals`
-    (`li1`/`met1`/`met2` only), and while the real PDK's MiM stacks do have a
-    landing via for the top plate too (`sky130.lvs`'s `connect(capm, via3)`
-    / `connect(capm2, via4)`), those land on `met4`/`met5` — also above this
-    curated deck's `metals` stack — so `CapacitorDevice.top_plate_via` is
-    left unset here. Both of sky130's plate terminals therefore remain their
-    own isolated, self-connected connectivity nodes exactly as before #314:
-    multiple plate polygons that touch merge into one net (e.g. a shared
-    bottom plate across several caps), but neither plate's net extends into
-    any real routing.
+  - **sky130**: the bottom plate is wired, the top plate is not. `met3`/
+    `met4` (the two stacks' `bottom_plate` layers) became two of this
+    curated deck's own `metals` connectivity levels when `metals` grew from
+    `li1`/`met1`/`met2` to the full `li1`-through-`met5` stack (issue #619,
+    closing the gap that left `_ROUTING_LAYER_RANGE`'s promised `met1-met5`
+    signal-routing range one level short of what this deck could actually
+    merge), so each bottom plate now ties straight into the real met3/met4
+    routing net around it — the same "bottom plate matches a tracked
+    `metals` layer" mechanism gf180mcu's `Metal4` bottom plate already used.
+    While the real PDK's MiM stacks do have a landing via for the top plate
+    too (`sky130.lvs`'s `connect(capm, via3)` / `connect(capm2, via4)`), and
+    `via3`/`via4` are now tracked `vias` entries as of the same #619
+    extension, wiring the top-plate mark layer itself through them is a
+    separate, not-yet-modelled feature — `CapacitorDevice.top_plate_via` is
+    still left unset here. sky130's top-plate terminal therefore remains its
+    own isolated, self-connected connectivity node exactly as before #314:
+    multiple top-plate polygons that touch merge into one net (e.g. a shared
+    top plate across several caps), but the top plate's net does not extend
+    into any real routing. (A layer serving both a `metals` connectivity role
+    and a device-recognition role simultaneously — as met3/met4 now do — is
+    not a conflict; see "Device-recognition-only layers" below for the
+    reporting distinction this dual role motivated.)
 
   In every case the *device* itself (a capacitor of the correct value
   between two correctly-shaped plates) is recognised identically; only an
@@ -452,6 +463,46 @@ Two consequences worth knowing:
 capacitors nor any voltage-flavor/size variant beyond the two curated
 `capm`/`capm2` stacks above are modelled — out of scope for this curated
 starter subset, not a silent omission.
+
+### Device-recognition-only layers (issue #619)
+
+`ignored_layers` (see "JSON schema" below) only distinguishes "shape-bearing
+layer this deck reads" from "shape-bearing layer this deck never reads at
+all" — it cannot tell "read as a `metals`/`vias` connectivity level" from
+"read only for a `bipolars`/`capacitors`/`resistors`/`diodes`
+device-recognition role." That ambiguity let a real routing-connectivity gap
+hide behind a clean-looking `ignored_layers` report: sky130's `met3.drawing`/
+`met4.drawing` were already read as `capacitors[].bottom_plate` (see above)
+well before they became `metals` connectivity levels, so a layout with two
+nets joined only through a met3/met4 segment extracted as two disconnected
+nets with `ignored_layers: []` — nothing in the response said why, because
+met3/met4 genuinely were not "ignored."
+
+`device_recognition_only_layers` (see "JSON schema" below) closes that gap:
+it lists every shape-bearing layer the deck reads for device recognition
+that is **not** also one of its `metals`/`vias` connectivity levels *and*
+**not** one of the deck's own MOS-core layers (`active`/`poly`/`nwell`/
+`contact`, plus optionals) — the "read but not merged" counterpart to
+`ignored_layers`'s "never read at all." A layer can legitimately appear in
+*neither* list (a `metals`/`vias` level that also happens to carry a
+device-recognition role, e.g. sky130's met3/met4 after issue #619's `metals`
+extension — see "MiM capacitor device recognition" above) — that dual role
+is not itself a problem.
+
+Unlike `ignored_layers`, a non-empty `device_recognition_only_layers` does
+**not** append to `warnings[]`: a deck's own marker/mask geometry (a drawn
+resistor's ID layer, a bipolar's marker, a MiM cap's top-plate mark) is
+expected to be device-recognition-only by PDK design — it was never a
+candidate connectivity level, so its presence is routine, not a
+correctness gap. Warning on every occurrence would make `warnings[]` fire
+on nearly any layout that uses one of these device classes, defeating the
+signal-to-noise this field is meant to provide. The MOS-core exclusion
+exists for the same low-noise reason: sky130's vertical-PNP bipolar reuses
+the deck's own `nwell`/`diff` layers as its `base`/`emitter` (see "Bipolar
+(BJT) device recognition" above), so without excluding MOS-core layers,
+*any* ordinary PMOS/NMOS layout — with no bipolar device drawn at all —
+would populate this field purely from that coincidental layer-number
+overlap.
 
 ### Drawn resistors
 
@@ -1584,6 +1635,7 @@ exit codes).
   "pin_count": 6,
   "device_counts": { "nfet": 1, "pfet": 1 },
   "ignored_layers": [{ "layer": 55, "datatype": 0, "shapes": 12 }],
+  "device_recognition_only_layers": [],
   "device_classes": [
     "nfet",
     "pfet",
@@ -1637,7 +1689,8 @@ exit codes).
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |
 | `dummy_devices_dropped` | integer               | Number of devices suppressed by the deck's optional `dummy` marker layer — MOS gates (issue #295), drawn resistors and bipolars (both issue #462), and junction diodes (issue #542) alike — deliberately non-functional dummy devices excluded from `devices[]`/`device_counts` before recognition. `0` when the deck declares no `dummy` layer or the layout draws none. See "Dummy devices: the `dummy` marker layer". |
-| `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. |
+| `ignored_layers`   | array\<object\>            | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck`'s connectivity graph does **not** read, each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Empty when every shape-bearing layer is one the deck reads. Geometry on such a layer is invisible to extraction, so a block routed on an undeclared metal level silently extracts as disconnected nets — a non-empty list with a material shape count is the signal that a downstream `klt lvs` mismatch is a deck-coverage gap, not a layout bug. The extraction-side analogue of `klt drc`'s `coverage.layers_in_stream_without_rules`. Does **not** catch a layer that is read for device recognition only, never as a `metals`/`vias` connectivity level — see `device_recognition_only_layers` below (issue #619). |
+| `device_recognition_only_layers` | array\<object\> | `(layer, datatype)` pairs carrying shapes in the input stream that this `--deck` **does** read (so they never appear in `ignored_layers` above) but only for a bipolar/capacitor/resistor/diode device-recognition role, never as a `metals`/`vias` connectivity level and never one of the deck's own MOS-core layers either (issue #619 — see "Device-recognition-only layers" below), each `{ "layer": int, "datatype": int, "shapes": int }` with its stream shape count, sorted by `(layer, datatype)`. Two nets joined only through such a layer will not merge, and — unlike a layer the deck never reads at all — this gap is invisible to `ignored_layers`, which can only tell "read" from "not read," not "read for connectivity" from "read for device recognition only." This is diagnostic context, not a warning: unlike `ignored_layers`, a non-empty list does **not** append to `warnings[]` (a deck's own marker/mask geometry is expected to be device-recognition-only by PDK design, not a coverage gap). Empty when every device-recognition layer is also a `metals`/`vias` level or one of the deck's own MOS-core layers, or the deck declares no `bipolars`/`capacitors`/`resistors`/`diodes` entries at all. |
 | `device_classes`   | array\<string\>            | The device-class roles this `--deck` is structurally capable of recognising (`["nfet", "pfet"]` for a MOS-only deck; a deck that also declares a bipolar entry appends its class name, e.g. sky130's `[..., "pnp", ...]` or gf180mcu's `[..., "bjt", ...]` — see "Bipolar (BJT) device recognition" above; a deck that declares one or more MiM-capacitor entries likewise appends each one's class name, e.g. sky130's two `"sky130_fd_pr__model__cap_mim"`/`"sky130_fd_pr__model__cap_mim_m4"` or gf180mcu's one `"cap_mim_2f0_m4m5_noshield"` — see "MiM capacitor device recognition" above; a deck that declares one or more drawn resistors appends the single `"resistor"` role after those — see "Drawn resistors" above; and a deck that declares one or more junction diodes appends each one's class name last, e.g. gf180mcu's `"diode_nd2ps_06v0"`/`"diode_pd2nw_06v0"` — see "Junction diodes" above), independent of what this layout happens to contain. sky130 currently reports `["nfet", "pfet", <bipolar>, <capacitor…>, "resistor"]` and gf180mcu `["nfet", "pfet", <bipolar>, <capacitor>, "resistor", <diode…>]`. Note the `"resistor"` role token is not a `devices[].class` label string (a deck's resistor class is named after the PDK device it models). What the deck **can find**, not what it found — see `device_counts` for that. A consumer that needs to know ahead of time whether a deck supports a given device class (e.g. before pairing it with a reference netlist for `klt lvs`) reads this instead of inferring "unsupported" from a zero count. |
 | `devices`          | array\<object\>            | One entry per extracted device, see below.                                                             |
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |

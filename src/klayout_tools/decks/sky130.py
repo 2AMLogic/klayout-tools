@@ -177,6 +177,30 @@ support only ``width``/``space``/``notch``/``separation``/``enclosing``/
 ``enclosed``/``overlap``) -- adding it would require a new check primitive,
 out of scope for this "extend the deck with existing-shape rules" issue; see
 #513 for a candidate follow-on.
+
+met3/met4/met5 connectivity (issue #619, closing the gap ``place_and_route.py``'s
+``_ROUTING_LAYER_RANGE`` exposed: it already told OpenROAD signal routing
+could use met1-met5, while ``EXTRACTION_DECK.metals`` stopped at met2, so a
+net joined only through met3-or-higher silently split into two nets with no
+warning): ``metals``/``metal_labels``/``vias`` below now cover the full
+li1-through-met5 stack, following the exact met1->met2 extension pattern
+issue #508 established (see that field's own comment below). Layer numbers
+verified against the same real sky130A install (volare) cited by #508:
+``libs.tech/klayout/tech/sky130A.lyt``'s ``<connectivity>`` block names
+``met2,69/44,met3`` / ``met3,70/44,met4`` / ``met4,71/44,met5`` (matching
+this deck's existing "via connects layer N's own layer number, datatype 44,
+to layer N+1" pattern -- mcon at li1's 67/44, via at met1's 68/44), and its
+``<symbols>`` block gives ``met3='70/20+70/5+70/16'`` /
+``met4='71/20+71/5+71/16'`` / ``met5='72/20-72/15+72/5+72/16'`` (drawing/
+label datatypes 20/5, the same convention every metal level already in this
+deck follows -- also matching this repo's own ``gen.py``'s
+``"top_metal": (72, 20)`` bond-pad role, cited there as ``met5.drawing``
+from the same source). met3/met4 (70/20, 71/20) were already named in this
+deck as ``capacitors[].bottom_plate`` (see the module docstring's provenance
+note above) -- a layer can legitimately serve both roles at once, and
+``ExtractionDeck.device_recognition_only_layers`` (issue #619) is exactly
+the mechanism that would have flagged this "read but not merged" ambiguity
+had it existed before this extension closed the gap.
 """
 
 from __future__ import annotations
@@ -451,6 +475,12 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (69, 20): "met2.drawing",
     (70, 20): "met3.drawing",
     (71, 20): "met4.drawing",
+    # met3/met4/met5 connectivity levels + their landing vias (issue #619),
+    # see the module docstring's provenance note for this extension.
+    (69, 44): "via2.drawing",
+    (70, 44): "via3.drawing",
+    (71, 44): "via4.drawing",
+    (72, 20): "met5.drawing",
     (89, 44): "capm.drawing",
     (97, 44): "capm2.drawing",
 }
@@ -712,16 +742,56 @@ EXTRACTION_DECK = ExtractionDeck(
     # 68/44` this module's docstring already cites; met2.drawing itself is
     # `69/20` (`sky130A.lyt`'s `met2='69/20+69/5-69/14-69/15'` symbol,
     # matching `LAYER_NAMES`'s existing `(69, 20): "met2.drawing"` entry
-    # above). `met3`/`met4` remain outside this stack -- see `capacitors`'s
-    # own comment below, unchanged by this extension.
-    metals=((67, 20), (68, 20), (69, 20)),  # li1, met1, met2 (.drawing each)
-    # met2's own pin/label-carrying datatype, matching the li1.pin/met1.pin
-    # (67/5, 68/5) convention this deck already follows for every metal
-    # level: `sky130A.lyt`'s `met2` symbol above includes `+69/5` as its
-    # label component (`sky130A.lyp`'s display name `met2.label - 69/5`),
-    # the same datatype-5 convention every other metal level here uses.
-    metal_labels=((67, 5), (68, 5), (69, 5)),  # li1.pin, met1.pin, met2.pin
-    vias=((67, 44), (68, 44)),  # mcon (li1<->met1), via.drawing (met1<->met2)
+    # above).
+    #
+    # met3/met4/met5 (issue #619, see the module docstring's own provenance
+    # note for this extension): before this, `metals`/`vias` stopped at
+    # met2, one full level short of `place_and_route.py`'s
+    # `_ROUTING_LAYER_RANGE["sky130_fd_sc_hd"]` (`"met1-met5"`) -- a net
+    # OpenROAD was told it could route through met3-or-higher would silently
+    # split into two disconnected nets on extraction, with nothing in the
+    # response flagging it (`ignored_layers` couldn't either: met3/met4 were
+    # already read as `capacitors[].bottom_plate`, so they weren't
+    # "ignored," just never merged -- see `ExtractionDeck.
+    # device_recognition_only_layers`). met3.drawing/met4.drawing/
+    # met5.drawing are `70/20`/`71/20`/`72/20`; the connecting vias are
+    # `69/44`/`70/44`/`71/44` (each named after the *lower* metal's own layer
+    # number, datatype 44 -- the same "via lands on the layer number of the
+    # metal below it" convention mcon (`67/44`, li1's number) and via
+    # (`68/44`, met1's number) already establish above). Both facts verified
+    # against the same real sky130A install (volare) cited above: its
+    # `<connectivity>` block names `met2,69/44,met3` / `met3,70/44,met4` /
+    # `met4,71/44,met5`, and its `<symbols>` block gives
+    # `met3='70/20+70/5+70/16'` / `met4='71/20+71/5+71/16'` /
+    # `met5='72/20-72/15+72/5+72/16'`.
+    metals=(
+        (67, 20),  # li1.drawing
+        (68, 20),  # met1.drawing
+        (69, 20),  # met2.drawing
+        (70, 20),  # met3.drawing
+        (71, 20),  # met4.drawing
+        (72, 20),  # met5.drawing
+    ),
+    # Pin/label-carrying datatype for every metal level (datatype 5), the
+    # li1.pin/met1.pin/met2.pin convention issue #508 already established,
+    # extended to met3.pin/met4.pin/met5.pin (`70/5`/`71/5`/`72/5`, issue
+    # #619) by the same `sky130A.lyt` `<symbols>` block cited above (each
+    # metal symbol includes its own `+N/5` label component).
+    metal_labels=(
+        (67, 5),  # li1.pin
+        (68, 5),  # met1.pin
+        (69, 5),  # met2.pin
+        (70, 5),  # met3.pin
+        (71, 5),  # met4.pin
+        (72, 5),  # met5.pin
+    ),
+    vias=(
+        (67, 44),  # mcon.drawing (li1<->met1)
+        (68, 44),  # via.drawing (met1<->met2)
+        (69, 44),  # via2.drawing (met2<->met3, issue #619)
+        (70, 44),  # via3.drawing (met3<->met4, issue #619)
+        (71, 44),  # via4.drawing (met4<->met5, issue #619)
+    ),
     # Vertical PNP (issue #223, see the module docstring's "Follow-up" note
     # above): base = nwell.drawing (the physical n-type body the device's
     # p+ emitter sits in), emitter = diff.drawing (the same p+ diffusion
@@ -756,18 +826,24 @@ EXTRACTION_DECK = ExtractionDeck(
     ),
     # MiM capacitors (issue #225, see the module docstring's provenance note
     # above): two independent stacks, one per metal level sky130's official
-    # LVS deck draws a purpose-built top-plate mark layer on. Neither
-    # `bottom_plate` (met3/met4) is one of this deck's own `metals` (which
-    # stops at met2 above -- extended from met1 by issue #508, still one
-    # level short of met3), so `extract.py`'s bottom-plate connectivity
-    # wiring (issue #314) has nothing to match against -- both plates stay
-    # isolated connectivity nodes, not wired into this deck's
-    # li1/met1/met2-only stack. No `top_plate_via`/`top_plate_via_metal`
-    # either: sky130's real MiM stacks do have a landing via for each
-    # (`sky130.lvs`'s `connect(capm, via3)` / `connect(capm2, via4)`, see the
-    # module docstring's provenance note), but they land on `met4`/`met5` --
-    # also above this curated deck's `metals` stack -- so there is no
-    # tracked metal to wire them to either; see `CapacitorDevice`'s "Known
+    # LVS deck draws a purpose-built top-plate mark layer on. Both
+    # `bottom_plate` layers (met3/met4, `70/20`/`71/20`) are now *also* two of
+    # this deck's own `metals` connectivity levels (extended met2->met5 by
+    # issue #619 -- previously `metals` stopped at met2, one level short of
+    # met3, so `extract.py`'s bottom-plate connectivity wiring (issue #314)
+    # had nothing to match against and both plates stayed isolated
+    # connectivity nodes). A layer serving both roles at once -- a `metals`
+    # connectivity level *and* a device-recognition role -- is not a
+    # conflict (see `ExtractionDeck.device_recognition_only_layers`'s
+    # docstring): the bottom plate now genuinely merges with the surrounding
+    # met3/met4 routing net the way real silicon does, on top of still being
+    # recognised as a MiM-cap terminal. No `top_plate_via`/
+    # `top_plate_via_metal`: sky130's real MiM stacks do have a landing via
+    # for each (`sky130.lvs`'s `connect(capm, via3)` / `connect(capm2,
+    # via4)`, see the module docstring's provenance note) -- `via3`/`via4`
+    # are now tracked `vias` entries too (issue #619), but wiring the
+    # top-plate mark layer itself to them is a separate, not-yet-modelled
+    # feature this issue does not add; see `CapacitorDevice`'s "Known
     # limitation". No `bottom_plate_oversize_um` -- unlike gf180mcu's MiM
     # stack, sky130's bottom plate is simply the conductor the purpose-drawn
     # top-plate layer sits over, no "virtual bottom plate" derivation needed.
@@ -864,7 +940,13 @@ EXTRACTION_DECK = ExtractionDeck(
 # non-goal of this first cut (issue #216 "Non-goals"). `metals` is
 # index-aligned with EXTRACTION_DECK's `metals` stack: index 0 is li1 (local
 # interconnect -- relatively high sheet R), index 1 is met1 (low sheet R),
-# index 2 is met2 (issue #508's third connectivity level).
+# index 2 is met2 (issue #508's third connectivity level), indices 3-5 are
+# met3/met4/met5 (issue #619's extension to the full li1-through-met5 stack
+# -- without these three entries, extending `EXTRACTION_DECK.metals` alone
+# would have regressed sky130 from a fully-populated `PARASITICS.metals`
+# table back into the same "metal level with no R/C coefficient" gap #547
+# fixed for gf180mcu, silently zeroing out `--parasitics`'s R/C for any net
+# routed on met3 or higher).
 # Values expressed as (sheet ohms/square, area cap fF/um^2, fringe cap fF/um).
 PARASITICS = ParasiticsDeck(
     # No diffusion role (issue #226): `klt extract`'s M cards already carry
@@ -893,6 +975,31 @@ PARASITICS = ParasiticsDeck(
         # aF/um^2, 37.76 aF/um).
         LayerRC(
             sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.0175, cap_perim_ff_um=0.03776
+        ),
+        # met3 (issue #619). sheet: `resist (allm3)/metal3` in the same
+        # nominal `variants (),(orig),(si)` block as met1/met2 above (47
+        # milliohms/sq = 0.047 ohm/sq); area/perim from the matching nominal,
+        # non-RERAM `defaultareacap`/`defaultperimeter allm3 metal3` entries
+        # (12.37 aF/um^2, 40.99 aF/um -- the `#else (!RERAM)` branch, the
+        # same branch met1/met2's own values above were transcribed from).
+        LayerRC(
+            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.01237, cap_perim_ff_um=0.04099
+        ),
+        # met4 (issue #619). sheet: `resist (allm4)/metal4`, same nominal
+        # block and `#ifdef METAL5` guard sky130.tech wraps met4/met5 in (47
+        # milliohms/sq = 0.047 ohm/sq -- identical to met3's own value in
+        # that block); area/perim from the matching nominal, non-RERAM
+        # `defaultareacap`/`defaultperimeter allm4 metal4` entries (8.42
+        # aF/um^2, 36.68 aF/um).
+        LayerRC(
+            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.00842, cap_perim_ff_um=0.03668
+        ),
+        # met5 (issue #619). sheet: `resist (allm5)/metal5`, same nominal
+        # block (29 milliohms/sq = 0.029 ohm/sq); area/perim from the
+        # matching nominal, non-RERAM `defaultareacap`/`defaultperimeter
+        # allm5 metal5` entries (6.32 aF/um^2, 38.85 aF/um).
+        LayerRC(
+            sheet_res_ohm_sq=0.029, cap_area_ff_um2=0.00632, cap_perim_ff_um=0.03885
         ),
     ),
 )

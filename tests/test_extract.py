@@ -4465,24 +4465,46 @@ def test_gf180mcu_deck_declares_full_metal_stack():
 
 
 # --------------------------------------------------------------------------- #
-# sky130's third connectivity level, met2 (issue #508, follow-up to #454/
-# #468's metal2/via1 routing roles): before this, sky130's `metals` stopped
-# at met1, so met1 -- itself already the *only* other level the curated
-# deck's connectivity graph knew about -- was the sole plane above the
-# device-pad layer a caller could route on. See `decks/sky130.py`'s own
-# `EXTRACTION_DECK.metals` comment for the full provenance.
+# sky130's full metal stack, li1 through met5 (issue #619, extending #508's
+# met2 level): before this, sky130's `metals`/`vias` stopped at met2, one
+# full level short of `place_and_route.py`'s `_ROUTING_LAYER_RANGE`
+# (`"met1-met5"`), so a net OpenROAD was told it could route through
+# met3-or-higher silently split into two disconnected nets on extraction.
+# See `decks/sky130.py`'s own `EXTRACTION_DECK.metals` comment for the full
+# provenance.
 # --------------------------------------------------------------------------- #
 
 
-def test_sky130_deck_declares_three_level_metal_stack():
-    """The sky130 extraction deck now declares li1/met1/met2 with a
-    mcon/via.drawing chain between them (index-aligned, `len(metals) - 1`
-    vias) and a pin/label layer per metal level -- the deck-data half of
-    #508."""
+def test_sky130_deck_declares_full_metal_stack():
+    """The sky130 extraction deck now declares the full li1-through-met5
+    stack with a mcon/via/via2/via3/via4 chain between them (index-aligned,
+    `len(metals) - 1` vias) and a pin/label layer per metal level -- matching
+    `place_and_route.py`'s `_ROUTING_LAYER_RANGE["sky130_fd_sc_hd"]`
+    (`"met1-met5"`), the deck-data half of #619."""
     deck = get_extraction_deck("sky130")
-    assert deck.metals == ((67, 20), (68, 20), (69, 20))
-    assert deck.vias == ((67, 44), (68, 44))
-    assert deck.metal_labels == ((67, 5), (68, 5), (69, 5))
+    assert deck.metals == (
+        (67, 20),  # li1.drawing
+        (68, 20),  # met1.drawing
+        (69, 20),  # met2.drawing
+        (70, 20),  # met3.drawing
+        (71, 20),  # met4.drawing
+        (72, 20),  # met5.drawing
+    )
+    assert deck.vias == (
+        (67, 44),  # mcon.drawing
+        (68, 44),  # via.drawing
+        (69, 44),  # via2.drawing
+        (70, 44),  # via3.drawing
+        (71, 44),  # via4.drawing
+    )
+    assert deck.metal_labels == (
+        (67, 5),
+        (68, 5),
+        (69, 5),
+        (70, 5),
+        (71, 5),
+        (72, 5),
+    )
     assert len(deck.vias) == len(deck.metals) - 1
 
 
@@ -4582,6 +4604,77 @@ def test_sky130_without_met2_bridge_drains_stay_disconnected(tmp_path):
     assert len(drains) == 2, f"drains should be disconnected without a bridge, {drains}"
 
 
+# mcon/met1/via.drawing/met2/via2.drawing/met3 -- the stack a drain pad's own
+# li1 footprint is contacted straight up through to reach met3 (issue #619).
+_SKY130_MET3_VIA_STACK = [(67, 44), (68, 20), (68, 44), (69, 20), (69, 44), (70, 20)]
+
+
+def _make_sky130_met3_bridge_layout(*, bridge: bool) -> kdb.Layout:
+    """Two sky130 NMOS transistors whose drains are separated in li1 and
+    (when ``bridge``) joined *only* through the met3 level: a full
+    mcon/met1/via/met2/via2/met3 column at each drain, plus a met3 span
+    between them -- the exact reproducer from issue #619 (before this fix,
+    `metals` stopped at met2, one level short of met3, so this bridge was
+    invisible to the connectivity graph and the drains extracted as two
+    disconnected nets with no warning). With ``bridge=False`` the met3 span
+    is absent and the two drains stay distinct -- the in-suite
+    counterfactual (mirrors `_make_sky130_metal_bridge_layout`)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    fa = _draw_sky130_nmos(top, layout, 0, "S1", drain_label="OUT")
+    fb = _draw_sky130_nmos(top, layout, 8000, "S2")
+
+    if bridge:
+
+        def d(layer, datatype, box):
+            top.shapes(layout.layer(layer, datatype)).insert(box)
+
+        for layer, datatype in _SKY130_MET3_VIA_STACK:
+            d(layer, datatype, fa)
+            d(layer, datatype, fb)
+        # met3 long-haul span joining the two drain columns.
+        d(70, 20, kdb.Box(fa.left, fa.bottom, fb.right, fb.top))
+
+    return layout
+
+
+def test_sky130_met3_bridge_joins_drains_into_one_net(tmp_path):
+    """Two NMOS drains joined only through the met3/via2.drawing stack
+    extract as a single connected net -- the core #619 fix (issue #619's own
+    reproducer, adapted into a real test). Before the deck declared met3 (and
+    the via2 reaching it), a net `place_and_route.py`'s `_ROUTING_LAYER_RANGE`
+    already told OpenROAD it could route through met3 was invisible to the
+    connectivity graph and silently split into two disconnected nets."""
+    path = _write_gds(
+        _make_sky130_met3_bridge_layout(bridge=True), tmp_path / "met3_bridge.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "met3_bridge.spice"))
+
+    nfets = [d for d in report["devices"] if d["class"] == "nfet"]
+    assert len(nfets) == 2
+    drains = {d["nets"]["d"] for d in nfets}
+    assert drains == {"OUT"}, f"drains should share the bridged net, got {drains}"
+    # The met3 bridge is a genuine connectivity level, never a coverage gap.
+    assert report["ignored_layers"] == []
+
+
+def test_sky130_without_met3_bridge_drains_stay_disconnected(tmp_path):
+    """Counterfactual for the test above: with the met3 bridge removed, the
+    same two drains extract as two distinct nets. Guards against a false
+    pass where the drains merged for some reason other than the met3/via2
+    stack."""
+    path = _write_gds(
+        _make_sky130_met3_bridge_layout(bridge=False), tmp_path / "no_met3_bridge.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "no_met3_bridge.spice"))
+
+    nfets = [d for d in report["devices"] if d["class"] == "nfet"]
+    assert len(nfets) == 2
+    drains = {d["nets"]["d"] for d in nfets}
+    assert len(drains) == 2, f"drains should be disconnected without a bridge, {drains}"
+
+
 # --------------------------------------------------------------------------- #
 # ignored_layers: shapes on layers the deck's connectivity graph never reads
 # (issue #220 interim ask -- the extraction-side analogue of `klt drc`'s
@@ -4650,6 +4743,92 @@ def test_ignored_layers_present_in_cli_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert "ignored_layers" in out
     assert {"layer": 53, "datatype": 0, "shapes": 1} in out["ignored_layers"]
+
+
+# --------------------------------------------------------------------------- #
+# device_recognition_only_layers (issue #619): the "read but not merged"
+# counterpart to ignored_layers -- a layer the deck reads for a
+# bipolar/capacitor/resistor/diode device-recognition role but never treats
+# as a metals/vias connectivity level. sky130's MiM-cap top-plate mark layers
+# (capm/capm2, 89/44 and 97/44) are exactly this: read for capacitor
+# recognition, never a `metals` level, so a net joined only through one would
+# not merge -- and, before this issue, that gap was invisible to
+# `ignored_layers` because the layer genuinely was read.
+# --------------------------------------------------------------------------- #
+
+
+def test_device_recognition_only_layers_reports_top_plate_not_bottom_plate(tmp_path):
+    """A sky130 MiM-cap layout's top-plate mark layer (`capm.drawing`, 89/44)
+    is read only for capacitor recognition and is reported in
+    `device_recognition_only_layers`; its bottom-plate conductor
+    (`met3.drawing`, 70/20) is *also* one of this deck's own `metals` levels
+    (issue #619's extension) and is correctly absent from both
+    `ignored_layers` and `device_recognition_only_layers` -- a layer can
+    legitimately serve both a connectivity and a device-recognition role at
+    once. Unlike `ignored_layers`, a non-empty `device_recognition_only_
+    layers` does not append to `warnings[]` -- a MiM cap's top-plate mark is
+    expected device-recognition-only geometry by PDK design, not a coverage
+    gap."""
+    path = _write_gds(_make_sky130_mim_layout(), tmp_path / "mim_recognition.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "mim_recognition.spice"))
+
+    recognition_only = {
+        (e["layer"], e["datatype"]): e["shapes"]
+        for e in report["device_recognition_only_layers"]
+    }
+    assert (89, 44) in recognition_only and recognition_only[(89, 44)] == 1
+    assert (70, 20) not in recognition_only
+    assert report["ignored_layers"] == []
+    assert not any(
+        "device_recognition_only_layers" in warning for warning in report["warnings"]
+    )
+
+
+def test_device_recognition_only_layers_empty_when_no_device_recognition_geometry(
+    tmp_path,
+):
+    """A layout with no bipolar/capacitor/resistor/diode device-recognition
+    geometry (the sky130 inverter fixture) reports an empty
+    `device_recognition_only_layers` -- no false positives. The inverter's
+    ordinary PMOS/NMOS `nwell`/`diff`/`poly` geometry coincides with
+    sky130's vertical-PNP bipolar recognition layers, but the MOS-core
+    exclusion (issue #619) keeps that coincidence from populating this field
+    without a real bipolar device drawn."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv_recognition.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv_recognition.spice"))
+    assert report["device_recognition_only_layers"] == []
+
+
+def test_device_recognition_only_layers_present_in_cli_json(tmp_path, capsys):
+    """`device_recognition_only_layers` is part of the JSON contract and is
+    emitted by the CLI."""
+    path = _write_gds(_make_sky130_mim_layout(), tmp_path / "mim_cli.gds")
+
+    exit_code = main(["extract", str(path), "--deck", "sky130", "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "device_recognition_only_layers" in out
+    assert {"layer": 89, "datatype": 44, "shapes": 1} in out[
+        "device_recognition_only_layers"
+    ]
+
+
+def test_deck_device_recognition_only_layers_excludes_dual_role_metals():
+    """`ExtractionDeck.device_recognition_only_layers` (the deck-data half of
+    issue #619) reports sky130's MiM-cap top-plate mark layers (capm/capm2,
+    89/44 and 97/44 -- read for recognition only) but excludes met3/met4
+    (70/20, 71/20), which are simultaneously the capacitors' own
+    `bottom_plate` layers *and* two of this deck's own `metals` connectivity
+    levels after this issue's extension."""
+    deck = get_extraction_deck("sky130")
+    recognition_only = deck.device_recognition_only_layers
+    assert (89, 44) in recognition_only
+    assert (97, 44) in recognition_only
+    assert (70, 20) not in recognition_only
+    assert (71, 20) not in recognition_only
+    # merge_layers is exactly metals + vias, and every device-recognition
+    # layer that is also a merge level does NOT appear here.
+    assert deck.merge_layers == frozenset(deck.metals) | frozenset(deck.vias)
 
 
 # --------------------------------------------------------------------------- #
