@@ -52,7 +52,13 @@ credential host profile and IAM shape", and "Guardrail mechanics" SS2-3):
   own group, and separately callable as a standalone maintenance routine --
   that lists and deletes any ``klt-remote-sim-klt-sim-*`` group with no
   attached network interface, closing the gap for a run that never reaches
-  ``terminate()`` at all (killed process, interrupted provisioning).
+  ``terminate()`` at all (killed process, interrupted provisioning). Each
+  group is stamped at creation with a :data:`_SECURITY_GROUP_CREATED_AT_TAG_KEY`
+  timestamp tag, and the reaper skips any candidate younger than
+  :data:`_SECURITY_GROUP_MIN_AGE_S` regardless of ENI state (PR #618 review)
+  -- without it, a second independent job's reap call could delete a first
+  job's just-created, not-yet-attached group before that first job reaches
+  its own ``run-instances`` call.
 
 Scope note: this module provisions and tears down the instance and resolves
 the AMI/sizing/cost inputs to do so, plus (:meth:`RemoteLauncher.get_public_ip`)
@@ -232,6 +238,24 @@ _SECURITY_GROUP_DELETE_BACKOFF_S = 2.0
 #: ``security_group_id``/``remote.security_group_id`` -- which must never be
 #: swept up by the reaper.
 _PER_JOB_SECURITY_GROUP_NAME_PREFIX = "klt-remote-sim-klt-sim-"
+
+#: Tag key :meth:`RemoteLauncher._resolve_security_group` stamps onto every
+#: group it creates, valued with the epoch-seconds creation time.
+#: :func:`reap_orphaned_security_groups` uses it to skip a group younger than
+#: :data:`_SECURITY_GROUP_MIN_AGE_S` regardless of ENI state (see that
+#: function's docstring for the race this closes).
+_SECURITY_GROUP_CREATED_AT_TAG_KEY = "klt:created-at"
+
+#: Minimum age, in seconds, a candidate group must have (per its
+#: :data:`_SECURITY_GROUP_CREATED_AT_TAG_KEY` tag) before
+#: :func:`reap_orphaned_security_groups` will consider deleting it -- closes
+#: the race where a *second*, independent job's reap call runs while a
+#: *first* job's own just-created group has zero attached ENIs simply
+#: because that first job hasn't reached ``run-instances`` yet. Comfortably
+#: above the several sequential ``aws`` round-trips (ingress rules, egress
+#: lockdown, AMI/cost resolution, ``run-instances`` itself, plus a possible
+#: spot->on-demand fallback) between group creation and attachment.
+_SECURITY_GROUP_MIN_AGE_S = 60.0
 
 
 class RemoteLaunchError(Exception):
@@ -795,6 +819,13 @@ def _run_aws_cli(args: list[str]) -> str:
 #: doesn't cost real wall-clock time.
 SleepFn = Callable[[float], None]
 
+#: Signature of the injectable "current time" function used to stamp
+#: :data:`_SECURITY_GROUP_CREATED_AT_TAG_KEY` at group-creation time and to
+#: evaluate :data:`_SECURITY_GROUP_MIN_AGE_S` in
+#: :func:`reap_orphaned_security_groups`. Defaults to :func:`time.time`;
+#: tests inject a fixed value so age comparisons are deterministic.
+NowFn = Callable[[], float]
+
 
 def _delete_security_group(
     aws: AwsRunner,
@@ -843,6 +874,8 @@ def reap_orphaned_security_groups(
     aws_runner: AwsRunner | None = None,
     name_prefix: str = _PER_JOB_SECURITY_GROUP_NAME_PREFIX,
     sleep_fn: SleepFn = time.sleep,
+    now_fn: NowFn = time.time,
+    min_age_s: float = _SECURITY_GROUP_MIN_AGE_S,
 ) -> list[str]:
     """Independent backstop for per-job security-group teardown
     (implementation option 3, issue #617): list every security group named
@@ -866,6 +899,22 @@ def reap_orphaned_security_groups(
     discovered via a failed delete, so a group genuinely still in use is
     never even attempted.
 
+    A candidate carrying a :data:`_SECURITY_GROUP_CREATED_AT_TAG_KEY` tag
+    younger than ``min_age_s`` is also left alone, regardless of ENI state
+    (a review comment on PR #618 caught this): a security group a job just
+    created via ``_resolve_security_group`` also has zero attached ENIs for
+    as long as it takes that same job to reach its own ``run-instances``
+    call (ingress rules, egress lockdown, AMI/cost resolution, possibly a
+    spot->on-demand fallback -- several sequential ``aws`` round-trips). The
+    reap call at the top of ``_resolve_security_group`` runs before *that*
+    job's own group exists, so a job never reaps its own group -- but
+    nothing stops a second, independent job from reaping the first job's
+    just-created, not-yet-attached group out from under it. A candidate with
+    no such tag (e.g. an orphan predating this tagging, or a hand-created
+    group that happens to match the name prefix) is not skipped by this
+    check -- only the ENI check above still applies -- so pre-existing
+    orphans are still reaped.
+
     Never raises for an individual group's failed delete (best-effort, folded
     into the returned list simply omitting it); the ``describe-*`` calls
     themselves *do* propagate :class:`RemoteLaunchError` -- a caller invoking
@@ -875,7 +924,7 @@ def reap_orphaned_security_groups(
     """
     aws = aws_runner if aws_runner is not None else _run_aws_cli
 
-    raw_ids = aws(
+    raw_candidates = aws(
         [
             "ec2",
             "describe-security-groups",
@@ -884,15 +933,28 @@ def reap_orphaned_security_groups(
             "--filters",
             f"Name=group-name,Values={name_prefix}*",
             "--query",
-            "SecurityGroups[].GroupId",
+            "SecurityGroups[].{GroupId:GroupId,"
+            f"CreatedAt:Tags[?Key=='{_SECURITY_GROUP_CREATED_AT_TAG_KEY}']"
+            "|[0].Value}",
             "--output",
-            "text",
+            "json",
         ]
     )
-    candidate_ids = raw_ids.split()
+    candidates = json.loads(raw_candidates) if raw_candidates.strip() else []
 
+    now = now_fn()
     deleted: list[str] = []
-    for group_id in candidate_ids:
+    for candidate in candidates:
+        group_id = candidate["GroupId"]
+        created_at = candidate.get("CreatedAt")
+        if created_at is not None:
+            try:
+                age_s = now - float(created_at)
+            except (TypeError, ValueError):
+                age_s = None
+            if age_s is None or age_s < min_age_s:
+                # Too young to be sure it isn't a sibling job's in-flight group.
+                continue
         raw_enis = aws(
             [
                 "ec2",
@@ -987,6 +1049,11 @@ class RemoteLauncher:
         # cadence and wants to avoid the extra describe-* calls per job).
         sleep_fn: SleepFn | None = None,
         reap_orphans_on_provision: bool = True,
+        # PR #618 review: injectable "now" used to stamp this job's own
+        # security group with a creation-time tag, and passed through to the
+        # opportunistic reap call so its min-age check is deterministic in
+        # tests. Defaults to time.time.
+        now_fn: NowFn | None = None,
     ) -> None:
         self.region = region
         self.pdk = pdk
@@ -1004,6 +1071,7 @@ class RemoteLauncher:
         self._aws = aws_runner if aws_runner is not None else _run_aws_cli
         self.retry_on_demand_on_spot_failure = retry_on_demand_on_spot_failure
         self._sleep: SleepFn = sleep_fn if sleep_fn is not None else time.sleep
+        self._now: NowFn = now_fn if now_fn is not None else time.time
         self.reap_orphans_on_provision = reap_orphans_on_provision
 
         self.instance_id: str | None = None
@@ -1144,11 +1212,19 @@ class RemoteLauncher:
             # block this job's own provisioning.
             try:
                 reap_orphaned_security_groups(
-                    self.region, aws_runner=self._aws, sleep_fn=self._sleep
+                    self.region,
+                    aws_runner=self._aws,
+                    sleep_fn=self._sleep,
+                    now_fn=self._now,
                 )
             except RemoteLaunchError:
                 pass
 
+        # PR #618 review: tag this job's own group with its creation time so
+        # a concurrent job's reap call (see reap_orphaned_security_groups's
+        # min_age_s check) can tell it apart from a genuine orphan while it
+        # is still between create-security-group and run-instances.
+        created_at = self._now()
         group_id = self._aws(
             [
                 "ec2",
@@ -1159,6 +1235,10 @@ class RemoteLauncher:
                 f"klt-remote-sim-{self.job_id}",
                 "--description",
                 f"klt remote sim job {self.job_id} (ephemeral)",
+                "--tag-specifications",
+                "ResourceType=security-group,Tags=[{Key="
+                f"{_SECURITY_GROUP_CREATED_AT_TAG_KEY},Value={created_at}"
+                "}]",
                 "--query",
                 "GroupId",
                 "--output",

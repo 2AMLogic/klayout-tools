@@ -1193,9 +1193,17 @@ def test_delete_security_group_helper_succeeds_without_exhausting_attempts():
 # --------------------------------------------------------------------------- #
 
 
-def _fake_describe_response(group_ids: list[str]) -> str:
+def _fake_describe_response(candidates: list[dict[str, str | None]]) -> str:
+    # aws --output json renders the --query's {GroupId, CreatedAt} shape as
+    # a JSON array -- candidates with no creation-time tag report
+    # CreatedAt=None, exactly like the real query does for an untagged
+    # group (e.g. a pre-#618 orphan).
+    return json.dumps(candidates)
+
+
+def _fake_eni_response(eni_ids: list[str]) -> str:
     # aws --output text renders a list of scalars whitespace-separated.
-    return "\t".join(group_ids)
+    return "\t".join(eni_ids)
 
 
 def test_reap_orphaned_security_groups_deletes_only_unattached_groups():
@@ -1203,13 +1211,19 @@ def test_reap_orphaned_security_groups_deletes_only_unattached_groups():
     aws.respond(
         "ec2",
         "describe-security-groups",
-        _fake_describe_response(["sg-orphan-1", "sg-still-attached", "sg-orphan-2"]),
+        _fake_describe_response(
+            [
+                {"GroupId": "sg-orphan-1", "CreatedAt": None},
+                {"GroupId": "sg-still-attached", "CreatedAt": None},
+                {"GroupId": "sg-orphan-2", "CreatedAt": None},
+            ]
+        ),
     )
 
     def describe_enis(args):
         group_id = args[args.index("--filters") + 1].split("Values=")[-1]
         if group_id == "sg-still-attached":
-            return _fake_describe_response(["eni-123"])
+            return _fake_eni_response(["eni-123"])
         return ""
 
     # _FakeAws only keys on argv[:2], which is identical for every
@@ -1239,6 +1253,62 @@ def test_reap_orphaned_security_groups_deletes_only_unattached_groups():
     ]
 
 
+def test_reap_orphaned_security_groups_skips_group_younger_than_min_age():
+    # PR #618 review: a candidate tagged with a recent creation time is left
+    # alone regardless of ENI state -- it may be a sibling job's own group,
+    # not yet attached because that job hasn't reached run-instances yet.
+    now = 1_000_000.0
+
+    def aws_runner(args):
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return _fake_describe_response(
+                [
+                    {"GroupId": "sg-fresh", "CreatedAt": str(now - 10)},
+                    {"GroupId": "sg-old-enough", "CreatedAt": str(now - 120)},
+                ]
+            )
+        if args[:2] == ["ec2", "describe-network-interfaces"]:
+            return ""  # neither has an attached ENI
+        if args[:2] == ["ec2", "delete-security-group"]:
+            return ""
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    deleted = rl.reap_orphaned_security_groups(
+        "us-east-1",
+        aws_runner=aws_runner,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: now,
+        min_age_s=60.0,
+    )
+
+    assert deleted == ["sg-old-enough"]
+
+
+def test_reap_orphaned_security_groups_reaps_untagged_candidate_regardless_of_age():
+    # A candidate with no creation-time tag (e.g. an orphan that predates
+    # #618's tagging) isn't skipped by the age check -- only the ENI check
+    # still applies, so pre-existing orphans are still reaped.
+    def aws_runner(args):
+        if args[:2] == ["ec2", "describe-security-groups"]:
+            return _fake_describe_response(
+                [{"GroupId": "sg-untagged", "CreatedAt": None}]
+            )
+        if args[:2] == ["ec2", "describe-network-interfaces"]:
+            return ""
+        if args[:2] == ["ec2", "delete-security-group"]:
+            return ""
+        raise AssertionError(f"unexpected aws call: {args}")
+
+    deleted = rl.reap_orphaned_security_groups(
+        "us-east-1",
+        aws_runner=aws_runner,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: 1_000_000.0,
+    )
+
+    assert deleted == ["sg-untagged"]
+
+
 def test_reap_orphaned_security_groups_no_candidates_deletes_nothing():
     calls: list[list[str]] = []
 
@@ -1259,7 +1329,7 @@ def test_reap_orphaned_security_groups_no_candidates_deletes_nothing():
 def test_reap_orphaned_security_groups_delete_failure_is_excluded_not_raised():
     def aws_runner(args):
         if args[:2] == ["ec2", "describe-security-groups"]:
-            return "sg-1"
+            return _fake_describe_response([{"GroupId": "sg-1", "CreatedAt": None}])
         if args[:2] == ["ec2", "describe-network-interfaces"]:
             return ""
         if args[:2] == ["ec2", "delete-security-group"]:
