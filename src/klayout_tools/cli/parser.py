@@ -38,6 +38,20 @@ from . import (
 )
 
 
+def _add_format_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    choices: tuple[str, ...] = ("text", "json"),
+    help: str = "output format (default: text)",
+) -> None:
+    """Register the shared ``--format`` option (kicad-tools convention).
+
+    Every ``klt`` subcommand defaults to ``text``; pass ``choices``/``help``
+    to override for the few subcommands with non-standard format options.
+    """
+    parser.add_argument("--format", choices=list(choices), default="text", help=help)
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="klt",
@@ -66,12 +80,7 @@ def create_parser() -> argparse.ArgumentParser:
             "to report shape counts summed across every top cell"
         ),
     )
-    layers_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(layers_parser)
     layers_parser.set_defaults(func=layers_cmd.run)
 
     stats_parser = subparsers.add_parser(
@@ -97,12 +106,7 @@ def create_parser() -> argparse.ArgumentParser:
             "(required in that case; optional otherwise)"
         ),
     )
-    stats_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
 
     cells_parser = subparsers.add_parser(
@@ -120,12 +124,7 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="only report top cells (cells with no parent instances)",
     )
-    cells_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(cells_parser)
     cells_parser.set_defaults(func=cells_cmd.run)
 
     drc_parser = subparsers.add_parser(
@@ -157,12 +156,7 @@ def create_parser() -> argparse.ArgumentParser:
             "check every top cell"
         ),
     )
-    drc_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(drc_parser)
     drc_parser.set_defaults(func=drc_cmd.run)
 
     precheck_parser = subparsers.add_parser(
@@ -218,12 +212,7 @@ def create_parser() -> argparse.ArgumentParser:
             "check every top cell"
         ),
     )
-    precheck_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(precheck_parser)
     precheck_parser.set_defaults(func=precheck_cmd.run)
 
     socket_check_parser = subparsers.add_parser(
@@ -267,12 +256,7 @@ def create_parser() -> argparse.ArgumentParser:
             "check every top cell"
         ),
     )
-    socket_check_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(socket_check_parser)
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
 
     lef_abstract_parser = subparsers.add_parser(
@@ -363,12 +347,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="output LEF path (default: <macro-name>.lef)",
     )
-    lef_abstract_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(lef_abstract_parser)
     lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
 
     ring_check_parser = subparsers.add_parser(
@@ -434,12 +413,7 @@ def create_parser() -> argparse.ArgumentParser:
             "Off by default (backward compatible)."
         ),
     )
-    ring_check_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
     layout_metrics_parser = subparsers.add_parser(
@@ -475,12 +449,7 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print layout.json without writing any file",
     )
-    layout_metrics_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(layout_metrics_parser)
     layout_metrics_parser.set_defaults(func=layout_metrics_cmd.run)
 
     render_parser = subparsers.add_parser(
@@ -529,12 +498,7 @@ def create_parser() -> argparse.ArgumentParser:
             "render every top cell"
         ),
     )
-    render_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(render_parser)
     render_parser.set_defaults(func=render_cmd.run)
 
     _add_pdk_parser(subparsers)
@@ -720,12 +684,7 @@ def create_parser() -> argparse.ArgumentParser:
             "abstraction' section."
         ),
     )
-    extract_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(extract_parser)
     extract_parser.set_defaults(func=extract_cmd.run)
 
     lvs_parser = subparsers.add_parser(
@@ -750,12 +709,7 @@ def create_parser() -> argparse.ArgumentParser:
             "request from stdin, or an inline JSON object string"
         ),
     )
-    lvs_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(lvs_parser)
     lvs_parser.set_defaults(func=lvs_cmd.run)
 
     synthesize_parser = subparsers.add_parser(
@@ -782,12 +736,7 @@ def create_parser() -> argparse.ArgumentParser:
     synthesize_parser.add_argument(
         "request", help="path to a klt synthesize request JSON file"
     )
-    synthesize_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
     functional_verification_parser = subparsers.add_parser(
@@ -818,12 +767,7 @@ def create_parser() -> argparse.ArgumentParser:
             "to read the request from stdin, or an inline JSON object string"
         ),
     )
-    functional_verification_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(functional_verification_parser)
     functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
 
     place_and_route_parser = subparsers.add_parser(
@@ -852,12 +796,7 @@ def create_parser() -> argparse.ArgumentParser:
     place_and_route_parser.add_argument(
         "request", help="path to a klt place-and-route request JSON file"
     )
-    place_and_route_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
 
     eval_parser = subparsers.add_parser(
@@ -892,12 +831,7 @@ def create_parser() -> argparse.ArgumentParser:
             "need no substitution."
         ),
     )
-    eval_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(eval_parser)
     eval_parser.add_argument(
         "--trajectory-log",
         default=None,
@@ -988,12 +922,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="output GDS/OASIS path (default: <cell_name>.gds)",
     )
-    gen_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(gen_parser)
     gen_parser.set_defaults(func=gen_cmd.run)
 
     gen_compose_parser = subparsers.add_parser(
@@ -1017,12 +946,7 @@ def create_parser() -> argparse.ArgumentParser:
     gen_compose_parser.add_argument(
         "request", help="path to a klt gen-compose request JSON file"
     )
-    gen_compose_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(gen_compose_parser)
     gen_compose_parser.set_defaults(func=gen_compose_cmd.run)
 
     draw_parser = subparsers.add_parser(
@@ -1063,12 +987,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="output GDS/OASIS path (default: <cell_name>.gds)",
     )
-    draw_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(draw_parser)
     draw_parser.set_defaults(func=draw_cmd.run)
 
     sim_parser = subparsers.add_parser(
@@ -1156,12 +1075,7 @@ def create_parser() -> argparse.ArgumentParser:
             "request's own `options.resume` when given. See docs/cli/sim.md."
         ),
     )
-    sim_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
 
     report_parser = subparsers.add_parser(
@@ -1183,10 +1097,9 @@ def create_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="path(s) to klt JSON envelope files, or '-' to read one from stdin",
     )
-    report_parser.add_argument(
-        "--format",
-        choices=["text", "json", "github-summary"],
-        default="text",
+    _add_format_arg(
+        report_parser,
+        choices=("text", "json", "github-summary"),
         help=(
             "output format (default: text). github-summary emits GitHub "
             "Flavored Markdown; json emits this command's own JSON envelope "
@@ -1233,12 +1146,7 @@ def create_parser() -> argparse.ArgumentParser:
             "inline in the --format json payload"
         ),
     )
-    trajectory_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(trajectory_parser)
     trajectory_parser.set_defaults(func=trajectory_cmd.run)
 
     _add_kb_parser(subparsers)
@@ -1292,12 +1200,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         dest="pdk_root",
         help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    find_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
 
     list_parser = pdk_sub.add_parser(
@@ -1313,12 +1216,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         dest="pdk_root",
         help="restrict the scan to this install root",
     )
-    list_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(list_parser)
     list_parser.set_defaults(func=pdk_cmd.run_list)
 
     env_parser = pdk_sub.add_parser(
@@ -1340,11 +1238,8 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         dest="pdk_root",
         help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    env_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text; text emits shell exports)",
+    _add_format_arg(
+        env_parser, help="output format (default: text; text emits shell exports)"
     )
     env_parser.set_defaults(func=pdk_cmd.run_env)
 
@@ -1378,12 +1273,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "library and exits 3 when no library is compatible"
         ),
     )
-    cells_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(cells_parser)
     cells_parser.set_defaults(func=pdk_cmd.run_cells)
 
     macros_parser = pdk_sub.add_parser(
@@ -1407,12 +1297,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         dest="pdk_root",
         help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    macros_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
 
     corners_parser = pdk_sub.add_parser(
@@ -1438,12 +1323,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         dest="pdk_root",
         help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    corners_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(corners_parser)
     corners_parser.set_defaults(func=pdk_cmd.run_corners)
 
 
@@ -1476,12 +1356,7 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
         help="list id, title, spec_class for every kb entry",
         description="Enumerate every kb/entries/*.json entry, id-sorted.",
     )
-    list_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(list_parser)
     list_parser.set_defaults(func=kb_cmd.run_list)
 
     show_parser = kb_sub.add_parser(
@@ -1492,12 +1367,7 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
     show_parser.add_argument(
         "id", help="entry id (kb/entries/<id>.json's filename stem)"
     )
-    show_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(show_parser)
     show_parser.set_defaults(func=kb_cmd.run_show)
 
     search_parser = kb_sub.add_parser(
@@ -1510,12 +1380,7 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     search_parser.add_argument("query", help="keyword to search for")
-    search_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(search_parser)
     search_parser.set_defaults(func=kb_cmd.run_search)
 
     validate_parser = kb_sub.add_parser(
@@ -1528,10 +1393,5 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
             "suitable for a CI gate."
         ),
     )
-    validate_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
+    _add_format_arg(validate_parser)
     validate_parser.set_defaults(func=kb_cmd.run_validate)
