@@ -1917,10 +1917,10 @@ def _resolve_abstract_cell_pins(
     cell: kdb.Cell,
     deck: ExtractionDeck,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
-) -> tuple[list[tuple[str, kdb.Point, str | None]], str | None, str | None]:
+) -> tuple[list[tuple[str, kdb.Point, str | None]], str | None, str | None, list[str]]:
     """Resolve one abstracted cell type's pins (issue #620).
 
-    Returns ``(pins, resolution_source, lef_path)`` where ``pins`` is
+    Returns ``(pins, resolution_source, lef_path, warnings)`` where ``pins`` is
     ``[(pin name, access point in **cell-local dbu**, probe layer role or
     ``None``), ...]`` sorted by pin name (the stable ``.subckt`` pin order),
     and ``resolution_source`` is:
@@ -1950,6 +1950,22 @@ def _resolve_abstract_cell_pins(
     - ``None`` -- neither source resolved anything; the caller turns this
       into an :class:`ExtractError` when the cell type actually has
       instances.
+
+    ``warnings`` (issue #624) is only ever populated on the ``"lef_abstract"``
+    path: a LEF-declared ``PIN`` whose :func:`~klayout_tools.lef_header.
+    parse_lef_macro_pin_ports` entry resolves zero port boxes (e.g. a pin
+    drawn only via ``PATH``/``VIA`` geometry, or a malformed ``POLYGON`` --
+    both statement shapes that module's own "declarative header + pin-access-
+    point only" scope deliberately never reads, see its module docstring) is
+    dropped from the returned pin list rather than raising, mirroring every
+    other malformed/partial-LEF tolerance in this codebase -- but *this*
+    silent drop is otherwise invisible to a caller, since it never prevents
+    the macro overall from resolving (the acceptance criterion only requires
+    *some* pin to resolve). One ``warnings`` entry per dropped pin names the
+    macro and pin so the gap has a caller-visible signal instead of a
+    silently incomplete black-box ``.SUBCKT``. Always ``[]`` on the
+    ``"in_cell_labels"``/``None`` paths, where every resolved pin always
+    carries a concrete point (an in-cell label is never geometry-less).
     """
     import klayout.db as kdb
 
@@ -1978,16 +1994,24 @@ def _resolve_abstract_cell_pins(
     if in_cell:
         pins = [(name, point, role) for name, (point, role) in in_cell.items()]
         pins.sort(key=lambda entry: entry[0])
-        return pins, "in_cell_labels", None
+        return pins, "in_cell_labels", None, []
 
     entry = lef_macros.get(cell.name)
     if entry is not None:
         lef_path, lef_pins = entry
         dbu = layout.dbu
         lef_resolved: list[tuple[str, kdb.Point, str | None]] = []
+        lef_warnings: list[str] = []
         for pin_name in sorted(lef_pins):
             boxes = lef_pins[pin_name]
             if not boxes:
+                lef_warnings.append(
+                    f"--abstract-cell-lef macro '{cell.name}' pin "
+                    f"'{pin_name}' declared no PORT geometry this parser "
+                    "reads (RECT/POLYGON only -- PATH/VIA and malformed "
+                    "POLYGON statements are skipped) -- pin dropped from "
+                    "the abstracted cell's resolved pin list"
+                )
                 continue
             x0, y0, x1, y1 = boxes[0]["bbox_um"]
             lef_resolved.append(
@@ -2001,9 +2025,9 @@ def _resolve_abstract_cell_pins(
                 )
             )
         if lef_resolved:
-            return lef_resolved, "lef_abstract", lef_path
+            return lef_resolved, "lef_abstract", lef_path, lef_warnings
 
-    return [], None, None
+    return [], None, None, []
 
 
 def _probe_abstract_pin_net(
@@ -2086,6 +2110,15 @@ def _wire_abstract_cells(
     ``unbiased_pmos_body_nets``) rather than a hard error for a single
     instance's placement issue.
 
+    A LEF-fallback pin the ``--abstract-cell-lef`` parser could not resolve
+    any ``PORT`` geometry for (issue #624 -- see
+    :func:`_resolve_abstract_cell_pins`'s own ``warnings`` docs) is dropped
+    from the black-box ``.SUBCKT`` entirely rather than wired in; its own
+    ``warnings[]`` entry (one per macro/pin, not per instance -- pin
+    resolution happens once per cell *type*) is folded into this function's
+    returned ``warnings`` alongside the per-instance geometric-miss entries
+    above.
+
     Instance/subckt naming is deterministic: cell types are visited in
     ``instances``'s own order (already sorted by
     :func:`_collect_abstract_instances`); each occurrence is named
@@ -2103,9 +2136,10 @@ def _wire_abstract_cells(
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
-        pins, source, lef_path = _resolve_abstract_cell_pins(
+        pins, source, lef_path, pin_warnings = _resolve_abstract_cell_pins(
             layout, cell, deck, lef_macros
         )
+        warnings.extend(pin_warnings)
         if source is None:
             raise ExtractError(
                 f"--abstract-cells matched cell type '{cell.name}' "
