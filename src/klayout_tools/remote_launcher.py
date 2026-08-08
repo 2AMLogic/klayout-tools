@@ -107,6 +107,14 @@ DEFAULT_MANIFEST_PATH: Path = (
 #: decision 4.
 SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu")
 
+#: PDK **families**, used to map a request's ``models.pdk`` -- which is a local
+#: *variant* name -- onto the key the AMI manifest publishes under. Longest
+#: first, so a prefix match can never pick the shorter of two overlapping
+#: families. Same convention as ``pdk._CORNER_PDK_FAMILIES`` and
+#: ``pdk_models._pdk_variant_family``; duplicated rather than imported for the
+#: reason those two already duplicate each other -- see #615.
+_AMI_PDK_FAMILIES: tuple[str, ...] = ("gf180mcu", "sky130")
+
 #: ``c7i`` instance-family sizing ladder: (name, vcpu count), ascending.
 #: Compute-optimized, per the design note's sizing recipe: "ngspice is
 #: CPU-bound with a modest memory footprint per process, so paying for extra
@@ -434,6 +442,43 @@ def load_ami_manifest(manifest_path: str | Path | None = None) -> dict[str, Any]
     return manifest
 
 
+def ami_pdk_key(pdk: str) -> str:
+    """Map a request's ``models.pdk`` to the key the AMI manifest publishes
+    under, accepting the *local variant* name the same request uses on the
+    ``local`` backend.
+
+    ``models.pdk`` has one meaning everywhere else in ``klt sim``: the PDK
+    variant directory to resolve locally (``sim._resolve_model_lib`` passes it
+    straight to ``pdk.find_pdk(variant=...)``). The AMI manifest, however, is
+    keyed by whatever ``build-remote-sim-ami.sh --pdk`` was given, which for
+    gf180mcu is the bare *family*.
+
+    For sky130 the two coincide -- ``sky130A`` is both a real variant
+    directory and the manifest key -- which is why #615 went unnoticed through
+    Epic #253's validation. gf180mcu cannot coincide: its variants are
+    ``gf180mcuA``-``D`` and its manifest key is ``gf180mcu``, so before this
+    mapping existed there was no value of ``models.pdk`` that both resolved
+    locally *and* found an AMI.
+
+    Exact matches win, so an explicit manifest key still works; otherwise the
+    variant is reduced to its family by prefix.
+    """
+    if pdk in SUPPORTED_PDKS:
+        return pdk
+    for family in _AMI_PDK_FAMILIES:
+        if pdk.startswith(family):
+            if family in SUPPORTED_PDKS:
+                return family
+            break
+    raise RemoteLaunchError(
+        f"unsupported PDK '{pdk}' for the remote backend "
+        f"(supported: {', '.join(SUPPORTED_PDKS)}). `models.pdk` carries the "
+        "local variant name and is reduced to its family to find the AMI "
+        "(e.g. 'gf180mcuC' -> 'gf180mcu'), so a variant whose family has no "
+        "published AMI is unsupported even when it resolves locally."
+    )
+
+
 def resolve_ami(
     pdk: str, region: str, manifest_path: str | Path | None = None
 ) -> dict[str, str]:
@@ -441,26 +486,30 @@ def resolve_ami(
     published AMI, returning ``{"ami_id": ..., "pdk_snapshot": ...,
     "ngspice_version": ..., "built_at": ...}``.
 
-    Raises :class:`RemoteLaunchError` for an unsupported ``pdk`` (not in
-    :data:`SUPPORTED_PDKS`) or when the manifest has no published entry for
-    the ``(pdk, region)`` pair -- never silently substitutes a different
-    region's or a stale AMI.
+    ``pdk`` is the request's ``models.pdk`` -- a *local variant* name -- and is
+    mapped to the manifest key by :func:`ami_pdk_key` (``"gf180mcuC"`` ->
+    ``"gf180mcu"``), so the same value works on both backends (#615).
+
+    Raises :class:`RemoteLaunchError` for a ``pdk`` whose family has no
+    published AMI, or when the manifest has no published entry for the
+    ``(key, region)`` pair -- never silently substitutes a different region's
+    or a stale AMI.
     """
-    if pdk not in SUPPORTED_PDKS:
-        raise RemoteLaunchError(
-            f"unsupported PDK '{pdk}' for the remote backend "
-            f"(supported: {', '.join(SUPPORTED_PDKS)})"
-        )
+    key = ami_pdk_key(pdk)
 
     manifest = load_ami_manifest(manifest_path)
     candidates = [
         image
         for image in manifest.get("images", [])
-        if image.get("pdk") == pdk and image.get("region") == region
+        if image.get("pdk") == key and image.get("region") == region
     ]
     if not candidates:
+        # Name the manifest key as well as the requested variant when they
+        # differ -- otherwise "no published AMI for pdk='gf180mcu'" reads as a
+        # typo to someone who wrote 'gf180mcuC' in the request.
+        asked = f"{pdk!r}" if key == pdk else f"{pdk!r} (manifest key {key!r})"
         raise RemoteLaunchError(
-            f"no published AMI for pdk={pdk!r} region={region!r} in the "
+            f"no published AMI for pdk={asked} region={region!r} in the "
             "manifest -- run scripts/aws/build-remote-sim-ami.sh for that "
             "region, or pick a region the manifest already publishes to"
         )
