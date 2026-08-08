@@ -179,6 +179,7 @@ result's `environment.random_seed` is enough to reproduce it exactly.
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
+| `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. |
 
 ## Response
 
@@ -315,6 +316,36 @@ Toggle coverage at 60% is correct, not a defect: the random test only drives
 values up to 500 through a 16-bit datapath, so many high-order bits never
 toggle — a real signal a designer (or an agent widening stimulus ranges)
 would act on.
+
+### `parameters`: overriding a Verilog `parameter` at elaboration time
+
+[`examples/functional-verification/request-modexp-parameters.json`](../../examples/functional-verification/request-modexp-parameters.json)
+elaborates the RSA-style `modexp.v` core (`#(parameter WIDTH = 16)`) at
+`WIDTH=8` instead of its RTL default, via `request.parameters`:
+
+```json
+{
+  "sources": ["modexp.v"],
+  "hdl_toplevel": "modexp",
+  "testbench": { "module": "test_modexp_parameters" },
+  "parameters": { "WIDTH": 8 }
+}
+```
+
+```console
+$ klt functional-verification examples/functional-verification/request-modexp-parameters.json
+engine: icarus ...
+hdl_toplevel: modexp
+testbench: test_modexp_parameters
+status: pass
+tests: 1  passed: 1  failed: 0  skipped: 0
+```
+
+The companion testbench (`test_modexp_parameters.py`) asserts
+`len(dut.result) == 8` before running its stimulus — proof the override
+reached elaboration itself, not just the request/response envelope — then
+re-runs `test_modexp.py`'s own width-adaptive randomized cross-check against
+Python's `pow`.
 
 ## Out of scope
 
