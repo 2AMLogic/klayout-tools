@@ -90,6 +90,7 @@ import os
 from typing import Any
 
 from ._layout import write_layout
+from ._paths import _resolve_relative
 from .decks import ExtractionDeck, get_extraction_deck
 from .gen import (
     _PDK_ROLE_LAYERS,
@@ -152,15 +153,6 @@ class GenComposeError(Exception):
     CLI turns this into a clean stderr message + exit code 1, never a
     traceback (see ``docs/cli/gen-compose.md``'s exit code table).
     """
-
-
-def _resolve_relative(path: str, base_dir: str) -> str:
-    """Expand env vars/``~`` in ``path``; join relative paths against
-    ``base_dir`` (same idiom as ``lvs.py``'s/``sim.py``'s ``_resolve_relative``)."""
-    expanded = os.path.expanduser(os.path.expandvars(path))
-    if os.path.isabs(expanded):
-        return expanded
-    return os.path.join(base_dir, expanded)
 
 
 def load_generator_report_arg(
