@@ -13,7 +13,7 @@ hygiene commands **apply their safe, reversible fixes by default** and report
 each change; add `--ask` to review findings and confirm first. Anything
 irreversible — deleting a branch, worktree, stash, or untracked file — is never
 automatic: it takes an explicit opt-in and passes a permanent-loss check.
-Commands whose only action is consequential (`orphans`, `update-tools`,
+Commands whose only action is consequential (`orphans`, `update-tools`, `deps`,
 `followups`, `release`, `remote`, `sudo`) always confirm first by nature. The environment commands (`remote`) stand up
 infrastructure only after showing exactly what they will create and what it
 costs.
@@ -33,6 +33,7 @@ costs.
 | [[remote]] | Launch a cloud dev session (GCP or AWS) with this repo ready to go, then open SSH. Its provisioning contract is implemented once in `scripts/repo/repo-remote.sh` (installed to `.claude/skills/repo/scripts/`); the interactive flow delegates to that script, which also serves as a headless `repo-remote up --yes --json` entry point for non-interactive callers (e.g. loom's `fleet add-worker`) |
 | [[sudo]] | Opt-in passwordless-sudo setup for a dev machine — install a `visudo`-validated `/etc/sudoers.d` drop-in (blanket `ALL` or a scoped command list) so an agent over SSH isn't blocked on password prompts; always confirmed first, validated with rollback on failure |
 | [[update-tools]] | Check installed tool packages (Loom, Anvil, …) against their sources and offer updates |
+| [[deps]] | Third-party dependency currency — verify/scaffold Dependabot (config *and* the repo-level security flag as distinct items) and triage open Dependabot PRs, always confirmed first |
 | [[followups]] | Capture follow-on work from this session and file it as issues — here or in upstream tool repos, always confirmed first |
 | [[branches]] | Branch & worktree hygiene — merged PRs, orphaned branches, stale worktrees |
 | [[gitignore]] | Gitignore hygiene — over-ignored files, under-ignored build artifacts |
@@ -50,7 +51,8 @@ costs.
 - When local hardware isn't enough or you need a clean Linux box (`remote`)
 - Before turning a Mac into a heavy Loom/agent build host (`host-optimize`)
 - To unblock an agent driving a dev box over SSH from `sudo` password prompts (`sudo`)
-- Periodically, to keep installed tool packages current (`update-tools`)
+- Periodically, to keep installed tool packages current (`update-tools`) and
+  third-party dependencies current — Dependabot setup and bot-PR triage (`deps`)
 - Periodically (monthly) as general hygiene (`audit`)
 - Before a demo, handoff, or onboarding (clean up before they arrive)
 
