@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -79,6 +79,22 @@ two disagree, this document (and the code) win.
   byte-for-byte unchanged; and for a deck with no `fixed_offset_ohm`-opted-in
   resistor class (everything except sky130's `res_high_po` today) the flag is
   a no-op either way. See "Deferring the fixed resistor offset" below.
+- `--abstract-cells` — optional, unset by default, repeatable. An `fnmatch`
+  glob (e.g. `'sky130_fd_sc_hd__*'`) naming instantiated cell types to
+  extract as opaque, pinned black boxes instead of flattening them to their
+  own devices (issue #620); repeatable flags OR together. Pins are resolved
+  per distinct cell type: from that type's own `metal_labels`/`well_label`/
+  `poly_label` text drawn directly in its own definition when present, else
+  from `--abstract-cell-lef`. A matched type with neither pin source is an
+  application error. Everything not matched by a pattern extracts exactly as
+  today. See "Cell-level (black-box + pins) abstraction" below.
+- `--abstract-cell-lef` — optional, unset by default, repeatable. A LEF file
+  (or a directory of `*.lef`/`*.tlef` files) to resolve pins from for an
+  `--abstract-cells`-matched cell type that draws no in-cell pin label — the
+  `MACRO`/`PIN`/`PORT` block whose name matches the cell type; first match
+  across repeated flags wins. Has no effect (and is an application error) if
+  given without `--abstract-cells`. See "Cell-level (black-box + pins)
+  abstraction" below.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -262,6 +278,126 @@ geometrically inside its bbox, indiscriminately. It is not a substitute for
 marking an individual *device* (e.g. a dummy MOS device interleaved with the
 functional devices it surrounds) as non-functional; that needs a
 device-granular marker, tracked separately.
+
+### Cell-level (black-box + pins) abstraction (`--abstract-cells`, issue #620)
+
+`black_box_regions` above excludes geometry by *region*, with no concept of a
+pin — the excluded area's contents simply disappear from connectivity.
+`--abstract-cells` is the complementary, **cell**-granular operation: every
+*instantiated cell* whose name matches a given `fnmatch` glob pattern is
+extracted as an opaque black box **with pins**, wired into the parent's net
+graph by name — a hierarchical SPICE subcircuit, not a flattened pile of
+devices. This is the mode a gate-level LVS needs: comparing an
+OpenROAD-produced, placed-and-routed GDS against its synthesized gate-level
+netlist requires extracting *at* the standard-cell boundary, not the
+transistor level (see
+[`2AMLogic/sky130-modexp#8`](https://github.com/2AMLogic/sky130-modexp/issues/8)).
+
+**Additive, off by default.** `--abstract-cells` unset is byte-for-byte
+identical to today's behaviour; only instantiated cells matching a given
+pattern are affected, and everything else in the same layout — routing
+metal, vias, fill, unmatched devices — extracts exactly as it does today,
+in the same run.
+
+**Pin resolution**, once per *distinct* matched cell type (cached across
+every occurrence of that type):
+
+1. **In-cell labels** (preferred). If the cell's own definition draws text
+   directly on one of the deck's own label layers (`metal_labels[i]`,
+   `well_label`, `poly_label`) — not promoted from a nested sub-cell, only
+   text drawn in the cell itself — each distinct label names a pin, and its
+   own footprint's centre is the pin's access point, probed on the specific
+   conductor layer the label was drawn on.
+2. **LEF fallback** (`--abstract-cell-lef`). When a matched cell type draws
+   no such label, each `--abstract-cell-lef` path (a LEF file, or a
+   directory of `*.lef`/`*.tlef` files) is searched for a `MACRO` block of
+   the same name; that macro's `PIN`/`PORT` geometry supplies the pin names
+   and access points (each port's bounding-box centre, in the macro's own
+   local micrometre frame — the standard convention every real PDK
+   standard-cell LEF follows, `ORIGIN 0 0` matching the cell's own drawn GDS
+   origin). The LEF's own layer name is not translated to a GDS layer, so a
+   LEF-resolved pin is probed against the deck's conductor stack bottom-up
+   instead of one specific layer.
+3. **Neither resolves.** A matched cell type with no in-cell label and no
+   matching LEF macro is an application error naming the cell type — never a
+   silently dropped pin or an unconnected instance.
+
+**What gets erased vs. preserved inside an abstracted cell.** Every
+device-recognition layer this deck's connectivity graph reads
+(`ExtractionDeck.connectivity_layers` — MOS-recognition layers, and any
+declared resistor/bipolar/diode marker or capacitor plate layer) is erased
+from the matched cell type's own definition (and everything it in turn
+instantiates) before extraction runs — so no transistor, drawn resistor,
+bipolar, or MiM capacitor inside an abstracted cell is ever recognised as a
+device. `contact`/`metals`/`vias` (routing/interconnect) and the label
+layers are deliberately left intact: the parent's own routing lands on and
+passes through an abstracted cell's own local interconnect mesh exactly as
+drawn, which is what makes the pin access point reachable at all, and the
+label layers are what pin resolution itself reads. A cell type matched by
+the pattern is assumed to be used **exclusively** as a black box wherever it
+is instantiated in the stream — erasure applies to every instance of that
+cell type, not just the ones reachable from the extraction top cell.
+
+**Known, documented gap**: a resistor or capacitor whose recognition layer
+happens to be one of the deck's own `metals` (a real but rare deck
+configuration — no PDK shipped in this repo does this) is not erased, since
+that layer is routing. Neither `sky130` nor `gf180mcu` declares a
+resistor/capacitor body on a `metals[]` layer today.
+
+**Output.** Every distinct matched cell type becomes its own
+`.SUBCKT <cell type> <pins...> ... .ENDS` block in the written SPICE (empty
+body — a black box declares no devices), and every matched instance becomes
+an `X<instance>` card in the parent's own `.SUBCKT` block, connected to the
+same layout-derived net names the un-abstracted portion of the circuit
+already uses. This falls directly out of KLayout's native netlist model
+(`kdb.SubCircuit`/`kdb.NetlistSpiceWriter`) — every circuit, including the
+flat top-level one, was already written as its own `.SUBCKT` block before
+this feature existed, so hierarchy here is a purely additive extension of
+the same writer, not a new SPICE-emission code path.
+
+```
+* cell TOP
+.SUBCKT TOP IN NET1 OUT
+* cell instance BUF_0 r0 *1 0,0
+XBUF_0 NET1 OUT BUF
+* cell instance BUF_1 r0 *1 0,0
+XBUF_1 IN NET1 BUF
+.ENDS TOP
+
+* cell BUF
+.SUBCKT BUF A Y
+.ENDS BUF
+```
+
+The JSON response's `abstracted_cells` field (see "JSON schema" below)
+reports one entry per distinct matched cell type: instance count, resolved
+pin count, and how its pins were resolved
+(`"in_cell_labels"` / `"lef_abstract"`, plus the specific LEF path for the
+latter) — mirroring the audit-coverage style of `black_box_regions[]`/
+`ignored_layers[]`. Always a list, empty unless `--abstract-cells` matched
+at least one instantiated cell.
+
+**A pin whose resolved access point lands on no conductor at all** (e.g. an
+unrouted design, or a LEF-fallback coordinate outside the drawn footprint)
+does not fail the run: that specific instance's pin gets a fresh,
+unconnected net instead, and a `warnings[]` entry names the instance and
+pin — the same "warn on a per-instance geometric miss, don't hard-fail the
+whole extraction" convention this module already uses elsewhere (e.g.
+`unbiased_pmos_body_nets`).
+
+**Mirrored/rotated instances** resolve their pins correctly: each
+occurrence's own instance transform (rotation, mirroring, array
+displacement) is applied to the cell-local access point before probing, so
+two differently-oriented instances of the same abstracted cell type wire up
+to the correct parent nets independently.
+
+**Scope note**: this mode emits a hierarchical **SPICE subcircuit**
+netlist only. A gate-level **Verilog** netlist (module instantiations,
+port-connected by name) is a deliberately deferred follow-up, tracked
+separately — see issue #620's discussion for the rationale (this keeps the
+initial delivery to a single bounded change, reusing KLayout's existing
+`NetlistSpiceWriter` machinery rather than adding a new output-format code
+path).
 
 ### Bipolar (BJT) device recognition
 
@@ -1603,6 +1739,7 @@ exit codes).
   "nets": [{ "name": "A", "pin": true, "device_count": 2 }],
   "warnings": [],
   "black_box_regions": [],
+  "abstracted_cells": [],
   "unmodelled_poly": [],
   "merged_net_labels": [],
   "voltage_domain_warnings": [],
@@ -1643,6 +1780,7 @@ exit codes).
 | `nets`             | array\<object\>            | One entry per extracted net, see below.                                                                |
 | `warnings`         | array\<string\>            | Non-fatal extraction notes (e.g. a gate shape touching no diffusion, the unmodelled-device-geometry heuristic below, or a top-level pin promoted from a label found below the top cell — see "Top-cell-only pin promotion"). Always present, empty when clean. |
 | `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
+| `abstracted_cells` | array\<object\>            | One entry per distinct cell type matched by `--abstract-cells` (issue #620 — see "Cell-level (black-box + pins) abstraction" above), each `{ "cell": string, "instance_count": int, "pin_count": int, "resolution_source": "in_cell_labels" \| "lef_abstract", "lef_path": string \| null }` (`lef_path` names the specific `--abstract-cell-lef` file for `"lef_abstract"`, `null` for `"in_cell_labels"`). Always present, empty unless `--abstract-cells` matched at least one instantiated cell. |
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
 | `merged_net_labels` | array\<object\>          | One entry per net whose KLayout-assigned name is a comma-joined merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`labels` is `net` split on `,`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
@@ -1738,6 +1876,10 @@ above, issue #217). The following remain out of scope:
   layout — see `decks/gf180mcu.py`), but not its salicided, N+ poly,
   diffusion, well, or metal resistors. These remaining flavours are
   deliberately excluded rather than approximated — see "Drawn resistors".
+- **Gate-level Verilog output.** `--abstract-cells` (issue #620) emits a
+  hierarchical **SPICE subcircuit** netlist only. A gate-level Verilog
+  netlist (module instantiations, port-connected by name) is a deliberately
+  deferred follow-up — see "Cell-level (black-box + pins) abstraction".
 
 Netlist comparison (`klt lvs`) is a separate command; this command only
 produces the layout-side netlist half of that comparison.

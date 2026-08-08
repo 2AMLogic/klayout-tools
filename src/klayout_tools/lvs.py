@@ -1080,6 +1080,9 @@ def _resolve_layout(
             # structured view of `klt extract`'s own warnings, not surfaced
             # in `klt lvs`'s response -- the compare itself is unaffected by
             # which voltage-domain model a MOS device happens to bind to.
+            # The 10th return (abstracted_cells, #620) is `klt extract
+            # --abstract-cells`'s own report; `klt lvs` never passes that
+            # flag, so it is always an empty list here.
             (
                 netlist,
                 top_cell_name,
@@ -1090,6 +1093,7 @@ def _resolve_layout(
                 _dummy,
                 _unmodelled_poly,
                 _voltage_domain_warnings,
+                _abstracted_cells,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

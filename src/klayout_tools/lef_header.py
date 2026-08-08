@@ -17,17 +17,28 @@ abstract it emits, and can round-trip-verify its own emitted macro LEF's
 
 Scope, deliberately narrow (mirrors KLayout's own importer, which parses
 these same header attributes and then discards them -- see
-``dbLEFImporter.cc`` citations in ``sc-leflib-evaluation.md``): this module
-reads **declarative header attributes only** -- ``SITE``/``LAYER`` blocks (at
-the top level of a *tech* LEF) and a *macro* LEF's ``MACRO``/``PIN``
-attributes (``CLASS``, ``SIZE``, ``SITE`` reference, ``SYMMETRY``, pin
-``DIRECTION``/``USE``). It never parses routing/pin **geometry**
-(``PORT``/``OBS`` ``RECT``/``POLYGON``/``PATH`` statements, ``VIA``/
-``VIARULE`` blocks, LEF58 properties) -- that is exactly the "hard engine"
-part of LEF (mask-aware, iterated geometry) this repo already gets for free
-from KLayout's own importer (``klayout.db``), per
-``docs/ARCHITECTURE.md``'s "wrap the proven engine" rule. A caller that also
-needs geometry reads the same file a second time through ``klayout.db``.
+``dbLEFImporter.cc`` citations in ``sc-leflib-evaluation.md``):
+:func:`parse_lef_header`/:func:`read_lef_header` read **declarative header
+attributes only** -- ``SITE``/``LAYER`` blocks (at the top level of a *tech*
+LEF) and a *macro* LEF's ``MACRO``/``PIN`` attributes (``CLASS``, ``SIZE``,
+``SITE`` reference, ``SYMMETRY``, pin ``DIRECTION``/``USE``). They never
+parse routing/pin **geometry** (``PORT``/``OBS`` ``RECT``/``POLYGON``/
+``PATH`` statements, ``VIA``/``VIARULE`` blocks, LEF58 properties) -- that is
+exactly the "hard engine" part of LEF (mask-aware, iterated geometry) this
+repo already gets for free from KLayout's own importer (``klayout.db``), per
+``docs/ARCHITECTURE.md``'s "wrap the proven engine" rule.
+
+One narrow, explicitly-scoped exception (issue #620):
+:func:`parse_lef_macro_pin_ports`/:func:`read_lef_macro_pin_ports` read the
+*axis-aligned bounding box* of a macro ``PIN``'s ``PORT`` ``RECT``/
+``POLYGON`` statements, keyed by the ``PORT``'s own ``LAYER`` name. That is
+the **pin access point** ``klt extract --abstract-cells`` needs to know
+*where* a black-boxed cell's pin lands so it can be wired into the parent
+net graph -- a single point per port, not a routing-grade geometry model.
+Everything genuinely "engine-shaped" stays out: ``PATH``/``VIA`` statements
+inside a ``PORT`` are skipped, ``ITERATE``/``MASK`` modifiers are ignored,
+and ``OBS`` is not read at all. A caller that needs real, mask-aware pin
+geometry still reads the same file through ``klayout.db``.
 
 Headless invariant: pure Python text parsing, no ``pya``/``klayout.db``
 import at all -- this module has no KLayout dependency.
@@ -94,6 +105,22 @@ _USE_RE = re.compile(r"\bUSE\s+(\S+)\s*;")
 #: ``klayout.db`` already owns geometry parsing, per this module's "wrap the
 #: proven engine" scope cut).
 _PORT_PRESENT_RE = re.compile(r"^[ \t]*PORT\b", re.MULTILINE)
+
+#: A ``PORT ... END`` block nested inside a ``PIN`` body. ``PORT`` closes with
+#: a *bare* ``END`` (no name) and never nests another ``PORT``, so a
+#: non-greedy match up to the next bare ``END`` line is exact. Only ever
+#: applied to a ``PIN`` body already carved out by :data:`_PIN_RE`, so the
+#: pin's own ``END <name>`` line is never in range.
+_PORT_BLOCK_RE = re.compile(
+    r"^[ \t]*PORT[ \t]*$\n(.*?)^[ \t]*END[ \t]*$", re.MULTILINE | re.DOTALL
+)
+
+#: One ``KEYWORD <args> ;`` statement inside a ``PORT`` body. LEF geometry
+#: statements are all of this shape (``LAYER met1 ;``, ``RECT 0.1 0.2 0.3
+#: 0.4 ;``, ``POLYGON x y x y ... ;``), so a single sweep in source order is
+#: enough to associate each geometry statement with the ``LAYER`` currently
+#: in effect.
+_PORT_STATEMENT_RE = re.compile(r"([A-Za-z][A-Za-z0-9_]*)([^;]*);", re.DOTALL)
 
 
 def _strip_comments(text: str) -> str:
@@ -260,6 +287,103 @@ def parse_lef_header(text: str) -> dict[str, Any]:
     }
 
 
+def _port_boxes(body: str) -> list[dict[str, Any]]:
+    """The ``[{"layer": str, "bbox_um": [x0, y0, x1, y1]}, ...]`` list for one
+    ``PORT`` body, one entry per ``RECT``/``POLYGON`` statement, in source
+    order.
+
+    A statement seen before any ``LAYER`` statement (malformed LEF) is
+    skipped rather than attributed to a guessed layer, and a statement whose
+    coordinates do not parse as floats is skipped too -- this is a
+    best-effort reader, matching :func:`parse_lef_header`'s own
+    never-raise-on-malformed-input contract.
+    """
+    boxes: list[dict[str, Any]] = []
+    layer: str | None = None
+    for keyword, raw_args in _PORT_STATEMENT_RE.findall(body):
+        key = keyword.upper()
+        args = raw_args.split()
+        if key == "LAYER":
+            layer = args[0] if args else None
+            continue
+        if layer is None or key not in ("RECT", "POLYGON"):
+            # PATH/VIA statements (and any LEF58 extension) are deliberately
+            # out of scope -- see the module docstring's scope note.
+            continue
+        # `MASK <n>` / `ITERATE ...` modifiers may precede the coordinates;
+        # keeping only the tokens that parse as numbers drops them without
+        # this reader needing a LEF grammar.
+        coords: list[float] = []
+        for token in args:
+            try:
+                coords.append(float(token))
+            except ValueError:
+                continue
+        if key == "RECT":
+            if len(coords) < 4:
+                continue
+            x0, y0, x1, y1 = coords[:4]
+        else:  # POLYGON -- reduced to its bounding box, see the module docstring
+            if len(coords) < 6 or len(coords) % 2:
+                continue
+            xs = coords[0::2]
+            ys = coords[1::2]
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        boxes.append(
+            {
+                "layer": layer,
+                "bbox_um": [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+            }
+        )
+    return boxes
+
+
+def parse_lef_macro_pin_ports(text: str) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Parse every macro pin's ``PORT`` bounding boxes out of raw LEF ``text``
+    (issue #620).
+
+    Returns ``{<macro name>: {<pin name>: [{"layer": <LEF layer name>,
+    "bbox_um": [x0, y0, x1, y1]}, ...]}}`` -- one entry per ``RECT``/
+    ``POLYGON`` statement inside that pin's ``PORT`` block(s), in source
+    order, in **macro-local micrometres** (the frame every LEF ``MACRO``
+    declares via ``ORIGIN``; see :mod:`klayout_tools.lef_abstract`, which
+    emits exactly this frame).
+
+    A pin with no ``PORT`` geometry at all maps to ``[]`` rather than being
+    omitted, so a caller can tell "declared but unroutable" apart from "not
+    declared" -- the same distinction ``klt lef-abstract``'s
+    ``unroutable_pins[]`` draws.
+
+    Complements :func:`parse_lef_header` rather than extending it: that
+    function's returned shape is a published contract several verbs already
+    consume, so the geometry lives behind its own entry point. Never raises
+    on malformed/partial LEF text, matching :func:`parse_lef_header`.
+    """
+    clean = _strip_comments(text)
+    macros: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for kind, name, body in _BLOCK_RE.findall(clean):
+        if kind != "MACRO":
+            continue
+        pins: dict[str, list[dict[str, Any]]] = {}
+        for pin_name, pin_body in _PIN_RE.findall(body):
+            boxes: list[dict[str, Any]] = []
+            for port_body in _PORT_BLOCK_RE.findall(pin_body):
+                boxes.extend(_port_boxes(port_body))
+            pins[pin_name] = boxes
+        macros[name] = pins
+    return macros
+
+
+def read_lef_macro_pin_ports(path: str) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """:func:`parse_lef_macro_pin_ports` for the LEF file at ``path``.
+
+    Raises :class:`OSError` (unchanged) if the file cannot be read -- same
+    convention as :func:`read_lef_header`.
+    """
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return parse_lef_macro_pin_ports(handle.read())
+
+
 def read_lef_header(path: str) -> dict[str, Any]:
     """:func:`parse_lef_header` for the LEF file at ``path``.
 
@@ -273,4 +397,9 @@ def read_lef_header(path: str) -> dict[str, Any]:
         return parse_lef_header(handle.read())
 
 
-__all__ = ["parse_lef_header", "read_lef_header"]
+__all__ = [
+    "parse_lef_header",
+    "parse_lef_macro_pin_ports",
+    "read_lef_header",
+    "read_lef_macro_pin_ports",
+]

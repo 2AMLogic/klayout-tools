@@ -1943,6 +1943,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _black_box_regions,
         _dummy_devices_dropped,
         _unmodelled_poly,
+        _abstracted_cells,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -3014,6 +3015,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _black_box_regions,
         _dummy_devices_dropped,
         _unmodelled_poly,
+        _abstracted_cells,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -4827,6 +4829,353 @@ def test_black_box_regions_present_in_cli_json(tmp_path, capsys):
     assert "black_box_regions" in out
     assert len(out["black_box_regions"]) == 1
     assert out["black_box_regions"][0]["shapes_excluded"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Cell-level (black-box + pins) abstraction -- `--abstract-cells`, issue #620
+# --------------------------------------------------------------------------- #
+
+
+def _make_abstract_leaf_cell(layout: kdb.Layout, name: str) -> kdb.Cell:
+    """One NMOS-shaped leaf cell on sky130 deck layers, with its own li1
+    pads labelled directly in the cell: ``"Y"`` (source, local (200, 500))
+    and ``"A"`` (drain, local (1800, 500)). The transistor geometry is real
+    (not a bare routing stub) precisely so a test can assert it is *not*
+    recognised as a device once the cell is abstracted -- proving
+    `--abstract-cells` actually suppresses device recognition inside the
+    cell, not just that it resolves pins.
+    """
+    cell = layout.create_cell(name)
+
+    def draw(layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (gate)
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (S side)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (D side)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (S side)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (D side)
+    label(67, 5, "Y", 200, 500)
+    label(67, 5, "A", 1800, 500)
+    return cell
+
+
+def _wire_abstract_instance_pins(
+    top: kdb.Cell, layout: kdb.Layout, trans: kdb.Trans, net_a: str, net_y: str
+) -> None:
+    """Land a mcon+met1 pad (labelled ``net_a``/``net_y``) directly on top of
+    one abstracted-leaf-cell instance's ``A``/``Y`` li1 pads, at the
+    instance's own ``trans`` -- so the parent's routing genuinely reaches the
+    pin location through ordinary (unmasked) contact/metal connectivity,
+    exactly as `_wire_abstract_cells` expects. Using the *same* `trans`
+    object to place this parent-side geometry that instantiated the cell
+    (rather than hand-computing the transformed coordinates) is deliberate:
+    it exercises the real transform composition instead of an
+    independently-derived (and possibly wrong) expectation.
+    """
+    # A (drain) pad: licon1 + met1 landing directly over the cell's own D pad.
+    top.shapes(layout.layer(67, 44)).insert(
+        kdb.Box(1700, 300, 1900, 700).transformed(trans)
+    )
+    top.shapes(layout.layer(68, 20)).insert(
+        kdb.Box(1600, 200, 2000, 800).transformed(trans)
+    )
+    top.shapes(layout.layer(68, 5)).insert(
+        kdb.Text(net_a, kdb.Trans(trans * kdb.Point(1800, 500)))
+    )
+    # Y (source) pad: same, over the cell's own S pad.
+    top.shapes(layout.layer(67, 44)).insert(
+        kdb.Box(100, 300, 300, 700).transformed(trans)
+    )
+    top.shapes(layout.layer(68, 20)).insert(
+        kdb.Box(0, 200, 400, 800).transformed(trans)
+    )
+    top.shapes(layout.layer(68, 5)).insert(
+        kdb.Text(net_y, kdb.Trans(trans * kdb.Point(200, 500)))
+    )
+
+
+def _make_abstract_cells_layout(
+    *, second_trans: kdb.Trans | None = None, cell_name: str = "SC_BUF"
+) -> kdb.Layout:
+    """Two instances of :func:`_make_abstract_leaf_cell` in a ``TOP`` cell,
+    each wired to its own pair of distinctly-named top-level nets via
+    :func:`_wire_abstract_instance_pins` -- the standard fixture for
+    ``--abstract-cells``'s in-cell-label pin-resolution tests.
+
+    ``second_trans`` overrides the second instance's transform (default: a
+    plain x-shift) -- used by the mirrored-instance test.
+    """
+    layout = kdb.Layout()
+    leaf = _make_abstract_leaf_cell(layout, cell_name)
+    top = layout.create_cell("TOP")
+
+    trans1 = kdb.Trans(kdb.Vector(0, 0))
+    trans2 = (
+        second_trans if second_trans is not None else kdb.Trans(kdb.Vector(5000, 0))
+    )
+    top.insert(kdb.CellInstArray(leaf.cell_index(), trans1))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), trans2))
+
+    _wire_abstract_instance_pins(top, layout, trans1, "INST1_A", "INST1_Y")
+    _wire_abstract_instance_pins(top, layout, trans2, "INST2_A", "INST2_Y")
+
+    return layout
+
+
+def test_abstract_cells_resolves_pins_from_in_cell_labels(tmp_path):
+    """`--abstract-cells` matching a cell type with in-cell li1 pin labels
+    resolves its pins from them, wires every instance in as a black-box
+    `X`/`.SUBCKT` pair using the parent's own net names, and -- because the
+    leaf cell draws a real transistor -- suppresses that transistor's own
+    device recognition entirely (`device_count == 0`)."""
+    layout = _make_abstract_cells_layout()
+    path = _write_gds(layout, tmp_path / "abstract.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "abstract.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+    )
+
+    assert report["device_count"] == 0
+    assert report["devices"] == []
+
+    net_names = {n["name"] for n in report["nets"]}
+    assert {"INST1_A", "INST1_Y", "INST2_A", "INST2_Y"}.issubset(net_names)
+
+    (entry,) = report["abstracted_cells"]
+    assert entry == {
+        "cell": "SC_BUF",
+        "instance_count": 2,
+        "pin_count": 2,
+        "resolution_source": "in_cell_labels",
+        "lef_path": None,
+    }
+
+    spice = Path(report["netlist_path"]).read_text()
+    assert ".SUBCKT SC_BUF A Y" in spice
+    assert ".ENDS SC_BUF" in spice
+    # Two X-cards, one per instance, each naming both parent nets.
+    x_lines = [line for line in spice.splitlines() if line.startswith("X")]
+    assert len(x_lines) == 2
+    assert any("INST1_A" in line and "INST1_Y" in line for line in x_lines)
+    assert any("INST2_A" in line and "INST2_Y" in line for line in x_lines)
+
+
+def test_abstract_cells_applies_mirror_transform_to_pin_footprint(tmp_path):
+    """A mirrored instance of the abstracted cell resolves its pins at the
+    *mirrored* access point, not the unmirrored local one -- the parent net
+    landed at the mirrored coordinate is the one that ends up wired to the
+    subcircuit's pin (acceptance criterion: per-instance mirror/rotation
+    transforms are applied correctly)."""
+    mirrored = kdb.Trans(kdb.Trans.M90, kdb.Vector(9000, 4000))
+    layout = _make_abstract_cells_layout(second_trans=mirrored)
+    path = _write_gds(layout, tmp_path / "abstract_mirror.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "abstract_mirror.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["instance_count"] == 2
+    assert entry["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    x_lines = [line for line in spice.splitlines() if line.startswith("X")]
+    assert len(x_lines) == 2
+    assert any("INST2_A" in line and "INST2_Y" in line for line in x_lines)
+
+
+def test_abstract_cells_pattern_matching_nothing_is_a_noop(tmp_path):
+    """A pattern that matches no instantiated cell leaves extraction exactly
+    as it would be without `--abstract-cells` (issue #620's zero-instance
+    edge case is not an error): `abstracted_cells` is an empty list, and
+    the layout's own real device extracts normally."""
+    layout = _make_inverter_layout()
+    path = _write_gds(layout, tmp_path / "inv_noop.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv_noop.spice"),
+        abstract_cell_patterns=("NO_SUCH_CELL_*",),
+    )
+
+    assert report["abstracted_cells"] == []
+    assert report["device_count"] == 2
+
+
+def test_abstract_cells_errors_when_cell_type_has_no_resolvable_pins(tmp_path):
+    """A matched cell type that draws no in-cell pin label and has no
+    `--abstract-cell-lef` fallback is a clean `ExtractError`, not a silently
+    dropped-pin or unconnected-instance result (issue #620's acceptance
+    criterion)."""
+    layout = kdb.Layout()
+    leaf = layout.create_cell("NAKED")
+    leaf.shapes(layout.layer(65, 20)).insert(kdb.Box(0, 0, 2000, 1000))
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    path = _write_gds(layout, tmp_path / "naked.gds")
+
+    with pytest.raises(ExtractError, match="NAKED"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "naked.spice"),
+            abstract_cell_patterns=("NAKED",),
+        )
+
+
+def test_abstract_cell_lef_without_abstract_cells_is_an_error(tmp_path):
+    """`--abstract-cell-lef` given without `--abstract-cells` is a clean
+    error (a likely CLI mistake -- the LEF fallback has no effect on its
+    own)."""
+    layout = _make_inverter_layout()
+    path = _write_gds(layout, tmp_path / "inv.gds")
+
+    with pytest.raises(ExtractError, match="abstract_cell_lef_paths"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            abstract_cell_lef_paths=("/nonexistent/some.lef",),
+        )
+
+
+def test_abstract_cells_falls_back_to_lef_abstract_when_no_in_cell_labels(tmp_path):
+    """A matched cell type with no in-cell pin label resolves its pins from
+    an `--abstract-cell-lef` MACRO/PIN/PORT block of the same name instead."""
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LEF_BUF")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(leaf, 65, 20, kdb.Box(0, 0, 2000, 1000))
+    draw(leaf, 66, 20, kdb.Box(800, -200, 1200, 1200))
+    draw(leaf, 66, 44, kdb.Box(100, 300, 300, 700))
+    draw(leaf, 66, 44, kdb.Box(1700, 300, 1900, 700))
+    draw(leaf, 67, 20, kdb.Box(0, 200, 400, 800))
+    draw(leaf, 67, 20, kdb.Box(1600, 200, 2000, 800))
+    # Deliberately no li1 labels -- forces the LEF fallback.
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    _wire_abstract_instance_pins(top, layout, kdb.Trans(0, 0), "IN", "OUT")
+    path = _write_gds(layout, tmp_path / "lef_buf.gds")
+
+    lef_path = tmp_path / "lef_buf.lef"
+    lef_path.write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO LEF_BUF\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 2.000 BY 1.000 ;\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 0.000 0.200 0.400 0.800 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 1.600 0.200 2.000 0.800 ;\n"
+        "    END\n"
+        "  END A\n"
+        "END LEF_BUF\n"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lef_buf.spice"),
+        abstract_cell_patterns=("LEF_BUF",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "LEF_BUF"
+    assert entry["instance_count"] == 1
+    assert entry["pin_count"] == 2
+    assert entry["resolution_source"] == "lef_abstract"
+    assert entry["lef_path"] == str(lef_path)
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    assert "IN" in x_line
+    assert "OUT" in x_line
+
+
+def test_abstract_cells_present_in_cli_json(tmp_path, capsys):
+    """`abstracted_cells` is part of the JSON contract and is emitted by the
+    CLI, via the repeatable `--abstract-cells` flag."""
+    layout = _make_abstract_cells_layout()
+    path = _write_gds(layout, tmp_path / "abstract_cli.gds")
+
+    exit_code = main(
+        [
+            "extract",
+            str(path),
+            "--deck",
+            "sky130",
+            "--abstract-cells",
+            "SC_BUF",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "abstracted_cells" in out
+    (entry,) = out["abstracted_cells"]
+    assert entry["cell"] == "SC_BUF"
+    assert entry["instance_count"] == 2
+
+
+def test_abstract_cells_coexists_with_unabstracted_devices(tmp_path):
+    """A layout that mixes an abstracted cell type with ordinary,
+    un-abstracted devices extracts both correctly in the same run: the real
+    inverter's devices are unaffected, and the abstracted instance is wired
+    in as its own subcircuit -- proving the abstraction-specific purge path
+    (`_purge_truly_floating_nets`) does not disturb ordinary device/net
+    extraction."""
+    layout = _make_inverter_layout()
+    leaf = _make_abstract_leaf_cell(layout, "SC_BUF")
+    top = layout.cell("TOP")
+    trans = kdb.Trans(kdb.Vector(20000, 0))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), trans))
+    _wire_abstract_instance_pins(top, layout, trans, "EXTRA_A", "EXTRA_Y")
+
+    path = _write_gds(layout, tmp_path / "mixed.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "mixed.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+    )
+
+    # The inverter's own two devices are unaffected.
+    assert report["device_count"] == 2
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "SC_BUF"
+    assert entry["instance_count"] == 1
+
+    net_names = {n["name"] for n in report["nets"]}
+    assert {"EXTRA_A", "EXTRA_Y"}.issubset(net_names)
+    # The inverter's own labelled nets survive too.
+    assert {"A", "Y", "VPWR", "VGND"}.issubset(net_names)
 
 
 def test_extraction_deck_connectivity_layers_covers_all_role_layers():

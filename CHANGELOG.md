@@ -159,6 +159,41 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-08 — `klt extract`: new `--abstract-cells <glob>` flag
+  (repeatable, #620), a **cell-level black-box + pins** abstraction mode,
+  additive to (and independent of) the existing region-based
+  `black_box_regions` exclusion. Every instantiated cell whose name matches
+  an `fnmatch` glob is extracted as an opaque, pinned subcircuit instead of
+  being flattened to its own devices — everything not matched extracts
+  exactly as today, in the same run. Pins are resolved once per distinct
+  matched cell type: from that type's own `metal_labels`/`well_label`/
+  `poly_label` text drawn directly in its own definition when present, else
+  from a `MACRO`/`PIN`/`PORT` block of the same name in one of the new
+  `--abstract-cell-lef <path>` files/directories (repeatable, first match
+  wins), read via two new pure-text functions in the same `lef_header.py`
+  module `klt lef-abstract` already relies on for tech-LEF header parsing
+  (`parse_lef_macro_pin_ports`/`read_lef_macro_pin_ports` — a `PIN`'s `PORT`
+  bounding box only, deliberately not the full mask-aware geometry engine).
+  A matched cell type with neither pin source is a clean `ExtractError`, never
+  a silently dropped pin or an unconnected instance. Per-instance
+  mirror/rotation transforms are applied to the resolved pin footprint
+  before probing, so differently-oriented instances of the same abstracted
+  cell type wire up correctly. The written SPICE gains one `.SUBCKT <cell
+  type> <pins...> ... .ENDS` block per distinct matched cell type (empty
+  body) and one `X<instance>` card per matched instance, wired via the same
+  layout-derived net names the un-abstracted portion already uses — a
+  purely additive extension of the existing `kdb.NetlistSpiceWriter`
+  machinery, not a new SPICE-emission code path. New `abstracted_cells[]`
+  JSON response field reports, per distinct matched cell type: instance
+  count, resolved pin count, and resolution source (`"in_cell_labels"` |
+  `"lef_abstract"`, plus the specific LEF path for the latter) — mirroring
+  `black_box_regions[]`/`ignored_layers[]`'s audit-coverage style. Always a
+  list, empty (byte-identical to before this feature existed) unless
+  `--abstract-cells` matched at least one instantiated cell. Scoped to a
+  hierarchical **SPICE subcircuit** netlist only for this first delivery — a
+  gate-level Verilog output is a deliberately deferred follow-up. See
+  `docs/cli/extract.md`'s "Cell-level (black-box + pins) abstraction".
+  Purely additive JSON shape change — no `schema_version` bump.
 - 2026-08-06 — `klt extract`: new `--deck-option <key>=<value>` flag
   (repeatable, #595), the "other half" of #299's base-vs-high-rho poly
   resistor split. `Resistor`-marked poly on gf180mcu recognises one shared
