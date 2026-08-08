@@ -5178,6 +5178,65 @@ def test_abstract_cells_coexists_with_unabstracted_devices(tmp_path):
     assert {"A", "Y", "VPWR", "VGND"}.issubset(net_names)
 
 
+def test_abstract_cells_preserves_devices_in_shared_called_cell(tmp_path):
+    """A cell type called from *inside* a matched macro that is *also*
+    instantiated independently, outside every matched subtree, keeps its
+    devices intact for that independent instance (issue #622's confirmed
+    bug). `_erase_abstracted_cell_geometry` used to erase a called cell's
+    definition in place -- but KLayout cell definitions are shared across
+    every place they are instantiated, so that silently destroyed devices on
+    an unrelated, un-abstracted instance of the same cell type too."""
+    layout = kdb.Layout()
+    leaf = _make_abstract_leaf_cell(layout, "LEAF")
+
+    macro = layout.create_cell("MACRO")
+    leaf_trans = kdb.Trans(kdb.Vector(0, 0))
+    macro.insert(kdb.CellInstArray(leaf.cell_index(), leaf_trans))
+    _wire_abstract_instance_pins(macro, layout, leaf_trans, "MA", "MY")
+
+    top = layout.create_cell("TOP")
+    macro_trans = kdb.Trans(kdb.Vector(10000, 0))
+    top.insert(kdb.CellInstArray(macro.cell_index(), macro_trans))
+    _wire_abstract_instance_pins(top, layout, macro_trans, "MACRO_A", "MACRO_Y")
+
+    # A second, independent instance of LEAF directly at top level -- shares
+    # LEAF's cell definition with the instance nested inside MACRO, but is
+    # not itself abstracted (only "MACRO" is matched below).
+    direct_trans = kdb.Trans(kdb.Vector(30000, 0))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), direct_trans))
+    _wire_abstract_instance_pins(top, layout, direct_trans, "DIRECT_A", "DIRECT_Y")
+
+    path = _write_gds(layout, tmp_path / "shared_subcell.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "shared_subcell.spice"),
+        abstract_cell_patterns=("MACRO",),
+    )
+
+    # Only MACRO is matched -- the direct, un-abstracted LEAF instance keeps
+    # its transistor. Before the fix this was 0: erasing MACRO's called
+    # LEAF sub-cell in place also erased the independent LEAF instance.
+    assert report["device_count"] == 1
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "MACRO"
+    assert entry["instance_count"] == 1
+
+    # The direct LEAF instance is not itself abstracted, so its own in-cell
+    # "A"/"Y" pin labels stay in the flat label walk and comma-merge with
+    # the parent net names on the same net -- not a regression, just how an
+    # un-abstracted instance's own labels always behave.
+    net_name_parts = {part for n in report["nets"] for part in n["name"].split(",")}
+    assert {"MACRO_A", "MACRO_Y", "DIRECT_A", "DIRECT_Y"}.issubset(net_name_parts)
+
+    spice = Path(report["netlist_path"]).read_text()
+    assert ".SUBCKT MACRO MA MY" in spice
+    x_lines = [line for line in spice.splitlines() if line.startswith("X")]
+    assert len(x_lines) == 1
+    assert "MACRO_A" in x_lines[0] and "MACRO_Y" in x_lines[0]
+
+
 def test_extraction_deck_connectivity_layers_covers_all_role_layers():
     """`ExtractionDeck.connectivity_layers` includes every layer the deck's
     extraction actually reads -- MOS-recognition, metal/via stack, labels, and

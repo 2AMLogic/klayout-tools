@@ -1720,26 +1720,65 @@ def _erase_abstracted_cell_geometry(
 
     A cell type matched by ``--abstract-cells`` is assumed to be used
     *exclusively* as a black box wherever it is instantiated in this stream
-    -- erasing its definition affects every instance, not just the ones
-    reachable from the extraction top cell (there is no cheaper way to erase
-    "this instance only" for a shared cell definition, and abstracting the
-    same standard cell/macro differently in different places is not a
-    meaningful operation LVS could compare against anyway).
+    -- erasing its own definition directly affects every instance, not just
+    the ones reachable from the extraction top cell, and that is fine (there
+    is no cheaper way to erase "this instance only" for a shared cell
+    definition, and abstracting the same standard cell/macro differently in
+    different places is not a meaningful operation LVS could compare against
+    anyway).
+
+    A **called** cell (one of ``cell_indices``' children, transitively) makes
+    no such promise, though: KLayout cell definitions are shared across every
+    place they are instantiated, and a cell used inside a matched macro may
+    also be instantiated independently *outside* every matched subtree (e.g.
+    a standard cell reused both inside an abstracted macro and directly at
+    top level). Erasing a called cell's definition in place would silently
+    destroy that unrelated instance's devices too. So each matched cell's
+    *own* instances of children are instead repointed at a private,
+    per-child-cell "shadow" duplicate (:meth:`kdb.Cell.copy_tree` -- a fresh,
+    unshared copy of the child's entire subtree, at every depth) before
+    erasing -- the shadow is never referenced by anything outside a matched
+    cell's own hierarchy, so erasing it can never affect a sibling instance
+    of the same cell type used elsewhere.
     """
+
+    def clear_mask_layers(cell_index: int) -> None:
+        cell = layout.cell(cell_index)
+        for layer in mask_layers:
+            layer_index = layout.find_layer(*layer)
+            if layer_index is not None:
+                cell.shapes(layer_index).clear()
+
+    # Original called-cell index -> private, unshared duplicate of its whole
+    # subtree. Shared across every matched cell that calls the same child
+    # cell type -- both sides of that sharing are themselves matched (about
+    # to be erased), so reusing one shadow between them is safe.
+    shadow_cells: dict[int, int] = {}
+
+    def shadow_for(child_index: int) -> int:
+        shadow_index = shadow_cells.get(child_index)
+        if shadow_index is not None:
+            return shadow_index
+        child_cell = layout.cell(child_index)
+        shadow = layout.create_cell(
+            layout.unique_cell_name(f"{child_cell.name}$abstract")
+        )
+        shadow.copy_tree(child_cell)
+        shadow_index = shadow.cell_index()
+        shadow_cells[child_index] = shadow_index
+        for ci in {shadow_index, *shadow.called_cells()}:
+            clear_mask_layers(ci)
+        return shadow_index
+
     seen: set[int] = set()
     for cell_index in cell_indices:
         if cell_index in seen:
             continue
-        subtree = {cell_index, *layout.cell(cell_index).called_cells()}
-        for ci in subtree:
-            if ci in seen:
-                continue
-            seen.add(ci)
-            cell = layout.cell(ci)
-            for layer in mask_layers:
-                layer_index = layout.find_layer(*layer)
-                if layer_index is not None:
-                    cell.shapes(layer_index).clear()
+        seen.add(cell_index)
+        cell = layout.cell(cell_index)
+        clear_mask_layers(cell_index)
+        for inst in list(cell.each_inst()):
+            inst.cell_index = shadow_for(inst.cell_index)
 
 
 def _texts_excluding_abstract_cells(
