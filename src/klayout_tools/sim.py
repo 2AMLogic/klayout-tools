@@ -64,6 +64,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from typing import Any
 
 from . import remote_transport
+from ._paths import _resolve_relative
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
@@ -967,14 +968,6 @@ def run_sim(
 # --------------------------------------------------------------------------- #
 # Model/netlist path resolution
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_relative(path: str, base_dir: str) -> str:
-    """Expand env vars/``~`` in ``path``; join relative paths against ``base_dir``."""
-    expanded = os.path.expanduser(os.path.expandvars(path))
-    if os.path.isabs(expanded):
-        return expanded
-    return os.path.join(base_dir, expanded)
 
 
 def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:

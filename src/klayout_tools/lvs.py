@@ -111,6 +111,7 @@ import tempfile
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from ._paths import _resolve_relative
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     InvalidDeckOptionError,
@@ -943,15 +944,6 @@ def run_lvs(request: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Request-side resolution: layout (inline extraction or pre-extracted), reference
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_relative(path: str, base_dir: str) -> str:
-    """Expand env vars/``~`` in ``path``; join relative paths against ``base_dir``
-    (same idiom as ``sim.py``'s ``_resolve_relative``)."""
-    expanded = os.path.expanduser(os.path.expandvars(path))
-    if os.path.isabs(expanded):
-        return expanded
-    return os.path.join(base_dir, expanded)
 
 
 def _require_path(spec: dict[str, Any], field: str, side: str, request_dir: str) -> str:
