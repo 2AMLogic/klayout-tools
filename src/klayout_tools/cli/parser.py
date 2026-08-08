@@ -683,6 +683,44 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--abstract-cells",
+        dest="abstract_cells",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help=(
+            "treat every instantiated cell whose name matches this fnmatch "
+            "glob (e.g. 'sky130_fd_sc_hd__*') as an opaque, pinned black box "
+            "instead of flattening it to its own devices (issue #620); "
+            "repeatable, OR'd together. Pins are resolved per distinct cell "
+            "type, from that cell's own metal_labels/well_label/poly_label "
+            "text when present, else from --abstract-cell-lef; a matched "
+            "type with neither pin source is an error. Emits one .SUBCKT "
+            "per matched cell type (empty body) and one X<instance> card per "
+            "matched instance in the written SPICE, wired via the same net "
+            "names the un-abstracted portion already uses. Everything not "
+            "matched extracts exactly as today. Off by default. See "
+            "docs/cli/extract.md's 'Cell-level (black-box + pins) "
+            "abstraction' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--abstract-cell-lef",
+        dest="abstract_cell_lef",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LEF file (or directory of *.lef/*.tlef files) to resolve pins "
+            "from for an --abstract-cells-matched cell type that draws no "
+            "in-cell pin label -- the MACRO/PIN/PORT block whose name "
+            "matches the cell type; repeatable, first match wins. Has no "
+            "effect without --abstract-cells (an error if given alone). See "
+            "docs/cli/extract.md's 'Cell-level (black-box + pins) "
+            "abstraction' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",

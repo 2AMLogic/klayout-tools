@@ -90,6 +90,11 @@ def run(args: argparse.Namespace) -> int:
             # `poly_res`). `None` when the flag was never given, unchanged
             # from every call site that predates it.
             deck_options=deck_options,
+            # `--abstract-cells`/`--abstract-cell-lef` (issue #620): cell-
+            # level black-box abstraction. `()` when the flag(s) were never
+            # given, unchanged from every call site that predates them.
+            abstract_cell_patterns=tuple(args.abstract_cells or ()),
+            abstract_cell_lef_paths=tuple(args.abstract_cell_lef or ()),
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)

@@ -132,10 +132,11 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import fnmatch
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
@@ -153,6 +154,7 @@ from .decks import (
     get_extraction_deck,
     get_parasitics_deck,
 )
+from .lef_header import read_lef_macro_pin_ports
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
     DeviceBinding,
@@ -226,6 +228,8 @@ def run_extract(
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
     deck_options: Mapping[str, str] | None = None,
+    abstract_cell_patterns: tuple[str, ...] = (),
+    abstract_cell_lef_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -362,6 +366,14 @@ def run_extract(
                 },
                 ...
             ],
+            "abstracted_cells": [
+                {
+                    "cell": str, "instance_count": int, "pin_count": int,
+                    "resolution_source": "in_cell_labels" | "lef_abstract",
+                    "lef_path": str | None,
+                },
+                ...
+            ],
             "unmodelled_poly": [
                 {
                     "bbox_um": {
@@ -466,6 +478,52 @@ def run_extract(
     Always a list, empty when the layout draws no reserved-layer geometry
     (byte-identical to the response before this field existed, other than
     the field's own presence).
+
+    ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (``klt extract
+    --abstract-cells '<glob>'``/``--abstract-cell-lef <path>``, both
+    repeatable; issue #620) select a **cell-level black-box** abstraction
+    mode, additive to (and independent of) ``black_box_regions`` above: every
+    instantiated cell whose name matches one of the ``fnmatch`` glob patterns
+    in ``abstract_cell_patterns`` is extracted as an opaque, pinned
+    subcircuit instead of being flattened down to its own devices --
+    everything *not* matched by a pattern is extracted exactly as it is
+    today. A matched cell's pins are resolved, per distinct cell *type*
+    (cached across every occurrence): first from that cell's own
+    ``metal_labels``/``well_label``/``poly_label`` text, drawn directly in
+    its own definition (never promoted from a nested sub-cell); when a
+    matched type draws no such label, from a ``MACRO``/``PIN``/``PORT``
+    block of the same name in one of the ``abstract_cell_lef_paths`` LEF
+    files/directories, in the order given. A matched cell type resolved by
+    neither source is an :class:`ExtractError` naming it (a caller must
+    either supply a pin source or narrow the pattern) -- see
+    :func:`_wire_abstract_cells`. ``abstract_cell_patterns`` empty (the
+    default) skips this mode entirely; the written SPICE and every other
+    field are then byte-identical to before this feature existed.
+    ``abstract_cell_lef_paths`` is only ever consulted as the fallback pin
+    source and has no effect when every matched cell type resolves its pins
+    from in-cell labels.
+
+    ``abstracted_cells`` reports this mode's own result: one entry per
+    *distinct* matched cell type (sorted by cell name), each
+    ``{"cell": <cell type name>, "instance_count": <int>, "pin_count":
+    <int>, "resolution_source": "in_cell_labels" | "lef_abstract",
+    "lef_path": <str | None>}`` -- ``lef_path`` names the specific LEF file
+    the pins were resolved from, ``None`` for ``"in_cell_labels"``. Always a
+    list, empty when ``abstract_cell_patterns`` is empty or matches no
+    instantiated cell.
+
+    The written SPICE gains one ``.SUBCKT <cell type> <pins...> ... .ENDS``
+    block per distinct matched cell type (empty body -- a black box declares
+    no devices) and one ``X<instance>`` card per matched instance in the top
+    circuit's own ``.SUBCKT`` block, wired to the same layout-derived net
+    names the un-abstracted portion of the circuit already uses -- KLayout's
+    native ``kdb.SubCircuit``/``NetlistSpiceWriter`` machinery emits this
+    automatically once the netlist model represents the abstraction (every
+    circuit, including the flat top-level one, is already written as its own
+    ``.SUBCKT`` block today, so this is a purely additive extension of the
+    same writer, not a new SPICE-emission code path). See
+    ``docs/cli/extract.md``'s "Cell-level (black-box + pins) abstraction"
+    section for worked examples.
 
     ``unmodelled_poly`` (issue #324) reports every poly shape the
     "unmodelled device" diagnostic flagged -- see
@@ -583,12 +641,21 @@ def run_extract(
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, ``deck_options`` names an unrecognised key/value, the
-    PDK (when given) does not resolve, the top cell is missing/ambiguous, or
-    the output path's parent directory cannot be created (e.g. it exists as
-    a non-directory file). The output path's parent directory is created
+    PDK (when given) does not resolve, the top cell is missing/ambiguous, an
+    ``abstract_cell_lef_paths`` entry cannot be read, a matched
+    ``abstract_cell_patterns`` cell type resolves no pins from either source,
+    or the output path's parent directory cannot be created (e.g. it exists
+    as a non-directory file). The output path's parent directory is created
     automatically when missing (matching ``klt render``/``klt lvs``),
     including any missing intermediate directories.
     """
+    if abstract_cell_lef_paths and not abstract_cell_patterns:
+        raise ExtractError(
+            "abstract_cell_lef_paths (--abstract-cell-lef) was given but "
+            "abstract_cell_patterns (--abstract-cells) is empty -- "
+            "--abstract-cell-lef only has an effect as a pin-resolution "
+            "fallback for a cell type --abstract-cells actually matches"
+        )
     pdk_info: dict[str, Any] | None = None
     # Populated only when a PDK resolves: `{<deck's device class name>:
     # DeviceBinding}` for every device class this deck extracts that has a
@@ -636,6 +703,7 @@ def run_extract(
         dummy_devices_dropped,
         unmodelled_poly,
         voltage_domain_warnings,
+        abstracted_cells,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -645,6 +713,8 @@ def run_extract(
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
         deck_options=deck_options,
+        abstract_cell_patterns=abstract_cell_patterns,
+        abstract_cell_lef_paths=abstract_cell_lef_paths,
     )
 
     import klayout.db as kdb
@@ -892,6 +962,11 @@ def run_extract(
         # draws no reserved-annotation-layer geometry -- see run_extract's
         # docstring for the field's full meaning.
         "black_box_regions": black_box_regions,
+        # Additive field (issue #620): always a list, empty unless
+        # `abstract_cell_patterns` (--abstract-cells) matched at least one
+        # instantiated cell -- see run_extract's docstring for the field's
+        # full meaning.
+        "abstracted_cells": abstracted_cells,
         # Additive field (issue #324): always a list, empty when `warnings`
         # carries no unmodelled-device entry -- see run_extract's docstring
         # and `_detect_unmodelled_poly_bodies` for the field's full meaning.
@@ -950,6 +1025,8 @@ def extract_netlist_from_layout(
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
     deck_options: Mapping[str, str] | None = None,
+    abstract_cell_patterns: tuple[str, ...] = (),
+    abstract_cell_lef_paths: tuple[str, ...] = (),
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -960,12 +1037,30 @@ def extract_netlist_from_layout(
     int,
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
-    voltage_domain_warnings)``.
+    voltage_domain_warnings, abstracted_cells)``.
+
+    ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
+    ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
+    ``abstract_cell_patterns`` is non-empty, every instantiated cell whose
+    name matches one of the given ``fnmatch`` glob patterns is treated as a
+    black box -- its own device-recognition geometry is erased from the
+    layout before extraction (see :func:`_erase_abstracted_cell_geometry`)
+    and it becomes a pin-only ``.SUBCKT``/``X`` instance in the returned
+    netlist instead of contributing devices to the flat top-level circuit
+    (see :func:`_wire_abstract_cells`). ``abstracted_cells`` is the JSON
+    response's field: one entry per distinct matched cell type, each
+    ``{"cell", "instance_count", "pin_count", "resolution_source",
+    "lef_path"}``. Always a list, empty when ``abstract_cell_patterns`` is
+    empty (the default) -- byte-identical to today's behavior in that case.
+    ``abstract_cell_lef_paths`` is consulted only as the *fallback* pin
+    source, when a matched cell type draws no in-cell pin label -- see
+    :func:`_resolve_abstract_cell_pins`.
 
     ``deck_options`` (issue #595): forwarded to
     :func:`~klayout_tools.decks.get_extraction_deck` -- selects a
@@ -1047,6 +1142,34 @@ def extract_netlist_from_layout(
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
     top_cell = _resolve_top_cell(layout, top, path)
+
+    # `--abstract-cells` (issue #620): resolved *before* `_extract_netlist`
+    # runs, by mutating `layout` in place -- see
+    # `_erase_abstracted_cell_geometry`'s docstring for why erasing each
+    # matched cell type's own device-recognition geometry here (rather than
+    # masking `Region` objects deep inside `_extract_netlist`) is both
+    # simpler and correct for every device class, including ones
+    # `_extract_netlist` re-reads straight from `layout` (bipolar/diode/
+    # capacitor), not just the ones it threads through local `Region`
+    # variables (MOS/resistor). `lef_macros` is loaded once here (an
+    # `--abstract-cell-lef` path is a filesystem read, not layout data),
+    # even though it is consulted per matched cell type inside
+    # `_wire_abstract_cells`.
+    abstract_instances: list[tuple[int, kdb.ICplxTrans]] = []
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] = {}
+    if abstract_cell_patterns:
+        abstract_instances = _collect_abstract_instances(
+            layout, top_cell, abstract_cell_patterns
+        )
+        if abstract_instances:
+            mask_layers = _abstract_cell_mask_layers(deck)
+            matched_cell_indices = dict.fromkeys(
+                cell_index for cell_index, _trans in abstract_instances
+            )
+            _erase_abstracted_cell_geometry(layout, matched_cell_indices, mask_layers)
+        if abstract_cell_lef_paths:
+            lef_macros = _load_abstract_cell_lefs(abstract_cell_lef_paths)
+
     (
         netlist,
         warnings,
@@ -1054,6 +1177,7 @@ def extract_netlist_from_layout(
         black_box_regions,
         dummy_devices_dropped,
         unmodelled_poly,
+        abstracted_cells,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -1062,6 +1186,9 @@ def extract_netlist_from_layout(
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
+        abstract_cell_patterns=abstract_cell_patterns,
+        abstract_instances=abstract_instances,
+        lef_macros=lef_macros,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -1086,6 +1213,7 @@ def extract_netlist_from_layout(
         dummy_devices_dropped,
         unmodelled_poly,
         voltage_domain_warnings,
+        abstracted_cells,
     )
 
 
@@ -1360,6 +1488,36 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
             circuit.connect_pin(pin, net)
 
 
+def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
+    """Remove every net, on every circuit, that has **no** pin, **no**
+    device terminal, and **no** subcircuit pin -- and nothing else (issue
+    #620's ``--abstract-cells`` purge path).
+
+    Unlike ``Netlist.purge()`` (and the ``_purge_preserving_named_nets``
+    rescue built on top of it), this never removes a circuit or a
+    ``SubCircuit`` instance, and never removes a net that carries *any*
+    connection at all, regardless of whether that connection eventually
+    leads to a real ``kdb.Device`` anywhere in the hierarchy. See the call
+    site's comment (in :func:`_extract_netlist`) for why that distinction
+    matters once a black-box abstraction -- which is, by definition,
+    device-free -- is in the netlist: ``Netlist.purge()`` judges an entire
+    subcircuit chain "unused" (and deletes the circuit, the ``SubCircuit``
+    instance, and the parent net it was wired to) whenever that chain is not
+    transitively connected to a real device, which is *always* true for a
+    pure black-box instance.
+    """
+    for circuit in netlist.each_circuit():
+        floating = [
+            net
+            for net in circuit.each_net()
+            if net.pin_count() == 0
+            and net.terminal_count() == 0
+            and net.subcircuit_pin_count() == 0
+        ]
+        for net in floating:
+            circuit.remove_net(net)
+
+
 def _resolve_black_box_regions(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -1487,6 +1645,516 @@ def _resolve_black_box_regions(
         poly_label.not_interacting(marker),
         [texts.not_interacting(marker) for texts in metal_labels],
     )
+
+
+# --------------------------------------------------------------------------- #
+# Cell-level (black-box + pins) abstraction -- `--abstract-cells`, issue #620
+# --------------------------------------------------------------------------- #
+
+
+def _matches_abstract_pattern(name: str, patterns: tuple[str, ...]) -> bool:
+    """``True`` when the cell ``name`` matches any of the ``--abstract-cells``
+    glob ``patterns``.
+
+    Case-sensitive (``fnmatch.fnmatchcase``): GDSII/OASIS cell names are
+    case-sensitive, and ``fnmatch.fnmatch`` would otherwise fold case on a
+    case-insensitive filesystem only -- a platform-dependent match is exactly
+    the kind of surprise a layout-processing contract must not have.
+    """
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def _collect_abstract_instances(
+    layout: kdb.Layout, top_cell: kdb.Cell, patterns: tuple[str, ...]
+) -> list[tuple[int, kdb.ICplxTrans]]:
+    """Every instance of a pattern-matched cell type under ``top_cell``, as
+    ``[(cell_index, transform-into-top-cell-coordinates), ...]``.
+
+    Walks the instance tree explicitly rather than through
+    ``begin_shapes_rec``, because the per-instance transform is exactly what
+    a pin footprint has to be resolved through (acceptance criterion 6):
+    ``CellInstArray.each_cplx_trans()`` yields one ``ICplxTrans`` per array
+    element, already carrying that element's rotation/mirror *and* its
+    displacement within the array, so a mirrored or rotated instance of the
+    same abstracted cell type resolves its pins at the right places for free.
+
+    A matched branch is **never descended into**: an abstracted cell that
+    itself instantiates another matched cell type is abstracted as a single
+    outermost black box, not twice. The top cell itself is never abstracted
+    even if a pattern matches its name -- ``klt extract`` extracts *from* the
+    top cell, so black-boxing it would produce an empty netlist rather than a
+    hierarchical one.
+
+    Returned in a deterministic order: sorted by ``(cell name, displacement
+    x, displacement y, transform string)``, so the ``X<instance>`` cards the
+    caller emits carry stable names across runs.
+    """
+    import klayout.db as kdb
+
+    found: list[tuple[int, kdb.ICplxTrans]] = []
+
+    def walk(cell: kdb.Cell, trans: kdb.ICplxTrans) -> None:
+        for inst in cell.each_inst():
+            target = layout.cell(inst.cell_index)
+            matched = _matches_abstract_pattern(target.name, patterns)
+            for element in inst.cell_inst.each_cplx_trans():
+                composed = trans * element
+                if matched:
+                    found.append((inst.cell_index, composed))
+                else:
+                    walk(target, composed)
+
+    walk(top_cell, kdb.ICplxTrans())
+
+    found.sort(
+        key=lambda entry: (
+            layout.cell(entry[0]).name,
+            entry[1].disp.x,
+            entry[1].disp.y,
+            str(entry[1]),
+        )
+    )
+    return found
+
+
+def _abstract_cell_mask_layers(deck: ExtractionDeck) -> set[tuple[int, int]]:
+    """Every deck-read layer that must be erased from an abstracted cell's
+    own definition so no device is recognised inside it (issue #620).
+
+    Defined as ``ExtractionDeck.connectivity_layers`` (every layer this
+    deck's connectivity graph reads at all -- already the curated set behind
+    the ``ignored_layers`` diagnostic, so it automatically covers every
+    device-recognition/marker layer any current or future deck declares,
+    including resistor/bipolar/diode markers and capacitor plates) *minus*:
+
+    - the routing/interconnect layers (``contact``, ``metals``, ``vias``) --
+      a parent's connection to a black-boxed cell's pin must still reach
+      through the cell's own local interconnect, so these are left intact;
+    - the label layers (``well_label``, ``poly_label``, ``metal_labels``) --
+      :func:`_resolve_abstract_cell_pins` reads a pin's name and access point
+      directly off these, in the cell's own (otherwise-erased) definition.
+
+    A resistor/capacitor whose recognition layer happens to be one of the
+    deck's own ``metals`` (a real but rare deck configuration) is a known,
+    documented gap: that layer is never erased (it is routing), so such a
+    device could still be recognised inside an abstracted cell. Every
+    curated deck shipped in this repo declares resistor/capacitor bodies on
+    ``poly``/``active``/a dedicated plate layer, never directly on
+    ``metals``, so this does not affect ``sky130``/``gf180mcu`` today.
+    """
+    routing = {deck.contact, *deck.metals, *deck.vias}
+    labels = {deck.well_label, deck.poly_label, *deck.metal_labels}
+    return {
+        layer
+        for layer in deck.connectivity_layers
+        if layer not in routing and layer not in labels
+    }
+
+
+def _erase_abstracted_cell_geometry(
+    layout: kdb.Layout,
+    cell_indices: Iterable[int],
+    mask_layers: set[tuple[int, int]],
+) -> None:
+    """Erase every ``mask_layers`` shape from each of ``cell_indices`` and
+    every cell it (transitively) calls -- issue #620's black-box
+    abstraction.
+
+    Mutates ``layout`` in place: every downstream ``_region()``/``_texts()``
+    call (which always re-derives its ``Region``/``Texts`` fresh from
+    ``layout``) then sees these cells as if they carried no
+    device-recognition geometry at all, with no changes needed anywhere else
+    in :func:`_extract_netlist`'s device-recognition passes -- including
+    ones (bipolar/diode/capacitor) that re-read straight from ``layout``
+    rather than through a locally-masked ``Region`` variable. Safe because
+    ``layout`` is loaded fresh, once, for this one extraction run
+    (:func:`extract_netlist_from_layout`) and never shared or cached across
+    calls.
+
+    A cell type matched by ``--abstract-cells`` is assumed to be used
+    *exclusively* as a black box wherever it is instantiated in this stream
+    -- erasing its own definition directly affects every instance, not just
+    the ones reachable from the extraction top cell, and that is fine (there
+    is no cheaper way to erase "this instance only" for a shared cell
+    definition, and abstracting the same standard cell/macro differently in
+    different places is not a meaningful operation LVS could compare against
+    anyway).
+
+    A **called** cell (one of ``cell_indices``' children, transitively) makes
+    no such promise, though: KLayout cell definitions are shared across every
+    place they are instantiated, and a cell used inside a matched macro may
+    also be instantiated independently *outside* every matched subtree (e.g.
+    a standard cell reused both inside an abstracted macro and directly at
+    top level). Erasing a called cell's definition in place would silently
+    destroy that unrelated instance's devices too. So each matched cell's
+    *own* instances of children are instead repointed at a private,
+    per-child-cell "shadow" duplicate (:meth:`kdb.Cell.copy_tree` -- a fresh,
+    unshared copy of the child's entire subtree, at every depth) before
+    erasing -- the shadow is never referenced by anything outside a matched
+    cell's own hierarchy, so erasing it can never affect a sibling instance
+    of the same cell type used elsewhere.
+    """
+
+    def clear_mask_layers(cell_index: int) -> None:
+        cell = layout.cell(cell_index)
+        for layer in mask_layers:
+            layer_index = layout.find_layer(*layer)
+            if layer_index is not None:
+                cell.shapes(layer_index).clear()
+
+    # Original called-cell index -> private, unshared duplicate of its whole
+    # subtree. Shared across every matched cell that calls the same child
+    # cell type -- both sides of that sharing are themselves matched (about
+    # to be erased), so reusing one shadow between them is safe.
+    shadow_cells: dict[int, int] = {}
+
+    def shadow_for(child_index: int) -> int:
+        shadow_index = shadow_cells.get(child_index)
+        if shadow_index is not None:
+            return shadow_index
+        child_cell = layout.cell(child_index)
+        shadow = layout.create_cell(
+            layout.unique_cell_name(f"{child_cell.name}$abstract")
+        )
+        shadow.copy_tree(child_cell)
+        shadow_index = shadow.cell_index()
+        shadow_cells[child_index] = shadow_index
+        for ci in {shadow_index, *shadow.called_cells()}:
+            clear_mask_layers(ci)
+        return shadow_index
+
+    seen: set[int] = set()
+    for cell_index in cell_indices:
+        if cell_index in seen:
+            continue
+        seen.add(cell_index)
+        cell = layout.cell(cell_index)
+        clear_mask_layers(cell_index)
+        for inst in list(cell.each_inst()):
+            inst.cell_index = shadow_for(inst.cell_index)
+
+
+def _texts_excluding_abstract_cells(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    layer: tuple[int, int] | None,
+    patterns: tuple[str, ...],
+) -> kdb.Texts:
+    """:func:`_texts` restricted to labels drawn *outside* every abstracted
+    cell type (issue #620).
+
+    An abstracted cell's own in-cell labels are its **pin names**, not the
+    parent's net names: left in the flat label collection they would rename
+    (or comma-merge into) whatever top-level net the pin happens to touch --
+    e.g. every instance of an inverter contributing its internal ``A`` label
+    to a different routing net. Stripping them keeps the un-abstracted
+    portion's net naming exactly what it would be if the cell were a hard
+    macro with no drawn labels at all.
+    """
+    import klayout.db as kdb
+
+    texts = kdb.Texts()
+    if layer is None:
+        return texts
+    layer_index = layout.find_layer(*layer)
+    if layer_index is None:
+        return texts
+
+    def walk(cell: kdb.Cell, trans: kdb.ICplxTrans) -> None:
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            texts.insert(text.transformed(trans))
+        for inst in cell.each_inst():
+            target = layout.cell(inst.cell_index)
+            if _matches_abstract_pattern(target.name, patterns):
+                continue
+            for element in inst.cell_inst.each_cplx_trans():
+                walk(target, trans * element)
+
+    walk(top_cell, kdb.ICplxTrans())
+    return texts
+
+
+def _load_abstract_cell_lefs(
+    lef_paths: tuple[str, ...],
+) -> dict[str, tuple[str, dict[str, list[dict[str, Any]]]]]:
+    """Read every ``--abstract-cell-lef`` file into ``{<MACRO name>: (<lef
+    path>, {<pin name>: [port box, ...]})}``.
+
+    A path may be a LEF file or a directory (every ``*.lef``/``*.tlef`` file
+    directly inside it is read, sorted by name for determinism). A macro
+    declared by more than one LEF resolves to the **first** path given, so
+    the flag's order is the precedence order -- an explicit block abstract
+    passed ahead of a PDK's merged standard-cell LEF wins, rather than the
+    result depending on directory iteration order.
+
+    Raises :class:`ExtractError` for an unreadable path -- a mistyped LEF
+    path must not silently degrade to "this cell has no LEF fallback".
+    """
+    macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] = {}
+    for path in lef_paths:
+        if os.path.isdir(path):
+            entries = sorted(
+                os.path.join(path, name)
+                for name in os.listdir(path)
+                if name.endswith((".lef", ".tlef"))
+            )
+        else:
+            entries = [path]
+        for entry in entries:
+            try:
+                parsed = read_lef_macro_pin_ports(entry)
+            except OSError as exc:
+                raise ExtractError(
+                    f"could not read --abstract-cell-lef '{entry}': {exc}"
+                ) from exc
+            for macro_name, pins in parsed.items():
+                macros.setdefault(macro_name, (entry, pins))
+    return macros
+
+
+def _resolve_abstract_cell_pins(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    deck: ExtractionDeck,
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
+) -> tuple[list[tuple[str, kdb.Point, str | None]], str | None, str | None]:
+    """Resolve one abstracted cell type's pins (issue #620).
+
+    Returns ``(pins, resolution_source, lef_path)`` where ``pins`` is
+    ``[(pin name, access point in **cell-local dbu**, probe layer role or
+    ``None``), ...]`` sorted by pin name (the stable ``.subckt`` pin order),
+    and ``resolution_source`` is:
+
+    - ``"in_cell_labels"`` -- the cell draws text on one of the deck's own
+      label layers (``metal_labels[i]``/``well_label``/``poly_label``)
+      **directly in the cell** (``cell.shapes``, never
+      ``begin_shapes_rec``): a label promoted up from a nested sub-cell
+      belongs to that sub-cell's interface, not this one's, and the whole
+      point of this mode is to stop at *this* cell's boundary. Each label
+      carries its own layer role, so the pin is probed on exactly the
+      conductor its label names.
+    - ``"lef_abstract"`` -- no such label, but a ``--abstract-cell-lef`` LEF
+      declares a ``MACRO`` of this cell's name with ``PORT`` geometry. Each
+      port's bounding-box centre is the access point, read directly as
+      cell-local micrometres converted to dbu -- the standard LEF/GDS
+      convention every real PDK standard-cell library follows: a macro's
+      ``ORIGIN`` is ``0 0`` and its ``PORT`` coordinates already sit in the
+      same local frame as the cell's own drawn GDS geometry (no additional
+      shift). A LEF whose macro declares a non-zero ``ORIGIN`` relative to
+      its cell's drawn geometry is a known, out-of-scope gap -- not expected
+      for a standard-cell/hard-macro LEF generated by (or compatible with)
+      real PDK tooling. The LEF layer name is not translated to a GDS layer
+      (that would need a PDK layer map ``klt extract`` does not resolve), so
+      these pins carry no layer role and are probed against the deck's
+      conductor layers bottom-up instead.
+    - ``None`` -- neither source resolved anything; the caller turns this
+      into an :class:`ExtractError` when the cell type actually has
+      instances.
+    """
+    import klayout.db as kdb
+
+    label_roles: list[tuple[tuple[int, int] | None, str]] = [
+        (deck.well_label, "nwell"),
+        (deck.poly_label, "poly"),
+    ]
+    label_roles += [
+        (layer, f"metal{index}") for index, layer in enumerate(deck.metal_labels)
+    ]
+
+    in_cell: dict[str, tuple[kdb.Point, str]] = {}
+    for layer, role in label_roles:
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            # First label wins for a repeated name (a pin drawn with two
+            # access points): both name the same electrical node, so probing
+            # either resolves the same net -- picking deterministically is
+            # what matters, and `label_roles` is itself a fixed order.
+            in_cell.setdefault(text.string, (kdb.Point(text.x, text.y), role))
+
+    if in_cell:
+        pins = [(name, point, role) for name, (point, role) in in_cell.items()]
+        pins.sort(key=lambda entry: entry[0])
+        return pins, "in_cell_labels", None
+
+    entry = lef_macros.get(cell.name)
+    if entry is not None:
+        lef_path, lef_pins = entry
+        dbu = layout.dbu
+        lef_resolved: list[tuple[str, kdb.Point, str | None]] = []
+        for pin_name in sorted(lef_pins):
+            boxes = lef_pins[pin_name]
+            if not boxes:
+                continue
+            x0, y0, x1, y1 = boxes[0]["bbox_um"]
+            lef_resolved.append(
+                (
+                    pin_name,
+                    kdb.Point(
+                        round(((x0 + x1) / 2) / dbu),
+                        round(((y0 + y1) / 2) / dbu),
+                    ),
+                    None,
+                )
+            )
+        if lef_resolved:
+            return lef_resolved, "lef_abstract", lef_path
+
+    return [], None, None
+
+
+def _probe_abstract_pin_net(
+    l2n: kdb.LayoutToNetlist,
+    point: kdb.Point,
+    role: str | None,
+    probe_layers: list[tuple[str, kdb.Region]],
+) -> kdb.Net | None:
+    """The extracted net at ``point``, via
+    ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``.
+
+    ``role`` (present for a label-resolved pin) names the conductor the pin's
+    own label was drawn on, so that layer is probed first and its answer is
+    authoritative. A pin with no role (the LEF fallback, whose LEF layer name
+    is not translated to a GDS layer) falls back to probing every conductor
+    in ``probe_layers`` order -- metals bottom-up, then poly/nwell/tap -- and
+    takes the first hit, since a standard cell's pins land on the lowest
+    metal available. Returns ``None`` when no conductor carries geometry at
+    that point at all.
+    """
+    if role is not None:
+        for name, region in probe_layers:
+            if name == role:
+                net = l2n.probe_net(region, point)
+                if net is not None:
+                    return net
+                break
+    for _name, region in probe_layers:
+        net = l2n.probe_net(region, point)
+        if net is not None:
+            return net
+    return None
+
+
+def _wire_abstract_cells(
+    layout: kdb.Layout,
+    deck: ExtractionDeck,
+    l2n: kdb.LayoutToNetlist,
+    netlist: kdb.Netlist,
+    top_circuit: kdb.Circuit,
+    instances: list[tuple[int, kdb.ICplxTrans]],
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
+    probe_layers: list[tuple[str, kdb.Region]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
+    black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
+    ``abstracted_cells[]`` field alongside any ``warnings`` this pass itself
+    generates.
+
+    For each *distinct* matched cell type (grouped from ``instances``, first-
+    seen order): resolves its pins once (:func:`_resolve_abstract_cell_pins`,
+    raising :class:`ExtractError` if neither source resolves any pin -- the
+    acceptance criterion that a matched-but-unresolvable cell type must fail
+    loudly, not silently drop pins or emit an unconnected instance), then
+    creates one pin-only ``kdb.Circuit`` for that cell type (no devices --
+    exactly the shell ``NetlistSpiceWriter`` already emits as an empty
+    ``.SUBCKT ... .ENDS`` block for a *device-free* circuit; verified
+    directly against ``klayout.db``). Every occurrence of that cell type then
+    becomes one ``kdb.SubCircuit`` in ``top_circuit``, with each pin
+    connected to the net probed at its instance-transformed access point
+    (:func:`_probe_abstract_pin_net`) -- the same net object the flat,
+    un-abstracted portion of the layout already resolved via ordinary
+    ``l2n.connect()`` wiring (this cell's own conductor/contact geometry was
+    deliberately left un-erased for exactly this reason, see
+    :func:`_abstract_cell_mask_layers`).
+
+    Must run on the *live* ``netlist``/``l2n`` pair, before
+    ``Netlist.make_top_level_pins()``/``purge()`` -- connecting a
+    ``SubCircuit`` pin to a net gives that net a non-zero
+    ``subcircuit_pin_count()``, which is what keeps an otherwise-bare routing
+    stub (the abstracted cell's own metal, touching no device outside it)
+    from being purged as floating before this pass has a chance to use it.
+
+    A pin whose resolved access point lands on no conductor at all (e.g. an
+    unrouted design, or a LEF-fallback coordinate that does not land inside
+    the drawn footprint) does not fail the whole run: a fresh, otherwise
+    disconnected net is created for it instead, and a ``warnings[]`` entry
+    names the instance/pin -- mirroring every other per-instance geometric-
+    miss diagnostic this module already reports (e.g.
+    ``unbiased_pmos_body_nets``) rather than a hard error for a single
+    instance's placement issue.
+
+    Instance/subckt naming is deterministic: cell types are visited in
+    ``instances``'s own order (already sorted by
+    :func:`_collect_abstract_instances`); each occurrence is named
+    ``"<cell type>_<n>"`` (0-based, per cell type), sanitized for SPICE via
+    :func:`_sanitize_instance_name`.
+    """
+    import klayout.db as kdb
+
+    grouped: dict[int, list[kdb.ICplxTrans]] = {}
+    for cell_index, trans in instances:
+        grouped.setdefault(cell_index, []).append(trans)
+
+    report: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    for cell_index, transforms in grouped.items():
+        cell = layout.cell(cell_index)
+        pins, source, lef_path = _resolve_abstract_cell_pins(
+            layout, cell, deck, lef_macros
+        )
+        if source is None:
+            raise ExtractError(
+                f"--abstract-cells matched cell type '{cell.name}' "
+                f"({len(transforms)} instance(s)), but no pins could be "
+                "resolved for it: it draws no label directly in its own "
+                "definition on any of this deck's well_label/poly_label/"
+                "metal_labels layers, and no --abstract-cell-lef declares a "
+                f"MACRO named '{cell.name}' -- pass at least one pin source "
+                "for this cell type, or narrow --abstract-cells to exclude it"
+            )
+
+        black_box_circuit = kdb.Circuit()
+        black_box_circuit.name = cell.name
+        pin_ids: dict[str, int] = {}
+        for pin_name, _point, _role in pins:
+            pin = black_box_circuit.create_pin(pin_name)
+            net = black_box_circuit.create_net(pin_name)
+            black_box_circuit.connect_pin(pin, net)
+            pin_ids[pin_name] = pin.id()
+        netlist.add(black_box_circuit)
+
+        for index, trans in enumerate(transforms):
+            instance_name = _sanitize_instance_name(f"{cell.name}_{index}")
+            subcircuit = top_circuit.create_subcircuit(black_box_circuit, instance_name)
+            for pin_name, point, role in pins:
+                global_point = trans * point
+                net = _probe_abstract_pin_net(l2n, global_point, role, probe_layers)
+                if net is None:
+                    net = top_circuit.create_net(f"{instance_name}__{pin_name}")
+                    warnings.append(
+                        f"--abstract-cells instance '{instance_name}' (cell "
+                        f"'{cell.name}') pin '{pin_name}': no conductor found "
+                        "at its resolved access point -- left unconnected to "
+                        "any parent net"
+                    )
+                subcircuit.connect_pin(pin_ids[pin_name], net)
+
+        report.append(
+            {
+                "cell": cell.name,
+                "instance_count": len(transforms),
+                "pin_count": len(pins),
+                "resolution_source": source,
+                "lef_path": lef_path,
+            }
+        )
+
+    report.sort(key=lambda entry: entry["cell"])
+    return report, warnings
 
 
 def _resolve_resistors(
@@ -2020,12 +2688,16 @@ def _extract_netlist(
     top_cell_pins_only: bool = False,
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
+    abstract_cell_patterns: tuple[str, ...] = (),
+    abstract_instances: list[tuple[int, kdb.ICplxTrans]] | None = None,
+    lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
     list[dict[str, Any]] | None,
     list[dict[str, Any]],
     int,
+    list[dict[str, Any]],
     list[dict[str, Any]],
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
@@ -2058,7 +2730,7 @@ def _extract_netlist(
     algebra.
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
-    dummy_devices_dropped, unmodelled_poly)``.
+    dummy_devices_dropped, unmodelled_poly, abstracted_cells)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
@@ -2076,6 +2748,25 @@ def _extract_netlist(
     :func:`_detect_unmodelled_poly_bodies` -- always a list, one entry per
     poly component flagged by the unmodelled-device diagnostic, empty when
     ``warnings`` carries no unmodelled-device entry.
+
+    ``abstract_cell_patterns``/``abstract_instances``/``lef_macros`` (issue
+    #620): ``abstract_instances`` is the already-collected
+    ``[(cell_index, transform), ...]`` list for every matched instance (see
+    :func:`_collect_abstract_instances`) -- by the time this function runs,
+    the *caller* (:func:`extract_netlist_from_layout`) has already erased
+    each matched cell type's own device-recognition geometry from ``layout``
+    in place, so nothing below this point needs to know about the
+    abstraction to correctly extract the un-abstracted portion. This
+    function's own responsibility is narrower: (1) exclude each abstracted
+    instance's in-cell pin labels from the flat ``well_label``/
+    ``poly_label``/``metal_labels`` collections (see
+    :func:`_texts_excluding_abstract_cells`) -- otherwise an abstracted
+    cell's own pin-name label would rename
+    whatever top-level net happens to touch it -- and (2) once the flat
+    netlist is extracted, wire every abstracted instance in as a black-box
+    ``kdb.SubCircuit`` (:func:`_wire_abstract_cells`). ``abstracted_cells``
+    is the JSON response's field -- always a list, empty when
+    ``abstract_cell_patterns`` is empty (the default).
     """
     import klayout.db as kdb
 
@@ -2084,10 +2775,23 @@ def _extract_netlist(
     nwell = _region(layout, top_cell, deck.nwell)
     tap = _region(layout, top_cell, deck.tap)
     contact = _region(layout, top_cell, deck.contact)
-    well_label = _texts(layout, top_cell, deck.well_label)
-    poly_label = _texts(layout, top_cell, deck.poly_label)
+
+    # A matched instance's own in-cell pin label is that pin's *name*, not a
+    # top-level net name -- left in the flat label collection it would
+    # rename (or comma-merge into) whatever net the parent's routing happens
+    # to touch at that point (issue #620). No-op (same as `_texts`) when
+    # `abstract_cell_patterns` is empty, the default.
+    def _label_texts(layer: tuple[int, int] | None) -> kdb.Texts:
+        if abstract_cell_patterns:
+            return _texts_excluding_abstract_cells(
+                layout, top_cell, layer, abstract_cell_patterns
+            )
+        return _texts(layout, top_cell, layer)
+
+    well_label = _label_texts(deck.well_label)
+    poly_label = _label_texts(deck.poly_label)
     metals = [_region(layout, top_cell, layer) for layer in deck.metals]
-    metal_labels = [_texts(layout, top_cell, layer) for layer in deck.metal_labels]
+    metal_labels = [_label_texts(layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
 
     # Black-box/abstract regions (#293), resolved *before* everything else
@@ -2695,6 +3399,45 @@ def _extract_netlist(
         ) from exc
     netlist = l2n.netlist()
 
+    # `--abstract-cells` (issue #620): wire every abstracted instance in as a
+    # black-box `kdb.SubCircuit` while `l2n`/`netlist` are still the *live*
+    # objects `l2n.probe_net()` and `Circuit.create_subcircuit()` need, and
+    # *before* `make_top_level_pins()`/the purge passes below -- connecting a
+    # subcircuit pin to a net is what keeps an abstracted cell's own routing
+    # stub from being purged as floating. See `_wire_abstract_cells`'s
+    # docstring for the full contract.
+    abstracted_cells: list[dict[str, Any]] = []
+    if abstract_instances:
+        top_circuit = netlist.circuit_by_name(top_cell.name)
+        assert top_circuit is not None, (
+            "top circuit must exist immediately after l2n.extract_netlist()"
+        )
+        # Metals bottom-up first, then poly/nwell/tap -- matches
+        # `_probe_abstract_pin_net`'s own documented fallback order (a
+        # standard cell's pins land on the lowest metal available). Getting
+        # this backwards is a confirmed correctness bug (PR #622 review): a
+        # parent-level well/tap shape (e.g. a guard ring) overlapping a
+        # LEF-fallback pin's footprint would silently win over the metal net
+        # the pin is actually routed to, since `_probe_abstract_pin_net`
+        # takes the first hit. The abstracted cell's *own* nwell/poly/tap
+        # cannot cause this -- `_abstract_cell_mask_layers` erases those
+        # inside its definition before probing runs -- so the exposure is
+        # specifically parent-level geometry.
+        probe_layers: list[tuple[str, kdb.Region]] = [
+            (f"metal{index}", region) for index, region in enumerate(metals)
+        ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
+        abstracted_cells, abstract_cell_warnings = _wire_abstract_cells(
+            layout,
+            deck,
+            l2n,
+            netlist,
+            top_circuit,
+            abstract_instances,
+            lef_macros or {},
+            probe_layers,
+        )
+        warnings = warnings + abstract_cell_warnings
+
     # Flat extraction (`begin_shapes_rec`) means `make_top_level_pins()` would
     # promote *every* named net to a top-level pin -- including nets that are
     # only named because a label sits inside an instanced sub-cell, which are
@@ -2773,7 +3516,34 @@ def _extract_netlist(
                 f"layout: {joined}"
             )
 
-    _purge_preserving_named_nets(netlist)
+    # `Netlist.purge()` (used by `_purge_preserving_named_nets` below) judges
+    # a net "floating" -- and, transitively, a whole circuit/subcircuit chain
+    # "unused" -- against whether it is (indirectly) connected to a real
+    # `kdb.Device`, *not* against its own `pin_count()`/`subcircuit_pin_count()`
+    # (verified directly against `klayout.db`: a named, pinned net whose only
+    # connections are a top-level pin and a `SubCircuit` pin into a
+    # device-free circuit is still wiped, along with that circuit and the
+    # `SubCircuit` instance itself, exactly as if none of them had ever been
+    # connected). A black-box abstraction (issue #620) is *by definition*
+    # device-free, so `_purge_preserving_named_nets`'s existing rescue --
+    # which only guards *individual* named/pinned nets against `purge()`,
+    # not whole subcircuit chains -- is not enough once `--abstract-cells`
+    # is in play: every abstracted instance (and the parent nets it is wired
+    # to) would otherwise silently vanish, defeating the whole feature.
+    # `abstract_instances` truthy therefore skips KLayout's native
+    # `purge()`/`_purge_preserving_named_nets` entirely in favour of
+    # :func:`_purge_truly_floating_nets`, a narrower, purely net-local pass
+    # that removes only what is *unconditionally* junk (no pin, no device
+    # terminal, no subcircuit pin -- on any circuit) and never touches a
+    # circuit or subcircuit instance. The one accepted trade-off: a
+    # genuinely-disconnected, unnamed junk net that `purge()` would normally
+    # remove via its device-anchored definition survives when
+    # `--abstract-cells` is given (it still shows up in `nets[]` with
+    # `device_count: 0`) -- cosmetic noise, not a correctness gap.
+    if abstract_instances:
+        _purge_truly_floating_nets(netlist)
+    else:
+        _purge_preserving_named_nets(netlist)
 
     # Post-extraction device-parameter corrections (issues #512, #518, #521):
     # applied to the live `kdb.Device` objects here -- *before* the netlist is
@@ -2820,6 +3590,7 @@ def _extract_netlist(
         black_box_regions,
         dummy_devices_dropped,
         unmodelled_poly,
+        abstracted_cells,
     )
 
 
