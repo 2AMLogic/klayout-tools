@@ -151,6 +151,70 @@ def test_resolve_ami_rejects_unsupported_pdk(tmp_path):
         rl.resolve_ami("freepdk45", "us-east-1", manifest)
 
 
+# --------------------------------------------------------------------------- #
+# `models.pdk` is a local VARIANT name; the manifest is keyed by family (#615).
+# Before this mapping there was no value of `models.pdk` that both resolved
+# locally and found a gf180mcu AMI: "gf180mcuC" was rejected as unsupported,
+# and "gf180mcu" is not a variant directory anywhere so local model resolution
+# failed instead. sky130 hid the collision because "sky130A" is simultaneously
+# a real variant and the manifest key.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "requested,expected_key",
+    [
+        ("gf180mcuA", "gf180mcu"),
+        ("gf180mcuB", "gf180mcu"),
+        ("gf180mcuC", "gf180mcu"),
+        ("gf180mcuD", "gf180mcu"),
+        ("gf180mcu", "gf180mcu"),  # explicit manifest key still accepted
+        ("sky130A", "sky130A"),  # exact match wins over family reduction
+    ],
+)
+def test_ami_pdk_key_maps_variant_to_manifest_key(requested, expected_key):
+    assert rl.ami_pdk_key(requested) == expected_key
+
+
+def test_ami_pdk_key_rejects_family_without_published_ami():
+    """`sky130B` reduces to family `sky130`, which is NOT a manifest key --
+    only `sky130A` is. It must be refused rather than silently served the
+    sky130A image, which is a different model deck."""
+    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
+        rl.ami_pdk_key("sky130B")
+
+
+def test_resolve_ami_accepts_gf180mcu_variant(tmp_path):
+    """The case #615 is about, end to end through resolve_ami."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "pdk": "gf180mcu",
+                "region": "us-west-2",
+                "ami_id": "ami-0d29920f74c634d07",
+                "pdk_snapshot": "gf180mcu-2026.08.08",
+                "ngspice_version": "46",
+                "built_at": "2026-08-08T06:02:25Z",
+            }
+        ],
+    )
+    resolved = rl.resolve_ami("gf180mcuC", "us-west-2", manifest)
+    assert resolved["ami_id"] == "ami-0d29920f74c634d07"
+
+
+def test_resolve_ami_missing_entry_names_both_variant_and_key(tmp_path):
+    """A "no published AMI for pdk='gf180mcu'" message reads as a typo to
+    someone who wrote 'gf180mcuC'; the error must show both."""
+    manifest = _write_manifest(tmp_path, [])
+    with pytest.raises(rl.RemoteLaunchError) as excinfo:
+        rl.resolve_ami("gf180mcuC", "eu-west-1", manifest)
+    message = str(excinfo.value)
+    assert "gf180mcuC" in message
+    assert "gf180mcu" in message
+    assert "no published AMI" in message
+
+
 def test_resolve_ami_missing_manifest_file(tmp_path):
     with pytest.raises(rl.RemoteLaunchError, match="not found"):
         rl.resolve_ami("sky130A", "us-east-1", tmp_path / "nope.json")
