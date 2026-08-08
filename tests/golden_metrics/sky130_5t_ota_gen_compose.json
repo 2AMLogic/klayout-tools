@@ -16,6 +16,7 @@
     "extract.device_classes_count": 6,
     "extract.device_count": 9,
     "extract.device_counts.nfet": 9,
+    "extract.device_recognition_only_layers_count": 0,
     "extract.devices_count": 9,
     "extract.dummy_devices_dropped": 2,
     "extract.ignored_layers_count": 0,

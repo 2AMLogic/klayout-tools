@@ -335,6 +335,9 @@ def run_extract(
             "ignored_layers": [
                 {"layer": int, "datatype": int, "shapes": int}, ...
             ],
+            "device_recognition_only_layers": [
+                {"layer": int, "datatype": int, "shapes": int}, ...
+            ],
             "device_classes": [<device class role>, ...],
             "devices": [
                 {
@@ -422,6 +425,29 @@ def run_extract(
     A non-empty ``ignored_layers`` with a material shape count is the signal
     that a downstream ``klt lvs`` mismatch is a deck-coverage gap, not a
     layout bug. Empty when every shape-bearing layer is one the deck reads.
+
+    ``device_recognition_only_layers`` (issue #619) lists ``(layer,
+    datatype)`` pairs that carry shapes in the input stream *and are read* by
+    this deck (so they never appear in ``ignored_layers`` above) but only for
+    a ``bipolars``/``capacitors``/``resistors``/``diodes`` device-recognition
+    role -- never as a ``metals``/``vias`` connectivity level, and never one
+    of the deck's own MOS-core layers either
+    (:attr:`ExtractionDeck.device_recognition_only_layers`). Two nets joined
+    only through such a layer will not merge, and this gap is invisible to
+    ``ignored_layers`` because the layer genuinely is read, just not for
+    net-merging purposes -- exactly how sky130's own met3/met4 (its MiM-cap
+    bottom plates) hid a routing-connectivity ceiling behind a clean-looking
+    ``ignored_layers`` report before its ``metals`` stack grew to cover them
+    too. This is diagnostic context, not a warning: unlike ``ignored_layers``,
+    a non-empty list does *not* append to ``warnings[]`` -- a deck's own
+    marker/mask geometry (a resistor's marker layer, a bipolar's ID mark, a
+    MiM cap's top-plate mark) is expected to be device-recognition-only by
+    PDK design, not a coverage gap, so flagging every occurrence would make
+    ``warnings[]`` fire on nearly every layout that uses one of these device
+    classes. Empty when every device-recognition layer is also a
+    ``metals``/``vias`` connectivity level or one of the deck's own MOS-core
+    layers (or the deck declares no ``bipolars``/``capacitors``/
+    ``resistors``/``diodes`` entries at all).
 
     ``black_box_regions`` (issue #293) reports every black-box/abstract
     region this run excluded from connectivity: a shape drawn on any
@@ -771,6 +797,28 @@ def run_extract(
     # than let it become a silent LVS mismatch downstream.
     ignored_layers = _describe_ignored_layers(path, deck)
 
+    # Layers carrying shapes the deck reads for bipolar/capacitor/resistor/
+    # diode device recognition but never treats as a `metals`/`vias`
+    # connectivity level (issue #619): such a layer does not appear in
+    # `ignored_layers` above (it *is* read), but two nets joined only through
+    # it will not merge -- exactly the gap that hid sky130's own met3/met4
+    # routing-connectivity ceiling behind a clean-looking `ignored_layers`
+    # report before this deck's `metals` stack grew to cover them too. Unlike
+    # `ignored_layers`, this is *not* mirrored into `warnings[]`: an
+    # `ExtractionDeck.device_recognition_only_layers` entry is the deck's own
+    # marker/mask geometry (a resistor's `poly.res` marker, a bipolar's ID
+    # mark, a MiM cap's top-plate mark) -- layers that are *never* candidate
+    # connectivity levels by PDK design, so their presence is routine, not a
+    # gap. Reporting them here is diagnostic context for the rare case where
+    # a caller genuinely needs to distinguish "read but not merged" from
+    # "never read," not a signal that something is wrong with this
+    # extraction. See `ExtractionDeck.device_recognition_only_layers`'s
+    # docstring and docs/cli/extract.md's "Device-recognition-only layers"
+    # section.
+    device_recognition_only_layers = _describe_device_recognition_only_layers(
+        path, deck
+    )
+
     parasitics_report: dict[str, Any] | None = None
     if parasitic_nets is not None:
         if circuit is not None and parasitic_nets:
@@ -831,6 +879,11 @@ def run_extract(
         "device_counts": dict(sorted(device_counts.items())),
         "dummy_devices_dropped": dummy_devices_dropped,
         "ignored_layers": ignored_layers,
+        # Additive field (issue #619): always a list, empty when no layer is
+        # read for device recognition only -- see run_extract's docstring and
+        # `ExtractionDeck.device_recognition_only_layers` for the field's
+        # full meaning.
+        "device_recognition_only_layers": device_recognition_only_layers,
         "device_classes": list(deck.device_classes),
         "devices": devices,
         "nets": nets,
@@ -3650,36 +3703,77 @@ def _detect_single_terminal_nets(
     return single_terminal
 
 
-def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:
-    """Build the response's ``ignored_layers[]`` array (issue #220).
-
-    Enumerates the input stream's layers (reusing ``layers.py``'s existing
-    per-layer walk, the same one ``klt drc``'s coverage report leans on) and
-    returns the shape-bearing ``(layer, datatype)`` pairs that are *not* in
-    ``deck.connectivity_layers`` -- geometry the extraction connectivity graph
-    never reads. Each entry carries its stream ``shapes`` count so a consumer
-    can judge whether the amount is material (a stray annotation vs. a whole
-    block routed on an undeclared metal level). Empty-layer entries (``shapes
-    == 0``) are skipped; the list is sorted by ``(layer, datatype)``.
+def _describe_layers_in_set(
+    path: str, layer_set: frozenset[tuple[int, int]], *, invert: bool = False
+) -> list[dict[str, Any]]:
+    """Shared helper behind ``ignored_layers``/``device_recognition_only_
+    layers`` (issue #619): enumerate the input stream's layers (reusing
+    ``layers.py``'s existing per-layer walk, the same one ``klt drc``'s
+    coverage report leans on) and return the shape-bearing ``(layer,
+    datatype)`` pairs that are in ``layer_set`` (``invert=False``) or *not* in
+    it (``invert=True``). Each entry carries its stream ``shapes`` count.
+    Empty-layer entries (``shapes == 0``) are skipped; the list is sorted by
+    ``(layer, datatype)``.
     """
     from .layers import layers_report
 
-    read_layers = deck.connectivity_layers
-    ignored: list[dict[str, Any]] = []
+    described: list[dict[str, Any]] = []
     for entry in layers_report(path)["layers"]:
         if entry["shapes"] <= 0:
             continue
-        if (entry["layer"], entry["datatype"]) in read_layers:
+        in_set = (entry["layer"], entry["datatype"]) in layer_set
+        if in_set == invert:
             continue
-        ignored.append(
+        described.append(
             {
                 "layer": entry["layer"],
                 "datatype": entry["datatype"],
                 "shapes": entry["shapes"],
             }
         )
-    ignored.sort(key=lambda e: (e["layer"], e["datatype"]))
-    return ignored
+    described.sort(key=lambda e: (e["layer"], e["datatype"]))
+    return described
+
+
+def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:
+    """Build the response's ``ignored_layers[]`` array (issue #220).
+
+    Returns the shape-bearing ``(layer, datatype)`` pairs that are *not* in
+    ``deck.connectivity_layers`` -- geometry the extraction connectivity graph
+    never reads. Each entry carries its stream ``shapes`` count so a consumer
+    can judge whether the amount is material (a stray annotation vs. a whole
+    block routed on an undeclared metal level).
+
+    Note this does *not* catch a layer that is read for device recognition
+    only, never as a ``metals``/``vias`` connectivity level -- see
+    :func:`_describe_device_recognition_only_layers` for that distinct case
+    (issue #619).
+    """
+    return _describe_layers_in_set(path, deck.connectivity_layers, invert=True)
+
+
+def _describe_device_recognition_only_layers(
+    path: str, deck: ExtractionDeck
+) -> list[dict[str, Any]]:
+    """Build the response's ``device_recognition_only_layers[]`` array
+    (issue #619).
+
+    Returns the shape-bearing ``(layer, datatype)`` pairs in
+    ``deck.device_recognition_only_layers`` -- layers the deck *reads* (for a
+    ``bipolars``/``capacitors``/``resistors``/``diodes`` device-recognition
+    role) but never treats as a ``metals``/``vias`` connectivity level, so
+    shapes there are invisible to net-merging even though they are not
+    "ignored" in the ``ignored_layers`` sense. Each entry carries its stream
+    ``shapes`` count. This is the "read but not merged" counterpart to
+    ``ignored_layers``'s "never read at all" -- see
+    ``ExtractionDeck.device_recognition_only_layers``'s docstring for why the
+    distinction matters (sky130's own met3/met4 hid a routing-connectivity
+    gap behind this exact ambiguity before its ``metals`` stack grew to
+    cover them too).
+    """
+    return _describe_layers_in_set(
+        path, deck.device_recognition_only_layers, invert=False
+    )
 
 
 def _describe_parasitics_metal_gaps(

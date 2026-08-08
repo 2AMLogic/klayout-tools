@@ -485,40 +485,42 @@ class ExtractionDeck:
         return tuple(classes)
 
     @property
-    def connectivity_layers(self) -> frozenset[tuple[int, int]]:
-        """Every ``(layer, datatype)`` this deck actually reads during
-        extraction -- the device-recognition, connectivity, and label layers
-        ``extract.py``'s ``_extract_netlist`` loads a ``Region``/``Texts`` for.
+    def merge_layers(self) -> frozenset[tuple[int, int]]:
+        """The ``(layer, datatype)`` pairs whose shapes actually *merge* two
+        nets together -- exactly ``metals`` plus ``vias``, this deck's
+        net-connectivity stack (issue #619).
 
-        Consumed by ``klt extract`` to compute the response's
-        ``ignored_layers`` field (issue #220): shapes drawn on a layer *not*
-        in this set are invisible to the connectivity graph, so a block routed
-        on such a layer silently extracts as disconnected nets. Reporting the
-        set difference against what the stream actually carries turns that
-        silent mis-extraction into a diagnostic (the extraction-side analogue
-        of ``klt drc``'s ``coverage.layers_in_stream_without_rules``).
-
-        Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
-        ``contact``, plus optional ``tap``), the ``metals``/``vias`` stack and
-        every label layer (``well_label``/``poly_label``/``metal_labels``),
-        and each ``bipolars``/``capacitors``/``resistors``/``diodes`` entry's
-        own recognition layers (base/emitter/marker/collector; plate +
-        requires/excludes; body/marker/requires/excludes plus optional
-        terminal; anode/cathode/marker + requires/excludes). ``None`` entries
-        (an absent optional layer) are skipped.
+        This is a strict subset of :attr:`connectivity_layers`: a layer can
+        be *read* by extraction (e.g. a ``capacitors[].bottom_plate`` device-
+        recognition role) without ever being one of these merge levels -- see
+        :attr:`device_recognition_only_layers` for exactly that gap, the one
+        that let sky130's own met3/met4 (read as MiM-cap bottom plates, but
+        not yet a ``metals`` level) hide a routing-connectivity gap from
+        ``ignored_layers`` before this deck's ``metals`` stack reached them
+        too.
         """
-        layers: set[tuple[int, int]] = {
-            self.active,
-            self.poly,
-            self.nwell,
-            self.contact,
-        }
-        for optional in (self.tap, self.well_label, self.poly_label, self.dummy):
-            if optional is not None:
-                layers.add(optional)
-        layers.update(self.metals)
-        layers.update(self.vias)
-        layers.update(label for label in self.metal_labels if label is not None)
+        return frozenset(self.metals) | frozenset(self.vias)
+
+    @property
+    def device_recognition_layers(self) -> frozenset[tuple[int, int]]:
+        """Every ``(layer, datatype)`` this deck reads for
+        ``bipolars``/``capacitors``/``resistors``/``diodes`` device
+        recognition -- base/emitter/marker/collector; plate +
+        requires/excludes; body/marker/requires/excludes plus optional
+        terminal; anode/cathode/marker + requires/excludes -- regardless of
+        whether the same layer is also one of this deck's ``metals``/``vias``
+        connectivity levels (see :attr:`merge_layers`). ``None`` entries (an
+        absent optional layer) are skipped.
+
+        A layer can legitimately serve both roles at once (sky130's met3/met4
+        are simultaneously a ``metals`` connectivity level and a
+        ``capacitors[].bottom_plate`` -- issue #619); this property reports
+        the device-recognition role on its own, independent of connectivity
+        status, so :attr:`device_recognition_only_layers` can subtract
+        :attr:`merge_layers` from it to find the layers that are read but
+        never merge a net.
+        """
+        layers: set[tuple[int, int]] = set()
         for bipolar in self.bipolars:
             layers.add(bipolar.base)
             layers.add(bipolar.emitter)
@@ -553,6 +555,111 @@ class ExtractionDeck:
                 layers.add(diode.anode)
             if diode.cathode is not None:
                 layers.add(diode.cathode)
+        return frozenset(layers)
+
+    @property
+    def _structural_recognition_layers(self) -> frozenset[tuple[int, int]]:
+        """The MOS-core and label layers this deck reads for a role other
+        than ``metals``/``vias`` connectivity or bipolar/capacitor/resistor/
+        diode device recognition -- ``active``/``poly``/``nwell``/
+        ``contact``, the optional ``tap``/``well_label``/``poly_label``/
+        ``dummy``, and every ``metal_labels`` entry. ``None`` optionals are
+        skipped.
+
+        Subtracted from :attr:`device_recognition_only_layers` (issue #619):
+        a bipolar device can legitimately reuse the deck's own MOS-core
+        layers as its recognition geometry (sky130's vertical PNP is built
+        from the *same* ``nwell``/``diff`` layers as an ordinary MOS body/
+        active region -- see ``sky130.py``'s ``bipolars`` comment), so
+        without this exclusion, *any* routine PMOS/NMOS layout -- with no
+        bipolar device drawn at all -- would trigger a spurious "device
+        recognition only" report from the coincidental layer-number overlap
+        alone, defeating this diagnostic's only-fire-on-a-real-gap intent.
+        """
+        layers: set[tuple[int, int]] = {
+            self.active,
+            self.poly,
+            self.nwell,
+            self.contact,
+        }
+        for optional in (self.tap, self.well_label, self.poly_label, self.dummy):
+            if optional is not None:
+                layers.add(optional)
+        layers.update(label for label in self.metal_labels if label is not None)
+        return frozenset(layers)
+
+    @property
+    def device_recognition_only_layers(self) -> frozenset[tuple[int, int]]:
+        """:attr:`device_recognition_layers` minus :attr:`merge_layers` and
+        minus :attr:`_structural_recognition_layers` -- layers this deck
+        reads *only* for a bipolar/capacitor/resistor/diode device-
+        recognition role that plays no other connectivity or MOS-core role
+        (issue #619).
+
+        Consumed by ``klt extract`` to compute the response's
+        ``device_recognition_only_layers`` field, the "read but not merged"
+        counterpart to ``ignored_layers``'s "never read at all". Without this
+        distinction, a layer that is read for device recognition looks
+        identical to a genuine connectivity level in
+        :attr:`connectivity_layers` -- ``ignored_layers`` alone cannot tell
+        "this layer is fully ignored" from "this layer is read, but shapes on
+        it never merge two nets" -- exactly the gap that let sky130's met3/
+        met4 (drawn as MiM-cap bottom plates) hide a routing-connectivity gap
+        from ``ignored_layers`` with a clean-looking (but wrong) empty
+        report, before this deck's ``metals`` stack grew to cover them too.
+
+        The :attr:`_structural_recognition_layers` subtraction keeps this
+        low-noise: a bipolar device's ``base``/``emitter`` can coincide with
+        the deck's own MOS ``nwell``/``active`` layers (sky130's vertical
+        PNP does exactly this), and those layers were never candidates for a
+        routing-connectivity gap in the first place -- they are structural
+        MOS-recognition geometry, not metal.
+        """
+        return (
+            self.device_recognition_layers
+            - self.merge_layers
+            - self._structural_recognition_layers
+        )
+
+    @property
+    def connectivity_layers(self) -> frozenset[tuple[int, int]]:
+        """Every ``(layer, datatype)`` this deck actually reads during
+        extraction -- the device-recognition, connectivity, and label layers
+        ``extract.py``'s ``_extract_netlist`` loads a ``Region``/``Texts`` for.
+
+        Consumed by ``klt extract`` to compute the response's
+        ``ignored_layers`` field (issue #220): shapes drawn on a layer *not*
+        in this set are invisible to the connectivity graph, so a block routed
+        on such a layer silently extracts as disconnected nets. Reporting the
+        set difference against what the stream actually carries turns that
+        silent mis-extraction into a diagnostic (the extraction-side analogue
+        of ``klt drc``'s ``coverage.layers_in_stream_without_rules``).
+
+        Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
+        ``contact``, plus optional ``tap``), the ``metals``/``vias`` stack
+        (:attr:`merge_layers`) and every label layer (``well_label``/
+        ``poly_label``/``metal_labels``), and each ``bipolars``/
+        ``capacitors``/``resistors``/``diodes`` entry's own recognition
+        layers (:attr:`device_recognition_layers`). ``None`` entries (an
+        absent optional layer) are skipped.
+
+        Note this does *not* distinguish a ``metals``/``vias`` connectivity
+        level from a layer read for device recognition only -- see
+        :attr:`device_recognition_only_layers` for that distinction (issue
+        #619).
+        """
+        layers: set[tuple[int, int]] = {
+            self.active,
+            self.poly,
+            self.nwell,
+            self.contact,
+        }
+        for optional in (self.tap, self.well_label, self.poly_label, self.dummy):
+            if optional is not None:
+                layers.add(optional)
+        layers.update(self.merge_layers)
+        layers.update(label for label in self.metal_labels if label is not None)
+        layers.update(self.device_recognition_layers)
         return frozenset(layers)
 
 

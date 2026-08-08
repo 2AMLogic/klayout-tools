@@ -147,6 +147,16 @@ def _print_text(report: dict) -> None:
         for entry in ignored_layers:
             print(f"  {entry['layer']}/{entry['datatype']}: {entry['shapes']} shape(s)")
 
+    device_recognition_only_layers = report.get("device_recognition_only_layers", [])
+    if device_recognition_only_layers:
+        print()
+        print(
+            "device_recognition_only_layers (read for device recognition, "
+            "not a metals/vias connectivity level):"
+        )
+        for entry in device_recognition_only_layers:
+            print(f"  {entry['layer']}/{entry['datatype']}: {entry['shapes']} shape(s)")
+
     warnings = report["warnings"]
     if warnings:
         print()
