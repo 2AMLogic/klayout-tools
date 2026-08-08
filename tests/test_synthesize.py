@@ -667,6 +667,86 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
+# Non-sky130 cell library + `--pdk`/`--pdk-root` (issue #629)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_liberty_pdk_variant_pins_a_specific_install(tmp_path, monkeypatch):
+    """`_resolve_liberty`'s `variant`/`root` kwargs (the CLI's own
+    `--pdk`/`--pdk-root` flags, threaded through `run_synthesize`) pin a
+    specific installed variant, beating both `$PDK` and `find_pdk()`'s own
+    alphabetical-first default -- mirroring `klt extract`'s identical
+    `--pdk` behavior."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    _make_pdk_install(install_root, "sky130B")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    monkeypatch.setenv("PDK", "sky130A")
+
+    liberty_path, corner, info = synthesize._resolve_liberty(
+        "sky130_fd_sc_hd", None, variant="sky130B"
+    )
+    assert info["variant"] == "sky130B"
+    assert corner == "tt_025C_1v80"
+    assert "sky130B" in liberty_path
+
+
+def test_run_synthesize_stubbed_success_gf180mcu(tmp_path, monkeypatch):
+    """A second, non-sky130 cell library resolves and synthesizes the same
+    way sky130 does -- `find_pdk()`/`list_cell_libraries()` were never
+    sky130-specific, only every fixture above happened to only exercise
+    sky130 (issue #629)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuC",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": "gf180mcu_fd_sc_mcu9t5v0", "corner": "tt_025C_1v80"}
+        ),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    assert report["provenance"]["pdk"]["name"] == "gf180mcuC"
+    assert (
+        report["provenance"]["deck"]["name"] == "gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80"
+    )
+
+
+def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
+    """`--pdk` (issue #629) selects a specific installed variant, beating
+    `$PDK` -- mirroring `klt extract`'s identical flag."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    _make_pdk_install(install_root, "sky130B")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    monkeypatch.setenv("PDK", "sky130A")
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    exit_code = main(
+        ["synthesize", request_path, "--pdk", "sky130B", "--format", "json"]
+    )
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["provenance"]["pdk"]["name"] == "sky130B"
+
+
+# --------------------------------------------------------------------------- #
 # CLI: exit codes, --format text/json
 # --------------------------------------------------------------------------- #
 

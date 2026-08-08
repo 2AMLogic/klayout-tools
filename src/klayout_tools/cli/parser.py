@@ -718,7 +718,7 @@ def create_parser() -> argparse.ArgumentParser:
         "synthesize",
         help="synthesize RTL against a standard-cell liberty via Yosys",
         description=(
-            "Synthesize RTL sources against a resolved sky130 standard-cell "
+            "Synthesize RTL sources against a resolved standard-cell "
             "liberty via Yosys + bundled ABC (`read_verilog` -> `hierarchy` "
             "-> `synth` -> `dfflibmap` -> `abc -liberty` -> `clean` -> "
             "`stat`/`write_verilog`), reporting instance count, area, and "
@@ -728,15 +728,28 @@ def create_parser() -> argparse.ArgumentParser:
             "CLI surface. Phase 2 of Epic #391. `pdk.cell_library`/`corner` "
             "are resolved to a liberty file via the same `find_pdk()`/ "
             "`libs_ref` discovery `klt pdk`/`klt cells` already use -- no "
-            "new PDK-fetch mechanism. `timing` is always `null` in this "
-            "contract, deferred to a future OpenROAD/OpenSTA step. Runs "
-            "Yosys as a subprocess -- requires a `yosys` binary on `$PATH`. "
-            "Takes a request-document path (like `klt lvs`/`klt sim`), not "
-            "positional RTL file args."
+            "new PDK-fetch mechanism; any standard-cell library the "
+            "resolved PDK install ships resolves the same way (sky130 is "
+            "the first proven example, not the only one). `timing` is "
+            "always `null` in this contract, deferred to a future "
+            "OpenROAD/OpenSTA step. Runs Yosys as a subprocess -- requires "
+            "a `yosys` binary on `$PATH`. Takes a request-document path "
+            "(like `klt lvs`/`klt sim`), not positional RTL file args."
         ),
     )
     synthesize_parser.add_argument(
         "request", help="path to a klt synthesize request JSON file"
+    )
+    synthesize_parser.add_argument(
+        "--pdk",
+        default=None,
+        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    synthesize_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        default=None,
+        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
@@ -774,29 +787,49 @@ def create_parser() -> argparse.ArgumentParser:
 
     place_and_route_parser = subparsers.add_parser(
         "place-and-route",
-        help="place and route a synthesized netlist against sky130hd via OpenROAD",
+        help=(
+            "place and route a synthesized netlist against a resolved PDK via OpenROAD"
+        ),
         description=(
             "Place and route a gate-level netlist (`klt synthesize`'s own "
-            "`netlist_path` output) against a resolved sky130 standard-cell "
+            "`netlist_path` output) against a resolved standard-cell "
             "LEF/liberty deck via OpenROAD's native Tcl API, stage by stage "
             "(floorplan -> global/detailed placement -> clock-tree synthesis "
             "-> global/detailed routing) -- see "
             "docs/design/digital-flow-contracts-spike.md section 5 for the "
             "request/response contract and docs/cli/place-and-route.md for "
-            "the CLI surface. Phase 4 of Epic #391. `target_stage` (default "
-            "`route`) controls how far the run goes; a run that reaches (or "
-            "exceeds) the requested stage is always a success, even short "
-            "of a full route. `def_path` is populated once `write_def` has "
-            "run; `gds_path` only once the DEF is also merged with the "
-            "standard-cell GDS views via KLayout's `pya`, in-process -- "
-            "never a `klayout` subprocess. Runs `openroad` as a subprocess "
-            "(once per stage) -- requires an `openroad` binary on `$PATH`. "
-            "Takes a request-document path (like `klt synthesize`/`klt "
-            "lvs`/`klt sim`), not positional file args."
+            "the CLI surface. Phase 4 of Epic #391. `pdk.cell_library`/ "
+            "`corner` resolve via the same `find_pdk()`/`libs_ref` "
+            "discovery `klt synthesize` uses -- any standard-cell library "
+            "the resolved PDK install ships resolves the same way (sky130 "
+            "is the first proven example, not the only one); reaching the "
+            "`cts`/`route` stages additionally needs a verified "
+            "clock-buffer/routing-layer table entry for that cell library. "
+            "`target_stage` (default `route`) controls how far the run "
+            "goes; a run that reaches (or exceeds) the requested stage is "
+            "always a success, even short of a full route. `def_path` is "
+            "populated once `write_def` has run; `gds_path` only once the "
+            "DEF is also merged with the standard-cell GDS views via "
+            "KLayout's `pya`, in-process -- never a `klayout` subprocess. "
+            "Runs `openroad` as a subprocess (once per stage) -- requires "
+            "an `openroad` binary on `$PATH`. Takes a request-document path "
+            "(like `klt synthesize`/`klt lvs`/`klt sim`), not positional "
+            "file args."
         ),
     )
     place_and_route_parser.add_argument(
         "request", help="path to a klt place-and-route request JSON file"
+    )
+    place_and_route_parser.add_argument(
+        "--pdk",
+        default=None,
+        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
+    )
+    place_and_route_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        default=None,
+        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
     )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)

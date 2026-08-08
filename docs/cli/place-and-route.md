@@ -1,14 +1,14 @@
 # `klt place-and-route`
 
 Place and route a gate-level netlist (`klt synthesize`'s own `netlist_path`
-output) against a resolved sky130 standard-cell LEF/liberty deck via
-OpenROAD's native Tcl API, stage by stage — Phase 4 of
+output) against a resolved standard-cell LEF/liberty deck via OpenROAD's
+native Tcl API, stage by stage — Phase 4 of
 [Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391) ("adopt the
 digital engine class — Yosys + OpenROAD — RTL→GDS as a first-class `klt`
 flow").
 
 ```
-klt place-and-route <request> [--format text|json]
+klt place-and-route <request> [--pdk VARIANT] [--pdk-root ROOT] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 documents — read
@@ -32,6 +32,10 @@ Like `klt synthesize`/`klt lvs`/`klt sim`, `klt place-and-route` takes a
 - `<request>` — a path to a request JSON file. Relative paths inside the
   request (`netlist`, `floorplan.def_path`) resolve against the **request
   file's own directory**.
+- `--pdk` — PDK variant to resolve (e.g. `sky130A`); overrides `$PDK`.
+  Optional — omit to use `find_pdk()`'s own default search order.
+- `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
+  search order.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -96,11 +100,18 @@ An unresolvable liberty or LEF is a clear **"liberty/LEF not found for
 deck"** application error (exit 1), matching `klt drc`'s existing "deck
 requires an asset the resolved install doesn't ship" posture.
 
-`sky130_fd_sc_hd` is the only cell library with known CTS-buffer/routing
--layer constants today (`_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE` in
-`place_and_route.py`, read from ORFS's own `platforms/sky130hd/config.mk`
-as reference data, never a runtime dependency) — reaching `target_stage:
-"cts"` or `"route"` with a different cell library is a clear error.
+Neither resolver is restricted to a single PDK family — any standard-cell
+library the resolved install ships `libs_ref`/LEF assets for resolves the
+same way. Reaching `target_stage: "cts"` or `"route"` additionally needs a
+verified entry in `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`
+(`place_and_route.py`) for that `cell_library` — a clock-tree buffer cell
+name and a signal routing-layer range are not derivable from the resolved
+PDK install itself, so each supported cell library needs its own verified
+entry (never a runtime dependency; never guessed). `sky130_fd_sc_hd` (read
+from ORFS's own `platforms/sky130hd/config.mk`) and `gf180mcu_fd_sc_mcu9t5v0`
+(verified directly against a real gf180mcu install's own LEF, since ORFS
+ships no `gf180mcu_fd_sc_mcu9t5v0` platform) both have entries today; a
+`cell_library` with no entry in either table is a clear error, not a guess.
 
 ## DEF→GDS merge
 

@@ -36,7 +36,15 @@ mechanism**. ``request.pdk`` carries only ``cell_library``/``corner`` (no
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
-with no flags would. When that install has no matching liberty at all, this
+with no flags would -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
+(mirroring ``klt extract``'s identical pair) pin a specific installed
+variant/root, threaded straight through to :func:`run_synthesize`'s
+``pdk_variant``/``pdk_root`` keyword args and from there to ``find_pdk()``.
+``cell_library`` is never restricted to a single PDK family -- any
+standard-cell library the resolved install ships a ``libs_ref`` entry for
+resolves the same way, sky130's ``sky130_fd_sc_hd`` included only as this
+module's first-proven example. When that install has no matching liberty at
+all, this
 raises a clear "liberty not found for deck" :class:`SynthesizeError` --
 matching ``klt drc``'s existing "deck requires an asset the resolved install
 doesn't ship" posture (the Yosys survey's own open question, resolved here).
@@ -121,8 +129,22 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
-def run_synthesize(request_path: str) -> dict[str, Any]:
+def run_synthesize(
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
+
+    ``pdk_variant``/``pdk_root`` (the CLI's ``--pdk``/``--pdk-root`` flags,
+    mirroring ``klt extract``'s identical pair) optionally pin a specific
+    installed PDK variant/root, passed straight through to
+    :func:`_resolve_liberty`'s own ``find_pdk()`` call. ``None`` (the
+    default) leaves ``find_pdk()``'s own default search order
+    (``$PDK_ROOT``/``$PDK``, then the ciel/volare stores, then the
+    conventional prefixes) in effect, unchanged from before this parameter
+    existed.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
@@ -169,7 +191,9 @@ def run_synthesize(request_path: str) -> dict[str, Any]:
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
 
-    liberty_path, corner, pdk_info = _resolve_liberty(cell_library, requested_corner)
+    liberty_path, corner, pdk_info = _resolve_liberty(
+        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
+    )
 
     output_dir = os.path.join(request_dir, ".klt", "synthesize")
     try:
@@ -266,9 +290,18 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
 
 
 def _resolve_liberty(
-    cell_library: str, requested_corner: str | None
+    cell_library: str,
+    requested_corner: str | None,
+    *,
+    variant: str | None = None,
+    root: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library``.
+
+    ``variant``/``root`` (the CLI's ``--pdk``/``--pdk-root`` flags, threaded
+    through from :func:`run_synthesize`) select a specific installed PDK
+    variant/root exactly as :func:`klayout_tools.pdk.find_pdk` does; ``None``
+    for either leaves that resolver's own default search order in effect.
 
     ``pdk_info`` is :func:`klayout_tools.pdk.find_pdk`'s own resolution dict
     -- passed straight through to :func:`build_provenance`'s ``pdk``
@@ -280,7 +313,7 @@ def _resolve_liberty(
     not found for deck" posture this module's docstring describes.
     """
     try:
-        info = find_pdk()
+        info = find_pdk(variant=variant, root=root)
     except PdkNotFoundError as exc:
         raise SynthesizeError(str(exc)) from exc
 
@@ -301,7 +334,7 @@ def _resolve_liberty(
 
     corner = requested_corner
     if corner is None:
-        libraries = list_cell_libraries()
+        libraries = list_cell_libraries(variant=info["variant"], root=info["root"])
         entry = next(
             (lib for lib in libraries["libraries"] if lib["name"] == cell_library),
             None,

@@ -1,5 +1,5 @@
-"""Place and route a synthesized netlist against sky130hd via OpenROAD,
-headless.
+"""Place and route a synthesized netlist against a resolved standard-cell
+PDK via OpenROAD, headless.
 
 Pure library: :func:`run_place_and_route` returns plain Python data (a
 ``dict`` of JSON-serialisable primitives) and never prints, mirroring
@@ -99,20 +99,34 @@ against the same real worked example above: a full floorplan->place->cts
 GDS view and the tech+cell LEF (for layer/pin geometry), through zero
 missing/orphan cells.
 
-sky130 PDK plumbing
----------------------
+Standard-cell PDK plumbing
+----------------------------
 
 ``pdk.cell_library``/``corner`` resolve a liberty exactly as ``klt
 synthesize`` already does (:func:`_resolve_liberty`, this module's own
 copy of that resolution -- each verb module in this repo is self-contained,
-matching the existing precedent). The tech + merged-cell LEF pair resolves
-via the new :func:`klayout_tools.pdk.lef_files` resolver (issue #397/#425 --
-``_ASSET_LAYOUT`` never carried a ``lef`` key). ORFS's own platform
-``config.mk`` (which LEF/lib files, which cells to exclude, which layers)
-is used here only as **reference data** for a small number of sky130hd-
-specific constants this module owns directly (:data:`_CTS_BUFFER_CELLS`,
-:data:`_ROUTING_LAYER_RANGE`) -- never as a runtime dependency; nothing in
-this module shells out to, reads, or requires an ORFS checkout.
+matching the existing precedent), and, like that module, accepts the CLI's
+own ``--pdk``/``--pdk-root`` flags (mirroring ``klt extract``'s identical
+pair) to pin a specific installed PDK variant/root rather than always
+falling back to ``find_pdk()``'s own default search order. The tech +
+merged-cell LEF pair resolves via the new :func:`klayout_tools.pdk.lef_files`
+resolver (issue #397/#425 -- ``_ASSET_LAYOUT`` never carried a ``lef`` key),
+pinned to whatever variant/root :func:`_resolve_liberty` already resolved.
+
+Neither resolver is restricted to a single PDK family -- any standard-cell
+library the resolved install ships ``libs_ref``/LEF assets for resolves the
+same way. The one genuinely per-family gap is the ``cts``/``route`` stages'
+own small reference-data tables (:data:`_CTS_BUFFER_CELLS`,
+:data:`_ROUTING_LAYER_RANGE`, issue #629): a clock-tree buffer cell name and
+a signal routing-layer range are not derivable from the resolved PDK install
+itself the way liberty/LEF paths are, so each supported ``cell_library``
+needs its own verified entry here (sourced from ORFS's own
+``platforms/<variant>/config.mk`` where an ORFS platform exists, or
+otherwise directly from the resolved install's own LEF/liberty content --
+never guessed). A ``cell_library`` with no entry in either table still fails
+with a clear error once a run reaches the stage that needs it, rather than
+guessing. This reference data is never a runtime dependency; nothing in this
+module shells out to, reads, or requires an ORFS checkout.
 
 Deliberately out of scope for this v1 (a core-only block, matching the
 contract's own IO-ring/footprint exclusion): tapcell insertion, power-grid
@@ -227,18 +241,40 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 #: Per-cell-library clock-buffer choice for `clock_tree_synthesis`'s
-#: ``-root_buf``/``-buf_list`` flags. sky130-only per this repo's PDK scope
-#: (``docs/ARCHITECTURE.md`` "Open PDKs only") -- read from ORFS's own
-#: ``platforms/sky130hd/config.mk`` (``CTS_BUF_CELL``) as reference data,
-#: not a runtime dependency on ORFS. A ``cell_library`` with no entry here
-#: raises a clear error when a run needs to reach the ``"cts"`` stage,
-#: rather than guessing.
-_CTS_BUFFER_CELLS: dict[str, str] = {"sky130_fd_sc_hd": "sky130_fd_sc_hd__buf_4"}
+#: ``-root_buf``/``-buf_list`` flags -- not derivable from the resolved PDK
+#: install itself (issue #629), so each supported ``cell_library`` needs its
+#: own verified entry here rather than a guess. A ``cell_library`` with no
+#: entry raises a clear error when a run needs to reach the ``"cts"`` stage.
+#:
+#: - ``sky130_fd_sc_hd``: read from ORFS's own
+#:   ``platforms/sky130hd/config.mk`` (``CTS_BUF_CELL``) as reference data,
+#:   not a runtime dependency on ORFS.
+#: - ``gf180mcu_fd_sc_mcu9t5v0``: no ORFS platform ships this family, so this
+#:   is instead verified directly against a real volare-fetched gf180mcu
+#:   install's own standard-cell LEF (``MACRO gf180mcu_fd_sc_mcu9t5v0__buf_4``
+#:   present in ``libs.ref/gf180mcu_fd_sc_mcu9t5v0/lef/*.lef``) -- the same
+#:   drive-strength choice (``buf_4``) as the sky130hd entry above, for
+#:   consistency, not because a stronger/weaker drive would be wrong.
+_CTS_BUFFER_CELLS: dict[str, str] = {
+    "sky130_fd_sc_hd": "sky130_fd_sc_hd__buf_4",
+    "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu_fd_sc_mcu9t5v0__buf_4",
+}
 
 #: Per-cell-library ``set_routing_layers -signal`` range for the ``"route"``
-#: stage. Same sky130-only, config.mk-as-reference-data posture as
-#: :data:`_CTS_BUFFER_CELLS`.
-_ROUTING_LAYER_RANGE: dict[str, str] = {"sky130_fd_sc_hd": "met1-met5"}
+#: stage. Same not-derivable-from-the-install, verified-not-guessed posture
+#: as :data:`_CTS_BUFFER_CELLS`.
+#:
+#: - ``sky130_fd_sc_hd``: ``met1-met5``, read from ORFS's own
+#:   ``platforms/sky130hd/config.mk`` as reference data.
+#: - ``gf180mcu_fd_sc_mcu9t5v0``: ``Metal1-Metal5``, verified directly
+#:   against a real volare-fetched gf180mcu install's own tech LEF
+#:   (``libs.ref/gf180mcu_fd_sc_mcu9t5v0/techlef/*__nom.tlef``), whose five
+#:   ``Metal1``..``Metal5`` layers are all ``TYPE ROUTING`` -- the layer name
+#:   case (``Metal``, not ``met``) matches that PDK's own LEF convention.
+_ROUTING_LAYER_RANGE: dict[str, str] = {
+    "sky130_fd_sc_hd": "met1-met5",
+    "gf180mcu_fd_sc_mcu9t5v0": "Metal1-Metal5",
+}
 
 #: Fixed internal `global_placement -density` target -- not an exposed
 #: request field (the contract's `floorplan` block sizes the die/core, not
@@ -326,10 +362,23 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
-def run_place_and_route(request_path: str) -> dict[str, Any]:
+def run_place_and_route(
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
     ``request_path``, through the requested (or default, ``"route"``)
     ``target_stage``.
+
+    ``pdk_variant``/``pdk_root`` (the CLI's ``--pdk``/``--pdk-root`` flags,
+    mirroring ``klt extract``'s identical pair and ``klt synthesize``'s own
+    ``run_synthesize`` kwargs) optionally pin a specific installed PDK
+    variant/root, passed straight through to :func:`_resolve_liberty`'s own
+    ``find_pdk()`` call. ``None`` (the default) leaves ``find_pdk()``'s own
+    default search order in effect, unchanged from before this parameter
+    existed.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/place-and-route.md`` /
@@ -380,7 +429,9 @@ def run_place_and_route(request_path: str) -> dict[str, Any]:
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
 
-    liberty_path, corner, pdk_info = _resolve_liberty(cell_library, requested_corner)
+    liberty_path, corner, pdk_info = _resolve_liberty(
+        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
+    )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
 
     stage_index = STAGE_ORDER.index(target_stage)
@@ -883,15 +934,24 @@ def _validate_target_stage(target_stage: Any) -> str:
 
 
 def _resolve_liberty(
-    cell_library: str, requested_corner: str | None
+    cell_library: str,
+    requested_corner: str | None,
+    *,
+    variant: str | None = None,
+    root: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Resolve ``(liberty_path, corner, pdk_info)`` for ``cell_library`` --
     this module's own copy of ``synthesize.py``'s identical resolution
-    (each verb module in this repo is self-contained). Raises
-    :class:`PlaceAndRouteError` (never :class:`~klayout_tools.pdk.PdkNotFoundError`).
+    (each verb module in this repo is self-contained). ``variant``/``root``
+    (the CLI's ``--pdk``/``--pdk-root`` flags, threaded through from
+    :func:`run_place_and_route`) select a specific installed PDK
+    variant/root exactly as :func:`klayout_tools.pdk.find_pdk` does; ``None``
+    for either leaves that resolver's own default search order in effect.
+    Raises :class:`PlaceAndRouteError` (never
+    :class:`~klayout_tools.pdk.PdkNotFoundError`).
     """
     try:
-        info = find_pdk()
+        info = find_pdk(variant=variant, root=root)
     except PdkNotFoundError as exc:
         raise PlaceAndRouteError(str(exc)) from exc
 
@@ -912,7 +972,7 @@ def _resolve_liberty(
 
     corner = requested_corner
     if corner is None:
-        libraries = list_cell_libraries()
+        libraries = list_cell_libraries(variant=info["variant"], root=info["root"])
         entry = next(
             (lib for lib in libraries["libraries"] if lib["name"] == cell_library),
             None,
