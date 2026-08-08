@@ -97,6 +97,7 @@ klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a so
 klt lef-abstract design.gds --socket socket.json --macro-name m --cell-library sky130_fd_sc_hd  # layout+socket -> LEF MACRO abstract
 klt report result.json                   # render a klt JSON report as markdown summary
 klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone table + plot
+klt deck resolve --content-hash sha256:... # pinned deck hash -> klayout-tools tag/version that shipped it
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/), one page per verb.
