@@ -31,37 +31,78 @@ artifact's provenance (input hashes, netlist/layout revision) matches the
 block's current sources — a passing report against last week's netlist is
 evidence of nothing.
 
-1. **Schematic** — committed schematic sources (or generator) plus the
-   netlist derived from them, regenerated on design change.
-2. **Layout** — committed GDS/OASIS, reproducibly generated or with
-   documented provenance.
+### Block kind
+
+A T1 claim states the block's **kind**: `analog`, `digital`, or
+`mixed-signal`. The kind determines which column of items 1, 2, 5, 6, and 7
+applies — items 3, 4, 9, and 10 are kind-independent and apply as written to
+every block.
+
+- **Analog** blocks satisfy the *Analog* column only.
+- **Digital** blocks satisfy the *Digital* column only. Nothing in the
+  Analog column (schematic capture, PVT corner sweeps, Monte Carlo) is
+  applicable or required — a digital block is not held to analog artifacts
+  it has no reason to produce.
+- **Mixed-signal** blocks partition into analog and digital sub-blocks
+  within the same repo and satisfy **both** columns, one per partition. The
+  claim must state the partition boundary explicitly (which nets/pins/cells
+  belong to which side) so a reviewer can tell which evidence covers which
+  silicon.
+
+1. **Design sources**
+   - *Analog* — committed schematic sources (or generator) plus the
+     netlist derived from them, regenerated on design change.
+   - *Digital* — committed RTL sources plus the synthesized gate-level
+     netlist derived from them, regenerated on design change.
+2. **Layout**
+   - *Analog* — committed GDS/OASIS, reproducibly generated or with
+     documented provenance.
+   - *Digital* — committed routed GDS/OASIS from place-and-route,
+     reproducibly generated from the gate-level netlist (P&R script/flow
+     committed, not a one-off hand edit).
 3. **DRC clean** — latest `klt drc` JSON report: `status: clean`, fresh,
    with the deck identified (content hash). Known deck coverage gaps
    (rule-free layers, skipped rules) must be enumerated in the claim, not
    hidden behind "clean" — a clean verdict from a deck with undisclosed
    holes is a false claim.
-4. **LVS clean** — latest LVS report `status: match`, fresh, engine named.
-   Warnings-only mismatches must be listed with the claim. A second,
-   independent engine's concurring verdict (#343) strengthens this from
-   "one toolchain agrees with itself" to a cross-checked result.
-5. **Full PVT corner simulation vs a ratified spec** — corner-matrix
-   results covering every spec row at its bound corners, with per-row
-   pass/fail and the binding corner recorded. Requires the spec table
-   itself to be ratified — verdicts against a draft spec are provisional
-   by construction.
+4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
+   checked against the netlist from item 1 (schematic netlist for analog,
+   synthesized/routed gate-level netlist for digital). Warnings-only
+   mismatches must be listed with the claim. A second, independent engine's
+   concurring verdict (#343) strengthens this from "one toolchain agrees
+   with itself" to a cross-checked result.
+5. **Full corner verification vs a ratified spec**
+   - *Analog* — PVT corner-matrix simulation results covering every spec
+     row at its bound corners, with per-row pass/fail and the binding
+     corner recorded.
+   - *Digital* — multi-corner static timing analysis (setup and hold
+     across the PVT corner set) plus a bit-exact functional test suite,
+     with per-corner and per-test pass/fail recorded.
+   - Both require the spec table itself to be ratified — verdicts against
+     a draft spec are provisional by construction.
 6. **Statistical claims carry Monte Carlo evidence** — any accuracy,
-   offset, or matching spec row is statistical; a corner matrix cannot
-   validate it. MC runs need a recorded seed, sample count, a
-   deterministic negative control, and results combined with (not instead
-   of) process corners (#344).
-7. **Post-layout simulation** — the spec suite re-run against the netlist
-   extracted from the layout, not only the drawn schematic (#252). Until
-   parasitic extraction lands (#217), state what the extracted netlist
-   does and does not model.
+   offset, or matching spec row is statistical; a corner matrix (or STA
+   corner sweep) cannot validate it. This applies to whichever spec rows
+   are actually statistical, regardless of block kind — most digital spec
+   rows (functional correctness, Fmax, timing closure) are not, and a
+   block whose spec has no statistical row must say so explicitly rather
+   than omit the item. Where it does apply, MC runs need a recorded seed,
+   sample count, a deterministic negative control, and results combined
+   with (not instead of) process corners (#344).
+7. **Post-layout verification**
+   - *Analog* — the spec suite re-run against the netlist extracted from
+     the layout, not only the drawn schematic (#252). Until parasitic
+     extraction lands (#217), state what the extracted netlist does and
+     does not model.
+   - *Digital* — the functional test suite re-run against the post-route
+     gate-level netlist with back-annotated SDF timing, not only the
+     pre-layout RTL/gate simulation.
 8. **Characterization report** — one aggregated, current artifact
    summarizing per-spec-row performance across conditions, with the
    evidence record each verdict rests on (#309 tracks the aggregation
-   tool).
+   tool). For a digital or mixed-signal digital partition this includes
+   Fmax, area, and power across the corner set, not just functional
+   pass/fail.
 9. **Testbenches shipped** — every claimed measurement's testbench
    committed, with a documented cold-start invocation a third party can
    run; pinned PDK revision.
