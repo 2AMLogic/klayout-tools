@@ -246,15 +246,31 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
 #: own verified entry here rather than a guess. A ``cell_library`` with no
 #: entry raises a clear error when a run needs to reach the ``"cts"`` stage.
 #:
-#: - ``sky130_fd_sc_hd``: read from ORFS's own
-#:   ``platforms/sky130hd/config.mk`` (``CTS_BUF_CELL``) as reference data,
-#:   not a runtime dependency on ORFS.
-#: - ``gf180mcu_fd_sc_mcu9t5v0``: no ORFS platform ships this family, so this
-#:   is instead verified directly against a real volare-fetched gf180mcu
-#:   install's own standard-cell LEF (``MACRO gf180mcu_fd_sc_mcu9t5v0__buf_4``
-#:   present in ``libs.ref/gf180mcu_fd_sc_mcu9t5v0/lef/*.lef``) -- the same
-#:   drive-strength choice (``buf_4``) as the sky130hd entry above, for
-#:   consistency, not because a stronger/weaker drive would be wrong.
+#: **Neither ORFS platform pins a CTS buffer of its own** (issue #637):
+#: ``flow/scripts/cts.tcl`` appends ``-buf_list`` only when the *optional*
+#: ``CTS_BUF_LIST`` variable is set, and neither ``platforms/sky130hd`` nor
+#: ``platforms/gf180`` sets it -- nor any ``CTS_BUF_CELL``, which does not
+#: exist anywhere in ORFS (zero code-search hits across that repo). ORFS
+#: therefore lets OpenROAD auto-select. This module names one explicitly
+#: instead, because a run-to-run reproducible clock tree is worth more here
+#: than OpenROAD's own per-version choice. Sourced, per library:
+#:
+#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__buf_4``: the buffer
+#:   ``platforms/sky130hd/config.mk`` itself names, via
+#:   ``MIN_BUF_CELL_AND_PORTS = sky130_fd_sc_hd__buf_4 A X``.
+#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> ``gf180mcu_fd_sc_mcu9t5v0__buf_4``:
+#:   ``platforms/gf180/config.mk``'s own reference non-inverting buffer for
+#:   exactly this library -- ``ABC_DRIVER_CELL = gf180mcu_fd_sc_mcu$(TRACK_
+#:   OPTION)$(POWER_OPTION)__buf_4``, whose platform defaults
+#:   (``TRACK_OPTION ?= 9t``, ``POWER_OPTION ?= 5v0``) resolve to
+#:   ``gf180mcu_fd_sc_mcu9t5v0``. Confirmed present as ``MACRO
+#:   gf180mcu_fd_sc_mcu9t5v0__buf_4`` in that platform's own standard-cell
+#:   LEF (``lef/gf180mcu_5LM_1TM_9K_9t_sc.lef``), and not excluded by the
+#:   platform's ``DONT_USE_CELLS = *_1``. That platform's own
+#:   ``MIN_BUF_CELL_AND_PORTS`` names ``__dlya_4`` instead -- deliberately
+#:   *not* mirrored from the sky130hd entry's derivation here, since
+#:   ``dlya`` is a delay cell for hold fixing, the wrong shape for a
+#:   clock-tree root buffer.
 _CTS_BUFFER_CELLS: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130_fd_sc_hd__buf_4",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu_fd_sc_mcu9t5v0__buf_4",
@@ -262,18 +278,41 @@ _CTS_BUFFER_CELLS: dict[str, str] = {
 
 #: Per-cell-library ``set_routing_layers -signal`` range for the ``"route"``
 #: stage. Same not-derivable-from-the-install, verified-not-guessed posture
-#: as :data:`_CTS_BUFFER_CELLS`.
+#: as :data:`_CTS_BUFFER_CELLS` -- but here ORFS *does* pin the value per
+#: platform, as ``MIN_ROUTING_LAYER``/``MAX_ROUTING_LAYER``:
 #:
-#: - ``sky130_fd_sc_hd``: ``met1-met5``, read from ORFS's own
-#:   ``platforms/sky130hd/config.mk`` as reference data.
-#: - ``gf180mcu_fd_sc_mcu9t5v0``: ``Metal1-Metal5``, verified directly
-#:   against a real volare-fetched gf180mcu install's own tech LEF
-#:   (``libs.ref/gf180mcu_fd_sc_mcu9t5v0/techlef/*__nom.tlef``), whose five
-#:   ``Metal1``..``Metal5`` layers are all ``TYPE ROUTING`` -- the layer name
-#:   case (``Metal``, not ``met``) matches that PDK's own LEF convention.
+#: - ``sky130_fd_sc_hd`` -> ``met1-met5``, from
+#:   ``platforms/sky130hd/config.mk`` (``MIN_ROUTING_LAYER ?= met1``,
+#:   ``MAX_ROUTING_LAYER ?= met5``).
+#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> ``Metal2-Metal5``, from
+#:   ``platforms/gf180/config.mk`` (``MIN_ROUTING_LAYER ?= Metal2``,
+#:   ``MAX_ROUTING_LAYER ?= Metal5``). This range deliberately starts one
+#:   layer **above** the stack's bottom routing layer, unlike sky130hd's
+#:   (issue #637): this library's standard cells pin out on ``Metal1``
+#:   itself (``buf_4``'s ``I``/``Z`` are both ``LAYER Metal1`` in
+#:   ``lef/gf180mcu_5LM_1TM_9K_9t_sc.lef``), so ``Metal1`` is left to pin
+#:   access and intra-cell/power-rail geometry rather than opened up to
+#:   free signal routing. sky130hd has no equivalent constraint -- its
+#:   cells pin out on ``li1``, below ``met1`` entirely (``buf_4``'s
+#:   ``A``/``X`` are ``LAYER li1`` in ``lef/sky130_fd_sc_hd_merged.lef``,
+#:   with only the power rails on ``met1``). The layer-name case
+#:   (``Metal``, not ``met``) is that PDK's own LEF convention, confirmed
+#:   against the platform tech LEF: ``lef/gf180mcu_5LM_1TM_9K_9t_tech.lef``
+#:   declares ``Metal1``..``Metal5`` as its five ``TYPE ROUTING`` layers.
+#:
+#: ORFS is **reference data only** for both tables, never a runtime
+#: dependency -- nothing in this module shells out to, reads, or requires an
+#: ORFS checkout, and no ORFS file is vendored here. In particular
+#: ``platforms/gf180/config.mk``'s trailing ``-include
+#: $(GF180_PRIVATE_DIR)/private.mk`` (a soft include, commented "for
+#: proprietary tool enablements that are not public") is irrelevant to these
+#: values: every variable read above is set in the public ``config.mk``
+#: itself, above that line, and each is independently corroborated against
+#: the platform's own open-source LEFs (issue #637). Values above read
+#: 2026-08-09 from ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``.
 _ROUTING_LAYER_RANGE: dict[str, str] = {
     "sky130_fd_sc_hd": "met1-met5",
-    "gf180mcu_fd_sc_mcu9t5v0": "Metal1-Metal5",
+    "gf180mcu_fd_sc_mcu9t5v0": "Metal2-Metal5",
 }
 
 #: Fixed internal `global_placement -density` target -- not an exposed

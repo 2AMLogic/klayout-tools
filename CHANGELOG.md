@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-09 — `klt place-and-route`: `_ROUTING_LAYER_RANGE`'s
+  `gf180mcu_fd_sc_mcu9t5v0` entry was `"Metal1-Metal5"`, one layer wider at
+  the bottom than the platform allows — OpenROAD was told it could route
+  signals on `Metal1`, which is where that library's standard cells put
+  their own pins (`buf_4`'s `I`/`Z` are both `LAYER Metal1`). Corrected to
+  `"Metal2-Metal5"`, matching `MIN_ROUTING_LAYER ?= Metal2` /
+  `MAX_ROUTING_LAYER ?= Metal5` in OpenROAD-flow-scripts' own
+  `platforms/gf180/config.mk` — the same primary source the
+  `sky130_fd_sc_hd` entry's `"met1-met5"` comes from (sky130hd legitimately
+  starts at `met1`: its cells pin out on `li1`, below `met1` entirely).
+  This narrows the range, so it does not reintroduce #619's
+  routing-range-wider-than-extraction-connectivity failure mode:
+  gf180mcu's `EXTRACTION_DECK` already covers the full Metal1-Metal5 stack
+  (#220), a superset. The provenance comments on both tables were also
+  wrong and are corrected: OpenROAD-flow-scripts **does** ship a `gf180`
+  platform whose defaults (`TRACK_OPTION ?= 9t`, `POWER_OPTION ?= 5v0`)
+  resolve to exactly `gf180mcu_fd_sc_mcu9t5v0`, and no `CTS_BUF_CELL`
+  variable exists anywhere in that repo — neither platform pins a CTS
+  buffer at all (`CTS_BUF_LIST` is optional and unset in both), so each
+  `_CTS_BUFFER_CELLS` entry now records its actual source. No behavior
+  change for `sky130_fd_sc_hd` (#637).
 - 2026-08-08 — `klt extract`: sky130's `EXTRACTION_DECK.metals`/`.vias`
   connectivity stack stopped at met2, one full level short of
   `place_and_route.py`'s `_ROUTING_LAYER_RANGE["sky130_fd_sc_hd"]`

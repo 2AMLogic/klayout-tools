@@ -19,21 +19,28 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
   tests (it needs a real DEF + real standard-cell GDS view to exercise
   meaningfully) and covered by its own focused unit tests below.
 - **CLI tests** cover exit codes and `--format text/json`.
-- **Integration test** (`@pytest.mark.skipif` when either `openroad` is not
-  on `$PATH` or no real PDK install resolving a `sky130_fd_sc_hd`
-  LEF/liberty/GDS set is found) runs the real GCD worked example end to end
-  -- this is the acceptance criterion's "verified end to end against a real
-  sky130 install" check. It is not required for CI (CI installs neither
-  `openroad` nor a real sky130 standard-cell PDK today, matching `klt
-  synthesize`'s own noted CI gap) but runs (and passes) on any machine with
-  both. **This repo's own worked example for issue #425 instead verified
-  the identical code path manually via a real `openroad/orfs` Docker image**
-  (`openroad -no_init -exit -metrics ...` against a real volare-fetched
-  `sky130A` install, floorplan through a full detailed route with 0 DRC
-  violations, followed by a real DEF->GDS merge via this module's own
-  `_merge_def_to_gds` producing a valid GDS) -- see the PR description for
-  the full transcript; that manual run is not automated as a test here
-  since it depends on Docker, which is not a project dependency.
+- **Integration tests** (`@pytest.mark.skipif` when either `openroad` is not
+  on `$PATH` or no real PDK install resolving that test's own
+  `<cell_library>` LEF/liberty/GDS set is found) run the real GCD worked
+  example end to end -- this is the acceptance criterion's "verified end to
+  end against a real install" check. There is one per supported
+  standard-cell library: `sky130_fd_sc_hd` (issue #425) and
+  `gf180mcu_fd_sc_mcu9t5v0` (issue #637), both gated the same way via
+  `_find_real_pnr_variant()`. Neither is required for CI (CI installs
+  neither `openroad` nor a real standard-cell PDK today, matching `klt
+  synthesize`'s own noted CI gap) but each runs on any machine with both
+  halves of its toolchain. **This repo's own worked example for issue #425
+  instead verified the identical code path manually via a real
+  `openroad/orfs` Docker image** (`openroad -no_init -exit -metrics ...`
+  against a real volare-fetched `sky130A` install, floorplan through a full
+  detailed route with 0 DRC violations, followed by a real DEF->GDS merge
+  via this module's own `_merge_def_to_gds` producing a valid GDS) -- see
+  the PR description for the full transcript; that manual run is not
+  automated as a test here since it depends on Docker, which is not a
+  project dependency. The gf180mcu sibling (issue #637) has **not** had an
+  equivalent manual run: no `openroad`/Docker/volare and no gf180mcu
+  install were available in the environment that added it, so its live
+  proof is the gated test above, wherever that toolchain exists.
 """
 
 from __future__ import annotations
@@ -1286,28 +1293,45 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_stubbed_full_route_success_gf180mcu(tmp_path, monkeypatch):
-    """A second, non-sky130 cell library reaches the `route` stage the same
-    way sky130 does -- the liberty/LEF resolver was never sky130-specific,
-    and `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE` now carry a real, verified
-    `gf180mcu_fd_sc_mcu9t5v0` entry alongside sky130's (issue #629)."""
+#: The nominal liberty corner, placement site and IO layers ORFS's own
+#: `platforms/gf180/config.mk` names for this library (`TC_LIB_FILES` ->
+#: `..__tt_025C_5v00.lib.gz`, `PLACE_SITE ?= GF018hv5v_green_sc9` for the
+#: `9t` track option, `IO_PLACER_H/V ?= Metal3/Metal4`) -- used so the
+#: fabricated install and request below mirror a real gf180mcu run rather
+#: than carrying sky130's values under a gf180mcu name (issue #637).
+_GF180MCU_CELL_LIBRARY = "gf180mcu_fd_sc_mcu9t5v0"
+_GF180MCU_CORNER = "tt_025C_5v00"
+
+
+def _setup_gf180mcu_success_env(tmp_path, monkeypatch, **request_overrides) -> str:
+    """`_setup_success_env`'s gf180mcu twin: a fabricated `gf180mcuC` install
+    shipping a `gf180mcu_fd_sc_mcu9t5v0` liberty/LEF/GDS set, plus a request
+    whose floorplan site and IO layers match ORFS's own gf180 platform."""
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"
     _make_pdk_install(
         install_root,
         "gf180mcuC",
-        cell_library="gf180mcu_fd_sc_mcu9t5v0",
-        corner="tt_025C_1v80",
+        cell_library=_GF180MCU_CELL_LIBRARY,
+        corner=_GF180MCU_CORNER,
     )
     monkeypatch.setenv("PDK_ROOT", str(install_root))
     _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
-    request_path = _write_request(
-        tmp_path / "request.json",
-        _base_request(
-            pdk={"cell_library": "gf180mcu_fd_sc_mcu9t5v0", "corner": "tt_025C_1v80"},
-            io={"layer_h": "Metal3", "layer_v": "Metal2"},
-        ),
+    request = _base_request(
+        pdk={"cell_library": _GF180MCU_CELL_LIBRARY, "corner": _GF180MCU_CORNER},
+        io={"layer_h": "Metal3", "layer_v": "Metal4"},
+        **request_overrides,
     )
+    request["floorplan"]["site"] = "GF018hv5v_green_sc9"
+    return _write_request(tmp_path / "request.json", request)
+
+
+def test_stubbed_full_route_success_gf180mcu(tmp_path, monkeypatch):
+    """A second, non-sky130 cell library reaches the `route` stage the same
+    way sky130 does -- the liberty/LEF resolver was never sky130-specific,
+    and `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE` now carry a real, verified
+    `gf180mcu_fd_sc_mcu9t5v0` entry alongside sky130's (issue #629)."""
+    request_path = _setup_gf180mcu_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
     merge_calls = _stub_merge_def_to_gds(monkeypatch)
 
@@ -1323,7 +1347,79 @@ def test_stubbed_full_route_success_gf180mcu(tmp_path, monkeypatch):
 
     provenance = report["provenance"]
     assert provenance["pdk"]["name"] == "gf180mcuC"
-    assert provenance["deck"]["name"] == "gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80"
+    assert provenance["deck"]["name"] == f"gf180mcu_fd_sc_mcu9t5v0__{_GF180MCU_CORNER}"
+
+
+def _stage_script(request_path: str, stage: str, hdl_toplevel: str = "gcd") -> str:
+    return os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        f"pnr_{hdl_toplevel}_{stage}.tcl",
+    )
+
+
+def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
+    tmp_path, monkeypatch
+):
+    """Issue #637: both per-cell-library reference-data tables must reach the
+    generated Tcl verbatim, with the values ORFS's own `platforms/gf180/
+    config.mk` pins -- in particular `Metal2-Metal5`, **not**
+    `Metal1-Metal5`.
+
+    `MIN_ROUTING_LAYER ?= Metal2` there is deliberate: this library's
+    standard cells pin out on `Metal1` itself (`buf_4`'s `I`/`Z` are both
+    `LAYER Metal1` in the platform's own `..._9t_sc.lef`), so `Metal1` is
+    reserved for pin access and intra-cell/power-rail geometry rather than
+    opened up to free signal routing. sky130hd's cells pin out on `li1`
+    instead, which is why its own entry legitimately does start at `met1` --
+    see the sky130 counterpart test below."""
+    request_path = _setup_gf180mcu_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    assert (
+        "clock_tree_synthesis -root_buf gf180mcu_fd_sc_mcu9t5v0__buf_4 "
+        "-buf_list gf180mcu_fd_sc_mcu9t5v0__buf_4"
+    ) in cts_lines
+    # The platform's own `MIN_BUF_CELL_AND_PORTS` names a `dlya` delay cell
+    # (a hold-fixing buffer) -- the wrong shape for a clock-tree root buffer,
+    # and deliberately not what this table carries.
+    assert not any("dlya" in line for line in cts_lines)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "set_routing_layers -signal Metal2-Metal5" in route_lines
+    assert not any("Metal1-Metal5" in line for line in route_lines)
+    # sky130's lowercase `met*` convention must never leak into a gf180mcu
+    # run -- the layer name is passed through to OpenROAD verbatim.
+    assert not any("met1-met5" in line for line in route_lines)
+
+
+def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
+    tmp_path, monkeypatch
+):
+    """The sky130hd counterpart of the gf180mcu guard above (issue #637):
+    `met1-met5` per ORFS's `platforms/sky130hd/config.mk`
+    (`MIN_ROUTING_LAYER ?= met1`, `MAX_ROUTING_LAYER ?= met5`), and the
+    `sky130_fd_sc_hd__buf_4` that platform's own `MIN_BUF_CELL_AND_PORTS`
+    names. Pins the two entries against an accidental cross-PDK edit."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    assert (
+        "clock_tree_synthesis -root_buf sky130_fd_sc_hd__buf_4 "
+        "-buf_list sky130_fd_sc_hd__buf_4"
+    ) in cts_lines
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "set_routing_layers -signal met1-met5" in route_lines
 
 
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
@@ -1790,10 +1886,15 @@ def test_merge_def_to_gds_merges_macro_gds_view_when_declared(tmp_path):
 HAVE_OPENROAD = shutil.which("openroad") is not None
 
 
-def _find_real_sky130_pnr_variant() -> tuple[str, str] | None:
+def _find_real_pnr_variant(cell_library: str) -> tuple[str, str] | None:
     """Search every install/variant `list_pdks()` discovers for one shipping
-    a real `sky130_fd_sc_hd` liberty + tech/cell LEF + GDS view. Returns
-    ``(root, variant)`` or ``None``."""
+    a real ``cell_library`` liberty + tech/cell LEF + GDS view. Returns
+    ``(root, variant)`` or ``None``.
+
+    Parameterized by cell library (issue #637) so the same gate serves both
+    the sky130hd and gf180mcu live worked examples -- the four asset paths
+    it probes are exactly what `lef_files()`/`_resolve_liberty`/
+    `_resolve_gds_view` resolve, and none of them is PDK-family-specific."""
     try:
         result = pdk_module.list_pdks()
     except Exception:
@@ -1801,22 +1902,23 @@ def _find_real_sky130_pnr_variant() -> tuple[str, str] | None:
     for install in result["installs"]:
         for variant in install["variants"]:
             lib_dir = os.path.join(
-                install["root"], variant["name"], "libs.ref", "sky130_fd_sc_hd"
+                install["root"], variant["name"], "libs.ref", cell_library
             )
             if all(
                 os.path.exists(os.path.join(lib_dir, sub))
                 for sub in (
                     "lib",
-                    os.path.join("techlef", "sky130_fd_sc_hd__nom.tlef"),
-                    os.path.join("lef", "sky130_fd_sc_hd.lef"),
-                    os.path.join("gds", "sky130_fd_sc_hd.gds"),
+                    os.path.join("techlef", f"{cell_library}__nom.tlef"),
+                    os.path.join("lef", f"{cell_library}.lef"),
+                    os.path.join("gds", f"{cell_library}.gds"),
                 )
             ):
                 return install["root"], variant["name"]
     return None
 
 
-_REAL_SKY130_PNR_VARIANT = _find_real_sky130_pnr_variant()
+_REAL_SKY130_PNR_VARIANT = _find_real_pnr_variant("sky130_fd_sc_hd")
+_REAL_GF180MCU_PNR_VARIANT = _find_real_pnr_variant(_GF180MCU_CELL_LIBRARY)
 
 
 @pytest.mark.skipif(
@@ -1853,6 +1955,83 @@ def test_integration_real_openroad_gcd_worked_example(tmp_path, monkeypatch):
     request_path = _write_request(
         tmp_path / "pnr_request.json",
         _base_request(netlist=synth_report["netlist_path"]),
+    )
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["def_path"] is not None
+    assert os.path.isfile(report["def_path"])
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
+    assert report["die_area_um2"] is not None
+    assert report["core_area_um2"] is not None
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_GF180MCU_PNR_VARIANT is None,
+    reason=(
+        "no real gf180mcu_fd_sc_mcu9t5v0 LEF/liberty/GDS set resolves via list_pdks()"
+    ),
+)
+def test_integration_real_openroad_gcd_worked_example_gf180mcu(tmp_path, monkeypatch):
+    """The same GCD worked example as above, on gf180mcu instead of sky130hd
+    (issue #637) -- `klt synthesize` -> `klt place-and-route`, floorplan
+    through a full detailed route, against a real `openroad` binary and a
+    real host-resolved gf180mcu install.
+
+    This is the automated form of this issue's "one real synthesized
+    gf180mcu netlist reaches a routed GDS end-to-end" acceptance criterion.
+    Gated exactly like its sky130hd sibling, and skipped (never failed) on
+    a machine without both halves of the toolchain -- CI installs neither
+    `openroad` nor a real gf180mcu standard-cell PDK today.
+
+    `request.pdk.corner` is deliberately omitted so `_resolve_liberty`
+    resolves the install's own nominal corner, rather than this test
+    hard-coding one gf180mcu liberty corner name. Floorplan site and IO
+    layers are ORFS's own `platforms/gf180/config.mk` values
+    (`PLACE_SITE ?= GF018hv5v_green_sc9` for `TRACK_OPTION ?= 9t`,
+    `IO_PLACER_H/V ?= Metal3/Metal4`); the 10 ns clock is a realistic
+    180 nm/5 V target rather than sky130hd's 1.1 ns.
+    """
+    root, variant = _REAL_GF180MCU_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.synthesize import run_synthesize
+
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text(_GCD_RTL, encoding="utf-8")
+    synth_request = _write_request(
+        tmp_path / "synth_request.json",
+        {
+            "engine": "yosys",
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": _GF180MCU_CELL_LIBRARY},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(
+            netlist=synth_report["netlist_path"],
+            pdk={"cell_library": _GF180MCU_CELL_LIBRARY},
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "aspect_ratio": 1.0,
+                "core_margin_um": 2.0,
+                "site": "GF018hv5v_green_sc9",
+            },
+            io={"layer_h": "Metal3", "layer_v": "Metal4"},
+            constraints={"clock_port": "clk", "clock_period_ns": 10.0},
+        ),
     )
 
     report = run_place_and_route(request_path)
