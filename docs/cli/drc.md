@@ -5,27 +5,42 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu [--top <cell>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
-- `--deck` — required. The DRC deck to run. Currently: `sky130`, `gf180mcu`.
+- `--deck` — the DRC deck to run for `--engine curated` (the default);
+  required in that case, ignored for `--engine klayout`. Currently: `sky130`,
+  `gf180mcu`.
 - `--top` — top cell to check when the stream has more than one; omit to
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
   reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
-  absent from the stream exits `1` with a clean error.
+  absent from the stream exits `1` with a clean error. **Not supported yet
+  for `--engine klayout`** (see "Engine" → "klayout" below).
+- `--engine` — `curated` (default) or `klayout` (issue #565, opt-in). See
+  "Engine" below.
+- `--deck-file` — explicit path to a KLayout DRC-DSL script (`.lydrc`/`.drc`)
+  to run with `--engine klayout`, overriding `--pdk`/`--pdk-root` resolution.
+- `--pdk` / `--pdk-root` — PDK variant/install-root to resolve the native
+  deck script from, for `--engine klayout` (same resolution semantics as
+  `klt lef-abstract`'s `--pdk`/`--pdk-root`, see [`klt pdk`](pdk.md)).
+- `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
+  (`--engine klayout` only; default `300`).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
+
+### `"curated"` (default)
 
 `klt drc` runs fully headless via the pip `klayout` package's native
 `klayout.db.Region` check primitives (`width_check`, `space_check`,
 `separation_check`, `enclosing_check`, `enclosed_check`, `notch_check`,
 `overlap_check`) — the same C++ polygon-processing engine that backs
 KLayout's higher-level DRC-DSL scripts, invoked directly instead of through
-the script runner. There is **no dependency on the standalone `klayout`
-application binary or its `.drc`/`.lydrc` script runner** — only
+the script runner. By default there is **no dependency on the standalone
+`klayout` application binary or its `.drc`/`.lydrc` script runner** — only
 `pip install klayout` (already this repo's sole runtime dependency), so the
 command runs anywhere that already runs in CI.
 
@@ -33,6 +48,83 @@ A "deck" is our own declarative rule table (`DrcRule`: rule id, layer,
 check kind, threshold, optional second layer) that drives those check
 primitives — not the official sky130 `.lydrc` script executed verbatim. See
 "Coverage" below for what that means for rule fidelity.
+
+### `"klayout"` (issue #565 — opt-in, run the PDK's own native deck)
+
+Wraps the standalone `klayout` application binary as a subprocess, the same
+"wrap a proven engine" pattern `klt lvs`'s `"netgen"` engine uses (issue
+#343) — see [`klt lvs`](lvs.md) → "Engine" → `"netgen"` for the sibling
+writeup this one mirrors closely. Requires a `klayout` binary on `$PATH` —
+not the pip `klayout` package this repo otherwise depends on exclusively; a
+missing binary is a clear, actionable error (exit 1), never a traceback.
+
+Invokes:
+
+```
+klayout -b -r <deck_file> -rd input=<file> -rd report=<tmp>.lyrdb
+```
+
+— the standard batch-mode DRC-DSL invocation KLayout's own tooling
+documents, and the exact usage comment a real sky130A install's own
+`libs.tech/klayout/drc/sky130A.lydrc` embeds. The report is always written
+as a `.lyrdb` (RDB XML) file and parsed into the same `violations[]`/
+`rule_counts` shape the curated engine produces — never trusting the
+subprocess's exit code alone: `klayout -b -r` can exit `0` even when the
+deck script itself errored out before reaching its own `report(...)` call,
+so the *report file's own presence* is this engine's only trustworthy
+completion signal (mirroring `_run_netgen_lvs`'s "no log file at all" check
+in `lvs.py`). A timeout (`--timeout-s`, default `300`) or a malformed/
+unparseable report both raise a clean error rather than guessing.
+
+**Deck resolution.** `<deck_file>` is resolved, in order: `--deck-file` (an
+explicit path) if given; otherwise `klayout_tools.pdk.drc_deck_file(variant=
+--pdk, root=--pdk-root)` (issue #565), which resolves a PDK-native,
+directly-runnable `<variant>.lydrc`/`.drc` script from the same
+`libs.tech/klayout/drc/` directory `klt pdk find` already discovers —
+mirroring `klt lvs`'s `netgen_setup_file()` PDK-asset resolver one asset
+area over. Verified against a real, `volare`-fetched sky130A install: sky130
+ships exactly this shape, a single self-contained `sky130A.lydrc`. A PDK
+that instead ships its native deck as topic fragments under
+`drc/rule_decks/*.drc` plus a Python assembly/CLI wrapper (`drc/run_drc.py`,
+gf180mcu's real shape) has no single ready-to-run file this resolver can
+find without either reassembling those fragments itself — the harder,
+riskier "concatenate prologue/rule-tables/epilogue by hand" path this
+engine's design deliberately avoids — or driving `run_drc.py`'s own bespoke
+CLI contract, which is out of scope for this uniform `--engine klayout`
+flag. For that shape, resolution returns nothing and `klt drc` exits with an
+actionable error naming `--deck-file` as the way forward; a caller who has
+already produced a merged deck (e.g. by running the PDK's own `run_drc.py
+--macro_gen` ahead of time) can still reach it that way.
+
+**Known limitations, relative to the curated engine:**
+
+- **No `--top` support yet.** An arbitrary PDK-native DRC-DSL script has no
+  standard `-rd`-settable "restrict to this one top cell" variable this
+  engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
+  whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
+  clean error rather than a silently-ignored request.
+- **No `coverage` population.** Unlike the curated engine's declarative
+  `DrcRule` table, an external deck's rule set is opaque to `klt drc` — every
+  `coverage` sub-field (`deck_layers`, `layers_checked`,
+  `layers_in_stream_without_rules`, `rules_skipped`, `voltage_domain_warnings`,
+  `deck_scope`) is an empty list for this engine, never fabricated.
+- **`check` is always `"external"` and `layer` echoes the rule id.** An RDB
+  report's `<category>` has no structured `width`/`space`/... check-kind
+  identity or separate layer name the way this repo's own `DrcRule` does —
+  only whatever the deck's own `report(...)`/`.output(...)` calls named.
+- **No per-instance attribution.** `source_cell`/`source_path` are always
+  `null` for this engine — mapping a violation back to its originating
+  placed instance (see "Per-instance attribution" below) needs this
+  module's own instance-tree walk against the *input* layout, which an RDB
+  report does not carry.
+- **`bbox`/`polygon` fidelity depends on the RDB value kind.** Every
+  coordinate pair embedded in an item's reported geometry contributes to
+  `bbox` (converted from the RDB's micrometre user units back to the input
+  layout's own database units); `polygon` is populated only for a value
+  reported as a plain closed polygon (`polygon: (x,y;x,y;...)`) — every
+  other kind (`edge-pair:`, `box:`, `edge:`, ...) still bounds `bbox` but
+  leaves `polygon` `null`, matching the curated engine's own "`null` if the
+  check produced a degenerate edge pair" convention for the analogous case.
 
 ### `"enclosing"` / `"enclosed"` also catch zero-overlap escapes
 
@@ -529,7 +621,8 @@ On a run with findings:
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
 | `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`; per-command).       |
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
-| `deck`            | string                   | The deck name used (`"sky130"` or `"gf180mcu"`).                         |
+| `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
+| `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
 | `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |

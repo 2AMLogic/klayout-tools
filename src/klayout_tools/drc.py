@@ -3,14 +3,21 @@
 Pure library: :func:`run_drc` returns plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never prints, mirroring ``layers.py``.
 
-Headless invariant: uses only the pip ``klayout`` package's batch database
-API (``klayout.db``) — specifically ``Region``'s native check primitives
-(``width_check``, ``space_check``, ``separation_check``, ``enclosing_check``,
-``enclosed_check``, ``notch_check``, ``overlap_check``) — no GUI, no Qt, and
-no dependency on the standalone ``klayout`` application binary or its
-DRC-DSL script runner. See ``docs/cli/drc.md`` for the engine-choice
-rationale (native ``Region`` checks vs. running the official ``.lydrc``
-deck through the full KLayout application).
+Headless invariant (default engine, :func:`run_drc`): uses only the pip
+``klayout`` package's batch database API (``klayout.db``) — specifically
+``Region``'s native check primitives (``width_check``, ``space_check``,
+``separation_check``, ``enclosing_check``, ``enclosed_check``,
+``notch_check``, ``overlap_check``) — no GUI, no Qt, and by default no
+dependency on the standalone ``klayout`` application binary or its DRC-DSL
+script runner. See ``docs/cli/drc.md`` for the engine-choice rationale
+(native ``Region`` checks vs. running the official ``.lydrc`` deck through
+the full KLayout application).
+
+An opt-in second engine, :func:`run_drc_klayout_engine` (issue #565), does
+depend on that standalone binary — it shells out to it as a subprocess to
+run a PDK-native DRC-DSL script directly, still headless (``klayout -b``)
+but a distinct dependency posture from the default. See that function's own
+docstring and ``docs/cli/drc.md`` → "Engine" → ``"klayout"``.
 
 Limitation: each rule is checked against the *whole layout*, flattened per
 top cell (via ``Cell.begin_shapes_rec``, the same flattening idiom used
@@ -29,6 +36,10 @@ instance rather than only the top cell.
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 from typing import Any
 
 from ._layout import load_layout
@@ -629,3 +640,371 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+# --------------------------------------------------------------------------- #
+# "klayout" engine (issue #565): opt-in subprocess wrapper around the
+# standalone `klayout` application binary, running a PDK-native DRC-DSL
+# script (`.lydrc`/`.drc`) instead of this module's own curated `DrcRule`
+# tables. Mirrors `lvs.py`'s `"netgen"` engine (issue #343) closely --
+# binary-resolution-without-`shutil.which`-precheck, timeout handling, and
+# "never trust the exit code, parse the tool's own report" discipline are all
+# copied from `_run_netgen_lvs`/`_parse_netgen_report`/
+# `_cleanup_netgen_work_dir` (see those functions' docstrings in `lvs.py`).
+# See `docs/cli/drc.md`, "Engine" -> "klayout" (opt-in, issue #565) for the
+# caller-facing writeup.
+# --------------------------------------------------------------------------- #
+
+#: Default `klayout -b -r ...` wall-clock budget -- the same idiom as
+#: `lvs.py`'s `_NETGEN_DEFAULT_TIMEOUT_S`, but scoped to a single DRC deck
+#: run rather than a netlist compare. Overridable via `klt drc`'s
+#: `--timeout-s` flag.
+KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S = 300.0
+
+#: Matches a coordinate pair inside a KLayout report-database (`.lyrdb`) item
+#: value string, e.g. the `(0.2,1;0.2,0)` in
+#: `"edge-pair: (0,0;0,1)|(0.2,1;0.2,0)"` or the `(0,0;0,1;0.2,1;0.2,0)` in
+#: `"polygon: (0,0;0,1;0.2,1;0.2,0)"` (both forms verified empirically against
+#: a real `klayout -b -r ... -rd report=...lyrdb` run for this issue --
+#: KLayout's RDB writer always reports coordinates in the layout's *user*
+#: units, i.e. micrometres, regardless of the check kind). Deliberately
+#: generic across every value kind (`edge-pair:`, `polygon:`, `box:`,
+#: `edge:`, ...) rather than one regex per kind, since an arbitrary
+#: PDK-native deck can emit `.output()` calls this module has no static list
+#: of.
+_RDB_COORD_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)")
+
+
+def _strip_rdb_quotes(text: str) -> str:
+    """Strip a matching pair of leading/trailing single quotes KLayout's RDB
+    writer sometimes wraps a category name in (empirically, when the name
+    contains a period -- `'.'` is the RDB category-path hierarchy separator,
+    so a literal rule id like ``"poly.width.1"`` is quoted to disambiguate it
+    from a three-level category path; a name with no period, e.g. ``"L1"``,
+    is written bare). Both forms were verified against real
+    ``klayout -b -r ...`` output for this issue -- this normalises them back
+    to the same rule id either way."""
+    text = text.strip()
+    if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+        return text[1:-1]
+    return text
+
+
+def _rdb_value_points_um(value_text: str) -> list[tuple[float, float]]:
+    """Every coordinate pair in one RDB item ``<value>`` string, in the
+    layout's user units (micrometres) -- see :data:`_RDB_COORD_RE`."""
+    return [(float(x), float(y)) for x, y in _RDB_COORD_RE.findall(value_text)]
+
+
+def _parse_klayout_rdb_report(
+    report_path: str, dbu: float
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Classify a KLayout report-database (``.lyrdb``, RDB XML) file into
+    ``(violations, rule_counts)`` matching ``klt drc``'s existing
+    ``violations[]``/``rule_counts`` shape (see :func:`run_drc`'s docstring).
+
+    Unlike the curated engine (:func:`run_drc`), an arbitrary PDK-native
+    ``.lydrc``/``.drc`` script is not built from this module's own
+    :class:`~klayout_tools.decks.DrcRule` table -- there is no declarative
+    ``check``/``layer`` identity to report per violation, only whatever the
+    deck's own ``report(...)``/``.output(...)`` calls wrote to the RDB. This
+    parser is therefore necessarily generic: each RDB ``<category>`` becomes
+    one ``violations[].rule`` id (with its ``<description>`` carried
+    through), ``violations[].check`` is always the literal string
+    ``"external"`` (this module cannot recover a `width`/`space`/... kind
+    from RDB XML alone), and ``violations[].layer`` echoes the same rule id
+    (an external deck's own category naming is the only per-violation layer
+    identity available). ``source_cell``/``source_path`` are always ``None``
+    -- per-instance attribution (see :func:`_attribute_to_instance`) needs
+    this module's own instance-tree walk against the *input* layout, which an
+    RDB report does not carry.
+
+    ``bbox``/``polygon`` are derived from every coordinate pair embedded in
+    an item's ``<values><value>`` text (see :data:`_RDB_COORD_RE`), converted
+    from the RDB's reported micrometre user units back to the input layout's
+    own database units via ``dbu`` (``round(value_um / dbu)``) -- the same
+    integer-dbu convention :func:`run_drc`'s own ``violations[].bbox`` uses.
+    ``polygon`` is populated only for a value whose text starts with
+    ``"polygon:"`` (a plain closed-polygon vertex list echoes back
+    faithfully); every other value kind (``edge-pair:``, ``box:``, ``edge:``,
+    ...) still contributes its points to the ``bbox`` bound but leaves
+    ``polygon`` ``None``, matching :func:`run_drc`'s own "``None`` if the
+    check produced a degenerate edge pair" convention for the analogous case.
+    An item with no recognisable coordinate payload at all gets a degenerate
+    zero ``bbox`` rather than being silently dropped -- mirroring
+    ``_parse_netgen_report``'s "never silently drop a declared defect"
+    discipline (`lvs.py`).
+
+    Raises :class:`DrcError` if ``report_path`` is not well-formed XML at
+    all -- a malformed/truncated report must never silently parse as "no
+    violations found."
+    """
+    try:
+        tree = ET.parse(report_path)
+    except ET.ParseError as exc:
+        raise DrcError(
+            f"could not parse klayout DRC report '{report_path}': {exc}"
+        ) from exc
+
+    root = tree.getroot()
+
+    descriptions: dict[str, str] = {}
+    categories_el = root.find("categories")
+    if categories_el is not None:
+        for category_el in categories_el.findall("category"):
+            name_el = category_el.find("name")
+            if name_el is None or not name_el.text:
+                continue
+            rule_id = _strip_rdb_quotes(name_el.text)
+            desc_el = category_el.find("description")
+            descriptions[rule_id] = (
+                desc_el.text if desc_el is not None and desc_el.text else ""
+            )
+
+    violations: list[dict[str, Any]] = []
+    rule_counts: dict[str, int] = {}
+
+    items_el = root.find("items")
+    if items_el is None:
+        return violations, rule_counts
+
+    for item_el in items_el.findall("item"):
+        category_el = item_el.find("category")
+        cell_el = item_el.find("cell")
+        if (
+            category_el is None
+            or not category_el.text
+            or cell_el is None
+            or not cell_el.text
+        ):
+            continue
+        rule_id = _strip_rdb_quotes(category_el.text)
+        cell_name = cell_el.text
+
+        points_um: list[tuple[float, float]] = []
+        polygon_points_um: list[tuple[float, float]] | None = None
+        values_el = item_el.find("values")
+        if values_el is not None:
+            for value_el in values_el.findall("value"):
+                if not value_el.text:
+                    continue
+                value_text = value_el.text
+                value_points = _rdb_value_points_um(value_text)
+                points_um.extend(value_points)
+                if value_text.lstrip().startswith("polygon:") and value_points:
+                    polygon_points_um = value_points
+
+        if points_um:
+            xs = [round(x / dbu) for x, _ in points_um]
+            ys = [round(y / dbu) for _, y in points_um]
+            bbox = {
+                "left": min(xs),
+                "bottom": min(ys),
+                "right": max(xs),
+                "top": max(ys),
+            }
+            polygon = (
+                [[round(x / dbu), round(y / dbu)] for x, y in polygon_points_um]
+                if polygon_points_um
+                else None
+            )
+        else:
+            bbox = {"left": 0, "bottom": 0, "right": 0, "top": 0}
+            polygon = None
+
+        violations.append(
+            {
+                "rule": rule_id,
+                "description": descriptions.get(rule_id, ""),
+                "check": "external",
+                "layer": rule_id,
+                "cell": cell_name,
+                "source_cell": None,
+                "source_path": None,
+                "bbox": bbox,
+                "polygon": polygon,
+            }
+        )
+        rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
+
+    return violations, rule_counts
+
+
+def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
+    import shutil
+
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def run_drc_klayout_engine(
+    path: str,
+    deck_file: str,
+    top: str | None = None,
+    timeout_s: float = KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
+    typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
+    explicit ``--deck-file`` override) against the layout at ``path``, via
+    the standalone ``klayout`` application binary -- opt-in alongside
+    :func:`run_drc`'s curated, pip-only engine (see ``docs/cli/drc.md``,
+    "Engine").
+
+    Invokes::
+
+        klayout -b -r <deck_file> -rd input=<path> -rd report=<tmp>.lyrdb
+
+    -- the standard batch-mode DRC-DSL invocation KLayout's own tooling
+    documents and open_pdks' sky130 deck itself embeds as a usage comment
+    (verified for this issue against a real ``volare``-fetched sky130A
+    install's ``libs.tech/klayout/drc/sky130A.lydrc``). The report path is
+    always a ``.lyrdb`` (RDB XML) file, regardless of what ``deck_file``
+    itself would otherwise default to, so the result is always the
+    structured format :func:`_parse_klayout_rdb_report` reads -- never
+    KLayout's plain-text list alternative.
+
+    Mirrors ``lvs.py``'s ``_run_netgen_lvs`` in every structural way that
+    module's docstring calls out:
+
+    - **Binary resolution**: no ``shutil.which`` precheck -- ``subprocess.run``
+      is attempted directly and a ``FileNotFoundError`` is caught and
+      re-raised as an actionable :class:`DrcError` naming the missing binary
+      and how to get one, or how to fall back to the curated engine.
+    - **Timeout**: ``subprocess.TimeoutExpired`` -> :class:`DrcError`.
+    - **Never trusts the exit code.** ``klayout -b -r`` can exit ``0`` even
+      when the deck script itself errored out before reaching
+      ``report(...)`` (e.g. a deck expecting a variable this invocation does
+      not set) -- the *report file's own presence* is the only trustworthy
+      completion signal, mirroring netgen's "no log file at all" check.
+      Missing report file -> :class:`DrcError` carrying klayout's own
+      stdout/stderr, never a silent ``status: "clean"``.
+    - **Workdir**: ``tempfile.mkdtemp``, cleaned up via
+      :func:`_cleanup_klayout_drc_work_dir` (``shutil.rmtree(...,
+      ignore_errors=True)``) in a ``finally``.
+
+    ``top`` is not yet supported for this engine (unlike :func:`run_drc`'s
+    curated engine, issue #554): an arbitrary PDK-native DRC-DSL script has
+    no standard ``-rd``-settable "restrict to this one top cell" variable
+    this module can rely on generically (`sky130A.lydrc`, e.g., always reads
+    the whole ``$input`` stream). Passing ``top`` raises :class:`DrcError`
+    rather than silently ignoring the caller's stated scope request --
+    mirroring how the ``"netgen"`` LVS engine rejects request fields it has
+    no equivalent hook for (``lvs.py``'s ``hints``/``reference.device_bulk``/
+    ``options.parameter_tolerance`` checks).
+
+    The returned dict matches :func:`run_drc`'s documented top-level shape
+    (``schema_version``, ``file``, ``deck``, ``dbu_um``, ``status``,
+    ``violation_count``, ``rule_counts``, ``violations``, ``coverage``,
+    ``provenance``) plus one additive field, ``"engine": "klayout"`` (the
+    curated engine's own output carries no ``engine`` key at all, unchanged,
+    since it has always been the sole engine until this issue). ``deck`` is
+    ``deck_file`` itself (there is no separate short deck *name* the way the
+    curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
+    arbitrary PDK-native script is identified by its own path).
+
+    Unlike the curated engine, ``coverage`` cannot be meaningfully populated
+    for an externally-run script this module has no declarative rule table
+    for -- every ``coverage`` sub-field is an empty list (never fabricated),
+    a known, documented limitation (see ``docs/cli/drc.md``, "Engine" ->
+    "klayout").
+
+    Raises :class:`DrcError` for every failure mode above, plus a missing/
+    unreadable ``path`` or ``deck_file`` (checked before the subprocess is
+    launched, the same fail-fast order :func:`run_drc` uses for ``path``).
+    """
+    if top is not None:
+        raise DrcError(
+            "the klayout engine does not support --top yet -- omit --top, "
+            "or use the curated deck engine (the default) instead"
+        )
+    if not os.path.isfile(deck_file):
+        raise DrcError(f"deck file not found: {deck_file}")
+
+    # Validates `path` (missing/directory/unreadable) before the subprocess
+    # is launched, the same fail-fast order `run_drc` uses -- and gives this
+    # engine the input layout's own `dbu`, needed to convert the RDB report's
+    # micrometre coordinates back to database units (see
+    # `_parse_klayout_rdb_report`).
+    layout = load_layout(path, DrcError)
+    dbu = layout.dbu
+
+    work_dir = tempfile.mkdtemp(prefix="klt-drc-klayout-")
+    try:
+        report_path = os.path.join(work_dir, "report.lyrdb")
+        cmd = [
+            "klayout",
+            "-b",
+            "-r",
+            deck_file,
+            "-rd",
+            f"input={path}",
+            "-rd",
+            f"report={report_path}",
+        ]
+        try:
+            completed = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_s
+            )
+        except FileNotFoundError as exc:
+            raise DrcError(
+                "could not launch klayout: binary not found on PATH. "
+                "Install KLayout (https://www.klayout.de/build.html) or "
+                "omit --engine klayout to use the curated deck instead. "
+                f"({exc})"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise DrcError(
+                f"klayout did not complete within {timeout_s}s (raise "
+                "--timeout-s to allow more time)"
+            ) from exc
+
+        if not os.path.isfile(report_path):
+            # klayout -b -r can exit 0 even when the deck script errored out
+            # before reaching report(...) -- never trust the exit code alone
+            # (see this function's docstring). No report file at all means no
+            # trustworthy verdict is possible; surface klayout's own
+            # stdout/stderr rather than a bare "no report" message.
+            raise DrcError(
+                "klayout did not produce a report file -- the deck script "
+                "likely failed before completing. klayout's own output:\n"
+                + (completed.stdout or completed.stderr or "").strip()
+            )
+
+        violations, rule_counts = _parse_klayout_rdb_report(report_path, dbu)
+    finally:
+        _cleanup_klayout_drc_work_dir(work_dir)
+
+    violations.sort(
+        key=lambda v: (
+            v["rule"],
+            v["cell"],
+            v["bbox"]["left"],
+            v["bbox"]["bottom"],
+            v["bbox"]["right"],
+            v["bbox"]["top"],
+        )
+    )
+
+    return {
+        "schema_version": 1,
+        "file": path,
+        "deck": deck_file,
+        "engine": "klayout",
+        "dbu_um": dbu,
+        "status": "violations" if violations else "clean",
+        "violation_count": len(violations),
+        "rule_counts": dict(sorted(rule_counts.items())),
+        "violations": violations,
+        "coverage": {
+            "deck_layers": [],
+            "layers_checked": [],
+            "layers_in_stream_without_rules": [],
+            "rules_skipped": [],
+            "voltage_domain_warnings": [],
+            "deck_scope": [],
+        },
+        "provenance": build_provenance(
+            deck_name=os.path.basename(deck_file),
+            deck_path=deck_file,
+            input_path=path,
+        ),
+    }
