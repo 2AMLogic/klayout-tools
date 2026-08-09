@@ -206,6 +206,7 @@ import re
 import subprocess
 from typing import Any
 
+from ._paths import _load_request_json
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
 from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
@@ -378,18 +379,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field, matching every other request-taking verb's
     ``load_request``.
     """
-    if not os.path.exists(request_path):
-        raise PlaceAndRouteError(f"file not found: {request_path}")
-    if os.path.isdir(request_path):
-        raise PlaceAndRouteError(f"not a file: {request_path}")
-
-    try:
-        with open(request_path, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise PlaceAndRouteError(f"could not read request file: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise PlaceAndRouteError(f"request file is not valid JSON: {exc}") from exc
+    request = _load_request_json(request_path, PlaceAndRouteError)
 
     if not isinstance(request, dict):
         raise PlaceAndRouteError("request file must contain a JSON object")
