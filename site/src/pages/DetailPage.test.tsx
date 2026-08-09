@@ -6,11 +6,17 @@
  * than an embedded viewer), gated on the exact same condition as the
  * existing raw-file download link (`layout.downloadable === true &&
  * layout.layout_file !== undefined`).
+ *
+ * Also covers the Signals section's canary-block degradation (issue #653):
+ * when `layout.signals` carries corners with no `waveform` artifact (e.g.
+ * the sky130-bandgap/gf180-bandgap canary blocks), the page must render the
+ * static measurements table `WaveformViewer` falls back to, not a
+ * corner-toggle fieldset wired to a plot that can never draw.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { DetailPage } from "./DetailPage";
-import type { Layout } from "@/data/types";
+import type { Layout, LayoutSignals } from "@/data/types";
 
 afterEach(cleanup);
 
@@ -76,5 +82,53 @@ describe("DetailPage viewer link", () => {
 
     expect(screen.queryByRole("link", { name: "View in browser" })).not.toBeInTheDocument();
     expect(screen.getByText("No download available.")).toBeInTheDocument();
+  });
+});
+
+describe("DetailPage Signals section (issue #653)", () => {
+  // Shaped like a canary block's `signals`: real per-corner measurement
+  // data, but no corner carries a `waveform` artifact (no `signals/`
+  // directory staged for these blocks at all).
+  const noTraceSignals: LayoutSignals = {
+    schema_version: 1,
+    engine: "ngspice",
+    engine_version: "46",
+    status: "pass",
+    corner_count: 1,
+    default_corner_id: "tt/3.300V/27C",
+    passed: 1,
+    failed: 0,
+    errored: 0,
+    measurements: [],
+    corners: [
+      {
+        corner_id: "tt/3.300V/27C",
+        process: "tt",
+        supply_v: { vdd: 3.3 },
+        temperature_c: 27,
+        status: "pass",
+        runtime_s: 1.2,
+        measurements: [{ name: "vref", value: 1.2, unit: "V", status: "pass", margin: 0.02 }],
+        diagnostics: [],
+      },
+    ],
+  };
+
+  it("renders the static measurements table, not a corner-toggle + plot, for a bandgap-style canary block", () => {
+    render(
+      <DetailPage layout={makeLayout({ slug: "sky130-bandgap", signals: noTraceSignals })} />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Signals" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Toggle corner/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("waveform-plot")).not.toBeInTheDocument();
+    expect(screen.getByTestId("signals-measurements-table")).toBeInTheDocument();
+    expect(screen.getByText("tt/3.300V/27C")).toBeInTheDocument();
+  });
+
+  it("omits the Signals section entirely when layout.signals is absent", () => {
+    render(<DetailPage layout={makeLayout({ signals: undefined })} />);
+
+    expect(screen.queryByRole("heading", { name: "Signals" })).not.toBeInTheDocument();
   });
 });

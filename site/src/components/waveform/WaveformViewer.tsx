@@ -38,6 +38,14 @@ import {
  * a re-run's result into the exact same plot the static `signals` data
  * populates. Omitted/`null` preserves this component's pre-#151 behavior
  * exactly (every existing prop shape still renders identically).
+ *
+ * When no corner in `signals.corners` carries a `waveform` artifact (and no
+ * `liveWaveform` is supplied) there is nothing for the plot to ever draw —
+ * e.g. the canary blocks, whose `signals` is real per-corner measurement
+ * data but ships no waveform JSON (issue #653). In that case this component
+ * skips the corner-toggle + plot affordance entirely and instead renders a
+ * static, readable table of each corner's measurements — the interactive
+ * controls never appear attached to a plot that can't draw.
  */
 export interface WaveformViewerProps {
   slug: string;
@@ -64,6 +72,68 @@ function statusColor(status: SignalsCorner["status"]): string {
   if (status === "pass") return "text-cyan";
   if (status === "fail") return "text-orange";
   return "text-red";
+}
+
+/**
+ * Static, readable fallback for a `signals.corners` set where no corner
+ * carries a `waveform` artifact — e.g. the canary blocks (issue #653). One
+ * row per corner measurement (corner id + status repeated per row, so each
+ * row is self-contained); corners with zero measurements still get one row
+ * so their PVT point and status remain visible.
+ */
+function SignalsMeasurementsTable({ corners }: { corners: SignalsCorner[] }) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border" data-testid="signals-measurements-table">
+      <table className="w-full border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-border">
+            <th scope="col" className="bg-panel px-3.5 py-2 text-left font-medium text-fog-dim">
+              Corner
+            </th>
+            <th scope="col" className="bg-panel px-3.5 py-2 text-left font-medium text-fog-dim">
+              Status
+            </th>
+            <th scope="col" className="bg-panel px-3.5 py-2 text-left font-medium text-fog-dim">
+              Measurement
+            </th>
+            <th scope="col" className="bg-panel px-3.5 py-2 text-left font-medium text-fog-dim">
+              Value
+            </th>
+            <th scope="col" className="bg-panel px-3.5 py-2 text-left font-medium text-fog-dim">
+              Margin
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {corners.flatMap((corner) =>
+            corner.measurements.length > 0
+              ? corner.measurements.map((m) => (
+                  <tr key={`${corner.corner_id}:${m.name}`} className="border-b border-border last:border-b-0">
+                    <td className="px-3.5 py-2 text-left font-mono text-fog">{corner.corner_id}</td>
+                    <td className={`px-3.5 py-2 text-left ${statusColor(corner.status)}`}>{corner.status}</td>
+                    <td className="px-3.5 py-2 text-left font-mono text-fog">{m.name}</td>
+                    <td className="px-3.5 py-2 text-left font-mono text-fog">
+                      {m.value === null ? "—" : formatEngineering(m.value, m.unit ?? undefined)}
+                    </td>
+                    <td className="px-3.5 py-2 text-left font-mono text-fog">
+                      {m.margin === null ? "—" : formatEngineering(m.margin, m.unit ?? undefined)}
+                    </td>
+                  </tr>
+                ))
+              : [
+                  <tr key={corner.corner_id} className="border-b border-border last:border-b-0">
+                    <td className="px-3.5 py-2 text-left font-mono text-fog">{corner.corner_id}</td>
+                    <td className={`px-3.5 py-2 text-left ${statusColor(corner.status)}`}>{corner.status}</td>
+                    <td className="px-3.5 py-2 text-left text-fog-dim" colSpan={3}>
+                      No measurements.
+                    </td>
+                  </tr>,
+                ],
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerProps) {
@@ -297,6 +367,18 @@ export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerPr
 
   if (corners.length === 0) {
     return <p className="text-fog-dim">No signals data.</p>;
+  }
+
+  // Nothing for the plot to ever draw: no corner has a `waveform` artifact,
+  // and no live re-run result was seeded in either. Degrade to a static
+  // measurements table instead of a corner-toggle fieldset wired to a plot
+  // that can never render (issue #653).
+  if (!corners.some((corner) => corner.waveform !== undefined) && !liveWaveform) {
+    return (
+      <div className="flex flex-col gap-4" data-testid="waveform-viewer">
+        <SignalsMeasurementsTable corners={corners} />
+      </div>
+    );
   }
 
   const cursorSweepUnit = loadedWaveforms[0] ? sweepName(loadedWaveforms[0]) : "x";

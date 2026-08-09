@@ -234,4 +234,58 @@ describe("WaveformViewer", () => {
     );
     expect(screen.getByText("No signals data.")).toBeInTheDocument();
   });
+
+  describe("no-traces (measurements-only) shape (issue #653)", () => {
+    // Shaped like the canary blocks' `signals`: real per-corner measurement
+    // data, but no corner carries a `waveform` artifact (no `signals/`
+    // directory staged for these blocks at all).
+    const noTraceSignals: LayoutSignals = {
+      ...signals,
+      corners: signals.corners.map(({ waveform: _waveform, ...corner }) => corner),
+    };
+
+    it("renders a static measurements table instead of the corner-toggle + plot UI", async () => {
+      render(<WaveformViewer slug="sky130-bandgap" signals={noTraceSignals} />);
+
+      // The interactive affordances a plot that can never draw must not
+      // appear at all.
+      expect(screen.queryByLabelText(/Toggle corner/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: "PVT corner selection" })).not.toBeInTheDocument();
+      expect(screen.queryByTestId("waveform-plot")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Zoom in" })).not.toBeInTheDocument();
+
+      // The per-corner measurement evidence is surfaced as a static table.
+      const table = screen.getByTestId("signals-measurements-table");
+      expect(table).toBeInTheDocument();
+      expect(within(table).getByText("tt/1.800V/27C")).toBeInTheDocument();
+      expect(within(table).getByText("ss/1.620V/125C")).toBeInTheDocument();
+      expect(within(table).getAllByText("tphl").length).toBe(2);
+      // No fetch should ever be attempted -- there is no waveform to load.
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("renders a row for a corner with zero measurements", () => {
+      const emptyMeasurementSignals: LayoutSignals = {
+        ...noTraceSignals,
+        corners: [{ ...noTraceSignals.corners[0], measurements: [] }],
+      };
+      render(<WaveformViewer slug="gf180-bandgap" signals={emptyMeasurementSignals} />);
+
+      const table = screen.getByTestId("signals-measurements-table");
+      expect(within(table).getByText("tt/1.800V/27C")).toBeInTheDocument();
+      expect(within(table).getByText("No measurements.")).toBeInTheDocument();
+    });
+
+    it("still renders the interactive plot when only SOME corners have a waveform", async () => {
+      const mixedSignals: LayoutSignals = {
+        ...signals,
+        corners: [signals.corners[0], { ...signals.corners[1], waveform: undefined }],
+      };
+      render(<WaveformViewer slug="sky130_fd_sc_hd__inv_1" signals={mixedSignals} />);
+
+      expect(screen.getByLabelText("Toggle corner tt/1.800V/27C")).toBeInTheDocument();
+      expect(screen.queryByTestId("signals-measurements-table")).not.toBeInTheDocument();
+      await waitFor(() => expect(screen.getByTestId("waveform-plot")).toBeInTheDocument());
+    });
+  });
 });
