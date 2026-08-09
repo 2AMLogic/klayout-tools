@@ -226,6 +226,22 @@ not `klt --version`, if you need to detect this kind of drift.
   `docs/design/design-pipeline.md` §4) or grade the checklist's non-JSON
   items (design-source hygiene, testbenches shipped). See
   `docs/cli/signoff.md`.
+- 2026-08-09 — `klt drc`: new opt-in `--engine klayout` (#565), a subprocess
+  wrapper around the standalone `klayout` application binary that runs a
+  PDK-native DRC-DSL script (`.lydrc`/`.drc`) instead of this repo's own
+  curated `Region`-primitive decks — mirroring `klt lvs`'s `"netgen"`
+  engine (#343): no `shutil.which` precheck (a missing binary raises a
+  clean, actionable error), the subprocess's exit code is never trusted
+  (only the report file's own presence/content is), and the report is
+  parsed from KLayout's own `.lyrdb` (RDB XML) output into the same
+  `violations[]`/`rule_counts` shape the curated engine produces. The deck
+  script is resolved via a new PDK-asset helper,
+  `klayout_tools.pdk.drc_deck_file()` (mirroring `netgen_setup_file()`), or
+  given directly via `--deck-file`. By default `klt drc` still has no
+  dependency on the standalone binary at all — this is opt-in, and does not
+  change the curated engine's own JSON schema (the new `engine`/one-field
+  is additive and only present on `--engine klayout` output). See
+  `docs/cli/drc.md` → "Engine" → `"klayout"`.
 - 2026-08-08 — new `klt deck resolve` verb (#623): resolves one of klt's
   built-in DRC/LVS rule decks (sky130, gf180mcu) by content hash
   (`--content-hash sha256:<hex>`, matching `provenance.deck.content_hash`'s

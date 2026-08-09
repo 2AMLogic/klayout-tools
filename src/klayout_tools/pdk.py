@@ -375,6 +375,73 @@ def netgen_setup_file(
     return None
 
 
+def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | None:
+    """Resolve the **filename** of the PDK's native, directly-runnable
+    KLayout DRC-DSL rule-deck script inside the already-discovered
+    ``assets["klayout"]`` directory's ``drc/`` subdirectory (issue #565),
+    mirroring :func:`netgen_setup_file`'s shape one asset area over.
+
+    ``find_pdk`` (and its ``_ASSET_LAYOUT`` table) only ever resolved the
+    containing ``libs.tech/klayout`` directory -- the specific script a
+    caller must hand to ``klayout -b -r <script> -rd input=... -rd
+    report=...`` was not looked up anywhere in this repo. Resolves
+    ``variant``/``root`` exactly as :func:`find_pdk` does (same precedence,
+    same :class:`PdkNotFoundError` on no match).
+
+    Naming convention (verified against a real ``volare``-fetched sky130A
+    install for this issue): open_pdks stages sky130's complete, ready-to-run
+    deck as a single file named after the variant,
+    ``libs.tech/klayout/drc/<variant>.lydrc`` (e.g. ``sky130A.lydrc``) --
+    self-contained, no assembly step, and already written to read its input/
+    report paths from the ``$input``/``$report`` DRC-DSL globals this
+    module's caller sets via ``-rd`` (confirmed by the script's own embedded
+    usage comment: ``klayout -b -rd input=... -rd report=... -r
+    drc_sky130.drc``). This function prefers that variant-named file (the
+    same "prefer the specific name" precedence :func:`netgen_setup_file`
+    uses) and falls back to a bare ``<variant>.drc``.
+
+    Not every PDK's native deck fits that single-file shape: gf180mcu (also
+    verified against a real fetched install) ships its native deck instead as
+    ~60 topic fragments under ``drc/rule_decks/*.drc`` plus a Python
+    assembly/CLI wrapper (``drc/run_drc.py``) that concatenates the right
+    subset at run time -- a distinct, PDK-specific invocation contract (its
+    own ``--variant``/``--table``/``--run_dir`` flags) this function
+    deliberately does not attempt to drive generically, the same "avoid
+    hand-assembling rule-table fragments ourselves" boundary
+    ``docs/cli/drc.md``'s "Engine" section draws for the curated-deck engine.
+    For a variant shaped like that, this function returns ``None`` rather
+    than guessing or reimplementing that assembly -- a caller who has already
+    produced a merged single-file deck (e.g. by running the PDK's own
+    ``run_drc.py --macro_gen`` ahead of time) can still reach it via `klt
+    drc`'s ``--deck-file`` override, which bypasses this resolver entirely.
+
+    Returns the absolute path to the resolved script, or ``None`` when the
+    variant ships no ``klayout`` asset directory at all, no ``drc/``
+    subdirectory, or that directory contains neither expected filename --
+    never guessed or fabricated, matching this module's existing
+    ``None``-means-absent convention (see :func:`_asset_dirs`/
+    :func:`netgen_setup_file`).
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves at all
+    (the same condition :func:`find_pdk` raises for).
+    """
+    info = find_pdk(variant=variant, root=root)
+    klayout_dir = info["assets"]["klayout"]
+    if klayout_dir is None:
+        return None
+
+    drc_dir = os.path.join(klayout_dir, "drc")
+    if not os.path.isdir(drc_dir):
+        return None
+
+    for name in (f"{info['variant']}.lydrc", f"{info['variant']}.drc"):
+        candidate = os.path.join(drc_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    return None
+
+
 #: Tech-LEF corner suffixes open_pdks ships alongside a standard-cell
 #: library's merged macro LEF (issue #397 / #425 -- the OpenROAD survey's own
 #: finding that ``_ASSET_LAYOUT`` has no ``lef`` key at all). Unlike

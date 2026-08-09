@@ -134,20 +134,24 @@ def create_parser() -> argparse.ArgumentParser:
         help="run a headless DRC deck against a GDSII/OASIS stream",
         description=(
             "Run a DRC rule deck against a GDSII or OASIS layout file and "
-            "report violations as structured data. Runs fully headless via "
-            "KLayout's native Region check primitives — no GUI, no Qt, no "
-            "standalone klayout binary."
+            "report violations as structured data. By default (--engine "
+            "curated), runs fully headless via KLayout's native Region "
+            "check primitives — no GUI, no Qt, no standalone klayout "
+            "binary. --engine klayout opts into shelling out to a "
+            "standalone klayout binary to run a PDK-native DRC-DSL deck "
+            "instead (issue #565)."
         ),
     )
     drc_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     drc_parser.add_argument(
         "--deck",
-        required=True,
+        default=None,
         help=(
-            "DRC deck to run (currently: sky130, gf180mcu). Not validated by "
-            "argparse -- an unknown deck name exits 1 with a clean error, "
-            "per docs/cli/drc.md's exit-code contract, rather than "
-            "argparse's usage-error exit 2."
+            "DRC deck to run (currently: sky130, gf180mcu). Required for "
+            "--engine curated (the default); ignored for --engine klayout. "
+            "Not validated by argparse -- an unknown deck name exits 1 with "
+            "a clean error, per docs/cli/drc.md's exit-code contract, "
+            "rather than argparse's usage-error exit 2."
         ),
     )
     drc_parser.add_argument(
@@ -155,7 +159,52 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "top cell to check when the stream has more than one; omit to "
-            "check every top cell"
+            "check every top cell. Not supported yet for --engine klayout."
+        ),
+    )
+    drc_parser.add_argument(
+        "--engine",
+        choices=("curated", "klayout"),
+        default="curated",
+        help=(
+            "'curated' (default): klt's own pip-only Region-primitive deck "
+            "(--deck required). 'klayout' (issue #565, opt-in): shells out "
+            "to a standalone klayout binary on PATH to run a PDK-native "
+            "DRC-DSL script (.lydrc/.drc), resolved via --pdk/--pdk-root or "
+            "given directly via --deck-file. See docs/cli/drc.md, 'Engine'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        help=(
+            "explicit path to a KLayout DRC-DSL script (.lydrc/.drc) to run "
+            "with --engine klayout, overriding --pdk/--pdk-root resolution"
+        ),
+    )
+    drc_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK variant to resolve the native deck from (e.g. sky130A), "
+            "for --engine klayout; overrides $PDK"
+        ),
+    )
+    drc_parser.add_argument(
+        "--pdk-root",
+        dest="pdk_root",
+        default=None,
+        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
+    )
+    drc_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=300.0,
+        help=(
+            "wall-clock budget in seconds for the klayout subprocess "
+            "(--engine klayout only)"
         ),
     )
     _add_format_arg(drc_parser)

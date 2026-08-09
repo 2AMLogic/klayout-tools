@@ -488,6 +488,108 @@ def test_netgen_setup_file_no_install_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# drc_deck_file (issue #565)
+#
+# Naming convention verified against a real, volare-fetched sky130A install:
+# open_pdks stages sky130's complete, ready-to-run native DRC deck as a
+# single variant-named file, `libs.tech/klayout/drc/<variant>.lydrc`. A real
+# gf180mcuC install, by contrast, ships no such single ready file at that
+# path -- only `drc/run_drc.py` plus `drc/rule_decks/*.drc` fragments -- so
+# this resolver deliberately returns `None` for that shape rather than
+# guessing (see `drc_deck_file`'s own docstring).
+# --------------------------------------------------------------------------- #
+
+
+def test_drc_deck_file_prefers_variant_named_lydrc(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    drc_dir = variant_dir / "libs.tech" / "klayout" / "drc"
+    drc_dir.mkdir(parents=True)
+    (drc_dir / "sky130A.lydrc").write_text("# native deck\n")
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result == str(drc_dir / "sky130A.lydrc")
+
+
+def test_drc_deck_file_falls_back_to_variant_named_drc(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    drc_dir = variant_dir / "libs.tech" / "klayout" / "drc"
+    drc_dir.mkdir(parents=True)
+    (drc_dir / "sky130A.drc").write_text("# native deck\n")
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result == str(drc_dir / "sky130A.drc")
+
+
+def test_drc_deck_file_none_when_gf180mcu_shaped_fragments_only(tmp_path):
+    """gf180mcu's real shape: `run_drc.py` + `rule_decks/*.drc` fragments,
+    no single ready-to-run `<variant>.lydrc`/`.drc` file -- this resolver
+    must not guess or assemble one; a caller wanting to run gf180mcu's
+    native deck must pass `--deck-file` pointing at an already-produced
+    merged deck instead (see the function's own docstring)."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuC", assets=("klayout",))
+    drc_dir = variant_dir / "libs.tech" / "klayout" / "drc"
+    rule_decks_dir = drc_dir / "rule_decks"
+    rule_decks_dir.mkdir(parents=True)
+    (drc_dir / "run_drc.py").write_text("# assembly wrapper\n")
+    (rule_decks_dir / "main.drc").write_text("# fragment\n")
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_drc_deck_file_none_when_directory_has_neither_file(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    (variant_dir / "libs.tech" / "klayout" / "drc").mkdir(parents=True)
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_drc_deck_file_none_when_no_drc_subdirectory(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("klayout",))  # no drc/ subdir yet
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_drc_deck_file_none_when_pdk_ships_no_klayout_asset(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))  # no "klayout"
+
+    result = pdk.drc_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_drc_deck_file_resolves_variant_and_root_like_find_pdk(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130B", assets=("klayout",))
+    _make_install(root, "sky130A", assets=("klayout",))
+    drc_dir = variant_dir / "libs.tech" / "klayout" / "drc"
+    drc_dir.mkdir(parents=True)
+    (drc_dir / "sky130B.lydrc").write_text("# native deck\n")
+
+    result = pdk.drc_deck_file(variant="sky130B", root=str(root))
+
+    assert result == str(drc_dir / "sky130B.lydrc")
+
+
+def test_drc_deck_file_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.drc_deck_file(root=str(tmp_path / "does-not-exist"))
+
+
+# --------------------------------------------------------------------------- #
 # lef_files (issue #397 / #425 -- the OpenROAD survey's own finding that
 # `_ASSET_LAYOUT` never carried a `lef` key; naming convention verified
 # against a real, volare-fetched `sky130A` install for issue #425's own
