@@ -20,6 +20,21 @@ deliberately left without a ``layout.json`` so the checked-in ``blocks/``
 tree demonstrates the gallery loader's ``no_artifacts`` handling on a real
 (non-synthetic) directory — see ``blocks/README.md``.
 
+Downloads / viewer link (issue #652)
+-------------------------------------
+
+Every block written here also gets its source GDS copied to
+``output/<slug>.gds`` and recorded as ``layout.json``'s ``layout_file``,
+with ``downloadable: true``. This is safe for every corpus file (unlike the
+canary blocks ingested by ``scripts/ingest-canary.py``): each one is a
+standard-cell layout redistributed verbatim from an Apache-2.0-licensed
+upstream PDK repo (``tests/corpus/README.md``), so there is no #62
+public-repo gate to check. Setting both fields is what makes
+``site/scripts/copy-renders.mjs`` stage the file into the built site and
+``DetailPage.tsx``'s Downloads section (raw download + the Tiny Tapeout
+hosted viewer link, issue #249) actually render instead of staying dead
+branches.
+
 Signals (issue #99, epic #90 phase 2)
 --------------------------------------
 
@@ -38,6 +53,7 @@ issue #99, for a fast local iteration loop.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -138,12 +154,26 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
     cells = run_klt("cells", str(rel))
     instance_count = sum(c.get("instances", 0) for c in cells.get("cells", []))
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stage the source GDS into the block's own output/ directory and record
+    # it as `layout_file` (issue #652): every corpus file is a standard-cell
+    # layout downloaded verbatim from an Apache-2.0-licensed upstream PDK
+    # repo (see tests/corpus/README.md "Provenance" / "License note"), so
+    # redistributing it here is clear -- unlike the two canary blocks
+    # (`gf180-bandgap`/`sky130-bandgap`), which stay gated behind #62's
+    # public-repo check in `scripts/ingest-canary.py` and are not touched by
+    # this script. `downloadable: true` + `layout_file` together are what
+    # `site/scripts/copy-renders.mjs` stages into the built site and
+    # `DetailPage.tsx`'s `canDownload` gate checks for.
+    staged_gds = output_dir / gds_path.name
+    shutil.copyfile(gds_path, staged_gds)
+
     # Field shape mirrors `klt layout-metrics` (issue #61) exactly — see
     # src/klayout_tools/layout_metrics.py and docs/cli/layout-metrics.md. In
     # particular: no `$schema` (the envelope key is `schema_version`), no
-    # `pdk` field, and `name` is always present. `layout_file`/`drc` are
-    # omitted here because this bootstrap reads the corpus GDS in place
-    # rather than materializing a layout file inside the block dir.
+    # `pdk` field, and `name` is always present. `drc` is omitted here
+    # because this bootstrap doesn't run a DRC deck against the corpus GDS.
     layout = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -154,12 +184,13 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
         "layer_count": layers["layer_count"],
         "cell_count": cells["cell_count"],
         "instance_count": instance_count,
+        "layout_file": staged_gds.name,
+        "downloadable": True,
     }
 
     if not skip_signals:
         _attach_signals(slug, block_dir, layout)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     layout_path = output_dir / "layout.json"
     layout_path.write_text(json.dumps(layout, indent=2) + "\n")
     print(f"  {slug}: wrote {layout_path.relative_to(REPO_ROOT)}")
