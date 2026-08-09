@@ -30,6 +30,13 @@ checklist** in `docs/design-evidence-tiers.md`. Work through the ten items
 in order; for each, record **PRESENT / PARTIAL / ABSENT**, the artifact
 paths, and the pass condition's actual state.
 
+**Digital / mixed-signal blocks**: this skill still only walks the analog
+ten-item list below. For a digital block, or a digital partition of a
+mixed-signal block, map each item through "Digital and mixed-signal T1
+equivalents" in `docs/design-evidence-tiers.md` by hand before recording a
+verdict — the skill does not yet branch on block kind automatically (#640
+tracks giving it that branch).
+
 ### Gathering rules
 
 1. **Find the newest artifact of each family, then check freshness.**
