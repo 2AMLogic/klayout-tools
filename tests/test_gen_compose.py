@@ -1744,6 +1744,179 @@ def test_route_two_pin_still_rejects_a_waypoint_that_crosses_a_block():
     assert "block 'a'" in result["reason"]
 
 
+def _narrow_gap_pair_fixture():
+    """Two blocks packed closer together than the route width, with their
+    ports on the row's *outer* edges at different y.
+
+    This is the shape the channel-width routability heuristic (check 1) fires
+    on: both ports face x, their y differs (so the fixed one-jog backbone
+    needs a vertical jog), and the only gap between the two bboxes is 0.1um
+    -- narrower than the 0.3um route. Both ports sit exactly on their own
+    block's outer edge, so an approach from outside the row crosses neither
+    block's interior at all.
+    """
+    blocks = {
+        "a": {
+            "id": "a",
+            "port_names": {"Y"},
+            "ports": {"Y": {"x_um": 0.0, "y_um": 5.0, "direction_deg": 180}},
+        },
+        "b": {
+            "id": "b",
+            "port_names": {"A"},
+            "ports": {"A": {"x_um": 20.1, "y_um": 6.0, "direction_deg": 0}},
+        },
+    }
+    offsets = {"a": {"x": 0.0, "y": 0.0}, "b": {"x": 0.0, "y": 0.0}}
+    bboxes = {
+        "a": {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0},
+        # 0.1um channel between the two blocks -- narrower than width_um=0.3.
+        "b": {"x0": 10.1, "y0": 0.0, "x1": 20.1, "y1": 10.0},
+    }
+    pin_a = {"block": "a", "port": "Y"}
+    pin_b = {"block": "b", "port": "A"}
+    return blocks, offsets, bboxes, pin_a, pin_b
+
+
+def test_route_two_pin_narrow_channel_still_rejected_without_waypoints():
+    # Baseline for the regression below: with no waypoints_um the fixed
+    # one-jog backbone really does have to squeeze its vertical jog through
+    # the 0.1um channel, so check 1 rejects -- unchanged behaviour.
+    blocks, offsets, bboxes, pin_a, pin_b = _narrow_gap_pair_fixture()
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "vertical jog needs a channel" in result["reason"]
+
+
+def test_route_two_pin_waypoints_bypass_the_narrow_channel_heuristic():
+    # Regression (#634 review): the channel-width heuristic used to run
+    # unconditionally, *before* manhattan_backbone() was even called, and
+    # reasoned about a direct jog between the raw port positions rather than
+    # about the path actually drawn. So a caller who supplied waypoints_um
+    # routing entirely over the top of the row -- never going anywhere near
+    # the 0.1um channel -- still got
+    #   routed: False, "vertical jog needs a channel >= width 0.3um ..."
+    # which silently defeated waypoints_um in precisely the tightly-packed
+    # case (gap < route width) that most needs a caller-supplied route-around.
+    blocks, offsets, bboxes, pin_a, pin_b = _narrow_gap_pair_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        # Up the west side of block a, straight across above both blocks'
+        # shared bbox top (y=10), then down the east side of block b.
+        waypoints_um=[(-0.3, 11.0), (20.4, 11.0)],
+    )
+    assert result["routed"] is True
+    assert result["reason"] is None
+    assert result["points_um"][0] == (0.0, 5.0)
+    assert result["points_um"][-1] == (20.1, 6.0)
+    assert result["route_length_um"] is not None
+    # The drawn path never enters the narrow channel it was rejected over.
+    assert not any(10.0 < x < 10.1 for x, _ in result["points_um"])
+
+
+def _self_net_same_row_fixture():
+    """One block with three same-row, same-facing (north) ports on the route
+    layer -- the #453 degenerate-jog shape: bussing E0 to E1 with B0 sitting
+    between them."""
+    layer = {"layer": 68, "datatype": 20}
+    blocks = {
+        "u": {
+            "id": "u",
+            "port_names": {"E0", "B0", "E1"},
+            "ports": {
+                "E0": {
+                    "x_um": 0.0,
+                    "y_um": 10.0,
+                    "direction_deg": 90,
+                    "width_um": 0.22,
+                    "layer": layer,
+                },
+                "B0": {
+                    "x_um": 5.0,
+                    "y_um": 10.0,
+                    "direction_deg": 90,
+                    "width_um": 0.22,
+                    "layer": layer,
+                },
+                "E1": {
+                    "x_um": 10.0,
+                    "y_um": 10.0,
+                    "direction_deg": 90,
+                    "width_um": 0.22,
+                    "layer": layer,
+                },
+            },
+        }
+    }
+    offsets = {"u": {"x": 0.0, "y": 0.0}}
+    bboxes = {"u": {"x0": -1.0, "y0": 0.0, "x1": 11.0, "y1": 10.0}}
+    pin_a = {"block": "u", "port": "E0"}
+    pin_b = {"block": "u", "port": "E1"}
+    return blocks, offsets, bboxes, pin_a, pin_b
+
+
+def test_route_two_pin_self_net_same_row_still_rejected_without_waypoints():
+    # Baseline: #453's conservative same-direction fallback still rejects the
+    # degenerate single-jog backbone that busses E0 to E1 straight over B0.
+    blocks, offsets, bboxes, pin_a, pin_b = _self_net_same_row_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a, pin_b, blocks, offsets, bboxes, 0.3, route_layer=(68, 20)
+    )
+    assert result["routed"] is False
+    assert "'B0'" in result["reason"]
+
+
+def test_route_two_pin_waypoints_bypass_the_same_row_degenerate_jog_check():
+    # Regression (#634 review, same defect class as the channel-width check):
+    # #453's conservative fallback rejects on the raw port positions alone,
+    # justified *only* by manhattan_backbone() collapsing to a single jog
+    # lifted one stub width along the ports' own row. Supplying waypoints_um
+    # replaces that shape entirely, so a caller lifting the bus well clear of
+    # B0's pad must not be rejected by a prediction about a path that is
+    # never drawn.
+    blocks, offsets, bboxes, pin_a, pin_b = _self_net_same_row_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer=(68, 20),
+        waypoints_um=[(0.0, 12.0), (10.0, 12.0)],
+    )
+    assert result["routed"] is True
+    assert result["reason"] is None
+    assert result["route_length_um"] is not None
+
+
+def test_route_two_pin_waypoints_do_not_disable_the_self_net_pad_check():
+    # ...but the pad-footprint test (check 3 proper) measures the *drawn*
+    # points, so waypoints that really do run across B0's inflated footprint
+    # are still rejected. Skipping the fixed-shape fallback above must not be
+    # mistaken for skipping the geometry check.
+    blocks, offsets, bboxes, pin_a, pin_b = _self_net_same_row_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.3,
+        route_layer=(68, 20),
+        waypoints_um=[(0.0, 10.1), (10.0, 10.1)],
+    )
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "'B0'" in result["reason"]
+
+
 def test_compose_route_two_pin_waypoints_um_rejects_malformed_entries(
     tmp_path, pdk_root
 ):
