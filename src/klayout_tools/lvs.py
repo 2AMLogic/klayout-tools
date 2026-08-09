@@ -102,16 +102,16 @@ indistinguishable from one where the numbers actually agreed.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._paths import _load_request_json, _resolve_relative
+from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     InvalidDeckOptionError,
@@ -241,6 +241,9 @@ class LvsError(Exception):
     """
 
 
+_REQUIRED_REQUEST_FIELDS = ("layout", "reference")
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt lvs`` request JSON file.
 
@@ -258,14 +261,12 @@ def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
     request, however it was sourced (file, inline JSON, stdin). ``source``
     is folded into the "must be a JSON object" error for context.
     """
-    if not isinstance(data, dict):
-        raise LvsError(f"{source} must contain a JSON object")
-
-    for field in ("layout", "reference"):
-        if field not in data:
-            raise LvsError(f"request is missing required field: {field}")
-
-    return data
+    return _shared_validate_request_shape(
+        data,
+        source,
+        error_cls=LvsError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+    )
 
 
 def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
@@ -290,27 +291,12 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     exception type :func:`load_request` raises, so callers (``run_lvs``,
     ``cli/lvs_cmd.py``) do not need to distinguish the three forms.
     """
-    if value == "-":
-        try:
-            data = json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
-            raise LvsError(f"stdin request is not valid JSON: {exc}") from exc
-        return _validate_request_shape(data, "stdin request"), os.getcwd()
-
-    if os.path.isfile(value):
-        return load_request(value), os.path.dirname(os.path.abspath(value))
-
-    if os.path.isdir(value):
-        raise LvsError(f"not a file: {value}")
-
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise LvsError(
-            f"request '{value}' is neither an existing file (file not "
-            f"found) nor valid inline JSON: {exc}"
-        ) from exc
-    return _validate_request_shape(data, "inline request"), os.getcwd()
+    return _shared_load_request_arg(
+        value,
+        error_cls=LvsError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+        load_request_fn=load_request,
+    )
 
 
 def run_lvs(request: str) -> dict[str, Any]:

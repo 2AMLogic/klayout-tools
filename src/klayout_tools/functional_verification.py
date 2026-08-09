@@ -66,7 +66,6 @@ synthesize`` takes toward a missing ``yosys`` binary.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -75,6 +74,8 @@ import xml.etree.ElementTree as ElementTree
 from typing import Any
 
 from ._paths import _load_request_json
+from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import validate_request_shape as _shared_validate_request_shape
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -124,20 +125,19 @@ class FunctionalVerificationError(Exception):
 # ---------------------------------------------------------------------------
 
 
+_REQUIRED_REQUEST_FIELDS = ("sources", "hdl_toplevel", "testbench")
+
+
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
     """Shared shape check for a JSON-decoded request, however it was sourced
     (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
     object" error for context."""
-    if not isinstance(data, dict):
-        raise FunctionalVerificationError(f"{source} must contain a JSON object")
-
-    for field in ("sources", "hdl_toplevel", "testbench"):
-        if field not in data:
-            raise FunctionalVerificationError(
-                f"request is missing required field: {field}"
-            )
-
-    return data
+    return _shared_validate_request_shape(
+        data,
+        source,
+        error_cls=FunctionalVerificationError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+    )
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -161,29 +161,12 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
     verb composes into ``klt eval``'s descriptor unchanged.
     """
-    if value == "-":
-        try:
-            data = json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
-            raise FunctionalVerificationError(
-                f"stdin request is not valid JSON: {exc}"
-            ) from exc
-        return _validate_request_shape(data, "stdin request"), os.getcwd()
-
-    if os.path.isfile(value):
-        return load_request(value), os.path.dirname(os.path.abspath(value))
-
-    if os.path.isdir(value):
-        raise FunctionalVerificationError(f"not a file: {value}")
-
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise FunctionalVerificationError(
-            f"request '{value}' is neither an existing file (file not found) "
-            f"nor valid inline JSON: {exc}"
-        ) from exc
-    return _validate_request_shape(data, "inline request"), os.getcwd()
+    return _shared_load_request_arg(
+        value,
+        error_cls=FunctionalVerificationError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+        load_request_fn=load_request,
+    )
 
 
 # ---------------------------------------------------------------------------
