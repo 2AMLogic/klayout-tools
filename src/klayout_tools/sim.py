@@ -64,7 +64,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from typing import Any
 
 from . import remote_transport
-from ._paths import _load_request_json, _resolve_relative
+from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
@@ -414,15 +414,12 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
-
-    if not isinstance(request, dict):
-        raise SimError("request file must contain a JSON object")
-
-    for field in ("netlist", "analysis"):
-        if field not in request:
-            raise SimError(f"request is missing required field: {field}")
-
-    return request
+    return validate_request_shape(
+        request,
+        "request file",
+        error_cls=SimError,
+        required_fields=("netlist", "analysis"),
+    )
 
 
 def _validate_meas_card(name: str, spice: str) -> None:
