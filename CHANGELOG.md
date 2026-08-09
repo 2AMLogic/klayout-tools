@@ -209,6 +209,23 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-09 — new `klt signoff` verb (#309): aggregates one or more `klt
+  drc`/`klt lvs`/`klt extract`/`klt sim` `--format json` envelopes into a
+  single pass/fail signoff verdict. Combines each input's own status
+  (`drc`'s `clean`, `lvs`'s `match`, `sim`'s `pass`; `klt extract` has no
+  independent pass/fail and always counts as passed) into an overall
+  `status: "pass"|"fail"`, and separately checks every input's shared
+  `provenance` block (#251) for consistency — mismatched `pdk.name`/
+  `pdk.version`, a same-named deck's `content_hash`, or `input.content_hash`
+  across the given envelopes **refuses** to produce a verdict at all
+  (`status: "refused"`, exit code `4`) rather than silently combining a
+  DRC pass against one layout revision with an LVS pass against another.
+  The mechanical building block underneath the `design-signoff` skill's T1
+  checklist walk (`docs/design-evidence-tiers.md`); does not yet diff
+  against a block's declared spec (no machine-readable S3 schema exists —
+  `docs/design/design-pipeline.md` §4) or grade the checklist's non-JSON
+  items (design-source hygiene, testbenches shipped). See
+  `docs/cli/signoff.md`.
 - 2026-08-08 — new `klt deck resolve` verb (#623): resolves one of klt's
   built-in DRC/LVS rule decks (sky130, gf180mcu) by content hash
   (`--content-hash sha256:<hex>`, matching `provenance.deck.content_hash`'s

@@ -38,6 +38,7 @@ docs/
     render.md
     report.md
     ring-check.md
+    signoff.md
     sim.md
     socket-check.md
     stats.md

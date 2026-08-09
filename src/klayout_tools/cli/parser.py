@@ -31,6 +31,7 @@ from . import (
     render_cmd,
     report_cmd,
     ring_check_cmd,
+    signoff_cmd,
     sim_cmd,
     socket_check_cmd,
     stats_cmd,
@@ -1142,6 +1143,34 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     report_parser.set_defaults(func=report_cmd.run)
+
+    signoff_parser = subparsers.add_parser(
+        "signoff",
+        help=(
+            "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
+            "pass/fail verdict"
+        ),
+        description=(
+            "Read one or more `klt` JSON envelope files (or '-' for stdin) "
+            "produced by `klt drc`/`klt lvs`/`klt extract`/`klt sim` and "
+            "combine them into a single signoff verdict: pass only if every "
+            "check's own status passed AND every input's `provenance` block "
+            "(issue #251) agrees on PDK/deck/input-layout identity -- a "
+            "mismatched-provenance input set is refused (status: "
+            "'refused'), never silently aggregated into a wrong verdict. "
+            "See docs/cli/signoff.md."
+        ),
+    )
+    signoff_parser.add_argument(
+        "files",
+        nargs="+",
+        help=(
+            "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
+            "'-' to read one from stdin"
+        ),
+    )
+    _add_format_arg(signoff_parser)
+    signoff_parser.set_defaults(func=signoff_cmd.run)
 
     trajectory_parser = subparsers.add_parser(
         "trajectory",
