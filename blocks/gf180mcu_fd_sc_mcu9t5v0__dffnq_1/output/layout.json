@@ -10,6 +10,9 @@
   "instance_count": 0,
   "layout_file": "gf180mcu_fd_sc_mcu9t5v0__dffnq_1.gds",
   "downloadable": true,
+  "renders": {
+    "overview": "renders/overview.png"
+  },
   "signals": {
     "schema_version": 1,
     "engine": "ngspice",

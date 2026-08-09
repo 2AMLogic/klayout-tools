@@ -21,6 +21,14 @@ documented in `blocks/README.md`:
   run -- these are the source repo's *own* simulation results, not a
   standard-cell sweep this repo runs itself.
 
+When a canary's GDS lands (see "GDS detection" below), this script also
+attaches `renders: {"overview": "renders/overview.png"}` -- the gallery
+thumbnail (#651, Option A) -- via `klt render`'s library function. Neither
+current canary is past the pre-layout stage yet, so this path is
+forward-compat/not exercised against real data today; see
+`tests/test_ingest_canary.py::test_gds_found_upgrades_to_ok_status` for its
+coverage against a synthetic GDS.
+
 Public-repo gate (fail-closed)
 -------------------------------
 Before touching the filesystem, `assert_public_repo()` calls `gh api
@@ -89,6 +97,7 @@ if str(SRC_DIR) not in sys.path:
 
 from klayout_tools.cells import CellsError, cells_report  # noqa: E402
 from klayout_tools.layers import LayersError, layers_report  # noqa: E402
+from klayout_tools.render import RenderError, render_report  # noqa: E402
 
 SCHEMA_VERSION = 1
 IN_DESIGN_STATUS = "in design — simulation evidence"
@@ -663,6 +672,27 @@ def _default_name(slug: str) -> str:
     return slug.replace("-", " ").replace("_", " ").title()
 
 
+def _attach_overview_render(
+    slug: str, block_dir: Path, gds_path: Path, layout: dict
+) -> None:
+    """Render `gds_path`'s all-layers composite into `output/renders/` and
+    attach it to `layout["renders"]` as `{"overview": "renders/overview.png"}`
+    (issue #651, Option A -- only the composite is tracked in git; per-layer
+    PNGs the same call writes alongside it stay `.gitignore`d).
+
+    Best-effort: a render failure prints a warning and leaves `layout`
+    untouched rather than aborting the ingest -- this is the "first link"
+    the render/copy/display chain was missing, not a required artifact, so
+    it follows the same opt-in treatment as `spec_summary`/`signals` above.
+    """
+    try:
+        render_report(str(gds_path), output_dir=str(block_dir / "output" / "renders"))
+    except RenderError as exc:
+        print(f"ingest-canary: {slug}: skipping render: {exc}", file=sys.stderr)
+        return
+    layout["renders"] = {"overview": "renders/overview.png"}
+
+
 def build_layout_json(
     repo_dir: Path,
     *,
@@ -705,6 +735,8 @@ def build_layout_json(
             parsed_ok = False
         layout["layout_file"] = staged.name
         status = "ok" if parsed_ok else "partial"
+        if not dry_run:
+            _attach_overview_render(slug, block_dir, staged, layout)
     else:
         status = IN_DESIGN_STATUS
 
