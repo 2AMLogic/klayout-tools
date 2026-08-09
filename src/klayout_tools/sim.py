@@ -64,7 +64,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from typing import Any
 
 from . import remote_transport
-from ._paths import _resolve_relative
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
@@ -413,18 +413,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``_resolve_models_lib``). Does not require the request to carry a
     ``schema`` field (see this module's docstring).
     """
-    if not os.path.exists(request_path):
-        raise SimError(f"file not found: {request_path}")
-    if os.path.isdir(request_path):
-        raise SimError(f"not a file: {request_path}")
-
-    try:
-        with open(request_path, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise SimError(f"could not read request file: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise SimError(f"request file is not valid JSON: {exc}") from exc
+    request = _load_request_json(request_path, SimError)
 
     if not isinstance(request, dict):
         raise SimError("request file must contain a JSON object")

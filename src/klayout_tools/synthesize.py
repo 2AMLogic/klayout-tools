@@ -68,6 +68,7 @@ import re
 import subprocess
 from typing import Any
 
+from ._paths import _load_request_json
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
 
@@ -106,18 +107,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     matching ``klt lvs``/``klt sim``'s ``load_request`` (user-authored
     input, never emitted by this tool).
     """
-    if not os.path.exists(request_path):
-        raise SynthesizeError(f"file not found: {request_path}")
-    if os.path.isdir(request_path):
-        raise SynthesizeError(f"not a file: {request_path}")
-
-    try:
-        with open(request_path, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise SynthesizeError(f"could not read request file: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise SynthesizeError(f"request file is not valid JSON: {exc}") from exc
+    request = _load_request_json(request_path, SynthesizeError)
 
     if not isinstance(request, dict):
         raise SynthesizeError("request file must contain a JSON object")

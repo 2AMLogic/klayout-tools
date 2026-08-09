@@ -111,7 +111,7 @@ import tempfile
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from ._paths import _resolve_relative
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     InvalidDeckOptionError,
@@ -249,19 +249,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     Does not require a ``schema`` field, matching ``klt sim``'s
     ``load_request`` (user-authored input, never emitted by this tool).
     """
-    if not os.path.exists(request_path):
-        raise LvsError(f"file not found: {request_path}")
-    if os.path.isdir(request_path):
-        raise LvsError(f"not a file: {request_path}")
-
-    try:
-        with open(request_path, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise LvsError(f"could not read request file: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise LvsError(f"request file is not valid JSON: {exc}") from exc
-
+    request = _load_request_json(request_path, LvsError)
     return _validate_request_shape(request, "request file")
 
 

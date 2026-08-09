@@ -74,6 +74,8 @@ import sys
 import xml.etree.ElementTree as ElementTree
 from typing import Any
 
+from ._paths import _load_request_json
+
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
@@ -148,23 +150,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field, matching ``klt lvs``/``klt sim``/``klt synthesize``'s
     own ``load_request`` (user-authored input, never emitted by this tool).
     """
-    if not os.path.exists(request_path):
-        raise FunctionalVerificationError(f"file not found: {request_path}")
-    if os.path.isdir(request_path):
-        raise FunctionalVerificationError(f"not a file: {request_path}")
-
-    try:
-        with open(request_path, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise FunctionalVerificationError(
-            f"could not read request file: {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise FunctionalVerificationError(
-            f"request file is not valid JSON: {exc}"
-        ) from exc
-
+    request = _load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 
