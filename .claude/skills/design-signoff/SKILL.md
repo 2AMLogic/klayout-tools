@@ -26,9 +26,52 @@ that artifact.
 ## Producing a qualification report
 
 Target: one markdown report grading a block repo against the **T1
-checklist** in `docs/design-evidence-tiers.md`. Work through the ten items
-in order; for each, record **PRESENT / PARTIAL / ABSENT**, the artifact
-paths, and the pass condition's actual state.
+checklist** in `docs/design-evidence-tiers.md`, selected for the block's
+declared **kind** (`analog` / `digital` / `mixed-signal` — see that doc's
+"Block kind" subsection). Work through the kind's ten-item checklist in
+order; for each, record **PRESENT / PARTIAL / ABSENT**, the artifact paths,
+and the pass condition's actual state.
+
+### Determining the block's kind
+
+The kind selects which column of items 1, 2, 5, and 7 applies, and which
+caveats items 6 and 8 carry (items 3, 4, 9, and 10 are kind-independent and
+apply as written regardless of kind — see `docs/design-evidence-tiers.md`).
+Resolve it in this order:
+
+1. **Explicit invocation argument.** If the caller states a kind
+   (`analog`, `digital`, or `mixed-signal`) when invoking this skill, use
+   it — this is the cheapest signal to provide and the recommended way to
+   declare kind going forward.
+2. **Repo declaration.** Otherwise, look for a `Block kind: <analog|
+   digital|mixed-signal>` line in the block repo's `README.md` (mirroring
+   the "Block kind" claim language in `docs/design-evidence-tiers.md`).
+3. **Default: analog.** If neither is present, treat the block as
+   `analog`. Every canary repo predating this convention (e.g.
+   `gf180-bandgap`, `sky130-bandgap`, `sky130-ota-5t`) has no kind
+   declared; defaulting to `analog` reproduces their reports unchanged —
+   no regression for existing analog block repos.
+
+With the kind resolved:
+
+- **`analog`** — walk items 1–10 using the *Analog* column for items 1, 2,
+  5, and 7 (item 6 and item 8 apply as written, using their analog-relevant
+  language). This is the original, unmodified ten-item walk — nothing about
+  it changes from before this skill supported other kinds.
+- **`digital`** — walk items 1–10 using the *Digital* column for items 1,
+  2, 5, and 7; item 6 applies only to whichever spec rows are actually
+  statistical (state explicitly if none are — most digital spec rows are
+  not, per the doc); item 8 includes Fmax, area, and power across the
+  corner set. Items 3, 4, 9, and 10 apply as written. No analog-only
+  artifact (schematic capture, PVT corner sweeps, Monte Carlo runs) is
+  required or graded for a block with no reason to produce it.
+- **`mixed-signal`** — the claim states the partition boundary (which
+  nets/pins/cells are analog vs. digital). Produce **two** ten-item
+  gradings, one per partition, each walked exactly as its own kind above —
+  grade each partition against its own checklist, never one blended list.
+  Items 3, 4, 9, and 10 are kind-independent: if a single artifact (e.g.
+  one chip-level DRC report) covers both partitions, cite that same
+  evidence in both tables rather than omitting the row from either.
 
 ### Gathering rules
 
@@ -56,21 +99,55 @@ paths, and the pass condition's actual state.
 
 ### Report shape
 
+For an `analog` or `digital` block (one checklist to grade):
+
 ```markdown
 # Qualification report — <block> on <pdk>
-Generated <date> at repo revision <sha>. Spec status: ratified|draft.
+Generated <date> at repo revision <sha>. Block kind: analog|digital.
+Spec status: ratified|draft.
 
 ## Verdict: T1 NOT MET — N of 10 items passing
 (or: T1 MET — all items passing; caveats listed below)
 
 | # | Item | Status | Evidence | Caveats |
 |---|------|--------|----------|---------|
-| 1 | Schematic | PRESENT | design/... | — |
+| 1 | Schematic | PRESENT | design/... | — |               <!-- analog -->
+| 1 | RTL + gate netlist | PRESENT | rtl/... | — |          <!-- digital -->
 | 3 | DRC clean | PARTIAL | layout/drc/reports/<latest> | 12 rule-free layers; #345 |
 ...
 
 ## Gaps, ordered by blocking depth
 1. <item>: <what's missing> — <repo-side work | tool-side issue #NNN>
+...
+
+## Tool-side friction observed
+<anything the toolkit should have provided — file as klayout-tools issues>
+```
+
+For a `mixed-signal` block, repeat the verdict + table **once per
+partition** — each headed by its own kind and graded against that kind's
+checklist — ahead of one shared gaps/friction section:
+
+```markdown
+# Qualification report — <block> on <pdk>
+Generated <date> at repo revision <sha>. Block kind: mixed-signal.
+Partition boundary: <analog nets/pins/cells> vs. <digital nets/pins/cells>.
+Spec status: ratified|draft.
+
+## Analog partition — Verdict: T1 NOT MET — N of 10 items passing
+| # | Item | Status | Evidence | Caveats |
+|---|------|--------|----------|---------|
+| 1 | Schematic | PRESENT | design/analog/... | — |
+...
+
+## Digital partition — Verdict: T1 NOT MET — M of 10 items passing
+| # | Item | Status | Evidence | Caveats |
+|---|------|--------|----------|---------|
+| 1 | RTL + gate netlist | PRESENT | rtl/... | — |
+...
+
+## Gaps, ordered by blocking depth
+1. <partition>/<item>: <what's missing> — <repo-side work | tool-side issue #NNN>
 ...
 
 ## Tool-side friction observed
