@@ -92,9 +92,19 @@ the response to drive the next sizing iteration:
   outranks `fail` in the aggregate — don't read an errored run's `passed`
   count as partial progress.
 
-No dedicated sizing/optimization verb exists yet (design doc §4, S5 gap-map
-row: "no friction issue filed yet") — the next-candidate proposal after
-reading a `klt sim` result is this skill's own reasoning, not a tool call.
+No dedicated sizing/optimization verb exists — the next-candidate proposal
+after reading a `klt sim` result is this skill's own reasoning, not a tool
+call. That is a **recorded decision, not an unfilled gap**: design doc §2's
+"S5 — sizing" section ("Recorded scope decision (#310)") weighed a generic
+optimizer verb, an S5-specific helper, and remain-manual, and chose
+remain-manual — the one real Loop A run on record converged in two passes
+without changing a single device size, so an optimizer would have had
+nothing to search. Read that decision before proposing to build one; it
+also names the re-trigger (a real block hitting escalation N with **every**
+pass genuinely changing device parameters and diagnosis-side causes ruled
+out) and asks for that `loop_a_history` to be attached to #310. If your
+loop meets it, that is the evidence — file it rather than freehanding
+around a missing tool.
 
 ## Loop A convergence / stuck-loop checklist
 
