@@ -195,8 +195,37 @@ that command's own doc rather than re-describing it.
 | Output artifact | `klt.pipeline.sizing/1` (proposed): device parameter set (W/L, multiplier, bias currents, passive values) bound to the topology, plus the last sim result that produced it. |
 | Entry criteria | Topology selected (S4). |
 | Exit criteria | Loop A's convergence criterion (§1): every declared measurement passes across the declared corner matrix for a stable candidate. |
-| `klt` verbs | `klt sim` for corner feedback (schematic-level passes of Loop A, §1); no dedicated sizing/optimization verb exists yet (see §4). |
+| `klt` verbs | `klt sim` for corner feedback (schematic-level passes of Loop A, §1); no dedicated sizing/optimization verb exists — agent-side by recorded decision (below), not by omission. |
 | Failure modes | Loop A's stuck condition (§1: non-monotonic margins, unresolved tradeoff, oscillation); local optimum that clears every declared measurement but is fragile to a corner not swept (an incompleteness in S3, surfacing here). |
+
+**Recorded scope decision (#310, 2026-08-09): candidate proposal stays
+agent-side.** Of the three options weighed — a generic parameter-optimizer
+verb (`klt optimize`, mirroring kicad-tools' CMA-ES placement optimizer),
+an S5-specific sizing helper, or remain-manual — the decision is
+**remain-manual for now**. The only real Loop A run in this repo (the
+sky130 5T OTA canary, Epic #153 phase 4;
+[`examples/design-pipeline/05-sizing.json`](../../examples/design-pipeline/05-sizing.json)'s
+`loop_a_history`) converged in two passes and changed **no device sizes**:
+pass 1's `gain_db` failure was a testbench-construction artifact, diagnosed
+and fixed in S6. A numeric proposer handed that pass's negative margin
+would have searched device sizes against an artifact — the wrong answer,
+arrived at faster. Loop A has so far been *diagnosis*-bound, not
+*search*-bound, and an optimizer only pays off in the search-bound regime;
+building one now would also mean designing its cost contract with no real
+cost function to validate it against.
+
+**Re-trigger — spike an optimization epic** (per
+[`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) → "How capabilities arrive")
+when a real block's Loop A reaches its escalation N (3-5 passes, per
+`.claude/skills/design-sizing/SKILL.md`) with **every** pass actually
+changing device parameters and the stuck-loop checklist's diagnosis-side
+causes ruled out — i.e. demonstrated search thrash, not a mis-characterized
+measurement. Attach that `loop_a_history` to #310; it is the evidence the
+epic would be scoped from. Two notes for whoever scopes it: the cost
+signal already exists in `klt sim`'s response (per-measurement `margin`,
+signed, rolled up to `worst_case` across the corner matrix), and a *generic*
+optimizer verb would want to land as an adopter of Epic #253 Phase 3's
+generic job type rather than inventing a second fan-out shape.
 
 ### S6 — schematic/netlist
 
@@ -298,7 +327,7 @@ layout-generator spike issue.
 | S2 system architecture & budget partition | None. | No friction issue filed yet; a candidate future optimization/partition capability per `docs/ARCHITECTURE.md`'s "optimization" scope line, not yet demanded loudly enough to spike. |
 | S3 block specs | None. | No friction issue filed yet — currently absorbed into S1/S2's human/agent judgment. |
 | S4 topology selection (KB-assisted) | Shipped. `klt kb list`/`show`/`search`/`validate` (`docs/cli/kb.md`) query the KB corpus (`kb/`); Epic #102 (corpus + query surface) and its sub-issues (#106–#110) are closed. What remains is corpus *breadth*, grown incrementally, not the query surface. | — |
-| S5 sizing | Partial. `klt sim` (shipped, #96) gives the feedback signal Loop A needs; no dedicated sizing/optimization tool proposes the next candidate — that reasoning is presently fully agent-side. | #310 (sizing candidate proposer) |
+| S5 sizing | Partial, **by decision**. `klt sim` (shipped, #96) gives the feedback signal Loop A needs; next-candidate proposal is fully agent-side and stays that way until the re-trigger in §2's S5 recorded decision fires. | #310 (sizing candidate proposer — decision recorded, see §2 S5) |
 | S6 schematic/netlist | None in `klt`. Schematic capture and netlist export live outside the repo today (xschem); the specific staleness/testbench-vs-block/config gaps a shared `klt netlist` (or documented helper) would close are filed. | #55 |
 | S7 layout generation | Shipped. `klt gen`/`klt gen-compose` (`docs/cli/gen.md`, `docs/cli/gen-compose.md`) generate and compose layout from a netlist + parameters; `klt render` (visual check) and `klt layout-metrics` (area/utilization) support inspection. #104 closed; `klt gen-compose` was driven end-to-end against a real sky130 5T OTA (Epic #153 phase 4, #164/#196). | — |
 | S8 DRC/LVS | Shipped. `klt drc` (`docs/cli/drc.md`) runs a curated sky130/gf180mcu deck subset (see that doc's "Coverage" section for fidelity caveats); `klt lvs` (`docs/cli/lvs.md`) runs a device/net compare (phase 3 of Epic #153). #54 closed. | — |
@@ -309,14 +338,15 @@ layout-generator spike issue.
 **Reading the map:** both structural loops now have their core tooling
 shipped. Loop A (sizing ↔ simulation) is served by `klt sim` (feedback) and
 `klt kb` (topology query), with only the sizing-*candidate* proposer still
-agent-side (#310). Loop B (layout ↔ DRC/LVS) has been driven end to end for
+agent-side — deliberately, per §2's S5 recorded decision (#310). Loop B (layout ↔ DRC/LVS) has been driven end to end for
 the sky130 5T OTA canary — `klt gen-compose` → `klt extract` → `klt lvs` →
 `klt sim` closing the loop against a real block (Epic #153 phase 4, #164),
 including the follow-on friction it surfaced (#199/#200/#201 —
 obstacle-unaware routing, missing net labels, a spurious LVS device-class
 mismatch — all closed). The stages that remain unbuilt are not loop
 tooling but the *bracketing* stages: S2/S3 spec-and-partition work (no
-tool, by design), the S5 sizing proposer (#310), S6 netlist export (#55),
+tool, by design), the S5 sizing proposer (#310 — also no tool by design,
+pending its re-trigger), S6 netlist export (#55),
 S10 waveform post-processing (#56), and S11 signoff aggregation (#309).
 Epic #105's Phase 3 worked example can now drive a genuine closed-loop run
 through Loop B rather than stubbing S7/S8/S9, with those bracketing stages
