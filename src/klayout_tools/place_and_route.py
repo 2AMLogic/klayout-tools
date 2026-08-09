@@ -206,7 +206,7 @@ import re
 import subprocess
 from typing import Any
 
-from ._paths import _load_request_json
+from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
 from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
@@ -380,15 +380,12 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``load_request``.
     """
     request = _load_request_json(request_path, PlaceAndRouteError)
-
-    if not isinstance(request, dict):
-        raise PlaceAndRouteError("request file must contain a JSON object")
-
-    for field in ("netlist", "hdl_toplevel", "pdk", "floorplan", "seed"):
-        if field not in request:
-            raise PlaceAndRouteError(f"request is missing required field: {field}")
-
-    return request
+    return validate_request_shape(
+        request,
+        "request file",
+        error_cls=PlaceAndRouteError,
+        required_fields=("netlist", "hdl_toplevel", "pdk", "floorplan", "seed"),
+    )
 
 
 def run_place_and_route(

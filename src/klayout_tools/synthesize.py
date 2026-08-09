@@ -68,7 +68,7 @@ import re
 import subprocess
 from typing import Any
 
-from ._paths import _load_request_json
+from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
 
@@ -108,15 +108,12 @@ def load_request(request_path: str) -> dict[str, Any]:
     input, never emitted by this tool).
     """
     request = _load_request_json(request_path, SynthesizeError)
-
-    if not isinstance(request, dict):
-        raise SynthesizeError("request file must contain a JSON object")
-
-    for field in ("sources", "hdl_toplevel", "pdk"):
-        if field not in request:
-            raise SynthesizeError(f"request is missing required field: {field}")
-
-    return request
+    return validate_request_shape(
+        request,
+        "request file",
+        error_cls=SynthesizeError,
+        required_fields=("sources", "hdl_toplevel", "pdk"),
+    )
 
 
 def run_synthesize(
