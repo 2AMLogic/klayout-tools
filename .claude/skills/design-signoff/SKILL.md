@@ -1,6 +1,6 @@
 ---
 name: "Design Pipeline: Signoff Report (S11)"
-description: "Generate a design-evidence qualification report for a block repo — grade it against the T1 sim-validated checklist (docs/design-evidence-tiers.md), with staleness and coverage-honesty checks. Aggregation tool tracked by #309; until it ships this skill specifies the hand-assembled report."
+description: "Generate a design-evidence qualification report for a block repo — grade it against the T1 sim-validated checklist (docs/design-evidence-tiers.md), with staleness and coverage-honesty checks. `klt signoff` (#309) mechanically aggregates the drc/lvs/extract/sim pieces of this walk; this skill still drives the parts it can't (no S3 spec schema, design-hygiene items) and the full report."
 domain: design-pipeline
 type: skill
 user-invocable: true
@@ -17,11 +17,25 @@ produce today. Re-read those docs if anything here seems stale.
 
 ## Status
 
-The mechanical aggregation tool does not exist yet — **#309** tracks it
-(with concrete friction evidence from the public canary repos). Until it
-ships, the report is hand-assembled per this skill; treat the output as the
-provisional shape of the future `klt.pipeline.signoff/1` artifact, not as
-that artifact.
+`klt signoff` (#309, `docs/cli/signoff.md`) now mechanically aggregates
+`klt drc`/`klt lvs`/`klt extract`/`klt sim` JSON envelopes into one
+pass/fail verdict, and refuses to combine inputs whose `provenance` blocks
+disagree (mismatched PDK, deck, or input-layout identity) rather than
+silently producing a wrong verdict — the two checklist items this skill
+graded entirely by hand before (items 3/4 "DRC/LVS clean" and the
+provenance-consistency half of "fresh") now have a tool behind them. Run it
+against a block's latest reports and fold its `checks[]`/
+`provenance_consistency` output into the table below instead of
+re-deriving pass/fail by eye.
+
+`klt signoff` does **not** yet diff against a block's declared spec (S3 in
+`docs/design/design-pipeline.md` has no machine-readable schema — see that
+doc's §4 gap map) and does not walk the full T1 checklist (design-source
+commit hygiene, README/license/CI, testbench-shipped checks have no `klt`
+verb JSON to read at all). This skill still hand-assembles the full report
+and everything `klt signoff` doesn't cover; treat its output as the
+provisional shape of a wider `klt.pipeline.signoff/1` artifact once a
+spec-diff capability exists, not as that artifact yet.
 
 ## Producing a qualification report
 
@@ -86,7 +100,12 @@ With the kind resolved:
 2. **Read verdicts from JSON, not prose.** `status`/`violation_count` from
    `klt drc` JSON, `status`/mismatch severities from LVS JSON, per-row
    verdicts from suite records. README status lines drift optimistic —
-   both canaries' did.
+   both canaries' did. When DRC/LVS/extract/sim JSON reports for the same
+   revision are on hand, `klt signoff <file>...` (docs/cli/signoff.md) does
+   both this step and step 1's provenance-freshness comparison for you in
+   one pass — read its `checks[]`/`provenance_consistency` output instead
+   of re-deriving pass/fail and staleness by eye, and cite its `status`
+   (`pass`/`fail`/`refused`) directly on items 3/4/7.
 3. **Carry coverage caveats into the verdict.** Deck coverage metadata
    (rule-free layers, skipped rules), warning-level LVS mismatches,
    MC legs not combined with process corners, known false negatives
@@ -169,11 +188,11 @@ construction — it grades against the public tier doc.
 | | |
 | --- | --- |
 | Input artifact | Converged outputs of S8 (DRC/LVS) and S10 (post-extraction sim), plus S3's block spec — or, pre-convergence, whatever exists (the report then shows the gap map). |
-| Output artifact | The qualification report above. `klt.pipeline.signoff/1` (proposed, #309) will mechanize the aggregation; entry criteria and shape mirror this skill. |
+| Output artifact | The qualification report above. `klt signoff`'s JSON (`docs/cli/signoff.md`, #309) now mechanizes the drc/lvs/extract/sim half of the aggregation (per-check pass/fail + provenance-consistency refusal); a wider `klt.pipeline.signoff/1` spec-diff artifact remains proposed until S3 has a schema. |
 | Entry criteria | None hard — the report is most useful *before* convergence, as a gap map. |
 | Exit criteria | Every S3 spec field has a recorded verdict or a named gap; no field silently unaddressed. |
-| `klt` verbs | `drc`, `lvs`, `extract`, `sim`, `layout-metrics`, `report` outputs as inputs; none aggregate yet (#309). |
-| Failure modes | Stale artifact pairing (staleness rule catches it); a spec field with no upstream check (surfaces as per-row ABSENT → backtrack per design doc §1). |
+| `klt` verbs | `drc`, `lvs`, `extract`, `sim`, `layout-metrics`, `report` outputs as inputs; `klt signoff` (#309) aggregates the drc/lvs/extract/sim subset into one pass/fail/refused verdict — no verb yet diffs against an S3 spec. |
+| Failure modes | Stale artifact pairing (`klt signoff`'s provenance-consistency check now catches the drc/lvs/extract/sim case mechanically — a mismatch produces `status: "refused"`, not a silently wrong verdict); a spec field with no upstream check (surfaces as per-row ABSENT → backtrack per design doc §1). |
 
 ## Model-class assignment (design doc §3)
 

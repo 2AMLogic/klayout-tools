@@ -290,8 +290,8 @@ generic job type rather than inventing a second fan-out shape.
 | Output artifact | `klt.pipeline.signoff/1` (proposed): pass/fail against every S3 spec field, with the corner/measurement/violation evidence each verdict rests on, and provenance hashes for every input artifact (mirroring `klt sim`'s `environment` block's reproducibility discipline). |
 | Entry criteria | Both S8 and S10 converged on the same layout/netlist generation (not a stale mix of an old layout's DRC pass and a newer netlist's sim pass). |
 | Exit criteria | Every S3 spec field has a recorded verdict; no field is silently unaddressed. |
-| `klt` verbs | None currently — aggregation across `klt drc`/`klt lvs`/`klt sim`/`klt extract` JSON outputs into one signoff artifact is unbuilt; tracked as #309 (see §4). |
-| Failure modes | A spec field with no corresponding check anywhere upstream, discovered only here (the "signoff rejection" backtrack in §1); provenance mismatch between the layout and netlist being signed off (stale artifact pairing). |
+| `klt` verbs | `klt signoff` (shipped, #309): aggregates `klt drc`/`klt lvs`/`klt extract`/`klt sim` JSON outputs into one pass/fail verdict, refusing (`status: "refused"`) to combine inputs whose `provenance` blocks disagree. Does not yet diff against S3's spec fields — S3 has no machine-readable schema (see §4) — so the "pass/fail against every S3 spec field" half of this stage's output artifact remains agent-assembled via the `design-signoff` skill. |
+| Failure modes | A spec field with no corresponding check anywhere upstream, discovered only here (the "signoff rejection" backtrack in §1); provenance mismatch between the layout and netlist being signed off (stale artifact pairing — `klt signoff`'s provenance-consistency check now catches this mechanically for the drc/lvs/extract/sim inputs it aggregates). |
 
 ## 3. Model-class matrix
 
@@ -333,7 +333,7 @@ layout-generator spike issue.
 | S8 DRC/LVS | Shipped. `klt drc` (`docs/cli/drc.md`) runs a curated sky130/gf180mcu deck subset (see that doc's "Coverage" section for fidelity caveats); `klt lvs` (`docs/cli/lvs.md`) runs a device/net compare (phase 3 of Epic #153). #54 closed. | — |
 | S9 extraction | Shipped. `klt extract` (`docs/cli/extract.md`) produces a schematic-equivalent netlist (devices + connectivity, sky130/gf180mcu) and, with `--parasitics`, RC-parasitic extraction (#216 decision / #217 implementation, both closed); see `.claude/skills/design-extraction/SKILL.md`. | — |
 | S10 simulation across corners | Mostly shipped. `klt sim` (#96) covers scalar `.meas`-based corner sweeps per the accepted spike. Sequence/waveform measurements (jitter, cycle-to-cycle, TIE) beyond scalar reduction are not covered. | #56 (waveform post-processing) |
-| S11 signoff report | None. No tool aggregates `klt drc`/`klt lvs`/`klt sim`/`klt extract` JSON into one signoff artifact. | #309 (signoff aggregator) |
+| S11 signoff report | Partial. `klt signoff` (`docs/cli/signoff.md`, #309) aggregates `klt drc`/`klt lvs`/`klt extract`/`klt sim` JSON into one pass/fail verdict with provenance-consistency refusal. Does not diff against S3 spec fields (S3 has no schema — see the S3 row above) or walk the full T1 checklist's non-JSON items (design-hygiene, testbenches shipped). | No tracking issue — the remaining gap is the S3 block-spec schema (row above), not a signoff-side gap. |
 
 **Reading the map:** both structural loops now have their core tooling
 shipped. Loop A (sizing ↔ simulation) is served by `klt sim` (feedback) and
@@ -346,8 +346,9 @@ obstacle-unaware routing, missing net labels, a spurious LVS device-class
 mismatch — all closed). The stages that remain unbuilt are not loop
 tooling but the *bracketing* stages: S2/S3 spec-and-partition work (no
 tool, by design), the S5 sizing proposer (#310 — also no tool by design,
-pending its re-trigger), S6 netlist export (#55),
-S10 waveform post-processing (#56), and S11 signoff aggregation (#309).
+pending its re-trigger), S6 netlist export (#55), and S10 waveform
+post-processing (#56); S11's mechanical drc/lvs/extract/sim aggregation now
+ships as `klt signoff` (#309).
 Epic #105's Phase 3 worked example can now drive a genuine closed-loop run
 through Loop B rather than stubbing S7/S8/S9, with those bracketing stages
 the remaining explicit gaps.

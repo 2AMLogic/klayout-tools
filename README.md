@@ -96,6 +96,7 @@ klt gen-compose plan.json                # place + wire generated blocks into on
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
 klt lef-abstract design.gds --socket socket.json --macro-name m --cell-library sky130_fd_sc_hd  # layout+socket -> LEF MACRO abstract
 klt report result.json                   # render a klt JSON report as markdown summary
+klt signoff drc.json lvs.json            # aggregate drc/lvs/extract/sim JSON into one pass/fail verdict
 klt trajectory run.jsonl --plot t.svg    # optimization trajectory -> milestone table + plot
 klt deck resolve --content-hash sha256:... # pinned deck hash -> klayout-tools tag/version that shipped it
 ```
@@ -171,9 +172,11 @@ load on demand:
   the back-end stages ([DRC/LVS](.claude/skills/design-drc-lvs/SKILL.md),
   [layout generation](.claude/skills/design-layout-generation/SKILL.md),
   [extraction](.claude/skills/design-extraction/SKILL.md), and
-  [signoff](.claude/skills/design-signoff/SKILL.md) — layout generation and
-  extraction now run against shipped `klt` verbs; signoff remains a
-  declared stub gated on the #309 aggregation tool).
+  [signoff](.claude/skills/design-signoff/SKILL.md) — layout generation,
+  extraction, and signoff's drc/lvs/extract/sim aggregation (`klt signoff`,
+  #309) now run against shipped `klt` verbs; the skill still hand-assembles
+  the parts `klt signoff` can't yet: the S3 spec diff and design-hygiene
+  checklist items).
 
 ## Design notes
 
