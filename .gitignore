@@ -21,8 +21,15 @@ pdks/*
 # tracked; only the emitted blocks/<slug>/output/layout.json is checked in.
 .cache/canary-repos/
 
-# klt render output (build artifact, not checked in — see docs/cli/render.md)
+# klt render output (build artifact, not checked in — see docs/cli/render.md).
+# The gallery content pipeline (issue #651, Option A) checks in only the
+# all-layers composite `overview.png` per block, so the gallery has a real
+# thumbnail without a KLayout-in-the-deploy-path CI cost; per-layer PNGs
+# (and any `renders/` directory outside `blocks/*/output/`) stay ignored.
 renders/
+!blocks/*/output/renders/
+blocks/*/output/renders/*
+!blocks/*/output/renders/overview.png
 
 # Artifacts a request-taking verb writes next to its request document
 # (`klt sim`, `klt synthesize`, `klt functional-verification`) — running

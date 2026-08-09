@@ -10,6 +10,9 @@
   "instance_count": 0,
   "layout_file": "sky130_fd_sc_hd__nand2_2.gds",
   "downloadable": true,
+  "renders": {
+    "overview": "renders/overview.png"
+  },
   "signals": {
     "schema_version": 1,
     "engine": "ngspice",

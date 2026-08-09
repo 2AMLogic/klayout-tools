@@ -48,6 +48,21 @@ bootstrap step is opt-in/best-effort, same as the DRC/renders fields
 ``klt layout-metrics`` itself treats as optional). ``--skip-signals``
 regenerates only the base layers/cells metrics, unchanged from before
 issue #99, for a fast local iteration loop.
+
+Renders (issue #651, epic #650 "gallery visuals" phase 1)
+------------------------------------------------------------
+
+For every block that gets a ``layout.json`` (i.e. not one of
+``NO_ARTIFACTS_SLUGS``), this script also calls ``klt render``'s library
+function (:func:`klayout_tools.render.render_report`) against the corpus
+GDS and attaches ``layout.json``'s ``renders`` field as
+``{"overview": "renders/overview.png"}`` -- **Option A** from #651: only
+the all-layers composite thumbnail is tracked in git (``.gitignore``
+narrowed accordingly), not the per-layer PNGs the same call also writes
+alongside it, so the gallery gets a real thumbnail without putting KLayout
+on the deploy path. Best-effort: a render failure is printed as a warning
+and does not fail the bootstrap run or affect ``layout["status"]``, same
+treatment as the DRC/signals fields.
 """
 
 from __future__ import annotations
@@ -61,6 +76,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gallery_signals  # noqa: E402
+
+SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from klayout_tools.render import RenderError, render_report  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_ROOT = REPO_ROOT / "tests" / "corpus"
@@ -134,6 +155,28 @@ def _attach_signals(slug: str, block_dir: Path, layout: dict | None) -> None:
         layout["signals"] = signals
 
 
+def _attach_overview_render(
+    slug: str, block_dir: Path, gds_path: Path, layout: dict
+) -> None:
+    """Render ``gds_path``'s all-layers composite into ``output/renders/``
+    and attach it to ``layout["renders"]`` as ``{"overview": ...}``.
+
+    Best-effort, mirroring ``_attach_signals``: a render failure prints a
+    warning and leaves ``layout`` untouched rather than aborting the whole
+    bootstrap run. Only the fixed ``renders/overview.png`` relative path is
+    recorded (Option A, issue #651) -- the per-layer PNGs `render_report`
+    also writes alongside it are real files on disk (useful for local
+    inspection) but deliberately not listed in `renders`, since
+    `.gitignore` only tracks the composite.
+    """
+    try:
+        render_report(str(gds_path), output_dir=str(block_dir / "output" / "renders"))
+    except RenderError as exc:
+        print(f"  {slug}: (skipping render: {exc})")
+        return
+    layout["renders"] = {"overview": "renders/overview.png"}
+
+
 def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
     slug = gds_path.stem
     rel = gds_path.relative_to(REPO_ROOT)
@@ -187,6 +230,8 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
         "layout_file": staged_gds.name,
         "downloadable": True,
     }
+
+    _attach_overview_render(slug, block_dir, gds_path, layout)
 
     if not skip_signals:
         _attach_signals(slug, block_dir, layout)

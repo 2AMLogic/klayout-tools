@@ -346,6 +346,56 @@ def test_gds_found_upgrades_to_ok_status(tmp_path):
     assert layout["layout_file"] == "block.gds"
     assert (block_dir / "output" / "block.gds").is_file()
 
+    # Issue #651, Option A: a found GDS also gets the gallery-thumbnail
+    # composite rendered and attached -- only the fixed "overview" key, not
+    # one entry per per-layer PNG (those stay `.gitignore`d on disk).
+    assert layout["renders"] == {"overview": "renders/overview.png"}
+    assert (block_dir / "output" / "renders" / "overview.png").is_file()
+
+
+def test_gds_found_dry_run_skips_render(tmp_path):
+    """`--dry-run` must not write any files -- including render output."""
+    repo_dir = tmp_path / "repo"
+    (repo_dir / "layout").mkdir(parents=True)
+    _make_layout().write(str(repo_dir / "layout" / "block.gds"))
+
+    block_dir = tmp_path / "blocks" / "some-block"
+    layout = ic.build_layout_json(
+        repo_dir,
+        repo="2AMLogic/some-block",
+        ref="deadbeef",
+        slug="some-block",
+        block_dir=block_dir,
+        dry_run=True,
+    )
+    assert layout["status"] == "ok"
+    assert "renders" not in layout
+    assert not (block_dir / "output").exists()
+
+
+def test_render_failure_is_best_effort(tmp_path, monkeypatch):
+    """A render failure must not fail the whole ingest or downgrade status
+    -- mirrors the DRC/signals fields' opt-in, best-effort treatment."""
+    repo_dir = tmp_path / "repo"
+    (repo_dir / "layout").mkdir(parents=True)
+    _make_layout().write(str(repo_dir / "layout" / "block.gds"))
+
+    def _boom(*args, **kwargs):
+        raise ic.RenderError("simulated render failure")
+
+    monkeypatch.setattr(ic, "render_report", _boom)
+
+    block_dir = tmp_path / "blocks" / "some-block"
+    layout = ic.build_layout_json(
+        repo_dir,
+        repo="2AMLogic/some-block",
+        ref="deadbeef",
+        slug="some-block",
+        block_dir=block_dir,
+    )
+    assert layout["status"] == "ok"
+    assert "renders" not in layout
+
 
 def test_no_gds_yields_in_design_status(tmp_path):
     repo_dir = tmp_path / "repo"

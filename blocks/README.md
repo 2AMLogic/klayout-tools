@@ -80,6 +80,19 @@ output. Only the nominal corners are staged — the remaining 12 PVT corners
 keep their measurements in `layout.json` but their multi-megabyte rawfiles
 are not committed.
 
+## Renders (issue #651, epic #650 "gallery visuals" phase 1)
+
+All 6 blocks with a `layout.json` also carry a `renders` field —
+`{"overview": "renders/overview.png"}` — the gallery-thumbnail composite
+`klt render` produces (`src/klayout_tools/render.py`), attached by
+`bootstrap-gallery-blocks.py`. Only that fixed key is recorded: `klt
+render` also writes one PNG per non-empty layer into the same
+`output/renders/` directory, but those stay `.gitignore`d (Option A from
+#651) — checking in a single ~1024x768 composite per block is enough for a
+real gallery thumbnail without putting KLayout on the site's deploy path.
+`clkinv_1` has no `renders` field for the same reason it has no
+`layout.json` at all (see above).
+
 ## Design-pipeline worked example (Epic #105 Phase 3)
 
 `sky130-ota-5t` is an eighth block, added by issue #130: a sky130 5T OTA
