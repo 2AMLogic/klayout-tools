@@ -533,6 +533,41 @@ def _validate_block_port(
     return block
 
 
+def _parse_waypoints_um(
+    raw_waypoints: Any, *, net: str, index: int
+) -> list[tuple[float, float]] | None:
+    """Parse the optional ``connectivity[<index>].waypoints_um`` field (#634).
+
+    ``None``/absent means "no waypoints" (today's behaviour, unchanged) --
+    every other value must be a non-empty array of ``[x_um, y_um]`` number
+    pairs, forced through in order by :func:`manhattan_backbone` between the
+    two ports' own stubs. Malformed input is an application error (exit 1),
+    the same treatment every other ``connectivity[]`` field gets.
+    """
+    if raw_waypoints is None:
+        return None
+    where = f"request.connectivity[{index}] (net '{net}').waypoints_um"
+    if not isinstance(raw_waypoints, list) or not raw_waypoints:
+        raise GenComposeError(
+            f"{where} must be a non-empty array of [x_um, y_um] pairs"
+        )
+
+    parsed: list[tuple[float, float]] = []
+    for wp_index, waypoint in enumerate(raw_waypoints):
+        if (
+            not isinstance(waypoint, list)
+            or len(waypoint) != 2
+            or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) for v in waypoint
+            )
+        ):
+            raise GenComposeError(
+                f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers"
+            )
+        parsed.append((float(waypoint[0]), float(waypoint[1])))
+    return parsed
+
+
 def _parse_connectivity(
     raw_connectivity: Any, blocks: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -581,7 +616,12 @@ def _parse_connectivity(
             )
             parsed_pins.append({"block": block_id, "port": port})
 
-        connectivity.append({"net": net, "pins": parsed_pins})
+        waypoints_um = _parse_waypoints_um(
+            entry.get("waypoints_um"), net=net, index=index
+        )
+        connectivity.append(
+            {"net": net, "pins": parsed_pins, "waypoints_um": waypoints_um}
+        )
 
     return connectivity
 
@@ -1002,6 +1042,7 @@ def manhattan_backbone(
     *,
     stub_a_um: float | None = None,
     stub_b_um: float | None = None,
+    waypoints: list[tuple[float, float]] | None = None,
 ) -> list[tuple[float, float]]:
     """Generate a two-pin Manhattan backbone from port ``a`` to port ``b``.
 
@@ -1021,6 +1062,25 @@ def manhattan_backbone(
     port sits inside (e.g. a gate landing pad recessed below its block's top
     edge, issue #461); each defaults to ``stub_um``.
 
+    ``waypoints`` (#634) is an optional caller-supplied ordered list of
+    ``(x, y)`` points the backbone is forced through, between port ``a``'s
+    stub and port ``b``'s stub -- the fixed-shape jog logic above is skipped
+    entirely when it is given. This is the escape hatch for a pair the
+    fixed shape can never route (most notably two ports facing the *same*
+    absolute direction in a row placement, where the one-jog shape's jog
+    lands inside the upstream block's own bbox): the caller supplies the
+    routing knowledge the fixed shape lacks (e.g. a point above the row's
+    shared bbox top), and every consecutive pair in ``[sa, *waypoints, sb]``
+    that does not already share an x or a y gets exactly one elbow corner
+    inserted between them (move in x first, then y -- the same corner
+    convention the mixed-orientation case above uses), so the result stays a
+    strictly axis-aligned polyline like every other backbone this function
+    returns. The caller is responsible for choosing waypoints that actually
+    clear whatever obstacle motivated them -- :func:`route_two_pin`'s
+    existing routability checks (including the obstacle-overlap check) still
+    run against the resulting path and reject it exactly as they would any
+    other backbone if it does not.
+
     Returns the cleaned ordered ``(x, y)`` waypoint list (um). ``pya.Path``
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
@@ -1033,6 +1093,18 @@ def manhattan_backbone(
     sb_len = stub_um if stub_b_um is None else stub_b_um
     sa = (ax + va[0] * sa_len, ay + va[1] * sa_len)
     sb = (bx + vb[0] * sb_len, by + vb[1] * sb_len)
+
+    if waypoints:
+        chain = [sa, *waypoints, sb]
+        points: list[tuple[float, float]] = [a, chain[0]]
+        for p, q in zip(chain, chain[1:], strict=False):
+            same_x = abs(p[0] - q[0]) < 1e-9
+            same_y = abs(p[1] - q[1]) < 1e-9
+            if not (same_x or same_y):
+                points.append((q[0], p[1]))  # elbow: x first, then y
+            points.append(q)
+        points.append(b)
+        return _cleanup_points(points)
 
     a_horizontal = va[1] == 0  # port a faces +/-x
     b_horizontal = vb[1] == 0  # port b faces +/-x
@@ -1491,6 +1563,7 @@ def route_two_pin(
     route_layer: tuple[int, int] | None = None,
     extraction_deck: ExtractionDeck | None = None,
     block_geometry: dict[str, dict[str, Any] | None] | None = None,
+    waypoints_um: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -1580,7 +1653,15 @@ def route_two_pin(
     applies. ``extraction_deck`` is likewise optional and only consulted
     (check 6) when both it and ``route_layer`` are given -- omitting it (e.g.
     a pre-#454 caller) draws every pin directly on ``route_layer`` with no
-    via-drop, exactly as before that issue.
+    via-drop, exactly as before that issue. ``waypoints_um`` (#634) is
+    likewise optional -- ``None``/omitted preserves today's fixed-shape
+    backbone exactly (:func:`manhattan_backbone`'s default one-jog/corner
+    shape); when given, it is threaded straight into
+    :func:`manhattan_backbone`, whose own docstring covers how the path is
+    built from it. Checks 1-5 above run against whatever ``points`` results
+    either way -- a waypoint-supplied path is not exempt from the
+    obstacle-overlap check (5) or any other geometry check just because the
+    caller supplied it.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list, "reason":
@@ -1713,10 +1794,16 @@ def route_two_pin(
     # (or bottoms, for -y). Scoped to ring-free blocks: a ringed block routes
     # through its declared gap at port level, never over its own top. For the
     # pre-#461 geometry (gate port exactly on the block edge) this reduces to
-    # the default stub, so no existing route changes.
+    # the default stub, so no existing route changes. Skipped entirely when
+    # the caller supplies waypoints_um (#634): the automatic jog this lift
+    # exists to clear is not drawn at all in that case (manhattan_backbone
+    # routes through the caller's own points instead), so stretching the
+    # stub here would just move the endpoint the caller's waypoints are
+    # relative to, out from under them.
     stub_a_um = stub_b_um = stub_um
     if (
-        pin_a["block"] != pin_b["block"]
+        waypoints_um is None
+        and pin_a["block"] != pin_b["block"]
         and dir_a == dir_b
         and va[0] == 0
         and not _block_has_ring_taps(block_a)
@@ -1734,7 +1821,14 @@ def route_two_pin(
             stub_b_um = max(stub_um, b[1] - jog_y)
 
     points = manhattan_backbone(
-        a, dir_a, b, dir_b, stub_um, stub_a_um=stub_a_um, stub_b_um=stub_b_um
+        a,
+        dir_a,
+        b,
+        dir_b,
+        stub_um,
+        stub_a_um=stub_a_um,
+        stub_b_um=stub_b_um,
+        waypoints=waypoints_um,
     )
     margin_eps_um = 1e-6
 
@@ -2272,6 +2366,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 if pins[0]["block"] == pins[1]["block"]
                 else None
             ),
+            waypoints_um=entry.get("waypoints_um"),
         )
         nets.append(
             {

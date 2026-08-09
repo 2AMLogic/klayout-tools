@@ -162,7 +162,9 @@ into the circuit.)
   *routable* at this phase — the router reports the obstruction rather than
   routing around it — so the worked example below still applies the same
   workarounds as before (an `add_guard_ring: false` block parameter, and
-  connectivity wired between *opposite*-facing port pairs only); the
+  connectivity wired between *opposite*-facing port pairs only — case
+  **(1)** now also has a remedy that keeps a same-facing pair: see
+  "Routing same-facing port pairs with waypoints_um" below); the
   difference #199 makes is that skipping a workaround now fails visibly
   (partial success, exit `3`) instead of silently producing a shorted
   device. The underlying detection
@@ -173,6 +175,34 @@ into the circuit.)
   lands, per the spike's own open questions) remains its own follow-up.
   Case **(2)** now also has a remedy that keeps the ring: see "Routing
   through a ring opening" below.
+- **Routing same-facing port pairs with `waypoints_um` (#634, fixed).** Case
+  **(1)** above has no remedy when the caller cannot choose which ports get
+  wired — e.g. a hand-drawn cell that legitimately puts its input and output
+  on the same edge, so *every* link between two such cells is a same-facing
+  pair, not just some. A `connectivity[]` entry now accepts an optional
+  `"waypoints_um": [[x, y], ...]` field (um, in the composed coordinate
+  frame): an ordered list of points the backbone is forced through, between
+  port `a`'s own stub and port `b`'s own stub, in place of
+  `manhattan_backbone()`'s fixed one-jog/corner shape. This is deliberately
+  *not* a general obstacle-avoiding router — the caller supplies the routing
+  knowledge the fixed shape lacks (e.g. a point above the row's shared bbox
+  top, clearing both blocks entirely), and every one of #199/#433/#453's
+  existing routability checks, including the obstacle-overlap check, still
+  runs against the resulting path: a waypoint that still crosses another
+  block's bbox interior is rejected (`routed: false`) exactly like any other
+  backbone, not silently drawn as a short. Omitting `waypoints_um` changes
+  nothing — the fixed-shape backbone above is exactly what still runs.
+
+  ```json
+  {
+    "net": "n1",
+    "pins": [
+      { "block": "a", "port": "Y" },
+      { "block": "b", "port": "A" }
+    ],
+    "waypoints_um": [[-0.17, 1.0], [11.09, 1.0]]
+  }
+  ```
 - **Routing through a ring opening (#434, fixed).** A closed ring left
   `add_guard_ring: false` as the only way to wire a matched group into the
   rest of a circuit — i.e. a block could have its ring or its connectivity,
@@ -563,6 +593,7 @@ exit codes).
 | `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"`. |
 | `placement.origins_um` | object | **Required when `strategy: "explicit"`**, otherwise not read. Maps every `placement.order` block `id` to its own `{"x": number, "y": number}` origin — that block's `offset_um`, applied exactly like a `"row"` offset (added directly to the block's own reported `bbox_um`; see "`blocks[]` entries" below). The key set must equal `order` exactly — a missing, extra, or unknown `id` is an application error (exit 1), as is a non-numeric `x`/`y`. |
 | `connectivity[]` | array\<object\> | One entry per net: a `net` label (caller-chosen, response traceability only) and `pins[]` (at least 2), each `{block, port}` addressing one named port from that block's own `generator_report.ports[]`. A **2-pin** net is routed point-to-point (see "Scope"); a **>2-pin** (bundle) net is left unrouted this phase. A `pins[].block`/`pins[].port` referencing a nonexistent block `id` or port name is an application error (exit 1). |
+| `connectivity[].waypoints_um` | array\<array\<number\>\> | Optional, **2-pin nets only**. An ordered, non-empty list of `[x_um, y_um]` points (composed-frame coordinates) the backbone is forced through, between port `a`'s own stub and port `b`'s own stub — see "Routing same-facing port pairs with `waypoints_um`" below. A malformed entry (not an array, not length-2, a non-numeric coordinate) is an application error (exit 1). Omitting it changes nothing (today's fixed one-jog/corner shape). |
 | `pins[]` | array\<object\> | Optional. One entry per single-pin top-level net to label **without routing** (#210) — e.g. a device gate, a bias/supply pad. Omitting it entirely changes nothing. Each entry names **exactly one** port (unlike `connectivity[]`'s 2+ `pins`). See fields below. |
 | `pins[].net` | string | Caller-chosen net name written as the `kdb.Text` label on the port, and echoed in the response. Required and non-empty. |
 | `pins[].block` | string | A `blocks[].id`. Referencing an unknown `id` is an application error (exit 1). |
