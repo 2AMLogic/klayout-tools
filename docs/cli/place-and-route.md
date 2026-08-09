@@ -107,11 +107,40 @@ verified entry in `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`
 (`place_and_route.py`) for that `cell_library` — a clock-tree buffer cell
 name and a signal routing-layer range are not derivable from the resolved
 PDK install itself, so each supported cell library needs its own verified
-entry (never a runtime dependency; never guessed). `sky130_fd_sc_hd` (read
-from ORFS's own `platforms/sky130hd/config.mk`) and `gf180mcu_fd_sc_mcu9t5v0`
-(verified directly against a real gf180mcu install's own LEF, since ORFS
-ships no `gf180mcu_fd_sc_mcu9t5v0` platform) both have entries today; a
-`cell_library` with no entry in either table is a clear error, not a guess.
+entry (never a runtime dependency; never guessed). Two libraries have
+entries today:
+
+| `cell_library` | CTS buffer | `set_routing_layers -signal` |
+| --- | --- | --- |
+| `sky130_fd_sc_hd` | `sky130_fd_sc_hd__buf_4` | `met1-met5` |
+| `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__buf_4` | `Metal2-Metal5` |
+
+A `cell_library` with no entry in either table is a clear error, not a
+guess.
+
+Both rows are read from ORFS's own platform reference data — `platforms/
+sky130hd/config.mk` and `platforms/gf180/config.mk` (whose defaults
+`TRACK_OPTION ?= 9t`/`POWER_OPTION ?= 5v0` resolve to exactly
+`gf180mcu_fd_sc_mcu9t5v0`) — cross-checked against those platforms' own
+open-source LEFs, and never a runtime dependency on an ORFS checkout. Two
+asymmetries in that table are deliberate, not typos:
+
+- **gf180mcu's routing range starts at `Metal2`, not `Metal1`**, matching
+  `platforms/gf180/config.mk`'s `MIN_ROUTING_LAYER ?= Metal2`. That
+  library's standard cells pin out on `Metal1` itself, so `Metal1` is left
+  to pin access and intra-cell/power-rail geometry. sky130hd has no
+  equivalent constraint — its cells pin out on `li1`, below `met1`
+  entirely — hence `met1-met5` there.
+- **The layer-name case differs** (`Metal1` vs `met1`) because each PDK's
+  own LEF uses that convention; the string is passed through to OpenROAD
+  verbatim.
+
+Neither ORFS platform pins a CTS buffer of its own (`CTS_BUF_LIST` is
+optional and unset in both; there is no `CTS_BUF_CELL` variable in ORFS at
+all), so ORFS lets OpenROAD auto-select. `klt place-and-route` names one
+explicitly instead, for a run-to-run reproducible clock tree — see
+`_CTS_BUFFER_CELLS`' own docstring in `place_and_route.py` for each entry's
+exact source.
 
 ## DEF→GDS merge
 
