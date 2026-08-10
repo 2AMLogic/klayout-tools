@@ -652,12 +652,25 @@ COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" --paginate \
 # printf, not echo: zsh's echo interprets \n escapes inside the JSON, corrupting it
 COMMENTS_AFTER=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m) | not)] | length')
 STANDDOWN_COUNT=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m))] | length')
+# Frozen Events/Timeline read cross-check (#668): if a PRIOR pass already
+# reclaimed against this EXACT $CLAIMED_AT, a genuine reclaim's re-add of the
+# label produces a NEW `labeled` event, which should have advanced CLAIMED_AT
+# by this pass. If it did not, the /timeline read itself — not the claim — is
+# stuck (live-verified on issue #509, 2026-08-10: real `--remove-label`/
+# `--add-label` toggles confirmed via `gh issue view --json labels`, but
+# `/events` and `/timeline` kept returning the same `labeled` event for
+# several minutes afterward). RECLAIM_MARKER is claim-value-specific, so it
+# only ever matches a reclaim comment left against this identical timestamp —
+# see "Frozen-Timeline Fallback" below.
+RECLAIM_MARKER="<!-- loom:reclaimed claim=$CLAIMED_AT -->"
+RECLAIM_COUNT=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$RECLAIM_MARKER" '[.[] | select(.body | contains($m))] | length')
 ```
 
 Then decide:
 
 | Condition | Verdict | Action |
 |-----------|---------|--------|
+| `RECLAIM_COUNT >= 1` (this exact `$CLAIMED_AT` was already reclaimed by a prior pass and the timeline read still has not advanced) | **Suspected frozen Events/Timeline read (#668)** | Do NOT reclaim again on the timestamp alone — see "Frozen-Timeline Fallback" below instead of the rows below. |
 | `STANDDOWN_COUNT >= LOOM_MAX_STANDDOWN_STREAK` (default **3**) AND claim age ≥ `LOOM_STALE_TREATING_MINUTES` (default **60**) | **Stale — bounded fallback** (see below) | Force-reclaim regardless of `COMMENTS_AFTER`. Breaks the livelock even if the marker/exclusion logic above is somehow bypassed — but the streak alone is never enough (#4790): it also requires the claim to have aged past the normal staleness threshold, so a high *peer arrival rate* (several concurrent Doctors each standing down within minutes) cannot force-reclaim a claim that is still genuinely fresh. |
 | Claim age < `LOOM_STALE_TREATING_MINUTES` (default **60**), OR `COMMENTS_AFTER > 0` | **Fresh** — a Doctor is actively fixing this PR | **Do not stomp the claim.** Post a marked stand-down comment **unless the latest comment on the PR already carries an identical marker for this exact `$CLAIMED_AT`** (see "Duplicate stand-down suppression" below — then skip silently instead), then skip this PR and move to the next candidate in the queue. |
 | Claim age ≥ `LOOM_STALE_TREATING_MINUTES` AND `COMMENTS_AFTER == 0` | **Stale** — the claiming Doctor's process almost certainly died mid-fix | Reclaim (see below), then proceed with the normal fix from step 3. |
@@ -728,7 +741,8 @@ longer overrides the age check too. Use this reclaim comment:
 
 ```bash
 gh pr edit $N --remove-label "loom:treating"
-gh pr comment $N --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT consecutive stand-down comments have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_TREATING_MINUTES:-60}m) with no actual fix progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+gh pr comment $N --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT consecutive stand-down comments have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_TREATING_MINUTES:-60}m) with no actual fix progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock.
+<!-- loom:reclaimed claim=$CLAIMED_AT -->"
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
@@ -738,11 +752,66 @@ CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 
 ```bash
 gh pr edit $N --remove-label "loom:treating"
-gh pr comment $N --body "Reclaiming stale loom:treating claim (age > ${LOOM_STALE_TREATING_MINUTES:-60}m, no follow-up comment) — a prior Doctor's process likely died mid-fix."
+gh pr comment $N --body "Reclaiming stale loom:treating claim (age > ${LOOM_STALE_TREATING_MINUTES:-60}m, no follow-up comment) — a prior Doctor's process likely died mid-fix.
+<!-- loom:reclaimed claim=$CLAIMED_AT -->"
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
 ```
+
+**Every reclaim comment (both paths above) MUST carry the
+`<!-- loom:reclaimed claim=$CLAIMED_AT -->` trailer** — it is what lets the
+`RECLAIM_COUNT` check on a future pass detect that this exact `$CLAIMED_AT`
+was already reclaimed once, the signal the Frozen-Timeline Fallback below
+depends on.
+
+### Frozen-Timeline Fallback (#668)
+
+Reached only when `RECLAIM_COUNT >= 1` — the timeline read did not advance
+even after a prior pass already removed and re-added the label. Cross-check
+against reads that do **not** go through `/events` or `/timeline` at all: the
+label's *current* presence (ground truth for "is it actually still claimed")
+and the PR's own `updatedAt`, which the Issues REST resource (PRs share it)
+bumps on every label add/remove/comment regardless of whether the
+Events/Timeline projection has caught up:
+
+```bash
+CURRENT_LABELS=$(gh pr view $N --json labels --jq '[.labels[].name]')
+UPDATED_AT=$(gh pr view $N --json updatedAt --jq '.updatedAt')
+FROZEN_MARKER="<!-- loom:frozen-timeline claim=$CLAIMED_AT -->"
+ALREADY_ALERTED=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$FROZEN_MARKER" '[.[] | select(.body | contains($m))] | length')
+```
+
+- **If `loom:treating` is no longer in `CURRENT_LABELS`**: someone else
+  already resolved this claim between your read and now — do nothing further,
+  re-run Priority 1/2 discovery.
+- **If `loom:treating` is still present** (the normal case here) **and
+  `UPDATED_AT` is more recent than `CLAIMED_AT`** (the resource changed after
+  the point the stuck timeline read is frozen on — corroborating a frozen
+  read rather than a genuinely dead claim): treat this pass as **Fresh,
+  fail-safe** — do NOT reclaim again on the timestamp alone. Post the
+  diagnostic comment below only if `ALREADY_ALERTED == 0` (same duplicate
+  suppression pattern as stand-down comments — one alert per frozen
+  `$CLAIMED_AT`, not one per pass):
+  ```bash
+  gh pr comment $N --body "Stale-claim check: \`CLAIMED_AT\` ($CLAIMED_AT) has not advanced despite an already-recorded reclaim against it, but \`updatedAt\` ($UPDATED_AT) shows more recent activity — the Events/Timeline read looks frozen for this PR (see #668). Standing down instead of reclaiming again; a human should verify current label state directly (\`gh pr view $N --json labels\`) before further action.
+  <!-- loom:frozen-timeline claim=$CLAIMED_AT -->"
+  ```
+- **If `UPDATED_AT` is not more recent than `CLAIMED_AT` either** (no
+  corroborating evidence of a frozen read — both signals agree the resource
+  has been quiet): this is very likely a genuinely dead claim rather than
+  #668's failure mode. Proceed with the ordinary reclaim above (it will
+  legitimately advance `CLAIMED_AT` this time, since nothing already reclaimed
+  against the correct fresh label event).
+
+This bounds the failure mode to **one** reclaim attempt plus **one**
+diagnostic comment per frozen `$CLAIMED_AT` value, instead of repeating
+indefinitely — the shape confirmed on #509 (30+ "Reclaiming stale claim..."
+comments accumulated over ~1 day because `CLAIMED_AT` never advanced). If the
+timeline read ever genuinely catches up (a human relabels manually, or GitHub
+resolves the lag), the next `labeled` event produces a new `$CLAIMED_AT` and
+`RECLAIM_COUNT` naturally resets to zero — normal reclaim behavior resumes
+without any manual reset needed.
 
 **Env vars**: `LOOM_STALE_TREATING_MINUTES` (default **60**) — deliberately
 longer than the Judge's `LOOM_STALE_REVIEWING_MINUTES` (30): a Doctor's fix
