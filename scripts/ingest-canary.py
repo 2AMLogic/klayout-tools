@@ -91,13 +91,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = REPO_ROOT / ".cache" / "canary-repos"
 DEFAULT_BLOCKS_DIR = REPO_ROOT / "blocks"
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from _gallery_common import attach_overview_render  # noqa: E402
+
 from klayout_tools.cells import CellsError, cells_report  # noqa: E402
 from klayout_tools.layers import LayersError, layers_report  # noqa: E402
-from klayout_tools.render import RenderError, render_report  # noqa: E402
+
+# RenderError is not used directly in this module anymore (the shared
+# _gallery_common.attach_overview_render helper catches it) -- kept as
+# `ic.RenderError` for tests/test_ingest_canary.py, which raises it via a
+# monkeypatched render_report to exercise the best-effort path.
+from klayout_tools.render import RenderError, render_report  # noqa: E402,F401
 
 SCHEMA_VERSION = 1
 IN_DESIGN_STATUS = "in design — simulation evidence"
@@ -680,17 +691,17 @@ def _attach_overview_render(
     (issue #651, Option A -- only the composite is tracked in git; per-layer
     PNGs the same call writes alongside it stay `.gitignore`d).
 
-    Best-effort: a render failure prints a warning and leaves `layout`
-    untouched rather than aborting the ingest -- this is the "first link"
-    the render/copy/display chain was missing, not a required artifact, so
-    it follows the same opt-in treatment as `spec_summary`/`signals` above.
+    Thin wrapper around the shared `_gallery_common.attach_overview_render`
+    helper (issue #670 -- deduped from a near-identical copy of this function
+    in `scripts/bootstrap-gallery-blocks.py`): a render failure prints a
+    warning here and leaves `layout` untouched rather than aborting the
+    ingest -- this is the "first link" the render/copy/display chain was
+    missing, not a required artifact, so it follows the same opt-in
+    treatment as `spec_summary`/`signals` above.
     """
-    try:
-        render_report(str(gds_path), output_dir=str(block_dir / "output" / "renders"))
-    except RenderError as exc:
+    exc = attach_overview_render(gds_path, block_dir, layout, render_fn=render_report)
+    if exc is not None:
         print(f"ingest-canary: {slug}: skipping render: {exc}", file=sys.stderr)
-        return
-    layout["renders"] = {"overview": "renders/overview.png"}
 
 
 def build_layout_json(
