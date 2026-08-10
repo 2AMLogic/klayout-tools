@@ -144,7 +144,10 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 ### Priority 4: Epic Proposals Ready to Evaluate
 
-If no individual proposals need promotion, check for epic proposals:
+If no individual proposals need promotion, check for epic proposals. Same
+`loom:evaluating`/`loom:operator-only`/`loom:blocked`/`loom:issue`/
+`loom:building` exclusion as Priorities 2/3 (see Priority 2's note on why the
+latter two are required):
 
 ```bash
 # Check for Epic proposals
@@ -153,7 +156,12 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq '.[] | "#\(.number) \(.title) [epic]"'
+  --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
+  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+  select([.labels[].name] | contains(["loom:blocked"]) | not) |
+  select([.labels[].name] | contains(["loom:issue"]) | not) |
+  select([.labels[].name] | contains(["loom:building"]) | not) |
+  "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.
