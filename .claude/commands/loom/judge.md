@@ -521,7 +521,11 @@ CLAIMED_AT=$(gh api "repos/{owner}/{repo}/issues/$N/timeline" --paginate \
   --jq '[.[] | select(.event=="labeled" and .label.name=="loom:reviewing")] | last | .created_at // empty' \
   | sort | tail -n 1)
 MARKER="<!-- loom:standdown claim=$CLAIMED_AT -->"
-COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" \
+# `--paginate` here too: the comments endpoint defaults to 30/page, and the
+# `jq` filter below is a separate pipe stage (not `--jq` on this call), so
+# `--paginate` alone concatenates every page into one array before filtering
+# — no `sort | tail` collapse needed, unlike the timeline call above.
+COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" --paginate \
   | jq --arg t "$CLAIMED_AT" '[.[] | select(.created_at > $t)]')
 # printf, not echo: zsh's echo interprets \n escapes inside the JSON, corrupting it
 COMMENTS_AFTER=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m) | not)] | length')
