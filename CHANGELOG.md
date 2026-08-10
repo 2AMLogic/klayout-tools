@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-10 — `klt extract`: a material, non-empty `ignored_layers` result
+  (any entry with `shapes > 0` — which is every entry, since empty layers
+  are filtered before they reach this field) now also appends a single
+  aggregate `warnings[]` entry naming the affected layer(s) and their total
+  shape count (#666). Before this, `ignored_layers` was diagnostic-only: a
+  net routed on a metal level the deck's connectivity graph does not read
+  extracted "successfully" with no signal in `warnings[]`, the one field a
+  caller checking only the minimal self-check every `klt` command output
+  documents would see. **Behavior change**: a layout that previously
+  extracted "clean" (no `warnings[]` entries) with a non-empty
+  `ignored_layers` now also emits a `warnings[]` entry for it — any test or
+  tooling that asserted an empty `warnings[]` purely because it never
+  inspected `ignored_layers` should be re-checked. `device_recognition_only_
+  layers` (#619) is unaffected — it intentionally still does not mirror into
+  `warnings[]`, unchanged from the 2026-08-08 entry below.
 - 2026-08-09 — `klt place-and-route`: `_ROUTING_LAYER_RANGE`'s
   `gf180mcu_fd_sc_mcu9t5v0` entry was `"Metal1-Metal5"`, one layer wider at
   the bottom than the platform allows — OpenROAD was told it could route
