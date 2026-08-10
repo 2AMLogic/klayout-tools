@@ -73,7 +73,8 @@ ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null
 
 # Then fall back to root manifests / build files, in this order of specificity:
 #   package.json      -> node/pnpm/npm build+test (read its "scripts")
-#   Cargo.toml (root) -> cargo build --release / cargo test
+#   Cargo.toml (root) -> cargo build --release / cargo test (unless CI uses
+#                         nextest — see the Rust extraction step below)
 #   pyproject.toml    -> python build; pytest / tox / nox for tests
 #   Makefile          -> make build / make test (read the targets first)
 #   (none of the above, no CI) -> see Step D3 "nothing to build/launch"
@@ -84,6 +85,39 @@ done
 
 Use the **discovered** command as `$BUILD_CMD` / `$TEST_CMD` in the workflow
 below. If CI already defines them, that is authoritative — reuse it verbatim.
+
+**Rust: extract CI's exact test invocation instead of guessing `cargo test`.**
+A generic `cargo test --workspace` guess is not always what CI actually runs —
+`cargo nextest` (process-per-test isolation) and `cargo test` (shared-process,
+multi-threaded) can produce **different** results for the same test suite on a
+busy/contended host, so guessing wrong can manufacture false "test failure on
+main" signals. When `Cargo.toml` exists at the repo root, extract CI's own
+`--workspace`-scoped nextest command before falling back to a generic guess:
+
+```bash
+if [[ -f Cargo.toml ]]; then
+    NEXTEST_CMD=$(rg -n 'cargo nextest run.*--workspace' .github/workflows/*.yml \
+        .github/workflows/*.yaml 2>/dev/null \
+        | head -1 | sed -E 's/^[^:]+:[0-9]+:[[:space:]]*(- )?(run:[[:space:]]*)?//')
+    if [[ -n "$NEXTEST_CMD" ]]; then
+        TEST_CMD="$NEXTEST_CMD"   # byte-for-byte reuse, flags included (e.g. --profile ci)
+    else
+        TEST_CMD="cargo test --workspace"   # no nextest reference found — unchanged fallback
+    fi
+fi
+```
+
+- Prefer a `--workspace`-scoped `cargo nextest run` line over a `--package`-scoped
+  one if a workflow has both (e.g. a package-specific feature-flag job) — the
+  fallback needs to cover the whole repo, not one crate.
+- If `.github/workflows/` doesn't exist, or no workflow file references `cargo
+  nextest run`, fall back to the existing generic default (`cargo test
+  --workspace`) unchanged — do not require `nextest` to be installed or treat it
+  as a hard dependency for repos that don't use it.
+- CI's Rust validation may span more than one command (e.g. a separate `cargo
+  test --workspace --doc` run for doctests, since nextest doesn't execute them,
+  or a feature-flag-specific job) — the extraction above only needs the
+  general-purpose `--workspace` suite; it is not meant to replicate every job.
 
 **Step D2 — detect the launchable artifact (what does "run it" mean here?):**
 
@@ -157,6 +191,62 @@ case $CI_STATUS in
         ;;
 esac
 ```
+
+### Docker-Dependent CI Legs (no local docker)
+
+Some repos run a CI leg that builds/runs a docker image (e.g. this repo's
+`worker-image-smoke` job, which builds and smoke-tests the `loom-worker`
+image). **Do not silently skip that leg just because `docker` is unavailable
+on this host** — look up the job's own real conclusion from the forge instead
+of building the image yourself (provisioning `docker` on the Auditor host is
+out of scope, #5748):
+
+```bash
+if ! command -v docker &>/dev/null; then
+    # No docker on this host — query the specific job's conclusion instead of
+    # silently omitting that leg. Use the exact GitHub Actions job `name:`
+    # (not the workflow-file job id) — e.g. "loom-worker Image Smoke Test"
+    # for this repo's worker-image-smoke job.
+    ./.loom/scripts/check-ci-status.sh --job "loom-worker Image Smoke Test" --quiet
+    JOB_STATUS=$?
+    case $JOB_STATUS in
+        0) echo "worker-image-smoke: PASSED (per CI, not locally validated — no docker on this host)" ;;
+        1) echo "worker-image-smoke: FAILED per CI — investigate/file a bug" ;;
+        2) echo "worker-image-smoke: still pending in CI" ;;
+        *) echo "worker-image-smoke: not applicable for this commit or no docker CI job on this forge (Gitea has none) — report as N/A, not pass/fail" ;;
+    esac
+    # Always mention this leg's status explicitly in the audit output —
+    # never complete the audit without reporting it, whichever branch above ran.
+else
+    # docker IS available — this is unchanged: build the image and run the
+    # repo's own smoke-test script locally (e.g. docker/worker/test-image.sh
+    # in this repo) instead of only trusting CI's report of it.
+    :
+fi
+```
+
+Exit code `3` from `--job` covers two distinct forge-reported states —
+`--quiet` distinguishes them by printed string (`not_found` vs `skipped`) if
+you need to tell them apart in the audit output: the job never ran for this
+commit at all (e.g. a Gitea repo, which has no such GitHub Actions job), or
+it ran but its own `if:` condition evaluated false for this commit (e.g. a
+non-push event where the docker-changed-files gate skipped it). Report
+either as "not applicable", never as a false pass or fail.
+
+**Docker present but host/target architecture mismatch**: some Dockerfiles
+(e.g. this repo's `docker/worker/Dockerfile`) `COPY` a pre-built binary for a
+specific target triple — `dist/loom-daemon-x86_64-unknown-linux-gnu` — rather
+than building it from source inside the image (artifact-reuse design, #5325).
+On a host whose `cargo build --release` output doesn't match that triple
+(e.g. an arm64 Auditor host, which produces a Mach-O arm64 binary, not the
+required ELF x86_64 one), the leg cannot be genuinely locally validated even
+though `docker` itself is installed and working (#5765). Treat this the same
+as the "no local docker" case above: fall back to
+`./.loom/scripts/check-ci-status.sh --job "loom-worker Image Smoke Test"
+--quiet` and report the leg as "passed per CI, not locally validated
+(host/target arch mismatch)" — do not attempt (and fail) a local `docker
+build` / `test-image.sh` run that you already know cannot produce the
+required artifact.
 
 ### Standard Validation Workflow
 
@@ -499,6 +589,20 @@ jq -c 'select(.pattern == "<pattern>")' .loom/logs/guard-decisions.log | tail -3
 
 **Label discipline:** file these as normal issues that enter through intake (`loom:triage`) or as `loom:auditor` proposals for Champion evaluation — **never self-apply `loom:issue`** (promotion ownership: see `.loom/roles/curator.md` § "Who promotes `loom:curated` → `loom:issue`"). The genuinely-dangerous set MUST remain `DENY`/`ASK`; the standing policy only ever refines *false positives*, never relaxes a real safety floor.
 
+## Bounded Rejection-Review (Standing Policy, #5859)
+
+Each tick, read the Judge rejections that landed since your last pass and watch for a **recurring process pattern** — a class of mistake a role prompt could prevent — as distinct from a one-off code-specific finding that needs no action (design rationale: `docs/design/retrospective-pattern-mining.md` §8, #5850).
+
+**Workflow (run each tick):**
+
+1. List `loom:changes-requested` label-**add** events since the last pass — index on the **event**, not the `<!-- loom:verdict-sha ... -->` comment marker: the marker was measured at ~50% recall while the label event is server-generated and therefore exact (#5850 §2, §4).
+2. Join each event to its verdict comment: the newest comment strictly preceding the event within 120s (`judge.md` chains the comment write and the label write with `&&`, so the gap is bounded — measured at 1–8s).
+3. Classify each pair as a **code-specific finding** (no action) or a **process pattern**.
+4. Keep the running tally in the pass's own issue/comment trail — **no new state file**, the forge is the state store.
+5. File a proposal only once the same pattern reaches **three or more independent instances**, citing the specific PR numbers.
+
+**Dedupe, label discipline, and safety floor:** identical to the Guard-Decision Telemetry Review above — dedupe with `./.loom/scripts/check-duplicate.sh`, file via `./.loom/scripts/create-issue.sh` (never a direct edit to `.loom/roles/*.md`, `CLAUDE.md`, or `.github/labels.yml`), enter at `loom:triage`/`loom:auditor` and never self-apply `loom:issue`, and never propose relaxing a safety rule, guard, label invariant, or lifecycle gate. Additionally, a proposal that adds lines to a prompt must say what it displaces, and proposing a deletion must be an available verdict — `CLAUDE.md` and `judge.md` are already near their prompt-budget ceilings.
+
 ## Decision Framework
 
 ### When to Report
@@ -554,7 +658,9 @@ gh issue list --state open --search "build failure" --limit 500 --json number,ti
 
 ```bash
 # DO: Run the full build and test suite USING THE DISCOVERED COMMANDS
-#     (the two lines below are illustrative Loom-repo examples, not instructions):
+#     (the two lines below are illustrative Loom-repo examples, not instructions
+#     — for the real $TEST_CMD on a Rust repo, see the Step D1 nextest
+#     extraction above, which this "cargo test" is deliberately simplified from):
 #       pnpm install && pnpm build && pnpm test     # a Node repo
 #       cargo build --release && cargo test         # a Rust repo
 eval "$BUILD_CMD" && eval "$TEST_CMD"

@@ -53,6 +53,16 @@ terminal — `title`/`body` feed `champion-issue-promo.md`'s body-hash
 idempotency check (the issue's aggregate `updatedAt` is deliberately NOT used
 for it, #4966):
 
+> **`loom:operator-only` is excluded here, but not unexamined (#5664).**
+> `champion-issue-promo.md` → "Pass 0: Self-Healing Un-Escalation Re-Scan" runs
+> one bounded scan of `loom:operator-only` proposals *before* this discovery
+> query and removes the label from any whose escalation was Champion's own,
+> dependency-only, and whose recorded blocker has since closed. Those issues then
+> match the query below in the same pass. Without that scan, an escalation for an
+> open dependency — a condition that clears itself — would be permanent, because
+> the only actor that could notice the blocker closed is the one this exclusion
+> tells to ignore it.
+
 ```bash
 gh issue list \
   --label="loom:curated" \
@@ -134,10 +144,7 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 ### Priority 4: Epic Proposals Ready to Evaluate
 
-If no individual proposals need promotion, check for epic proposals. Same
-`loom:evaluating`/`loom:operator-only`/`loom:blocked`/`loom:issue`/
-`loom:building` exclusion as Priorities 2/3 (see Priority 2's note on why the
-latter two are required):
+If no individual proposals need promotion, check for epic proposals:
 
 ```bash
 # Check for Epic proposals
@@ -146,12 +153,7 @@ gh issue list \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
-  select([.labels[].name] | contains(["loom:blocked"]) | not) |
-  select([.labels[].name] | contains(["loom:issue"]) | not) |
-  select([.labels[].name] | contains(["loom:building"]) | not) |
-  "#\(.number) \(.title) [epic]"'
+  --jq '.[] | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.
