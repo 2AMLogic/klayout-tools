@@ -81,7 +81,15 @@ SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from klayout_tools.render import RenderError, render_report  # noqa: E402
+# _gallery_common imports from klayout_tools.render, so SRC_DIR must already
+# be on sys.path (above) before this import.
+from _gallery_common import attach_overview_render  # noqa: E402
+
+# RenderError is not used directly in this module anymore (the shared
+# _gallery_common.attach_overview_render helper catches it) -- kept as
+# `bg.RenderError` for tests/test_bootstrap_gallery_blocks.py, which raises
+# it via a monkeypatched render_report to exercise the best-effort path.
+from klayout_tools.render import RenderError, render_report  # noqa: E402,F401
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_ROOT = REPO_ROOT / "tests" / "corpus"
@@ -161,20 +169,19 @@ def _attach_overview_render(
     """Render ``gds_path``'s all-layers composite into ``output/renders/``
     and attach it to ``layout["renders"]`` as ``{"overview": ...}``.
 
-    Best-effort, mirroring ``_attach_signals``: a render failure prints a
-    warning and leaves ``layout`` untouched rather than aborting the whole
-    bootstrap run. Only the fixed ``renders/overview.png`` relative path is
-    recorded (Option A, issue #651) -- the per-layer PNGs `render_report`
-    also writes alongside it are real files on disk (useful for local
-    inspection) but deliberately not listed in `renders`, since
-    `.gitignore` only tracks the composite.
+    Thin wrapper around the shared ``_gallery_common.attach_overview_render``
+    helper (issue #670 -- deduped from a near-identical copy of this function
+    in ``scripts/ingest-canary.py``): best-effort, mirroring
+    ``_attach_signals``, a render failure prints a warning here and leaves
+    ``layout`` untouched rather than aborting the whole bootstrap run. Only
+    the fixed ``renders/overview.png`` relative path is recorded (Option A,
+    issue #651) -- the per-layer PNGs `render_report` also writes alongside
+    it are real files on disk (useful for local inspection) but deliberately
+    not listed in `renders`, since `.gitignore` only tracks the composite.
     """
-    try:
-        render_report(str(gds_path), output_dir=str(block_dir / "output" / "renders"))
-    except RenderError as exc:
+    exc = attach_overview_render(gds_path, block_dir, layout, render_fn=render_report)
+    if exc is not None:
         print(f"  {slug}: (skipping render: {exc})")
-        return
-    layout["renders"] = {"overview": "renders/overview.png"}
 
 
 def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
