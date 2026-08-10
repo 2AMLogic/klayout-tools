@@ -437,6 +437,11 @@ def run_extract(
     A non-empty ``ignored_layers`` with a material shape count is the signal
     that a downstream ``klt lvs`` mismatch is a deck-coverage gap, not a
     layout bug. Empty when every shape-bearing layer is one the deck reads.
+    Every entry already carries a material (``shapes > 0``) count -- empty
+    layers are dropped before they reach this field -- so a non-empty
+    ``ignored_layers`` also appends a single aggregate prose entry to
+    ``warnings[]`` (issue #666), naming the affected layers and their total
+    shape count, so a caller checking only ``warnings[]`` still sees it.
 
     ``device_recognition_only_layers`` (issue #619) lists ``(layer,
     datatype)`` pairs that carry shapes in the input stream *and are read* by
@@ -866,6 +871,38 @@ def run_extract(
     # #220): geometry there is invisible to extraction, so surface it rather
     # than let it become a silent LVS mismatch downstream.
     ignored_layers = _describe_ignored_layers(path, deck)
+
+    # A material `ignored_layers` result gets a matching `warnings[]` entry
+    # (issue #666): `_describe_layers_in_set` already drops every
+    # `shapes == 0` entry before it reaches `ignored_layers`, so a non-empty
+    # list here is by construction "material" -- geometry that is genuinely
+    # invisible to this extraction's connectivity graph, not a stray empty
+    # layer declaration. Before this, `ignored_layers` was a diagnostic-only
+    # field: a routed net split across an undeclared metal level extracted
+    # "successfully" with no signal in `warnings[]`, the one field
+    # `docs/cli/extract.md` documents as the minimal self-check every `klt`
+    # command output should get. One aggregate line with the shape total
+    # baked in (issue #599's pattern), not one line per layer -- mirroring
+    # `metals_without_coefficient`'s `warnings[]` entry a bit further down
+    # this function.
+    if ignored_layers:
+        layer_word = "layer" if len(ignored_layers) == 1 else "layers"
+        be_word = "is" if len(ignored_layers) == 1 else "are"
+        total_shapes = sum(entry["shapes"] for entry in ignored_layers)
+        shape_word = "shape" if total_shapes == 1 else "shapes"
+        layers_str = ", ".join(
+            f"{entry['layer']}/{entry['datatype']}" for entry in ignored_layers
+        )
+        warnings.append(
+            f"{len(ignored_layers)} {layer_word} ({layers_str}) carrying "
+            f"{total_shapes} {shape_word} {be_word} outside '{deck_name}' "
+            "deck's connectivity graph -- this geometry is invisible to "
+            "extraction, so a net routed only through it extracts as "
+            "multiple disconnected nets instead of one, which will "
+            "silently mismatch a downstream `klt lvs` reference netlist -- "
+            "see ignored_layers[] for the full per-layer shape counts. See "
+            "docs/cli/extract.md's 'ignored_layers' field documentation."
+        )
 
     # Layers carrying shapes the deck reads for bipolar/capacitor/resistor/
     # diode device recognition but never treats as a `metals`/`vias`

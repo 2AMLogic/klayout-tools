@@ -4747,6 +4747,46 @@ def test_ignored_layers_present_in_cli_json(tmp_path, capsys):
     assert {"layer": 53, "datatype": 0, "shapes": 1} in out["ignored_layers"]
 
 
+def test_ignored_layers_material_appends_warning(tmp_path):
+    """A material (`shapes > 0`) `ignored_layers` result also appends an
+    aggregate `warnings[]` entry naming the layer(s) and shape count (issue
+    #666) -- before this, `ignored_layers` was a diagnostic-only field, so a
+    net routed on an undeclared metal level could extract "cleanly" with no
+    signal in `warnings[]`, the one field a caller is meant to be able to
+    check as the minimal self-check on every `klt` command's output."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(22, 0)).insert(kdb.Box(0, 0, 1000, 1000))  # Comp (read)
+    # MetalTop (53/0) is genuinely outside the gf180mcu deck's connectivity
+    # graph -- the same layer `test_ignored_layers_reports_undeclared_shape_
+    # bearing_layers` above uses.
+    top.shapes(layout.layer(53, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(layout.layer(53, 0)).insert(kdb.Box(0, 2000, 1000, 3000))
+    path = _write_gds(layout, tmp_path / "ign_warn.gds")
+
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "ign_warn.spice"))
+
+    ignored = {
+        (e["layer"], e["datatype"]): e["shapes"] for e in report["ignored_layers"]
+    }
+    assert ignored == {(53, 0): 2}
+    warning = next((w for w in report["warnings"] if "53/0" in w), None)
+    assert warning is not None, report["warnings"]
+    assert "connectivity graph" in warning
+    assert "2 shapes" in warning
+
+
+def test_ignored_layers_empty_shapes_produces_no_warning(tmp_path):
+    """Counterfactual for the test above: a layout with zero shapes on any
+    layer outside `deck.connectivity_layers` produces both an empty
+    `ignored_layers` and an empty `warnings[]` -- no false positive on the
+    common, clean case."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv_no_warn.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv_no_warn.spice"))
+    assert report["ignored_layers"] == []
+    assert not any("connectivity graph" in w for w in report["warnings"])
+
+
 # --------------------------------------------------------------------------- #
 # device_recognition_only_layers (issue #619): the "read but not merged"
 # counterpart to ignored_layers -- a layer the deck reads for a
