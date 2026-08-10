@@ -31,3 +31,20 @@ commands/loom/champion-epic.md
 # project ever adopts an equivalent filter, this pin can be dropped and the
 # file resynced normally.
 commands/loom/champion.md
+
+# #668: curator.md/judge.md/doctor.md's "Stale `loom:curating`/`loom:reviewing`/
+# `loom:treating` Claim Check" sections carry a local-only "Frozen-Timeline
+# Fallback" -- a `RECLAIM_MARKER`/`RECLAIM_COUNT` cross-check plus a
+# `gh issue|pr view --json labels,updatedAt` ground-truth read -- added after a
+# live-verified false-positive livelock on issue #509 (2026-08-10): a real
+# label toggle was confirmed via `gh issue view --json labels`, but
+# `/events`/`/timeline` kept returning the same stale `labeled` event for
+# several minutes, so `CLAIMED_AT` never advanced and the same "Reclaiming
+# stale claim..." comment fired 30+ times. This mitigation was never
+# upstreamed into rjwalters/loom's own templates, so an unpinned resync would
+# silently drop it and reintroduce the livelock. If the upstream Loom project
+# ever adopts an equivalent mitigation, these pins can be dropped and the
+# files resynced normally.
+commands/loom/curator.md
+commands/loom/judge.md
+commands/loom/doctor.md
