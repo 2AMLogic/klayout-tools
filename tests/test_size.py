@@ -98,24 +98,31 @@ def _stub_subprocess_run(monkeypatch, *, log_text: str = "", side_effect=None):
 
 
 #: Same textbook level=1 square-law constants `_write_models_lib` bakes into
-#: its synthetic model, plus a typical NMOS Vth temperature coefficient --
-#: used by `_install_synthetic_ngspice_stub` below to produce a real,
-#: physically plausible per-corner gm/Id drift for corner-set tests, without
-#: needing the real `ngspice` binary installed (issue #729).
+#: its synthetic model, plus typical NMOS Vth and mobility (KP) temperature
+#: coefficients -- used by `_install_synthetic_ngspice_stub` below to
+#: produce a real, physically plausible per-corner gm/Id drift for
+#: corner-set tests, without needing the real `ngspice` binary installed
+#: (issue #729). Vth's tempco alone barely moves gm/Id at fixed Id in a
+#: square-law model with no other nonlinearity (Vth drops out of
+#: gm/Id=2/Vov to first order) -- KP's tempco (mobility degrading with
+#: temperature) is what actually reproduces the drift `gm/Id` sizing
+#: methodology is known to see across a PVT sweep.
 _SQUARE_LAW_KP = 120e-6
 _SQUARE_LAW_VTO = 0.5
 _SQUARE_LAW_LAMBDA = 0.02
 _SQUARE_LAW_L = 0.5
 _SQUARE_LAW_VTO_TEMPCO = -0.002  # V/degC
+_SQUARE_LAW_KP_TEMPCO = -0.005  # fractional/degC
 
 
 def _square_law_op_point(w_um: float, id_a: float, temperature_c: float) -> dict:
     vto = _SQUARE_LAW_VTO + _SQUARE_LAW_VTO_TEMPCO * (temperature_c - 27.0)
+    kp = _SQUARE_LAW_KP * (1 + _SQUARE_LAW_KP_TEMPCO * (temperature_c - 27.0))
 
     def f(vov: float) -> float:
         vgs = vov + vto
         return (
-            0.5 * _SQUARE_LAW_KP * (w_um / _SQUARE_LAW_L) * vov**2 * (1 + _SQUARE_LAW_LAMBDA * vgs)
+            0.5 * kp * (w_um / _SQUARE_LAW_L) * vov**2 * (1 + _SQUARE_LAW_LAMBDA * vgs)
             - id_a
         )
 
@@ -131,8 +138,8 @@ def _square_law_op_point(w_um: float, id_a: float, temperature_c: float) -> dict
     vov = (lo + hi) / 2
     vgs = vov + vto
     gm = (
-        _SQUARE_LAW_KP * (w_um / _SQUARE_LAW_L) * vov * (1 + _SQUARE_LAW_LAMBDA * vgs)
-        + 0.5 * _SQUARE_LAW_KP * (w_um / _SQUARE_LAW_L) * vov**2 * _SQUARE_LAW_LAMBDA
+        kp * (w_um / _SQUARE_LAW_L) * vov * (1 + _SQUARE_LAW_LAMBDA * vgs)
+        + 0.5 * kp * (w_um / _SQUARE_LAW_L) * vov**2 * _SQUARE_LAW_LAMBDA
     )
     return {"gm": gm, "id": id_a, "vgs": vgs, "vth": vto}
 
@@ -143,7 +150,9 @@ _OP_ELEMENT_RE = re.compile(r"@m\.x1\.(\w+)\[")
 _W_SWEEP_RE = re.compile(r"w_sweep=(\S+)")
 
 
-def _install_synthetic_ngspice_stub(monkeypatch, *, error_temps: set[float] | None = None):
+def _install_synthetic_ngspice_stub(
+    monkeypatch, *, error_temps: set[float] | None = None
+):
     """Monkeypatch `size.subprocess.run` with a fake ngspice that reads each
     generated deck's own current/temperature/width-sweep values back out of
     the deck text (rather than returning a fixed canned log) and solves the
@@ -923,7 +932,10 @@ def test_parse_corner_set_sizing_no_match_raises():
 
 
 def test_resolve_sizing_index_default_is_first_point():
-    points = [{"process": "tt", "temperature_c": 27.0}, {"process": "ss", "temperature_c": -40.0}]
+    points = [
+        {"process": "tt", "temperature_c": 27.0},
+        {"process": "ss", "temperature_c": -40.0},
+    ]
     assert size._resolve_sizing_index(points, None) == 0
 
 

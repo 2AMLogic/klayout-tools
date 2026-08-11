@@ -320,9 +320,7 @@ def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], in
 
     if corner_set is None:
         parsed = _parse_corner(legacy_corner or {})
-        parsed["corner_id"] = _corner_label(
-            parsed["process"], parsed["temperature_c"]
-        )
+        parsed["corner_id"] = _corner_label(parsed["process"], parsed["temperature_c"])
         return [parsed], 0
 
     if not isinstance(corner_set, dict):
@@ -346,9 +344,7 @@ def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], in
     except SimError as exc:
         raise SizeError(str(exc)) from exc
     if not points:
-        raise SizeError(
-            "request.corners produced no corner points (check 'exclude')"
-        )
+        raise SizeError("request.corners produced no corner points (check 'exclude')")
 
     parsed_points: list[dict[str, Any]] = []
     for point in points:
@@ -388,9 +384,7 @@ def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int
         ):
             raise SizeError("request.corners.sizing.temperature_c must be a number")
         candidates = [
-            i
-            for i in candidates
-            if points[i]["temperature_c"] == float(temperature_c)
+            i for i in candidates if points[i]["temperature_c"] == float(temperature_c)
         ]
     if not candidates:
         raise SizeError(

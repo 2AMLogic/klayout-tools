@@ -319,6 +319,28 @@ not `klt --version`, if you need to detect this kind of drift.
   simulation implies for the hand-sized input pair, `klt size` returns
   5.44 um against the hand-sized 8 um on the real sky130A models. See
   `docs/cli/size.md`.
+- 2026-08-11 — `klt size` now accepts a PDK **corner set**, not just a
+  single corner (#729): `request.corners` reuses `klt sim`'s own
+  `corners.process`/`corners.temperature_c` axis semantics verbatim (bare
+  `.lib` section names or `{name, sections}` bundles) rather than a third
+  spelling, plus a single scalar `corners.vdd_v` (this command biases one
+  fixed supply, never sweeps it). The width search still runs at exactly
+  **one** sizing corner (`corners.sizing`, defaulting to the first declared
+  point on each axis) — re-solving per corner would return a different
+  width per corner, which is not a device. The solved width is then
+  verified with a fresh single-point confirmation at every other declared
+  corner, reporting each corner's own operating point and margins in the
+  new `corners` response block. Declaring several corners does not by
+  itself fail a good sizing — a non-sizing corner's `gm/Id` genuinely
+  drifts with process/temperature, and that spread is reported, not
+  aggregate-failing, unless the request opts in via
+  `targets.hold_across_corners: true`. An evaluator error at *any* declared
+  corner still forces the aggregate `status` to `"error"` (exit `4`),
+  mirroring `klt sim`'s own error > fail > pass precedence. The pre-#729
+  single-corner request/response shape (`request.corner`, top-level
+  `corner`/`operating_point`/`margins`) is unchanged and still works — the
+  `corners` block is purely additive, no `schema_version` bump. See
+  `docs/cli/size.md`'s "Corner sets" section.
 - 2026-08-11 — `klt signoff --manifest <file>` (#722, Phase 0 of epic
   #706): a second, additive mode alongside the existing envelope-
   aggregation mode. Renders the full T1-T4 evidence-tier item skeleton,

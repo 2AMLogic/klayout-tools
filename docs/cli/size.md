@@ -133,7 +133,7 @@ verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `device.mult`                 | number             | Multiplicity passed to the subcircuit. Defaults to `1`. |
 | `device.op_point_element`     | string             | Override for the internal op-point instance path (see "Device convention" above). Defaults to `m<model>`. |
 | `models.lib`/`pdk`/`pdk_root` | --                 | Resolved exactly like `klt sim`'s `models` block -- see [`docs/cli/sim.md`](sim.md)'s "Model library resolution". |
-| `corner.process`              | string             | `.lib` section to select. Defaults to `"tt"`. |
+| `corner.process`              | string             | `.lib` section to select. Defaults to `"tt"`. Mutually exclusive with `corners` (see "Corner sets" below) -- a request declares one or the other, never both. |
 | `corner.vdd_v`                | number, required   | Supply voltage bias source value. |
 | `corner.temperature_c`        | number             | Simulation temperature. Defaults to `27`. |
 | `target.id_a`                 | number, required   | Current budget (amps) -- enforced exactly by an ideal bias current source; the search variable is width, not current. |
@@ -142,6 +142,117 @@ verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `options.sweep_points`        | integer            | Points in the coarse log-spaced width sweep. Defaults to `25`; must be `>= 5`. |
 | `options.timeout_s`           | number             | Per-invocation ngspice wall-clock budget. Defaults to `180`. Overridable with `--timeout-s`. |
 | `options.keep_artifacts`      | boolean            | Retain the generated `sweep.cir`/`confirm.cir` decks and their logs on disk under `--outdir` (or its default). Defaults to `false`. |
+
+## Corner sets
+
+A request declares a PDK corner **set** instead of the single `corner` object
+above via `request.corners` -- reusing `klt sim`'s own `corners.process`/
+`corners.temperature_c` axis semantics verbatim (see
+[`docs/cli/sim.md`](sim.md)'s "Corner axes") rather than a third spelling.
+`corner` and `corners` are mutually exclusive; a request with neither falls
+back to the single-corner default (`process: "tt"`, `temperature_c: 27`,
+`vdd_v` required).
+
+```json
+{
+  "corners": {
+    "process": ["tt", "ss", "ff"],
+    "temperature_c": [27, -40, 125],
+    "vdd_v": 1.8,
+    "sizing": { "process": "tt", "temperature_c": 27 },
+    "exclude": [{ "process": "ff", "temperature_c": -40 }]
+  },
+  "targets": { "hold_across_corners": false }
+}
+```
+
+| Field                     | Type                     | Description |
+| ------------------------- | ------------------------ | ----------- |
+| `corners.process`         | array                    | Each entry is either a bare `.lib` section name (e.g. `"tt"`) or a multi-section bundle `{"name": str, "sections": [str, ...]}` (gf180mcu's named corners need several `.lib` cards -- see `docs/cli/sim.md`'s "Corner axes"). Defaults to a single `null`-process point (`"tt"`-equivalent) when omitted. |
+| `corners.temperature_c`   | array of numbers         | Defaults to `[27]` when omitted. |
+| `corners.vdd_v`           | number, required         | A single scalar supply across the whole set -- this command biases one fixed `Vdd`, never sweeps it (unlike `klt sim`'s `corners.supply_v`). |
+| `corners.sizing`          | object                   | `{"process": str, "temperature_c": number}` -- either key optional, both narrow the match. Selects the one declared point the width search actually runs at. Defaults to the first expanded point (process outer, temperature inner, in declaration order -- the same odometer order `klt sim` uses). |
+| `corners.exclude`         | array of objects          | Same shape as `klt sim`'s `corners.exclude` -- drops any expanded point matching every key of one entry. |
+| `targets.hold_across_corners` | boolean               | Defaults to `false`. See "Aggregate status across a corner set" below. |
+
+The device's width is solved **once**, at the sizing corner only -- re-solving
+per corner would return a different width per corner, which is not a device.
+The solved width is then **verified** (a fresh single-point confirmation, no
+further search) at every other declared corner, reporting each corner's own
+operating point and margins.
+
+### Aggregate status across a corner set
+
+`gm/Id` at a fixed current genuinely drifts with process and temperature; no
+choice of width holds it constant across a PVT matrix. So the top-level
+`status` is **not** simply "every corner passed":
+
+- The **sizing corner's** own `pass`/`fail` sets the aggregate `status` --
+  that is the corner the search actually targeted.
+- Every **other** declared corner's `pass`/`fail` is reported as spread (each
+  corner's own `corners.results[].status`) but does **not** by itself flip
+  the aggregate to `fail` -- a multi-corner request does not fail by
+  construction just because `gm/Id` drifts away from the sizing corner.
+  Setting `targets.hold_across_corners: true` opts into strict behavior: an
+  out-of-tolerance non-sizing corner then fails the aggregate too.
+- An **evaluator error** (`status: "error"`) at *any* declared corner --
+  sizing or not -- always makes the aggregate `status` `"error"`, mirroring
+  `klt sim`'s own `error` > `fail` > `pass` precedence. Exit code `4` follows
+  from this the same way it always has.
+
+### `corners` response block
+
+```json
+{
+  "corners": {
+    "declared": [
+      { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+      { "corner_id": "ss/-40C", "process": "ss", "vdd_v": 1.8, "temperature_c": -40.0 },
+      { "corner_id": "ff/125C", "process": "ff", "vdd_v": 1.8, "temperature_c": 125.0 }
+    ],
+    "sizing": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+    "hold_across_corners": false,
+    "results": [
+      {
+        "corner_id": "tt/27C", "process": "tt", "temperature_c": 27.0,
+        "is_sizing": true, "status": "pass",
+        "operating_point": { "...": "..." },
+        "margins": { "gm_id_rel_error": 0.0001, "id_rel_error": 0.0 },
+        "diagnostic": null
+      },
+      {
+        "corner_id": "ss/-40C", "process": "ss", "temperature_c": -40.0,
+        "is_sizing": false, "status": "fail",
+        "operating_point": { "...": "..." },
+        "margins": { "gm_id_rel_error": 0.041, "id_rel_error": 0.0 },
+        "diagnostic": null
+      },
+      {
+        "corner_id": "ff/125C", "process": "ff", "temperature_c": 125.0,
+        "is_sizing": false, "status": "error",
+        "operating_point": null, "margins": null,
+        "diagnostic": "ngspice verification run at the sizing width did not return usable operating-point data"
+      }
+    ]
+  }
+}
+```
+
+- `corners.declared` -- every expanded corner point, in the same
+  deterministic (process-outer, temperature-inner) order `_expand_corners`
+  produces, echoed regardless of `status`.
+- `corners.sizing` -- the one declared point the width search ran at, same
+  shape as one `declared` entry.
+- `corners.results` -- one entry per `declared` point, same order, present
+  once (if) the verification pass ran; `null` when the sizing corner's own
+  search/confirmation errored (no solved width exists yet to verify anywhere
+  else). Each entry's `operating_point`/`margins` mirror the top-level
+  fields' shape; `diagnostic` is non-`null` only for `status: "error"`.
+- **Backward compatible**: the top-level `corner`/`operating_point`/`margins`
+  fields are unchanged and always mirror the sizing corner's own entry -- a
+  single-corner request (`request.corner`, no `request.corners`) still gets
+  the pre-#729 response shape, plus an additive `corners` block whose
+  `declared`/`results` each have exactly one entry.
 
 ### Response
 
@@ -154,7 +265,8 @@ verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
     "w_min_um": 0.42, "w_max_um": 50.0, "nf": 1, "mult": 1,
     "op_point_element": "msky130_fd_pr__nfet_01v8"
   },
-  "corner": { "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+  "corner": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+  "corners": { "declared": [{ "...": "..." }], "sizing": { "...": "..." }, "hold_across_corners": false, "results": [{ "...": "..." }] },
   "target": { "id_a": 2e-05, "gm_id": 12.0 },
   "tolerance": { "gm_id_rel": 0.03 },
   "operating_point": {
@@ -207,6 +319,12 @@ verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
   [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance`
   block"). `environment.artifacts_dir` is present only when
   `options.keep_artifacts` is true.
+- `corners` -- always populated (present on every response, including
+  `status: "error"`), reporting the full declared corner set, the sizing
+  corner, and (once the search has run) the per-corner verification results.
+  See "Corner sets" above for the full field-by-field breakdown -- `corner`/
+  `operating_point`/`margins` above always mirror the sizing corner's own
+  entry within it.
 
 ### Inversion-level classification
 
