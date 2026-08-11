@@ -8,6 +8,7 @@ results are hermetic regardless of what is installed on the machine running
 the suite.
 """
 
+import itertools
 import json
 
 import pytest
@@ -950,6 +951,8 @@ def _layer_bbox(gds_path, layer, datatype):
         # contact-enclosure height past the diffusion. The `"parallel"`
         # default routes the gate to a comb above the drain strap instead --
         # covered by `test_mos_array_parallel_fingers_gate_comb_*` below.
+        # #781: with fingers > 1 in "series" mode every gate finger is its
+        # own reported port (`U<i>_G<j>`), not just `U<i>_G` for the first.
         (
             "mos_array",
             {
@@ -959,7 +962,7 @@ def _layer_bbox(gds_path, layer, datatype):
                 "fingers": 2,
                 "finger_topology": "series",
             },
-            "U0_G",
+            "U0_G0",
         ),
         ("diff_pair", {"splits": 1, "add_guard_ring": False}, "Q1_1_G"),
         ("diff_pair", {"splits": 2, "add_guard_ring": True}, "Q1_1_G"),
@@ -1258,26 +1261,128 @@ def test_mos_array_parallel_fingers_are_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
-def test_mos_array_series_finger_topology_is_opt_in_and_warns(tmp_path, pdk_root):
+def test_mos_array_series_finger_topology_reports_notes_not_warnings(
+    tmp_path, pdk_root
+):
     """`finger_topology="series"` keeps the pre-#777 unstrapped stripes for a
-    caller who wants to strap them itself -- but it no longer does so
-    silently: `warnings[]` says the interior S/D segments and gates are
-    neither reported nor contactable, and the extracted netlist is the series
-    chain the issue described."""
-    gds_path, report = _mos_unit_gds(
+    caller who wants to strap them itself, and still surfaces an
+    informational `drc_hints.notes` entry describing the series-chain shape
+    -- but since #781 every terminal is reported and contactable, so there
+    is no longer a `warnings[]` entry telling a caller they can't reach it."""
+    _, report = _mos_unit_gds(
         tmp_path, pdk_root, "series", fingers=4, finger_topology="series"
     )
 
-    assert any("finger_topology" in w and "series" in w for w in report["warnings"])
-    assert any("not reported as ports" in w for w in report["warnings"])
-    assert any("series" in n for n in report["drc_hints"]["notes"])
+    assert any(
+        "finger_topology" in n and "series" in n for n in report["drc_hints"]["notes"]
+    )
+    assert report["warnings"] == []
+    assert report["device_count"] == 4
 
-    extracted = run_extract(str(gds_path), "sky130")
-    devices = extracted["devices"]
-    assert len(devices) == 4
-    # A chain: one gate net per finger, and `fingers + 1` S/D nets.
-    assert len({d["nets"]["g"] for d in devices}) == 4
-    assert len({n for d in devices for n in (d["nets"]["s"], d["nets"]["d"])}) == 5
+
+def test_mos_array_series_fingers_reports_every_terminal(tmp_path, pdk_root):
+    """#781 (the follow-up to #777's option 1): `finger_topology="series"`
+    with `fingers > 1` reports every finger's S/D/gate terminal, not just
+    the two end segments and the first gate -- exact port-name convention
+    from the issue: segment `2j` is `S<j>`, segment `2j + 1` is `D<j>`, gate
+    `j` is `G<j>`. End segments keep the original `180`/`0` direction and
+    the diffusion's own width; interior segments (boxed in by a gate either
+    side) report direction `270` and the pad's own x-width instead."""
+    _, report = _mos_unit_gds(
+        tmp_path, pdk_root, "series3", fingers=3, finger_topology="series"
+    )
+
+    port_names = [p["name"] for p in report["ports"]]
+    assert port_names == [
+        "U0_S0",
+        "U0_D0",
+        "U0_S1",
+        "U0_D1",
+        "U0_G0",
+        "U0_G1",
+        "U0_G2",
+    ]
+    assert report["device_count"] == 3
+
+    ports = {p["name"]: p for p in report["ports"]}
+    pad_um = gen.CONTACT_SIZE_UM + 2 * gen.ENCLOSURE_MARGIN_UM
+    assert ports["U0_S0"]["direction_deg"] == 180
+    assert ports["U0_D1"]["direction_deg"] == 0
+    assert ports["U0_S0"]["width_um"] == pytest.approx(1.0)  # w_um
+    assert ports["U0_D1"]["width_um"] == pytest.approx(1.0)
+    for interior in ("U0_D0", "U0_S1"):
+        assert ports[interior]["direction_deg"] == 270
+        assert ports[interior]["width_um"] == pytest.approx(pad_um)
+
+
+def test_mos_array_series_fingers_ports_land_on_drawn_conductors(tmp_path, pdk_root):
+    """Every reported port -- including the newly-reported interior S/D
+    segments and gate fingers -- must sit on the conductor it names, not on
+    empty space."""
+    gds_path, report = _mos_unit_gds(
+        tmp_path, pdk_root, "series3_conductors", fingers=3, finger_topology="series"
+    )
+    for port in report["ports"]:
+        layer = port["layer"]
+        polygon = _merged_polygon_at(
+            gds_path, layer["layer"], layer["datatype"], port["x_um"], port["y_um"]
+        )
+        assert polygon is not None, f"{port['name']} port is not on a drawn conductor"
+
+
+def test_mos_array_series_fingers_gate_conductors_are_distinct(tmp_path, pdk_root):
+    """The `fingers` gate fingers are independent gates (a series chain, not
+    a strapped comb) -- their reported ports must resolve to `fingers`
+    mutually distinct merged polygons, not one shared gate."""
+    gds_path, report = _mos_unit_gds(
+        tmp_path, pdk_root, "series3_gates", fingers=3, finger_topology="series"
+    )
+    gate_ports = [p for p in report["ports"] if p["name"].startswith("U0_G")]
+    assert len(gate_ports) == 3
+    layer = gate_ports[0]["layer"]
+    polygons = [
+        _merged_polygon_at(
+            gds_path, layer["layer"], layer["datatype"], p["x_um"], p["y_um"]
+        )
+        for p in gate_ports
+    ]
+    assert all(p is not None for p in polygons)
+    for a, b in itertools.combinations(polygons, 2):
+        assert a != b
+
+
+def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root):
+    """#781's acceptance bar: a contact placed at *any* reported gate port
+    (not just the first finger's, as before) is DRC-clean -- every finger
+    is padded per #461, not just the first."""
+    import klayout.db as kdb
+
+    gds_path, report = _mos_unit_gds(
+        tmp_path, pdk_root, "series3_contacts", fingers=3, finger_topology="series"
+    )
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    top = layout.top_cell()
+    dbu = layout.dbu
+    licon = layout.layer(66, 44)
+    half = gen.CONTACT_SIZE_UM / 2.0
+    for port in report["ports"]:
+        if not port["name"].startswith("U0_G"):
+            continue
+        gx, gy = port["x_um"], port["y_um"]
+        top.shapes(licon).insert(
+            kdb.Box(
+                round((gx - half) / dbu),
+                round((gy - half) / dbu),
+                round((gx + half) / dbu),
+                round((gy + half) / dbu),
+            )
+        )
+    contacted = tmp_path / "series3_contacted.gds"
+    layout.write(str(contacted))
+
+    drc_report = run_drc(str(contacted), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_mos_array_parallel_is_the_default_finger_topology(tmp_path, pdk_root):

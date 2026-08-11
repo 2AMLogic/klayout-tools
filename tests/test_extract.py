@@ -1231,6 +1231,55 @@ def test_mos_array_sky130_dummy_gates_suppressed(tmp_path):
     assert report["dummy_devices_dropped"] == dropped
 
 
+def test_mos_array_series_finger_topology_round_trips_as_a_chain(tmp_path):
+    """Issue #781: `klt gen mos_array` with `finger_topology="series"` and
+    `fingers > 1` reports the unit as `fingers` chained transistors -- and
+    `klt extract` must see exactly that shape back: `klt gen`'s own
+    `device_count` matches what `klt extract` counts, each finger is on a
+    distinct gate net (a series chain, not a strapped comb), `fingers + 1`
+    distinct S/D nodes (one per reported segment port, no unreported node
+    left over), and `2 * fingers + 1` reported ports (`fingers + 1` S/D +
+    `fingers` gate)."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "sky130A")
+    params = {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 0,
+        "fingers": 3,
+        "finger_topology": "series",
+    }
+    gen_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_series.gds")},
+        }
+    )
+    fingers = params["fingers"]
+    assert gen_report["device_count"] == fingers
+    assert len(gen_report["ports"]) == 2 * fingers + 1
+
+    report = run_extract(
+        str(tmp_path / "mos_series.gds"),
+        "sky130",
+        output=str(tmp_path / "mos_series.spice"),
+    )
+
+    assert report["device_count"] == gen_report["device_count"]
+    assert report["device_counts"] == {"nfet": fingers}
+
+    devices = report["devices"]
+    # A chain: one independent gate net per finger...
+    assert len({d["nets"]["g"] for d in devices}) == fingers
+    # ...and `fingers + 1` distinct S/D nodes -- one net per reported S/D
+    # port, no unreported node left over.
+    sd_nets = {n for d in devices for n in (d["nets"]["s"], d["nets"]["d"])}
+    assert len(sd_nets) == fingers + 1
+
+
 def test_res_array_sky130_dummy_resistors_suppressed(tmp_path):
     """Issue #491: `klt gen res_array` (sky130, `dummy > 0`) piped into `klt
     extract --deck sky130` suppresses the dummy resistor bodies instead of

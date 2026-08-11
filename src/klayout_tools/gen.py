@@ -835,27 +835,35 @@ def _mos_unit_layout(
     ``fingers`` transistors chained source-to-drain on ``fingers``
     independent gate nets.
 
-    In the ``"series"`` shape only the two end segments (the
-    leftmost/rightmost, i.e. this unit's overall source/drain) are exposed
-    as ports -- interior segments (for ``fingers > 1``) are drawn but not
-    individually reported, mirroring ``resistor_strip``'s P1/P2-only
-    precedent, and the interior gates are drawn without a landing pad and so
-    cannot be contacted at all. ``mos_array`` warns about exactly that (see
-    :func:`_mos_array_describe`).
+    In the ``"series"`` shape with ``fingers == 1`` there is nothing but the
+    two end segments and the one gate, so the unit reports plain
+    ``s_xy``/``d_xy``/``g_xy`` exactly as before. For ``fingers > 1`` (issue
+    #781, the follow-up to #777's option 1) *every* finger is padded and
+    *every* terminal is exposed: ``seg_xy`` holds all ``fingers + 1`` S/D
+    segment centres (west to east) and ``gate_xy`` holds all ``fingers`` gate
+    pad centres, so :func:`_mos_array_describe` can report a ``U<i>_S<j>``/
+    ``U<i>_D<j>`` port for every segment and a ``U<i>_G<j>`` port for every
+    gate instead of leaving the interior of the chain undrivable. ``s_xy``/
+    ``d_xy``/``g_xy`` still alias ``seg_xy[0]``/``seg_xy[-1]``/``gate_xy[0]``
+    so single-finger callers (:func:`_diff_pair_layout`,
+    :func:`_esd_device_layout`, and the ``fingers == 1`` case here) need no
+    change.
 
-    The first gate finger additionally carries a **poly landing pad** that
-    extends past the diffusion's top edge, so a contact can be placed on the
-    gate outside the channel (issue #461). Without it the gate poly shared
-    both the top and bottom edge of the diffusion, leaving nowhere legal for
-    a gate contact to land: one at the diff edge straddles it
+    Every gate finger carries the same **poly landing pad** that extends
+    past the diffusion's top edge, so a contact can be placed on the gate
+    outside the channel (issue #461). Without it the gate poly shared both
+    the top and bottom edge of the diffusion, leaving nowhere legal for a
+    gate contact to land: one at the diff edge straddles it
     (``poly.enclosing.licon.1``/``diff.enclosing.licon.1`` violations) and
     one moved inward sits over the channel (a gate-oxide short). The pad is a
     ``contact_region_um`` square (``CONTACT_SIZE_UM`` enclosed by
     ``ENCLOSURE_MARGIN_UM`` on every side -- the same enclosure budget the
     S/D contacts use), centred on the gate ``ENCLOSURE_MARGIN_UM`` clear of
-    the diffusion, and the reported gate port sits at its centre. Only the
-    reported (first) finger is padded, so the pad never neighbours another
-    pad and no inter-pad spacing rule can bind regardless of gate length.
+    the diffusion, and each reported gate port sits at its own pad's centre.
+    Adjacent pads end up exactly ``l_um`` apart -- the same gap the S/D
+    local-metal pads either side of a gate already have, i.e. the gap
+    ``GATE_LENGTH_SAFE_MIN_UM`` was chosen to cover -- so padding every
+    finger (not just the first) costs no new DRC risk.
 
     ``gate_contact`` (issue #492) finishes that stack: it draws a contact
     **and** a local-metal pad on the landing pad, so the gate terminal is a
@@ -884,6 +892,7 @@ def _mos_unit_layout(
         "metal": [],
     }
     contact_half = CONTACT_SIZE_UM / 2.0
+    seg_xy: list[tuple[float, float]] = []
     for sx0, sx1 in seg_positions:
         boxes["metal"].append((sx0, 0.0, sx1, w_um))
         cx = (sx0 + sx1) / 2.0
@@ -891,46 +900,53 @@ def _mos_unit_layout(
         boxes["contact"].append(
             (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
         )
+        seg_xy.append((cx, cy))
 
-    s_xy = ((seg_positions[0][0] + seg_positions[0][1]) / 2.0, w_um / 2.0)
-    d_xy = ((seg_positions[-1][0] + seg_positions[-1][1]) / 2.0, w_um / 2.0)
+    s_xy = seg_xy[0]
+    d_xy = seg_xy[-1]
 
+    gate_xy: list[tuple[float, float]] = []
     if poly_positions:
-        # Gate landing pad above the first finger. Its half-width
-        # (contact_region_um / 2) can exceed l_um / 2, so the pad overhangs
-        # the narrow gate on both sides -- that is the point: the pad, not
-        # the sub-contact-width gate, is what encloses the contact. It abuts
-        # the gate at y == w_um (keeping the poly one connected region) and
-        # extends contact_region_um past it.
+        # Gate landing pad above *every* finger (issue #781 -- previously
+        # only the first). Each pad's half-width (contact_region_um / 2) can
+        # exceed l_um / 2, so it overhangs its narrow gate on both sides --
+        # that is the point: the pad, not the sub-contact-width gate, is
+        # what encloses the contact. It abuts its own gate at y == w_um
+        # (keeping that gate's poly one connected region) and extends
+        # contact_region_um past it. Adjacent pads end up exactly l_um
+        # apart, the same gap the S/D local-metal pads either side of a gate
+        # already have, so padding every finger binds no new spacing rule.
         #
-        # With `gate_contact` the pad's contact region is first pushed
+        # With `gate_contact` each pad's contact region is first pushed
         # MIN_SAME_LAYER_SPACING_UM further out (the poly simply grows into a
         # stem of the same width across that clearance, so it stays one
         # connected region): the metal pad drawn on it is a full
         # contact_region_um square, and centred on the #461 pad it would
         # share the y == w_um edge with the S/D local-metal pads either side
         # -- merging into one polygon and shorting the gate to source/drain.
-        g_cx = (poly_positions[0][0] + poly_positions[0][1]) / 2.0
         pad_half = contact_region_um / 2.0
         stem_um = MIN_SAME_LAYER_SPACING_UM if gate_contact else 0.0
         gate_ext_um = stem_um + contact_region_um
-        boxes["poly"].append(
-            (g_cx - pad_half, w_um, g_cx + pad_half, w_um + gate_ext_um)
-        )
         g_cy = w_um + stem_um + contact_region_um / 2.0
-        if gate_contact:
-            boxes["contact"].append(
-                (
-                    g_cx - contact_half,
-                    g_cy - contact_half,
-                    g_cx + contact_half,
-                    g_cy + contact_half,
+        for px0, px1 in poly_positions:
+            g_cx = (px0 + px1) / 2.0
+            boxes["poly"].append(
+                (g_cx - pad_half, w_um, g_cx + pad_half, w_um + gate_ext_um)
+            )
+            if gate_contact:
+                boxes["contact"].append(
+                    (
+                        g_cx - contact_half,
+                        g_cy - contact_half,
+                        g_cx + contact_half,
+                        g_cy + contact_half,
+                    )
                 )
-            )
-            boxes["metal"].append(
-                (g_cx - pad_half, g_cy - pad_half, g_cx + pad_half, g_cy + pad_half)
-            )
-        g_xy = (g_cx, g_cy)
+                boxes["metal"].append(
+                    (g_cx - pad_half, g_cy - pad_half, g_cx + pad_half, g_cy + pad_half)
+                )
+            gate_xy.append((g_cx, g_cy))
+        g_xy = gate_xy[0]
         g_width_um = contact_region_um
     else:
         g_xy = (total_len_um / 2.0, w_um)
@@ -951,6 +967,14 @@ def _mos_unit_layout(
         "d_xy": d_xy,
         "g_xy": g_xy,
         "g_width_um": g_width_um,
+        # Every S/D segment centre (fingers + 1 of them, west to east) and
+        # every gate pad centre (fingers of them) -- issue #781. `s_xy`/
+        # `d_xy`/`g_xy` above alias `seg_xy[0]`/`seg_xy[-1]`/`gate_xy[0]`.
+        # `gate_xy` is `[]` only when `poly_positions` is (never happens for
+        # `fingers >= 1`, since `_mos_finger_positions` always yields at
+        # least one gate).
+        "seg_xy": seg_xy,
+        "gate_xy": gate_xy,
         # Perpendicular width of the reported S/D ports. Equal to the bare
         # diffusion height here (the ports sit on the S/D pads, which span
         # it); the strapped topology reports its strap-rail height instead
@@ -3823,45 +3847,95 @@ def _mos_array_describe(
     # gate stays the bare-poly node #210 established.
     gate_layer = metal_layer if params["gate_contact"] else poly_layer
 
+    # #781: with `finger_topology == "series"` and `fingers > 1` the unit is
+    # genuinely `fingers` transistors, so every S/D segment and every gate
+    # finger is reported -- not just the two end segments and the first
+    # gate. `fingers == 1` has no interior segment either way, so it keeps
+    # reporting the plain `U<i>_S`/`U<i>_D`/`U<i>_G` triple, byte-for-byte
+    # unchanged under both topologies (#777/#780 pinned this).
+    series_fingers = params["finger_topology"] == "series" and params["fingers"] > 1
+
     ports = []
-    sx, sy = unit["s_xy"]
-    dx, dy = unit["d_xy"]
-    gx, gy = unit["g_xy"]
-    for c in info["cells"]:
-        idx = c["idx"]
-        ports.append(
-            {
-                "name": f"U{idx}_S",
-                "net": None,
-                "layer": metal_layer,
-                "x_um": c["x0_um"] + sx,
-                "y_um": c["y0_um"] + sy,
-                "width_um": unit["sd_width_um"],
-                "direction_deg": 180,
-            }
-        )
-        ports.append(
-            {
-                "name": f"U{idx}_D",
-                "net": None,
-                "layer": metal_layer,
-                "x_um": c["x0_um"] + dx,
-                "y_um": c["y0_um"] + dy,
-                "width_um": unit["sd_width_um"],
-                "direction_deg": 0,
-            }
-        )
-        ports.append(
-            {
-                "name": f"U{idx}_G",
-                "net": None,
-                "layer": gate_layer,
-                "x_um": c["x0_um"] + gx,
-                "y_um": c["y0_um"] + gy,
-                "width_um": unit["g_width_um"],
-                "direction_deg": 90,
-            }
-        )
+    if series_fingers:
+        seg_xy = unit["seg_xy"]
+        gate_xy = unit["gate_xy"]
+        last_seg = len(seg_xy) - 1
+        for c in info["cells"]:
+            idx = c["idx"]
+            for seg_idx, (sx, sy) in enumerate(seg_xy):
+                letter = "S" if seg_idx % 2 == 0 else "D"
+                if seg_idx == 0:
+                    direction_deg, width_um = 180, unit["sd_width_um"]
+                elif seg_idx == last_seg:
+                    direction_deg, width_um = 0, unit["sd_width_um"]
+                else:
+                    # Interior segments are boxed in by a gate on either
+                    # side, so their only free approach is from below (the
+                    # gate pads sit above); their reported width is the
+                    # pad's own x-width, not `w_um`.
+                    direction_deg, width_um = 270, unit["g_width_um"]
+                ports.append(
+                    {
+                        "name": f"U{idx}_{letter}{seg_idx // 2}",
+                        "net": None,
+                        "layer": metal_layer,
+                        "x_um": c["x0_um"] + sx,
+                        "y_um": c["y0_um"] + sy,
+                        "width_um": width_um,
+                        "direction_deg": direction_deg,
+                    }
+                )
+            for gate_idx, (gx, gy) in enumerate(gate_xy):
+                ports.append(
+                    {
+                        "name": f"U{idx}_G{gate_idx}",
+                        "net": None,
+                        "layer": gate_layer,
+                        "x_um": c["x0_um"] + gx,
+                        "y_um": c["y0_um"] + gy,
+                        "width_um": unit["g_width_um"],
+                        "direction_deg": 90,
+                    }
+                )
+    else:
+        sx, sy = unit["s_xy"]
+        dx, dy = unit["d_xy"]
+        gx, gy = unit["g_xy"]
+        for c in info["cells"]:
+            idx = c["idx"]
+            ports.append(
+                {
+                    "name": f"U{idx}_S",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + sx,
+                    "y_um": c["y0_um"] + sy,
+                    "width_um": unit["sd_width_um"],
+                    "direction_deg": 180,
+                }
+            )
+            ports.append(
+                {
+                    "name": f"U{idx}_D",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + dx,
+                    "y_um": c["y0_um"] + dy,
+                    "width_um": unit["sd_width_um"],
+                    "direction_deg": 0,
+                }
+            )
+            ports.append(
+                {
+                    "name": f"U{idx}_G",
+                    "net": None,
+                    "layer": gate_layer,
+                    "x_um": c["x0_um"] + gx,
+                    "y_um": c["y0_um"] + gy,
+                    "width_um": unit["g_width_um"],
+                    "direction_deg": 90,
+                }
+            )
 
     notes = []
     if params["l_um"] < GATE_LENGTH_SAFE_MIN_UM:
@@ -3875,13 +3949,13 @@ def _mos_array_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
-    series_fingers = params["finger_topology"] == "series" and params["fingers"] > 1
     if series_fingers:
         notes.append(
             "params.finger_topology is 'series', so each unit device's "
             f"{params['fingers']} fingers are drawn unstrapped -- they extract as "
             f"{params['fingers']} transistors chained source-to-drain, not one "
-            f"parallel device of width {params['fingers']} x {params['w_um']}um"
+            f"parallel device of width {params['fingers']} x {params['w_um']}um "
+            f"(reported as U<i>_S<j>/U<i>_D<j>/U<i>_G<j> ports, one per finger)"
         )
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
@@ -3892,8 +3966,16 @@ def _mos_array_describe(
     # from each other (see the issue's Implementation Guidance item 5).
     matched_group_id = f"mos_array:{grid}:{params['topology']}"
 
+    # #781: in "series" mode each unit really is `fingers` chained
+    # transistors (matching what `klt extract` reports back), not one
+    # device -- "parallel" mode still folds `fingers` into one device per
+    # cell, so its device_count is unaffected.
+    device_count = (
+        params["rows"] * params["cols"] * (params["fingers"] if series_fingers else 1)
+    )
+
     return {
-        "device_count": params["rows"] * params["cols"],
+        "device_count": device_count,
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
@@ -3904,21 +3986,6 @@ def _mos_array_describe(
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
-            else []
-        )
-        # #777: the unstrapped series shape's interior S/D segments and
-        # interior gates have no reported ports and no landing pads, so a
-        # caller cannot reach them -- that has to surface at generate time,
-        # not as a surprise in an extracted netlist or an LVS diff.
-        + (
-            [
-                f"params.finger_topology 'series' with fingers={params['fingers']}: "
-                "the interior S/D segments and all but the first gate are drawn "
-                "but not reported as ports and cannot be contacted -- the unit "
-                "extracts as a series chain of transistors with floating gates "
-                "(use the default 'parallel' for one folded device)"
-            ]
-            if series_fingers
             else []
         ),
     }

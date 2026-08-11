@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt gen mos_array`'s `finger_topology="series"` (issue #777's
+  deferred option 1, follow-up to #780's `"parallel"` default) now pads
+  *every* gate finger and reports *every* terminal instead of only the two
+  end S/D segments and the first finger's gate: for `fingers > 1` the unit
+  reports the `fingers + 1` S/D segments as `U<i>_S<j>`/`U<i>_D<j>`
+  (alternating — segment `2j` is `S<j>`, segment `2j + 1` is `D<j>`) and each
+  finger's gate as `U<i>_G<j>`, with interior segments reporting
+  `direction_deg: 270` and the gate pad's own width instead of `w_um`.
+  `device_count` is now `rows * cols * fingers` in this mode, matching what
+  `klt extract` reports back (`"parallel"` mode's `device_count` is
+  unaffected). Previously the interior segments and gates had no reported
+  port and no landing pad, so they extracted as permanently floating gates
+  — `"series"` still surfaces an informational `drc_hints.notes` entry
+  describing the chained-transistor shape, but no longer a `warnings[]`
+  entry, since every terminal is now reachable. `fingers=1` output is
+  byte-for-byte unchanged under either topology.
+
 - 2026-08-11 — `klt gen mos_array`'s `fingers > 1` now draws the
   conventional **parallel** multi-finger device instead of an unstrapped
   series chain (issue #777). Previously the generator drew N gate stripes
