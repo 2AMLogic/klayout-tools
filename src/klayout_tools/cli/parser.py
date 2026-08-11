@@ -1121,9 +1121,10 @@ def create_parser() -> argparse.ArgumentParser:
             "one composed GDS/OASIS stream, per a request document's "
             "blocks[]/placement/connectivity[]/routing/options shape -- see "
             "docs/design/gen-composition-spike.md section 2 for the contract "
-            "and docs/cli/gen-compose.md for the CLI surface. Phase 1 "
-            'implements placement.strategy: "row" only; connectivity[] is '
-            "validated but not yet routed. A distinct top-level verb (not a "
+            "and docs/cli/gen-compose.md for the CLI surface. Supports "
+            'placement.strategy: "row" (auto-packed) and "explicit" '
+            "(caller-specified offsets); connectivity[] is validated but not "
+            "yet routed. A distinct top-level verb (not a "
             "`gen` sub-subcommand) -- see docs/cli/gen-compose.md's "
             "'CLI shape' note for why. Runs fully headless via KLayout's "
             "native pya -- no GUI, no Qt. Takes a request-document path (like "
