@@ -95,11 +95,9 @@ declares, so `klt extract`'s dummy-device suppression (see "Dummy devices:
 the `dummy` marker layer" in `docs/cli/extract.md`) drops it from the
 extracted netlist instead of reporting it as a spurious unmatched device
 under `klt lvs` — gf180mcu draws no equivalent marker (its curated deck
-declares no `dummy` layer). For a single-finger unit device — and for the
-opt-in `finger_topology: "series"` shape described below — the first gate
-finger carries a **poly landing
-pad** that extends
-one `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
+declares no `dummy` layer). For a single-finger unit device the (one) gate
+finger carries a **poly landing pad** that extends one
+`CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
 diffusion's gate-side edge, so a contact can land on the gate *outside* the
 channel — without it the gate poly shared the diffusion's exact extent and a
 contact at the reported gate port straddled the diff edge
@@ -107,7 +105,8 @@ contact at the reported gate port straddled the diff edge
 (issue #461). The reported `U<i>_G` port now sits at that pad's centre (its
 `y_um` is offset past the diffusion edge, and its `width_um` reports the pad
 width rather than `l_um`) — a JSON-contract-visible move of the gate port
-coordinate.
+coordinate. The opt-in `finger_topology: "series"` shape described below pads
+every finger this way, not just the first (issue #781).
 
 `gate_contact` (issue #492) finishes that stack rather than leaving it to the
 caller: it draws a contact **and** a local-metal pad on the landing pad, and
@@ -146,18 +145,34 @@ which is how a single-routing-metal generator gets both rails and a gate
 terminal out of one cell.
 
 `"series"` draws the pre-#777 bare stripes with no straps at all: `fingers`
-transistors chained source-to-drain on `fingers` independent gate nets. Only
-the two end segments and the first finger's gate are reported as ports, and
-the interior gates have no landing pad, so they cannot be contacted at all —
-choosing it therefore emits a `warnings[]` entry saying so, plus a
-`drc_hints.notes` entry, rather than letting the shape surface in an LVS
-diff. It is the right choice only for a caller that intends to strap the
-stripes itself from the drawn geometry. `fingers=1` has nothing to strap, so
-`finger_topology` does not move a single edge or port there.
+transistors chained source-to-drain on `fingers` independent gate nets. Unlike
+the pre-#781 shape, every finger is padded (the same #461 landing pad -- and,
+with `gate_contact`, the same #492 contact + local-metal pad -- the first
+finger always got) and every terminal is reported: with `fingers > 1` the unit
+contributes `2 * fingers + 1` ports instead of three -- the `fingers + 1` S/D
+segments as `U<i>_S<j>`/`U<i>_D<j>` (alternating west to east: segment `2j` is
+`S<j>`, segment `2j + 1` is `D<j>`) and each finger's gate as `U<i>_G<j>`. The
+two end segments keep the usual `180`/`0` `direction_deg` and the diffusion's
+own width (`w_um`); the interior segments -- boxed in by a gate on either side,
+so their only free approach is from below -- report `direction_deg: 270` and
+the gate pad's own x-width (`CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM`, not
+`w_um`). Choosing `"series"` still emits a `drc_hints.notes` entry describing
+the chained-transistor shape (so it never surfaces as a surprise in an
+extracted netlist or an LVS diff), but -- since every terminal is now
+reachable -- no longer a `warnings[]` entry: for `fingers=3`,
+`klt gen mos_array` reports exactly `U0_S0`, `U0_D0`, `U0_S1`, `U0_D1`,
+`U0_G0`, `U0_G1`, `U0_G2`. `device_count` is `rows * cols * fingers` in this
+mode (matching what `klt extract` reports back), not `rows * cols` --
+`"parallel"` mode still folds `fingers` into one device per cell, so its
+`device_count` is unaffected. `fingers=1` has nothing to strap or pad beyond
+the first finger either way, so `finger_topology` does not move a single edge
+or port there -- output stays the plain `U<i>_S`/`U<i>_D`/`U<i>_G` triple,
+byte-for-byte identical under both topologies.
 
-Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
-(local-metal) and `U<i>_G` (poly, or local-metal with `gate_contact`), where
-`<i>` is the device's position in
+Each unit device contributes three ports -- `U<i>_S`/`U<i>_D`
+(local-metal) and `U<i>_G` (poly, or local-metal with `gate_contact`) -- in
+`"parallel"` mode (any `fingers`) and in `"series"` mode with `fingers=1`; see
+above for `"series"` with `fingers > 1`. `<i>` is the device's position in
 the `topology`-selected numbering order — `"array"` numbers row-major;
 `"common_centroid"` (the default) numbers nearest-center-first, pairing each
 instance immediately with its point-reflection through the array center, so
@@ -165,7 +180,8 @@ a downstream matching/LVS consumer can pair index `2k`/`2k+1` as
 centroid-symmetric partners. (Physical placement is the same uniform grid
 either way — `topology` changes the *numbering*, not the layout; see
 `diff_pair` below for a generator that physically interleaves two distinct
-devices.) `device_count` is `rows * cols` (dummies excluded).
+devices.) `device_count` is `rows * cols` (dummies excluded) except for
+`"series"` mode's `fingers > 1` case noted above.
 `drc_hints.matched_group_id` is `"mos_array:<rows>x<cols>:<topology>"`
 (`flavor` is not folded in — a matched group is always one generator call by
 construction, so every instance in it already shares one `flavor`).
@@ -182,7 +198,7 @@ all — output for the default case is unchanged.
 | `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
 | `l_um`         | double | `0.28`             | Gate length (µm). Must be `> 0`; below `0.28`um risks violating a target PDK's poly-width or S/D metal-spacing rule (flagged via `drc_hints.notes`, not rejected). |
 | `fingers`      | int    | `1`                | Gate fingers per unit device. Must be `>= 1`. With `finger_topology: "parallel"` (the default) the unit device is one folded transistor of width `fingers * w_um`. |
-| `finger_topology` | string | `"parallel"`    | How a `fingers > 1` unit is wired: `"parallel"` (alternating S/D segments strapped, every gate tied — one folded device) or `"series"` (bare stripes, no straps: a chain of transistors with uncontactable interior gates, warned about in `warnings[]`). Must be `"parallel"` or `"series"`. No effect when `fingers` is `1`. |
+| `finger_topology` | string | `"parallel"`    | How a `fingers > 1` unit is wired: `"parallel"` (alternating S/D segments strapped, every gate tied — one folded device) or `"series"` (bare stripes, no straps — every finger padded and every S/D/gate terminal reported as its own `U<i>_S<j>`/`U<i>_D<j>`/`U<i>_G<j>` port, `device_count` multiplied by `fingers`). Must be `"parallel"` or `"series"`. No effect when `fingers` is `1`. |
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
