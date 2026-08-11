@@ -787,8 +787,41 @@ Two things `"explicit"` deliberately does not add (see "Scope" above):
 placed blocks carry no orientation/rotation (an origin is a translation
 only), and `gen-compose` performs no overlap check of its own — a caller
 that declares two blocks at overlapping origins gets a composed GDS with
-overlapping geometry and no error from this command; `klt drc` remains the
-authority that would catch an actually-illegal result.
+overlapping geometry and no error from this command. `klt drc` is the
+authority for illegal *shapes* on the composed output, but it is not a
+complete backstop for placement mistakes: two same-layer shapes placed with
+zero clearance merge into one polygon, which is not a spacing violation by
+any rule (there is no gap left to measure once they're unioned), so `klt
+drc` reports 0 violations on exactly the case that matters most — a block
+placed flush against a neighbour's edge. That kind of short only otherwise
+surfaces later, downstream, via `klt extract`'s `merged_net_labels`
+diagnostic.
+
+To close that gap without turning `"explicit"` placement into a hard
+validator, `gen-compose` adds one advisory check (#692): for every ordered
+pair of distinct blocks `(A, B)` where `A`'s own `generator_report`
+(`drc_hints.min_spacing_um`) declares a positive minimum spacing, the actual
+placed clearance between `A` and `B` is compared against it. If the
+clearance is smaller, the response's top-level `warnings[]` gets one entry
+naming both blocks, the declared minimum, and the clearance actually found —
+composition still succeeds (this never raises, and never blocks output), so
+existing overlapping-origin requests keep working exactly as before:
+
+```json
+{
+  "warnings": [
+    "block 'core' is placed 0.00um from block 'ring' (strategy: explicit), closer than ring's own declared drc_hints.min_spacing_um of 1.00um"
+  ]
+}
+```
+
+This warning is scoped to `strategy: "explicit"` only — `"row"` placement's
+own uniform `spacing_um` does not have the same "silently flush against a
+declared-hint neighbour" trap, so it gains no new warnings. It is also only
+as good as the input: a block whose `generator_report` doesn't report a
+`drc_hints.min_spacing_um` (or reports `0`) triggers nothing, so this is a
+courtesy for generators (like `guard_ring`) that do report one, not a
+general-purpose spacing check.
 
 ## Worked example
 

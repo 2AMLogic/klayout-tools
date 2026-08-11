@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt gen-compose`'s `placement.strategy: "explicit"` path now
+  warns when a block is placed closer to a neighbour than that neighbour's
+  own declared `generator_report.drc_hints.min_spacing_um` (#692). Before
+  this, `"explicit"` performed no clearance check at all: a block placed
+  flush against (0um clearance from) a `guard_ring`-generated neighbour
+  composed without complaint, and `klt drc` reported the result clean —
+  two same-layer shapes placed with zero clearance merge into one polygon,
+  which is not a spacing violation by any rule (there's no gap left to
+  measure once they're unioned), so the resulting short surfaced only
+  downstream via `klt extract`'s `merged_net_labels` diagnostic. `compose()`
+  now appends one `warnings[]` entry per offending ordered block pair naming
+  both blocks, the declared minimum, and the actual clearance found; this is
+  advisory only (composition still succeeds, geometry stays advisory
+  exactly as documented) and scoped to `"explicit"` placement only — `"row"`
+  placement's own uniform `spacing_um` does not have the same silently-flush
+  ergonomics trap and gains no new warnings. See `docs/cli/gen-compose.md`'s
+  "Explicit placement" section.
+
 - 2026-08-11 — `klt gen guard_ring` (and every generator that composes its
   ring drawing: `diff_pair`, `bjt_array`, `esd_device`): a `contacts_per_side`
   value `_guard_ring_validate` accepted as geometrically fine could still
