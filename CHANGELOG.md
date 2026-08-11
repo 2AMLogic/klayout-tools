@@ -882,6 +882,27 @@ not `klt --version`, if you need to detect this kind of drift.
   within-row gap between interleaved splits) is unchanged. See
   `docs/cli/gen.md`.
 
+### Changed since release
+
+- 2026-08-11 — `klt place-and-route`'s `place` stage now runs OpenROAD's
+  `global_placement` with `-routability_driven -timing_driven` enabled
+  (#745, P&R survey §3.1 Priority 1) — both already-implemented `gpl` modes
+  were previously never requested. A pure flag addition to the generated
+  Tcl, no request field, no new dependency. On the `gcd` corpus fixture
+  (sky130hd, 38% target utilization, `tt_025C_1v80`, real Yosys + real
+  OpenROAD), A/B against the prior unflagged default: total negative slack
+  improves (-82.50ns → -78.05ns, ~5.4% better) at the cost of worst slack
+  (-2.238ns → -2.256ns), final wirelength (11682um → 12210um, +4.5%), and
+  estimated power (14.83mW → 17.43mW, +17.5%) — `repair_design`/
+  `repair_timing` insert more buffers under the new placement (4355 → 4934
+  extracted devices), which is what drives the utilization/power/wirelength
+  increase. Routing DRC (OpenROAD's own `-output_drc`) stays clean (0
+  violations) on both, and `klt lvs` self-compare stays `status: "match"`
+  on both — this fixture is too small/low-density for routability-driven
+  placement's congestion benefit to be visible, but the flag change is
+  functionally safe. See `docs/design/place-and-route-improvements-survey.md`
+  §3.1.
+
 ## 0.2.0 (2026-08-04)
 
 The first release since `0.1.0`. `klt` grew from **5 verbs to 24**; the 19
