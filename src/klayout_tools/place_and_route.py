@@ -1220,7 +1220,7 @@ def _stage_script_lines(
             f"-ver_layers {io_spec['layer_v']}",
             f"set_wire_rc -layer {io_spec['layer_v']}",
             f"global_placement -density {_GLOBAL_PLACEMENT_DENSITY} "
-            f"-random_seed {seed}",
+            f"-routability_driven -timing_driven -random_seed {seed}",
             "estimate_parasitics -placement",
             "repair_design",
             "repair_timing",
