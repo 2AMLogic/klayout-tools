@@ -38,6 +38,9 @@ import json
 import os
 from typing import Any
 
+from ._check_result import finish as _finish
+from ._check_result import fmt_layer as _fmt_layer
+from ._check_result import skipped as _skipped
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
 
@@ -178,10 +181,6 @@ def run_socket_check(
     }
 
 
-def _fmt_layer(layer_tuple: tuple[int, int]) -> str:
-    return f"{layer_tuple[0]}/{layer_tuple[1]}"
-
-
 def _is_number(value: Any) -> bool:
     """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
     return not isinstance(value, bool) and isinstance(value, (int, float))
@@ -193,26 +192,6 @@ def _is_layer_pair(value: Any) -> bool:
         and len(value) == 2
         and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
     )
-
-
-def _finish(name: str, violations: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": "fail" if violations else "pass",
-        "violation_count": len(violations),
-        "violations": violations,
-        "skip_reason": None,
-    }
-
-
-def _skipped(name: str, reason: str) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": "skipped",
-        "violation_count": 0,
-        "violations": [],
-        "skip_reason": reason,
-    }
 
 
 # --------------------------------------------------------------------------- #

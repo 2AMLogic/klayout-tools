@@ -53,6 +53,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._layout import clip_box as _clip_box
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells_shared
 
@@ -232,25 +233,6 @@ def _select_top_cells(layout: Any, top: str | None) -> list[Any]:
     ``socket-check`` too, so this module keeps its own error type.
     """
     return _select_top_cells_shared(layout, top, RingCheckError)
-
-
-def _clip_box(
-    kdb: Any, region_um: tuple[float, float, float, float], dbu: float
-) -> Any:
-    """Convert a micrometre ``(left, bottom, right, top)`` window into an
-    integer-dbu ``kdb.Box`` for clipping.
-
-    Coordinates are rounded to the nearest whole database unit -- the same
-    rounding ``drc.py`` applies to deck thresholds -- so a caller who authored
-    the window in micrometres never needs to know the stream's dbu.
-    """
-    left, bottom, right, top = region_um
-    return kdb.Box(
-        round(left / dbu),
-        round(bottom / dbu),
-        round(right / dbu),
-        round(top / dbu),
-    )
 
 
 def _assert_annulus(

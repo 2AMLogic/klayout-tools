@@ -978,6 +978,32 @@ def reap_orphaned_security_groups(
     return deleted
 
 
+def _signal_handlers_install(
+    prev_handlers: dict[int, Any],
+    handler: Callable[[int, FrameType | None], None],
+) -> None:
+    """Install ``handler`` for SIGINT/SIGTERM, recording each signal's
+    previous handler into ``prev_handlers`` so :func:`_signal_handlers_restore`
+    can put it back later. Shared by :class:`RemoteLauncher` and
+    :class:`~klayout_tools.remote_fleet.FleetLauncher`, whose
+    ``__enter__``/``__exit__`` guaranteed-teardown context managers (see this
+    module's docstring, mechanism (a)) both need the identical install/restore
+    dance around a per-class ``_handle_signal`` -- only ``_handle_signal``
+    itself differs (a different exception type/message per class).
+    """
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        prev_handlers[sig] = signal.getsignal(sig)
+        signal.signal(sig, handler)
+
+
+def _signal_handlers_restore(prev_handlers: dict[int, Any]) -> None:
+    """Restore every handler previously captured by
+    :func:`_signal_handlers_install`, then clear ``prev_handlers``."""
+    for sig, handler in prev_handlers.items():
+        signal.signal(sig, handler)
+    prev_handlers.clear()
+
+
 class RemoteLauncher:
     """Provision one cold, per-job spot (default) or on-demand EC2 instance
     sized for ``corner_count``, guaranteeing teardown on every exit path.
@@ -1097,14 +1123,10 @@ class RemoteLauncher:
         return False  # never swallow an exception raised in the block
 
     def _install_signal_handlers(self) -> None:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            self._prev_handlers[sig] = signal.getsignal(sig)
-            signal.signal(sig, self._handle_signal)
+        _signal_handlers_install(self._prev_handlers, self._handle_signal)
 
     def _restore_signal_handlers(self) -> None:
-        for sig, handler in self._prev_handlers.items():
-            signal.signal(sig, handler)
-        self._prev_handlers.clear()
+        _signal_handlers_restore(self._prev_handlers)
 
     def _handle_signal(self, signum: int, frame: FrameType | None) -> None:
         del frame
