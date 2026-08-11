@@ -77,11 +77,23 @@ def _print_text(report: dict) -> None:
     corners = report.get("corners")
     if corners is not None and len(corners.get("declared") or []) > 1:
         print()
+        print(f"objective: {corners.get('objective', 'sizing_corner')}")
+        worst_case_id = corners.get("worst_case")
         print("corners:")
         for entry in corners.get("results") or corners.get("declared") or []:
-            marker = "*" if entry.get("is_sizing") else " "
+            sizing_marker = "*" if entry.get("is_sizing") else " "
+            worst_marker = "!" if entry.get("corner_id") == worst_case_id else " "
             entry_status = entry.get("status", "not evaluated")
-            print(f"  {marker} {entry['corner_id']}: {entry_status}")
+            entry_margins = entry.get("margins")
+            margin_str = (
+                f"  gm_id_rel_error={entry_margins['gm_id_rel_error']:+.4g}"
+                if entry_margins is not None
+                else ""
+            )
+            print(
+                f"  {sizing_marker}{worst_marker} {entry['corner_id']}: "
+                f"{entry_status}{margin_str}"
+            )
 
     method = report["method"]
     print()
