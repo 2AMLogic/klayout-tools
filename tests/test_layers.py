@@ -273,3 +273,263 @@ def test_cli_unknown_top_exits_one(tmp_path, capsys):
     assert main(["layers", str(path), "--top", "NOPE"]) == 1
     err = capsys.readouterr().err
     assert "top cell not found in stream: NOPE" in err
+
+
+# --- --flattened / --include-text (issue #675) ------------------------------
+
+
+def _make_flattened_hierarchy() -> kdb.Layout:
+    """``CHILD`` instantiated under multiple transforms and multiplicities on
+    ``TOP``, exercising the ``--flattened``/``--include-text`` acceptance
+    criteria (issue #675):
+
+    - ``CHILD`` draws one box (0,0)-(10,10) and one text label ``"PIN"`` at
+      (5,5) on layer (1, 0) -- definition-level: 2 shapes.
+    - ``TOP`` instantiates ``CHILD`` 8 times total: once plain at the
+      origin, once rotated 90 degrees and displaced to (100, 0), and once as
+      a 2x3 array with a (300, 0) base and (50, 0)/(0, 50) row/column
+      vectors -- so flattened counts are 8x the definition count, spanning
+      three distinct transform kinds (plain, rotation+displacement, array).
+    """
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+
+    child = layout.create_cell("CHILD")
+    child.shapes(li).insert(kdb.Box(0, 0, 10, 10))
+    child.shapes(li).insert(kdb.Text("PIN", kdb.Trans(5, 5)))
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(kdb.Trans.R90, 100, 0)))
+    top.insert(
+        kdb.CellInstArray(
+            child.cell_index(),
+            kdb.Trans(300, 0),
+            kdb.Vector(50, 0),
+            kdb.Vector(0, 50),
+            2,
+            3,
+        )
+    )
+
+    return layout
+
+
+def test_flattened_default_off_preserves_definition_only_schema(tmp_path):
+    """Omitting ``--flattened`` leaves the report byte-identical to the
+    pre-#675 schema -- no new keys appear at all."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path))
+    (entry,) = report["layers"]
+    assert set(entry.keys()) == {"layer", "datatype", "name", "shapes", "annotation"}
+    assert entry["shapes"] == 2
+
+
+def test_flattened_definition_count_unchanged(tmp_path):
+    """Requesting ``--flattened`` does not change the existing
+    per-cell-definition ``shapes`` count -- only adds new fields."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path), flattened=True)
+    (entry,) = report["layers"]
+    assert entry["shapes"] == 2  # unchanged: 1 box + 1 text, defined once
+
+
+def test_flattened_shape_count_scales_with_instantiation(tmp_path):
+    """``flattened_shapes`` reflects every placement: 8 instances * (1 box +
+    1 text) = 16, not the 2-shape definition count."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path), flattened=True)
+    (entry,) = report["layers"]
+    assert entry["flattened_shapes"] == 16
+
+
+def test_flattened_bbox_includes_transforms(tmp_path):
+    """The flattened bounding box is the union of every placement's
+    transformed extents -- plain, rotated+displaced, and arrayed."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path), flattened=True)
+    (entry,) = report["layers"]
+    assert entry["bbox_um"] == {
+        "left": 0.0,
+        "bottom": 0.0,
+        "right": 0.36,
+        "top": 0.11,
+        "width": 0.36,
+        "height": 0.11,
+    }
+
+
+def test_flattened_contributors_are_instance_weighted(tmp_path):
+    """``contributors`` counts scale with instantiation (16, matching
+    ``flattened_shapes``), not the 2-shape definition count -- the whole
+    hierarchy funnels through a single contributing cell here."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path), flattened=True)
+    (entry,) = report["layers"]
+    assert entry["contributors"] == [{"cell": "CHILD", "shapes": 16}]
+
+
+def test_flattened_omits_text_fields_without_include_text(tmp_path):
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path), flattened=True)
+    (entry,) = report["layers"]
+    assert "text_count" not in entry
+    assert "texts" not in entry
+
+
+def test_include_text_reports_flattened_occurrence_counts(tmp_path):
+    """``text_count``/``texts`` match the flattened placement count (8), not
+    the single definition-level text shape."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    report = layers_report(str(path), flattened=True, include_text=True)
+    (entry,) = report["layers"]
+    assert entry["text_count"] == 8
+    assert entry["texts"] == [{"text": "PIN", "count": 8}]
+
+
+def test_include_text_requires_flattened():
+    with pytest.raises(LayersError, match="--include-text requires --flattened"):
+        layers_report("/no/such/path/design.gds", include_text=True)
+
+
+def test_flattened_report_is_deterministic(tmp_path):
+    """Two independent runs over the same file produce byte-identical JSON
+    -- contributor and text ordering does not depend on iteration order."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    first = layers_report(str(path), flattened=True, include_text=True)
+    second = layers_report(str(path), flattened=True, include_text=True)
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_flattened_top_scopes_flattening_root(tmp_path):
+    """With ``--top``, flattening starts only at the named cell's own
+    sub-hierarchy -- a multi-top library's other top cell does not leak into
+    the flattened count (issue #675's "top-cell selection for multi-top
+    libraries" requirement)."""
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+
+    child = layout.create_cell("CHILD")
+    child.shapes(li).insert(kdb.Box(0, 0, 10, 10))
+
+    block_a = layout.create_cell("BLOCK_A")
+    block_a.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(0, 0)))
+    block_a.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(20, 0)))
+
+    block_b = layout.create_cell("BLOCK_B")
+    block_b.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(0, 0)))
+
+    path = tmp_path / "multi_top_hier.gds"
+    layout.write(str(path))
+
+    report_a = layers_report(str(path), top="BLOCK_A", flattened=True)
+    (entry_a,) = report_a["layers"]
+    assert entry_a["flattened_shapes"] == 2
+
+    report_b = layers_report(str(path), top="BLOCK_B", flattened=True)
+    (entry_b,) = report_b["layers"]
+    assert entry_b["flattened_shapes"] == 1
+
+    # Whole-stream (no --top) sums flattening roots across every top cell.
+    report_all = layers_report(str(path), flattened=True)
+    (entry_all,) = report_all["layers"]
+    assert entry_all["flattened_shapes"] == 3
+
+
+def test_flattened_layer_with_no_shapes_reports_empty_bbox(tmp_path):
+    """A declared-but-empty layer under ``--flattened`` reports the same
+    all-zero ``bbox_um`` convention as ``klt stats``, plus zero counts."""
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))  # layer (5, 0) "empty" carries no shapes
+
+    report = layers_report(str(path), flattened=True)
+    entry = next(e for e in report["layers"] if (e["layer"], e["datatype"]) == (5, 0))
+    assert entry["flattened_shapes"] == 0
+    assert entry["contributors"] == []
+    assert entry["bbox_um"] == {
+        "left": 0.0,
+        "bottom": 0.0,
+        "right": 0.0,
+        "top": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+    }
+
+
+def test_cli_flattened_json_reports_new_fields(tmp_path, capsys):
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    assert (
+        main(["layers", str(path), "--flattened", "--include-text", "--format", "json"])
+        == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    (entry,) = data["layers"]
+    assert set(entry.keys()) == {
+        "layer",
+        "datatype",
+        "name",
+        "shapes",
+        "annotation",
+        "flattened_shapes",
+        "bbox_um",
+        "contributors",
+        "text_count",
+        "texts",
+    }
+    assert entry["flattened_shapes"] == 16
+    assert entry["text_count"] == 8
+
+
+def test_cli_flattened_text_output_includes_new_columns(tmp_path, capsys):
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    assert main(["layers", str(path), "--flattened", "--include-text"]) == 0
+    out = capsys.readouterr().out
+    assert "flattened_shapes" in out
+    assert "bbox_um" in out
+    assert "contributors" in out
+    assert "text_count" in out
+    assert "texts" in out
+    assert "CHILD:16" in out
+    assert "PIN:8" in out
+
+
+def test_cli_default_text_output_unchanged_without_flattened(tmp_path, capsys):
+    """Same assertion as ``test_default_format_is_text``, run against the
+    flattened-hierarchy fixture: no new columns leak into default output."""
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    assert main(["layers", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "flattened_shapes" not in out
+    assert "bbox_um" not in out
+    assert "contributors" not in out
+
+
+def test_cli_include_text_without_flattened_exits_one(tmp_path, capsys):
+    path = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(path))
+
+    assert main(["layers", str(path), "--include-text"]) == 1
+    err = capsys.readouterr().err
+    assert "--include-text requires --flattened" in err
