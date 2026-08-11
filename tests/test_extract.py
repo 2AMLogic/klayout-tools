@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -44,7 +45,12 @@ from klayout_tools.extract import (
     _region,
     run_extract,
 )
-from klayout_tools.pdk_models import _select_bipolar_variant, equivalent_rectangle_um
+from klayout_tools.pdk_models import (
+    _format_um,
+    _format_um2,
+    _select_bipolar_variant,
+    equivalent_rectangle_um,
+)
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
@@ -521,7 +527,16 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     assert classes == {"nfet", "pfet"}
     for device in devices:
         assert set(device["nets"]) == {"s", "g", "d", "b"}
-        assert set(device["params"]) == {"w_um", "l_um"}
+        # Issue #695: MOS `params` also carries the extractor's measured
+        # source/drain junction area+perimeter, regardless of `--pdk`.
+        assert set(device["params"]) == {
+            "w_um",
+            "l_um",
+            "as_um2",
+            "ad_um2",
+            "ps_um",
+            "pd_um",
+        }
 
     nfet = next(d for d in devices if d["class"] == "nfet")
     pfet = next(d for d in devices if d["class"] == "pfet")
@@ -2135,6 +2150,88 @@ def test_pdk_resolved_x_card_carries_l_w_with_unit_suffix(tmp_path):
     l_um, w_um = nfet["params"]["l_um"], nfet["params"]["w_um"]
     assert f"L={l_um:g}U" in text
     assert f"W={w_um:g}U" in text
+
+
+def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
+    """Issue #695: a `--pdk`-bound MOS `X` card carries the extractor's
+    measured source/drain junction area+perimeter (`AS`/`AD`/`PS`/`PD`)
+    under the same (KLayout-native) parameter spelling the unbound `M`-card
+    form already uses, with the same measured values -- diffing the bound
+    and unbound netlists for the same cell shows the bound form loses no
+    parameter."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    unbound = run_extract(path, "sky130", output=str(tmp_path / "inv_m.spice"))
+    bound = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "inv_x.spice"),
+    )
+
+    unbound_text = Path(unbound["netlist_path"]).read_text()
+    bound_text = Path(bound["netlist_path"]).read_text()
+
+    def junction_params(text: str) -> list[tuple[str, str, str, str]]:
+        return re.findall(r"AS=(\S+) AD=(\S+) PS=(\S+)\s*\n?\+?\s*PD=(\S+)", text)
+
+    unbound_junctions = junction_params(unbound_text)
+    bound_junctions = junction_params(bound_text)
+    assert unbound_junctions, "expected AS/AD/PS/PD on the unbound M cards"
+    assert bound_junctions == unbound_junctions
+
+    nfet = next(d for d in bound["devices"] if d["class"] == "nfet")
+    # Regression: a device with drawn diffusion has non-zero junction
+    # parameters on the bound card, not the PDK subcircuit's `as=0 ad=0
+    # ps=0 pd=0` defaults (the silent-zero-junction-capacitance bug #695
+    # reports).
+    assert nfet["params"]["as_um2"] > 0.0
+    assert nfet["params"]["ad_um2"] > 0.0
+    assert nfet["params"]["ps_um"] > 0.0
+    assert nfet["params"]["pd_um"] > 0.0
+
+    assert f"AS={_format_um2(nfet['params']['as_um2'])}" in bound_text
+    assert f"AD={_format_um2(nfet['params']['ad_um2'])}" in bound_text
+    assert f"PS={_format_um(nfet['params']['ps_um'])}" in bound_text
+    assert f"PD={_format_um(nfet['params']['pd_um'])}" in bound_text
+
+
+def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
+    """Issue #695 acceptance criterion: since the MOS binding now carries
+    every extractor-measured parameter onto the `X` card, a layout with only
+    MOS devices produces no "parameter dropped" warning under `--pdk`."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "inv.spice"),
+    )
+    assert report["warnings"] == []
+
+
+def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
+    """Issue #695 acceptance criterion: sky130's fixed-geometry `pnp_05v5`
+    cells take no per-instance base/collector-area/perimeter or
+    emitter-count override, so binding a `pnp` device under `--pdk`
+    deliberately drops those extractor-measured parameters -- this must be
+    named in `warnings[]` (with the class), not dropped silently."""
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=str(tmp_path / "bjt.spice"),
+    )
+    (warning,) = report["warnings"]
+    assert "'pnp'" in warning
+    assert "PE" in warning and "AB" in warning and "NE" in warning
 
 
 def test_pdk_resolved_but_deck_family_mismatch_is_application_error(tmp_path):

@@ -1251,7 +1251,7 @@ library at all.
 subcircuit call against the resolved PDK's real device library instead:
 
 ```
-X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U
+X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U AS=0.234P AD=0.234P PS=1.6U PD=1.6U
 X$7 RA RB sky130_fd_pr__res_generic_po l=6U w=1U
 X$8 net1 net2 sky130_fd_pr__cap_mim_m3_1 l=10U w=5U
 X$9 vsubs BASE EMIT vsubs sky130_fd_pr__pnp_05v5_W0p68L0p68
@@ -1269,7 +1269,7 @@ recognised analog device classes):
 
 | Device class | sky130 | gf180mcu | Geometry on the `X` card |
 |---|---|---|---|
-| MOS (`nfet`/`pfet`) | ✅ | ✅ | `L`/`W`, read off the device |
+| MOS (`nfet`/`pfet`) | ✅ | ✅ | `L`/`W`/`AS`/`AD`/`PS`/`PD`, read off the device (issue #695) |
 | Resistor | ✅ | ✅ (all flavours) | `l`/`w` (sky130) or `r_length`/`r_width` (gf180mcu), read off the device |
 | Capacitor (MiM) | ✅ | ✅ | `l`/`w` (sky130) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | none — a geometry-named variant selected by emitter area |
@@ -1320,20 +1320,38 @@ future epic):
   naming what was tried — **never** a silent fallback to the bare primitive
   form. (This up-front deck/PDK-mismatch guard keys off the MOS table, which
   every deck has; it is distinct from the per-class carve-out above.)
-- Geometry values on every `X` card use an explicit micrometre unit suffix
-  (e.g. `L=0.15U`, `l=6U`, `r_length=6U` — the same convention `klt extract`'s
+- Geometry values on every `X` card use an explicit unit suffix (e.g.
+  `L=0.15U`, `l=6U`, `r_length=6U` for a length in micrometres, `AS=0.234P`
+  for an area in square micrometres — the same convention `klt extract`'s
   `M`-card form already uses, unambiguous regardless of any `.option scale` a
   caller's testbench may or may not set) and rely on the resolved
   subcircuit's own defaults for everything else (`nf`/`mult`/`par`/`m`, all
   confirmed `1`-equivalent in the fetched real installs each table was
-  verified against). MOS source/drain area+perimeter (`AS`/`AD`/`PS`/`PD`,
-  present on the bare `M`-card form) are **not** carried onto the `X` card —
-  consistent with this command's documented schematic-equivalent,
-  no-parasitics scope (see "Out of scope" below).
-- **The JSON response is unaffected**: `device_counts`/`devices[].class`
-  always report the deck's own class label (`nfet`/`pfet`/`res_generic_po`/
-  `cap_mim_2f0_m4m5_noshield`/`pnp`/`bjt`/…), regardless of `--pdk`. Model
-  binding is a SPICE-serialization concern only.
+  verified against — the extractor has no opinion on multi-finger/multiplied
+  devices, so there is nothing measured to carry there). MOS source/drain
+  junction area+perimeter (`AS`/`AD`/`PS`/`PD`, present on the bare `M`-card
+  form) **are** carried onto the `X` card (issue #695) — both curated PDKs'
+  target subcircuits declare matching `as`/`ad`/`ps`/`pd` call-site
+  parameters, so nothing is lost for a bound MOS device.
+- **Not every dropped parameter has somewhere to go.** sky130's bound `pnp`
+  is the one case today: `pnp_05v5_W0p68L0p68`/`_W3p40L3p40` are
+  fixed-geometry cells selected by name (see `variants` above), so they take
+  no per-instance base/collector-area/perimeter or emitter-count override at
+  all — the extractor's measured `PE`/`AB`/`PB`/`AC`/`PC`/`NE` (KLayout's
+  `DeviceClassBJT3Transistor`, present and non-zero on the bare `Q`-card
+  form) have no parameter to land on. Rather than dropping them silently,
+  `--pdk` binding emits one aggregate `warnings[]` entry per affected class,
+  naming both the class and the specific parameters dropped (issue #695's
+  acceptance criterion) — re-run without `--pdk` to recover them from the
+  bare `Q`-card form.
+- **The JSON response's `devices[].class`/`device_counts` are unaffected**:
+  they always report the deck's own class label (`nfet`/`pfet`/
+  `res_generic_po`/`cap_mim_2f0_m4m5_noshield`/`pnp`/`bjt`/…), regardless of
+  `--pdk` — model binding rewrites the *written SPICE* only.
+  `devices[].params`, by contrast, always carries every parameter the
+  extractor measured (see "`devices[]` entries" below) — independent of
+  `--pdk`, since it is built from the extracted device objects before the
+  `--pdk`-bound netlist is even written.
 
 ## Parasitic (RC) extraction (`--parasitics`)
 
@@ -1423,10 +1441,11 @@ counting them here would double-count it (#226):
   measuring — the gate sits over the channel, not the substrate the
   coefficients describe, and its capacitance is in the device model. Only the
   parasitic measurement subtracts it; device connectivity is untouched.
-- **Source/drain diffusion** carries no parasitic role: the extracted `M`
-  cards already emit `AS`/`AD`/`PS`/`PD`, from which the device model derives
-  the junction capacitance. Both PDKs' own magic tech files comment their
-  active-layer parasitic caps out for the same reason.
+- **Source/drain diffusion** carries no parasitic role: the extracted MOS
+  card already emits `AS`/`AD`/`PS`/`PD` — the bare `M`-card form always has,
+  and a `--pdk`-bound `X` card does too (issue #695) — from which the device
+  model derives the junction capacitance. Both PDKs' own magic tech files
+  comment their active-layer parasitic caps out for the same reason.
 
 The coefficients are curated per-PDK-family in each deck module's `PARASITICS`
 table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py`), **transcribed with
@@ -1841,7 +1860,14 @@ exit codes).
       "name": "$1",
       "class": "nfet",
       "nets": { "s": "VGND", "g": "A", "d": "Y", "b": "vsubs" },
-      "params": { "w_um": 0.65, "l_um": 0.15 }
+      "params": {
+        "w_um": 0.65,
+        "l_um": 0.15,
+        "as_um2": 0.234,
+        "ad_um2": 0.234,
+        "ps_um": 1.6,
+        "pd_um": 1.6
+      }
     }
   ],
   "nets": [{ "name": "A", "pin": true, "device_count": 2 }],
@@ -1915,7 +1941,7 @@ consume.
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
 | `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
 
