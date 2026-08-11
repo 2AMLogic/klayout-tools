@@ -25,6 +25,11 @@
 # string the spike itself captured -- `Icarus Verilog version 13.0 (stable)
 # (v13_0)` -- no drift.
 #
+# The fetch/checksum/marker/parallelism boilerplate shared with
+# install-verilator.sh and install-yosys.sh lives in _install_common.sh
+# (issue #687) -- this file keeps only the pinned version and the
+# configure/make build step.
+#
 # Usage: scripts/install-icarus-verilog.sh [--force]
 #   Installs into $ICARUS_INSTALL_PREFIX (default: ~/.cache/icarus-<version>).
 #   Add "$ICARUS_INSTALL_PREFIX/bin" to $PATH after running. Idempotent: a
@@ -33,6 +38,9 @@
 #   convention).
 
 set -euo pipefail
+
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
 # Pinned release -- bump the tag, asset checksum, and CHANGELOG.md together
 # in the same change if this is ever refreshed. Fails closed on mismatch.
@@ -51,42 +59,13 @@ MARKER="$PREFIX/.installed-version"
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
-if [[ -f "$MARKER" && $FORCE -eq 0 ]]; then
-    have="$(cat "$MARKER")"
-    if [[ "$have" == "$ICARUS_TAG" ]]; then
-        echo "iverilog $ICARUS_TAG already installed at $PREFIX (use --force to rebuild)"
-        exit 0
-    fi
-fi
-
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
+check_marker "$MARKER" "$ICARUS_TAG" "$FORCE" "iverilog"
 
 tmp_tarball="$(mktemp)"
 src_dir="$(mktemp -d)"
 trap 'rm -f "$tmp_tarball"; rm -rf "$src_dir"' EXIT
 
-echo "Fetching $ICARUS_ASSET_URL ..."
-if ! curl -fsL --retry 3 -o "$tmp_tarball" "$ICARUS_ASSET_URL"; then
-    echo "error: failed to fetch $ICARUS_ASSET_URL" >&2
-    exit 1
-fi
-
-actual_sha256="$(sha256_of "$tmp_tarball")"
-if [[ "$actual_sha256" != "$ICARUS_ASSET_SHA256" ]]; then
-    echo "error: checksum mismatch for $ICARUS_ASSET_URL" >&2
-    echo "  expected: $ICARUS_ASSET_SHA256" >&2
-    echo "  actual:   $actual_sha256" >&2
-    exit 1
-fi
+fetch_and_verify "$ICARUS_ASSET_URL" "$ICARUS_ASSET_SHA256" "$tmp_tarball"
 
 echo "Extracting into $src_dir ..."
 tar -xzf "$tmp_tarball" -C "$src_dir" --strip-components=1
@@ -94,7 +73,6 @@ tar -xzf "$tmp_tarball" -C "$src_dir" --strip-components=1
 echo "Configuring (prefix=$PREFIX) ..."
 (cd "$src_dir" && ./configure --prefix="$PREFIX")
 
-nproc_val="$( (command -v nproc &>/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 echo "Building (parallel=$nproc_val) ..."
 (cd "$src_dir" && make -j"$nproc_val")
 
@@ -102,6 +80,4 @@ echo "Installing into $PREFIX ..."
 rm -rf "$PREFIX"
 (cd "$src_dir" && make install)
 
-echo "$ICARUS_TAG" >"$MARKER"
-echo "Installed iverilog $ICARUS_TAG into $PREFIX"
-echo "  Add to PATH: $PREFIX/bin"
+finish_install "$MARKER" "$ICARUS_TAG" "iverilog" "$PREFIX"
