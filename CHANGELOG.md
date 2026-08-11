@@ -224,6 +224,20 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — new `klt components` verb (#674): reports which shapes form
+  one electrically connected geometric component across a caller-supplied
+  conductor/via stack — no PDK deck, no device recognition. Wraps the same
+  `kdb.LayoutToNetlist` connect/via-join idiom `klt extract`'s internal
+  extraction already uses (`l2n.connect(metal, via)` / `l2n.connect(via)` /
+  `l2n.connect(via, next_metal)`) behind an ad-hoc `--conductors`/`--vias`
+  mapping instead of a hardcoded `ExtractionDeck`, so two shapes that merely
+  overlap in XY on different layers are never treated as connected — only a
+  same-layer touch or an explicit, landed via joins two components. Never
+  calls a device extractor or purges floating nets, so an isolated,
+  unnamed, device-free island still appears as its own component. Optional
+  `--label-layers` reports which GDS text touches each component; optional
+  `--region` crops to a window and flags components that touch its edge.
+  See `docs/cli/components.md`.
 - 2026-08-09 — new `klt signoff` verb (#309): aggregates one or more `klt
   drc`/`klt lvs`/`klt extract`/`klt sim` `--format json` envelopes into a
   single pass/fail signoff verdict. Combines each input's own status
