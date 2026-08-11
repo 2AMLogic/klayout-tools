@@ -48,7 +48,7 @@
 
 set -euo pipefail
 
-# shellcheck source=./_install_common.sh
+# shellcheck source=scripts/_install_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
 # Pinned release -- bump the tag, asset checksum, and CHANGELOG.md together
