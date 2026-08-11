@@ -539,6 +539,36 @@ def test_run_unknown_cell_library_rejects_route_stage(tmp_path, monkeypatch):
         run_place_and_route(request_path)
 
 
+def test_run_unknown_cell_library_rejects_route_stage_missing_antenna_diode_cell(
+    tmp_path, monkeypatch
+):
+    """Same as above, one check further -- a `cell_library` with a known CTS
+    buffer and routing-layer range but no `_ANTENNA_DIODE_CELLS` entry still
+    fails clearly when a run reaches `route` (issue #759), never a silent
+    guess. Both earlier tables are patched with fake entries so their own
+    checks do not mask the antenna-diode check this test targets."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    monkeypatch.setitem(
+        place_and_route._CTS_BUFFER_CELLS, "acme_fd_sc_hd", "acme_fd_sc_hd__buf_4"
+    )
+    monkeypatch.setitem(
+        place_and_route._ROUTING_LAYER_RANGE, "acme_fd_sc_hd", "met1-met5"
+    )
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_fd_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "acme_fd_sc_hd", "corner": "tt_025C_1v80"}),
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match="no antenna-diode cell known for standard-cell library 'acme_fd_sc_hd'",
+    ):
+        run_place_and_route(request_path)
+
+
 # --------------------------------------------------------------------------- #
 # `request.macros` validation (issue #438, Epic #393 Phase 2 Capability A)
 # --------------------------------------------------------------------------- #
@@ -974,10 +1004,12 @@ def _stub_openroad_success(
     stages: tuple[str, ...] = place_and_route.STAGE_ORDER,
     setup_violations: dict[str, int] | None = None,
     hold_violations: dict[str, int] | None = None,
+    antenna_violations: dict[str, int] | None = None,
     version: str = "26Q3-771-gdeadbeef",
 ) -> None:
     setup_violations = setup_violations or {}
     hold_violations = hold_violations or {}
+    antenna_violations = antenna_violations or {}
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
@@ -1011,6 +1043,13 @@ def _stub_openroad_success(
                 f"pin_{i} (VIOLATED)" for i in range(hold_violations.get(stage, 0))
             ]
             stdout_lines.append(place_and_route._HOLD_VIOLATIONS_END)
+        if stage == "route":
+            stdout_lines.append(place_and_route._ANTENNA_VIOLATIONS_BEGIN)
+            stdout_lines.append(
+                f"[INFO ANT-0002] Found {antenna_violations.get(stage, 0)} "
+                "net violations."
+            )
+            stdout_lines.append(place_and_route._ANTENNA_VIOLATIONS_END)
 
         def_path = _script_write_def_path(script_path)
         if def_path is not None:
@@ -1038,7 +1077,10 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
 def test_stubbed_full_route_success(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(
-        monkeypatch, setup_violations={"route": 3}, hold_violations={"route": 1}
+        monkeypatch,
+        setup_violations={"route": 3},
+        hold_violations={"route": 1},
+        antenna_violations={"route": 0},
     )
     merge_calls = _stub_merge_def_to_gds(monkeypatch)
 
@@ -1061,6 +1103,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert report["fmax_mhz"] == pytest.approx(304.11)
     assert report["setup_violation_count"] == 3
     assert report["hold_violation_count"] == 1
+    assert report["antenna_violation_count"] == 0
     assert report["estimated_power_mw"] == pytest.approx(11.6)
 
     assert [stage["name"] for stage in report["stages"]] == list(
@@ -1069,6 +1112,10 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # floorplan stage has no wirelength/fmax/power/violation-count fields.
     assert "wirelength_um" not in report["stages"][0]
     assert "setup_violation_count" not in report["stages"][0]
+    assert "antenna_violation_count" not in report["stages"][0]
+    # place/cts stages report setup/hold but not antenna (route-only check).
+    assert "antenna_violation_count" not in report["stages"][1]
+    assert "antenna_violation_count" not in report["stages"][2]
     # place stage onward does.
     assert "wirelength_um" in report["stages"][1]
     assert report["stages"][3]["setup_violation_count"] == 3
@@ -1084,6 +1131,30 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert provenance["klt_version"]
     assert provenance["pdk"]["name"] == "sky130A"
     assert provenance["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+
+
+def test_stubbed_full_route_reports_nonzero_antenna_violation_count(
+    tmp_path, monkeypatch
+):
+    """`antenna_violation_count` parses a multi-digit `check_antennas` count
+    (issue #759), not just the zero-violations happy path above."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, antenna_violations={"route": 12})
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["antenna_violation_count"] == 12
+    assert report["stages"][3]["antenna_violation_count"] == 12
+
+
+def test_count_antenna_violations_defensive_when_markers_missing():
+    """`_count_antenna_violations` returns `None` (never `0`) when the
+    markers are absent from stdout -- keeps a genuinely missing signal
+    distinguishable from a confirmed-zero violation count, mirroring
+    `_count_violations`'s own defensive-`0` fallback shape but for a `None`
+    sentinel (this field is nullable, unlike the setup/hold counts)."""
+    assert place_and_route._count_antenna_violations("no markers here") is None
 
 
 def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
@@ -1189,6 +1260,9 @@ def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     # stage), even though routing never ran.
     assert report["wirelength_um"] == 7852.26
     assert report["worst_slack_ns"] == pytest.approx(-1.9939)
+    # `antenna_violation_count` is `null` before the `route` stage runs --
+    # the route stage is where `repair_antennas`/`check_antennas` live.
+    assert report["antenna_violation_count"] is None
 
 
 def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
@@ -1396,6 +1470,11 @@ def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
     # sky130's lowercase `met*` convention must never leak into a gf180mcu
     # run -- the layer name is passed through to OpenROAD verbatim.
     assert not any("met1-met5" in line for line in route_lines)
+    # Issue #759: the gf180mcu antenna-diode cell (`_ANTENNA_DIODE_CELLS`),
+    # verified against `platforms/gf180/lef/gf180mcu_5LM_1TM_9K_9t_sc.lef`'s
+    # only `CLASS core ANTENNACELL`-marked macro.
+    assert "repair_antennas gf180mcu_fd_sc_mcu9t5v0__antenna" in route_lines
+    assert not any("sky130_fd_sc_hd__diode_2" in line for line in route_lines)
 
 
 def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
@@ -1420,6 +1499,44 @@ def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
     assert "set_routing_layers -signal met1-met5" in route_lines
+    # Issue #759: the sky130hd antenna-diode cell (`_ANTENNA_DIODE_CELLS`),
+    # verified against `platforms/sky130hd/lef/sky130_fd_sc_hd_merged.lef`'s
+    # only `CLASS CORE ANTENNACELL`-marked macro -- the same cell the survey
+    # itself flagged as an unverified [LIT]-tier recollection, now confirmed.
+    assert "repair_antennas sky130_fd_sc_hd__diode_2" in route_lines
+    assert not any("gf180mcu_fd_sc_mcu9t5v0__antenna" in line for line in route_lines)
+
+
+def test_route_stage_runs_post_route_antenna_repair(tmp_path, monkeypatch):
+    """Issue #759 (P&R survey section 2.7/3.3, priority 3): `repair_antennas`
+    must run after `detailed_route` and before `write_def`, followed by a
+    reroute pass (mirroring ORFS's own `flow/scripts/detail_route.tcl`, which
+    re-runs `detailed_route` immediately after `repair_antennas` to route/
+    legalize each newly inserted diode instance) and `check_antennas` to
+    report the post-repair violation count."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    detailed_route_indices = [
+        i for i, line in enumerate(route_lines) if line.startswith("detailed_route")
+    ]
+    repair_index = next(
+        i for i, line in enumerate(route_lines) if line.startswith("repair_antennas")
+    )
+    check_index = route_lines.index("check_antennas")
+    write_def_index = next(
+        i for i, line in enumerate(route_lines) if line.startswith("write_def")
+    )
+
+    # detailed_route -> repair_antennas -> detailed_route (reroute) ->
+    # check_antennas -> ... -> write_def, in that order.
+    assert len(detailed_route_indices) == 2
+    assert detailed_route_indices[0] < repair_index < detailed_route_indices[1]
+    assert detailed_route_indices[1] < check_index < write_def_index
 
 
 def test_place_stage_enables_routability_and_timing_driven_global_placement(
