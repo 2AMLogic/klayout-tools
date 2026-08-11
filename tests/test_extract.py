@@ -34,6 +34,7 @@ from klayout_tools.decks import (
     get_unmodeled_voltage_markers,
 )
 from klayout_tools.extract import (
+    PARASITIC_MODEL_SCOPE,
     ExtractError,
     _describe_devices,
     _detect_single_terminal_nets,
@@ -5857,7 +5858,13 @@ def test_parasitics_summary_block_shape(tmp_path):
         "total_capacitance_ff",
         "nets",
         "metals_without_coefficient",
+        "model",
     }
+    # `model` (issue #728) declares the parasitic model's own scope --
+    # static across every extraction, so it must match the module constant
+    # exactly, not just be present.
+    assert para["model"] == PARASITIC_MODEL_SCOPE
+    assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
     # sky130's PARASITICS.metals is fully populated (issue #547's regression
     # target was gf180mcu, not sky130) -- no gap for this deck.
     assert para["metals_without_coefficient"] == []
@@ -5899,6 +5906,36 @@ def test_parasitics_summary_block_shape(tmp_path):
     )
     # Ground net never gets its own parasitic stub.
     assert "vsubs" not in names
+
+
+def test_parasitics_netlist_header_declares_model_scope(tmp_path):
+    """Issue #728: `--parasitics` writes the model's scope as `*`-commented
+    header lines in the SPICE, mirroring `parasitics.model` in the JSON, so a
+    reader of the raw netlist alone (not just the JSON) can see the model is
+    net-to-ground-only without inferring it from capacitor terminals."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    plain = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+    para = run_extract(
+        path, "sky130", output=str(tmp_path / "para.spice"), parasitics=True
+    )
+
+    plain_text = Path(plain["netlist_path"]).read_text()
+    para_text = Path(para["netlist_path"]).read_text()
+
+    # No --parasitics: no model-scope header (nothing to declare the scope
+    # of -- there is no parasitics block at all).
+    assert "parasitic model" not in plain_text
+
+    para_lines = para_text.splitlines()
+    assert para_lines[0] == "* extracted by klt extract --deck sky130"
+    assert para_lines[1] == "* parasitic model (--parasitics):"
+    header_block = "\n".join(para_lines[: len(PARASITIC_MODEL_SCOPE) + 2])
+    for key, value in PARASITIC_MODEL_SCOPE.items():
+        assert f"* - {key}: {value}" in header_block
+    # Every header line is a well-formed SPICE comment -- a reader that
+    # blindly parses every non-comment line would otherwise choke on it.
+    for line in para_lines[: len(PARASITIC_MODEL_SCOPE) + 2]:
+        assert line.startswith("*")
 
 
 def test_parasitics_writes_r_and_c_cards_preserving_subckt_interface(tmp_path):
