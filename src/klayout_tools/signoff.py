@@ -19,15 +19,29 @@ that need no external contract to implement:
 
 What this module does **not** yet do: diff the aggregated result against a
 block's declared spec (S3 in ``docs/design/design-pipeline.md`` has no
-machine-readable schema yet -- see that doc's §4 gap map), or walk the full
-T1 checklist (design-source/layout-hygiene items the checklist covers but no
-``klt`` verb emits JSON for). Those remain the ``design-signoff`` skill's
-job until a follow-on issue gives them a schema to target.
+machine-readable schema yet -- see that doc's §4 gap map).
 
-Pure library: :func:`build_signoff` returns plain Python data (a ``dict`` of
-JSON-serialisable primitives) and never prints, mirroring ``report.py``.
-Serialisation and console printing live in the CLI command module
-(``cli/signoff_cmd.py``).
+## Tier-verdict mode (issue #722, Phase 0 of epic #706)
+
+:func:`build_tier_report` is a second, additive entry point alongside
+:func:`build_signoff`: instead of aggregating a fixed set of envelope files,
+it renders the full T1-T4 item skeleton -- mechanically parsed from
+``docs/design-evidence-tiers.md`` by :mod:`.design_evidence_tiers`, never
+duplicated here -- and grades each item against a caller-supplied **block
+manifest** (kind + per-item evidence locations). An item is ``"met"`` only
+when its evidence resolves to a *passing* ``klt`` JSON envelope with fresh
+provenance; anything else (no evidence given, an unreadable/malformed
+evidence file, an envelope whose own check did not pass, or a stale
+input-hash pairing) renders ``"unmet"`` -- this phase never fabricates a
+``"met"`` verdict for an item with no runnable check behind it. Wiring the
+actual DRC/LVS/sim *gates* (deciding which item maps to which verb, running
+them, not just reading pre-existing JSON) is Phase 1; this phase is the item
+model, the doc parser, and the interface only.
+
+Pure library: both :func:`build_signoff` and :func:`build_tier_report`
+return plain Python data (a ``dict`` of JSON-serialisable primitives) and
+never print, mirroring ``report.py``. Serialisation and console printing
+live in the CLI command module (``cli/signoff_cmd.py``).
 
 This module is a **consumer** of the shared JSON envelope
 (``docs/json-contract.md``), like ``report.py`` -- it never changes any
@@ -45,13 +59,30 @@ import os
 import sys
 from typing import Any
 
-__all__ = ["SignoffError", "build_signoff"]
+from .design_evidence_tiers import DesignEvidenceTiersError, parse_tier_doc
+
+__all__ = [
+    "SignoffError",
+    "DesignEvidenceTiersError",
+    "build_signoff",
+    "build_tier_report",
+]
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md. This is *this* command's own
 #: envelope version, independent of the schema_version of any envelope it
 #: aggregates.
 SCHEMA_VERSION = 1
+
+#: Schema version for :func:`build_tier_report`'s own JSON shape -- distinct
+#: from :data:`SCHEMA_VERSION` (the envelope-aggregation mode's shape)
+#: because the two modes' top-level fields are unrelated; bumping one must
+#: never imply the other changed.
+TIER_REPORT_SCHEMA_VERSION = 1
+
+#: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
+#: kind" subsection -- the manifest's ``kind`` field must be one of these.
+_BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
@@ -423,3 +454,279 @@ def _check_deck_hashes(
             mismatches.append(
                 {"field": f"deck[{name}].content_hash", "values": entries}
             )
+
+
+# --------------------------------------------------------------------------- #
+# Tier-verdict mode (issue #722, Phase 0 of epic #706)
+# --------------------------------------------------------------------------- #
+
+
+def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Grade a block manifest against the T1-T4 evidence-tier item skeleton
+    mechanically parsed from ``docs/design-evidence-tiers.md``
+    (:mod:`.design_evidence_tiers`) -- the item list is never duplicated
+    here, so tiers and this aggregator can never drift.
+
+    ``manifest`` (JSON in)::
+
+        {
+            "block": "my-block",              # optional, echoed back verbatim
+            "kind": "analog" | "digital" | "mixed-signal",   # required
+            "evidence": {                      # optional, default {}
+                "3": "drc.json",
+                "4": {"file": "lvs.json", "content_hash": "sha256:..."},
+                # for a mixed-signal block, per-kind items (1, 2, 5, 7) key
+                # on "<item id>.<analog|digital>"; kind-independent items
+                # (3, 4, 6, 8, 9, 10) may use the bare "<item id>" key and
+                # are looked up by both partitions -- see the doc's "Block
+                # kind" subsection for which items split which way.
+            }
+        }
+
+    Returns (JSON out)::
+
+        {
+            "schema_version": 1,
+            "block": "my-block" | None,
+            "kind": "analog",
+            "tier": "T1" | None,
+            "t1_item_count": 10,
+            "t1_met_count": 3,
+            "source_doc": "docs/design-evidence-tiers.md",
+            "items": [
+                {
+                    "tier": "T1",
+                    "id": 3,
+                    "title": "DRC clean",
+                    "partition": None,
+                    "text": "latest `klt drc` JSON report: ...",
+                    "notes": [],
+                    "status": "met",
+                    "citation": {
+                        "file": "drc.json",
+                        "kind": "drc",
+                        "check_status": "clean",
+                        "content_hash": "sha256:...",
+                        "exit_status": 0,
+                    },
+                },
+                ...  # items 1-10 (doubled per partition for mixed-signal),
+                     # then one entry per T2/T3/T4 ladder row
+            ],
+        }
+
+    An item's ``status`` is ``"met"`` only when its ``evidence`` entry
+    resolves to a *readable* ``klt`` JSON envelope, classifiable as one of
+    ``drc``/``lvs``/``extract``/``sim`` (:func:`_classify`), whose own check
+    passed (:func:`_check_passed`) -- and, if the evidence entry pinned an
+    expected ``content_hash``, whose ``provenance.input.content_hash``
+    matches it (a mismatch means the check ran against a *different* layout
+    revision than the one being claimed -- stale, so it renders ``"unmet"``,
+    never a false pass). Every other case (no evidence entry, a malformed
+    entry, an unreadable/unparsable evidence file, an unrecognised envelope
+    shape, or a failing check) also renders ``"unmet"``: this phase never
+    infers a ``"met"`` verdict for an item with no runnable check behind it.
+
+    A ``"met"`` item's ``citation`` always carries the evidence file, the
+    envelope's own status, its input content hash (``None`` when the
+    envelope's own provenance doesn't populate one -- ``klt lvs``/``klt
+    sim`` don't, per ``docs/json-contract.md``), and ``exit_status: 0``
+    (inferred: a readable, classifiable, non-error envelope implies the
+    producing command exited zero -- every ``klt`` verb emits an
+    ``error``-kind envelope, not a success envelope, on any nonzero exit).
+
+    T2-T4 render as single ladder-row items (per the doc's "The ladder"
+    table -- a Curator correction on issue #722: only T1 has an itemized
+    checklist, T2-T4 are each one gated condition layered on top) and are
+    always ``"unmet"`` in this phase: this toolkit's closed loop targets T1,
+    and T2+ require commercial tools/fab access this repo has no mechanism
+    to check.
+
+    ``tier`` is ``"T1"`` only when every rendered T1 item (across every
+    partition, for a ``mixed-signal`` block) is ``"met"``; otherwise
+    ``None`` -- there is no partial-credit tier.
+
+    Raises :class:`SignoffError` if ``manifest`` is not a JSON object, its
+    ``kind`` is missing or not one of ``analog``/``digital``/``mixed-signal``,
+    or its ``evidence`` field (when given) is not a JSON object. Raises
+    :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
+    (re-exported here for convenient ``except`` handling alongside
+    :class:`SignoffError`) if ``docs/design-evidence-tiers.md`` itself
+    cannot be read or parsed.
+    """
+    if not isinstance(manifest, dict):
+        raise SignoffError(
+            f"block manifest must be a JSON object, got {type(manifest).__name__}"
+        )
+
+    kind = manifest.get("kind")
+    if kind not in _BLOCK_KINDS:
+        raise SignoffError(
+            "block manifest 'kind' must be one of "
+            f"{', '.join(repr(value) for value in _BLOCK_KINDS)} (got {kind!r})"
+        )
+
+    evidence = manifest.get("evidence", {})
+    if not isinstance(evidence, dict):
+        raise SignoffError(
+            "block manifest 'evidence' must be a JSON object, got "
+            f"{type(evidence).__name__}"
+        )
+
+    doc = parse_tier_doc()
+    partitions: tuple[str, ...] = (
+        ("analog", "digital") if kind == "mixed-signal" else (kind,)
+    )
+
+    items: list[dict[str, Any]] = []
+    met_count = 0
+    total = 0
+    for t1_item in doc["t1_items"]:
+        for partition in partitions:
+            entry = _build_tier_item(
+                tier="T1",
+                item_id=t1_item["id"],
+                title=t1_item["title"],
+                text=_t1_item_text(t1_item, partition),
+                notes=list(t1_item["notes"]),
+                partition=partition if kind == "mixed-signal" else None,
+                evidence=evidence,
+            )
+            total += 1
+            if entry["status"] == "met":
+                met_count += 1
+            items.append(entry)
+
+    for ladder_row in doc["ladder"]:
+        if ladder_row["tier"] == "T1":
+            continue  # T1 is the itemized checklist above, not a ladder row
+        items.append(
+            {
+                "tier": ladder_row["tier"],
+                "id": None,
+                "title": f"{ladder_row['tier']} — {ladder_row['name']}",
+                "partition": None,
+                "text": f"{ladder_row['claim']} ({ladder_row['demonstrated_by']})",
+                "notes": [],
+                "status": "unmet",
+                "citation": None,
+            }
+        )
+
+    tier = "T1" if total > 0 and met_count == total else None
+
+    return {
+        "schema_version": TIER_REPORT_SCHEMA_VERSION,
+        "block": manifest.get("block"),
+        "kind": kind,
+        "tier": tier,
+        "t1_item_count": total,
+        "t1_met_count": met_count,
+        "source_doc": "docs/design-evidence-tiers.md",
+        "items": items,
+    }
+
+
+def _t1_item_text(t1_item: dict[str, Any], partition: str) -> str | None:
+    """Select the body text a T1 checklist item shows for ``partition``:
+    the matching column for a per-kind item (1, 2, 5, 7), or the item's
+    single kind-independent body otherwise (3, 4, 6, 8, 9, 10)."""
+    columns = t1_item["columns"]
+    if columns:
+        return columns.get(partition) or t1_item["text"]
+    return t1_item["text"]
+
+
+def _lookup_evidence(
+    evidence: dict[str, Any], item_id: int, partition: str | None
+) -> Any:
+    """Look up a manifest ``evidence`` entry for ``item_id``, preferring a
+    partition-qualified key (``"<id>.<partition>"``) over the bare
+    ``"<id>"`` key -- so a mixed-signal manifest can give per-partition
+    evidence for a per-kind item while still sharing one evidence entry
+    across both partitions for a kind-independent item."""
+    if partition:
+        keyed = evidence.get(f"{item_id}.{partition}")
+        if keyed is not None:
+            return keyed
+    return evidence.get(str(item_id))
+
+
+def _normalize_evidence_entry(raw: Any) -> tuple[str | None, str | None]:
+    """Return ``(file, expected_content_hash)`` from a manifest evidence[]
+    entry -- either a bare file-path string, or an object with a required
+    ``"file"`` string and an optional ``"content_hash"`` string to pin the
+    check to a specific layout revision. Returns ``(None, None)`` for any
+    entry whose shape isn't recognised -- a malformed *single* entry
+    degrades that one item to ``"unmet"`` rather than aborting the whole
+    report (see :func:`build_tier_report`'s docstring)."""
+    if isinstance(raw, str):
+        return raw, None
+    if isinstance(raw, dict):
+        file = raw.get("file")
+        if not isinstance(file, str):
+            return None, None
+        expected_hash = raw.get("content_hash")
+        if expected_hash is not None and not isinstance(expected_hash, str):
+            expected_hash = None
+        return file, expected_hash
+    return None, None
+
+
+def _build_tier_item(
+    *,
+    tier: str,
+    item_id: int,
+    title: str,
+    text: str | None,
+    notes: list[str],
+    partition: str | None,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Grade one T1 checklist item against ``evidence`` -- see
+    :func:`build_tier_report`'s docstring for the full met/unmet rule."""
+    citation = None
+    status = "unmet"
+
+    raw_entry = _lookup_evidence(evidence, item_id, partition)
+    if raw_entry is not None:
+        file, expected_hash = _normalize_evidence_entry(raw_entry)
+        if file is not None:
+            try:
+                envelope = _read_envelope(file)
+            except SignoffError:
+                envelope = None
+            if isinstance(envelope, dict):
+                try:
+                    check_kind = _classify(envelope, file)
+                except SignoffError:
+                    check_kind = None
+                if (
+                    check_kind is not None
+                    and check_kind != "error"
+                    and _check_passed(check_kind, envelope)
+                ):
+                    provenance = envelope.get("provenance") or {}
+                    input_block = provenance.get("input") or {}
+                    actual_hash = input_block.get("content_hash")
+                    stale = expected_hash is not None and actual_hash != expected_hash
+                    if not stale:
+                        citation = {
+                            "file": file,
+                            "kind": check_kind,
+                            "check_status": envelope.get("status"),
+                            "content_hash": actual_hash,
+                            "exit_status": 0,
+                        }
+                        status = "met"
+
+    return {
+        "tier": tier,
+        "id": item_id,
+        "title": title,
+        "partition": partition,
+        "text": text,
+        "notes": notes,
+        "status": status,
+        "citation": citation,
+    }
