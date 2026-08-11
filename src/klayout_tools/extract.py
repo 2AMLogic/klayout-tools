@@ -4241,19 +4241,30 @@ def _compute_parasitics(
     measured -- keys on ``net_id`` instead.
 
     **Pairs are keyed by SPICE-safe net *name*, not by net object**, matching
-    the node model of everything downstream: ``_inject_parasitics`` resolves
-    entries through a ``spice_safe_net_name``-keyed ``nets_by_name`` map, and
-    the emitted SPICE netlist has exactly one node per distinct name. A
-    layout can give several genuinely distinct nets the same label -- the
-    ``gcd`` corpus block has 105 separate, un-strapped ``VGND`` rail islands
-    and 88 ``VPWR`` ones -- and those all collapse to a single node in the
-    output (pre-existing behaviour, unchanged here). Two consequences, both
-    deliberate: overlap between two same-named nets is **skipped entirely**
-    (its charge stays on ground) because a capacitor between one node and
-    itself is a self-loop that would inflate the reported total while
-    contributing nothing electrically; and overlap between two *different*
-    names accumulates into one pair however many net objects on each side
-    contributed, which is precisely the collapsed view the netlist emits.
+    the node the coupling ``C`` card actually lands on:
+    :func:`_inject_parasitics` hangs each pair between two **per-name** hubs
+    (its ``hub_by_net`` map is keyed on ``entry["net"]``), so when several
+    genuinely distinct net objects share one layout label -- the ``gcd``
+    corpus block has 105 separate, un-strapped ``VGND`` rail islands and 88
+    ``VPWR`` ones -- every pair naming that label resolves to a single
+    (last-registered) island's hub. Two consequences, both deliberate:
+    overlap between two same-named nets is **skipped entirely** (its charge
+    stays on ground) because both of its terminals would resolve to that one
+    same hub, making the "coupling capacitor" a self-loop that would inflate
+    the reported total while contributing nothing electrically; and overlap
+    between two *different* names accumulates into one pair however many net
+    objects on each side contributed, matching the one hub per name that the
+    card attaches to.
+
+    That name-keying is *this* pass's own aggregation choice, not something
+    forced on it from downstream. Since issue #765 the ground entries above
+    resolve by ``net_id``, and KLayout's ``NetlistSpiceWriter`` renames
+    duplicates when it writes them (two nets both labelled ``VGND`` are
+    written as the distinct nodes ``VGND`` and ``VGND$1``) -- so neither the
+    injection step nor the emitted netlist collapses same-labelled islands
+    into one node. Coupling is therefore modelled one level coarser than the
+    per-net ground terms; a per-net-object coupling model is a named
+    follow-on, not a behaviour this function claims today.
     """
     if circuit is None:
         return [], []
@@ -4408,14 +4419,19 @@ def _compute_parasitics(
                 if name_a == name_b:
                     # Two *distinct* nets that carry the same layout label
                     # (e.g. `gcd`'s 105 separate, un-strapped `VGND` rail
-                    # islands) collapse to a single node downstream: both
-                    # `_inject_parasitics`' `nets_by_name` and the emitted
-                    # SPICE netlist key on `spice_safe_net_name`, so the two
-                    # would resolve to one node and the "coupling capacitor"
-                    # between them would be a self-loop -- an element with
-                    # both terminals on the same node, contributing nothing
-                    # electrically while inflating
-                    # `total_coupling_capacitance_ff`. Skipped *before* the
+                    # islands). Pairs here are keyed by SPICE-safe *name*
+                    # (`_net_pair_key`), and `_inject_parasitics` attaches
+                    # each pair's `C` card between two per-*name* hubs (its
+                    # `hub_by_net` map), so both terminals of a same-name
+                    # pair would land on one and the same hub net -- a
+                    # self-loop, contributing nothing electrically while
+                    # inflating `total_coupling_capacitance_ff`. (That is a
+                    # property of this name-keyed pair/hub model, not of the
+                    # netlist: since issue #765 the *ground* entries resolve
+                    # by `net_id`, and KLayout's SPICE writer renames a
+                    # duplicate net on write -- `VGND` and `VGND$1` -- so the
+                    # islands are not collapsed into one node downstream.)
+                    # Skipped *before* the
                     # deduction below, so that area simply stays on the
                     # ground term, exactly as it did pre-#760; charge is
                     # still conserved.

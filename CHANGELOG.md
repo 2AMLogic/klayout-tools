@@ -306,9 +306,10 @@ not `klt --version`, if you need to detect this kind of drift.
   decomposes that block's
   full 146.33 fF of crossover charge as 77.6 fF same-net (a net's own via
   stacks and its own li1-under-met1 routing, correctly left on ground),
-  0.3 fF between distinct nets that share one layout label (they collapse to
-  a single node downstream, so a capacitor between them would be a
-  self-loop; also left on ground), and 68.4 fF genuinely inter-net.
+  0.3 fF between distinct nets that share one layout label (coupling is
+  aggregated per net *name*, so both terminals of such a pair would land on
+  the same hub node — a self-loop; also left on ground), and 68.4 fF
+  genuinely inter-net.
   **No `schema_version` bump** — new fields are additive
   (`parasitics.nets[].coupled[]`, `cc_count`,
   `total_coupling_capacitance_ff`, `overlap_pairs_without_coefficient[]`),

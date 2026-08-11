@@ -1534,14 +1534,21 @@ parallel-plate capacitor between the two nets. `--parasitics` models it:
   area stays on the ground term. On the `gcd` corpus block this is the
   majority of all crossover area — 77.6 fF-equivalent of 146.3 fF-equivalent
   total, with 68.4 fF-equivalent genuinely inter-net.
-- **Nets that share a layout label share a node.** Where a layout gives
-  several genuinely distinct nets the same label (`gcd` has 105 separate,
-  un-strapped `VGND` rail islands), they collapse to one node in the emitted
-  netlist — pre-existing behaviour. Overlap between two such same-named nets
-  is skipped and left on the ground term, since a capacitor between one node
-  and itself would contribute nothing electrically while inflating the
-  reported total. Overlap between two *different* names accumulates into a
-  single pair, matching that same collapsed node view.
+- **Coupling is aggregated per net *name*, not per net object.** Where a
+  layout gives several genuinely distinct nets the same label (`gcd` has 105
+  separate, un-strapped `VGND` rail islands), every coupling pair naming that
+  label attaches to a single (last-registered) island's hub node, because the
+  pair list and the hub map are both keyed by name. Overlap between two such
+  same-named nets is therefore skipped and left on the ground term: both
+  terminals would land on that one hub, and a capacitor between a node and
+  itself contributes nothing electrically while inflating the reported total.
+  Overlap between two *different* names accumulates into a single pair,
+  matching the one hub per name the card attaches to. Note the ground terms
+  themselves are **not** aggregated this way — since issue #765 each
+  `parasitics.nets[]` entry is a distinct net object with its own `net_id`,
+  and KLayout's SPICE writer renames duplicates on write (`VGND`, `VGND$1`,
+  …), so same-labelled islands stay separate nodes in the netlist. Per-net-
+  object coupling is a named follow-on.
 
 Output is additive:
 

@@ -6754,12 +6754,17 @@ def test_gcd_parasitics_no_self_coupled_pair(gcd_parasitics_reports):
     """A coupling capacitor must never have both terminals on the same node
     (issue #760). `gcd` is the case that makes this reachable: it has 105
     genuinely distinct, un-strapped `VGND` rail-island nets and 88 `VPWR`
-    ones, all of which collapse to a single node downstream because
-    `_inject_parasitics` and the emitted SPICE netlist both key on
-    `spice_safe_net_name`. Overlap between two such same-named nets is
-    skipped in `_compute_parasitics` rather than emitted as a self-loop that
-    would contribute nothing electrically while inflating
-    `total_coupling_capacitance_ff`.
+    ones, i.e. many `parasitics.nets[]` entries sharing one `net` string.
+    Coupling pairs are keyed by that name, and `_inject_parasitics` attaches
+    each pair's `C` card between two per-*name* hubs (`hub_by_net`), so a
+    same-name pair would put both terminals on one hub net. Such overlap is
+    therefore skipped in `_compute_parasitics` rather than emitted as a
+    self-loop that would contribute nothing electrically while inflating
+    `total_coupling_capacitance_ff`. (Since issue #765 the ground entries
+    themselves resolve by `net_id`, and KLayout's SPICE writer renames
+    duplicate net names on write -- `VGND`, `VGND$1`, ... -- so the islands
+    are *not* collapsed into a single node downstream; the self-loop risk
+    lives in this pass's name-keyed pair/hub model.)
 
     Also pins the aggregate invariant that keeping the pair list name-keyed
     buys: `total_coupling_capacitance_ff` equals the sum over *distinct*
