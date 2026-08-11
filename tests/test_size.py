@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -91,6 +92,106 @@ def _stub_subprocess_run(monkeypatch, *, log_text: str = "", side_effect=None):
             raise side_effect
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
+        return _FakeCompleted("** ngspice-99\n")
+
+    monkeypatch.setattr(size.subprocess, "run", fake_run)
+
+
+#: Same textbook level=1 square-law constants `_write_models_lib` bakes into
+#: its synthetic model, plus typical NMOS Vth and mobility (KP) temperature
+#: coefficients -- used by `_install_synthetic_ngspice_stub` below to
+#: produce a real, physically plausible per-corner gm/Id drift for
+#: corner-set tests, without needing the real `ngspice` binary installed
+#: (issue #729). Vth's tempco alone barely moves gm/Id at fixed Id in a
+#: square-law model with no other nonlinearity (Vth drops out of
+#: gm/Id=2/Vov to first order) -- KP's tempco (mobility degrading with
+#: temperature) is what actually reproduces the drift `gm/Id` sizing
+#: methodology is known to see across a PVT sweep.
+_SQUARE_LAW_KP = 120e-6
+_SQUARE_LAW_VTO = 0.5
+_SQUARE_LAW_LAMBDA = 0.02
+_SQUARE_LAW_L = 0.5
+_SQUARE_LAW_VTO_TEMPCO = -0.002  # V/degC
+_SQUARE_LAW_KP_TEMPCO = -0.005  # fractional/degC
+
+
+def _square_law_op_point(w_um: float, id_a: float, temperature_c: float) -> dict:
+    vto = _SQUARE_LAW_VTO + _SQUARE_LAW_VTO_TEMPCO * (temperature_c - 27.0)
+    kp = _SQUARE_LAW_KP * (1 + _SQUARE_LAW_KP_TEMPCO * (temperature_c - 27.0))
+
+    def f(vov: float) -> float:
+        vgs = vov + vto
+        return (
+            0.5 * kp * (w_um / _SQUARE_LAW_L) * vov**2 * (1 + _SQUARE_LAW_LAMBDA * vgs)
+            - id_a
+        )
+
+    lo, hi = 1e-6, 5.0
+    flo = f(lo)
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        fm = f(mid)
+        if (fm > 0) == (flo > 0):
+            lo, flo = mid, fm
+        else:
+            hi = mid
+    vov = (lo + hi) / 2
+    vgs = vov + vto
+    gm = (
+        kp * (w_um / _SQUARE_LAW_L) * vov * (1 + _SQUARE_LAW_LAMBDA * vgs)
+        + 0.5 * kp * (w_um / _SQUARE_LAW_L) * vov**2 * _SQUARE_LAW_LAMBDA
+    )
+    return {"gm": gm, "id": id_a, "vgs": vgs, "vth": vto}
+
+
+_ID_DC_RE = re.compile(r"^Idc\b.*\bDC\s+(\S+)$", re.MULTILINE)
+_TEMP_RE = re.compile(r"^\.temp\s+(\S+)$", re.MULTILINE)
+_OP_ELEMENT_RE = re.compile(r"@m\.x1\.(\w+)\[")
+_W_SWEEP_RE = re.compile(r"w_sweep=(\S+)")
+
+
+def _install_synthetic_ngspice_stub(
+    monkeypatch, *, error_temps: set[float] | None = None
+):
+    """Monkeypatch `size.subprocess.run` with a fake ngspice that reads each
+    generated deck's own current/temperature/width-sweep values back out of
+    the deck text (rather than returning a fixed canned log) and solves the
+    same square-law equations `_write_models_lib`'s synthetic model
+    implements, with a linear Vth temperature coefficient folded in (see
+    `_square_law_op_point`). Lets a test exercise the full
+    `run_size` sweep + confirm + corner-set verification pipeline --
+    including genuine per-corner gm/Id drift -- without needing the real
+    `ngspice` binary installed. `error_temps` simulates an evaluator failure
+    (a fatal log line, no usable operating-point data) for any deck whose
+    declared `.temp` is in the set.
+    """
+    error_temps = error_temps or set()
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[cmd.index("-b") + 1]
+        log_path = cmd[cmd.index("-o") + 1]
+        deck_text = Path(deck_path).read_text(encoding="utf-8")
+
+        temperature_c = float(_TEMP_RE.search(deck_text).group(1))
+        id_a = abs(float(_ID_DC_RE.search(deck_text).group(1)))
+        op_element = _OP_ELEMENT_RE.search(deck_text).group(1)
+        w_values = [float(m) for m in _W_SWEEP_RE.findall(deck_text)]
+
+        lines = []
+        if temperature_c in error_temps:
+            lines.append("fatal error: synthetic evaluator failure")
+        else:
+            for index, w_um in enumerate(w_values):
+                op = _square_law_op_point(w_um, id_a, temperature_c)
+                lines.append(f"KLT_SIZE_POINT {index} {w_um!r}")
+                lines.append(f"@m.x1.{op_element}[gm] = {op['gm']!r}")
+                lines.append(f"@m.x1.{op_element}[id] = {op['id']!r}")
+                lines.append(f"@m.x1.{op_element}[vgs] = {op['vgs']!r}")
+                lines.append(f"@m.x1.{op_element}[vth] = {op['vth']!r}")
+
+        Path(log_path).write_text(
+            "** ngspice-99\n" + "\n".join(lines) + "\n", encoding="utf-8"
+        )
         return _FakeCompleted("** ngspice-99\n")
 
     monkeypatch.setattr(size.subprocess, "run", fake_run)
@@ -725,3 +826,292 @@ def test_run_size_keep_artifacts_writes_decks(tmp_path):
     assert (outdir / "sweep.cir").is_file()
     assert (outdir / "confirm.cir").is_file()
     assert report["environment"]["artifacts_dir"] == str(outdir)
+
+
+# --------------------------------------------------------------------------- #
+# Corner-set input parsing (issue #729): _parse_corner_set / _resolve_sizing_index
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_corner_set_legacy_single_corner():
+    request = {"corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27}}
+    points, sizing_index = size._parse_corner_set(request)
+
+    assert sizing_index == 0
+    assert len(points) == 1
+    assert points[0]["process"] == "tt"
+    assert points[0]["vdd_v"] == 1.8
+    assert points[0]["temperature_c"] == 27.0
+    assert points[0]["corner_id"] == "tt/27C"
+
+
+def test_parse_corner_set_legacy_defaults_when_corner_omitted():
+    with pytest.raises(size.SizeError, match="vdd_v"):
+        size._parse_corner_set({})
+
+
+def test_parse_corner_set_process_and_temperature_arrays():
+    request = {
+        "corners": {
+            "process": ["tt", "ss", "ff"],
+            "temperature_c": [27, -40, 125],
+            "vdd_v": 1.8,
+        }
+    }
+    points, sizing_index = size._parse_corner_set(request)
+
+    assert len(points) == 9
+    # Default sizing corner: first declared point on each axis.
+    assert sizing_index == 0
+    assert points[0]["process"] == "tt"
+    assert points[0]["temperature_c"] == 27.0
+    assert all(p["vdd_v"] == 1.8 for p in points)
+    assert {p["process"] for p in points} == {"tt", "ss", "ff"}
+    assert {p["temperature_c"] for p in points} == {27.0, -40.0, 125.0}
+    # Deterministic order: process (outer) x temperature (inner).
+    assert [p["process"] for p in points[:3]] == ["tt", "tt", "tt"]
+    assert [p["temperature_c"] for p in points[:3]] == [27.0, -40.0, 125.0]
+
+
+def test_parse_corner_set_process_bundle():
+    request = {
+        "corners": {
+            "process": [{"name": "typical", "sections": ["mos_tt", "res_tt"]}],
+            "temperature_c": [27],
+            "vdd_v": 1.8,
+        }
+    }
+    points, _sizing_index = size._parse_corner_set(request)
+
+    assert len(points) == 1
+    assert points[0]["process"] == "typical"
+    assert points[0]["process_sections"] == ["mos_tt", "res_tt"]
+    assert points[0]["corner_id"] == "typical/27C"
+
+
+def test_parse_corner_set_missing_vdd_raises():
+    request = {"corners": {"process": ["tt"], "temperature_c": [27]}}
+    with pytest.raises(size.SizeError, match="vdd_v"):
+        size._parse_corner_set(request)
+
+
+def test_parse_corner_set_both_corner_and_corners_raises():
+    request = {
+        "corner": {"process": "tt", "vdd_v": 1.8},
+        "corners": {"process": ["tt"], "vdd_v": 1.8},
+    }
+    with pytest.raises(size.SizeError, match="not both"):
+        size._parse_corner_set(request)
+
+
+def test_parse_corner_set_explicit_sizing_selects_declared_point():
+    request = {
+        "corners": {
+            "process": ["tt", "ss", "ff"],
+            "temperature_c": [27, 125],
+            "vdd_v": 1.8,
+            "sizing": {"process": "ff", "temperature_c": 125},
+        }
+    }
+    points, sizing_index = size._parse_corner_set(request)
+
+    assert points[sizing_index]["process"] == "ff"
+    assert points[sizing_index]["temperature_c"] == 125.0
+
+
+def test_parse_corner_set_sizing_no_match_raises():
+    request = {
+        "corners": {
+            "process": ["tt", "ss"],
+            "vdd_v": 1.8,
+            "sizing": {"process": "ff"},
+        }
+    }
+    with pytest.raises(size.SizeError, match="does not match"):
+        size._parse_corner_set(request)
+
+
+def test_resolve_sizing_index_default_is_first_point():
+    points = [
+        {"process": "tt", "temperature_c": 27.0},
+        {"process": "ss", "temperature_c": -40.0},
+    ]
+    assert size._resolve_sizing_index(points, None) == 0
+
+
+def test_corner_label_formats_process_and_temperature():
+    assert size._corner_label("tt", 27.0) == "tt/27C"
+    assert size._corner_label("ss", -40.0) == "ss/-40C"
+
+
+# --------------------------------------------------------------------------- #
+# Corner-set verification pipeline (issue #729): full run_size, stubbed
+# ngspice (synthetic square-law model -- see `_install_synthetic_ngspice_stub`)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_size_single_corner_response_includes_corners_block(tmp_path, monkeypatch):
+    """The pre-#729 single-corner request shape keeps working unchanged, and
+    now additionally carries a `corners` block with exactly one declared/
+    result entry -- the additive, backward-compatible shape."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_request())
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass"
+    assert report["operating_point"]["gm_id"] == pytest.approx(8.0, rel=0.02)
+    assert report["corner"]["process"] == "tt"
+    assert report["corner"]["vdd_v"] == 1.8
+    assert report["corner"]["temperature_c"] == 27.0
+    corners = report["corners"]
+    assert len(corners["declared"]) == 1
+    assert corners["sizing"]["corner_id"] == "tt/27C"
+    assert corners["hold_across_corners"] is False
+    assert len(corners["results"]) == 1
+    assert corners["results"][0]["is_sizing"] is True
+    assert corners["results"][0]["status"] == "pass"
+
+
+def test_run_size_corner_set_reports_spread_without_failing_by_default(
+    tmp_path, monkeypatch
+):
+    """A wide PVT spread drifts gm/Id enough that a non-sizing corner misses
+    tolerance -- but that alone must not fail the aggregate run (issue #729
+    acceptance criterion)."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    corners = report["corners"]
+    assert len(corners["declared"]) == 2
+    assert corners["hold_across_corners"] is False
+    results_by_corner = {r["corner_id"]: r for r in corners["results"]}
+    sizing_result = results_by_corner["tt/27C"]
+    other_result = results_by_corner["tt/125C"]
+
+    assert sizing_result["is_sizing"] is True
+    assert sizing_result["status"] == "pass"
+    assert other_result["is_sizing"] is False
+    # The temperature-driven Vth shift pushes gm/Id outside the default 3%
+    # tolerance at the same fixed width -- a real, reported spread.
+    assert other_result["status"] == "fail"
+    assert other_result["operating_point"] is not None
+    assert other_result["margins"]["gm_id_rel_error"] != pytest.approx(0.0, abs=0.03)
+
+    # A non-sizing corner's "fail" does not fail the aggregate by default.
+    assert report["status"] == "pass"
+
+
+def test_run_size_hold_across_corners_fails_aggregate_on_spread(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+            },
+            targets={"hold_across_corners": True},
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["corners"]["hold_across_corners"] is True
+    assert report["status"] == "fail"
+    # The sizing corner itself still reports its own true status.
+    results_by_corner = {r["corner_id"]: r for r in report["corners"]["results"]}
+    assert results_by_corner["tt/27C"]["status"] == "pass"
+
+
+def test_run_size_corner_set_errored_corner_forces_aggregate_error(
+    tmp_path, monkeypatch
+):
+    """An evaluator error at ANY declared corner makes the whole run
+    `error`, even when the sizing corner itself solved cleanly (issue #729's
+    error > fail > pass precedence, matching `klt sim`)."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch, error_temps={125.0})
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    results_by_corner = {r["corner_id"]: r for r in report["corners"]["results"]}
+    assert results_by_corner["tt/27C"]["status"] == "pass"
+    assert results_by_corner["tt/125C"]["status"] == "error"
+    assert results_by_corner["tt/125C"]["diagnostic"] is not None
+    # The sizing corner's own solved operating point is still reported --
+    # the aggregate `status` signals reduced trust in the *spread*, not that
+    # the sizing search itself failed.
+    assert report["operating_point"] is not None
+    assert report["operating_point"]["gm_id"] == pytest.approx(8.0, rel=0.02)
+
+
+def test_run_size_corner_set_sizing_selects_declared_point(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+                "sizing": {"temperature_c": 125},
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["corners"]["sizing"]["corner_id"] == "tt/125C"
+    results_by_corner = {r["corner_id"]: r for r in report["corners"]["results"]}
+    assert results_by_corner["tt/125C"]["is_sizing"] is True
+    assert results_by_corner["tt/27C"]["is_sizing"] is False
+
+
+def test_cli_exit_code_error_status_from_non_sizing_corner(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch, error_temps={125.0})
+
+    assert main(["size", str(request), "--format", "json"]) == 4
