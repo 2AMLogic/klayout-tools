@@ -474,6 +474,48 @@ not `klt --version`, if you need to detect this kind of drift.
   feature existing. Purely additive (`corners.objective` defaults to
   `"sizing_corner"`), no `schema_version` bump. See `docs/cli/size.md`'s
   "Worst-corner margin objective" section.
+- 2026-08-11 — `klt size` now solves a **coupled multi-device topology
+  jointly**, not just one device at a time (#768, Phase 1a of epic #705): a
+  request declares `topology: "diff_pair_mirror_tail"` (an NMOS
+  differential input pair, a PMOS current-mirror load, and an NMOS tail
+  current source with its diode-connected bias replica — six device
+  instances, three solved widths, the bias structure of this repo's own
+  hand-sized 5T OTA canary) plus a shared `budget` (`tail_current_a`,
+  `tail_mirror_ratio`) instead of a single `device`/`target.id_a`. The
+  solve runs *on the assembled circuit*: one diode-connected width sweep
+  per role seeds the search and supplies its local slope, then each
+  candidate `(W_tail, W_input, W_mirror)` is evaluated by a fresh ngspice
+  DC operating-point run of the **whole** topology, reading back every
+  instance's real in-circuit `gm`/`Id`/`Vgs` at its actual coupled `Vds`
+  and correcting all three widths at once from that single coupled
+  measurement (each role's own curve, shifted by its measured offset).
+  That is what makes it one joint solve rather than three independent
+  single-device solves glued together — `joint_solve.iterations[0]` is
+  exactly the independent-solve answer, and the trajectory shows what the
+  coupling correction bought. The response reports all six instances, each
+  with its own gm/Id, inversion level, margins and rationale, the solved
+  width per role, and `budget.measured` — the coupled quantities the
+  circuit actually delivered (real tail current, the two legs' split, the
+  realized mirror ratio). Against the real sky130A models it reproduces the
+  5T OTA canary's hand-sized 10/8/6 um at 9.83/8.74/6.41 um from the
+  canary's own measured gm/Id spec. Corner sets (`corners`) are not yet
+  supported in topology mode. Purely a new request/response shape
+  (`request.topology`, `request.devices`, `request.budget`, `request.bias`)
+  alongside the unchanged single-device one — no `schema_version` bump. See
+  `docs/cli/size.md`'s "Coupled multi-device topology sizing" section.
+- 2026-08-11 — `klt size` now reports a PMOS's overdrive `Vov` with the
+  correct polarity, so a PMOS is no longer misclassified as weakly inverted
+  regardless of its actual bias (found while building #768, whose coupled
+  topology has a PMOS mirror load and whose acceptance criteria require a
+  per-device inversion-level rationale). The polarity is taken from the
+  sign of the *reported* `Vth` rather than from `device.kind`, because the
+  two model conventions this command meets disagree — a bare SPICE
+  `level=1` PMOS reports negative `Vgs`/`Vth`, sky130's `__pfet_01v8`
+  subcircuit reports positive magnitudes. Affects
+  `operating_point.vov_v`/`operating_point.inversion_level` for PMOS
+  devices only (NMOS results are bit-for-bit unchanged); no field added or
+  removed, no `schema_version` bump. See `docs/cli/size.md`'s
+  "Inversion-level classification" section.
 - 2026-08-11 — `klt signoff --manifest <file>` (#722, Phase 0 of epic
   #706): a second, additive mode alongside the existing envelope-
   aggregation mode. Renders the full T1-T4 evidence-tier item skeleton,
