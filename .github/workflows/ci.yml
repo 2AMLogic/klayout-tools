@@ -117,7 +117,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/yosys-0.67
-          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh') }}
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
 
       - name: Build + install pinned Yosys (cache miss only)
         if: steps.yosys-cache.outputs.cache-hit != 'true'
@@ -170,7 +170,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/icarus-13.0
-          key: icarus-13.0-${{ runner.os }}-${{ hashFiles('scripts/install-icarus-verilog.sh') }}
+          key: icarus-13.0-${{ runner.os }}-${{ hashFiles('scripts/install-icarus-verilog.sh', 'scripts/_install_common.sh') }}
 
       - name: Build + install pinned Icarus Verilog (cache miss only)
         if: steps.icarus-cache.outputs.cache-hit != 'true'
@@ -187,7 +187,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/verilator-5.050
-          key: verilator-5.050-${{ runner.os }}-${{ hashFiles('scripts/install-verilator.sh') }}
+          key: verilator-5.050-${{ runner.os }}-${{ hashFiles('scripts/install-verilator.sh', 'scripts/_install_common.sh') }}
 
       - name: Build + install pinned Verilator (cache miss only)
         if: steps.verilator-cache.outputs.cache-hit != 'true'
