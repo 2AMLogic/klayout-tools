@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
-from ._layout import cells_in_hierarchy, load_layout
+from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout
 
 
 class StatsError(Exception):
@@ -70,26 +70,6 @@ def _accumulate(cells: Any, layer_index: int) -> tuple[int, int, int]:
             polygon_count += 1
             vertex_count += _shape_vertex_count(shape)
     return area_dbu2, polygon_count, vertex_count
-
-
-def _bbox_um(box: Any, dbu: float) -> dict[str, float]:
-    if box.empty():
-        return {
-            "left": 0.0,
-            "bottom": 0.0,
-            "right": 0.0,
-            "top": 0.0,
-            "width": 0.0,
-            "height": 0.0,
-        }
-    return {
-        "left": box.left * dbu,
-        "bottom": box.bottom * dbu,
-        "right": box.right * dbu,
-        "top": box.top * dbu,
-        "width": box.width() * dbu,
-        "height": box.height() * dbu,
-    }
 
 
 def _density(area_dbu2: int, bbox_area_dbu2: int) -> float:
@@ -223,7 +203,7 @@ def stats_report(
         "file": path,
         "dbu_um": dbu,
         "top_cell": top_cell.name if top_cell is not None else None,
-        "bbox_um": _bbox_um(bbox, dbu),
+        "bbox_um": bbox_um_dict(bbox, dbu),
         "total": {
             "area_um2": total_area_dbu2 * dbu * dbu,
             "density": _density(total_area_dbu2, bbox_area_dbu2),

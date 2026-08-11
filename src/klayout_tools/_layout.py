@@ -102,6 +102,37 @@ def cells_in_hierarchy(layout: kdb.Layout, top_cell: kdb.Cell) -> list[kdb.Cell]
     return [top_cell] + [layout.cell(idx) for idx in top_cell.called_cells()]
 
 
+def bbox_um_dict(box: kdb.Box, dbu: float) -> dict[str, float]:
+    """Convert a ``kdb.Box`` to a JSON-serialisable ``left``/``bottom``/
+    ``right``/``top``/``width``/``height`` dict, scaled from database units
+    to micrometres by ``dbu``.
+
+    An empty box (no shapes contributed to it -- e.g. a layer with zero
+    flattened shapes) reports an all-zero dict rather than KLayout's raw
+    empty-box sentinel coordinates, which are not meaningful bounds.
+
+    Shared by ``stats.py`` and ``layers.py``, which both report per-scope
+    bounding boxes in this exact shape (issue #691).
+    """
+    if box.empty():
+        return {
+            "left": 0.0,
+            "bottom": 0.0,
+            "right": 0.0,
+            "top": 0.0,
+            "width": 0.0,
+            "height": 0.0,
+        }
+    return {
+        "left": box.left * dbu,
+        "bottom": box.bottom * dbu,
+        "right": box.right * dbu,
+        "top": box.top * dbu,
+        "width": box.width() * dbu,
+        "height": box.height() * dbu,
+    }
+
+
 def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:
     """Write ``layout`` to ``path`` with deterministic (reproducible-build) output.
 
