@@ -133,6 +133,47 @@ def bbox_um_dict(box: kdb.Box, dbu: float) -> dict[str, float]:
     }
 
 
+def region(
+    layout: kdb.Layout, cell: kdb.Cell, layer: tuple[int, int] | None
+) -> kdb.Region:
+    """A flattened ``Region`` for ``layer`` under ``cell`` (same flattening
+    idiom ``drc.py`` uses via ``begin_shapes_rec``), or an empty ``Region``
+    when ``layer`` is ``None``/absent from the stream.
+
+    Shared by ``extract.py`` and ``components.py``, which both flatten a
+    ``(layer, datatype)`` into a ``Region`` this exact way (issue #699).
+    """
+    # Imported lazily, matching load_layout()'s lazy `klayout.db` import.
+    import klayout.db as kdb
+
+    if layer is None:
+        return kdb.Region()
+    layer_index = layout.find_layer(*layer)
+    if layer_index is None:
+        return kdb.Region()
+    return kdb.Region(cell.begin_shapes_rec(layer_index))
+
+
+def texts(
+    layout: kdb.Layout, cell: kdb.Cell, layer: tuple[int, int] | None
+) -> kdb.Texts:
+    """A flattened ``Texts`` collection for ``layer`` under ``cell``, or empty
+    when ``layer`` is ``None``/absent from the stream.
+
+    Shared by ``extract.py`` and ``components.py`` (issue #699); see
+    :func:`region`.
+    """
+    # Imported lazily, matching load_layout()'s lazy `klayout.db` import.
+    import klayout.db as kdb
+
+    if layer is None:
+        return kdb.Texts()
+    layer_index = layout.find_layer(*layer)
+    if layer_index is None:
+        return kdb.Texts()
+    return kdb.Texts(cell.begin_shapes_rec(layer_index))
+
+
 def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:
     """Write ``layout`` to ``path`` with deterministic (reproducible-build) output.
 

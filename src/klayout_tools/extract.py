@@ -140,6 +140,8 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
+from ._layout import region as _region
+from ._layout import texts as _texts
 from ._provenance import build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
@@ -1372,37 +1374,6 @@ def _default_output_path(path: str) -> str:
     """``<file>`` with its extension replaced by ``.spice`` (spike section 2a)."""
     stem, _ext = os.path.splitext(path)
     return f"{stem}.spice"
-
-
-def _region(
-    layout: kdb.Layout, cell: kdb.Cell, layer: tuple[int, int] | None
-) -> kdb.Region:
-    """A flattened ``Region`` for ``layer`` under ``cell`` (same flattening
-    idiom ``drc.py`` uses via ``begin_shapes_rec``), or an empty ``Region``
-    when ``layer`` is ``None``/absent from the stream."""
-    import klayout.db as kdb
-
-    if layer is None:
-        return kdb.Region()
-    layer_index = layout.find_layer(*layer)
-    if layer_index is None:
-        return kdb.Region()
-    return kdb.Region(cell.begin_shapes_rec(layer_index))
-
-
-def _texts(
-    layout: kdb.Layout, cell: kdb.Cell, layer: tuple[int, int] | None
-) -> kdb.Texts:
-    """A flattened ``Texts`` collection for ``layer`` under ``cell``, or empty
-    when ``layer`` is ``None``/absent from the stream."""
-    import klayout.db as kdb
-
-    if layer is None:
-        return kdb.Texts()
-    layer_index = layout.find_layer(*layer)
-    if layer_index is None:
-        return kdb.Texts()
-    return kdb.Texts(cell.begin_shapes_rec(layer_index))
 
 
 def _label_layer_strings(
