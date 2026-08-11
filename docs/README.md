@@ -70,6 +70,7 @@ docs/
     siliconcompiler-core-survey.md
     sim-evidence-discipline-spike.md
     spice-corner-runner-spike.md
+    synthesize-qor-improvements-survey.md
     wasm-spice-playground-spike.md
     yosys-synthesis-spike.md
   schemas/               # published JSON Schemas
