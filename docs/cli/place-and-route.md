@@ -76,6 +76,15 @@ The `"place"` stage's `global_placement` call runs with `-routability_driven
 requires a linked `create_clock`, which is already in effect by this point in
 every non-floorplan stage script.
 
+The `"route"` stage runs `repair_antennas <diode_cell>` immediately after
+`detailed_route`, followed by a second `detailed_route` pass (issue #759, P&R
+survey §2.7/§3.3 Priority 3) — inserting a diode instance on a violating net
+changes that net's own routing, so this mirrors ORFS's own
+`flow/scripts/detail_route.tcl`, which re-runs `detailed_route` right after
+`repair_antennas` to route/legalize each newly inserted diode. `check_antennas`
+then reports the post-repair violation count (`antenna_violation_count`)
+before `write_def`.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -109,20 +118,27 @@ requires an asset the resolved install doesn't ship" posture.
 Neither resolver is restricted to a single PDK family — any standard-cell
 library the resolved install ships `libs_ref`/LEF assets for resolves the
 same way. Reaching `target_stage: "cts"` or `"route"` additionally needs a
-verified entry in `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`
-(`place_and_route.py`) for that `cell_library` — a clock-tree buffer cell
-name and a signal routing-layer range are not derivable from the resolved
-PDK install itself, so each supported cell library needs its own verified
-entry (never a runtime dependency; never guessed). Two libraries have
-entries today:
+verified entry in `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE`/
+`_ANTENNA_DIODE_CELLS` (`place_and_route.py`) for that `cell_library` — a
+clock-tree buffer cell name, a signal routing-layer range, and an antenna-
+diode cell are not derivable from the resolved PDK install itself, so each
+supported cell library needs its own verified entry (never a runtime
+dependency; never guessed). Two libraries have entries today:
 
-| `cell_library` | CTS buffer | `set_routing_layers -signal` |
-| --- | --- | --- |
-| `sky130_fd_sc_hd` | `sky130_fd_sc_hd__buf_4` | `met1-met5` |
-| `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__buf_4` | `Metal2-Metal5` |
+| `cell_library` | CTS buffer | `set_routing_layers -signal` | Antenna-diode cell |
+| --- | --- | --- | --- |
+| `sky130_fd_sc_hd` | `sky130_fd_sc_hd__buf_4` | `met1-met5` | `sky130_fd_sc_hd__diode_2` |
+| `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__buf_4` | `Metal2-Metal5` | `gf180mcu_fd_sc_mcu9t5v0__antenna` |
 
-A `cell_library` with no entry in either table is a clear error, not a
-guess.
+A `cell_library` with no entry in any of the three tables is a clear error,
+not a guess. Unlike the CTS-buffer/routing-range pair, neither ORFS platform's
+own `config.mk` names an antenna-diode cell at all — ORFS's own
+`detail_route.tcl` calls `repair_antennas` with no diode-cell argument,
+relying on OpenROAD's null-diode "jumper only" fallback. So the antenna-diode
+table's source of truth is each platform's own standard-cell LEF instead: the
+one macro each platform's LEF marks `CLASS CORE/core ANTENNACELL` (see
+`_ANTENNA_DIODE_CELLS`'s own docstring in `place_and_route.py` for the full
+verification trail).
 
 Both rows are read from ORFS's own platform reference data — `platforms/
 sky130hd/config.mk` and `platforms/gf180/config.mk` (whose defaults
@@ -276,6 +292,7 @@ Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
   "fmax_mhz": 304.11,
   "setup_violation_count": 3,
   "hold_violation_count": 1,
+  "antenna_violation_count": 0,
   "estimated_power_mw": 11.6,
   "stages": [
     { "name": "floorplan", "die_area_um2": 8487.94, "core_area_um2": 7607.3, "utilization_pct": 38.7993, "worst_slack_ns": -3.71641, "total_negative_slack_ns": -143.072 },
@@ -311,6 +328,7 @@ Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
 | `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. |
 | `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). |
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
+| `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |

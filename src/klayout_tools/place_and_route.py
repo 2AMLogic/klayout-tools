@@ -316,6 +316,51 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
     "gf180mcu_fd_sc_mcu9t5v0": "Metal2-Metal5",
 }
 
+#: Per-cell-library antenna-diode cell (and its signal pin) for the
+#: ``"route"`` stage's post-route ``repair_antennas`` call. Same not-
+#: derivable-from-the-install, verified-not-guessed posture as
+#: :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` (issue #629/#637)
+#: -- but here **neither** ORFS platform's own ``config.mk`` names a diode
+#: cell at all (confirmed against the real ``openroad/orfs:latest``
+#: container's own vendored ORFS checkout, 2026-08-11: zero
+#: ``ANTENNA``/``DIODE``-named `config.mk` variable across any platform;
+#: ORFS's own ``flow/scripts/detail_route.tcl`` calls ``repair_antennas``
+#: with **no** diode-cell argument at all, relying on OpenROAD's own
+#: null-diode "jumper only" fallback). So this table's source of truth is
+#: each platform's own standard-cell LEF, not `config.mk` -- specifically,
+#: the one macro each platform's LEF marks ``CLASS CORE/core ANTENNACELL``:
+#:
+#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__diode_2``, pin ``DIODE`` --
+#:   ``platforms/sky130hd/lef/sky130_fd_sc_hd_merged.lef``'s only
+#:   ``ANTENNACELL``-classed macro, with exactly one non-power/ground pin
+#:   (``DIODE``, ``USE SIGNAL``; ``VGND``/``VNB``/``VPB``/``VPWR`` are all
+#:   ``USE GROUND``/``USE POWER``). Not excluded by that platform's
+#:   ``DONT_USE_CELLS`` (`config.mk`, checked live). Matches the sky130
+#:   candidate the survey itself flagged as **[LIT]**-tier recollection
+#:   only -- now confirmed **[REPO-RUN]** against the real LEF.
+#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> ``gf180mcu_fd_sc_mcu9t5v0__antenna``,
+#:   pin ``I`` -- ``platforms/gf180/lef/gf180mcu_5LM_1TM_9K_9t_sc.lef``'s
+#:   only ``ANTENNACELL``-classed macro (``CLASS core ANTENNACELL``), with
+#:   exactly one non-power/ground pin (``I``, ``DIRECTION INPUT``; ``VDD``/
+#:   ``VSS`` are ``USE power``/``USE ground``).
+#:
+#: The pin is recorded here for verification/documentation only (confirming
+#: each cell has exactly one signal pin, matching what OpenROAD's own
+#: auto-derivation would select) -- it is never passed to the Tcl call.
+#: Verified live (``openroad -no_init``, ``help repair_antennas``, the same
+#: ``openroad/orfs:latest`` container, build ``26Q3-1080-gab6fd26351``) that
+#: the current ``repair_antennas`` Tcl command (**plural** -- the survey's
+#: own "repair_antenna" naming does not exist as a command) takes only a
+#: single positional ``diode_cell`` argument; there is no
+#: ``-diode_pin_name``-shaped flag in the current API -- the pin (MTerm) is
+#: auto-derived internally as the named cell's unique non-power/ground port,
+#: erroring if more than one exists (which the entries above already rule
+#: out).
+_ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
+    "sky130_fd_sc_hd": ("sky130_fd_sc_hd__diode_2", "DIODE"),
+    "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__antenna", "I"),
+}
+
 #: Fixed internal `global_placement -density` target -- not an exposed
 #: request field (the contract's `floorplan` block sizes the die/core, not
 #: placement density); verified live at this value against the worked
@@ -323,6 +368,11 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
 _GLOBAL_PLACEMENT_DENSITY = 0.6
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
+
+#: Matches `check_antennas`'s own stdout summary line, e.g.
+#: ``"[INFO ANT-0002] Found 3 net violations."`` -- see
+#: :func:`_count_antenna_violations`.
+_ANTENNA_VIOLATION_COUNT_RE = re.compile(r"Found (\d+) net violations")
 
 #: Markers delimiting each `report_check_types -violators` block in a
 #: stage's captured stdout, so :func:`_count_violations` can isolate the
@@ -332,6 +382,13 @@ _SETUP_VIOLATIONS_BEGIN = "===KLT_SETUP_VIOLATIONS_BEGIN==="
 _SETUP_VIOLATIONS_END = "===KLT_SETUP_VIOLATIONS_END==="
 _HOLD_VIOLATIONS_BEGIN = "===KLT_HOLD_VIOLATIONS_BEGIN==="
 _HOLD_VIOLATIONS_END = "===KLT_HOLD_VIOLATIONS_END==="
+
+#: Same marker convention as the setup/hold pair above, isolating
+#: `check_antennas`'s own stdout (run post-`repair_antennas`, `"route"`
+#: stage only) so :func:`_count_antenna_violations` can parse its summary
+#: count line without picking up unrelated output.
+_ANTENNA_VIOLATIONS_BEGIN = "===KLT_ANTENNA_VIOLATIONS_BEGIN==="
+_ANTENNA_VIOLATIONS_END = "===KLT_ANTENNA_VIOLATIONS_END==="
 
 #: Response fields whose value is always "the last completed stage's own
 #: value, restated at top level" -- see the contract spike section 5's
@@ -347,6 +404,7 @@ _TOP_LEVEL_METRIC_KEYS = (
     "fmax_mhz",
     "setup_violation_count",
     "hold_violation_count",
+    "antenna_violation_count",
     "estimated_power_mw",
 )
 
@@ -497,6 +555,15 @@ def run_place_and_route(
             f"'{cell_library}' (supported: {', '.join(sorted(_ROUTING_LAYER_RANGE))}) "
             f"-- cannot reach target_stage '{target_stage}'"
         )
+    if (
+        stage_index >= STAGE_ORDER.index("route")
+        and cell_library not in _ANTENNA_DIODE_CELLS
+    ):
+        raise PlaceAndRouteError(
+            f"no antenna-diode cell known for standard-cell library "
+            f"'{cell_library}' (supported: {', '.join(sorted(_ANTENNA_DIODE_CELLS))}) "
+            f"-- cannot reach target_stage '{target_stage}'"
+        )
 
     output_dir = os.path.join(request_dir, ".klt", "place-and-route")
     try:
@@ -547,8 +614,15 @@ def run_place_and_route(
             hold_count = _count_violations(
                 completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
             )
+        antenna_count = None
+        if stage == "route":
+            antenna_count = _count_antenna_violations(completed.stdout)
 
-        stages.append(_extract_stage_metrics(stage, metrics, setup_count, hold_count))
+        stages.append(
+            _extract_stage_metrics(
+                stage, metrics, setup_count, hold_count, antenna_count
+            )
+        )
         checkpoint_path = next_checkpoint
 
     gds_path: str | None = None
@@ -1149,6 +1223,19 @@ def _violation_count_lines() -> list[str]:
     ]
 
 
+def _antenna_check_lines() -> list[str]:
+    """``"route"`` stage only, run right after `repair_antennas`'s own
+    reroute -- reports the post-repair antenna-violation count via
+    `check_antennas`'s own stdout summary line ("Found N net violations."),
+    isolated the same `puts` marker way :func:`_violation_count_lines` isolates
+    the setup/hold blocks."""
+    return [
+        f'puts "{_ANTENNA_VIOLATIONS_BEGIN}"',
+        "check_antennas",
+        f'puts "{_ANTENNA_VIOLATIONS_END}"',
+    ]
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -1248,15 +1335,33 @@ def _stage_script_lines(
         ]
     else:  # stage == "route"
         routing_range = _ROUTING_LAYER_RANGE[cell_library]
+        diode_cell = _ANTENNA_DIODE_CELLS[cell_library][0]
         drc_report = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
         maze_log = os.path.join(output_dir, f"{hdl_toplevel}_route_maze.log")
+        detailed_route_call = (
+            f"detailed_route -output_drc {drc_report} -output_maze {maze_log} "
+            f"-or_seed {seed}"
+        )
         lines += [
             f"set_routing_layers -signal {routing_range}",
             "global_route",
-            f"detailed_route -output_drc {drc_report} -output_maze {maze_log} "
-            f"-or_seed {seed}",
-            "estimate_parasitics -global_routing",
+            detailed_route_call,
+            # Post-route antenna repair (survey section 2.7/3.3): inserting a
+            # diode instance on a violating net changes that net's routing,
+            # so -- mirroring ORFS's own `flow/scripts/detail_route.tcl`,
+            # which re-runs `detailed_route` immediately after
+            # `repair_antennas` to route/legalize each new diode instance --
+            # this repeats the identical `detailed_route` call once after
+            # `repair_antennas`. Deliberately a single repair+reroute pass,
+            # not ORFS's own opt-in `MAX_REPAIR_ANTENNAS_ITER_DRT` iterative
+            # loop (unset, and therefore inactive, in ORFS's own default
+            # flow). `check_antennas` then reports the post-repair violation
+            # count unconditionally, exactly as ORFS's own flow does.
+            f"repair_antennas {diode_cell}",
+            detailed_route_call,
         ]
+        lines += _antenna_check_lines()
+        lines += ["estimate_parasitics -global_routing"]
 
     lines += _metrics_report_lines(include_fmax=True, include_power=True)
     lines += _violation_count_lines()
@@ -1349,6 +1454,29 @@ def _count_violations(stdout: str, begin: str, end: str) -> int:
     return stdout[start_idx:stop_idx].count("(VIOLATED)")
 
 
+def _count_antenna_violations(stdout: str) -> int | None:
+    """Parse the post-repair antenna-*violating-net* count from
+    `check_antennas`'s own stdout, isolated between the
+    ``_ANTENNA_VIOLATIONS_BEGIN``/``_END`` markers -- same marker-scrape
+    convention as :func:`_count_violations`, but `check_antennas` prints one
+    summary count line (``"Found N net violations."``, verified live against
+    a real ``openroad/orfs:latest`` run) rather than one line per violation,
+    so this parses that count directly instead of counting lines. Returns
+    ``None`` (never ``0`` defensively) when the markers or the expected
+    message aren't found -- should not happen for a successful ``"route"``
+    stage run, and keeps a genuinely missing signal distinguishable from a
+    confirmed-zero violation count."""
+    try:
+        start_idx = stdout.index(_ANTENNA_VIOLATIONS_BEGIN) + len(
+            _ANTENNA_VIOLATIONS_BEGIN
+        )
+        stop_idx = stdout.index(_ANTENNA_VIOLATIONS_END, start_idx)
+    except ValueError:
+        return None
+    match = _ANTENNA_VIOLATION_COUNT_RE.search(stdout[start_idx:stop_idx])
+    return int(match.group(1)) if match else None
+
+
 def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     if not os.path.isfile(metrics_path):
         raise PlaceAndRouteError(
@@ -1378,6 +1506,7 @@ def _extract_stage_metrics(
     metrics: dict[str, Any],
     setup_violation_count: int | None,
     hold_violation_count: int | None,
+    antenna_violation_count: int | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -1420,6 +1549,8 @@ def _extract_stage_metrics(
             entry["setup_violation_count"] = setup_violation_count
         if hold_violation_count is not None:
             entry["hold_violation_count"] = hold_violation_count
+        if antenna_violation_count is not None:
+            entry["antenna_violation_count"] = antenna_violation_count
 
     return entry
 
