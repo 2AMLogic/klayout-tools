@@ -430,6 +430,27 @@ not `klt --version`, if you need to detect this kind of drift.
   `corner`/`operating_point`/`margins`) is unchanged and still works — the
   `corners` block is purely additive, no `schema_version` bump. See
   `docs/cli/size.md`'s "Corner sets" section.
+- 2026-08-11 — `klt size` now offers a worst-corner margin objective (#769,
+  Phase 1 of the analog-sizing epic #705): `request.corners.objective:
+  "worst_case_margin"` searches for the single width that maximizes the
+  *worst* per-corner gm/Id margin across every declared corner, instead of
+  #729's default (`"sizing_corner"`) which solves at one nominal corner and
+  only reports the spread elsewhere. It sweeps the full width grid at
+  *every* declared corner, then finds the width that minimizes the
+  worst-case relative gm/Id error via a bisection on ln(W) against the
+  already-swept per-corner curves (no extra ngspice invocation per
+  bisection step), and finally confirms that width with a fresh
+  single-point ngspice run at every declared corner (`2N` invocations for
+  `N` corners, vs. `"sizing_corner"`'s `N+1`). The top-level
+  `corner`/`operating_point`/`margins` fields mirror the worst-margin
+  corner among those confirmations under this objective; the new
+  `corners.worst_case` field names which declared corner that was. A
+  single declared corner makes the two objectives mathematically
+  equivalent, and the legacy `request.corner` shape has no `objective`
+  field at all, so a single-corner request's result is unaffected by this
+  feature existing. Purely additive (`corners.objective` defaults to
+  `"sizing_corner"`), no `schema_version` bump. See `docs/cli/size.md`'s
+  "Worst-corner margin objective" section.
 - 2026-08-11 — `klt signoff --manifest <file>` (#722, Phase 0 of epic
   #706): a second, additive mode alongside the existing envelope-
   aggregation mode. Renders the full T1-T4 evidence-tier item skeleton,
