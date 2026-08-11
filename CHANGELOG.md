@@ -224,6 +224,24 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt extract`: new additive `dead_metal[]` field (#676)
+  reporting every connected cluster of routing-stack geometry (the deck's
+  `metals`/`vias` levels) that joins **no** extracted net — `{"role",
+  "layer", "datatype", "bbox_um", "shapes", "area_um2"}` per cluster, sorted
+  by `(layer, datatype, left, bottom)`. Deliberate dead metal (artwork, fill,
+  a bond-pad blank) and accidental dead metal (a routing stub that never
+  reached its via) were both invisible to every `klt` report before this:
+  nothing in `nets[]` mentions the geometry, so the only way to find it was
+  to render the raw stream and eyeball it. XY overlap between adjacent metal
+  levels is **not** treated as connection — the netted side of the
+  comparison comes from the extracted connectivity graph, which joins two
+  levels only through a declared via layer. A labelled floating cluster
+  (power strap, seal ring, bond pad) survives extraction as a real named net
+  and is never reported. **Behavior change**: a non-empty `dead_metal[]`
+  also appends one aggregate `warnings[]` entry (count baked in, #599's
+  pattern), so a layout with untied dummy-device routing or leftover
+  floating islands that previously extracted with an empty `warnings[]` now
+  emits one. See `docs/cli/extract.md`'s "Dead metal" section.
 - 2026-08-11 — new `klt components` verb (#674): reports which shapes form
   one electrically connected geometric component across a caller-supplied
   conductor/via stack — no PDK deck, no device recognition. Wraps the same

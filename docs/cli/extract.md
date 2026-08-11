@@ -1595,6 +1595,62 @@ floating gates shorted together, `device_count == 2`) is not detected —
 that pattern still passes `klt drc` and this diagnostic alike, since neither
 tool traces DC bias paths transitively across the whole netlist.
 
+### Dead metal (issue #676)
+
+Geometry on the deck's routing stack — its `metals` and `vias` levels — that
+joins **no** extracted net. No via lands on it, no same-layer wiring touches
+it, so nothing in `nets[]` mentions it and it is invisible to this report, to
+`klt lvs`, and to a resimulation of the written netlist. The only way to find
+it before this diagnostic existed was to render the raw geometry and eyeball
+it against the extracted nets.
+
+It cuts both ways, which is why it is reported rather than warned about
+quietly:
+
+- **Deliberate** dead metal is common and legitimate — artwork, a logo, a
+  fill or density trick, a bond-pad blank. A reviewer should be *told* that
+  non-functional geometry is present, not have to discover it.
+- **Accidental** dead metal is the symptom of a connection you meant to make
+  and did not (or of an extraction that quietly dropped it): a routing stub
+  that never reached its via, an island left behind by an edit.
+
+Surfaced two ways:
+
+- The top-level `dead_metal[]` array (see "JSON schema" below), one entry per
+  connected **cluster** — not per drawn polygon — with the layer, bounding
+  box, drawn-shape count and area, so a human can go look at it.
+- A single aggregate prose `warnings[]` entry with the cluster and shape
+  counts baked in (issue #599 — not one line per cluster, so `warnings[]`
+  does not scale with the amount of dead geometry).
+
+**XY overlap between adjacent layers is not connection.** The netted side of
+the comparison comes from the extracted connectivity graph, which joins two
+metal levels only through a declared via layer — so a met2 wire passing
+directly over a live met1 wire, with no via between them, is still dead metal.
+A naive `Region.interacting()` check across adjacent layers gets exactly this
+wrong.
+
+**A labelled floating cluster is not dead.** A power strap, seal ring, bond
+pad or RDL segment that carries a pin label survives extraction as a real,
+named, pinned net (see "Device-free labelled nets" behaviour in issue #539) —
+its geometry *does* join an extracted net, so it never appears here, however
+few devices it touches.
+
+**Known interaction — dummy devices.** A device suppressed by the deck's
+`dummy` marker (see "Dummy devices: the `dummy` marker layer") produces no
+device, so its source/drain routing joins no net unless the layout ties it
+off to a rail. A dummy left deliberately untied therefore *does* show up here
+— correctly, since that geometry genuinely is absent from the netlist — but
+cross-check `dummy_devices_dropped` before treating it as a routing bug.
+
+**Scope: the routing stack only.** Device-forming layers (poly, diffusion,
+well, tap) are deliberately out of scope — unnetted geometry there has its own
+sharper diagnostics (`unmodelled_poly`, `single_terminal_nets`,
+`unbiased_pmos_body_nets`), and the deck's own well/substrate regions are not
+"routed" in a sense this comparison could judge. Geometry on a layer the deck
+does not read at all is a different failure class again — see
+`ignored_layers` above.
+
 ### JSON `parasitics` block
 
 `--parasitics` adds a top-level `parasitics` field (an additive, independently
@@ -1799,6 +1855,7 @@ exit codes).
   "voltage_domain_warnings": [],
   "unbiased_pmos_body_nets": [],
   "single_terminal_nets": [],
+  "dead_metal": [],
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -1841,6 +1898,7 @@ exit codes).
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
+| `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
