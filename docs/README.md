@@ -33,6 +33,7 @@ docs/
     layout-metrics.md
     lef-abstract.md
     lvs.md
+    mom.md
     pdk.md
     place-and-route.md
     precheck.md
@@ -60,6 +61,7 @@ docs/
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
+    mom-validation.md
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md
     pdk-device-corner-metadata-spike.md
