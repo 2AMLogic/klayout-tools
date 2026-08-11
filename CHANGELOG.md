@@ -286,6 +286,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt mom`'s numbers are now checked against analytic ground
+  truth (#719, Phase 1 of the Method-of-Moments epic #701), closing the gap
+  #718's entry below left open. `tests/test_mom_validation.py` asserts the
+  solver against four closed forms — the ideal parallel plate
+  (`C = εr ε0 A/d`, a strict lower bound for finite plates), Kirchhoff's
+  1877 fringing-corrected disk asymptotic, the coaxial closed form with the
+  exact conformal-mapping equivalent radii of a square cross-section, and
+  full-enclosure `C00 = −C01` — and demonstrates convergence under mesh
+  refinement two ways: Richardson extrapolation of the solver's own sequence
+  (observed order 3.47 on the parallel plate) and error against the coax
+  closed form directly (4.48% → 0.75% under one halving, observed order
+  2.58). Convergence is **gated, not merely reported**: a sequence whose
+  successive refinements stop shrinking fails the suite, demonstrated
+  against the solver's own documented breakdown regime as well as synthetic
+  sequences. No behavior change to `klt mom` itself — the solver was found
+  accurate to 0.75% of the coax closed form and 1.8% of the fringing-
+  corrected plate oracle at the stated operating points. Oracles, measured
+  values, and the reasoning behind each tolerance:
+  `docs/design/mom-validation.md`.
 - 2026-08-11 — new `klt mom` verb (#718): Phase 0/1 of the Method-of-Moments
   epic (#701) — quasi-static **capacitance** extraction. Given a GDSII/OASIS
   layout plus a JSON spec file mapping GDS layers to conductors and z-extents,

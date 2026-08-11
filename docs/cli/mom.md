@@ -5,11 +5,13 @@ discretise conductor surfaces from a GDSII/OASIS layout, fill the
 potential-coefficient matrix, and solve for the Maxwell capacitance matrix.
 Phase 0/1 of the Method-of-Moments epic ([#701](https://github.com/2AMLogic/klayout-tools/issues/701)),
 delivered by [#718](https://github.com/2AMLogic/klayout-tools/issues/718).
-Numeric-accuracy validation against closed-form references (parallel-plate,
-coax) is owned by the sibling issue
-[#719](https://github.com/2AMLogic/klayout-tools/issues/719) — this command's
-own bar is "produces a numeric capacitance-matrix result", not "matches a
-closed form".
+This command's own bar is "produces a numeric capacitance-matrix result".
+How close those numbers are to the true answer is a separate question,
+answered by [`docs/design/mom-validation.md`](../design/mom-validation.md)
+([#719](https://github.com/2AMLogic/klayout-tools/issues/719)): the solver is
+checked against the parallel-plate and coaxial closed forms and shown to
+converge under mesh refinement. Read it before trusting a number from here —
+in particular for what `panel_size_um` you need for a given accuracy.
 
 ```
 klt mom <file> <spec> [--top <cell>] [--format text|json]
@@ -242,7 +244,11 @@ limitations") wildly overestimates their coupling — badly enough to flip the
 mutual term's sign. As a rule of thumb, keep `panel_size_um` at or below the
 smallest gap you care about resolving, and re-run with a smaller value to
 confirm the answer has stopped moving. Convergence-under-refinement is
-validated systematically by [#719](https://github.com/2AMLogic/klayout-tools/issues/719).
+validated systematically in
+[`docs/design/mom-validation.md`](../design/mom-validation.md) (#719), which
+also measures what a given `panel_size_um`/gap ratio costs you in accuracy:
+`panel_size_um = gap` lands within ~1% of the converged answer on a
+parallel-plate fixture, `gap/2` within ~0.1%.
 
 ```
 $ klt mom plates.gds coarse.mom.json
@@ -322,7 +328,8 @@ See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
   panel centroids rather than a true panel-to-panel double integral; the
   diagonal (self) term uses the standard closed-form equivalent-square-panel
   approximation. This is adequate for "produces a numeric result" (this
-  issue's bar); accuracy-vs-refinement is validated by #719. The kernel's
+  command's bar); accuracy-vs-refinement is measured in
+  [`docs/design/mom-validation.md`](../design/mom-validation.md). The kernel's
   known failure mode — panels wider than the gap they face — is detected and
   surfaced in `warnings` rather than returned silently (see "Warnings").
 - **No ports/S-parameters.** This is a pure electrostatic (capacitance-only)
@@ -355,5 +362,7 @@ mismatch). Increase `panel_size_um`, or split the request, to work around it.
   worth revisiting if the cost/accuracy tradeoff argues for it.
 - [#701](https://github.com/2AMLogic/klayout-tools/issues/701) — the parent
   Method-of-Moments epic (later phases: ports, coupling, resistance/inductance).
-- [#719](https://github.com/2AMLogic/klayout-tools/issues/719) — closed-form
-  validation and convergence-under-refinement for this solver.
+- [`docs/design/mom-validation.md`](../design/mom-validation.md) — closed-form
+  validation and convergence-under-refinement for this solver
+  ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)): the analytic
+  oracles, the measured agreement, and the stated tolerances.
