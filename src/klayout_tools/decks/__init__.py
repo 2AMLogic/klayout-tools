@@ -1100,11 +1100,29 @@ class ParasiticsDeck:
     the coefficients are per-deck and per-metal-index rather than keyed by a
     universal role name. A ``None`` role (or a ``metals`` entry that is
     ``None``) contributes no parasitics for that role.
+
+    ``metal_overlaps`` (issue #760, Extract Stage 2a) curates the *vertical*
+    plate-overlap coupling coefficient for each **adjacent** pair of
+    ``metals`` levels -- entry ``i`` is the coefficient between
+    ``metals[i]`` (the lower plate) and ``metals[i+1]`` (the upper plate),
+    transcribed from each PDK's own public magic tech file's
+    ``defaultoverlap`` entries (femtofarads per square micrometre of
+    overlapping area, the same aF/um^2 -> fF/um^2 convention as
+    ``cap_area_ff_um2``). A fully-populated table has ``len(metals) - 1``
+    entries; a shorter tuple, or an explicit ``None`` entry, means that pair
+    has no curated coupling coefficient -- see
+    ``klayout_tools.extract._describe_parasitics_overlap_gaps`` (the
+    ``metals_without_coefficient``-style gap report for this table, issue
+    #547's pattern extended to overlap coupling) for how that is surfaced
+    rather than silently zeroed. Empty by default so a deck that never
+    populates this field behaves exactly as before this field existed
+    (ground capacitance only, `--parasitics`'s pre-#760 behaviour).
     """
 
     diffusion: LayerRC | None = None
     poly: LayerRC | None = None
     metals: tuple[LayerRC | None, ...] = ()
+    metal_overlaps: tuple[float | None, ...] = ()
 
 
 class UnknownExtractionDeckError(Exception):

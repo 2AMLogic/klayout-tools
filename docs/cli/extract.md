@@ -1428,10 +1428,16 @@ shape, but through a fresh internal node rather than the net itself
 to make the net double as a hub for.
 
 - **C to ground** (femtofarads) = Σ over conductor roles of
-  `area_um2 * cap_area + perimeter_um * cap_perim`, the net's lumped ground
-  capacitance — unchanged by the star split, still one capacitor per net.
-  The reference node is the deck's `substrate_net` (`vsubs`), which a `klt
-  sim` testbench ties to the AC ground.
+  `(area_um2 − coupled_area_um2) * cap_area + perimeter_um * cap_perim`, the
+  net's lumped ground capacitance — unchanged by the star split, still one
+  capacitor per net. The reference node is the deck's `substrate_net`
+  (`vsubs`), which a `klt sim` testbench ties to the AC ground.
+  `coupled_area_um2` is the part of that role's area that sits directly over
+  or under *another* net's conductor on an adjacent metal level, which is
+  charged between the two nets instead — see "Vertical-overlap coupling
+  capacitance" below. It is zero for every non-metal role, zero for the
+  perimeter/fringe term (only the *area* term moves), and zero on any deck
+  that curates no overlap coefficients.
 - **total series R** (ohms) = Σ over conductor roles of `sheet_res *
   n_squares`, where `n_squares` is estimated per layer from the net's area
   `A` and perimeter `P` by modelling its copper as one equivalent rectangle
@@ -1469,7 +1475,8 @@ table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py`), **transcribed with
 citations from each PDK's public magic technology file** (`sky130.tech` /
 `gf180mcu.tech` in fossi-foundation/open-pdks, GPLv3) — sheet resistances from
 its `resist` entries, area/fringe capacitances from its `defaultareacap` /
-`defaultperimeter` entries — never NDA'd, the same public-source curation
+`defaultperimeter` entries, vertical-overlap coupling from its
+`defaultoverlap` entries — never NDA'd, the same public-source curation
 pattern as the DRC decks and the SPICE model-binding table (#214). Each changed
 coefficient carries an inline citation (source file + field name) in its deck
 comment.
@@ -1495,16 +1502,87 @@ comparatively uninteresting.
 A net is omitted from `parasitics.nets[]` only when it is the deck's
 substrate/ground net, or when it has genuinely **zero** eligible interconnect
 geometry (e.g. a net whose only poly is a transistor gate, already excluded
-above, and that carries no metal) — not because it lacks a label.
+above, and that carries no metal) — not because it lacks a label. That test is
+applied to the net's **pre-coupling** ground capacitance, so which nets appear
+is unchanged by the coupling correction below: a net whose entire area term
+moved to coupling still gets an entry (with `capacitance_ff` possibly `0.0`),
+because its hub still has to exist for the coupling capacitor to attach to.
+
+### Vertical-overlap coupling capacitance (issue #760)
+
+Where one net's conductor on metal level `i` sits **directly under** a
+*different* net's conductor on the adjacent level `i+1`, that overlap is a
+parallel-plate capacitor between the two nets. `--parasitics` models it:
+
+- **Geometry.** For each adjacent level pair, the two nets' already-extracted
+  per-level regions are intersected (`Region & Region` on
+  `LayoutToNetlist.polygons_of_net` output). This is a plain boolean AND on
+  geometry the extraction already has — there is **no halo search, no
+  neighbour-search structure, and no new dependency**, which is why the
+  crossover term is affordable while the lateral term (Stage 2b) is not yet.
+- **Coefficient.** `overlap_area_um2 × PARASITICS.metal_overlaps[i]`, the
+  PDK's own `defaultoverlap` value for that level pair (fF/µm²), transcribed
+  with a per-value citation exactly like the area/fringe coefficients.
+- **Charge moves; it is not duplicated.** The overlap area is subtracted from
+  **both** nets' ground *area* term on their own respective level, so the
+  same area is never charged twice. Perimeter/fringe terms and series R are
+  untouched — resistance is a property of a conductor's own geometry, not of
+  what sits above or below it.
+- **Same-net overlap is excluded by construction.** A net's own via stack (or
+  its own li1 routed under its own met1 strap) is overlap between one net and
+  itself; coupling is only ever computed between two *distinct* nets, so that
+  area stays on the ground term. On the `gcd` corpus block this is the
+  majority of all crossover area — 77.6 fF-equivalent of 146.3 fF-equivalent
+  total, with 68.4 fF-equivalent genuinely inter-net.
+- **Nets that share a layout label share a node.** Where a layout gives
+  several genuinely distinct nets the same label (`gcd` has 105 separate,
+  un-strapped `VGND` rail islands), they collapse to one node in the emitted
+  netlist — pre-existing behaviour. Overlap between two such same-named nets
+  is skipped and left on the ground term, since a capacitor between one node
+  and itself would contribute nothing electrically while inflating the
+  reported total. Overlap between two *different* names accumulates into a
+  single pair, matching that same collapsed node view.
+
+Output is additive:
+
+| Field | Meaning |
+|---|---|
+| `parasitics.nets[].coupled[]` | Per net, its coupling counterparts: `{"net", "capacitance_ff", "levels"}`, sorted by counterpart name. `levels` is the list of `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs that contributed. Each pair appears from **both** sides, so summing `coupled[].capacitance_ff` across `nets[]` double-counts — use `total_coupling_capacitance_ff`. |
+| `parasitics.cc_count` | Number of coupled net **pairs** (equivalently, coupling `C` cards emitted). |
+| `parasitics.total_coupling_capacitance_ff` | Sum over distinct pairs, each counted once. |
+| `parasitics.overlap_pairs_without_coefficient[]` | Gap report — adjacent metal-level pairs the deck declares with no curated overlap coefficient. See below. |
+
+`c_count` keeps its documented meaning — always one per `nets[]` entry, ground
+capacitors only. Coupling capacitors are counted by `cc_count`, not folded
+into it.
+
+In the emitted SPICE, each coupled pair becomes one two-terminal `C` card
+between the two nets' **hub** nodes (named `cc_<net_a>_<net_b>`, sanitized the
+same way every other parasitic instance name is). Because both terminals sit
+on real nets rather than on the substrate net, this is the first element in
+`klt extract`'s output that can carry a disturbance from one net to another —
+i.e. the first extracted netlist that can show crosstalk in `klt sim` at all.
+
+**Still a fixed, quasi-static, uncalibrated model.** Adding this term makes
+the crossover charge better *attributed* and better *sized*; it does not make
+`--parasitics` a PEX tool. See "What it does *not* do" below.
 
 ### What it does *not* do
 
-- **Net-to-net coupling capacitance** is explicitly out of scope for this
-  first increment (ground capacitance only). Coupling needs spacing-aware
-  neighbor geometry the lumped-to-ground model does not capture; it is a
-  credible second increment once a friction log demands it. This scope is
-  now self-declared in the output too — see "Parasitic model scope
-  (`parasitics.model`)" below (issue #728).
+- **Lateral (same-layer, sidewall) coupling capacitance and fringe
+  shielding** are out of scope. Two wires running side by side on the *same*
+  level couple to each other in the real layout; this model gives that
+  exactly zero, and additionally charges each of their facing edges the full
+  isolated-edge `defaultperimeter` fringe term to substrate as though the
+  neighbour were not there. Both need spacing-aware neighbour geometry (a
+  halo search) that the crossover pass below deliberately does not do. They
+  are Stage 2b/2c of `docs/design/extract-fidelity-roadmap.md`, named
+  follow-ons rather than open-ended future work. This scope is self-declared
+  in the output — see "Parasitic model scope (`parasitics.model`)" below
+  (issue #728).
+
+  *Vertical* (crossover) coupling **is** modelled as of issue #760 — see
+  "Vertical-overlap coupling capacitance" below.
 - **Device connectivity, as reported in `devices[]`/`nets[]`, is untouched.**
   Those two fields are built from the schematic-equivalent netlist *before*
   parasitics injection and carry their exact documented meaning whether or
@@ -1704,12 +1782,25 @@ counted as nets.
 more per net) rather than always equalling `c_count`. See
 `docs/json-contract.md`.
 
+**Additive fields, no `schema_version` bump (issue #760):**
+`nets[].coupled[]`, `cc_count`, `total_coupling_capacitance_ff`, and
+`overlap_pairs_without_coefficient[]` are new; no documented field is renamed
+or retyped, and `c_count` keeps its meaning. The `model.coupling` *value*
+changes (it no longer reads `"not modelled"`) — an additive behavior change
+per `docs/json-contract.md`'s pre-1.0 caveat, recorded in `CHANGELOG.md`
+rather than versioned, the same treatment issue #547's material R/C value
+change got. Values of `nets[].capacitance_ff` and `total_capacitance_ff` move
+(crossover charge relocates to the new coupling term) without their
+definitions changing.
+
 ```json
 "parasitics": {
   "r_count": 6,
   "c_count": 4,
+  "cc_count": 1,
   "total_resistance_ohm": 3050.7818,
   "total_capacitance_ff": 5.400116,
+  "total_coupling_capacitance_ff": 0.171301,
   "nets": [
     {
       "net": "Y",
@@ -1730,13 +1821,21 @@ more per net) rather than always equalling `c_count`. See
           "leg_net": "Y__t1",
           "resistance_ohm": 643.4917
         }
+      ],
+      "coupled": [
+        {
+          "net": "A",
+          "capacitance_ff": 0.171301,
+          "levels": [[0, 1]]
+        }
       ]
     }
   ],
   "metals_without_coefficient": [],
+  "overlap_pairs_without_coefficient": [],
   "model": {
-    "capacitance": "net-to-ground only -- every capacitor's second terminal is the deck's ground/substrate net; there is no inter-net coupling capacitance in the model",
-    "coupling": "not modelled -- a neighboring net's displacement current (e.g. a slewing supply, clock, or big driver) contributes exactly zero to any net's reported capacitance, whether or not the real layout has significant coupling there",
+    "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
+    "coupling": "vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels",
     "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder",
     "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"
   }
@@ -1746,11 +1845,14 @@ more per net) rather than always equalling `c_count`. See
 | Field                  | Type            | Description                                                                                     |
 | ---------------------- | --------------- | ------------------------------------------------------------------------------------------------- |
 | `r_count`              | integer         | Total number of parasitic resistors emitted across every net — one per `terminals[]` entry (star topology, issue #592), or exactly one for a net with no device terminal (the pre-#592 Γ-shunt fallback). `>= c_count` whenever any net has more than one terminal. |
-| `c_count`              | integer         | Number of parasitic capacitors emitted — always one per `nets[]` entry, unchanged since issue #216. |
+| `c_count`              | integer         | Number of **ground** capacitors emitted — always one per `nets[]` entry, unchanged since issue #216. Coupling capacitors are *not* counted here; see `cc_count`. |
+| `cc_count`             | integer         | Number of **coupling** capacitors emitted (issue #760) — one per distinct coupled net pair. `0` when the layout has no inter-net vertical overlap, or the deck curates no overlap coefficients. |
 | `total_resistance_ohm` | number          | Sum of each net's *total* series resistance (ohms) — the same value as summing `nets[].resistance_ohm`, not `nets[].terminals[].resistance_ohm` (which sums back to the same per-net total, modulo the negligible per-leg minimum-resistance clamp). |
 | `total_capacitance_ff` | number          | Sum of the emitted ground capacitances (femtofarads).                                             |
+| `total_coupling_capacitance_ff` | number | Sum of the emitted coupling capacitances (femtofarads), each pair counted **once** (issue #760). Summing `nets[].coupled[].capacitance_ff` instead double-counts, since every pair is reported from both endpoints. |
 | `nets`                 | array\<object\> | One entry per net carrying parasitics, sorted by `net` for deterministic output. See below.       |
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
+| `overlap_pairs_without_coefficient` | array\<object\> | Adjacent metal-level pairs the deck declares but its `PARASITICS.metal_overlaps` table has no vertical-overlap coefficient for (issue #760). See below. Empty for both shipped decks. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 
 Each `nets[]` entry:
@@ -1760,9 +1862,10 @@ Each `nets[]` entry:
 | `net`            | string          | The schematic-equivalent net name. **Not guaranteed unique across `nets[]`** — two electrically distinct nets can carry the identical layout label (e.g. separate un-strapped `VGND` islands nothing straps together); use `net_id` to disambiguate (issue #765). |
 | `net_id`         | integer         | Additive field (issue #765). A stable identifier, unique across every entry in this response, that disambiguates same-named entries — the net object's own KLayout cluster id. Build `{entry["net_id"]: entry}` instead of `{entry["net"]: entry}` if the layout may have same-labelled distinct nets (real layouts routinely do — 105 out of 908 distinct `VGND`/`VPWR`/... labels on the `gcd` corpus). |
 | `resistance_ohm` | number          | The net's total computed series resistance (ohms) — the star's total "budget", distributed across `terminals[]`. |
-| `capacitance_ff` | number          | The net's total lumped ground capacitance (femtofarads), hung off `hub_net`.                           |
+| `capacitance_ff` | number          | The net's total lumped **ground** capacitance (femtofarads), hung off `hub_net` — with any area coupled to another net on an adjacent metal level already removed (issue #760, see `coupled[]`). Can be `0.0` for a net whose whole area term moved to coupling; the entry (and its hub) still exists. |
 | `hub_net`        | string          | The star's hub node name. Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |
 | `terminals`      | array\<object\> | One entry per device terminal moved onto its own leg net, `{"device", "terminal", "leg_net", "resistance_ohm"}` — `device` is the owning device's `expanded_name()`, `terminal` its terminal name (e.g. `"D"`, `"G"`, `"A"`), `leg_net` the fresh internal node that terminal now connects to (`<net>__t<i>`, or a collision-suffixed variant), and `resistance_ohm` that leg's own series resistance back to `hub_net`. **Empty** for the no-device-terminal fallback case above. |
+| `coupled`        | array\<object\> | This net's vertical-overlap coupling counterparts (issue #760), `{"net", "capacitance_ff", "levels"}`, sorted by counterpart `net`. `capacitance_ff` is the pair's total coupling capacitance summed over every contributing level pair; `levels` lists the contributing `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs. **Empty** when the net has no inter-net crossover. Each pair appears on both endpoints' lists — see `total_coupling_capacitance_ff`. |
 
 Two device terminals on the same net now sit in series through their two
 `terminals[]` legs (`leg_a --Ra--> hub_net <--Rb-- leg_b`) — the
@@ -1797,14 +1900,37 @@ top-level `warnings[]`, e.g. `"'gf180mcu' deck's PARASITICS.metals has no R/C
 coefficient for Metal3, Metal4 -- ..."`, so a caller checking only
 `warnings[]` still sees it.
 
+### Curated-coefficient gaps: `overlap_pairs_without_coefficient` (issue #760)
+
+The vertical-overlap coefficient family (`PARASITICS.metal_overlaps`) gets the
+same treatment, for the same reason: entry `i` is the coefficient between
+`metals[i]` and `metals[i+1]`, so a fully-populated table has `len(metals) - 1`
+entries, and a shorter tuple (including the empty-tuple default a deck starts
+from) or an explicit `None` entry means that adjacent pair silently
+contributes **zero** coupling capacitance. Unlike the `metals` gap, the area
+is not lost — it stays charged to ground exactly as it was before this
+feature existed — but the crossover between those two levels is invisible in
+the output, and a caller reading `model.coupling` would otherwise reasonably
+assume it had been accounted for.
+
+`overlap_pairs_without_coefficient` reports one entry per gap,
+`{"lower_metal_index", "upper_metal_index", "lower_layer", "lower_datatype",
+"upper_layer", "upper_datatype"}` (0-based indices into the deck's `metals`
+tuple; pair index 0 is between the bottom two levels), sorted by
+`lower_metal_index`. Empty for both shipped decks — each curates one
+`defaultoverlap` coefficient per adjacent pair its stack declares — and
+trivially empty for a deck with fewer than two metal levels. A non-empty list
+is mirrored into top-level `warnings[]` the same way.
+
 ### Parasitic model scope (`parasitics.model`)
 
-Every capacitor `--parasitics` emits hangs off the deck's ground/substrate
-net — there is no card connecting two signal nets, and before issue #728
-nothing in the emitted netlist or JSON said so. A consumer could only learn
-the model's scope by noticing that every `C_*` card's second terminal is the
-same ground net, which reads back indistinguishable from "the tool looked for
-coupling here and found none."
+Before issue #728, nothing in the emitted netlist or JSON declared the
+parasitic model's boundaries. A consumer could only infer scope by noticing
+that every `C_*` card's second terminal was the same ground net, which reads
+back indistinguishable from "the tool looked for coupling here and found
+none." As of issue #760 that inference would also be *wrong* — some cards now
+connect two signal nets — which is exactly why the declaration is a field
+rather than a doc paragraph.
 
 `parasitics.model` states the model's own boundaries machine-readably instead
 — a fixed, four-key object present on every `parasitics` block (including the
@@ -1812,16 +1938,20 @@ all-zero case, when no net had eligible interconnect geometry to parasitize):
 
 | Key           | Value (verbatim)                                                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `capacitance` | `"net-to-ground only -- every capacitor's second terminal is the deck's ground/substrate net; there is no inter-net coupling capacitance in the model"`       |
-| `coupling`    | `"not modelled -- a neighboring net's displacement current (e.g. a slewing supply, clock, or big driver) contributes exactly zero to any net's reported capacitance, whether or not the real layout has significant coupling there"` |
+| `capacitance` | `"net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net"` |
+| `coupling`    | `"vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels"` |
 | `resistance`  | `"single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder"` |
 | `frequency`   | `"quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"`                                       |
 
 The text is static — identical across every deck, cell, and run — so a
-downstream flow can assert the exact model it is relying on (e.g. "fail the
-run if `parasitics.model.coupling != 'not modelled'`" once/if a coupling-aware
-increment lands) instead of a human inferring the model's limits by grepping
-capacitor terminals. The same four lines are also written as `*`-commented
+downstream flow can assert the exact model it is relying on instead of a human
+inferring the model's limits by grepping capacitor terminals. Issue #728
+anticipated exactly one use of that: "fail the run if
+`parasitics.model.coupling != 'not modelled'`" once a coupling-aware increment
+lands. Issue #760 **is** that increment, so such an assertion now starts
+firing by design — the value no longer reads `"not modelled"`. A consumer that
+wants "no coupling at all" must now either pin the full string or omit
+`--parasitics`. The same four lines are also written as `*`-commented
 header lines at the top of the SPICE netlist whenever `--parasitics` was
 given, immediately after the existing `* extracted by klt extract --deck
 <name>` line:
@@ -1829,8 +1959,8 @@ given, immediately after the existing `* extracted by klt extract --deck
 ```
 * extracted by klt extract --deck sky130
 * parasitic model (--parasitics):
-* - capacitance: net-to-ground only -- every capacitor's second terminal is the deck's ground/substrate net; there is no inter-net coupling capacitance in the model
-* - coupling: not modelled -- a neighboring net's displacement current (e.g. a slewing supply, clock, or big driver) contributes exactly zero to any net's reported capacitance, whether or not the real layout has significant coupling there
+* - capacitance: net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net
+* - coupling: vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels
 * - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder
 * - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
 ```
@@ -1839,16 +1969,18 @@ so a reader of the raw netlist alone (not just the JSON) can see the model's
 scope without cross-referencing `klt extract`'s JSON output. Omitted (no
 header lines beyond the existing `* extracted by ...` line) whenever
 `--parasitics` was not given, matching `parasitics` itself being `null` in
-that case. This is item (1) of the near-term half of the Method-of-Moments
-epic (#701) laid out in issue #728 — declaring the model's scope, not
-changing what it computes; net-to-net coupling capacitance itself remains
-"Out of scope" below.
+that case. Declaring the model's scope was item (1) of the near-term half of
+the Method-of-Moments epic (#701), laid out in issue #728; issue #760 is the
+next item, changing what the model computes rather than only what it declares.
+*Lateral* coupling remains "Out of scope" below.
 
 ### Parasitic R/C instance names are sanitized, not literal net names
 
-The `C` card (one per net) `--parasitics` injects into the written SPICE is
-named after that net's own `net` value above (e.g. net `Y` gets a `CY`), and
-each of its star-leg `R` cards is named the same way with a `_t<i>` suffix
+The ground `C` card (one per net) `--parasitics` injects into the written
+SPICE is named after that net's own `net` value above (e.g. net `Y` gets a
+`CY`), each coupling `C` card (one per coupled pair, issue #760) is named
+`Ccc_<net_a>_<net_b>` from the same values (e.g. nets `A`/`Y` get a
+`Ccc_A_Y`), and each of its star-leg `R` cards is named the same way with a `_t<i>` suffix
 (e.g. `RY_t0`, `RY_t1` — one per `parasitics.nets[].terminals[]` entry; a net
 with no device terminal falls back to a single unsuffixed `RY`, matching the
 capacitor's naming) — but with every character outside `[A-Za-z0-9_]` mapped
@@ -2072,14 +2204,18 @@ written to stdout. No Python traceback is printed.
 First-order lumped RC parasitics are available behind `--parasitics` (see
 above, issue #217). The following remain out of scope:
 
-- **Net-to-net coupling capacitance.** `--parasitics` models lumped
-  capacitance to ground only; coupling between neighboring nets is
-  deliberately deferred (it needs spacing-aware neighbor geometry the
-  lumped-to-ground model does not capture) and is a credible second
-  increment. Without `--parasitics`, no interconnect R/C is extracted at all.
-  This gap is now declared machine-readably in the output itself rather than
-  only in this doc — see `parasitics.model` (issue #728, "Parasitic model
-  scope").
+- **Lateral (same-layer, sidewall) coupling capacitance.** `--parasitics`
+  models capacitance to ground plus *vertical* (crossover) net-to-net
+  coupling on adjacent metal levels (issue #760, see "Vertical-overlap
+  coupling capacitance"). Two wires running side by side on the same level
+  still couple by exactly zero, and each still charges its facing edge the
+  full isolated-edge fringe term to substrate as though the neighbour were
+  absent — both need the spacing-aware neighbour (halo) search the crossover
+  pass deliberately avoids. Stage 2b/2c of
+  `docs/design/extract-fidelity-roadmap.md`. Without `--parasitics`, no
+  interconnect R/C is extracted at all. This gap is declared
+  machine-readably in the output itself rather than only in this doc — see
+  `parasitics.model` (issue #728, "Parasitic model scope").
 - **Full distributed, per-segment RC (a PEX-style ladder).** `--parasitics`
   distributes each net's resistance as a coarse star from the net to each
   device terminal (issue #592 — see "Parasitic (RC) extraction" → "The

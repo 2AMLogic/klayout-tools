@@ -726,6 +726,21 @@ leaves 2b as a pure geometry-and-coefficients follow-on.
   floor of ~121 fF-equivalent, with the inter-net share reported. The bound
   comes from §1.5's measurement on the same file, so the test has a real
   number to check against on day one.
+
+  **Measured, as shipped (#760) [REPO-RUN]:** the ceiling held; the floor did
+  not, exactly as §1.5's "a crude floor, not a correction" caveat warned.
+  Supplying the connectivity decomposes that same 146.328 fF as **77.611
+  fF-equivalent same-net** (a net's own via stacks *and* its own li1 routed
+  under its own met1 over via-free stretches — much more than the via
+  footprint alone can see, which is why ~121 fF was too high), **0.324
+  fF-equivalent between distinct nets sharing one layout label** (`gcd` has
+  105 un-strapped `VGND` islands and 88 `VPWR` ones; they collapse to one
+  node downstream, so this is left on ground rather than emitted as a
+  self-loop), and **68.393 fF-equivalent genuinely inter-net** — the shipped
+  figure, 46.7% of the net-agnostic bound. The three shares sum to 146.328 fF
+  exactly. `tests/test_extract.py::test_gcd_parasitics_coupling_magnitude`
+  therefore asserts the rigorous ceiling and the measured band, not the
+  provisional floor.
 - **Independent geometry cross-check:** per-net coupling capacitance compared
   against magic `ext2spice`'s own coupling caps on the identical GDS, with
   the agreement tolerance stated and the circularity caveat from §4 recorded

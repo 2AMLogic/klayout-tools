@@ -286,6 +286,52 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
+  (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
+  `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on
+  metal level `i` sits directly under a *different* net's conductor on level
+  `i+1`, that overlap area is charged between the two nets at the PDK's own
+  `defaultoverlap` coefficient and **removed** from both nets' ground-area
+  term — charge moves rather than duplicating. The geometry is a plain
+  `Region &` on the per-net regions the extraction already has: no halo
+  search, no new geometry structure, no new dependency. This is the first
+  element `klt extract` has ever emitted that connects two signal nets, so
+  it is the first extracted netlist that can show crosstalk in `klt sim` at
+  all — a disturbance that was previously zero *by construction*, not by
+  measurement. On the `gcd` corpus block it emits 5 638 net-to-net
+  capacitors totalling 68.39 fF, taking 29.10 fF off the ground term
+  (2 617.23 → 2 588.13 fF) — the same geometry the PDK's own coefficients
+  price 2.35× higher between nets than to substrate, which is the
+  misattribution this stage exists to correct. The same measurement
+  decomposes that block's
+  full 146.33 fF of crossover charge as 77.6 fF same-net (a net's own via
+  stacks and its own li1-under-met1 routing, correctly left on ground),
+  0.3 fF between distinct nets that share one layout label (they collapse to
+  a single node downstream, so a capacitor between them would be a
+  self-loop; also left on ground), and 68.4 fF genuinely inter-net.
+  **No `schema_version` bump** — new fields are additive
+  (`parasitics.nets[].coupled[]`, `cc_count`,
+  `total_coupling_capacitance_ff`, `overlap_pairs_without_coefficient[]`),
+  `c_count` keeps its documented "one per `nets[]` entry, ground capacitors
+  only" meaning, and no documented field is renamed or retyped. Two
+  behavior changes land here rather than in a version, per this file's
+  preamble: `parasitics.model.coupling` no longer reads `"not modelled"`
+  (the field issue #728 added for exactly this moment — a consumer asserting
+  on that literal string starts failing **by design**), and
+  `nets[].capacitance_ff` / `total_capacitance_ff` values move as crossover
+  charge relocates, with their definitions unchanged. `--parasitics` stays
+  default-off and fixed-model; `devices[]`/`nets[]` and the
+  `--parasitics`-off netlist are byte-identical to before. Coefficients are
+  transcribed per adjacent level pair with per-value citations from each
+  PDK's public magic tech file (sky130A's nominal `variants (),(orig),(si)`
+  block, gf180mcuD's `variants ()` block, open_pdks
+  `c6d73a35f524070e85faff4a6a9eef49553ebc2b`), and any declared adjacent
+  pair without a curated coefficient is reported in
+  `overlap_pairs_without_coefficient[]` plus `warnings[]` rather than
+  silently contributing zero (#547's pattern). Lateral (same-layer,
+  sidewall) coupling and fringe shielding remain unmodelled — Stage 2b/2c.
+  See docs/cli/extract.md's "Vertical-overlap coupling capacitance".
+
 - 2026-08-11 — `klt mom`'s numbers are now checked against analytic ground
   truth (#719, Phase 1 of the Method-of-Moments epic #701), closing the gap
   #718's entry below left open. `tests/test_mom_validation.py` asserts the

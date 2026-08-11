@@ -137,6 +137,16 @@ def _print_text(report: dict) -> None:
             f"total_R={parasitics['total_resistance_ohm']} ohm  "
             f"total_C={parasitics['total_capacitance_ff']} fF"
         )
+        # Additive (issue #760): only printed once coupling capacitance
+        # exists at all (`cc_count == 0` is the common case for a small,
+        # isolated cell today), matching this function's existing convention
+        # of omitting empty/zero optional sections rather than printing a
+        # row of zeros.
+        if parasitics.get("cc_count"):
+            print(
+                f"parasitics_coupling: CC={parasitics['cc_count']}  "
+                f"total_CC={parasitics['total_coupling_capacitance_ff']} fF"
+            )
 
     device_counts = report["device_counts"]
     if device_counts:

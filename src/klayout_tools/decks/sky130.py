@@ -1079,4 +1079,41 @@ PARASITICS = ParasiticsDeck(
             sheet_res_ohm_sq=0.029, cap_area_ff_um2=0.00632, cap_perim_ff_um=0.03885
         ),
     ),
+    # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
+    # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`
+    # (lower plate) and `metals[i+1]` (upper plate), so a fully-populated
+    # table has `len(metals) - 1` = 5 entries for this li1+met1..met5 stack.
+    #
+    # Transcribed from sky130.tech's nominal `variants (),(orig),(si)` block
+    # -- the same block `metals` above is sourced from, and the first of the
+    # file's three corner blocks (the others being `variants (hrhc),(lrhc)`
+    # and `variants (hrlc),(lrlc)`, the max/min-capacitance corners this deck
+    # deliberately does not model: `--parasitics` has no corner axis, and
+    # adding one is explicitly out of scope for this stage). Only the
+    # `allmN metalN allmM metalM` / `allm1 metal1 allli locali` rows are used
+    # (conductor-over-conductor on *adjacent* levels); the same block's
+    # `... nwell,pwell well` and `... allpolynonres active` rows describe
+    # overlap onto the substrate/poly the existing `cap_area_ff_um2` ground
+    # term already covers, and its non-adjacent rows (e.g. `allm3 metal3
+    # allm1 metal1`) are Stage 2's non-adjacent-level extension, not this one.
+    #
+    # Magic states these in aF/um^2; divided by 1000 to fF/um^2, matching
+    # `cap_area_ff_um2`'s convention above.
+    metal_overlaps=(
+        # li1 (idx0) <-> met1 (idx1): `defaultoverlap allm1 metal1 allli
+        # locali 114.20`.
+        0.11420,
+        # met1 (idx1) <-> met2 (idx2): `defaultoverlap allm2 metal2 allm1
+        # metal1 133.86`.
+        0.13386,
+        # met2 (idx2) <-> met3 (idx3): `defaultoverlap allm3 metal3 allm2
+        # metal2 86.19`.
+        0.08619,
+        # met3 (idx3) <-> met4 (idx4): `defaultoverlap allm4 metal4 allm3
+        # metal3 84.03`.
+        0.08403,
+        # met4 (idx4) <-> met5 (idx5): `defaultoverlap allm5 metal5 allm4
+        # metal4 68.33`.
+        0.06833,
+    ),
 )
