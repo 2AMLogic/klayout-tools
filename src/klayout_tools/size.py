@@ -78,6 +78,29 @@ points by default) runs inside a *single* ``ngspice`` invocation, using
 A second, single-point invocation then *confirms* the interpolated answer
 (never trusts the coarse grid or the interpolation alone as the final
 word) -- see :func:`run_size`.
+
+Corner *set* input, one sizing corner (issue #729)
+----------------------------------------------------
+A request declares either the original single ``request.corner`` object
+(``process``/``vdd_v``/``temperature_c`` scalars, unchanged) or a corner
+*set* via ``request.corners``, reusing ``sim.py``'s own
+``corners.process``/``corners.temperature_c`` axis semantics verbatim
+(:func:`klayout_tools.sim._expand_corners`) rather than inventing a third
+spelling -- ``vdd_v`` stays a single scalar across the whole set, since this
+command biases one fixed supply rather than sweeping it. Exactly **one**
+declared point, ``corners.sizing`` (defaulting to the first point on each
+axis), is the *sizing* corner: the width search (the sweep + confirm
+described above) runs only there, because re-solving per corner would
+return a different width per corner, which is not a device. The confirmed
+width is then *verified* -- a fresh single-point ngspice confirmation, no
+further search -- at every other declared corner, reporting each corner's
+own operating point, margins, and ``pass``/``fail``/``error`` status
+(:func:`_parse_corner_set`, :func:`run_size`). The sizing corner's status
+alone sets the response's aggregate ``status`` unless the request opts in
+via ``targets.hold_across_corners: true``; an evaluator error at *any*
+declared corner always makes the aggregate ``status`` ``"error"``, mirroring
+``klt sim``'s own error > fail > pass precedence -- see
+``docs/cli/size.md``'s "Corner sets" section for the full response shape.
 """
 
 from __future__ import annotations
@@ -92,7 +115,7 @@ from typing import Any
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from .pdk import PdkNotFoundError, find_pdk
-from .sim import SimError, _resolve_models_lib
+from .sim import SimError, _expand_corners, _resolve_models_lib
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -266,6 +289,160 @@ def _parse_corner(corner: dict[str, Any]) -> dict[str, Any]:
     return {"process": process, "vdd_v": vdd, "temperature_c": float(temperature_c)}
 
 
+def _corner_label(process: str, temperature_c: float) -> str:
+    """Deterministic display label for one corner point, e.g. ``"tt/27C"``
+    -- mirrors ``klt sim``'s own ``CornerPoint.corner_id`` (this module's
+    docstring's "Corner set input" section), minus the supply-voltage
+    segment (``vdd_v`` is a single scalar across the whole set here, never
+    swept per corner)."""
+    temp_label = f"{temperature_c:g}"
+    return f"{process}/{temp_label}C"
+
+
+def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    """Parse the request's corner declaration into a list of expanded
+    corner-point dicts (each shaped like :func:`_parse_corner`'s output,
+    plus a ``corner_id`` label and, for a process *bundle* entry, a
+    ``process_sections`` list) and the index of the declared sizing corner
+    within that list.
+
+    Accepts either the original single-corner ``request.corner`` object
+    (unchanged) or the new corner-*set* ``request.corners`` object -- never
+    both. See this module's docstring's "Corner set input" section.
+    """
+    legacy_corner = request.get("corner")
+    corner_set = request.get("corners")
+    if legacy_corner is not None and corner_set is not None:
+        raise SizeError(
+            "request must declare either 'corner' (single) or 'corners' "
+            "(a set), not both"
+        )
+
+    if corner_set is None:
+        parsed = _parse_corner(legacy_corner or {})
+        parsed["corner_id"] = _corner_label(parsed["process"], parsed["temperature_c"])
+        return [parsed], 0
+
+    if not isinstance(corner_set, dict):
+        raise SizeError("request.corners must be a JSON object")
+
+    vdd = corner_set.get("vdd_v")
+    if vdd is None:
+        raise SizeError("request.corners.vdd_v is required")
+    vdd = _require_positive_number(vdd, "request.corners.vdd_v")
+
+    exclude_spec = corner_set.get("exclude") or []
+    if not isinstance(exclude_spec, list):
+        raise SizeError("request.corners.exclude must be a list")
+
+    axes_spec = {
+        "process": corner_set.get("process"),
+        "temperature_c": corner_set.get("temperature_c"),
+    }
+    try:
+        points = _expand_corners(axes_spec, exclude_spec)
+    except SimError as exc:
+        raise SizeError(str(exc)) from exc
+    if not points:
+        raise SizeError("request.corners produced no corner points (check 'exclude')")
+
+    parsed_points: list[dict[str, Any]] = []
+    for point in points:
+        process = point.process if point.process is not None else "tt"
+        entry: dict[str, Any] = {
+            "process": process,
+            "vdd_v": vdd,
+            "temperature_c": float(point.temperature_c),
+        }
+        if point.process_sections is not None:
+            entry["process_sections"] = list(point.process_sections)
+        entry["corner_id"] = _corner_label(process, entry["temperature_c"])
+        parsed_points.append(entry)
+
+    sizing_index = _resolve_sizing_index(parsed_points, corner_set.get("sizing"))
+    return parsed_points, sizing_index
+
+
+def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int:
+    """Resolve ``corners.sizing`` to an index into ``points``. Defaults to
+    the first declared point on each axis (index 0 -- :func:`_expand_corners`
+    expands process (outer) x temperature (inner), in declaration order, so
+    the first expanded point already *is* "first point on each axis")."""
+    if sizing_spec is None:
+        return 0
+    if not isinstance(sizing_spec, dict):
+        raise SizeError("request.corners.sizing must be a JSON object")
+
+    candidates = list(range(len(points)))
+    process = sizing_spec.get("process")
+    if process is not None:
+        candidates = [i for i in candidates if points[i]["process"] == process]
+    temperature_c = sizing_spec.get("temperature_c")
+    if temperature_c is not None:
+        if isinstance(temperature_c, bool) or not isinstance(
+            temperature_c, (int, float)
+        ):
+            raise SizeError("request.corners.sizing.temperature_c must be a number")
+        candidates = [
+            i for i in candidates if points[i]["temperature_c"] == float(temperature_c)
+        ]
+    if not candidates:
+        raise SizeError(
+            "request.corners.sizing does not match any declared corner point"
+        )
+    return candidates[0]
+
+
+def _corner_public(corner: dict[str, Any]) -> dict[str, Any]:
+    """The response-facing shape for one corner-point dict: the original
+    ``process``/``vdd_v``/``temperature_c`` fields (unchanged, so the
+    top-level ``corner`` field stays backward compatible) plus the additive
+    ``corner_id`` label and, for a process bundle, ``process_sections``."""
+    out = {
+        "corner_id": corner["corner_id"],
+        "process": corner["process"],
+        "vdd_v": corner["vdd_v"],
+        "temperature_c": corner["temperature_c"],
+    }
+    if "process_sections" in corner:
+        out["process_sections"] = corner["process_sections"]
+    return out
+
+
+def _corner_set_echo(
+    corner_points: list[dict[str, Any]], sizing_index: int, hold_across_corners: bool
+) -> dict[str, Any]:
+    """The ``corners`` response block's input-echo portion (``declared``/
+    ``sizing``/``hold_across_corners``) -- present on every response,
+    including an early evaluator-error one, per this module's "no stated
+    method is rejected" precedent. ``results`` is filled in by the caller
+    once (if) the per-corner verification pass actually runs."""
+    return {
+        "declared": [_corner_public(c) for c in corner_points],
+        "sizing": _corner_public(corner_points[sizing_index]),
+        "hold_across_corners": hold_across_corners,
+        "results": None,
+    }
+
+
+def _parse_hold_across_corners(request: dict[str, Any]) -> bool:
+    """``request.targets.hold_across_corners`` -- opts a non-sizing declared
+    corner's ``fail`` into the aggregate ``status`` (see this module's
+    docstring's "Corner set input" section). Defaults to ``False``: a
+    multi-corner request does not fail by construction just because
+    ``gm/Id`` genuinely drifts with process/temperature away from the
+    sizing corner."""
+    targets_block = request.get("targets")
+    if targets_block is None:
+        return False
+    if not isinstance(targets_block, dict):
+        raise SizeError("request.targets must be a JSON object")
+    value = targets_block.get("hold_across_corners", False)
+    if not isinstance(value, bool):
+        raise SizeError("request.targets.hold_across_corners must be a boolean")
+    return value
+
+
 def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(target, dict):
         raise SizeError("request.target must be a JSON object")
@@ -281,8 +458,12 @@ def run_size(
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Solve ``request.device``'s width from ``request.target``'s gm/Id and
-    current budget, at ``request.corner``, with ``ngspice`` scoring every
-    candidate against the real PDK models named by ``request.models``.
+    current budget, at exactly one declared *sizing* corner, with ``ngspice``
+    scoring every candidate against the real PDK models named by
+    ``request.models`` -- then verify the solved width's operating point
+    and per-target margins across every corner declared in
+    ``request.corner``/``request.corners`` (see this module's docstring's
+    "Corner set input" section).
 
     ``artifacts_dir`` overrides where the generated decks/logs are written
     when ``options.keep_artifacts`` is true; defaults to a ``.klt/size/``
@@ -309,8 +490,11 @@ def run_size(
         )
 
     device = _parse_device(request["device"])
-    corner = _parse_corner(request.get("corner") or {})
+    corner_points, sizing_index = _parse_corner_set(request)
+    sizing_corner = corner_points[sizing_index]
     target = _parse_target(request["target"])
+    hold_across_corners = _parse_hold_across_corners(request)
+    corners_echo = _corner_set_echo(corner_points, sizing_index, hold_across_corners)
 
     models = request.get("models") or {}
     try:
@@ -362,7 +546,7 @@ def run_size(
 
     sweep_points_result, sweep_engine_version, sweep_log, sweep_diagnostic = _run_sweep(
         device=device,
-        corner=corner,
+        corner=sizing_corner,
         target=target,
         models_lib=models_lib,
         w_values=w_grid,
@@ -395,7 +579,8 @@ def run_size(
     if len(valid_points) < 2:
         payload = _error_payload(
             device=device,
-            corner=corner,
+            corner=sizing_corner,
+            corners=corners_echo,
             target=target,
             environment=environment,
             provenance=provenance,
@@ -426,7 +611,7 @@ def run_size(
     confirm_points, confirm_engine_version, confirm_log, confirm_diagnostic = (
         _run_sweep(
             device=device,
-            corner=corner,
+            corner=sizing_corner,
             target=target,
             models_lib=models_lib,
             w_values=[w_star],
@@ -443,7 +628,8 @@ def run_size(
     if confirmed is None or confirmed["gm_s"] is None or not confirmed["id_a"]:
         payload = _error_payload(
             device=device,
-            corner=corner,
+            corner=sizing_corner,
+            corners=corners_echo,
             target=target,
             environment=environment,
             provenance=provenance,
@@ -458,47 +644,16 @@ def run_size(
             _cleanup_dir(work_dir)
         return payload
 
-    confirmed_gm_id = abs(confirmed["gm_s"]) / abs(confirmed["id_a"])
+    operating_point, confirmed_gm_id, vov, vov_is_approx = _op_point_from_confirmed(
+        confirmed, device
+    )
     gm_id_rel_error = (confirmed_gm_id - target["gm_id"]) / target["gm_id"]
     id_rel_error = (abs(confirmed["id_a"]) - target["id_a"]) / target["id_a"]
-
-    vgs = confirmed["vgs_v"]
-    vth = confirmed["vth_v"]
-    vdsat = confirmed["vdsat_v"]
-    vov_is_approx = False
-    if vgs is not None and vth is not None:
-        vov = vgs - vth
-    elif vdsat is not None:
-        # Fallback for a compact model that does not expose Vth via its
-        # internal op-point vectors (e.g. a bare SPICE level=1 device, see
-        # this module's test fixtures): Vdsat approximates Vov for a simple
-        # square-law model in saturation. Flagged as approximate in the
-        # rationale below -- not accurate for a model where Vdsat and Vov
-        # genuinely diverge (e.g. velocity-saturated short-channel BSIM).
-        vov = vdsat
-        vov_is_approx = True
-    else:
-        vov = None
-    inversion_level = _classify_inversion(vov)
-
-    operating_point = {
-        "w_um": confirmed["w_um"],
-        "l_um": device["l_um"],
-        "nf": device["nf"],
-        "mult": device["mult"],
-        "id_a": abs(confirmed["id_a"]),
-        "gm_s": abs(confirmed["gm_s"]),
-        "gm_id": confirmed_gm_id,
-        "vgs_v": vgs,
-        "vth_v": vth,
-        "vov_v": vov,
-        "vdsat_v": confirmed["vdsat_v"],
-        "inversion_level": inversion_level,
-    }
+    inversion_level = operating_point["inversion_level"]
 
     feasible = bracket is not None
     within_tolerance = abs(gm_id_rel_error) <= gm_id_rel_tol
-    status = "pass" if (feasible and within_tolerance) else "fail"
+    sizing_status = "pass" if (feasible and within_tolerance) else "fail"
 
     rationale_parts = [
         f"gm/Id lookup via a diode-connected bias sweep (Vds=Vgs): {device['kind']} "
@@ -551,11 +706,63 @@ def run_size(
         "feasible": feasible,
     }
 
+    # Verify the solved width across every OTHER declared corner -- a fresh
+    # single-point confirmation each, no further search (issue #729). The
+    # sizing corner's own entry is already fully computed above.
+    corner_results: list[dict[str, Any]] = [None] * len(corner_points)  # type: ignore[list-item]
+    corner_results[sizing_index] = {
+        "corner_id": sizing_corner["corner_id"],
+        "process": sizing_corner["process"],
+        "temperature_c": sizing_corner["temperature_c"],
+        "is_sizing": True,
+        "status": sizing_status,
+        "operating_point": operating_point,
+        "margins": {
+            "gm_id_rel_error": gm_id_rel_error,
+            "id_rel_error": id_rel_error,
+        },
+        "diagnostic": None,
+    }
+    for index, other_corner in enumerate(corner_points):
+        if index == sizing_index:
+            continue
+        corner_results[index] = _verify_corner(
+            device=device,
+            corner=other_corner,
+            target=target,
+            models_lib=models_lib,
+            w_star=w_star,
+            work_dir=work_dir,
+            deck_name=f"verify_{index}.cir",
+            log_name=f"verify_{index}.log",
+            timeout_s=timeout_s,
+            gm_id_rel_tol=gm_id_rel_tol,
+        )
+    corners_echo["results"] = corner_results
+
+    # error > fail > pass, mirroring `klt sim`'s own aggregate precedence: an
+    # evaluator error at *any* declared corner always wins. Otherwise the
+    # sizing corner's own status sets the aggregate -- a non-sizing corner's
+    # "fail" is reported spread, not aggregate-failing, unless the request
+    # opts in via `targets.hold_across_corners`.
+    if any(result["status"] == "error" for result in corner_results):
+        status = "error"
+    elif sizing_status == "fail":
+        status = "fail"
+    elif hold_across_corners and any(
+        not result["is_sizing"] and result["status"] == "fail"
+        for result in corner_results
+    ):
+        status = "fail"
+    else:
+        status = "pass"
+
     payload = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "device": device,
-        "corner": corner,
+        "corner": _corner_public(sizing_corner),
+        "corners": corners_echo,
         "target": target,
         "tolerance": {"gm_id_rel": gm_id_rel_tol},
         "operating_point": operating_point,
@@ -576,25 +783,146 @@ def run_size(
     return payload
 
 
+def _op_point_from_confirmed(
+    confirmed: dict[str, Any], device: dict[str, Any]
+) -> tuple[dict[str, Any], float, float | None, bool]:
+    """Build the ``operating_point`` response shape from one confirmed
+    sweep-log point -- shared by the sizing corner's own confirmation and
+    every other declared corner's verification run (:func:`_verify_corner`).
+
+    Returns ``(operating_point, gm_id, vov, vov_is_approx)`` -- the latter
+    two are exposed separately because the sizing corner's rationale text
+    (built by its caller) needs them past what ``operating_point`` itself
+    carries.
+    """
+    gm_id = abs(confirmed["gm_s"]) / abs(confirmed["id_a"])
+    vgs = confirmed["vgs_v"]
+    vth = confirmed["vth_v"]
+    vdsat = confirmed["vdsat_v"]
+    vov_is_approx = False
+    if vgs is not None and vth is not None:
+        vov = vgs - vth
+    elif vdsat is not None:
+        # Fallback for a compact model that does not expose Vth via its
+        # internal op-point vectors (e.g. a bare SPICE level=1 device, see
+        # this module's test fixtures): Vdsat approximates Vov for a simple
+        # square-law model in saturation. Flagged as approximate in the
+        # rationale below -- not accurate for a model where Vdsat and Vov
+        # genuinely diverge (e.g. velocity-saturated short-channel BSIM).
+        vov = vdsat
+        vov_is_approx = True
+    else:
+        vov = None
+    operating_point = {
+        "w_um": confirmed["w_um"],
+        "l_um": device["l_um"],
+        "nf": device["nf"],
+        "mult": device["mult"],
+        "id_a": abs(confirmed["id_a"]),
+        "gm_s": abs(confirmed["gm_s"]),
+        "gm_id": gm_id,
+        "vgs_v": vgs,
+        "vth_v": vth,
+        "vov_v": vov,
+        "vdsat_v": vdsat,
+        "inversion_level": _classify_inversion(vov),
+    }
+    return operating_point, gm_id, vov, vov_is_approx
+
+
+def _verify_corner(
+    *,
+    device: dict[str, Any],
+    corner: dict[str, Any],
+    target: dict[str, Any],
+    models_lib: str,
+    w_star: float,
+    work_dir: str,
+    deck_name: str,
+    log_name: str,
+    timeout_s: float,
+    gm_id_rel_tol: float,
+) -> dict[str, Any]:
+    """Verify the sizing corner's solved width ``w_star`` at one other
+    declared ``corner``: a single-point confirmation, no further search
+    (issue #729's "verify the solved width... across every declared
+    corner"). Never raises -- an evaluator failure at this corner yields a
+    ``"error"`` entry, exactly like the sizing corner's own confirmation
+    failure does via :func:`_error_payload`.
+    """
+    points, _engine_version, _log_path, diagnostic = _run_sweep(
+        device=device,
+        corner=corner,
+        target=target,
+        models_lib=models_lib,
+        w_values=[w_star],
+        work_dir=work_dir,
+        deck_name=deck_name,
+        log_name=log_name,
+        timeout_s=timeout_s,
+    )
+    confirmed = points[0] if points else None
+    if confirmed is None or confirmed["gm_s"] is None or not confirmed["id_a"]:
+        return {
+            "corner_id": corner["corner_id"],
+            "process": corner["process"],
+            "temperature_c": corner["temperature_c"],
+            "is_sizing": False,
+            "status": "error",
+            "operating_point": None,
+            "margins": None,
+            "diagnostic": (
+                "ngspice verification run at the sizing width did not "
+                "return usable operating-point data"
+                + (f": {diagnostic}" if diagnostic else "")
+            ),
+        }
+
+    operating_point, gm_id, _vov, _vov_is_approx = _op_point_from_confirmed(
+        confirmed, device
+    )
+    gm_id_rel_error = (gm_id - target["gm_id"]) / target["gm_id"]
+    id_rel_error = (abs(confirmed["id_a"]) - target["id_a"]) / target["id_a"]
+    status = "pass" if abs(gm_id_rel_error) <= gm_id_rel_tol else "fail"
+    return {
+        "corner_id": corner["corner_id"],
+        "process": corner["process"],
+        "temperature_c": corner["temperature_c"],
+        "is_sizing": False,
+        "status": status,
+        "operating_point": operating_point,
+        "margins": {
+            "gm_id_rel_error": gm_id_rel_error,
+            "id_rel_error": id_rel_error,
+        },
+        "diagnostic": None,
+    }
+
+
 def _error_payload(
     *,
     device: dict[str, Any],
     corner: dict[str, Any],
+    corners: dict[str, Any],
     target: dict[str, Any],
     environment: dict[str, Any],
     provenance: dict[str, Any],
     reason: str,
 ) -> dict[str, Any]:
     """Build the ``status: "error"`` response shape -- the evaluator itself
-    could not produce a trustworthy result. ``method`` is still populated
-    (per this module's docstring, "no stated method is rejected" applies to
-    every status, not just a successful one).
+    could not produce a trustworthy result at the sizing corner, so no other
+    declared corner is verified either (there is no solved width to check).
+    ``method`` is still populated (per this module's docstring, "no stated
+    method is rejected" applies to every status, not just a successful
+    one); ``corners.declared``/``corners.sizing`` are still echoed,
+    ``corners.results`` stays ``None`` (never evaluated).
     """
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "error",
         "device": device,
-        "corner": corner,
+        "corner": _corner_public(corner),
+        "corners": corners,
         "target": target,
         "tolerance": None,
         "operating_point": None,
@@ -706,7 +1034,15 @@ def _write_sweep_deck(
 
     lines = ["* klt size -- generated device sweep deck, do not edit"]
     lines.append(f".param w_sweep={w_values[0]!r}")
-    lines.append(f".lib {models_lib} {corner['process']}")
+    process_sections = corner.get("process_sections")
+    if process_sections:
+        # Multi-section corner bundle (e.g. gf180mcu's per-device-family
+        # `.lib` cards) -- one line per declared section, in order, matching
+        # `sim.py`'s own `_write_corner_deck` handling of the same shape.
+        for section in process_sections:
+            lines.append(f".lib {models_lib} {section}")
+    else:
+        lines.append(f".lib {models_lib} {corner['process']}")
     lines.append(f"Vdd vdd 0 DC {vdd!r}")
     x_params = f"l={l_um!r} w={{w_sweep}} nf={nf!r} mult={mult!r}"
     if kind == "nmos":
