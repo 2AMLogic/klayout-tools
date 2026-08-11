@@ -1,5 +1,5 @@
-"""``klt size`` command: serialise a single-device gm/Id sizing result as
-text or JSON.
+"""``klt size`` command: serialise a gm/Id sizing result -- single-device or
+coupled multi-device topology (issue #768) -- as text or JSON.
 
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
@@ -51,6 +51,10 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _print_text(report: dict) -> None:
+    if "topology" in report:
+        _print_topology_text(report)
+        return
+
     device = report["device"]
     print(f"device: {device['kind']} {device['model']} (L={device['l_um']}um)")
     print(f"status: {report['status']}")
@@ -99,6 +103,88 @@ def _print_text(report: dict) -> None:
     print()
     print(f"method: {method['name']}")
     print(f"rationale: {method['rationale']}")
+
+    env = report["environment"]
+    print()
+    print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
+    print(f"models_lib: {env['models_lib']}")
+
+
+def _print_topology_text(report: dict) -> None:
+    """Text rendering for a coupled multi-device topology result (issue
+    #768) -- a different top-level shape from single-device mode's: no
+    top-level ``device``/``operating_point``, but a ``roles`` map (the
+    solved widths), a ``devices`` map keyed by instance (every device's own
+    in-circuit operating point and rationale), and a ``joint_solve`` block
+    (the coupled iteration trajectory)."""
+    print(f"topology: {report['topology']}")
+    print(f"status: {report['status']}")
+
+    budget = report["budget"]
+    print(
+        f"budget: tail_current={budget['tail_current_a']:.6g}A  "
+        f"branch_current={budget['branch_current_a']:.6g}A  "
+        f"tail_mirror_ratio={budget['tail_mirror_ratio']:g}  "
+        f"i_ref={budget['reference_current_a']:.6g}A"
+    )
+    measured = budget.get("measured")
+    if measured is not None:
+        split = measured.get("tail_split")
+        split_str = f"{split[0] * 100:.1f}/{split[1] * 100:.1f}%" if split else "n/a"
+        print(
+            f"measured: tail_current={measured['tail_current_a']:.6g}A  "
+            f"split={split_str}  "
+            f"mirror_ratio={measured['mirror_ratio']:.4g}"
+        )
+
+    print()
+    print("solved widths:")
+    for role, entry in (report.get("roles") or {}).items():
+        width = entry["w_um"]
+        width_str = f"{width:g}um" if width is not None else "-"
+        print(
+            f"  {role}: W={width_str}  L={entry['l_um']:g}um  "
+            f"target gm/Id={entry['target_gm_id']:g}  "
+            f"(control: {entry['control_instance']})"
+        )
+
+    for key, entry in (report.get("devices") or {}).items():
+        device = entry["device"]
+        print()
+        control = " [control]" if entry["is_control"] else ""
+        print(
+            f"[{key}] {entry['instance']} -- {entry['role']}{control}: "
+            f"{device['kind']} {device['model']} (L={device['l_um']}um)"
+        )
+        op = entry.get("operating_point")
+        if op is not None:
+            print(
+                f"  W={op['w_um']:g}um  gm/Id={op['gm_id']:g}  "
+                f"Id={op['id_a']:g}A  inversion={op['inversion_level']}  "
+                f"status={entry['status']}"
+            )
+        print(f"  rationale: {entry['rationale']}")
+
+    solve = report.get("joint_solve")
+    if solve is not None:
+        print()
+        print(
+            f"joint solve: {solve['iterations_run']} coupled ngspice "
+            f"iteration(s), converged={solve['converged']}"
+        )
+        for step in solve.get("iterations") or []:
+            worst = step.get("worst_abs_rel_error")
+            worst_str = f"{worst:.4g}" if worst is not None else "n/a"
+            widths = "  ".join(
+                f"{role}={w:g}um" for role, w in step["widths_um"].items()
+            )
+            print(f"  #{step['index']} {widths}  worst|gm/Id err|={worst_str}")
+
+    method = report.get("method")
+    if method is not None:
+        print()
+        print(f"method: {method['name']}")
+        print(f"rationale: {method['rationale']}")
 
     env = report["environment"]
     print()

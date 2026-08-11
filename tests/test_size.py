@@ -1441,3 +1441,785 @@ def test_cli_worst_case_margin_text_output_includes_objective(
     captured = capsys.readouterr()
     assert "objective: worst_case_margin" in captured.out
     assert "corners:" in captured.out
+
+
+# --------------------------------------------------------------------------- #
+# Coupled multi-device topology sizing (issue #768, Phase 1a of epic #705)
+# --------------------------------------------------------------------------- #
+#
+# Three tiers, mirroring the single-device tests above:
+#
+# - Pure-function/validation tests for the new `request.topology` shape and
+#   the joint solve's own helpers (no ngspice).
+# - Integration tests against the tiny synthetic `nmos_demo`/`pmos_demo`
+#   library, which exercise the real assembled-topology deck, the coupled
+#   iteration, and the per-instance read-back.
+# - A canary reproduction (`@_SKIP_NO_SKY130_NGSPICE`) that hands the joint
+#   solver the *hand-sized* 5T OTA canary's own measured per-device gm/Id as
+#   the spec and asserts it re-derives the hand-sized widths.
+
+
+def _base_topology_request(models_lib_name: str = "models.lib", **overrides) -> dict:
+    """A `diff_pair_mirror_tail` request on the same synthetic
+    `nmos_demo`/`pmos_demo` library `_write_models_lib` writes -- tuned
+    (`bias.vcm_v: 1.3`, these gm/Id targets) so the joint solve converges
+    with every device reporting `status: "pass"` against the real `ngspice`
+    binary. See `examples/size/generate.py`'s `write_topology_request`
+    docstring for why the default mid-supply common-mode bias would not
+    leave the tail device enough headroom at these targets.
+    """
+    request = {
+        "topology": "diff_pair_mirror_tail",
+        "devices": {
+            "input_pair": {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 60,
+            },
+            "mirror": {
+                "kind": "pmos",
+                "model": "pmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 60,
+            },
+            "tail": {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 60,
+            },
+        },
+        "models": {"lib": models_lib_name},
+        "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+        "budget": {"tail_current_a": 2e-05, "tail_mirror_ratio": 1},
+        "target": {
+            "input_pair": {"gm_id": 20.0},
+            "mirror": {"gm_id": 12.0},
+            "tail": {"gm_id": 20.0},
+        },
+        "bias": {"vcm_v": 1.3},
+        "tolerance": {"gm_id_rel": 0.05},
+        "options": {"sweep_points": 25},
+    }
+    request.update(overrides)
+    return request
+
+
+# --- request validation (raised before ngspice ever runs) ------------------ #
+
+
+def test_load_request_device_and_topology_both_present_raises(tmp_path):
+    request = _base_request()
+    request["topology"] = "diff_pair_mirror_tail"
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="not both"):
+        size.load_request(str(path))
+
+
+def test_load_request_neither_device_nor_topology_raises(tmp_path):
+    request = _base_request()
+    del request["device"]
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="device.*topology"):
+        size.load_request(str(path))
+
+
+def test_run_size_unsupported_topology_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    request["topology"] = "two_stage_miller"
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="unsupported topology"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_corners_not_supported_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    del request["corner"]
+    request["corners"] = {"process": ["tt", "ss"], "vdd_v": 1.8}
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="does not yet support"):
+        size.run_size(str(path))
+
+
+@pytest.mark.parametrize("missing_role", ["input_pair", "mirror", "tail"])
+def test_run_size_topology_missing_role_device_raises(tmp_path, missing_role):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    del request["devices"][missing_role]
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match=f"devices.{missing_role}"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_wrong_device_kind_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    request["devices"]["input_pair"]["kind"] = "pmos"
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="input_pair.kind must be 'nmos'"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_missing_budget_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    del request["budget"]
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="budget"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_non_positive_tail_current_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request(budget={"tail_current_a": -1e-5})
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="tail_current_a"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_non_positive_mirror_ratio_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request(
+        budget={"tail_current_a": 2e-5, "tail_mirror_ratio": 0}
+    )
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="tail_mirror_ratio"):
+        size.run_size(str(path))
+
+
+@pytest.mark.parametrize("missing_role", ["input_pair", "mirror", "tail"])
+def test_run_size_topology_missing_target_role_raises(tmp_path, missing_role):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    del request["target"][missing_role]
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match=f"target.{missing_role}"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_invalid_vcm_v_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request(bias={"vcm_v": "mid"})
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="bias.vcm_v"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_invalid_max_joint_iterations_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request(
+        options={"sweep_points": 10, "max_joint_iterations": 0}
+    )
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="max_joint_iterations"):
+        size.run_size(str(path))
+
+
+# --- coupled-budget / joint-solve helpers (pure functions) ----------------- #
+
+
+def test_parse_topology_budget_defaults_to_unity_mirror_ratio():
+    budget = size._parse_topology_budget({"tail_current_a": 2e-5})
+
+    assert budget["tail_mirror_ratio"] == 1.0
+    assert budget["reference_current_a"] == pytest.approx(2e-5)
+    assert budget["branch_current_a"] == pytest.approx(1e-5)
+
+
+def test_parse_topology_budget_mirror_ratio_scales_reference_current():
+    """`tail_mirror_ratio` is a coupled degree of freedom, not a per-device
+    knob: a 4:1 tail mirror sources the same tail current from a quarter of
+    the reference current, while each input-pair leg still carries half the
+    tail current."""
+    budget = size._parse_topology_budget(
+        {"tail_current_a": 2e-5, "tail_mirror_ratio": 4}
+    )
+
+    assert budget["reference_current_a"] == pytest.approx(5e-6)
+    assert budget["branch_current_a"] == pytest.approx(1e-5)
+
+
+def test_topology_instances_cover_every_role_with_one_control_each():
+    roles = {role for _key, _inst, role, _ctl in size.TOPOLOGY_INSTANCES}
+    assert roles == set(size.TOPOLOGY_ROLES)
+    for role in size.TOPOLOGY_ROLES:
+        controls = [
+            key
+            for key, _inst, entry_role, is_control in size.TOPOLOGY_INSTANCES
+            if entry_role == role and is_control
+        ]
+        assert controls == [size._ROLE_CONTROL_INSTANCE[role]]
+
+
+def test_invert_curve_interpolates_within_the_swept_range():
+    curve = [
+        {"w_um": 1.0, "gm_id": 5.0},
+        {"w_um": 4.0, "gm_id": 15.0},
+    ]
+    w_um, feasible, note = size._invert_curve(curve, 10.0)
+
+    assert feasible is True
+    assert note == ""
+    assert w_um == pytest.approx(2.0)
+
+
+def test_invert_curve_clamps_to_the_closest_boundary_when_unreachable():
+    curve = [
+        {"w_um": 1.0, "gm_id": 5.0},
+        {"w_um": 4.0, "gm_id": 15.0},
+    ]
+    w_um, feasible, note = size._invert_curve(curve, 40.0)
+
+    assert feasible is False
+    assert w_um == 4.0
+    assert "highest achievable" in note
+
+
+def test_op_point_from_confirmed_normalizes_pmos_overdrive_polarity():
+    """Two PDK conventions report a PMOS operating point differently: a bare
+    SPICE `level=1` device returns negative Vgs/Vth, sky130's
+    `__pfet_01v8` subcircuit returns positive magnitudes. Both describe the
+    same strongly-inverted device, and both must classify as `strong` --
+    keying the polarity off `sign(Vth)` is what makes that true (issue #768:
+    the coupled topology's mirror load is a PMOS)."""
+    device = {"kind": "pmos", "l_um": 0.5, "nf": 1, "mult": 1}
+    negative_convention = {
+        "w_um": 4.0,
+        "gm_s": -1e-4,
+        "id_a": -1e-5,
+        "vgs_v": -0.9,
+        "vth_v": -0.5,
+        "vdsat_v": None,
+    }
+    positive_convention = dict(negative_convention, vgs_v=1.2, vth_v=1.0)
+
+    negative_op, _gm_id, negative_vov, _approx = size._op_point_from_confirmed(
+        negative_convention, device
+    )
+    positive_op, _gm_id, positive_vov, _approx = size._op_point_from_confirmed(
+        positive_convention, device
+    )
+
+    assert negative_vov == pytest.approx(0.4)
+    assert negative_op["inversion_level"] == "strong"
+    assert positive_vov == pytest.approx(0.2)
+    assert positive_op["inversion_level"] == "strong"
+
+
+def test_parse_topology_log_groups_instances_and_node_voltages():
+    log_text = "\n".join(
+        [
+            "** ngspice-99",
+            "KLT_SIZE_INSTANCE tail",
+            "@m.xtail.mnmos_demo[gm] = 1.5e-04",
+            "@m.xtail.mnmos_demo[id] = 2.0e-05",
+            "KLT_SIZE_INSTANCE input_a",
+            "@m.xinputa.mnmos_demo[gm] = 1.0e-04",
+            "@m.xinputa.mnmos_demo[id] = 1.0e-05",
+            "KLT_SIZE_INSTANCE __nodes__",
+            "v(out) = 8.9e-01",
+            "v(tail) = 2.0e-01",
+        ]
+    )
+
+    points, nodes = size._parse_topology_log(log_text)
+
+    assert points["tail"]["gm_s"] == pytest.approx(1.5e-4)
+    assert points["input_a"]["id_a"] == pytest.approx(1.0e-5)
+    # Instances the deck never printed are present-but-None, so a caller can
+    # tell "ran but incomplete" from "never ran" (same convention as
+    # `_parse_sweep_log`).
+    assert points["mirror_b"] is None
+    assert nodes == {"out": pytest.approx(0.89), "tail": pytest.approx(0.2)}
+
+
+def test_write_topology_deck_assembles_the_real_coupled_circuit(tmp_path):
+    """The joint deck must be the *actual* topology -- six instances, a
+    diode-connected tail replica, the DC-only feedback network that holds
+    the output at the common-mode point -- not a per-device surrogate."""
+    devices = size._parse_topology_devices(
+        _base_topology_request()["devices"], "diff_pair_mirror_tail"
+    )
+    budget = size._parse_topology_budget(
+        {"tail_current_a": 2e-5, "tail_mirror_ratio": 4}
+    )
+    deck_path = tmp_path / "joint.cir"
+
+    size._write_topology_deck(
+        deck_path=str(deck_path),
+        devices=devices,
+        widths_um={"tail": 3.0, "input_pair": 4.0, "mirror": 5.0},
+        corner={"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+        budget=budget,
+        vcm_v=0.9,
+        models_lib="models.lib",
+    )
+    deck = deck_path.read_text()
+
+    # Diode-connected tail replica fed by the (ratio-scaled) reference
+    # current, tail device mirroring it up by `tail_mirror_ratio`.
+    assert "Iref vdd nbias DC 5e-06" in deck
+    assert "Xtailref nbias nbias 0 0 nmos_demo" in deck
+    assert "Xtail tail nbias 0 0 nmos_demo" in deck
+    assert "mult=4.0" in deck
+    # Input pair sources tied to the tail node; mirror diode leg on n1.
+    assert "Xinputa n1 inp tail 0 nmos_demo" in deck
+    assert "Xinputb out inn tail 0 nmos_demo" in deck
+    assert "Xmirrora n1 n1 vdd vdd pmos_demo" in deck
+    assert "Xmirrorb out n1 vdd vdd pmos_demo" in deck
+    # DC-only feedback network (short at DC, open at AC).
+    assert "Lfb out inn" in deck
+    assert "Cfb inn cm" in deck
+    # Every instance instrumented, plus the coupled node voltages.
+    for key, _instance, _role, _control in size.TOPOLOGY_INSTANCES:
+        assert f"KLT_SIZE_INSTANCE {key}" in deck
+    assert "print v(out)" in deck
+
+
+# --- evaluator-error path, stubbed (no real ngspice needed) ---------------- #
+
+
+def test_run_size_topology_stubbed_missing_binary_is_evaluator_error(
+    tmp_path, monkeypatch
+):
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+    _stub_subprocess_run(monkeypatch, side_effect=FileNotFoundError("no ngspice"))
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    assert report["devices"] is None
+    assert report["budget"]["measured"] is None
+    # `method` is populated on every status, including this one.
+    assert "Evaluator error" in report["method"]["rationale"]
+    assert report["roles"]["tail"]["target_gm_id"] == 20.0
+
+
+def test_cli_topology_exit_code_evaluator_errored(tmp_path, monkeypatch):
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+    _stub_subprocess_run(monkeypatch, side_effect=FileNotFoundError("no ngspice"))
+
+    assert main(["size", str(request), "--format", "json"]) == 4
+
+
+# --- real ngspice against the tiny synthetic library ----------------------- #
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_solves_every_device_jointly(tmp_path):
+    """Issue #768's first acceptance criterion: one request spanning a
+    diff-pair + mirror + tail returns a sized operating point for *all*
+    devices jointly, validated in ngspice."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", report["method"]["rationale"]
+    assert report["topology"] == "diff_pair_mirror_tail"
+
+    # Three solved widths shared by six reported instances.
+    assert set(report["roles"]) == set(size.TOPOLOGY_ROLES)
+    assert set(report["devices"]) == {
+        key for key, _i, _r, _c in size.TOPOLOGY_INSTANCES
+    }
+    for role in size.TOPOLOGY_ROLES:
+        assert report["roles"][role]["w_um"] > 0
+    for key, _instance, role, _control in size.TOPOLOGY_INSTANCES:
+        entry = report["devices"][key]
+        assert entry["role"] == role
+        assert entry["operating_point"]["w_um"] == report["roles"][role]["w_um"]
+
+    # The joint solve actually ran against the assembled circuit.
+    solve = report["joint_solve"]
+    assert solve["converged"] is True
+    assert solve["iterations_run"] >= 1
+    for step in solve["iterations"]:
+        assert set(step["widths_um"]) == set(size.TOPOLOGY_ROLES)
+
+    # Every control device hit its target *in circuit*, not in a
+    # diode-connected surrogate.
+    tol = report["tolerance"]["gm_id_rel"]
+    for role in size.TOPOLOGY_ROLES:
+        control = report["devices"][size._ROLE_CONTROL_INSTANCE[role]]
+        assert abs(control["margins"]["gm_id_rel_error"]) <= tol
+        assert control["operating_point"]["gm_id"] == pytest.approx(
+            report["roles"][role]["target_gm_id"], rel=tol
+        )
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_reports_measured_coupled_quantities(tmp_path):
+    """The tail current split and the realized mirror ratio are *outputs*
+    of the coupled solve -- the balanced topology should deliver ~50/50 and
+    ~1:1, and the response has to say so rather than echo the request."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+
+    report = size.run_size(str(request))
+    measured = report["budget"]["measured"]
+
+    assert measured["tail_split"][0] == pytest.approx(0.5, abs=0.02)
+    assert measured["tail_split"][1] == pytest.approx(0.5, abs=0.02)
+    assert measured["mirror_ratio"] == pytest.approx(1.0, rel=0.05)
+    assert measured["tail_current_a"] == pytest.approx(
+        report["budget"]["tail_current_a"], rel=0.25
+    )
+    # The output node is held at the common-mode point by the DC feedback
+    # network, not floating to a rail.
+    assert report["bias"]["vout_v"] == pytest.approx(report["bias"]["vcm_v"], abs=0.05)
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_every_device_states_gm_id_and_inversion(tmp_path):
+    """Issue #768's third acceptance criterion: every device's result states
+    its gm/Id and its inversion-level rationale."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+
+    report = size.run_size(str(request))
+
+    for key, entry in report["devices"].items():
+        op = entry["operating_point"]
+        assert op["gm_id"] > 0
+        assert op["inversion_level"] in {"weak", "moderate", "strong"}
+        rationale = entry["rationale"]
+        assert "gm/Id" in rationale
+        assert f"Inversion level '{op['inversion_level']}'" in rationale
+        assert entry["placement"], key
+        # Both PMOS mirror legs must classify from a positive overdrive --
+        # the polarity normalization is what keeps them off "weak".
+        if entry["device"]["kind"] == "pmos":
+            assert op["vov_v"] > 0
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_joint_iteration_improves_on_the_seeded_widths(tmp_path):
+    """The point of the joint solve: the seeded widths (iteration 0) come
+    from per-role, diode-connected sizing -- exactly what "three independent
+    single-device solves" would produce -- and the coupled iteration must
+    measurably improve on them when the assembled circuit disagrees.
+
+    The mid-supply common-mode bias below puts the tail device at a Vds far
+    from the Vgs its diode-connected characterization assumed, so the seeded
+    widths land visibly off target in the assembled circuit; a tight
+    tolerance then forces at least one correction step.
+    """
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_topology_request(
+            target={
+                "input_pair": {"gm_id": 12.0},
+                "mirror": {"gm_id": 10.0},
+                "tail": {"gm_id": 10.0},
+            },
+            bias={"vcm_v": 0.9},
+            tolerance={"gm_id_rel": 0.005},
+            options={"sweep_points": 25, "max_joint_iterations": 5},
+        ),
+    )
+
+    report = size.run_size(str(request))
+    steps = [s for s in report["joint_solve"]["iterations"] if s["status"] == "ok"]
+
+    assert len(steps) >= 2, "tight tolerance should have forced a correction step"
+    assert steps[-1]["worst_abs_rel_error"] < steps[0]["worst_abs_rel_error"]
+    # ...and the widths genuinely moved between candidates.
+    assert steps[-1]["widths_um"] != steps[0]["widths_um"]
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_infeasible_target_reports_fail(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_topology_request(
+            target={
+                "input_pair": {"gm_id": 500.0},
+                "mirror": {"gm_id": 12.0},
+                "tail": {"gm_id": 20.0},
+            }
+        ),
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "fail"
+    assert report["roles"]["input_pair"]["feasible"] is False
+    assert report["method"]["feasible"] is False
+    assert "not reachable" in report["devices"]["input_a"]["rationale"]
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_topology_keep_artifacts_writes_decks(tmp_path):
+    _write_models_lib(tmp_path)
+    outdir = tmp_path / "artifacts"
+    request = _write_request(
+        tmp_path,
+        _base_topology_request(
+            options={"sweep_points": 10, "keep_artifacts": True},
+        ),
+    )
+
+    report = size.run_size(str(request), artifacts_dir=str(outdir))
+
+    assert (outdir / "tail_sweep.cir").is_file()
+    assert (outdir / "input_pair_sweep.cir").is_file()
+    assert (outdir / "mirror_sweep.cir").is_file()
+    assert (outdir / "joint_0.cir").is_file()
+    assert report["environment"]["artifacts_dir"] == str(outdir)
+
+
+@_SKIP_NO_NGSPICE
+def test_cli_topology_text_output(tmp_path, capsys):
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_topology_request())
+
+    assert main(["size", str(request), "--format", "text"]) == 0
+
+    captured = capsys.readouterr()
+    assert "topology: diff_pair_mirror_tail" in captured.out
+    assert "solved widths:" in captured.out
+    assert "[input_a] xinputa -- input_pair [control]" in captured.out
+    assert "joint solve:" in captured.out
+
+
+@_SKIP_NO_NGSPICE
+def test_examples_size_topology_worked_example_passes():
+    exit_code = main(
+        ["size", str(EXAMPLES_DIR / "topology_request.json"), "--format", "json"]
+    )
+    assert exit_code == 0
+
+
+# --- canary reproduction against the real sky130A models ------------------- #
+
+
+_CANARY_INSTANCE_TO_ROLE = {"xm5": "tail", "xm1": "input_pair", "xm3": "mirror"}
+_CANARY_OP_ELEMENT = {
+    "xm5": "msky130_fd_pr__nfet_01v8",
+    "xm1": "msky130_fd_pr__nfet_01v8",
+    "xm3": "msky130_fd_pr__pfet_01v8",
+}
+
+
+def _measure_canary_gm_id(tmp_path: Path) -> dict[str, float]:
+    """Measure the *hand-sized* 5T OTA canary's own per-role in-circuit
+    gm/Id, by running its committed netlist (`examples/design-pipeline/
+    ota_5t.spice`, W/L recorded in `05-sizing.json`) through ngspice at the
+    `tt`/27C/1.8V corner.
+
+    This is the spec the joint solver is then handed: it never sees the
+    canary's widths, only the gm/Id the hand-sized design achieves and the
+    shared tail-current budget. Reproducing the widths from that is the
+    non-trivial part.
+    """
+    deck = tmp_path / "canary_ref.cir"
+    log = tmp_path / "canary_ref.log"
+    lines = [
+        "* klt size test -- hand-sized 5T OTA canary reference operating point",
+        f".lib {SKY130_NGSPICE_LIB} tt",
+        f".include {CANARY_DIR / 'ota_5t.spice'}",
+        ".temp 27",
+        ".control",
+        "op",
+    ]
+    for instance, role in _CANARY_INSTANCE_TO_ROLE.items():
+        lines.append(f"echo KLT_SIZE_INSTANCE {role}")
+        lines.append(f"print @m.{instance}.{_CANARY_OP_ELEMENT[instance]}[gm]")
+        lines.append(f"print @m.{instance}.{_CANARY_OP_ELEMENT[instance]}[id]")
+    lines += ["quit", ".endc", ".end"]
+    deck.write_text("\n".join(lines) + "\n")
+
+    subprocess.run(
+        ["ngspice", "-b", str(deck), "-o", str(log)],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    values: dict[str, dict[str, float]] = {}
+    current: str | None = None
+    for raw in log.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        marker = size._INSTANCE_MARKER_RE.match(line)
+        if marker:
+            current = marker.group(1)
+            values[current] = {}
+            continue
+        match = size._OP_VALUE_RE.match(line)
+        if match and current is not None:
+            values[current][match.group(1)] = float(match.group(2))
+    return {
+        role: abs(entry["gm"]) / abs(entry["id"])
+        for role, entry in values.items()
+        if entry.get("gm") is not None and entry.get("id")
+    }
+
+
+@_SKIP_NO_SKY130_NGSPICE
+def test_reproduces_canary_5t_ota_topology_jointly(tmp_path):
+    """Issue #768's second acceptance criterion: the jointly-sized result is
+    validated in ngspice and reproduces the hand-sized reference on the same
+    spec.
+
+    The reference is this repo's own hand-sized, corner-verified 5T OTA
+    canary (`examples/design-pipeline/`, `05-sizing.json`): an NMOS input
+    pair (M1/M2, 8/0.5 um), a PMOS mirror load (M3/M4, 6/1 um) and an NMOS
+    tail with its bias replica (M5/M5b, 10/1 um), biased at 20 uA with a 1:1
+    tail mirror, whose open-loop AC response passed all 20 declared corners
+    (`sim-ac.result.json`). The curator's own reconciliation on #768
+    recommends this canary over the LDO error amp named in the epic phase
+    description, which only models its error amp behaviorally.
+
+    The *spec* handed to `klt size` is the canary's own measured per-role
+    in-circuit gm/Id (`_measure_canary_gm_id`) plus its tail-current budget
+    and channel lengths -- never its widths. The solver has to invert the
+    coupled circuit to get those back.
+
+    Two things are asserted, and deliberately with different strictness:
+
+    1. **Reproduces the spec** (tight): every role's control device lands
+       within the requested gm/Id tolerance *in the assembled circuit*.
+       This is the "validated in ngspice" half, and it is a real bar --
+       the seeded, per-role diode-connected widths do not meet it.
+    2. **Reproduces the reference widths** (a factor-of-two band, matching
+       `test_reproduces_canary_5t_ota_input_pair`'s own precedent): the
+       hand-sized design is one point on a shallow gm/Id-vs-W curve, and
+       the canary's committed evidence spans a wide corner range while this
+       command sizes at one nominal corner. A tighter band would encode
+       PDK-release-specific numbers as a regression bar.
+    """
+    sizing = json.loads((CANARY_DIR / "05-sizing.json").read_text())
+    ac_result = json.loads((CANARY_DIR / "sim-ac.result.json").read_text())
+    devices = sizing["devices"]
+    tail_current_a = sizing["bias"]["tail_current_ua"] * 1e-6
+
+    reference_gm_id = _measure_canary_gm_id(tmp_path)
+    assert set(reference_gm_id) == set(size.TOPOLOGY_ROLES), (
+        "could not measure the hand-sized canary's own operating point: "
+        f"{reference_gm_id}"
+    )
+
+    # Cross-check the measured input-pair gm/Id against the same committed
+    # AC evidence `test_reproduces_canary_5t_ota_input_pair` derives its
+    # target from (`gm1 = 2*pi*CL*ugf`, averaged over the four tt corners),
+    # so this test is anchored to simulation evidence, not only to a fresh
+    # measurement of the netlist.
+    tt_ugf = [
+        measurement["value"]
+        for corner in ac_result["corners"]
+        if corner["process"] == "tt"
+        for measurement in corner["measurements"]
+        if measurement["name"] == "ugf"
+    ]
+    ac_derived_gm_id = (
+        2 * math.pi * (sizing["load_cap_pf"] * 1e-12) * (sum(tt_ugf) / len(tt_ugf))
+    ) / (tail_current_a / 2)
+    assert reference_gm_id["input_pair"] == pytest.approx(ac_derived_gm_id, rel=0.5)
+
+    request = _write_request(
+        tmp_path,
+        {
+            "topology": "diff_pair_mirror_tail",
+            "devices": {
+                "input_pair": {
+                    "kind": "nmos",
+                    "model": devices["M1"]["model"],
+                    "l_um": devices["M1"]["l_um"],
+                    "w_min_um": 1.0,
+                    "w_max_um": 40.0,
+                },
+                "mirror": {
+                    "kind": "pmos",
+                    "model": devices["M3"]["model"],
+                    "l_um": devices["M3"]["l_um"],
+                    "w_min_um": 1.0,
+                    "w_max_um": 40.0,
+                },
+                "tail": {
+                    "kind": "nmos",
+                    "model": devices["M5"]["model"],
+                    "l_um": devices["M5"]["l_um"],
+                    "w_min_um": 1.0,
+                    "w_max_um": 40.0,
+                },
+            },
+            "models": {
+                "pdk": "sky130A",
+                "lib": "libs.tech/ngspice/sky130.lib.spice",
+            },
+            "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+            "budget": {"tail_current_a": tail_current_a, "tail_mirror_ratio": 1},
+            "target": {
+                role: {"gm_id": reference_gm_id[role]} for role in size.TOPOLOGY_ROLES
+            },
+            # The canary's own common-mode operating point.
+            "bias": {"vcm_v": 0.9},
+            "tolerance": {"gm_id_rel": 0.05},
+            "options": {
+                # Same reasoning as `test_reproduces_canary_5t_ota_input_pair`
+                # (#730): the real sky130A deck's wall-clock cost is dominated
+                # by host contention, so give each invocation a ceiling well
+                # above `size.DEFAULT_TIMEOUT_S`.
+                "sweep_points": 12,
+                "max_joint_iterations": 4,
+                "timeout_s": 900,
+            },
+        },
+        name="canary_topology.json",
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", (
+        f"status={report['status']!r}, rationale="
+        f"{report.get('method', {}).get('rationale')!r}"
+    )
+    assert report["joint_solve"]["converged"] is True
+
+    # (1) Reproduces the spec, confirmed by ngspice on the assembled circuit.
+    tol = report["tolerance"]["gm_id_rel"]
+    for role in size.TOPOLOGY_ROLES:
+        control = report["devices"][size._ROLE_CONTROL_INSTANCE[role]]
+        assert control["operating_point"]["gm_id"] == pytest.approx(
+            reference_gm_id[role], rel=tol
+        ), f"{role}: {control['rationale']}"
+
+    # (2) Reproduces the hand-sized widths within the documented band.
+    hand_sized = {
+        "input_pair": devices["M1"]["w_um"],
+        "mirror": devices["M3"]["w_um"],
+        "tail": devices["M5"]["w_um"],
+    }
+    for role, reference_w_um in hand_sized.items():
+        sized_w_um = report["roles"][role]["w_um"]
+        assert reference_w_um / 2 <= sized_w_um <= reference_w_um * 2, (
+            f"{role}: sized W={sized_w_um:.3g}um is not within a factor of "
+            f"two of the canary's hand-sized W={reference_w_um}um"
+        )
+
+    # The coupled quantities the assembled circuit actually delivered.
+    measured = report["budget"]["measured"]
+    assert measured["tail_split"][0] == pytest.approx(0.5, abs=0.02)
+    assert measured["mirror_ratio"] == pytest.approx(1.0, rel=0.05)
+
+    # Every device -- all six instances, not just the three solved roles --
+    # states its own gm/Id and inversion-level rationale.
+    assert len(report["devices"]) == 6
+    for entry in report["devices"].values():
+        assert entry["operating_point"]["inversion_level"] in {
+            "weak",
+            "moderate",
+            "strong",
+        }
+        assert "gm/Id" in entry["rationale"]
+        assert "Inversion level" in entry["rationale"]

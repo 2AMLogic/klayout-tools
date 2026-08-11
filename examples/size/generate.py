@@ -104,6 +104,73 @@ def write_request() -> None:
     print(f"wrote {path}")
 
 
+def write_topology_request() -> None:
+    """The coupled ``diff_pair_mirror_tail`` worked example (issue #768,
+    Phase 1a of epic #705): sizes an NMOS input pair, a PMOS mirror load,
+    and an NMOS tail current source as one joint problem, on the same
+    synthetic ``nmos_demo``/``pmos_demo`` library `write_models_lib` writes
+    above -- reusing it rather than a second synthetic library, since the
+    coupled topology needs exactly the NMOS/PMOS pair that library already
+    provides.
+
+    ``bias.vcm_v`` (1.3V, well above the ``Vdd/2`` default) is set
+    explicitly here: at this synthetic model's textbook square-law
+    parameters and these gm/Id targets, the default mid-supply common-mode
+    bias leaves too little drain-source headroom for the tail device to
+    stay in saturation once the topology is actually assembled -- exactly
+    the kind of coupling a per-device diode-connected solve cannot see, and
+    the reason this command solves against the assembled circuit instead
+    (see `docs/cli/size.md`'s "Coupled multi-device topology sizing").
+    `tests/test_size.py`'s
+    `test_examples_size_topology_worked_example_passes` runs this live and
+    asserts the joint solve converges with every device reporting `status:
+    "pass"`.
+    """
+    request = {
+        "topology": "diff_pair_mirror_tail",
+        "devices": {
+            "input_pair": {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 60,
+            },
+            "mirror": {
+                "kind": "pmos",
+                "model": "pmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 60,
+            },
+            "tail": {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 60,
+            },
+        },
+        "models": {"lib": "models.lib"},
+        "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+        "budget": {"tail_current_a": 2e-05, "tail_mirror_ratio": 1},
+        "target": {
+            "input_pair": {"gm_id": 20.0},
+            "mirror": {"gm_id": 12.0},
+            "tail": {"gm_id": 20.0},
+        },
+        "bias": {"vcm_v": 1.3},
+        "tolerance": {"gm_id_rel": 0.05},
+        "options": {"sweep_points": 25, "max_joint_iterations": 6},
+    }
+    path = os.path.join(_DIR, "topology_request.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {path}")
+
+
 if __name__ == "__main__":
     write_models_lib()
     write_request()
+    write_topology_request()
