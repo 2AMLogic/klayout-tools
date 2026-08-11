@@ -1233,7 +1233,17 @@ def _stage_script_lines(
             f"set_wire_rc -layer {io_spec['layer_v']}",
             "estimate_parasitics -placement",
             f"clock_tree_synthesis -root_buf {buf_cell} -buf_list {buf_cell}",
+            # Post-CTS parasitics must be re-estimated (the clock tree just
+            # added real buffers/wire) *before* hold repair runs -- hold
+            # slack is only meaningful once a real clock tree (with real
+            # skew) exists, the general reason production flows run
+            # hold-fixing immediately after CTS, not before (survey
+            # section 2.7/3.2, `docs/design/place-and-route-improvements-
+            # survey.md`). `repair_timing -hold` inserts hold buffers,
+            # which `detailed_placement` below then legalizes alongside
+            # CTS's own buffers -- one legalization pass covers both.
             "estimate_parasitics -placement",
+            "repair_timing -hold",
             "detailed_placement",
         ]
     else:  # stage == "route"

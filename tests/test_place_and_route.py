@@ -1446,6 +1446,32 @@ def test_place_stage_enables_routability_and_timing_driven_global_placement(
     )
 
 
+def test_cts_stage_runs_post_cts_hold_repair(tmp_path, monkeypatch):
+    """Issue #746 (P&R survey #735 section 3.2, priority 2): post-CTS hold-
+    timing repair -- `repair_timing -hold` must run after
+    `clock_tree_synthesis` (with fresh post-CTS parasitics, needed for hold
+    slack to be meaningful) and before the stage's closing
+    `detailed_placement`, so hold-fixing buffers get legalized in the same
+    pass as CTS's own buffers."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    assert "repair_timing -hold" in cts_lines
+
+    cts_index = next(
+        i for i, line in enumerate(cts_lines) if line.startswith("clock_tree_synthesis")
+    )
+    hold_index = cts_lines.index("repair_timing -hold")
+    placement_index = max(
+        i for i, line in enumerate(cts_lines) if line == "detailed_placement"
+    )
+    assert cts_index < hold_index < placement_index
+
+
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
     """`--pdk` (issue #629) selects a specific installed variant, beating
     `$PDK` -- mirroring `klt extract`'s identical flag."""
