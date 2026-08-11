@@ -14,6 +14,7 @@
     "extract.abstracted_cells_count": 0,
     "extract.black_box_regions_count": 0,
     "extract.dbu_um": 0.001,
+    "extract.dead_metal_count": 4,
     "extract.device_classes_count": 6,
     "extract.device_count": 9,
     "extract.device_counts.nfet": 9,
@@ -30,7 +31,7 @@
     "extract.unbiased_pmos_body_nets_count": 0,
     "extract.unmodelled_poly_count": 0,
     "extract.voltage_domain_warnings_count": 0,
-    "extract.warnings_count": 2,
+    "extract.warnings_count": 3,
     "gen_compose.bbox_um.x0": 0.0,
     "gen_compose.bbox_um.x1": {
       "value": 13.440000000000001,

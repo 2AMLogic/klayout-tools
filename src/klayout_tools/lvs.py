@@ -1048,7 +1048,10 @@ def _resolve_layout(
             # which voltage-domain model a MOS device happens to bind to.
             # The 10th return (abstracted_cells, #620) is `klt extract
             # --abstract-cells`'s own report; `klt lvs` never passes that
-            # flag, so it is always an empty list here.
+            # flag, so it is always an empty list here. The 11th return
+            # (dead_metal, #676) is likewise a report-only structured view of
+            # `klt extract`'s own warnings -- routing geometry on no net
+            # cannot change which devices/nets the compare below sees.
             (
                 netlist,
                 top_cell_name,
@@ -1060,6 +1063,7 @@ def _resolve_layout(
                 _unmodelled_poly,
                 _voltage_domain_warnings,
                 _abstracted_cells,
+                _dead_metal,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

@@ -1944,6 +1944,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _dummy_devices_dropped,
         _unmodelled_poly,
         _abstracted_cells,
+        _dead_metal,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -3016,6 +3017,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _dummy_devices_dropped,
         _unmodelled_poly,
         _abstracted_cells,
+        _dead_metal,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -6780,3 +6782,212 @@ def test_partial_dummy_marker_on_bipolar_is_a_clean_cut_not_a_drop(
 
     assert report["dummy_devices_dropped"] == 0
     assert report["device_counts"] == {"pnp": 1}
+
+
+# --------------------------------------------------------------------------- #
+# dead_metal (issue #676): routing-stack geometry that joins no extracted net.
+# The `l2n` connectivity graph is the oracle -- so XY overlap between adjacent
+# metal levels is deliberately NOT connection: only a same-layer touch or a
+# via landing joins two shapes.
+# --------------------------------------------------------------------------- #
+
+
+def _make_dead_metal_layout(
+    *,
+    via_on_island: bool = False,
+    island_label: str | None = None,
+    second_island_shape: bool = False,
+    island_shapes: bool = True,
+) -> kdb.Layout:
+    """The sky130 inverter fixture with the `Y` drain pad routed up onto a
+    long met1 wire, plus (by default) a met2 island that *projects over* that
+    live met1 wire without any via between them.
+
+    The met1 wire is genuinely netted (mcon down to the labelled li1 `Y` pad,
+    which reaches both transistors' drains). The met2 island overlaps it in
+    XY only -- the exact false-connection the hand-rolled check behind issue
+    #676 got wrong first time -- so it must still be reported as dead.
+
+    - ``via_on_island`` drops a via (68/44) in the overlap, which *is*
+      electrical contact: the island joins net `Y` and stops being dead.
+    - ``island_label`` draws a met2.pin (69/5) text on the island, making it
+      a named net `_purge_preserving_named_nets` rescues -- the labelled
+      floating power-strap case that must not be a false positive.
+    - ``second_island_shape`` abuts a second met2 box to the first, so the
+      two drawn shapes form one dead *cluster* of two shapes.
+    - ``island_shapes=False`` omits the island entirely: a fully-netted
+      control layout.
+    """
+    layout = _make_inverter_layout()
+    top = layout.top_cell()
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # mcon over the labelled li1 `Y` drain pad, up onto a long met1 wire.
+    draw(67, 44, kdb.Box(1700, 400, 1900, 600))
+    draw(68, 20, kdb.Box(1600, 300, 5000, 700))
+
+    if not island_shapes:
+        return layout
+
+    # met2 island directly over the live met1 wire -- projection only.
+    draw(69, 20, kdb.Box(4000, 250, 4600, 750))
+    if second_island_shape:
+        draw(69, 20, kdb.Box(4600, 250, 5000, 750))
+    if via_on_island:
+        draw(68, 44, kdb.Box(4100, 400, 4300, 600))
+    if island_label is not None:
+        top.shapes(layout.layer(69, 5)).insert(
+            kdb.Text(island_label, kdb.Trans(4300, 500))
+        )
+
+    return layout
+
+
+def test_dead_metal_reports_projection_only_overlap_as_dead(tmp_path):
+    """A met2 island that overlaps a live met1 wire in XY but has no via
+    landing on it joins no extracted net, and is reported in `dead_metal[]`
+    with its layer, bounding box and drawn-shape count -- XY overlap between
+    adjacent levels is not electrical contact."""
+    path = _write_gds(_make_dead_metal_layout(), tmp_path / "dead.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "dead.spice"))
+
+    assert len(report["dead_metal"]) == 1, report["dead_metal"]
+    entry = report["dead_metal"][0]
+    assert entry["role"] == "metal2"
+    assert (entry["layer"], entry["datatype"]) == (69, 20)
+    assert entry["shapes"] == 1
+    assert entry["bbox_um"] == {
+        "left": 4.0,
+        "bottom": 0.25,
+        "right": 4.6,
+        "top": 0.75,
+    }
+    assert entry["area_um2"] == pytest.approx(0.3)
+
+
+def test_dead_metal_via_landing_is_electrical_contact(tmp_path):
+    """Counterfactual for the test above: the same island with a via in the
+    overlap joins net `Y` and is not reported -- the diagnostic keys off the
+    extracted connectivity graph, not geometric proximity."""
+    path = _write_gds(
+        _make_dead_metal_layout(via_on_island=True), tmp_path / "live.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "live.spice"))
+
+    assert report["dead_metal"] == []
+    net_names = {n["name"] for n in report["nets"]}
+    assert "Y" in net_names
+
+
+def test_dead_metal_empty_on_a_fully_netted_layout(tmp_path):
+    """No false positives: a layout whose every routing shape reaches a
+    device reports an empty `dead_metal[]` and no dead-metal warning."""
+    path = _write_gds(
+        _make_dead_metal_layout(island_shapes=False), tmp_path / "netted.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "netted.spice"))
+
+    assert report["dead_metal"] == []
+    assert not any("dead" in w for w in report["warnings"])
+
+
+def test_dead_metal_groups_touching_shapes_into_one_cluster(tmp_path):
+    """Two abutting dead met2 boxes are one connected cluster, reported as a
+    single entry whose `shapes` count is 2 and whose bbox spans both -- one
+    place for a human to go look, not one entry per drawn polygon."""
+    path = _write_gds(
+        _make_dead_metal_layout(second_island_shape=True), tmp_path / "cluster.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "cluster.spice"))
+
+    assert len(report["dead_metal"]) == 1, report["dead_metal"]
+    entry = report["dead_metal"][0]
+    assert entry["shapes"] == 2
+    assert entry["bbox_um"] == {
+        "left": 4.0,
+        "bottom": 0.25,
+        "right": 5.0,
+        "top": 0.75,
+    }
+
+
+def test_dead_metal_labelled_floating_strap_is_not_dead(tmp_path):
+    """A labelled floating strap (bond pad, seal ring, power mesh) survives
+    extraction as a real, named, pinned net -- so its geometry *does* join an
+    extracted net and must not be reported, even though it touches no
+    device."""
+    path = _write_gds(
+        _make_dead_metal_layout(island_label="VDD_MESH"), tmp_path / "strap.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "strap.spice"))
+
+    assert "VDD_MESH" in {n["name"] for n in report["nets"]}
+    assert report["dead_metal"] == []
+
+
+def test_dead_metal_appends_one_aggregate_warning(tmp_path):
+    """A non-empty `dead_metal[]` appends exactly one aggregate `warnings[]`
+    line with the cluster and shape counts baked in (issue #599's pattern),
+    not one line per cluster."""
+    path = _write_gds(
+        _make_dead_metal_layout(second_island_shape=True), tmp_path / "warn.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "warn.spice"))
+
+    dead_warnings = [w for w in report["warnings"] if "join no extracted net" in w]
+    assert len(dead_warnings) == 1, report["warnings"]
+    assert "1 routing-stack cluster" in dead_warnings[0]
+    assert "2 shapes" in dead_warnings[0]
+    assert "69/20" in dead_warnings[0]
+
+
+def test_dead_metal_reports_an_unlanded_via(tmp_path):
+    """The via levels are part of the routing stack this diagnostic covers: a
+    via cut that lands on neither the metal below nor the metal above joins
+    no net and is reported with its own via layer."""
+    layout = _make_dead_metal_layout(island_shapes=False)
+    top = layout.top_cell()
+    # A via (68/44) far from every met1/met2 shape -- lands on nothing.
+    top.shapes(layout.layer(68, 44)).insert(kdb.Box(8000, 8000, 8200, 8200))
+    path = _write_gds(layout, tmp_path / "via.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "via.spice"))
+
+    assert len(report["dead_metal"]) == 1, report["dead_metal"]
+    assert report["dead_metal"][0]["role"] == "via1"
+    assert (
+        report["dead_metal"][0]["layer"],
+        report["dead_metal"][0]["datatype"],
+    ) == (68, 44)
+
+
+def test_dead_metal_present_in_cli_json(tmp_path, capsys):
+    """`dead_metal` is part of the JSON contract and is emitted by the CLI."""
+    path = _write_gds(_make_dead_metal_layout(), tmp_path / "cli_dead.gds")
+
+    exit_code = main(["extract", str(path), "--deck", "sky130", "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dead_metal" in out
+    assert [(e["layer"], e["datatype"]) for e in out["dead_metal"]] == [(69, 20)]
+
+
+@pytest.mark.parametrize("gds", SKY130_CORPUS_FILES, ids=lambda p: p.name)
+def test_dead_metal_empty_on_sky130_corpus(gds, tmp_path):
+    """Zero findings on the real sky130 standard cells: every routing shape
+    in a signed-off library cell reaches a device, so the diagnostic must be
+    silent on all of them (the issue's no-false-positives bar, checked
+    against real layout rather than only synthetic fixtures)."""
+    report = run_extract(str(gds), "sky130", output=str(tmp_path / f"{gds.stem}.spice"))
+    assert report["dead_metal"] == [], gds.name
+
+
+@pytest.mark.parametrize("gds", GF180MCU_CORPUS_FILES, ids=lambda p: p.name)
+def test_dead_metal_empty_on_gf180mcu_corpus(gds, tmp_path):
+    """gf180mcu counterpart of the sky130 corpus check above."""
+    report = run_extract(
+        str(gds), "gf180mcu", output=str(tmp_path / f"{gds.stem}.spice")
+    )
+    assert report["dead_metal"] == [], gds.name

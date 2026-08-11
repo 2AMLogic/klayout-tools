@@ -400,6 +400,17 @@ def run_extract(
                 },
                 ...
             ],
+            "dead_metal": [
+                {
+                    "role": str, "layer": int, "datatype": int,
+                    "bbox_um": {
+                        "left": float, "bottom": float,
+                        "right": float, "top": float,
+                    },
+                    "shapes": int, "area_um2": float,
+                },
+                ...
+            ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
             "provenance": {  # shared reproducibility block, see _provenance.py
@@ -632,6 +643,31 @@ def run_extract(
     list, empty when every net either has zero or 2+ device terminals, or is
     a declared pin.
 
+    ``dead_metal`` (issue #676) reports every connected cluster of
+    routing-stack geometry -- the deck's ``metals``/``vias`` levels -- that
+    joins **no** extracted net: nothing in ``nets[]`` mentions it, so it is
+    invisible to this report, to ``klt lvs``, and to a resimulation of the
+    written netlist. One entry per cluster (not per drawn polygon), each
+    ``{"role": "metal<i>" | "via<i>", "layer": int, "datatype": int,
+    "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int,
+    "area_um2": float}``, sorted by ``(layer, datatype, left, bottom)`` --
+    ``role``'s ``<i>`` indexes the deck's own ``metals``/``vias`` tuple
+    (``0`` = the bottom-most level), and ``shapes`` counts the drawn shapes
+    on that stream layer the cluster covers, so a reviewer knows how much
+    geometry to go look at. The netted side of the subtraction comes from the
+    extracted connectivity graph, so **XY overlap between adjacent metal
+    levels is not connection**: a wire passing over another with no via
+    between them stays dead. A non-empty list also appends a single aggregate
+    prose entry to ``warnings[]`` (count baked in, issue #599's pattern) --
+    dead metal is often deliberate (artwork, fill, a bond-pad blank), which is
+    exactly why a reviewer should be told it is there rather than left to
+    discover it by rendering the raw geometry. A *labelled* floating cluster
+    is not dead: :func:`_purge_preserving_named_nets` keeps it as a real,
+    named, pinned net, so power straps/seal rings/bond pads that carry a
+    label never appear here. See :func:`_detect_dead_metal` and
+    ``docs/cli/extract.md``'s "Dead metal" section. Always a list, empty when
+    every metal/via shape joins a net.
+
     ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
     stack level the deck's ``ExtractionDeck.metals`` declares that has no
     matching entry in the deck's ``ParasiticsDeck.metals`` -- the
@@ -709,6 +745,7 @@ def run_extract(
         unmodelled_poly,
         voltage_domain_warnings,
         abstracted_cells,
+        dead_metal,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -1028,6 +1065,13 @@ def run_extract(
         # run_extract's docstring and `_detect_single_terminal_nets` for the
         # field's full meaning.
         "single_terminal_nets": single_terminal_nets,
+        # Additive field (issue #676): always a list, empty when every
+        # routing-stack (metals/vias) shape joins an extracted net -- see
+        # run_extract's docstring and `_detect_dead_metal` for the field's
+        # full meaning. Computed inside `_extract_netlist` (it needs the live
+        # `LayoutToNetlist` shape database), which also appends its aggregate
+        # `warnings[]` entry.
+        "dead_metal": dead_metal,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -1075,12 +1119,13 @@ def extract_netlist_from_layout(
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
-    voltage_domain_warnings, abstracted_cells)``.
+    voltage_domain_warnings, abstracted_cells, dead_metal)``.
 
     ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
     ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
@@ -1215,6 +1260,7 @@ def extract_netlist_from_layout(
         dummy_devices_dropped,
         unmodelled_poly,
         abstracted_cells,
+        dead_metal,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -1251,6 +1297,7 @@ def extract_netlist_from_layout(
         unmodelled_poly,
         voltage_domain_warnings,
         abstracted_cells,
+        dead_metal,
     )
 
 
@@ -2770,6 +2817,7 @@ def _extract_netlist(
     int,
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -2801,7 +2849,7 @@ def _extract_netlist(
     algebra.
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
-    dummy_devices_dropped, unmodelled_poly, abstracted_cells)``.
+    dummy_devices_dropped, unmodelled_poly, abstracted_cells, dead_metal)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
@@ -2818,7 +2866,10 @@ def _extract_netlist(
     ``unmodelled_poly`` is the JSON response's field (issue #324) -- see
     :func:`_detect_unmodelled_poly_bodies` -- always a list, one entry per
     poly component flagged by the unmodelled-device diagnostic, empty when
-    ``warnings`` carries no unmodelled-device entry.
+    ``warnings`` carries no unmodelled-device entry. ``dead_metal`` is the
+    JSON response's field (issue #676) -- see :func:`_detect_dead_metal` --
+    one entry per routing-stack cluster that joins no surviving net, empty
+    on a layout whose every metal/via shape is netted.
 
     ``abstract_cell_patterns``/``abstract_instances``/``lef_macros`` (issue
     #620): ``abstract_instances`` is the already-collected
@@ -3038,8 +3089,9 @@ def _extract_netlist(
     metal_index: list[int] = []
     for index, region in enumerate(metals):
         metal_index.append(l2n.register(region, f"metal{index}"))
+    via_index: list[int] = []
     for index, region in enumerate(vias):
-        l2n.register(region, f"via{index}")
+        via_index.append(l2n.register(region, f"via{index}"))
     l2n.register(well_label, "well_label")
     l2n.register(poly_label, "poly_label")
     for index, texts in enumerate(metal_labels):
@@ -3632,6 +3684,43 @@ def _extract_netlist(
         netlist, deck, apply_resistor_fixed_offset=apply_resistor_fixed_offset
     )
 
+    # Dead metal (issue #676): routing-stack geometry left on no surviving
+    # net. Like the parasitics pass below, this must run *here* -- after the
+    # purge (so "the nets a caller actually sees" is the yardstick) but while
+    # `l2n` still owns the shape database `polygons_of_net` reads.
+    dead_metal = _detect_dead_metal(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        layout,
+        top_cell,
+        layout.dbu,
+        [
+            (f"metal{index}", deck.metals[index], region, metal_index[index])
+            for index, region in enumerate(metals)
+        ]
+        + [
+            (f"via{index}", deck.vias[index], region, via_index[index])
+            for index, region in enumerate(vias)
+        ],
+    )
+    if dead_metal:
+        cluster_word = "cluster" if len(dead_metal) == 1 else "clusters"
+        total_shapes = sum(entry["shapes"] for entry in dead_metal)
+        shape_word = "shape" if total_shapes == 1 else "shapes"
+        layers_str = ", ".join(
+            sorted({f"{entry['layer']}/{entry['datatype']}" for entry in dead_metal})
+        )
+        warnings.append(
+            f"{len(dead_metal)} routing-stack {cluster_word} ({total_shapes} "
+            f"{shape_word} on {layers_str}) join no extracted net -- no via "
+            "lands on this geometry and no same-layer wiring touches it, so "
+            "it is invisible to the extracted netlist and to every downstream "
+            "`klt lvs`/`klt sim` view; deliberate dead metal (artwork, fill) "
+            "is expected here, unexplained dead metal usually means the "
+            "connection you intended is missing -- see dead_metal[] for the "
+            "per-cluster layer/bbox/shape count."
+        )
+
     # Parasitics geometry must be read *before* `l2n` (which owns the shape
     # database `polygons_of_net` reads) is garbage-collected below, so compute
     # it here while the graph is still live. Returned as plain data; the R/C
@@ -3662,6 +3751,7 @@ def _extract_netlist(
         dummy_devices_dropped,
         unmodelled_poly,
         abstracted_cells,
+        dead_metal,
     )
 
 
@@ -4014,6 +4104,107 @@ def _compute_parasitics(
 
     results.sort(key=lambda entry: entry["net"])
     return results
+
+
+def _detect_dead_metal(
+    l2n: kdb.LayoutToNetlist,
+    circuit: kdb.Circuit | None,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    dbu: float,
+    routing_layers: list[tuple[str, tuple[int, int], kdb.Region, int]],
+) -> list[dict[str, Any]]:
+    """Report every routing-stack cluster that joins no extracted net (issue
+    #676) -- "dead metal".
+
+    ``routing_layers`` is one ``(role, (layer, datatype), region, index)``
+    tuple per registered ``metals``/``vias`` level: ``region`` is the exact
+    :class:`kdb.Region` handed to ``LayoutToNetlist.register`` (so black-box
+    masking and the MiM top-via exclusion are already applied to it) and
+    ``index`` is that call's returned layer index. For each level, the union
+    of ``polygons_of_net(net, index)`` over every surviving net is what the
+    extraction *did* account for; whatever is left after subtracting it is
+    geometry no ``nets[]`` entry mentions.
+
+    **Electrical contact, not projection.** The netted union comes from the
+    extracted connectivity graph, which joins two metal levels only through a
+    declared via layer -- so a wire passing under or over another wire with no
+    via between them stays two nets, and an isolated shape stays dead however
+    much it overlaps a live one in XY. That is the distinction a naive
+    ``Region.interacting()`` check across adjacent layers gets wrong.
+
+    **Why the surviving netlist is the yardstick.** KLayout gives *every*
+    connected cluster a net at ``extract_netlist()`` time, floating ones
+    included, so "has a net" is trivially true before the purge and this
+    function must run after it. A floating cluster that reaches no device is
+    exactly what ``Netlist.purge()`` drops, and a caller reading ``nets[]``
+    can no longer find its geometry anywhere -- which is the reported
+    complaint. A *labelled* floating cluster (bond pad, seal ring, power
+    strap) is rescued by :func:`_purge_preserving_named_nets` with its
+    ``cluster_id`` intact, so it stays netted and is deliberately **not**
+    reported: a named net is findable, whatever it does or does not touch.
+
+    Returns one entry per connected dead cluster (not per drawn polygon):
+    ``{"role", "layer", "datatype", "bbox_um", "shapes", "area_um2"}``, sorted
+    by ``(layer, datatype, left, bottom)``. ``role`` is ``metal<i>``/``via<i>``
+    with ``<i>`` indexing the deck's own ``metals``/``vias`` tuple (``0`` is
+    the bottom-most level), matching the names ``_extract_netlist`` registers
+    those layers under. ``shapes`` counts the *drawn* shapes on that stream
+    layer interacting with the cluster, so a human knows how much geometry to
+    go look at; a cluster that is only a fragment of a drawn shape (the part
+    of it left outside a black-box region, say) still counts that whole shape.
+    """
+    import klayout.db as kdb
+
+    nets = (
+        [net for net in circuit.each_net() if net.cluster_id != 0]
+        if circuit is not None
+        else []
+    )
+
+    dead_metal: list[dict[str, Any]] = []
+    for role, (layer, datatype), region, index in routing_layers:
+        if region.is_empty():
+            continue
+        netted = kdb.Region()
+        for net in nets:
+            netted += l2n.polygons_of_net(net, index)
+        dead = region - netted
+        if dead.is_empty():
+            continue
+        drawn = _region(layout, top_cell, (layer, datatype))
+        # Raw-polygon semantics: with KLayout's default merged semantics two
+        # abutting drawn boxes count as one polygon, which would report
+        # "1 shape" for a cluster a human has to go edit two shapes to fix.
+        drawn.merged_semantics = False
+        for component in dead.merged().each():
+            cluster = kdb.Region(component)
+            box = component.bbox()
+            dead_metal.append(
+                {
+                    "role": role,
+                    "layer": layer,
+                    "datatype": datatype,
+                    "bbox_um": {
+                        "left": round(box.left * dbu, _PARAM_PRECISION_UM),
+                        "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
+                        "right": round(box.right * dbu, _PARAM_PRECISION_UM),
+                        "top": round(box.top * dbu, _PARAM_PRECISION_UM),
+                    },
+                    "shapes": drawn.interacting(cluster).count(),
+                    "area_um2": round(cluster.area() * dbu * dbu, _PARAM_PRECISION_UM),
+                }
+            )
+
+    dead_metal.sort(
+        key=lambda entry: (
+            entry["layer"],
+            entry["datatype"],
+            entry["bbox_um"]["left"],
+            entry["bbox_um"]["bottom"],
+        )
+    )
+    return dead_metal
 
 
 def _terminal_star_positions_um(terminal_refs: list[Any]) -> list[tuple[float, float]]:
