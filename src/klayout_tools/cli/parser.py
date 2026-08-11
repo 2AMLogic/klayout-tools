@@ -57,6 +57,25 @@ def _add_format_arg(
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
 
 
+def _add_pdk_args(
+    parser: argparse.ArgumentParser,
+    *,
+    pdk_help: str = "PDK variant to resolve (e.g. sky130A); overrides $PDK",
+    pdk_root_help: str = (
+        "explicit PDK install root; overrides $PDK_ROOT and the search order"
+    ),
+    include_pdk: bool = True,
+) -> None:
+    """Register the shared ``--pdk``/``--pdk-root`` options (kicad-tools convention).
+
+    ``include_pdk=False`` registers ``--pdk-root`` only (for subcommands, like
+    ``pdk list``, that scan an install root without resolving a specific variant).
+    """
+    if include_pdk:
+        parser.add_argument("--pdk", default=None, help=pdk_help)
+    parser.add_argument("--pdk-root", dest="pdk_root", default=None, help=pdk_root_help)
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="klt",
@@ -282,19 +301,12 @@ def create_parser() -> argparse.ArgumentParser:
             "with --engine klayout, overriding --pdk/--pdk-root resolution"
         ),
     )
-    drc_parser.add_argument(
-        "--pdk",
-        default=None,
-        help=(
+    _add_pdk_args(
+        drc_parser,
+        pdk_help=(
             "PDK variant to resolve the native deck from (e.g. sky130A), "
             "for --engine klayout; overrides $PDK"
         ),
-    )
-    drc_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        default=None,
-        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
     )
     drc_parser.add_argument(
         "--timeout-s",
@@ -480,17 +492,7 @@ def create_parser() -> argparse.ArgumentParser:
             "omit to emit no SYMMETRY statement"
         ),
     )
-    lef_abstract_parser.add_argument(
-        "--pdk",
-        default=None,
-        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    lef_abstract_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        default=None,
-        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
-    )
+    _add_pdk_args(lef_abstract_parser)
     lef_abstract_parser.add_argument(
         "-o",
         "--output",
@@ -719,20 +721,13 @@ def create_parser() -> argparse.ArgumentParser:
             "(required in that case; optional otherwise)"
         ),
     )
-    extract_parser.add_argument(
-        "--pdk",
-        default=None,
-        help=(
+    _add_pdk_args(
+        extract_parser,
+        pdk_help=(
             "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
             "Optional -- extraction runs from --deck alone when omitted; "
             "when given, an unresolvable PDK is an application error."
         ),
-    )
-    extract_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        default=None,
-        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
     )
     extract_parser.add_argument(
         "--parasitics",
@@ -912,17 +907,7 @@ def create_parser() -> argparse.ArgumentParser:
     synthesize_parser.add_argument(
         "request", help="path to a klt synthesize request JSON file"
     )
-    synthesize_parser.add_argument(
-        "--pdk",
-        default=None,
-        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    synthesize_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        default=None,
-        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
-    )
+    _add_pdk_args(synthesize_parser)
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
@@ -1035,17 +1020,7 @@ def create_parser() -> argparse.ArgumentParser:
     place_and_route_parser.add_argument(
         "request", help="path to a klt place-and-route request JSON file"
     )
-    place_and_route_parser.add_argument(
-        "--pdk",
-        default=None,
-        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    place_and_route_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        default=None,
-        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
-    )
+    _add_pdk_args(place_and_route_parser)
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
 
@@ -1149,17 +1124,7 @@ def create_parser() -> argparse.ArgumentParser:
             "object (e.g. '{\"num\": 8}'); omit to use every param's default"
         ),
     )
-    gen_parser.add_argument(
-        "--pdk",
-        default=None,
-        help="PDK variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    gen_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        default=None,
-        help="explicit PDK install root; overrides $PDK_ROOT and the search order",
-    )
+    _add_pdk_args(gen_parser)
     gen_parser.add_argument(
         "--cell-name",
         dest="cell_name",
@@ -1527,14 +1492,10 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "resolved, and its per-tool asset directories."
         ),
     )
-    find_parser.add_argument(
-        "--pdk",
-        help="variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    find_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        help="explicit install root; overrides $PDK_ROOT and the search order",
+    _add_pdk_args(
+        find_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
     _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
@@ -1547,10 +1508,10 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "order. An empty result is success (exit 0), not an error."
         ),
     )
-    list_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        help="restrict the scan to this install root",
+    _add_pdk_args(
+        list_parser,
+        pdk_root_help="restrict the scan to this install root",
+        include_pdk=False,
     )
     _add_format_arg(list_parser)
     list_parser.set_defaults(func=pdk_cmd.run_list)
@@ -1565,14 +1526,10 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "tooling picked. --format json emits the same payload as `find`."
         ),
     )
-    env_parser.add_argument(
-        "--pdk",
-        help="variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    env_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        help="explicit install root; overrides $PDK_ROOT and the search order",
+    _add_pdk_args(
+        env_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
     _add_format_arg(
         env_parser, help="output format (default: text; text emits shell exports)"
@@ -1591,14 +1548,10 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "exits non-zero (3) when no library matches, so this can gate CI."
         ),
     )
-    cells_parser.add_argument(
-        "--pdk",
-        help="variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    cells_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        help="explicit install root; overrides $PDK_ROOT and the search order",
+    _add_pdk_args(
+        cells_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
     cells_parser.add_argument(
         "--supply",
@@ -1624,14 +1577,10 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "see `klt pdk cells --help`."
         ),
     )
-    macros_parser.add_argument(
-        "--pdk",
-        help="variant to resolve (e.g. sky130A); overrides $PDK",
-    )
-    macros_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        help="explicit install root; overrides $PDK_ROOT and the search order",
+    _add_pdk_args(
+        macros_parser,
+        pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
     _add_format_arg(macros_parser)
     macros_parser.set_defaults(func=pdk_cmd.run_macros)
@@ -1650,14 +1599,10 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
             "bug this command exists to surface."
         ),
     )
-    corners_parser.add_argument(
-        "--pdk",
-        help="variant to resolve (e.g. gf180mcuD); overrides $PDK",
-    )
-    corners_parser.add_argument(
-        "--pdk-root",
-        dest="pdk_root",
-        help="explicit install root; overrides $PDK_ROOT and the search order",
+    _add_pdk_args(
+        corners_parser,
+        pdk_help="variant to resolve (e.g. gf180mcuD); overrides $PDK",
+        pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
     _add_format_arg(corners_parser)
     corners_parser.set_defaults(func=pdk_cmd.run_corners)
