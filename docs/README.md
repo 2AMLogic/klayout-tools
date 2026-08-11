@@ -53,6 +53,7 @@ docs/
     digital-flow-contracts-spike.md
     digital-fleet-unit-abstraction-decision.md
     em-field-sim-spike.md
+    extract-fidelity-roadmap.md
     gen-bjt-array-spike.md
     gen-canary-bringup-phase3.md
     gen-composition-spike.md
