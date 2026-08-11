@@ -44,7 +44,9 @@ from __future__ import annotations
 from typing import Any
 
 from ._layout import load_layout
+from ._layout import region as _region
 from ._layout import select_top_cells as _select_top_cells_shared
+from ._layout import texts as _texts
 
 #: Floating-point-noise cleanup applied to every micrometre value this module
 #: reports -- same precision ``extract.py``'s ``black_box_regions`` uses.
@@ -241,21 +243,21 @@ def _components_for_cell(
     """Compute every connected component for one top ``cell``."""
     conductor_regions: dict[str, Any] = {}
     for spec in conductor_specs:
-        region = _region(kdb, layout, cell, spec["layer"])
+        region = _region(layout, cell, spec["layer"])
         if clip_box is not None:
             region &= kdb.Region(clip_box)
         conductor_regions[spec["name"]] = region
 
     via_regions: dict[str, Any] = {}
     for spec in via_specs:
-        region = _region(kdb, layout, cell, spec["layer"])
+        region = _region(layout, cell, spec["layer"])
         if clip_box is not None:
             region &= kdb.Region(clip_box)
         via_regions[spec["name"]] = region
 
     label_texts: dict[str, Any] = {}
     for spec in label_specs:
-        texts = _texts(kdb, layout, cell, spec["layer"])
+        texts = _texts(layout, cell, spec["layer"])
         if clip_box is not None:
             texts = texts.interacting(kdb.Region(clip_box))
         label_texts[spec["name"]] = texts
@@ -404,24 +406,6 @@ def _select_top_cells(layout: Any, top: str | None) -> list[Any]:
     ``ring_check.py``/``drc.py``/``precheck.py`` already share.
     """
     return _select_top_cells_shared(layout, top, ComponentsError)
-
-
-def _region(kdb: Any, layout: Any, cell: Any, layer: tuple[int, int]) -> Any:
-    """A flattened ``Region`` for ``layer`` under ``cell``, or empty when the
-    layer is absent from the stream."""
-    layer_index = layout.find_layer(*layer)
-    if layer_index is None:
-        return kdb.Region()
-    return kdb.Region(cell.begin_shapes_rec(layer_index))
-
-
-def _texts(kdb: Any, layout: Any, cell: Any, layer: tuple[int, int]) -> Any:
-    """A flattened ``Texts`` collection for ``layer`` under ``cell``, or empty
-    when the layer is absent from the stream."""
-    layer_index = layout.find_layer(*layer)
-    if layer_index is None:
-        return kdb.Texts()
-    return kdb.Texts(cell.begin_shapes_rec(layer_index))
 
 
 def _clip_box(
