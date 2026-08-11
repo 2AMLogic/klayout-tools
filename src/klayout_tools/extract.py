@@ -862,6 +862,44 @@ def run_extract(
             "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
         )
 
+    # `--pdk`-bound device classes whose target subcircuit has no parameter
+    # for something the extractor measured (issue #695): today, only a
+    # sky130 `pnp` bipolar binding, whose fixed-geometry `pnp_05v5_*` cells
+    # take no per-instance base/collector-area/perimeter or emitter-count
+    # override at all (see `pdk_models.DeviceBinding.dropped_params` and
+    # `_BIPOLAR_DROPPED_PARAMS`'s docstring for the full provenance). MOS
+    # bindings carry every measured parameter onto the `X` card as of #695
+    # (see `devices[].params`' `as_um2`/`ad_um2`/`ps_um`/`pd_um` above) and so
+    # never reach this branch. One aggregate line per affected class (not per
+    # device), mirroring `unbiased_pmos_body_nets`'s pattern just above --
+    # `device_counts` is keyed by `devices[].class`, independent of `--pdk`,
+    # so it is safe to consult here even though it was computed before the
+    # `--pdk`-bound netlist is written below.
+    if model_bindings is not None:
+        for class_name in sorted(model_bindings):
+            binding = model_bindings[class_name]
+            if not binding.dropped_params:
+                continue
+            count = device_counts.get(class_name, 0)
+            if count == 0:
+                continue
+            device_word = "device" if count == 1 else "devices"
+            params_str = "/".join(binding.dropped_params)
+            # `binding.subckt` is empty for a "bipolar" binding -- the real
+            # subcircuit name is resolved per device, from `binding.variants`
+            # (see `_select_bipolar_variant`), not fixed for the whole class
+            # -- so name the *target* generically rather than print an empty
+            # quoted string.
+            target = f"'{binding.subckt}'" if binding.subckt else "its bound target"
+            warnings.append(
+                f"--pdk binds {count} '{class_name}' {device_word} onto "
+                f"{target}, which has no parameter for the extractor's "
+                f"measured {params_str} -- these values are "
+                "dropped from the written netlist (rerun without --pdk to "
+                "recover them from the bare device-class card form). See "
+                "docs/cli/extract.md's 'SPICE model binding' section."
+            )
+
     # Nets touching exactly one device terminal and no declared pin (issue
     # #596): there is no DC path through such a node from anywhere else in
     # the netlist, so a downstream simulator hits a singular matrix on it --
@@ -4539,6 +4577,34 @@ def _describe_devices(
                 # `_apply_device_parameter_corrections`.
                 params["r_ohm"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_OHM
+                )
+            elif param.name == "AS":
+                # MOS source-diffusion junction area, square micrometres
+                # (issue #695). Present regardless of `--pdk`: this is the
+                # same value the unbound `M`-card form's `AS=...` already
+                # carries and, since #695, the same value a `--pdk`-bound `X`
+                # card's own `AS=...` carries -- so a caller reading this
+                # field never needs an unbound extraction just to recover it.
+                params["as_um2"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_UM
+                )
+            elif param.name == "AD":
+                # MOS drain-diffusion junction area, square micrometres --
+                # see `AS` above (issue #695).
+                params["ad_um2"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_UM
+                )
+            elif param.name == "PS":
+                # MOS source-diffusion junction perimeter, micrometres --
+                # see `AS` above (issue #695).
+                params["ps_um"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_UM
+                )
+            elif param.name == "PD":
+                # MOS drain-diffusion junction perimeter, micrometres -- see
+                # `AS` above (issue #695).
+                params["pd_um"] = round(
+                    device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
 
         devices.append(

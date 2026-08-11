@@ -108,11 +108,29 @@ models multi-finger/multiplied devices either (one flat
 :func:`create_model_binding_delegate` matches this real-world convention and
 the extractor's own scope by emitting only ``L``/``W`` and omitting
 ``nf``/``mult``/``par`` (left at the resolved subcircuit's own default of 1).
+
 Source/drain area+perimeter (``AS``/``AD``/``PS``/``PD``, present on the bare
-``M``-card form for parasitic-capacitance modelling) are likewise not carried
-onto the ``X`` card -- consistent with `klt extract`'s documented
-schematic-equivalent, no-parasitics scope (``klayout_tools.extract``'s module
-docstring).
+``M``-card form) **are** carried onto the ``X`` card (issue #695): both
+``sky130_fd_pr__nfet_01v8``/``pfet_01v8`` and ``nfet_03v3``/``pfet_03v3``
+declare ``as``/``ad``/``ps``/``pd`` call-site parameters (confirmed in the
+same real fetched installs, both defaulting to ``0`` -- e.g. gf180mcu's
+``.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7 + as=0 ad=0 ps=0 pd=0 ...``), so
+leaving them off the ``X`` card silently zeroed every bound MOS device's
+source/drain junction area and perimeter -- and with it, its junction
+capacitance -- even though the extractor measured the real, non-zero drawn
+values right there on the unbound card. ``write_device`` reads them the same
+way it reads ``L``/``W`` and writes them under the same (KLayout-native,
+uppercase) parameter spelling the unbound ``M``-card form already uses --
+SPICE subcircuit parameter names are matched case-insensitively by both
+PDKs' real ngspice decks, so this does not need to track each PDK's own
+lowercase spelling the way ``length_param``/``width_param`` do for
+resistor/capacitor. Areas are formatted with an explicit ``P`` (pico) unit
+suffix rather than ``U`` (micro) -- a source/drain area in square
+micrometres is numerically identical to the same value in square metres
+times ``1e-12`` (e.g. ``0.8`` um² ``== 0.8e-12`` m² ``== 0.8P``), matching
+KLayout's own default ``M``-card writer's formatting of ``AS``/``AD``
+exactly (see ``docs/cli/extract.md``'s "SPICE model binding" section for a
+worked ``M``-card/``X``-card example).
 
 **Resistor / capacitor / bipolar subcircuit names + parameter conventions,
 verified against the same real fetched PDK installs** (issue #339; every name
@@ -339,6 +357,19 @@ def _format_um(value: float) -> str:
     return f"{text or '0'}U"
 
 
+def _format_um2(value: float) -> str:
+    """Format a square-micrometre value the same way KLayout's own default
+    ``M``-card writer formats ``AS``/``AD`` (e.g. ``0.8`` -> ``"0.8P"``) --
+    ``1 um^2 == 1e-12 m^2``, the same order of magnitude the SPICE ``P``
+    (pico, ``1e-12``) unit suffix denotes, so a value already expressed in
+    square micrometres needs no numeric conversion at all, only swapping
+    ``_format_um``'s ``"U"`` (micro) suffix for ``"P"`` (issue #695).
+    """
+    rounded = round(value, _PARAM_PRECISION_UM)
+    text = f"{rounded:.{_PARAM_PRECISION_UM}f}".rstrip("0").rstrip(".")
+    return f"{text or '0'}P"
+
+
 def equivalent_rectangle_um(
     area_um2: float, perimeter_um: float
 ) -> tuple[float, float] | None:
@@ -394,6 +425,20 @@ class DeviceBinding:
     or ``c_length``/``c_width`` for gf180mcu -- see the module docstring's
     verified-provenance section). ``variants`` is the ``(nominal AE in um^2,
     subcircuit name)`` selection table for a geometry-named bipolar family.
+
+    ``dropped_params`` names every parameter the extractor measures on this
+    device class that this binding deliberately does **not** carry onto the
+    emitted ``X`` card, because the resolved target subcircuit has no
+    parameter for it (issue #695's acceptance criterion: dropping a measured
+    value silently is not acceptable -- naming it in ``warnings[]`` is). Empty
+    for ``"mos"`` (its target subcircuits all declare ``as``/``ad``/``ps``/
+    ``pd``, so nothing is dropped) and ``"resistor"``/``"capacitor"`` (their
+    only extractor-measured geometry, ``L``/``W`` or the ``A``/``P`` it is
+    derived from, is fully carried). Non-empty for ``"bipolar"``: sky130's
+    ``pnp_05v5`` cells are fixed-geometry (selected by name, not
+    parameterized -- see :attr:`variants`), so the extractor's measured base/
+    collector area+perimeter and emitter count have no call-site parameter to
+    land on at all.
     """
 
     kind: str
@@ -402,6 +447,7 @@ class DeviceBinding:
     length_param: str = "L"
     width_param: str = "W"
     variants: tuple[tuple[float, str], ...] = field(default_factory=tuple)
+    dropped_params: tuple[str, ...] = field(default_factory=tuple)
 
 
 #: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> subckt name}.
@@ -450,6 +496,18 @@ _BIPOLAR_MODEL_TABLE: dict[
         ),
     },
 }
+
+#: `DeviceClassBJT3Transistor`/`...BJT4Transistor` parameters a bound bipolar
+#: binding has no call-site parameter to carry (issue #695): sky130's
+#: `pnp_05v5_W0p68L0p68`/`_W3p40L3p40` subcircuits take only an optional
+#: `mult` (confirmed against the real fetched install -- see the module
+#: docstring's verified-provenance section), so every one of these -- all
+#: independently measured by KLayout's own device extractor, verified
+#: non-zero on a real synthetic BJT fixture -- is dropped when the device is
+#: written as an `X` card. `AE` itself is excluded: it *is* used, to select
+#: which fixed-geometry variant to call (see `_select_bipolar_variant`), so
+#: it is consumed rather than silently dropped.
+_BIPOLAR_DROPPED_PARAMS: tuple[str, ...] = ("PE", "AB", "PB", "AC", "PC", "NE")
 
 #: Per-PDK-family subcircuit length/width parameter spellings (see the module
 #: docstring): sky130 uses ``l``/``w``; gf180mcu's resistor/capacitor cells use
@@ -519,7 +577,11 @@ def resolve_device_bindings(
             # card (see `decks/gf180mcu.py:557-559` and `docs/cli/extract.md`).
             continue
         bindings[bipolar.class_name] = DeviceBinding(
-            "bipolar", "", ("C", "B", "E", "C"), variants=variants
+            "bipolar",
+            "",
+            ("C", "B", "E", "C"),
+            variants=variants,
+            dropped_params=_BIPOLAR_DROPPED_PARAMS,
         )
 
     return bindings
@@ -601,10 +663,32 @@ def create_model_binding_delegate(
                 length_um = self._device_param(device, "L") or 0.0
                 width_um = self._device_param(device, "W") or 0.0
 
+            extra_params = ""
+            if binding.kind == "mos":
+                # Source/drain junction area+perimeter (issue #695): the
+                # extractor measures these on every MOS device (see
+                # `DeviceClassMOS4Transistor`'s `AS`/`AD`/`PS`/`PD`) and both
+                # curated PDKs' target subcircuits declare matching call-site
+                # parameters (verified against a real fetched install -- see
+                # the module docstring's "Card shape" section), so nothing is
+                # dropped here the way `DeviceBinding.dropped_params`
+                # documents for bipolar. `AS`/`AD` use `_format_um2`'s `P`
+                # suffix (matching the unbound `M`-card form's own area
+                # formatting); `PS`/`PD` are lengths, so `_format_um`'s `U`
+                # suffix applies exactly as it does for `L`/`W`.
+                as_um2 = self._device_param(device, "AS") or 0.0
+                ad_um2 = self._device_param(device, "AD") or 0.0
+                ps_um = self._device_param(device, "PS") or 0.0
+                pd_um = self._device_param(device, "PD") or 0.0
+                extra_params = (
+                    f" AS={_format_um2(as_um2)} AD={_format_um2(ad_um2)}"
+                    f" PS={_format_um(ps_um)} PD={_format_um(pd_um)}"
+                )
+
             self.emit_line(
                 f"X{name} {pins} {binding.subckt} "
                 f"{binding.length_param}={_format_um(length_um)} "
-                f"{binding.width_param}={_format_um(width_um)}"
+                f"{binding.width_param}={_format_um(width_um)}{extra_params}"
             )
 
     return _ModelBindingSpiceWriterDelegate(bindings)
