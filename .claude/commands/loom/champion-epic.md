@@ -141,9 +141,12 @@ phase issues exist, so the idempotency check below never posts a new rejection.)
 
 Compute a marker keyed to a **hash of the epic's own text** (title + body), so a
 genuine revision always gets a fresh evaluation while an unchanged epic never
-gets re-commented. The check is **three-way**: no match → evaluate; match with
-skips left in the budget → skip silently; match with the budget exhausted →
-**escalate** (see the coupling note below).
+gets re-commented. Before applying that marker, also check for a **human
+operator override** (#763 — see below): a real human's comment posted after
+the last verdict/escalation always takes priority over whatever the marker
+says. With no override, the check is **three-way**: no match → evaluate; match
+with skips left in the budget → skip silently; match with the budget
+exhausted → **escalate** (see the coupling note below).
 
 ```bash
 EPIC_NUMBER=<number>
@@ -173,7 +176,37 @@ ALREADY_ROUTED=$(printf '%s\n' "$EPIC_JSON" | jq -e '.labels[] | select(.name=="
 SKIP_STREAK=0            # silent skips already recorded for THIS body revision
 ESCALATE_UNREVISED=no    # set to yes to bypass re-evaluation and go straight to Step 4's escalation
 
-if printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
+# Human operator override (#763). #713 (and siblings #700/#701/#704-#712) flapped
+# because nothing here ever looked past the bot-authored verdict/escalation
+# comments for a LATER human decision: Champion escalated, a human operator
+# posted an explicit approval overriding it, Curator re-applied `loom:epic`, and
+# the next Champion pass re-escalated anyway on the same stale
+# PRIOR_REJECTIONS/SKIP_STREAK tally. Detect the automation actor via its own
+# authenticated login (same `gh api user --jq .login` resolution `sweep.md`'s
+# `@me` handling uses) plus anything with a `[bot]`-suffixed login, and check
+# whether anyone else commented after the most recent
+# `champion:epic-verdict:body-*` / `champion:epic-escalated` marker comment.
+AUTOMATION_LOGIN=$(gh api user --jq '.login')
+LAST_VERDICT_AT=$(printf '%s\n' "$EPIC_JSON" | jq -r \
+  '[.comments[] | select(.body | test("<!-- champion:epic-verdict:body-|<!-- champion:epic-escalated -->"))]
+   | sort_by(.createdAt) | last | .createdAt // empty')
+OPERATOR_OVERRIDE=no
+if [ -n "$LAST_VERDICT_AT" ] && printf '%s\n' "$EPIC_JSON" | jq -e \
+     --arg login "$AUTOMATION_LOGIN" --arg after "$LAST_VERDICT_AT" \
+     '[.comments[] | select(.createdAt > $after) | select(.author.login != $login) | select(.author.login | endswith("[bot]") | not)] | length > 0' \
+     >/dev/null; then
+  OPERATOR_OVERRIDE=yes
+  # A human's decision after the last verdict is authoritative — reset the
+  # unrevised-evaluation tally for this body hash exactly as a genuine body
+  # revision would (see "Body hash, not updatedAt" below), so the next check
+  # runs a fresh, VISIBLE Step 2 evaluation instead of silently re-matching the
+  # stale marker or (worse) escalating past a verdict a human already overrode.
+  PRIOR_REJECTIONS=0
+  SKIP_STREAK=0
+  echo "Epic #$EPIC_NUMBER has a human operator comment posted after the last verdict/escalation — treating it as authoritative, resetting PRIOR_REJECTIONS/SKIP_STREAK to 0 for body hash $BODY_HASH, and re-evaluating fresh instead of re-escalating"
+fi
+
+if [ "$OPERATOR_OVERRIDE" = "no" ] && printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
      '.comments[] | select(.body | contains($m))' >/dev/null; then
   # This exact revision was already evaluated. Read the silent-skip tally carried
   # by the matching verdict comment. REST, not `gh issue view`: only the REST
@@ -214,17 +247,41 @@ if printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
 fi
 ```
 
-If the marker is present **and `ESCALATE_UNREVISED=no`**, **stop here for this
-epic** — do not evaluate, do not comment. This turns "N identical Epic Needs
-Revision comments" into "1 comment, then silent skips" for a truly unrevised
-epic. If `ESCALATE_UNREVISED=yes`, do **not** stop: go straight to Step 4's
-escalation branch without re-running the 6 criteria.
+If `OPERATOR_OVERRIDE=yes`, the marker-match block above never runs (its `if`
+is gated on `OPERATOR_OVERRIDE=no`) regardless of whether the marker matches —
+**do not stop here**: continue to Step 2 and run a full, fresh evaluation of
+the 6 criteria, exactly as if this were the first time the epic (at this body
+hash) had been evaluated. Otherwise, if the marker is present **and
+`ESCALATE_UNREVISED=no`**, **stop here for this epic** — do not evaluate, do
+not comment. This turns "N identical Epic Needs Revision comments" into "1
+comment, then silent skips" for a truly unrevised epic. If
+`ESCALATE_UNREVISED=yes`, do **not** stop: go straight to Step 4's escalation
+branch without re-running the 6 criteria.
 
 **Body hash, not `updatedAt` (#4966).** Keying the marker to the epic's aggregate
 `updatedAt` is self-invalidating — posting the verdict comment bumps `updatedAt`,
 so the marker can never match and the epic is re-evaluated every cycle. A hash of
 title + body changes if and only if the epic is actually edited; comments, label
 churn, and Champion's own verdict all leave it untouched.
+
+**A post-verdict human operator comment resets the counters too (#763).** A
+body revision is not the only event that should start the unrevised-evaluation
+tally over — a **human operator comment posted after the last verdict or
+escalation** is a fresh decision that supersedes the automated verdict just as
+completely as an edited body does, and #713's flapping loop (escalate → human
+approves → Curator restores `loom:epic` → Champion re-escalates on the stale
+tally) happened precisely because nothing checked for one. `OPERATOR_OVERRIDE`
+detects this by comparing comment timestamps against the newest
+`champion:epic-verdict:body-*` / `champion:epic-escalated` marker and excluding
+the automation actor's own login (and any `[bot]`-suffixed login) from the
+candidates. When it fires, `PRIOR_REJECTIONS` and `SKIP_STREAK` reset to `0`
+for the current body hash — mirroring the body-hash reset above — and the
+marker-match branch is skipped entirely so the epic gets one fresh, visible
+Step 2 evaluation instead of a silent re-skip or an escalation the human
+already overrode. This is intentionally **not** a permanent bypass: if the
+epic is rejected again after the override, that rejection starts a new
+`PRIOR_REJECTIONS` count from `1`, and the N=2 escalation guard applies again
+on schedule from there.
 
 **The skip and the escalation are one mechanism (#4967).** A silent skip must
 still cost something, or suppressing duplicate comments also suppresses the
@@ -255,10 +312,14 @@ epic still escalates on schedule; both paths stay bounded.
 - If the re-approval guard finds existing `loom:epic:<N>:phase:1` markers,
   **skip Step 3** for this epic no matter how Step 2 scores it (Phase Progression
   owns an already-approved epic).
-- If the idempotency check matched the verdict marker and `ESCALATE_UNREVISED=no`,
-  **stop** — skip silently, do not evaluate or comment.
-- If the idempotency check set `ESCALATE_UNREVISED=yes`, jump straight to Step 4's
-  escalation branch (do not re-run the 6 criteria).
+- If the idempotency check set `OPERATOR_OVERRIDE=yes` (a human operator
+  commented after the last verdict/escalation, #763), the marker-match branch
+  never runs regardless of what it would have found — proceed to a fresh Step 2
+  evaluation, do not stop and do not jump to Step 4's escalation branch.
+- Otherwise, if the idempotency check matched the verdict marker and
+  `ESCALATE_UNREVISED=no`, **stop** — skip silently, do not evaluate or comment.
+- Otherwise, if the idempotency check set `ESCALATE_UNREVISED=yes`, jump straight
+  to Step 4's escalation branch (do not re-run the 6 criteria).
 
 Otherwise, read the epic and evaluate normally:
 
