@@ -30,12 +30,26 @@ re-deriving pass/fail by eye.
 
 `klt signoff` does **not** yet diff against a block's declared spec (S3 in
 `docs/design/design-pipeline.md` has no machine-readable schema — see that
-doc's §4 gap map) and does not walk the full T1 checklist (design-source
-commit hygiene, README/license/CI, testbench-shipped checks have no `klt`
-verb JSON to read at all). This skill still hand-assembles the full report
-and everything `klt signoff` doesn't cover; treat its output as the
-provisional shape of a wider `klt.pipeline.signoff/1` artifact once a
-spec-diff capability exists, not as that artifact yet.
+doc's §4 gap map). This skill still hand-assembles the full report and
+everything `klt signoff` doesn't cover; treat its output as the provisional
+shape of a wider `klt.pipeline.signoff/1` artifact once a spec-diff
+capability exists, not as that artifact yet.
+
+`klt signoff --manifest <file>` (#722, Phase 0 of epic #706) now also
+renders the **full T1-T4 item skeleton**, mechanically parsed from
+`docs/design-evidence-tiers.md`, and grades each item against a block
+manifest's declared kind and per-item evidence citations -- a strict
+superset of the checklist table this skill hand-assembles below, including
+the T2-T4 ladder rows and every T1 item, not only the drc/lvs/extract/sim
+ones. This phase is the item model and interface only: an item is `"met"`
+only when the manifest cites a passing, fresh `klt` JSON envelope for it,
+so items with no `klt` verb JSON to cite (design-source/layout hygiene,
+README/license/CI, testbench-shipped) still render `"unmet"` in its output
+today, exactly as this skill still grades them by hand -- see
+`docs/cli/signoff.md`'s "Tier-verdict report" section for the manifest
+shape and JSON schema. Wiring the actual DRC/LVS/sim *gates* (rather than
+reading pre-existing envelope files) is a follow-on phase of epic #706;
+until then this skill's hand-assembled report remains the complete picture.
 
 ## Producing a qualification report
 

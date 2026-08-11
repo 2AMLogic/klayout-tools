@@ -93,6 +93,7 @@ klt lvs request.json                     # compare extracted vs reference netlis
 klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
 klt place-and-route request.json         # netlist -> placed+routed DEF/GDS (OpenROAD), JSON out
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage
+klt equiv request.json                   # combinational equivalence (Yosys miter/SAT) -> proof or counterexample
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor

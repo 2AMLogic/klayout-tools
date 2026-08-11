@@ -187,6 +187,24 @@ SCHEMA_VERSION = 2
 #: below any curated deck's dbu grid).
 _PARAM_PRECISION_UM = 6
 
+
+def _bbox_um_rounded(box: kdb.Box, dbu: float) -> dict[str, float]:
+    """Convert a ``kdb.Box`` to a JSON-serialisable ``left``/``bottom``/
+    ``right``/``top`` dict, scaled from database units to micrometres by
+    ``dbu`` and rounded to ``_PARAM_PRECISION_UM`` decimal places.
+
+    Shared by the ``black_box_regions``, ``unmodelled_poly``, and
+    ``dead_metal`` report entries, which all report this exact rounded
+    bbox shape (issue #714).
+    """
+    return {
+        "left": round(box.left * dbu, _PARAM_PRECISION_UM),
+        "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
+        "right": round(box.right * dbu, _PARAM_PRECISION_UM),
+        "top": round(box.top * dbu, _PARAM_PRECISION_UM),
+    }
+
+
 #: Decimal places a drawn capacitor's `devices[].params.c_f` (in **Farads**)
 #: is rounded to -- same floating-point-noise cleanup as `_PARAM_PRECISION_UM`,
 #: but a MiM cap's capacitance sits in the femtofarad-to-picofarad range
@@ -1718,12 +1736,7 @@ def _resolve_black_box_regions(
         box = component.bbox()
         black_box_regions.append(
             {
-                "bbox_um": {
-                    "left": round(box.left * dbu, _PARAM_PRECISION_UM),
-                    "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
-                    "right": round(box.right * dbu, _PARAM_PRECISION_UM),
-                    "top": round(box.top * dbu, _PARAM_PRECISION_UM),
-                },
+                "bbox_um": _bbox_um_rounded(box, dbu),
                 "shapes_excluded": shapes_excluded,
             }
         )
@@ -2703,12 +2716,7 @@ def _detect_unmodelled_poly_bodies(
         box = component.bbox()
         unmodelled_poly.append(
             {
-                "bbox_um": {
-                    "left": round(box.left * dbu, _PARAM_PRECISION_UM),
-                    "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
-                    "right": round(box.right * dbu, _PARAM_PRECISION_UM),
-                    "top": round(box.top * dbu, _PARAM_PRECISION_UM),
-                },
+                "bbox_um": _bbox_um_rounded(box, dbu),
                 "reason": reason,
             }
         )
@@ -4201,12 +4209,7 @@ def _detect_dead_metal(
                     "role": role,
                     "layer": layer,
                     "datatype": datatype,
-                    "bbox_um": {
-                        "left": round(box.left * dbu, _PARAM_PRECISION_UM),
-                        "bottom": round(box.bottom * dbu, _PARAM_PRECISION_UM),
-                        "right": round(box.right * dbu, _PARAM_PRECISION_UM),
-                        "top": round(box.top * dbu, _PARAM_PRECISION_UM),
-                    },
+                    "bbox_um": _bbox_um_rounded(box, dbu),
                     "shapes": drawn.interacting(cluster).count(),
                     "area_um2": round(cluster.area() * dbu * dbu, _PARAM_PRECISION_UM),
                 }

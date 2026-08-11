@@ -16,6 +16,7 @@ from . import (
     deck_cmd,
     draw_cmd,
     drc_cmd,
+    equiv_cmd,
     eval_cmd,
     extract_cmd,
     functional_verification_cmd,
@@ -925,6 +926,49 @@ def create_parser() -> argparse.ArgumentParser:
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
+    equiv_parser = subparsers.add_parser(
+        "equiv",
+        help="prove/refute combinational equivalence of two RTL/gate netlists (Yosys)",
+        description=(
+            "Prove or refute combinational equivalence between two RTL/"
+            "gate-level netlists ('gold' and 'gate') via Yosys's built-in "
+            "miter/SAT equivalence-checking flow -- Phase 0 of the formal-"
+            "equivalence epic #707, the correctness loop-closer #704 (RTL "
+            "synthesis) and #700 (place-and-route) both depend on. On a "
+            "refutation, the concrete counterexample vector is independently "
+            "re-run through both netlists via iverilog/vvp to confirm the "
+            "divergence, not just trusted from the solver. A solver/process "
+            "timeout is reported `inconclusive`, never `equivalent`. "
+            "Combinational designs only in this MVP -- a design containing "
+            "flip-flops, latches, or memories is a clear scope error (exit "
+            "1), not a silently-wrong verdict. Takes a request-document "
+            "path (like `klt lvs`/`klt sim`/`klt synthesize`), not "
+            "positional RTL file args -- see docs/cli/equiv.md."
+        ),
+    )
+    equiv_parser.add_argument(
+        "request",
+        help=(
+            "klt equiv request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string"
+        ),
+    )
+    equiv_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds for the Yosys proof "
+            "(default: 60, or the request's own `timeout_s` field); "
+            "overrides the request field when given. A run that does not "
+            "finish within this budget is reported `inconclusive`, never "
+            "`equivalent` -- see docs/cli/equiv.md."
+        ),
+    )
+    _add_format_arg(equiv_parser)
+    equiv_parser.set_defaults(func=equiv_cmd.run)
+
     functional_verification_parser = subparsers.add_parser(
         "functional-verification",
         help="run a cocotb regression against Icarus/Verilator",
@@ -1357,7 +1401,8 @@ def create_parser() -> argparse.ArgumentParser:
         "signoff",
         help=(
             "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
-            "pass/fail verdict"
+            "pass/fail verdict, or render a T1-T4 tier-verdict report "
+            "with --manifest"
         ),
         description=(
             "Read one or more `klt` JSON envelope files (or '-' for stdin) "
@@ -1367,15 +1412,33 @@ def create_parser() -> argparse.ArgumentParser:
             "(issue #251) agrees on PDK/deck/input-layout identity -- a "
             "mismatched-provenance input set is refused (status: "
             "'refused'), never silently aggregated into a wrong verdict. "
+            "With --manifest instead, renders the T1-T4 evidence-tier item "
+            "skeleton mechanically parsed from docs/design-evidence-tiers.md, "
+            "graded against a block manifest's declared kind and per-item "
+            "evidence locations -- an item is 'met' only when it cites a "
+            "passing klt JSON envelope with fresh provenance; a missing or "
+            "stale check renders 'unmet', never assumed met. "
             "See docs/cli/signoff.md."
         ),
     )
     signoff_parser.add_argument(
         "files",
-        nargs="+",
+        nargs="*",
+        default=[],
         help=(
             "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
-            "'-' to read one from stdin"
+            "'-' to read one from stdin (mutually exclusive with --manifest)"
+        ),
+    )
+    signoff_parser.add_argument(
+        "--manifest",
+        metavar="FILE",
+        help=(
+            "path to a block manifest JSON file (or '-' for stdin) -- "
+            "renders the T1-T4 tier-verdict report instead of aggregating "
+            "envelope <file> arguments (mutually exclusive with them). See "
+            "docs/cli/signoff.md's 'Tier-verdict report' section for the "
+            "manifest shape."
         ),
     )
     _add_format_arg(signoff_parser)
