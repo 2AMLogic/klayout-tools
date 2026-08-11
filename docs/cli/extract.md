@@ -1704,6 +1704,22 @@ counted as nets.
 more per net) rather than always equalling `c_count`. See
 `docs/json-contract.md`.
 
+**Breaking shape change, `schema_version` 2 -> 3 (issue #765):**
+`parasitics.nets[].net` is now guaranteed unique across the array. Two or
+more electrically distinct nets can carry the same layout label (e.g.
+un-strapped power-rail islands nothing in the layout ties together) --
+before this change every such entry reported the identical `net` string, so
+`_inject_parasitics` silently routed all but one of them onto the wrong net
+object and derived colliding SPICE device instance names for each (a SPICE
+reader could reject the netlist outright, or silently take the last card and
+drop the rest). The first entry for a given label keeps it verbatim; every
+later entry sharing that label gets a `__dup<n>` suffix (`n` starting at
+`2`). Each entry is now also correctly attributed to the exact net object
+its `resistance_ohm`/`capacitance_ff`/`terminals[]` were measured from,
+regardless of name collisions. A caller that already builds
+`{entry["net"]: entry}` from `parasitics.nets[]` keeps every entry instead of
+silently losing all but the last of a collision.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -1756,7 +1772,7 @@ Each `nets[]` entry:
 
 | Field            | Type            | Description                                                                                          |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------------ |
-| `net`            | string          | The schematic-equivalent net name.                                                                     |
+| `net`            | string          | The schematic-equivalent net name -- unique across `parasitics.nets[]` (issue #765). Usually the net's spice-safe label verbatim; when two or more distinct nets share a label, every entry after the first gets a `__dup<n>` suffix (`n` starting at `2`) so the array stays keyable by `net`.                                                                     |
 | `resistance_ohm` | number          | The net's total computed series resistance (ohms) — the star's total "budget", distributed across `terminals[]`. |
 | `capacitance_ff` | number          | The net's total lumped ground capacitance (femtofarads), hung off `hub_net`.                           |
 | `hub_net`        | string          | The star's hub node name. Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |

@@ -482,7 +482,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["file"] == path
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
@@ -4055,7 +4055,7 @@ def test_sky130_corpus_extraction_produces_well_formed_report(layout_path, tmp_p
         str(layout_path), "sky130", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -4074,7 +4074,7 @@ def test_gf180mcu_corpus_extraction_produces_well_formed_report(layout_path, tmp
         str(layout_path), "gf180mcu", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -6377,6 +6377,140 @@ def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
     netlist_text = Path(report["netlist_path"]).read_text()
     r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
     assert len(r_lines) == report["parasitics"]["r_count"]
+
+
+def _make_same_label_islands_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Two electrically separate NMOS source rails plus one purely-geometric
+    li1 island -- three genuinely distinct net *objects*, all three sharing
+    the layout label ``VGND``, with nothing in the layout that ties them
+    together (issue #765's motivating shape, scaled down from a real gcd
+    corpus cell's 105 un-strapped ``VGND`` islands to three, one per
+    fallback path the acceptance criteria calls out: two nets with exactly
+    one device terminal each -- attached to two different transistors, so
+    they take the star-topology path -- plus one net with zero device
+    terminals but real routed geometry, which takes the Gamma-shunt fallback
+    path). Each island is a different size so a correctness check can also
+    tell the three measured capacitances apart."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Text(text, kdb.Trans(x, y)))
+
+    # T1: active 0..2000 x 0..1000, gate at x 800..1200 (label A1). Source
+    # is VGND island #1 (0.4um x 0.6um li1, a real device terminal -> star
+    # topology).
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (T1 gate)
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # T1 source contact
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # T1 source li1 (VGND island #1)
+    label(67, 5, "VGND", 200, 500)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # T1 drain contact
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # T1 drain li1
+    label(67, 5, "D1", 1800, 500)
+    draw(67, 20, kdb.Box(850, 1050, 1150, 1250))  # T1 gate li1
+    label(67, 5, "A1", 1000, 1150)
+    draw(66, 44, kdb.Box(900, 1050, 1100, 1150))
+
+    # T2: active 5000..7000 x 0..1000, gate at x 5800..6200 (label A2), far
+    # enough from T1 that nothing merges. Source is VGND island #2 -- SAME
+    # label, a genuinely distinct net object, sized differently (0.5um x
+    # 0.6um) so its measured capacitance differs from island #1's -- another
+    # device terminal, so it also takes the star-topology path.
+    draw(65, 20, kdb.Box(5000, 0, 7000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(5800, -200, 6200, 1200))  # poly.drawing (T2 gate)
+    draw(66, 44, kdb.Box(5100, 300, 5300, 700))  # T2 source contact
+    draw(67, 20, kdb.Box(5000, 200, 5500, 800))  # T2 source li1 (VGND island #2)
+    label(67, 5, "VGND", 5250, 500)
+    draw(66, 44, kdb.Box(6700, 300, 6900, 700))  # T2 drain contact
+    draw(67, 20, kdb.Box(6600, 200, 7000, 800))  # T2 drain li1
+    label(67, 5, "D2", 6800, 500)
+    draw(67, 20, kdb.Box(5850, 1050, 6150, 1250))  # T2 gate li1
+    label(67, 5, "A2", 6000, 1150)
+    draw(66, 44, kdb.Box(5900, 1050, 6100, 1150))
+
+    # VGND island #3: purely geometric li1 shape (0.7um x 0.5um), far from
+    # both transistors, with no contact/device attached at all -- a third
+    # distinct net object sharing the same "VGND" label, with zero device
+    # terminals (Gamma-shunt fallback) -- exactly gcd's real un-strapped
+    # rail-island shape (issue #539's motivating scenario), scaled down.
+    draw(67, 20, kdb.Box(10000, 0, 10700, 500))
+    label(67, 5, "VGND", 10350, 250)
+
+    return layout
+
+
+def test_parasitics_disambiguates_colliding_net_names(tmp_path):
+    """Regression (issue #765): three electrically distinct net objects
+    sharing the layout label ``VGND`` -- two with a real device terminal
+    (star topology) and one with none (Gamma-shunt fallback) -- each get
+    their own, correctly-attributed star/shunt topology and a unique
+    `parasitics.nets[].net` value, instead of all colliding onto whichever
+    single net object happened to be last in `nets_by_name`'s pre-fix
+    last-write-wins dict construction.
+
+    Before the fix: `_inject_parasitics` resolved every same-named entry to
+    the *same* net object, so only the first-processed entry could ever see
+    that object's real terminal(s); the other two always fell through to an
+    (incorrectly-attached) Gamma-shunt on that same shared object, and all
+    three derived the identical, colliding SPICE instance name from
+    `entry["net"]`."""
+    path = _write_gds(_make_same_label_islands_layout(), tmp_path / "same_label.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "same_label.spice"), parasitics=True
+    )
+    assert report["device_counts"] == {"nfet": 2}
+
+    vgnd_entries = [
+        n
+        for n in report["parasitics"]["nets"]
+        if n["net"] == "VGND" or n["net"].startswith("VGND__dup")
+    ]
+    assert len(vgnd_entries) == 3
+
+    # Keyable (issue #765's third Impact bullet): three distinct nets, three
+    # distinct `net` values -- a caller building `{entry["net"]: entry}`
+    # keeps all three instead of silently losing two of them.
+    assert len({e["net"] for e in vgnd_entries}) == 3
+
+    # Correct per-island attribution -- three distinct measured capacitances
+    # for three differently-sized islands, none conflated with another.
+    assert len({round(e["capacitance_ff"], 6) for e in vgnd_entries}) == 3
+
+    # Correct per-island routing (the actual root-cause fix): exactly one of
+    # the three islands has no device terminal at all (real geometry, no
+    # contact -> Gamma-shunt fallback) and the other two each have exactly
+    # one (a distinct NMOS source terminal each -> star topology).
+    terminal_counts = sorted(len(e["terminals"]) for e in vgnd_entries)
+    assert terminal_counts == [0, 1, 1]
+
+    star_entries = [e for e in vgnd_entries if e["terminals"]]
+    assert len(star_entries) == 2
+    devices = {e["terminals"][0]["device"] for e in star_entries}
+    # Two distinct star entries land on two distinct devices -- neither
+    # island's star incorrectly attaches to the other's transistor.
+    assert len(devices) == 2
+
+    # Every net gets its own hub/leg topology -- no two of the three islands
+    # share a hub node.
+    hub_nets = {e["hub_net"] for e in vgnd_entries}
+    assert len(hub_nets) == 3
+
+    # No two devices `_inject_parasitics` creates share an instance name --
+    # the issue's own reproduction check (`grep ... | uniq -d`), applied
+    # directly to this fixture's written netlist.
+    netlist_text = Path(report["netlist_path"]).read_text()
+    rc_instance_names = [
+        ln.split()[0]
+        for ln in netlist_text.splitlines()
+        if ln.startswith("R") or ln.startswith("C")
+    ]
+    assert len(rc_instance_names) == len(set(rc_instance_names))
 
 
 # --------------------------------------------------------------------------- #

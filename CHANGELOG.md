@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt extract --parasitics` no longer emits duplicate SPICE
+  device instance names (or mis-attributes R/C) when two or more
+  electrically distinct nets share the same layout label (issue #765) — e.g.
+  dozens of un-strapped `VGND`/`VPWR` rail islands nothing in the layout
+  ties together. Previously, `_inject_parasitics` resolved every
+  `parasitics.nets[]` entry back to a real net object through a
+  name-keyed dict; a name collision made that dict last-write-wins, so
+  every same-named entry silently routed to the *same* net object — only
+  the first-processed entry ever saw that object's real device terminal(s),
+  every later one attached an incorrectly-routed shunt to it, and all of
+  them derived the identical (colliding) SPICE instance name from the
+  shared label. The lookup is now keyed on the net's own `cluster_id`
+  (unique per net object), so every entry resolves to the exact net object
+  it was measured from, with zero risk of collision; `_purge_preserving_named_nets`
+  (issue #539) had the same name-keyed-restoration bug for a
+  pinned-but-deviceless net sharing a label with another net and is fixed
+  the same way. `parasitics.nets[].net` is now also guaranteed unique
+  across the array — a colliding entry after the first gets a `__dup<n>`
+  suffix — bumping `klt extract`'s `schema_version` 2 -> 3. See
+  docs/cli/extract.md's "JSON `parasitics` block" section.
+
 - 2026-08-11 — A merged-label net (two drawn text labels shorted onto one
   electrical net, issue #470) now has exactly one spelling everywhere `klt
   extract`/`klt lvs` name it (#696). KLayout's own `Net.expanded_name()`

@@ -179,7 +179,18 @@ if TYPE_CHECKING:
 #: star). `parasitics.r_count` also changed meaning: it now counts every
 #: emitted resistor (one or more per net), not one per net, so
 #: `r_count == c_count` no longer holds in general.
-SCHEMA_VERSION = 2
+#:
+#: 3 (issue #765): `parasitics.nets[].net` semantics changed. Previously it
+#: was the net's spice-safe label verbatim, which collided whenever two or
+#: more electrically distinct net *objects* shared the same layout label
+#: (e.g. un-strapped power-rail islands nothing in the layout merges) --
+#: every such entry silently routed to the same net object and derived the
+#: same SPICE device instance name. `net` is now guaranteed unique across
+#: `parasitics.nets[]`: the first entry for a given label keeps it verbatim,
+#: every later colliding entry gets a `__dup<n>` suffix (`n` starting at 2).
+#: A caller that already builds `{entry["net"]: entry}` keeps every entry
+#: instead of silently losing all but the last of a collision.
+SCHEMA_VERSION = 3
 
 #: Decimal places `devices[].params` (`w_um`/`l_um`) are rounded to -- clears
 #: floating-point noise from KLayout's internal dbu -> um conversion (e.g.
@@ -1651,7 +1662,40 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
             circuit.cell_index = cell_index
             netlist.add(circuit)
 
-        net = next((n for n in circuit.each_net() if n.name == net_name), None)
+        # Matched by `cluster_id`, not `net_name` (issue #765): two or more
+        # distinct pinned-but-deviceless survivors -- or a survivor and an
+        # unrelated net that legitimately survived `purge()` on its own
+        # merit (a real device terminal) -- can share the identical layout
+        # label (e.g. un-strapped power-rail islands). A name-keyed lookup
+        # here would silently splice a later same-named survivor onto
+        # whichever net (restored or natively-surviving) happened to already
+        # carry that name, dropping the later survivor's own identity
+        # entirely -- the same class of bug this issue reports for
+        # `_inject_parasitics`, just one purge pass earlier. `cluster_id` is
+        # the key `LayoutToNetlist` itself uses to find a net's shapes (see
+        # below), and is unique per net object *when it is tied to a real
+        # layout cluster* -- `0` is the "no cluster" sentinel (see
+        # `_compute_parasitics`'s belt-and-braces check on the same field),
+        # shared by every net nothing ever clustered (e.g. one built directly
+        # via `Circuit.create_net()` outside a `LayoutToNetlist` run, as
+        # `klt lvs`'s pre-extracted-reference path or a unit test can do), so
+        # matching on it verbatim would misidentify one such net as another.
+        # Fall back to the pre-#765 name-keyed match, restricted to other
+        # cluster-less nets only, for that sentinel case -- unchanged
+        # behavior for every caller that never assigns real cluster ids.
+        if cluster_id != 0:
+            net = next(
+                (n for n in circuit.each_net() if n.cluster_id == cluster_id), None
+            )
+        else:
+            net = next(
+                (
+                    n
+                    for n in circuit.each_net()
+                    if n.cluster_id == 0 and n.name == net_name
+                ),
+                None,
+            )
         if net is None:
             net = circuit.create_net(net_name)
             # Same rationale as `cell_index` above, for the other half of the
@@ -4187,11 +4231,64 @@ def _compute_parasitics(
                 "net": spice_safe_net_name(name),
                 "resistance_ohm": round(r_ohm, 4),
                 "capacitance_ff": round(c_ff, 6),
+                # `cluster_id` is the key `LayoutToNetlist` itself uses to
+                # find a net's shapes (see the belt-and-braces check above),
+                # and is unique per net *object* within this circuit -- unlike
+                # `entry["net"]`, which is only the net's spice-safe *label*
+                # and can collide across distinct net objects (issue #765,
+                # e.g. dozens of un-strapped `VGND` rail islands sharing that
+                # label with nothing in the layout that merges them).
+                # `_inject_parasitics` keys its lookup on this field so every
+                # entry resolves back to the exact net object measured here,
+                # never to a different same-named one. Internal-only: never
+                # copied into the JSON `parasitics.nets[]` entries themselves.
+                "net_id": net.cluster_id,
             }
         )
 
-    results.sort(key=lambda entry: entry["net"])
+    results.sort(key=lambda entry: (entry["net"], entry["net_id"]))
+    _dedupe_parasitic_net_names(results)
     return results
+
+
+def _dedupe_parasitic_net_names(entries: list[dict[str, Any]]) -> None:
+    """Disambiguate ``entry["net"]`` in place when two or more entries share
+    the same spice-safe net name (issue #765).
+
+    ``entry["net"]`` is derived purely from
+    ``spice_safe_net_name(net.expanded_name())`` -- a net *label*, not a net
+    *identity* -- so it collides whenever multiple electrically distinct net
+    objects carry the same layout label and nothing in the layout ties them
+    together (the motivating case: a real design with dozens of separate,
+    un-strapped ``VGND`` rail islands). Left ambiguous, two problems follow
+    downstream in :func:`_inject_parasitics`: every colliding entry would
+    derive the *same* SPICE device instance name via
+    ``_sanitize_instance_name(entry["net"])`` (duplicate ``R``/``C`` cards a
+    SPICE reader may reject or silently mismatch), and a caller building
+    ``{entry["net"]: entry}`` from ``parasitics.nets[]`` would silently lose
+    every collision but the last.
+
+    Entries must already be sorted by ``(net, net_id)`` (the caller's
+    contract) so occurrences of the same name are contiguous and processed in
+    a deterministic order for a given input. The first occurrence keeps its
+    bare name; every later one gets a ``__dup<n>`` suffix (``n`` starting at
+    2), matching the double-underscore synthesized-suffix convention
+    :func:`_unique_net_name` already uses elsewhere in this module (e.g.
+    ``__par``, ``__t0``). This only relabels the JSON-facing/instance-naming
+    string -- it does not rename the underlying `kdb.Net` objects, so it
+    cannot touch the circuit's pin interface or the `.SUBCKT` written by
+    ``klt sim``'s consumer; KLayout's own `NetlistSpiceWriter` already assigns
+    each net object a distinct numeric SPICE node regardless of name
+    collisions, so electrical topology was never at risk here -- only the
+    reported label and the derived instance name were.
+    """
+    seen: dict[str, int] = {}
+    for entry in entries:
+        base = entry["net"]
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        if count > 1:
+            entry["net"] = f"{base}__dup{count}"
 
 
 def _detect_dead_metal(
@@ -4386,28 +4483,33 @@ def _inject_parasitics(
     if ground is None:
         ground = circuit.create_net(ground_net_name)
 
-    # Keyed by `spice_safe_net_name(expanded_name())` rather than looked up
-    # via `net_by_name()` per entry: `net_by_name()` only resolves *named*
-    # nets (an explicit layout label), so it silently returns `None` -- and
-    # drops the entry -- for every genuinely internal/unlabelled net, whose
-    # `expanded_name()` is KLayout's auto-generated `$<n>` form rather than a
-    # real `.name`. Issue #283: `_compute_parasitics` already measures these
-    # nets correctly (the geometry is there), so this lookup must resolve
-    # them too or the R/C it computed for them is discarded right here. The
-    # `spice_safe_net_name` wrap (issue #696) matches `_compute_parasitics`'
-    # own conversion of `entry["net"]`, so a merged-label net's `|`-joined
-    # key here actually matches instead of silently missing.
-    nets_by_name = {
-        spice_safe_net_name(net.expanded_name()): net for net in circuit.each_net()
+    # Keyed by `Net.cluster_id` (issue #765) rather than by name: a name-keyed
+    # dict is last-write-wins whenever two or more distinct net *objects*
+    # share the same spice-safe label (e.g. dozens of un-strapped `VGND` rail
+    # islands nothing in the layout merges) -- every same-named entry would
+    # then resolve to whichever object happened to be inserted last, silently
+    # attaching one island's measured R/C to a *different* island's device
+    # terminals. `cluster_id` is the key `LayoutToNetlist` itself uses to find
+    # a net's shapes (see `_compute_parasitics`'s belt-and-braces check on the
+    # `cluster_id == 0` sentinel) and is unique per net object within this
+    # circuit, so this lookup always resolves an entry back to the exact
+    # object `_compute_parasitics` measured, with zero risk of collision.
+    # `_compute_parasitics` already disambiguates `entry["net"]` itself for
+    # any name collision (`_dedupe_parasitic_net_names`), so `existing_names`
+    # -- used only to keep the *fresh* leg/hub node names this function
+    # synthesizes below from colliding with any real net's own name -- can
+    # stay name-keyed as before.
+    nets_by_id = {net.cluster_id: net for net in circuit.each_net()}
+    existing_names = {
+        spice_safe_net_name(net.expanded_name()) for net in circuit.each_net()
     }
-    existing_names = set(nets_by_name)
 
     report_nets: list[dict[str, Any]] = []
     total_r = 0.0
     total_c_ff = 0.0
     total_r_count = 0
     for entry in parasitic_nets:
-        net = nets_by_name.get(entry["net"])
+        net = nets_by_id.get(entry["net_id"])
         if net is None:
             continue
 
