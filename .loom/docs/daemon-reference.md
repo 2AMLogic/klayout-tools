@@ -3233,15 +3233,27 @@ env-only behavior** — the config read soft-fails (missing file / malformed JSO
 missing block all resolve to "no config value → fall through to env/default"),
 exactly like `main_health_gate::read_build_gate_config`.
 
+**Not every knob below is live.** Some of this block is re-read from
+`.loom/config.json` on the next tick of whichever loop owns it (the whole
+`autonomous.roleRunner.*` sub-block is, per registered root) — but many are
+resolved exactly once, during daemon bring-up, and then held for the rest of
+that process's life as a frozen value or a process-global handle. Editing one
+of those and merely landing the edit on disk changes nothing on a host until
+the daemon is **restarted** — the table below marks each with
+**"restart required"**; see
+[`fleet-config-lifecycle.md`](fleet-config-lifecycle.md) for the "landed !=
+effective" convention this exists to support and the mechanical test for
+knobs not yet audited here.
+
 | Config key | Env override | Default | Notes |
 |------------|--------------|---------|-------|
 | `autonomous.model` | *(per-dispatch `dispatch_sweep` `model` param)* | `sonnet` | Model pinned on **every** daemon-dispatched child (work-finder, epic supervisor, and `dispatch_sweep` when its `model` param is absent). See below (#3944) |
-| `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop |
+| `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop. **Restart required** — read once, before the loop is spawned; flipping it in config alone does not start/stop an already-running daemon's loop (#5963) |
 | `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default |
-| `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | **The** per-machine admission knob since #4512 — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
-| `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` | `3` | Per-tick **ramp** cap (#4234) — bounds how many *new* sweeps one tick may admit, independent of `maxConcurrent`/the live dynamic cap. Zero/invalid → default; resolved once at startup, mirroring `maxConcurrent`. See [Per-tick admission (ramp) cap](#per-tick-admission-ramp-cap-4234) below |
-| `autonomous.workFinder.saturationBrake.enabled` | `LOOM_ADMISSION_BRAKE` | `true` | Saturation admission brake on/off (#4903). A safety backstop — **defaults on**. Holds *new* admissions while the host is already saturated; never preempts a running sweep. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. See [Saturation admission brake](#saturation-admission-brake-4903) below |
-| `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (a single over-threshold reading), the breaker remains the slower sustained-distress trip |
+| `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | **The** per-machine admission knob since #4512 — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Restart required** — `resolve_max_concurrent_with_config` runs once during bring-up and the resulting `configured_max` is threaded into the loop as a frozen value; the per-tick `dynamic_cap` recomputes only its `disk`/`ram` headroom terms around that fixed operator ceiling, so retuning this key in config alone changes nothing until the daemon restarts (#5963). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
+| `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` | `3` | Per-tick **ramp** cap (#4234) — bounds how many *new* sweeps one tick may admit, independent of `maxConcurrent`/the dynamic cap. Zero/invalid → default; resolved once at startup, the same startup-capture pattern as `maxConcurrent`. **Restart required** to pick up a change (#5963) |
+| `autonomous.workFinder.saturationBrake.enabled` | `LOOM_ADMISSION_BRAKE` | `true` | Saturation admission brake on/off (#4903). A safety backstop — **defaults on**. Holds *new* admissions while the host is already saturated; never preempts a running sweep. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Restart required** — resolved once at startup and registered as a process-global handle alongside the host breaker (#5963). See [Saturation admission brake](#saturation-admission-brake-4903) below |
+| `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (a single over-threshold reading), the breaker remains the slower sustained-distress trip. **Restart required** — same startup-resolved global as `enabled` above (#5963) |
 | `autonomous.workFinder.saturationBrake.starvationWarnSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_WARN_SECS` | `300` | Seconds of continuous held+0-in-flight before the `WARN`-level `STARVING` log fires once per streak (#5715). `<= 0`/invalid → default. See [Starvation escape hatch](#starvation-escape-hatch-5715) |
 | `autonomous.workFinder.saturationBrake.starvationEscapeSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_ESCAPE_SECS` | `900` | Seconds of continuous held+0-in-flight before the escape hatch yields one tick despite the raw load still being over threshold, logged at `ERROR` (#5715). `<= 0`/invalid → default |
 | `autonomous.workFinder.quarantine.enabled` | `LOOM_WORK_FINDER_QUARANTINE` | `true` | Insta-crash quarantine on/off (#3939). A safety backstop — defaults on |
@@ -3251,21 +3263,21 @@ exactly like `main_health_gate::read_build_gate_config`.
 | `autonomous.workFinder.dispatchBackoff.enabled` | `LOOM_DISPATCH_BACKOFF` | `true` | Per-issue dispatch backoff on/off (#4485). A safety backstop — defaults on. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config |
 | `autonomous.workFinder.dispatchBackoff.baseSecs` | `LOOM_DISPATCH_BACKOFF_BASE_SECS` | `60` | Backoff applied after the **first** failed dispatch of an issue; doubles per consecutive failure. Zero/invalid → default |
 | `autonomous.workFinder.dispatchBackoff.maxSecs` | `LOOM_DISPATCH_BACKOFF_MAX_SECS` | `900` | Ceiling on the doubling — also the idle window after which an issue's consecutive-failure tally restarts at zero. Zero/invalid → default; clamped up to `baseSecs` |
-| `autonomous.hostBreaker.enabled` | `LOOM_HOST_BREAKER` | `true` | Host-distress circuit breaker on/off (#4235). A safety backstop — **defaults on**. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. See [Host-distress circuit breaker](#host-distress-circuit-breaker-4235) below |
+| `autonomous.hostBreaker.enabled` | `LOOM_HOST_BREAKER` | `true` | Host-distress circuit breaker on/off (#4235). A safety backstop — **defaults on**. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Restart required** — resolved once at startup and registered as a process-global handle (#5963). See [Host-distress circuit breaker](#host-distress-circuit-breaker-4235) below |
 | `autonomous.hostBreaker.loadPerCoreTrip` | `LOOM_HOST_BREAKER_LOAD_PER_CORE` | `2.5` | Load-per-core at/over which a tick counts toward tripping. `<= 0`/invalid → default |
 | `autonomous.hostBreaker.sustainTicks` | `LOOM_HOST_BREAKER_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required to trip (a single spike never trips). Zero/invalid → default |
 | `autonomous.hostBreaker.cooldownSecs` | `LOOM_HOST_BREAKER_COOLDOWN_SECS` | `300` | Cool-down window held after distress subsides before dispatch resumes. Zero/invalid → default |
-| `autonomous.rateLimitBreaker.enabled` | `LOOM_RATE_LIMIT_BREAKER` | `true` | GitHub rate-limit circuit breaker on/off (#4429). A safety backstop — **defaults on**. Env truthy enables, any other value disables; wins over config. See [GitHub rate-limit circuit breaker](#github-rate-limit-circuit-breaker-4429) below |
+| `autonomous.rateLimitBreaker.enabled` | `LOOM_RATE_LIMIT_BREAKER` | `true` | GitHub rate-limit circuit breaker on/off (#4429). A safety backstop — **defaults on**. Env truthy enables, any other value disables; wins over config. **Restart required** — resolved once at startup, before any loop is spawned (#5963). See [GitHub rate-limit circuit breaker](#github-rate-limit-circuit-breaker-4429) below |
 | `autonomous.rateLimitBreaker.fallbackCooldownSecs` | `LOOM_RATE_LIMIT_BREAKER_FALLBACK_COOLDOWN_SECS` | `900` | Cooldown length when the `gh api rate_limit` reset probe fails. Zero/invalid → default; every computed cooldown is clamped to `[60, 3600]`s |
 | `autonomous.perTokenConcurrency` | `LOOM_PER_TOKEN_CONCURRENCY` | *(none)* | **RETIRED — removed entirely (#5743, previously retired-from-the-cap-only by #5270).** Used to feed a `healthy × per-token` figure into the dynamic cap (#3947); since #5270 it fed only a disclaimed, informational `status`/`calibrate` line with no admission effect. Unlike the CPU knobs below, there is no ongoing deprecation warning for it — the key and env var are simply unread; a config file that still sets it parses fine (unknown keys are ignored, not an error) |
 | `autonomous.cpuUtilizationTarget` | `LOOM_CPU_UTILIZATION_TARGET` | *(none)* | **DEPRECATED — accepted but ignored (#4512).** Fed the deleted CPU-headroom admission term (#3978, config surface #4032). Any value at any type still parses (never a config error); the daemon logs one warning per process naming it and `loom-daemon calibrate` prints it to stderr. Delete it to silence the warning; tune `autonomous.workFinder.maxConcurrent` instead |
 | `autonomous.estCoresPerSweep` | `LOOM_EST_CORES_PER_SWEEP` | *(none)* | **DEPRECATED — accepted but ignored (#4512).** Same story as `cpuUtilizationTarget` above: the CPU term it sized is gone; heavy build/test stages are bounded by the [machine-wide build slot](#machine-wide-build-slot-4512) instead |
 | `autonomous.mainHealthGate.enabled` | `LOOM_MAIN_HEALTH_GATE` | `false` | Gate loop on/off |
 | `autonomous.mainHealthGate.ciWorkflow` | `LOOM_GATE_CI_WORKFLOW` | *(unset)* | Forge workflow that must itself conclude `success` for forge-CI corroboration to vouch for a commit (#3987). Empty/whitespace → unset. Absent → today's unanimity rule, unchanged. See [Optional named verification workflow](#optional-named-verification-workflow-loom_gate_ci_workflow-3987) |
-| `autonomous.mainHealthGate.suppressDispatchDuringGate` | `LOOM_MAIN_HEALTH_GATE_SUPPRESS_DISPATCH` | `true` | Hold new dispatch off a root while its build-gate run is in flight (#4084), per-root so a sibling with no gate in flight keeps dispatching. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. Set `false` to recover the pre-#4084 `is_halted`-only behavior. See [build-gate.md → gate-in-flight dispatch suppressor](build-gate.md) |
+| `autonomous.mainHealthGate.suppressDispatchDuringGate` | `LOOM_MAIN_HEALTH_GATE_SUPPRESS_DISPATCH` | `true` | Hold new dispatch off a root while its build-gate run is in flight (#4084), per-root so a sibling with no gate in flight keeps dispatching. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. Set `false` to recover the pre-#4084 `is_halted`-only behavior. **Restart required** — resolved once at startup from the primary workspace config (#5963). See [build-gate.md → gate-in-flight dispatch suppressor](build-gate.md) |
 | **`forge.githubApp.mintTimeoutSeconds`** (not `autonomous.*` — it lives beside the `appId` / `privateKeyPath` that `github-app-token.sh` itself reads) | `LOOM_GITHUB_APP_MINT_TIMEOUT_SECS` | `90` | Bound on one `github-app-token.sh get-token` subprocess (#5630). Raised from the pre-#5630 fixed `20` because on a saturated host (`observed_idle=0%`) fork/exec + the JWT sign + two GitHub round-trips routinely exceeded 20s, failing a refresh tick that succeeds in ~30ms by hand. Zero/invalid → default. The mint is additionally retried **once** on a transport-level failure (timeout / spawn error), never on a parsed `{"status":"error"}` answer |
 | *(env only — n/a)* | `LOOM_FORGE_CREDENTIAL_STALE_GRACE_SECS` | `1800` | How long after the **first** failure of a consecutive credential-refresh-failure streak the main-health gate treats its forge answers as untrustworthy and holds each repo's previous verdict (#5630). Env-only: the credentials are daemon-global, so a per-repo config key would be ambiguous. Zero/invalid → default. See [Stale-credential gate hold](#stale-credential-gate-hold-5630) below |
-| `autonomous.roleRunner.enabled` | `LOOM_ROLE_RUNNER` | `false` | Periodic standalone support-role runner on/off (#4015). **Resolved per registered root** (#4377) — see the callout below the table |
+| `autonomous.roleRunner.enabled` | `LOOM_ROLE_RUNNER` | `false` | Periodic standalone support-role runner on/off (#4015). **Resolved per registered root** (#4377) — see the callout below the table. **Live** — every `roleRunner.*` key (`enabled`, `roles`, `onIdle`, `model`, …) is re-read from that root's config on every role-runner tick, not cached at daemon startup; no restart needed for a config-only change (#5963) |
 | `autonomous.roleRunner.roles` | *(config only)* | the 7 **interval-default** roles (`architect` excluded, #5656) | Subset of `champion`/`curator`/`judge`/`doctor`/`auditor`/`guide`/`hermit`/`architect` to dispatch on the interval cadence; explicit empty array runs none. **The absent-key default is the interval-default subset, not the whole table**: `architect` is idle-addressable-only (see `onIdle` below) and is never swept in by the "unset ⇒ all defaults" fallback — naming it here explicitly is the deliberate opt-in to a timer-driven architect (1h cadence). **Allowlist, not an addition** — must be updated by hand when a new interval-default role ships, or it silently never dispatches (#5339); a non-empty pinned list missing an interval-default entry warns (omitting `architect` never warns — that is correct, not stale). Also resolved from each root's own config |
 | `autonomous.roleRunner.intervalSecs` | `LOOM_ROLE_RUNNER_INTERVAL_SECS` | per-role built-in (5–15 min) | Uniform override applied to every enabled role's cadence |
 | `autonomous.roleRunner.model` | *(config only)* | `sonnet` | Model every role child is pinned to via `--model` (#4501). Resolved through the same `resolve_dispatch_model` chain as sweep dispatch: this key > `autonomous.model` > shipped default; blanks treated as unset. A role child never inherits the account's interactive CLI default |
@@ -4220,6 +4232,77 @@ stops a host running sweeps at all).
 | — | `autonomous.worktreeReaper.gracePeriodSecs` | config > default | `600` (10 min) |
 | `LOOM_WORKTREE_REAPER_DISK_WARN_GB` | `autonomous.worktreeReaper.diskWarnFreeGb` | env > config > default | `20` |
 
+#### Pressure-triggered deep clean (#5919)
+
+**The remaining leak.** The passes above reclaim *worktrees* — the whole
+directory when its PR merged, or just `target/`/`node_modules/` from a kept-but-
+idle one (#5187). Neither can touch the one directory that is neither a worktree
+nor removable: the registered repo's **own primary checkout**. Only
+`clean --deep` reclaims from `repo_root` itself, and the reaper never ran it. On
+a long-lived host that leaked monotonically: 34 GB of `target/` regrowth in
+about a day, a host down to 1.9 GiB free with its daemon alive but unqueryable
+over IPC, and a `dynamic_cap` of 5 against a configured 12 — half the host's
+concurrency lost to artifacts nobody was reclaiming.
+
+**What it does.** At the end of each reaper tick, the daemon measures free space
+on the volume holding **the repo itself** (not the worktree-root volume, which
+may be a different disk) and, when it is below the floor, runs the equivalent of
+`loom-daemon clean --deep --safe` against the primary checkout — removing
+exactly `target/` and `node_modules/`, through the same code path the manual
+command uses. It logs at `WARN` naming both what it reclaimed and why it fired.
+
+**Pressure-triggered, not "deep every tick"** — flipping the 15-minute pass to
+`deep` would delete a developer's warm build cache four times an hour on a host
+with plenty of disk. A `minIntervalSecs` cooldown (default 6h) additionally
+keeps a disk that is full for some *other* reason (a big dataset) from turning
+into a delete/rebuild/delete loop.
+
+**Safety.** `safe: true` is enforced at runtime, not by convention: the pass
+refuses to run at all if handed non-`safe` or `force` options, so a scheduled
+bare `--deep` is unreachable by construction. It also **holds the machine-wide
+build slot** for the duration of the removal, so it can never delete `target/`
+under a running build gate — if the slot cannot be taken it defers to the next
+tick rather than proceeding unserialized (a consequence worth knowing:
+`LOOM_BUILD_SLOTS=0` therefore also disables scheduled deep cleans, and the log
+line says so). It never deletes the directory holding the running binary, and an
+unmeasurable `df` never fires a deletion (unknown != zero, #4164).
+
+```json
+{
+  "autonomous": {
+    "worktreeReaper": {
+      "deepClean": {
+        "enabled": true,
+        "freeGb": 20,
+        "minIntervalSecs": 21600
+      }
+    }
+  }
+}
+```
+
+| Env var | Config key | Precedence | Default |
+|---------|-----------|------------|---------|
+| `LOOM_DEEP_CLEAN` | `autonomous.worktreeReaper.deepClean.enabled` | env > config > default | `true` (on) |
+| `LOOM_DEEP_CLEAN_FREE_GB` | `autonomous.worktreeReaper.deepClean.freeGb` | env > config > `diskWarnFreeGb` | `20` |
+| `LOOM_DEEP_CLEAN_MIN_INTERVAL_SECS` | `autonomous.worktreeReaper.deepClean.minIntervalSecs` | env > config > default | `21600` (6h) |
+
+**Observability.** `loom-daemon status` prints an `artifact reclaim (deep, per
+repo)` block beside the dynamic-cap disk term — when a pass last fired, what it
+reclaimed, and (the common case) why the last evaluation declined, e.g.
+`118G free >= 20G floor — no disk pressure`. The same records are on
+`status --json` under `deep_clean[]`, so a watch loop can assert reclamation is
+alive:
+
+```bash
+loom-daemon status --json | jq '.deep_clean[] | {root, last_fired_at, last_reason}'
+```
+
+The firing record (and therefore the cooldown) is **process state**: a daemon
+restart re-arms it, which is harmless — the artifacts are already gone, so the
+next pass reclaims nothing and re-arms. `last_fired_at: null` means "not since
+this daemon started", not "never". See `loom-daemon/src/deep_clean.rs`.
+
 **Not limited to the daemon's attached workspace.** The loop walks
 `WorkspaceRegistry::effective_roots()` each tick, so a daemon started from
 `~/GitHub/anvil` still reaps `~/GitHub/loom` as long as that repo is registered
@@ -4232,6 +4315,64 @@ superset recovery path that reports zero errors when the loop already cleaned
 up. The first tick after daemon startup is deliberately skipped so in-flight
 sweeps can re-establish their `.loom-in-use` markers first. See
 `loom-daemon/src/worktree_reaper.rs`.
+
+#### `pr-<N>` worktrees are reaped too (#5939)
+
+Through v0.18.11 every automatic reclaim path was scoped to the `issue-<N>`
+naming class. The directory scan itself always enumerated `.loom/worktrees/`,
+but each entry was then resolved through `naming::issue_from_worktree`, which
+recognizes only `issue-<N>` — so a `pr-<N>` worktree (created by
+`.loom/scripts/pr-worktree.sh` for a PR whose branch does not fit the
+`feature/issue-<N>` convention) was enumerated and immediately discarded.
+Nothing on a timer could ever reclaim one; only a hand-run `loom-daemon clean
+--aggressive` could, and that mode walks a vestigial-worktree decision tree
+over *every* `git worktree` entry, so it is not something to schedule.
+
+Measured on `loom-worker-1` (2026-08-10): 125 worktree entries, of which
+**110 were `pr-*` holding 27 GB** — long-merged PRs against a repo ~600 PRs
+further on. The scheduled cleaner was working correctly and reclaiming
+nothing, because everything it could see had already been taken; disk fell
+from 20 GB to 6.8 GB free over 2.5 hours and pinned `dynamic_cap` at 4 against
+a configured 12.
+
+The reaper now runs a second, parallel pass over `pr-<N>` directories:
+
+- **Same safety gates.** `worktree_ops::clean::classify_pr_worktree` applies
+  the identical in-use / active-process / editable-install / `.loom-managed`
+  sentinel / grace-period / uncommitted-changes chain
+  `classify_worktree` does. Both removal passes share one enumeration and one
+  gate loop, so the `pr-<N>` class cannot drift from the `issue-<N>` class.
+- **PR-number-keyed eligibility.** A `pr-<N>` worktree has no backing Loom
+  issue, so there is no closed-issue gate and no issue-keyed claim-lock to
+  consult. Its PR status is resolved directly from its own number via
+  `gh api repos/{owner}/{repo}/pulls/<N>` (REST, like every other reaper
+  probe); a 404 or any failure reads as `UNKNOWN`, which is always a skip.
+- **Its branch is read, not constructed.** An `issue-<N>` worktree's branch is
+  always `feature/issue-<N>`. A `pr-<N>` worktree's is whatever
+  `gh pr checkout` produced, so it is read back from the worktree itself — and
+  `main`/`master`/`develop`/`trunk` are never deletion candidates, the one
+  guard the issue-keyed path does not need.
+- **Artifact reclaim too.** A **kept** `pr-<N>` worktree (open PR, dirty tree,
+  unresolvable PR status) gets its `target/` / `node_modules/` reclaimed
+  in place, exactly as AC3 of #5177 already did for `issue-<N>`. Those are the
+  long-lived worktrees by definition, so they are the ones whose multi-GB
+  build directories sit on disk for days.
+- **`--aggressive` is unchanged.** The genuinely risky classes — HEAD
+  unreachable, unknown provenance, worktrees outside `.loom/` — remain
+  `--aggressive`-only. The 29 "would lose work" skips in the measurement above
+  are the correct default and stay that way.
+
+**Worktree footprint in `loom-daemon status`.** The same issue added a
+`Worktree footprint:` section under the dynamic-cap breakdown, reporting each
+managed repo's worktree count split by naming class plus its total on-disk
+size (and the matching `worktrees[]` array in `--json`). Before it, a host
+carrying 39 GB of merged-PR worktrees rendered identically to one that was
+genuinely out of space. The residual `other` bucket — entries matching neither
+`issue-<N>` nor `pr-<N>` — is called out explicitly, so the *next* naming
+class the reaper does not recognize is visible the day it appears rather than
+after it has eaten a disk. It is collected client-side by the CLI (a
+filesystem walk), never inside the IPC handler, for the same reason the
+per-token usage table and `--pipeline` are.
 
 ### Orphaned-process reaper (#5110)
 

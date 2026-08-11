@@ -750,6 +750,18 @@ gh issue close <number> --reason "not planned"
 
 #### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
 
+**First, confirm this is genuinely operator-by-right, not unbuilt capability.**
+If curation surfaces an issue — new or already carrying `loom:operator-only` —
+whose block is really "automation could do this once a specific tool/agent
+capability exists" rather than a ruling only a human can make, the correct
+label is `loom:needs-capability`, not `loom:operator-only`. If the issue
+**already** carries `loom:operator-only` and you determine on re-curation that
+it is actually this shape, relabel it per `.loom/docs/label-state-machine.md`
+→ "Bidirectional routing: `loom:operator-only` ↔ `loom:needs-capability`"
+(#5818) — relabel, file/reuse a capability-request issue against the owning
+tool repo, and cross-link both issues in both directions, all in the same
+pass.
+
 **Never apply `loom:operator-only` on its own.** Choose exactly one sub-kind and
 apply both labels in the **same** command. This is purely additive — the base
 label is never removed or replaced, so every filter/skip keyed on it (sweep
@@ -760,7 +772,8 @@ Priority-2 query above) behaves exactly as before:
 |---|---|
 | `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
 | `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required |
-| `loom:operator-decision` | A genuine human ruling is needed (policy, trade-off, security/access). **Safe default whenever the kind is not obvious** |
+| `loom:operator-decision` | The act requires authority an agent structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
+| `loom:operator-objective` | The issue is determined once the operator states an objective — name the candidate objectives and the answer under each (#5826) |
 
 ```bash
 # Curator routing an issue that encodes a still-pending human decision:
@@ -768,8 +781,14 @@ gh issue comment <number> --body "Routing to the operator: <why a human must dec
 gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
 ```
 
-Being unsure which sub-kind applies is **never** a reason to emit the bare
-label — `loom:operator-decision` is always safe to over-apply.
+**Being unsure which sub-kind applies means curation is incomplete, not that
+the bare label is safe to reach for (#5826).** `loom:operator-decision` is
+**not** a safe default when the kind is not obvious — before applying it, run
+the falsifiability test from `.loom/docs/label-state-machine.md`: name the axis
+two well-informed people would still disagree on, and show it is a preference,
+not a fact. If you can't name that axis, finish the analysis — the item is
+determined, not a decision. If the only gap is a missing objective, that's
+`loom:operator-objective`, not `loom:operator-decision`.
 
 **If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
 in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
@@ -777,6 +796,14 @@ in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
 `warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
 does not satisfy this — the phrase itself must be present so a later automated
 pass can tell when the blocker clears.
+
+**If you chose `loom:operator-decision`**, the same comment MUST name the
+disagreement axis and state why it is a preference rather than a fact — "needs
+judgement" alone does not satisfy this.
+
+**If you chose `loom:operator-objective`**, the same comment MUST list the
+candidate objectives and the answer under each, not just "needs an
+objective."
 
 Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
 "`loom:operator-only` sub-kinds".
