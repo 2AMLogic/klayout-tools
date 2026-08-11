@@ -286,6 +286,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — new `klt size` verb (#721): Phase 0 of the analog-sizing
+  epic (#705) — solve a single device's channel width from a gm/Id target
+  and a current budget, with `ngspice` on the real PDK models as the
+  in-loop evaluator (never a closed-form surrogate as the final word).
+  Uses a diode-connected bias sweep (an ideal current source fixes `Id`
+  exactly; ngspice's own DC operating-point solver finds the resulting
+  `Vgs`/`gm` for each candidate width), pays a real PDK's model-library
+  parse cost once per invocation via `alterparam`/`reset` iteration rather
+  than re-invoking `ngspice` per candidate, and always confirms the
+  interpolated answer with a fresh, independent ngspice run before
+  reporting it. Reuses `klt sim`'s model-library resolution and
+  exit-code trichotomy (0/1/3/4). Every response — pass, fail, or error —
+  carries a populated `method` field stating the sizing rationale and
+  inversion-level derivation; a result with no stated method is never
+  produced. Validated against this repo's own sky130 5T OTA canary
+  (`examples/design-pipeline/`): given the gm/Id its committed AC
+  simulation implies for the hand-sized input pair, `klt size` returns
+  5.44 um against the hand-sized 8 um on the real sky130A models. See
+  `docs/cli/size.md`.
 - 2026-08-11 — `klt gen guard_ring`: new additive `contacts_per_side_ns`/
   `contacts_per_side_ew` int params (#685), each defaulting to `0` (inherit
   `contacts_per_side`, so existing single-scalar callers are unaffected).

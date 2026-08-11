@@ -83,6 +83,7 @@ klt stats design.gds --per-layer         # densities, bbox, polygon counts
 klt pdk find --pdk sky130A               # locate an installed PDK, JSON out
 klt render design.gds                    # per-layer PNGs, headless
 klt sim request.json                     # SPICE PVT corner sweep (ngspice), JSON out
+klt size request.json                    # single-device gm/Id sizing, ngspice-scored, JSON out
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
 klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)

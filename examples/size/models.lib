@@ -1,0 +1,29 @@
+* klt size worked example -- tiny synthetic device library
+* (not a real PDK -- see this file's generate.py docstring)
+.lib tt
+.subckt nmos_demo d g s b
+.param l=0.5 w=1 nf=1 mult=1
+mnmos_demo d g s b nmos_demo__model l={l} w={w}
+.model nmos_demo__model nmos level=1 vto=0.5 kp=120u lambda=0.02 gamma=0.4 phi=0.7
+.ends nmos_demo
+
+.subckt pmos_demo d g s b
+.param l=0.5 w=1 nf=1 mult=1
+mpmos_demo d g s b pmos_demo__model l={l} w={w}
+.model pmos_demo__model pmos level=1 vto=-0.5 kp=40u lambda=0.02 gamma=0.4 phi=0.7
+.ends pmos_demo
+.endl tt
+
+.lib ss
+.subckt nmos_demo d g s b
+.param l=0.5 w=1 nf=1 mult=1
+mnmos_demo d g s b nmos_demo__model l={l} w={w}
+.model nmos_demo__model nmos level=1 vto=0.55 kp=102u lambda=0.02 gamma=0.4 phi=0.7
+.ends nmos_demo
+
+.subckt pmos_demo d g s b
+.param l=0.5 w=1 nf=1 mult=1
+mpmos_demo d g s b pmos_demo__model l={l} w={w}
+.model pmos_demo__model pmos level=1 vto=-0.55 kp=34u lambda=0.02 gamma=0.4 phi=0.7
+.ends pmos_demo
+.endl ss

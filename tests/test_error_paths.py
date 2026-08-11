@@ -10,11 +10,12 @@ Verb-specific tests (text-format markers, verb-specific exceptions, `drc`'s
 `--deck` handling, `pdk`'s different arg shape, etc.) stay in their own test
 modules — only the mechanically identical error paths live here.
 
-`sim`'s positional is a request JSON file rather than a GDSII/OASIS layout,
-but the same missing-file / unreadable-input / JSON-envelope behavior
-applies: a missing request file is "not found" (`klayout_tools.sim.SimError`)
-exactly like a missing layout file, and an unparseable request file (e.g.
-plain text) fails the same way a non-layout-stream file fails `klt layers`.
+`sim`'s and `size`'s positionals are request JSON files rather than a
+GDSII/OASIS layout, but the same missing-file / unreadable-input /
+JSON-envelope behavior applies: a missing request file is "not found"
+(`klayout_tools.sim.SimError`, `klayout_tools.size.SizeError`) exactly like
+a missing layout file, and an unparseable request file (e.g. plain text)
+fails the same way a non-layout-stream file fails `klt layers`.
 """
 
 import json
@@ -32,6 +33,7 @@ VERBS = [
     ("precheck", []),
     ("render", []),
     ("sim", []),
+    ("size", []),
 ]
 
 
