@@ -24,7 +24,7 @@ verb-specific ``except`` clauses -- and are passed in here as ``error_cls``.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -172,6 +172,30 @@ def texts(
     if layer_index is None:
         return kdb.Texts()
     return kdb.Texts(cell.begin_shapes_rec(layer_index))
+
+
+def clip_box(
+    kdb_module: Any, region_um: tuple[float, float, float, float], dbu: float
+) -> Any:
+    """Convert a micrometre ``(left, bottom, right, top)`` window into an
+    integer-dbu ``kdb.Box`` for clipping. Coordinates are rounded to the
+    nearest whole database unit -- the same rounding ``drc.py`` applies to
+    deck thresholds -- so a caller who authored the window in micrometres
+    never needs to know the stream's dbu.
+
+    Takes the ``klayout.db`` module itself as ``kdb_module`` (rather than
+    importing it at module scope) so callers can keep their own lazy-import
+    convention (see :func:`load_layout`'s docstring) -- originally
+    implemented by ``ring_check.py``'s own ``_clip_box``, then duplicated
+    verbatim in ``components.py`` before both were factored out here.
+    """
+    left, bottom, right, top = region_um
+    return kdb_module.Box(
+        round(left / dbu),
+        round(bottom / dbu),
+        round(right / dbu),
+        round(top / dbu),
+    )
 
 
 def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:

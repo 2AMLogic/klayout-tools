@@ -95,6 +95,8 @@ from .remote_launcher import (
     RemoteLauncher,
     RemoteLaunchError,
     _run_aws_cli,
+    _signal_handlers_install,
+    _signal_handlers_restore,
     build_security_group_egress_lockdown_args,
     build_security_group_ingress_args,
     instance_vcpu_count,
@@ -441,14 +443,10 @@ class FleetLauncher:
         return False  # never swallow an exception raised in the block
 
     def _install_signal_handlers(self) -> None:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            self._prev_handlers[sig] = signal.getsignal(sig)
-            signal.signal(sig, self._handle_signal)
+        _signal_handlers_install(self._prev_handlers, self._handle_signal)
 
     def _restore_signal_handlers(self) -> None:
-        for sig, handler in self._prev_handlers.items():
-            signal.signal(sig, handler)
-        self._prev_handlers.clear()
+        _signal_handlers_restore(self._prev_handlers)
 
     def _handle_signal(self, signum: int, frame: FrameType | None) -> None:
         del frame

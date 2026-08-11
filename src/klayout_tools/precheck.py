@@ -28,6 +28,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._check_result import finish as _finish
+from ._check_result import fmt_layer as _fmt_layer
+from ._check_result import skipped as _skipped
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._provenance import build_provenance
@@ -202,36 +205,12 @@ def run_precheck(
     }
 
 
-def _fmt_layer(layer_tuple: tuple[int, int]) -> str:
-    return f"{layer_tuple[0]}/{layer_tuple[1]}"
-
-
 def _bbox_dict(bbox: Any) -> dict[str, int]:
     return {
         "left": bbox.left,
         "bottom": bbox.bottom,
         "right": bbox.right,
         "top": bbox.top,
-    }
-
-
-def _finish(name: str, violations: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": "fail" if violations else "pass",
-        "violation_count": len(violations),
-        "violations": violations,
-        "skip_reason": None,
-    }
-
-
-def _skipped(name: str, reason: str) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": "skipped",
-        "violation_count": 0,
-        "violations": [],
-        "skip_reason": reason,
     }
 
 

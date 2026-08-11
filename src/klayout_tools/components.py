@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._layout import clip_box as _clip_box
 from ._layout import load_layout
 from ._layout import region as _region
 from ._layout import select_top_cells as _select_top_cells_shared
@@ -406,21 +407,6 @@ def _select_top_cells(layout: Any, top: str | None) -> list[Any]:
     ``ring_check.py``/``drc.py``/``precheck.py`` already share.
     """
     return _select_top_cells_shared(layout, top, ComponentsError)
-
-
-def _clip_box(
-    kdb: Any, region_um: tuple[float, float, float, float], dbu: float
-) -> Any:
-    """Convert a micrometre ``(left, bottom, right, top)`` window into an
-    integer-dbu ``kdb.Box`` for clipping -- same rounding ``ring_check.py``
-    applies."""
-    left, bottom, right, top = region_um
-    return kdb.Box(
-        round(left / dbu),
-        round(bottom / dbu),
-        round(right / dbu),
-        round(top / dbu),
-    )
 
 
 def _validate_conductors(conductors: list[dict[str, Any]]) -> list[dict[str, Any]]:
