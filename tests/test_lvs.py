@@ -783,6 +783,81 @@ X2 b1 b2 cellB
     assert len([e for e in correspondence if e["reference"] == "OUT"]) == 2
 
 
+def _make_single_nmos_layout(extra_drain_label: str = "Y2"):
+    """One NMOS (sky130 layers, no `nwell` drawn) whose drain pad carries
+    two distinct li1 labels (`Y` and ``extra_drain_label``) -- the same
+    multi-label-merge shape `tests/test_extract.py`'s
+    `_make_inverter_layout(extra_y_label=...)` fixture exercises, trimmed to
+    a single device since a self-compare (see the test below) needs no
+    second transistor. KLayout's `Net.expanded_name()` joins the two labels
+    with a comma at extraction time -- the real-object case
+    `spice_safe_net_name`/`_name_or_none` (issue #696) must convert, unlike
+    a name typed directly into a hand-written SPICE fixture."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing (no nwell -> nmos)
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (gate)
+
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (source side)
+    draw(66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1 (drain side)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (source pad)
+    draw(67, 20, kdb.Box(1600, 200, 2000, 800))  # li1 (drain pad)
+
+    label(66, 20, "A", 1000, 500)  # gate, directly on poly
+    label(67, 5, "VGND", 200, 500)  # source pad
+    label(67, 5, "Y", 1800, 500)  # drain pad, label 1
+    label(67, 5, extra_drain_label, 1650, 500)  # drain pad, label 2 (merges)
+
+    return layout
+
+
+def test_net_correspondence_spells_merged_net_like_the_netlist(tmp_path):
+    """Issue #696: `net_correspondence[].layout`'s spelling of a real,
+    layout-extracted label-merged net (`Y`/`Y2` on one drain pad, joined by
+    KLayout as `Y,Y2` internally) matches `klt extract`'s own `nets[].name`/
+    the written netlist -- `Y|Y2`, not the un-escaped comma form -- so a
+    caller can join `net_correspondence` straight into `klt extract`'s
+    report by exact net name."""
+    from klayout_tools.extract import run_extract
+
+    layout = _make_single_nmos_layout()
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(gds_path), "sky130", output=reference_path)
+    assert extracted["merged_net_labels"] == [{"net": "Y|Y2", "labels": ["Y", "Y2"]}]
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(gds_path), "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = {
+        (entry["layout"], entry["reference"]) for entry in report["net_correspondence"]
+    }
+    assert ("Y|Y2", "Y|Y2") in correspondence
+    assert not any(
+        "Y,Y2" in (layout, reference) for layout, reference in correspondence
+    )
+
+
 def test_auto_selected_top_matches_explicit_top(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)

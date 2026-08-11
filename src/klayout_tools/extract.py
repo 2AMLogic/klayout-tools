@@ -808,21 +808,27 @@ def run_extract(
     else:
         devices, device_counts, nets = [], {}, []
 
-    # Nets whose KLayout-assigned name is a comma-joined multi-label merge
-    # (issue #470): `Net.expanded_name()` joins every distinct label found on
-    # one electrical net with `,` (see `tests/test_extract.py`'s
+    # Nets whose KLayout-assigned name is a multi-label merge (issue #470):
+    # `Net.expanded_name()` joins every distinct label found on one
+    # electrical net with `,` (see `tests/test_extract.py`'s
     # `_make_inverter_layout(extra_y_label=...)` fixture, built for issue
-    # #312's SPICE-name-sanitization fix). That is a silent signal that two
-    # differently-named nets were shorted together on the layout side --
-    # e.g. a `gen-compose` `pins[]` entry naming a port that other
-    # connectivity already reaches. Surfaced two ways: a structured
-    # `merged_net_labels[]` entry (so a caller does not have to re-derive
-    # the label list from the joined string) and a matching prose
-    # `warnings[]` entry (so a caller checking only `warnings[]`, per the
-    # documented contract, still sees it). See docs/cli/extract.md's
-    # "Merged net labels" section for the false-positive limitation: a
-    # label that legitimately contains a literal comma is indistinguishable
-    # from a real collision by this heuristic.
+    # #312's SPICE-name-sanitization fix), but this response's `nets[]`
+    # (built by `_describe_nets`, above) has already rewritten that to the
+    # `|`-joined spelling KLayout's own `NetlistSpiceWriter` uses for the
+    # net's node references in the written SPICE (`spice_safe_net_name`,
+    # issue #696) -- so `merged_net_labels[].net` below is byte-identical to
+    # the netlist's own spelling, not a separately (comma-) spelled alias of
+    # it. That is a silent signal that two differently-named nets were
+    # shorted together on the layout side -- e.g. a `gen-compose` `pins[]`
+    # entry naming a port that other connectivity already reaches. Surfaced
+    # two ways: a structured `merged_net_labels[]` entry (so a caller does
+    # not have to re-derive the label list from the joined string) and a
+    # matching prose `warnings[]` entry (so a caller checking only
+    # `warnings[]`, per the documented contract, still sees it). See
+    # docs/cli/extract.md's "Merged net labels" section for the
+    # false-positive limitation: a label that legitimately contains a
+    # literal `|` is indistinguishable from a real collision by this
+    # heuristic.
     merged_net_labels = _detect_merged_net_labels(nets)
     for merged_entry in merged_net_labels:
         labels_str = ", ".join(merged_entry["labels"])
@@ -830,7 +836,8 @@ def run_extract(
             f"net '{merged_entry['net']}' merges "
             f"{len(merged_entry['labels'])} distinct labels ({labels_str}) "
             "onto one net -- KLayout joins multiple labels found on the "
-            "same electrical net with ',' in Net.expanded_name(); this "
+            "same electrical net (as '|' here and in the written netlist, "
+            "matching NetlistSpiceWriter's own node-name escaping); this "
             "usually means two differently-named nets were shorted "
             "together in the layout -- see docs/cli/extract.md's "
             "'Merged net labels' section."
@@ -4134,7 +4141,7 @@ def _compute_parasitics(
             continue
         results.append(
             {
-                "net": name,
+                "net": spice_safe_net_name(name),
                 "resistance_ohm": round(r_ohm, 4),
                 "capacitance_ff": round(c_ff, 6),
             }
@@ -4341,15 +4348,20 @@ def _inject_parasitics(
     if ground is None:
         ground = circuit.create_net(ground_net_name)
 
-    # Keyed by `expanded_name()` rather than looked up via `net_by_name()`
-    # per entry: `net_by_name()` only resolves *named* nets (an explicit
-    # layout label), so it silently returns `None` -- and drops the entry --
-    # for every genuinely internal/unlabelled net, whose `expanded_name()` is
-    # KLayout's auto-generated `$<n>` form rather than a real `.name`. Issue
-    # #283: `_compute_parasitics` already measures these nets correctly (the
-    # geometry is there), so this lookup must resolve them too or the R/C it
-    # computed for them is discarded right here.
-    nets_by_name = {net.expanded_name(): net for net in circuit.each_net()}
+    # Keyed by `spice_safe_net_name(expanded_name())` rather than looked up
+    # via `net_by_name()` per entry: `net_by_name()` only resolves *named*
+    # nets (an explicit layout label), so it silently returns `None` -- and
+    # drops the entry -- for every genuinely internal/unlabelled net, whose
+    # `expanded_name()` is KLayout's auto-generated `$<n>` form rather than a
+    # real `.name`. Issue #283: `_compute_parasitics` already measures these
+    # nets correctly (the geometry is there), so this lookup must resolve
+    # them too or the R/C it computed for them is discarded right here. The
+    # `spice_safe_net_name` wrap (issue #696) matches `_compute_parasitics`'
+    # own conversion of `entry["net"]`, so a merged-label net's `|`-joined
+    # key here actually matches instead of silently missing.
+    nets_by_name = {
+        spice_safe_net_name(net.expanded_name()): net for net in circuit.each_net()
+    }
     existing_names = set(nets_by_name)
 
     report_nets: list[dict[str, Any]] = []
@@ -4445,6 +4457,38 @@ def _inject_parasitics(
     }
 
 
+def spice_safe_net_name(name: str) -> str:
+    """Rewrite a KLayout ``Net.expanded_name()`` string to the exact spelling
+    KLayout's own ``NetlistSpiceWriter`` writes for that net's *node*
+    references in the ``.SUBCKT``/instance lines of the written SPICE file
+    (issue #696).
+
+    ``Net.expanded_name()`` joins every distinct text label found on one
+    electrical net with ``,`` (see :func:`_detect_merged_net_labels`'s
+    docstring, issue #470) -- but a SPICE node token cannot contain a comma
+    (a common argument separator), so ``NetlistSpiceWriter`` writes the
+    *same* joined net using ``|`` instead wherever it appears as an actual
+    node reference (only its leading ``* pin ...``/``* net ...`` comments
+    keep the comma-joined form). Before this function existed, every net
+    name this module put into the JSON response (``nets[].name``,
+    ``devices[].nets[...]``, ``merged_net_labels[].net``,
+    ``parasitics.nets[].net``) used the *unescaped* comma form, while the
+    written netlist used the escaped pipe form -- the same net, spelled two
+    different ways depending which artifact you read it from, with no way
+    for a caller to know the two strings named the same node short of
+    hard-coding the ``,`` -> ``|`` substitution itself. Calling this on every
+    net name before it enters the response makes it byte-identical to the
+    netlist's own spelling everywhere it is reported (also applied by
+    ``klt lvs``'s ``net_correspondence``/``mismatches[].net`` via
+    ``lvs.py``'s ``_name_or_none``, sourced from the same
+    ``Net.expanded_name()`` convention).
+
+    A no-op for the overwhelming majority of net names, which contain no
+    comma at all.
+    """
+    return name.replace(",", "|")
+
+
 _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
@@ -4515,7 +4559,7 @@ def _describe_devices(
         for terminal in device_class.terminal_definitions():
             net = device.net_for_terminal(terminal.id())
             nets[terminal.name.lower()] = (
-                net.expanded_name() if net is not None else None
+                spice_safe_net_name(net.expanded_name()) if net is not None else None
             )
 
         params: dict[str, float] = {}
@@ -4627,11 +4671,11 @@ def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
 
     nets: list[dict[str, Any]] = []
     for net in circuit.each_net():
-        name = net.expanded_name()
+        raw_name = net.expanded_name()
         nets.append(
             {
-                "name": name,
-                "pin": name in pin_nets,
+                "name": spice_safe_net_name(raw_name),
+                "pin": raw_name in pin_nets,
                 "device_count": net.terminal_count(),
             }
         )
@@ -4652,20 +4696,25 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
     caller may not have intended.
 
     Scans ``nets`` (the already-built ``nets[]`` array, so this reuses the
-    same ``name`` KLayout assigned rather than re-querying the circuit) for
-    any net whose name splits into 2+ parts on ``,``, and returns one entry
-    per match: ``{"net": "<full joined name>", "labels": ["Y", "OUT", ...]}``.
-    Always a list; empty when no net carries multiple labels.
+    same name this module reports elsewhere rather than re-querying the
+    circuit) for any net whose name splits into 2+ parts on ``|`` -- the
+    netlist-consistent spelling :func:`spice_safe_net_name` already rewrote
+    ``nets[].name`` to (issue #696), matching the written SPICE netlist's own
+    ``.SUBCKT``/instance-line node references. Returns one entry per match:
+    ``{"net": "<full joined name>", "labels": ["Y", "OUT", ...]}`` -- ``net``
+    is therefore a usable key into the written netlist, not a separately
+    (comma-) spelled alias of it. Always a list; empty when no net carries
+    multiple labels.
 
     Known limitation (heuristic, not exact): a label that legitimately
-    contains a literal comma is indistinguishable from a real multi-label
+    contains a literal ``|`` is indistinguishable from a real multi-label
     collision by this substring split -- see docs/cli/extract.md's "Merged
     net labels" section.
     """
     merged: list[dict[str, Any]] = []
     for net in nets:
         name = net["name"]
-        labels = name.split(",")
+        labels = name.split("|")
         if len(labels) < 2:
             continue
         merged.append({"net": name, "labels": labels})

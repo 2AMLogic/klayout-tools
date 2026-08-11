@@ -1012,20 +1012,37 @@ connectivity (drawn metal, or a second `pins[]`/`connectivity[]` entry)
 already reaches, silently renaming the node that owns the pad rather than
 naming the caller's intended net. KLayout does not treat this as an error:
 `LayoutToNetlist` simply joins every distinct label text found on one net
-with a comma in `Net.expanded_name()` — two labels `Y` and `OUT` shorted
-together come back as the single net name `Y,OUT` (three or more labels
-join the same way, e.g. `Y,OUT,FOO`). That joined name flows into `nets[]`
-and the written netlist unremarked; nothing about the string itself says
-"these were two different names before extraction merged them."
+into its `Net.expanded_name()` — two labels `Y` and `OUT` shorted together
+come back as one joined net name (three or more labels join the same way).
 
-`klt extract` detects this heuristically: any net whose name splits into 2+
-parts on `,` is treated as a label collision. Each match produces two things:
+**One spelling everywhere (issue #696).** KLayout's own `Net.expanded_name()`
+joins labels with a comma (`Y,OUT`) — but a SPICE node token cannot contain
+a comma, so KLayout's `NetlistSpiceWriter` writes the *same* net using `|`
+instead (`Y|OUT`) wherever it appears as an actual node reference in the
+written netlist (its `.SUBCKT` pin list and every instance line that
+connects to it — only its leading `* pin ...` comment keeps the raw,
+comma-joined form). `klt extract` renders every net name it reports —
+`nets[].name`, `devices[].nets[...]`, `merged_net_labels[].net`, and
+`parasitics.nets[].net` — using that same `|`-joined spelling, so a merged
+net's name is byte-identical across the written netlist and every JSON field
+that names it; `klt lvs`'s `net_correspondence[]` and `mismatches[].net`
+follow the same convention (see `docs/cli/lvs.md`). Before this, the JSON
+carried the raw, un-escaped comma spelling while the netlist carried the
+escaped pipe spelling — the same net, spelled two different ways depending
+on which artifact you read it from, with no documented way to join them by
+name short of hard-coding the `,` -> `|` substitution yourself.
+
+`klt extract` detects a merge heuristically: any net whose (already
+`|`-joined) name splits into 2+ parts on `|` is treated as a label
+collision. Each match produces two things:
 
 - A structured entry in the response's `merged_net_labels[]` array (see "JSON
   schema" above): `{ "net": "<full joined name>", "labels": ["Y", "OUT"] }`
-  — `labels` is the joined name pre-split, so a consumer does not have to
-  re-derive the label list by re-implementing the `,`-scan against
-  `nets[].name` itself.
+  — `net` uses the same `|`-joined spelling as `nets[].name` and the written
+  netlist, so it is a usable key into the netlist rather than a separately
+  spelled alias of it; `labels` is the joined name pre-split, so a consumer
+  does not have to re-derive the label list by re-implementing the `|`-scan
+  against `nets[].name` itself.
 - A matching prose entry in `warnings[]`, so a caller that only checks
   `warnings[]` (the documented, minimal self-check every `klt` command
   supports) still sees the collision rather than needing to know about
@@ -1040,13 +1057,13 @@ is currently the only place in the toolchain that surfaces it.
 
 **Known limitation (false positives).** The heuristic is a substring split,
 not a provenance check: KLayout's `Net.expanded_name()` does not record
-*why* a net carries a `,`-containing name, only the final joined string. A
-label that legitimately contains a literal comma in its own text (unusual,
-but not disallowed by any layer's text-shape format) is indistinguishable
-from a genuine two-label collision by this heuristic — it will be reported
-as a false-positive entry in both `merged_net_labels[]` and `warnings[]`.
-There is no server-side fix for this today: a caller that intentionally
-uses comma-containing label text should expect (and can safely ignore) a
+*why* a net carries a multi-label name, only the final joined string. A
+label that legitimately contains a literal `|` in its own text (unusual, but
+not disallowed by any layer's text-shape format) is indistinguishable from a
+genuine two-label collision by this heuristic — it will be reported as a
+false-positive entry in both `merged_net_labels[]` and `warnings[]`. There is
+no server-side fix for this today: a caller that intentionally uses
+`|`-containing label text should expect (and can safely ignore) a
 `merged_net_labels[]` entry whose `labels` do not actually correspond to
 independent naming intents.
 
@@ -1779,20 +1796,22 @@ with no device terminal falls back to a single unsuffixed `RY`, matching the
 capacitor's naming) — but with every character outside `[A-Za-z0-9_]` mapped
 to `_` first (issue #312). This matters because a net's name can carry
 characters a SPICE reader treats as syntax rather than an opaque token — `$`
-(KLayout's placeholder for an unlabelled/anonymous net, e.g. `$12`) and `,`
-(KLayout's join character when multiple text labels land on one net, e.g.
-`Y,Y2`). ngspice does not reject either: it silently splits the comma-joined
-form at the comma into an extra positional node, corrupting the card's arity
-and erroring against an unrelated node instead of a clean syntax error.
+(KLayout's placeholder for an unlabelled/anonymous net, e.g. `$12`) and `|`
+(this field's own join character when multiple text labels land on one net,
+e.g. `Y|Y2` — see "Merged net labels" above, issue #696). ngspice does not
+reject either: it silently splits the joined form into an extra positional
+node, corrupting the card's arity and erroring against an unrelated node
+instead of a clean syntax error.
 
 The sanitization applies to the **instance name only** — a cosmetic handle
 nothing downstream keys off of. The `net` field in the `parasitics.nets[]`
 JSON above, the `hub_net` / `terminals[].leg_net` node names, and the
-`.SUBCKT` pin interface are all unaffected and still carry the literal net
-identity (further escaped by KLayout's own `NetlistSpiceWriter` where node
-syntax requires it). If you need to map an emitted `R`/`C` card back to the
-net it parasitizes, use `parasitics.nets[].net` (or the netlist's own node
-names on that card), not the sanitized instance name.
+`.SUBCKT` pin interface are all unaffected and already carry the literal net
+identity as the written netlist itself spells it (the same `\|`-joined form
+KLayout's own `NetlistSpiceWriter` writes for node syntax, issue #696 — see
+"Merged net labels" above). If you need to map an emitted `R`/`C` card back
+to the net it parasitizes, use `parasitics.nets[].net` (or the netlist's own
+node names on that card), not the sanitized instance name.
 
 ## Verified compatible with `klt sim`'s netlist convention
 
@@ -1920,7 +1939,7 @@ exit codes).
 | `black_box_regions` | array\<object\>           | One entry per black-box/abstract region excluded from connectivity (issue #293 — see "Black-box / abstract regions" above), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "shapes_excluded": int }`. Always present, empty when the layout draws no reserved-annotation-layer (990-999) geometry — see "Reserved annotation layer" above. |
 | `abstracted_cells` | array\<object\>            | One entry per distinct cell type matched by `--abstract-cells` (issue #620 — see "Cell-level (black-box + pins) abstraction" above), each `{ "cell": string, "instance_count": int, "pin_count": int, "resolution_source": "in_cell_labels" \| "lef_abstract", "lef_path": string \| null }` (`lef_path` names the specific `--abstract-cell-lef` file for `"lef_abstract"`, `null` for `"in_cell_labels"`). Always present, empty unless `--abstract-cells` matched at least one instantiated cell. |
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. |
-| `merged_net_labels` | array\<object\>          | One entry per net whose KLayout-assigned name is a comma-joined merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`labels` is `net` split on `,`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
+| `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer (issue #552 — see "Voltage-domain markers" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker or a layout that draws none of it overlapping MOS geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: gf180mcu's anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — which is every layout on a deck (e.g. sky130) whose curated layer set draws a real well-tie/tap. Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
@@ -1940,7 +1959,7 @@ consume.
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line).    |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map. MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
 | `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
@@ -1949,7 +1968,7 @@ consume.
 
 | Field          | Type    | Description                                                                 |
 | -------------- | ------- | ------------------------------------------------------------------------------ |
-| `name`         | string  | The net's name in the written netlist (a labelled name, or an anonymous `$N`). |
+| `name`         | string  | The net's name, byte-identical to how the written netlist's `.SUBCKT`/instance lines reference it (a labelled name, or an anonymous `$N`) — a net two labels merged is `\|`-joined (e.g. `"Y\|Y2"`), not KLayout's own un-escaped, comma-joined `Net.expanded_name()` form (issue #696 — see "Merged net labels" below). |
 | `pin`          | boolean | Whether this net is promoted to a top-cell pin (a named net at the top level). |
 | `device_count` | integer | Number of device terminals connected to this net.                             |
 
