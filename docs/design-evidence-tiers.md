@@ -24,6 +24,29 @@ This toolkit's closed loop targets T1; T2+ require tools and fab access
 outside its scope, and are defined here only so T1 claims are honest about
 what they are not.
 
+### Relationship to the everyblock catalog
+
+This ladder is the same four rungs as the `2AMLogic/product` repo's everyblock
+catalog, under commercial vocabulary:
+
+| this repo | everyblock catalog | claim |
+|---|---|---|
+| T1 | bronze | sim-validated (open tools) |
+| T2 | silver | signoff-validated (commercial decks) |
+| T3 | gold | silicon-validated (measured) |
+| T4 | platinum | production-validated (external user's silicon) |
+
+`product/everyblock/tiers.md` is the commercial-side definition of the ladder;
+`product/everyblock/grants.md` is the authoritative record of whether a given
+block is actually *at* bronze/silver/gold/platinum on a given PDK. The T1
+checklist below is the concrete, checkable expansion of the catalog's
+one-line "bronze" evidence column — engineering tracks progress against it in
+each canary's "gap to T1" issue, but this repo's checklist does not itself
+grant a tier; `grants.md` does. Whether the internal (T1-T4) and external
+(bronze/silver/gold/platinum) vocabularies stay split by audience, or
+converge on one name, is a proposed-but-pending operator decision recorded as
+OPEN in `product/everyblock/tiers.md`.
+
 ## T1 checklist — what "sim-validated" requires
 
 Every item names the artifact and the pass condition. "Fresh" means the
