@@ -70,6 +70,12 @@ recovered by counting `"(VIOLATED)"` lines in
 `report_check_types -violators -format end`'s own stdout, the documented
 fallback.
 
+The `"place"` stage's `global_placement` call runs with `-routability_driven
+-timing_driven` (issue #745, P&R survey §3.1 Priority 1) — both are OpenROAD
+`gpl` module flags, not a new dependency or code path. `-timing_driven`
+requires a linked `create_clock`, which is already in effect by this point in
+every non-floorplan stage script.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the

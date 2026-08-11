@@ -1422,6 +1422,30 @@ def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
     assert "set_routing_layers -signal met1-met5" in route_lines
 
 
+def test_place_stage_enables_routability_and_timing_driven_global_placement(
+    tmp_path, monkeypatch
+):
+    """Issue #745 (P&R survey Priority 1): OpenROAD's `gpl` module already
+    implements routability- and timing-driven global placement -- enabling
+    both on the `place` stage's `global_placement` call is a pure flag
+    addition, no new dependency. `-timing_driven` requires `create_clock` to
+    already be in effect, which `_clock_lines` guarantees earlier in the same
+    stage script."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    place_lines = _script_lines(_stage_script(request_path, "place"))
+    assert any(
+        "global_placement" in line
+        and "-routability_driven" in line
+        and "-timing_driven" in line
+        for line in place_lines
+    )
+
+
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
     """`--pdk` (issue #629) selects a specific installed variant, beating
     `$PDK` -- mirroring `klt extract`'s identical flag."""
