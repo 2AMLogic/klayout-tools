@@ -286,6 +286,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — new `klt mom` verb (#718): Phase 0/1 of the Method-of-Moments
+  epic (#701) — quasi-static **capacitance** extraction. Given a GDSII/OASIS
+  layout plus a JSON spec file mapping GDS layers to conductors and z-extents,
+  it discretises conductor surfaces into panels, fills the
+  potential-coefficient matrix with a constant-panel point-collocation
+  boundary-element method, and solves one right-hand side per conductor for
+  the Maxwell capacitance matrix (femtofarads, `capacitance_matrix_ff`).
+  Unlike `klt extract --parasitics`'s net-to-ground lumped model, this one
+  **does** produce inter-conductor coupling terms.
+  **This is the first Rust component in klayout-tools.** The numerics live in
+  a pyo3/maturin extension crate at `native/mom/` (establishing the
+  `native/<engine>/` convention for future Rust engines per
+  `docs/ARCHITECTURE.md`'s "Rewrite rule"); the Python layer does the
+  `klayout.db` geometry read and the JSON envelope. Because building it needs
+  a Rust toolchain, it is an **optional** `mom` dependency group (`uv sync --group mom`)
+  — every other `klt` verb still installs with no Rust in sight, and `klt mom`
+  fails cleanly with a build pointer when the extension is absent, never an
+  `ImportError` traceback. Numeric-accuracy validation against closed-form
+  references is deliberately out of scope here and owned by #719; the solve
+  does self-check the two properties any physical capacitance matrix has
+  (positive diagonal, non-positive off-diagonal) and reports violations in a
+  `warnings` array rather than silently returning a sign-flipped mutual
+  capacitance. See `docs/cli/mom.md`.
 - 2026-08-11 — `klt extract --parasitics` now declares its own model scope
   machine-readably (#728): a new `parasitics.model` object (`capacitance`,
   `coupling`, `resistance`, `frequency` — static text, unchanged across every

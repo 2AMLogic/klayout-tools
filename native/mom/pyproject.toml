@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "klt-mom-native"
+version = "0.1.0"
+description = "Compiled pyo3 extension backing `klt mom` (2AMLogic/klayout-tools) -- not published standalone"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+# The extension module Python imports as `klt_mom_native` (matches the crate's
+# `[lib] name` in Cargo.toml).
+module-name = "klt_mom_native"
+features = ["pyo3/extension-module"]

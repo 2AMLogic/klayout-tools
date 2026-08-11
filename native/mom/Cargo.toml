@@ -1,0 +1,45 @@
+[package]
+name = "klt-mom-native"
+version = "0.1.0"
+edition = "2021"
+description = "Method-of-Moments quasi-static capacitance solver core for `klt mom` (2AMLogic/klayout-tools)"
+license = "MIT"
+publish = false
+
+[lib]
+# `cdylib` is required for pyo3's `extension-module`; `rlib` keeps the crate
+# usable from `cargo test` (a `cdylib`-only crate can't be linked as a normal
+# Rust test binary).
+name = "klt_mom_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# pyo3 0.29 is the first line supporting Python 3.14 (verified locally: 0.22
+# and 0.23 both reject a 3.14 interpreter at build time with "the configured
+# Python interpreter version (3.14) is newer than PyO3's maximum supported
+# version"). Pinning to a version floor that already covers the newest
+# interpreter avoids that failure mode recurring as CI/dev interpreters move
+# forward.
+#
+# `extension-module` is deliberately NOT enabled here. That feature tells pyo3
+# to leave Python's symbols unresolved for the interpreter to supply at import
+# time, which is correct for the shipped `.so`/`.dylib` but makes a plain
+# `cargo test` binary unlinkable ("symbol(s) not found ... _PyErr_SetObject").
+# `native/mom/pyproject.toml`'s `[tool.maturin] features` turns it on for the
+# maturin build only, so `cargo test` (which links libpython normally) and
+# `maturin develop`/`maturin build` both work from the same manifest.
+pyo3 = { version = "0.29" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Dense LU solve for the potential-coefficient matrix. The MVP's conductor
+# counts are small (a handful of conductors, at most a few hundred panels),
+# so a single-threaded dense solve is more than adequate -- `rayon`-based
+# parallel panel fill is a follow-up once conductor/panel counts grow enough
+# to matter (see docs/cli/mom.md's "Performance" note).
+nalgebra = "0.33"
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+lto = true

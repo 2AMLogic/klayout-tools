@@ -74,6 +74,15 @@ when all three hold:
 3. **Unlock** — the rewrite enables something the wrapper structurally
    cannot (e.g. incremental DRC inside an agent's edit loop).
 
+**Where Rust code lives**: `native/<engine>/`, one self-contained
+`maturin`-built [pyo3](https://pyo3.rs/) crate per engine, each with its own
+`Cargo.toml` + `pyproject.toml` and reached from the top-level
+`pyproject.toml` through a PEP 735 dependency group plus `[tool.uv.sources]`.
+That keeps the Rust toolchain an **optional** build dependency — the rest of
+`klt` installs and runs without it — and keeps every other command's
+packaging untouched. `native/mom/` (the `klt mom` capacitance solver, issue
+#718) established this convention and is the reference for the next one.
+
 Good early targets: the geometry layer — GDSII/OASIS parsing, polygon
 ops, hierarchy traversal, eventually a DRC engine. Poor targets: SPICE
 numerics and device models (BSIM4/PSP are a moving target maintained by
