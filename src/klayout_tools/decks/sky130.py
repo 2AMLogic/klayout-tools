@@ -201,6 +201,51 @@ note above) -- a layer can legitimately serve both roles at once, and
 ``ExtractionDeck.device_recognition_only_layers`` (issue #619) is exactly
 the mechanism that would have flagged this "read but not merged" ambiguity
 had it existed before this extension closed the gap.
+
+met3/met4/met5 + via2/via3/via4 + capm/capm2 DRC rule coverage (issue #776,
+closing the asymmetry #619's connectivity extension and #225's MiM-cap
+device recognition opened -- the same class of gap #513 closed one stack
+level earlier for met2/via): before this, ``DECK`` had no rule of any kind
+above met2/via -- ``EXTRACTION_DECK.metals``/``.vias`` already recognised
+met3/met4/met5 and via2/via3/via4 as real connectivity, and
+``EXTRACTION_DECK.capacitors`` already recognised ``capm``/``capm2`` as
+genuine MiM-cap device marks, but ``klt drc --deck sky130`` reported a bare
+``clean`` verdict on all of it -- a caller who routed on met3-or-higher, or
+drew a MiM cap, got "no rule looked at this" indistinguishable from "this is
+legal." The rules below close that gap, transcribed from the same real
+sky130A install (volare) cited by the met2/via #513 note above --
+``libs.tech/klayout/drc/sky130A_mr.drc``'s ``m3.*``/``via2.*``,
+``m4.*``/``via3.*``, ``m5.*``/``via4.*``, and ``capm.*``/``cap2m.*`` rule
+families -- mirroring the exact width/space/enclosure rule shapes the
+met1/mcon and met2/via sections above already establish: each new metal
+level gets a width + space rule; each new via level gets a width + space
+rule plus an enclosure rule from the metal on each side; each MiM-cap top
+plate (``capm`` 89/44, ``capm2``/``cap2m`` 97/44) gets a width + space rule,
+an enclosure-by-its-bottom-plate rule, an enclosure-of-its-landing-via rule,
+and a plate-to-landing-via *separation* rule (``capm.separation(via3, ...)``
+/ ``cap2m.separation(via4, ...)``) -- unlike the enclosing rules elsewhere
+in this deck, this is a plain, uncompounded two-layer check with no
+boolean-expression narrowing, so it transcribes to our engine's own
+``"separation"`` check kind exactly, with no approximation.
+
+Not modelled, for the same reasons the met1/met2 sections above already
+document: ``m3.6``/``m3.7`` (met3 area/holes-area), ``m4.4a``/``m4.7``
+(met4 area/holes-area), ``m5.4``/``m5.7`` (met5 area/holes-area) -- no
+``"area"`` check primitive exists in this engine's vocabulary, the same gap
+``m2.6`` left unmodelled above; ``m3.3cd``/``m4.5ab`` (wide-metal spacing
+exceptions, the met3/met4 analogues of ``m1.3ab``/``m2.3ab``); ``via2.5``/
+``via3.5`` (2-adjacent-edges-relaxed enclosure refinements, the analogues
+of ``via.5a``/``m2.5``); and ``capm.2b``/``capm.2b_a``/``capm.11``/
+``cap2m.2b``/``cap2m.2b_a``/``cap2m.11``/``capm.3`` (the commented-out
+compound variant)/``cap2m.3`` -- each defined on a compound
+``capm.and(m3)``/``m3.not_interacting(...)``-style boolean layer expression
+this engine's single-layer/two-layer ``Region`` check primitives do not
+evaluate, the same class of approximation ``difftap.1``/``poly.1a``'s own
+compound-layer notes above document (``met3.enclosing.capm.1``/
+``met4.enclosing.capm2.1`` below transcribe each pair's plain-layer sibling
+rule instead -- ``m3.enclosing(capm, ...)``/``m4.enclosing(cap2m, ...)`` --
+exactly as ``capm.3``'s own source-deck comment already prefers that
+formulation over its commented-out compound predecessor).
 """
 
 from __future__ import annotations
@@ -491,6 +536,455 @@ DECK: list[DrcRule] = [
         # model areaid.* layers elsewhere either; same "primary rule only"
         # approximation as met1.enclosing.via.1 above.)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+    ),
+    # met3/via2 rule coverage (issue #776), mirroring the met2/via rule
+    # shapes above -- see the module docstring's own #776 note for
+    # source/provenance and the m3.6/m3.7/m3.3cd/via2.5 scope-outs.
+    DrcRule(
+        id="met3.width.1",
+        description="minimum met3 width",
+        layer=(70, 20),  # met3.drawing
+        check="width",
+        threshold_dbu=300,  # 0.3 um
+        # sky130A_mr.drc rule "m3.1": m3.width(0.3, euclidian)
+        # -> "m3.1 : min. m3 width : 0.3um"
+        scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m3.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met3.space.1",
+        description="minimum met3 spacing",
+        layer=(70, 20),  # met3.drawing
+        check="space",
+        threshold_dbu=300,  # 0.3 um
+        # sky130A_mr.drc rule "m3.2": non_huge_m3.space(0.3, euclidian)
+        # -> "m3.2 : min. m3 spacing : 0.3um"
+        # (the wide-metal 0.4um exception, "m3.3cd", is not modelled here --
+        # the same approximation met1.space.1/met2.space.1 above already
+        # make for their own wide-metal exceptions.)
+        scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m3.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="via2.width.1",
+        description=(
+            "minimum via2 (met2<->met3 via) size (approximates the "
+            "official rectangularity + max-length rule as a "
+            "minimum-width check)"
+        ),
+        layer=(69, 44),  # via2.drawing
+        check="width",
+        threshold_dbu=200,  # 0.2 um
+        # sky130A_mr.drc rule "via2.1a_a" (part of the "via2.1a" family):
+        # via2_not_mt.width(0.2, euclidian)
+        # -> "via2.1a_a : min. width of via2 outside of moduleCut : 0.2um"
+        # (mirrors via.width.1's own approximation: the official rule also
+        # requires the via be rectangular ("via2.1a") and capped at the same
+        # 0.2um length ("via2.1a_b") -- only the min-size half is enforced.)
+        scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via2.1a_a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="via2.space.1",
+        description="minimum via2 (met2<->met3 via) spacing",
+        layer=(69, 44),  # via2.drawing
+        check="space",
+        threshold_dbu=200,  # 0.2 um
+        # sky130A_mr.drc rule "via2.2": via2.space(0.2, euclidian)
+        # -> "via2.2 : min. via2 spacing : 0.2um"
+        scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via2.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met2.enclosing.via2.1",
+        description="minimum met2 enclosure of via2 (met2<->met3 via)",
+        layer=(69, 20),  # met2.drawing
+        other_layer=(69, 44),  # via2.drawing
+        check="enclosing",
+        threshold_dbu=40,  # 0.04 um
+        # sky130A_mr.drc rule "via2.4": m2.enclosing(via2, 0.04, euclidian)
+        # -> "via2.4 : min. m2 enclosure of via2 : 0.04um"
+        scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met3.enclosing.via2.1",
+        description="minimum met3 enclosure of via2 (met2<->met3 via)",
+        layer=(70, 20),  # met3.drawing
+        other_layer=(69, 44),  # via2.drawing
+        check="enclosing",
+        threshold_dbu=65,  # 0.065 um
+        # sky130A_mr.drc rule "m3.4": m3.enclosing(via2, 0.065, euclidian)
+        # -> "m3.4 : min. m3 enclosure of via2 : 0.065um"
+        # (the 2-adjacent-edges-relaxed refinement, "via2.5" (0.085um), is
+        # not modelled here -- the same "primary rule only" approximation
+        # met1.enclosing.via.1/met2.enclosing.via.1 above already make for
+        # their own sibling refinements.)
+        scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+    ),
+    # met4/via3 rule coverage (issue #776), mirroring the met3/via2 rule
+    # shapes just above.
+    DrcRule(
+        id="met4.width.1",
+        description="minimum met4 width",
+        layer=(71, 20),  # met4.drawing
+        check="width",
+        threshold_dbu=300,  # 0.3 um
+        # sky130A_mr.drc rule "m4.1": m4.width(0.3, euclidian)
+        # -> "m4.1 : min. m4 width : 0.3um"
+        scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m4.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met4.space.1",
+        description="minimum met4 spacing",
+        layer=(71, 20),  # met4.drawing
+        check="space",
+        threshold_dbu=300,  # 0.3 um
+        # sky130A_mr.drc rule "m4.2": non_huge_m4.space(0.3, euclidian)
+        # -> "m4.2 : min. m4 spacing : 0.3um"
+        # (the wide-metal 0.4um exception, "m4.5ab", is not modelled here --
+        # the same approximation met3.space.1 above already makes for its
+        # own wide-metal exception.)
+        scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m4.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="via3.width.1",
+        description=(
+            "minimum via3 (met3<->met4 via) size (approximates the "
+            "official rectangularity + max-length rule as a "
+            "minimum-width check)"
+        ),
+        layer=(70, 44),  # via3.drawing
+        check="width",
+        threshold_dbu=200,  # 0.2 um
+        # sky130A_mr.drc rule "via3.1_a": via3_not_mt.width(0.2, euclidian)
+        # -> "via3.1_a : min. width of via3 outside of moduleCut : 0.2um"
+        # (mirrors via2.width.1's own approximation: the official rule also
+        # requires the via be rectangular ("via3.1") and capped at the same
+        # 0.2um length ("via3.1_b") -- only the min-size half is enforced.)
+        scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via3.1_a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="via3.space.1",
+        description="minimum via3 (met3<->met4 via) spacing",
+        layer=(70, 44),  # via3.drawing
+        check="space",
+        threshold_dbu=200,  # 0.2 um
+        # sky130A_mr.drc rule "via3.2": via3.space(0.2, euclidian)
+        # -> "via3.2 : min. via3 spacing : 0.2um"
+        scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via3.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met3.enclosing.via3.1",
+        description="minimum met3 enclosure of via3 (met3<->met4 via)",
+        layer=(70, 20),  # met3.drawing
+        other_layer=(70, 44),  # via3.drawing
+        check="enclosing",
+        threshold_dbu=60,  # 0.06 um
+        # sky130A_mr.drc rule "via3.4": m3.enclosing(via3, 0.06, euclidian)
+        # -> "via3.4 : min. m3 enclosure of via3 : 0.06um"
+        # (the 2-adjacent-edges-relaxed refinement, "via3.5" (0.09um), is
+        # not modelled here -- the same "primary rule only" approximation
+        # met3.enclosing.via2.1 above already makes for its own sibling
+        # refinement.)
+        scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met4.enclosing.via3.1",
+        description="minimum met4 enclosure of via3 (met3<->met4 via)",
+        layer=(71, 20),  # met4.drawing
+        other_layer=(70, 44),  # via3.drawing
+        check="enclosing",
+        threshold_dbu=65,  # 0.065 um
+        # sky130A_mr.drc rule "m4.3": m4.enclosing(via3, 0.065, euclidian)
+        # -> "m4.3 : min. m4 enclosure of via3 : 0.065um"
+        scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
+    ),
+    # met5/via4 rule coverage (issue #776), mirroring the met4/via3 rule
+    # shapes just above.
+    DrcRule(
+        id="met5.width.1",
+        description="minimum met5 width",
+        layer=(72, 20),  # met5.drawing
+        check="width",
+        threshold_dbu=1600,  # 1.6 um
+        # sky130A_mr.drc rule "m5.1": m5.width(1.6, euclidian)
+        # -> "m5.1 : min. m5 width : 1.6um"
+        scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m5.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met5.space.1",
+        description="minimum met5 spacing",
+        layer=(72, 20),  # met5.drawing
+        check="space",
+        threshold_dbu=1600,  # 1.6 um
+        # sky130A_mr.drc rule "m5.2": m5.space(1.6, euclidian)
+        # -> "m5.2 : min. m5 spacing : 1.6um"
+        scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m5.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="via4.width.1",
+        description=(
+            "minimum via4 (met4<->met5 via) size (approximates the "
+            "official rectangularity + max-length rule as a "
+            "minimum-width check)"
+        ),
+        layer=(71, 44),  # via4.drawing
+        check="width",
+        threshold_dbu=800,  # 0.8 um
+        # sky130A_mr.drc rule "via4.1_a": rectVIA4.width(0.8, euclidian)
+        # -> "via4.1_a : min. width of via4 outside of moduleCut : 0.8um"
+        # (mirrors via3.width.1's own approximation: the official rule also
+        # requires the via be rectangular ("via4.1") and capped at the same
+        # 0.8um length ("via4.1_b") -- only the min-size half is enforced.)
+        scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via4.1_a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="via4.space.1",
+        description="minimum via4 (met4<->met5 via) spacing",
+        layer=(71, 44),  # via4.drawing
+        check="space",
+        threshold_dbu=800,  # 0.8 um
+        # sky130A_mr.drc rule "via4.2": via4.space(0.8, euclidian)
+        # -> "via4.2 : min. via4 spacing : 0.8um"
+        scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via4.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met4.enclosing.via4.1",
+        description="minimum met4 enclosure of via4 (met4<->met5 via)",
+        layer=(71, 20),  # met4.drawing
+        other_layer=(71, 44),  # via4.drawing
+        check="enclosing",
+        threshold_dbu=190,  # 0.19 um
+        # sky130A_mr.drc rule "via4.4": m4.enclosing(via4, 0.19, euclidian)
+        # -> "via4.4 : min. m4 enclosure of via4 : 0.19um"
+        scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met5.enclosing.via4.1",
+        description="minimum met5 enclosure of via4 (met4<->met5 via)",
+        layer=(72, 20),  # met5.drawing
+        other_layer=(71, 44),  # via4.drawing
+        check="enclosing",
+        threshold_dbu=310,  # 0.31 um
+        # sky130A_mr.drc rule "m5.3": m5.enclosing(via4, 0.31, euclidian)
+        # -> "m5.3 : min. m5 enclosure of via4 : 0.31um"
+        scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
+    ),
+    # capm (met3 MiM-cap top plate) rule coverage (issue #776). capm.3's
+    # commented-out compound variant and capm.2b/capm.2b_a/capm.11 (each
+    # defined on a compound boolean layer expression) are not modelled --
+    # see the module docstring's own #776 note.
+    DrcRule(
+        id="capm.width.1",
+        description="minimum capm (met3 MiM-cap top plate) width",
+        layer=(89, 44),  # capm.drawing
+        check="width",
+        threshold_dbu=1000,  # 1.0 um
+        # sky130A_mr.drc rule "capm.1": capm.width(1.0, euclidian)
+        # -> "capm.1 : min. capm width : 1.0um"
+        scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="capm.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="capm.space.1",
+        description="minimum capm (met3 MiM-cap top plate) spacing",
+        layer=(89, 44),  # capm.drawing
+        check="space",
+        threshold_dbu=840,  # 0.84 um
+        # sky130A_mr.drc rule "capm.2a": capm.space(0.84, euclidian)
+        # -> "capm.2a : min. capm spacing : 0.84um"
+        scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="capm.2a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met3.enclosing.capm.1",
+        description="minimum met3 (MiM-cap bottom plate) enclosure of capm",
+        layer=(70, 20),  # met3.drawing
+        other_layer=(89, 44),  # capm.drawing
+        check="enclosing",
+        threshold_dbu=140,  # 0.14 um
+        # sky130A_mr.drc rule "capm.3": m3.enclosing(capm, 0.14, euclidian)
+        # -> "capm.3 : min. m3 enclosure of capm : 0.14um"
+        # (the source deck's own commented-out compound variant,
+        # `capm.and(m3).enclosing(m3, 0.14, euclidian)`, is not the shipped
+        # rule and is not transcribed here.)
+        scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="capm.enclosing.via3.1",
+        description="minimum capm enclosure of via3 (its landing via)",
+        layer=(89, 44),  # capm.drawing
+        other_layer=(70, 44),  # via3.drawing
+        check="enclosing",
+        threshold_dbu=140,  # 0.14 um
+        # sky130A_mr.drc rule "capm.4": capm.enclosing(via3, 0.14, euclidian)
+        # -> "capm.4 : min. capm enclosure of via3 : 0.14um"
+        scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="capm.separation.via3.1",
+        description="minimum capm-to-via3 separation, outside the landing via",
+        layer=(89, 44),  # capm.drawing
+        other_layer=(70, 44),  # via3.drawing
+        check="separation",
+        threshold_dbu=140,  # 0.14 um
+        # sky130A_mr.drc rule "capm.5": capm.separation(via3, 0.14, euclidian)
+        # -> "capm.5 : min. capm spacing to via3 : 0.14um"
+        # (unlike this deck's other enclosing/space rules, this transcribes
+        # exactly: the source rule is a plain, uncompounded two-layer check.)
+        scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
+    ),
+    # capm2 (met4 MiM-cap top plate, official rule-id prefix "cap2m") rule
+    # coverage (issue #776), mirroring the capm rule shapes just above.
+    # cap2m.3's compound variant and cap2m.2b/cap2m.2b_a/cap2m.11 are not
+    # modelled -- same reasons as capm's own compound-expression siblings.
+    DrcRule(
+        id="capm2.width.1",
+        description="minimum capm2 (met4 MiM-cap top plate) width",
+        layer=(97, 44),  # capm2.drawing
+        check="width",
+        threshold_dbu=1000,  # 1.0 um
+        # sky130A_mr.drc rule "cap2m.1": cap2m.width(1.0, euclidian)
+        # -> "cap2m.1 : min. cap2m width : 1.0um"
+        scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="cap2m.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="capm2.space.1",
+        description="minimum capm2 (met4 MiM-cap top plate) spacing",
+        layer=(97, 44),  # capm2.drawing
+        check="space",
+        threshold_dbu=840,  # 0.84 um
+        # sky130A_mr.drc rule "cap2m.2a": cap2m.space(0.84, euclidian)
+        # -> "cap2m.2a : min. cap2m spacing : 0.84um"
+        scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="cap2m.2a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
+    ),
+    DrcRule(
+        id="met4.enclosing.capm2.1",
+        description="minimum met4 (MiM-cap bottom plate) enclosure of capm2",
+        layer=(71, 20),  # met4.drawing
+        other_layer=(97, 44),  # capm2.drawing
+        check="enclosing",
+        threshold_dbu=140,  # 0.14 um
+        # sky130A_mr.drc rule "cap2m.3_a": m4.enclosing(cap2m, 0.14, euclidian)
+        # -> "cap2m.3_a : min. m4 enclosure of cap2m : 0.14um"
+        # (the source deck's own compound variant, "cap2m.3" --
+        # `cap2m.and(m4).enclosing(m4, 0.14, euclidian)` -- is not
+        # transcribed here; same choice as capm.3/met3.enclosing.capm.1
+        # above.)
+        scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="capm2.enclosing.via4.1",
+        description="minimum capm2 enclosure of via4 (its landing via)",
+        layer=(97, 44),  # capm2.drawing
+        other_layer=(71, 44),  # via4.drawing
+        check="enclosing",
+        threshold_dbu=200,  # 0.2 um
+        # sky130A_mr.drc rule "cap2m.4": cap2m.enclosing(via4, 0.2, euclidian)
+        # -> "cap2m.4 : min. cap2m enclosure of via4 : 0.2um"
+        scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="capm2.separation.via4.1",
+        description="minimum capm2-to-via4 separation, outside the landing via",
+        layer=(97, 44),  # capm2.drawing
+        other_layer=(71, 44),  # via4.drawing
+        check="separation",
+        threshold_dbu=200,  # 0.2 um
+        # sky130A_mr.drc rule "cap2m.5": cap2m.separation(via4, 0.2, euclidian)
+        # -> "cap2m.5 : min. cap2m spacing to via4 : 0.2um"
+        # (transcribes exactly, same note as capm.separation.via3.1 above.)
+        scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
     ),
 ]
 

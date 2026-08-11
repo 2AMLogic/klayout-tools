@@ -1,4 +1,216 @@
 {
+  "capm.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            89,
+            44
+          ]
+        },
+        {
+          "box": [
+            2940,
+            0,
+            4940,
+            4000
+          ],
+          "layer": [
+            89,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's own CAPM/CAP2M sections (rules \"capm.*\"/\"cap2m.*\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for diff.width.1/poly.width.1 above, now also gating every capm/cap2m rule. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      89,
+      44
+    ],
+    "threshold_dbu": 840,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            89,
+            44
+          ]
+        },
+        {
+          "box": [
+            2740,
+            0,
+            4740,
+            4000
+          ],
+          "layer": [
+            89,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "capm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1100,
+            4000
+          ],
+          "layer": [
+            89,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's own CAPM/CAP2M sections (rules \"capm.*\"/\"cap2m.*\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for diff.width.1/poly.width.1 above, now also gating every capm/cap2m rule. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      89,
+      44
+    ],
+    "threshold_dbu": 1000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            900,
+            4000
+          ],
+          "layer": [
+            89,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "capm2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            97,
+            44
+          ]
+        },
+        {
+          "box": [
+            2940,
+            0,
+            4940,
+            4000
+          ],
+          "layer": [
+            97,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's own CAPM/CAP2M sections (rules \"capm.*\"/\"cap2m.*\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for diff.width.1/poly.width.1 above, now also gating every capm/cap2m rule. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      97,
+      44
+    ],
+    "threshold_dbu": 840,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            97,
+            44
+          ]
+        },
+        {
+          "box": [
+            2740,
+            0,
+            4740,
+            4000
+          ],
+          "layer": [
+            97,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "capm2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1100,
+            4000
+          ],
+          "layer": [
+            97,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's own CAPM/CAP2M sections (rules \"capm.*\"/\"cap2m.*\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for diff.width.1/poly.width.1 above, now also gating every capm/cap2m rule. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      97,
+      44
+    ],
+    "threshold_dbu": 1000,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            900,
+            4000
+          ],
+          "layer": [
+            97,
+            44
+          ]
+        }
+      ]
+    }
+  },
   "diff.width.1": {
     "check": "width",
     "clean": {
@@ -423,6 +635,324 @@
       ]
     }
   },
+  "met3.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            70,
+            20
+          ]
+        },
+        {
+          "box": [
+            2400,
+            0,
+            4400,
+            4000
+          ],
+          "layer": [
+            70,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      70,
+      20
+    ],
+    "threshold_dbu": 300,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            70,
+            20
+          ]
+        },
+        {
+          "box": [
+            2200,
+            0,
+            4200,
+            4000
+          ],
+          "layer": [
+            70,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met3.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            400,
+            4000
+          ],
+          "layer": [
+            70,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      70,
+      20
+    ],
+    "threshold_dbu": 300,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            70,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met4.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            71,
+            20
+          ]
+        },
+        {
+          "box": [
+            2400,
+            0,
+            4400,
+            4000
+          ],
+          "layer": [
+            71,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      71,
+      20
+    ],
+    "threshold_dbu": 300,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            71,
+            20
+          ]
+        },
+        {
+          "box": [
+            2200,
+            0,
+            4200,
+            4000
+          ],
+          "layer": [
+            71,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met4.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            400,
+            4000
+          ],
+          "layer": [
+            71,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      71,
+      20
+    ],
+    "threshold_dbu": 300,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            71,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met5.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            72,
+            20
+          ]
+        },
+        {
+          "box": [
+            3700,
+            0,
+            5700,
+            4000
+          ],
+          "layer": [
+            72,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      72,
+      20
+    ],
+    "threshold_dbu": 1600,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            72,
+            20
+          ]
+        },
+        {
+          "box": [
+            3500,
+            0,
+            5500,
+            4000
+          ],
+          "layer": [
+            72,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met5.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1700,
+            4000
+          ],
+          "layer": [
+            72,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      72,
+      20
+    ],
+    "threshold_dbu": 1600,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1500,
+            4000
+          ],
+          "layer": [
+            72,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "poly.width.1": {
     "check": "width",
     "clean": {
@@ -564,6 +1094,324 @@
           ],
           "layer": [
             68,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            69,
+            44
+          ]
+        },
+        {
+          "box": [
+            2265,
+            0,
+            4265,
+            4000
+          ],
+          "layer": [
+            69,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated via2 shape -- the only kind of fixture this single-layer, single-rule pilot manifest can build -- trips several real sky130A.lydrc rules unrelated to this rule's own width/space threshold: \"via2.1a\" (an exact min/max width check, not a minimum-only one -- the same exact-size mismatch already documented for via.width.1/via.space.1 above: any fixture wide enough to pass this engine's min-only width_check is by construction wider than the native max), \"via2\" (\"via2 must enclose all via2\") and \"m3.via2\" (\"m3 must enclose via2\") -- both met-layer enclosure rules this single-layer fixture never draws a landing pad to satisfy -- and \"via2.5\" (the 2-adjacent-edges-relaxed enclosure refinement this curated deck does not model, see this rule's own sibling enclosing rule's docstring in sky130.py). Reconciling all of these would require a realistic multi-layer via/metal stack, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      69,
+      44
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            69,
+            44
+          ]
+        },
+        {
+          "box": [
+            2135,
+            0,
+            4135,
+            4000
+          ],
+          "layer": [
+            69,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            265,
+            4000
+          ],
+          "layer": [
+            69,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated via2 shape -- the only kind of fixture this single-layer, single-rule pilot manifest can build -- trips several real sky130A.lydrc rules unrelated to this rule's own width/space threshold: \"via2.1a\" (an exact min/max width check, not a minimum-only one -- the same exact-size mismatch already documented for via.width.1/via.space.1 above: any fixture wide enough to pass this engine's min-only width_check is by construction wider than the native max), \"via2\" (\"via2 must enclose all via2\") and \"m3.via2\" (\"m3 must enclose via2\") -- both met-layer enclosure rules this single-layer fixture never draws a landing pad to satisfy -- and \"via2.5\" (the 2-adjacent-edges-relaxed enclosure refinement this curated deck does not model, see this rule's own sibling enclosing rule's docstring in sky130.py). Reconciling all of these would require a realistic multi-layer via/metal stack, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      69,
+      44
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            135,
+            4000
+          ],
+          "layer": [
+            69,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via3.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            70,
+            44
+          ]
+        },
+        {
+          "box": [
+            2265,
+            0,
+            4265,
+            4000
+          ],
+          "layer": [
+            70,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated via3 shape -- the only kind of fixture this single-layer, single-rule pilot manifest can build -- trips several real sky130A.lydrc rules unrelated to this rule's own width/space threshold: \"via3.1a\" (an exact min/max width check, not a minimum-only one -- the same exact-size mismatch already documented for via.width.1/via.space.1 above: any fixture wide enough to pass this engine's min-only width_check is by construction wider than the native max), \"via3\" (\"via3 must enclose all via3\") and \"m4.via3\" (\"m4 must enclose via3\") -- both met-layer enclosure rules this single-layer fixture never draws a landing pad to satisfy -- and \"via3.5\" (the 2-adjacent-edges-relaxed enclosure refinement this curated deck does not model, see this rule's own sibling enclosing rule's docstring in sky130.py). Reconciling all of these would require a realistic multi-layer via/metal stack, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      70,
+      44
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            70,
+            44
+          ]
+        },
+        {
+          "box": [
+            2135,
+            0,
+            4135,
+            4000
+          ],
+          "layer": [
+            70,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via3.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            265,
+            4000
+          ],
+          "layer": [
+            70,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated via3 shape -- the only kind of fixture this single-layer, single-rule pilot manifest can build -- trips several real sky130A.lydrc rules unrelated to this rule's own width/space threshold: \"via3.1a\" (an exact min/max width check, not a minimum-only one -- the same exact-size mismatch already documented for via.width.1/via.space.1 above: any fixture wide enough to pass this engine's min-only width_check is by construction wider than the native max), \"via3\" (\"via3 must enclose all via3\") and \"m4.via3\" (\"m4 must enclose via3\") -- both met-layer enclosure rules this single-layer fixture never draws a landing pad to satisfy -- and \"via3.5\" (the 2-adjacent-edges-relaxed enclosure refinement this curated deck does not model, see this rule's own sibling enclosing rule's docstring in sky130.py). Reconciling all of these would require a realistic multi-layer via/metal stack, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      70,
+      44
+    ],
+    "threshold_dbu": 200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            135,
+            4000
+          ],
+          "layer": [
+            70,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via4.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            71,
+            44
+          ]
+        },
+        {
+          "box": [
+            2900,
+            0,
+            4900,
+            4000
+          ],
+          "layer": [
+            71,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated via4 shape -- the only kind of fixture this single-layer, single-rule pilot manifest can build -- trips several real sky130A.lydrc rules unrelated to this rule's own width/space threshold: \"via4.1a\" (an exact min/max width check, not a minimum-only one -- the same exact-size mismatch already documented for via.width.1/via.space.1 above: any fixture wide enough to pass this engine's min-only width_check is by construction wider than the native max) and \"via4\"/\"m5.via4\" (met4/met5 enclosure rules this single-layer fixture never draws a landing pad to satisfy). Reconciling these would require a realistic multi-layer via/metal stack, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      71,
+      44
+    ],
+    "threshold_dbu": 800,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            71,
+            44
+          ]
+        },
+        {
+          "box": [
+            2700,
+            0,
+            4700,
+            4000
+          ],
+          "layer": [
+            71,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via4.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            900,
+            4000
+          ],
+          "layer": [
+            71,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated via4 shape -- the only kind of fixture this single-layer, single-rule pilot manifest can build -- trips several real sky130A.lydrc rules unrelated to this rule's own width/space threshold: \"via4.1a\" (an exact min/max width check, not a minimum-only one -- the same exact-size mismatch already documented for via.width.1/via.space.1 above: any fixture wide enough to pass this engine's min-only width_check is by construction wider than the native max) and \"via4\"/\"m5.via4\" (met4/met5 enclosure rules this single-layer fixture never draws a landing pad to satisfy). Reconciling these would require a realistic multi-layer via/metal stack, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      71,
+      44
+    ],
+    "threshold_dbu": 800,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            700,
+            4000
+          ],
+          "layer": [
+            71,
             44
           ]
         }
