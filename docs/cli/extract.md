@@ -1713,6 +1713,7 @@ more per net) rather than always equalling `c_count`. See
   "nets": [
     {
       "net": "Y",
+      "net_id": 42,
       "resistance_ohm": 1169.7827,
       "capacitance_ff": 1.910204,
       "hub_net": "Y",
@@ -1756,7 +1757,8 @@ Each `nets[]` entry:
 
 | Field            | Type            | Description                                                                                          |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------------ |
-| `net`            | string          | The schematic-equivalent net name.                                                                     |
+| `net`            | string          | The schematic-equivalent net name. **Not guaranteed unique across `nets[]`** — two electrically distinct nets can carry the identical layout label (e.g. separate un-strapped `VGND` islands nothing straps together); use `net_id` to disambiguate (issue #765). |
+| `net_id`         | integer         | Additive field (issue #765). A stable identifier, unique across every entry in this response, that disambiguates same-named entries — the net object's own KLayout cluster id. Build `{entry["net_id"]: entry}` instead of `{entry["net"]: entry}` if the layout may have same-labelled distinct nets (real layouts routinely do — 105 out of 908 distinct `VGND`/`VPWR`/... labels on the `gcd` corpus). |
 | `resistance_ohm` | number          | The net's total computed series resistance (ohms) — the star's total "budget", distributed across `terminals[]`. |
 | `capacitance_ff` | number          | The net's total lumped ground capacitance (femtofarads), hung off `hub_net`.                           |
 | `hub_net`        | string          | The star's hub node name. Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |
@@ -1868,6 +1870,18 @@ KLayout's own `NetlistSpiceWriter` writes for node syntax, issue #696 — see
 "Merged net labels" above). If you need to map an emitted `R`/`C` card back
 to the net it parasitizes, use `parasitics.nets[].net` (or the netlist's own
 node names on that card), not the sanitized instance name.
+
+**Disambiguated across same-labelled nets (issue #765).** Since `net` is not
+guaranteed unique (see `net_id` above), two entries can sanitize to the
+identical instance-name base — e.g. two un-strapped `VGND` islands both want
+`RVGND`/`CVGND`. The first entry to reach a given base name keeps it
+unsuffixed; every later entry sharing that base gets a `_dup<n>` suffix
+(`RVGND`, `RVGND_dup1`, `RVGND_dup2`, ...), so every emitted `R`/`C` card has
+a distinct instance name even when many nets share a label. This suffix is
+assigned in `parasitics.nets[]` order (sorted by `(net, net_id)`), so it is
+deterministic across runs of the same layout/deck but is **not** meaningful
+on its own — use `net_id`, not the `_dup<n>` count, to identify which net an
+instance name's card belongs to.
 
 ## Verified compatible with `klt sim`'s netlist convention
 
