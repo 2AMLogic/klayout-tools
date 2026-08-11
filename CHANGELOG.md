@@ -304,6 +304,27 @@ not `klt --version`, if you need to detect this kind of drift.
   `<file>...` envelope-aggregation arguments. See `docs/cli/signoff.md`'s
   "Tier-verdict report" section.
 
+- 2026-08-11 — new `klt equiv` verb (#723): proves or refutes
+  **combinational** equivalence between two RTL/gate-level netlists
+  (`gold`/`gate`) — Phase 0 of the formal-equivalence epic #707, the
+  correctness loop-closer #704 (RTL synthesis) and #700 (place-and-route)
+  both depend on. Orchestrates Yosys's own built-in `miter -equiv` /
+  `sat -prove-asserts` flow as a subprocess (built-in MiniSat, no
+  `sby`/SymbiYosys dependency — see `docs/cli/equiv.md`'s "Engine" section
+  for why, given this repo's CI installs `yosys` but not SymbiYosys). On a
+  refutation, the concrete counterexample vector is independently re-run
+  through both netlists via `iverilog`/`vvp` (`confirmed_by_simulation` in
+  the response) rather than trusted from the solver alone. A design
+  containing flip-flops, latches, or memories on either side is rejected up
+  front with a clear scope error — this MVP is combinational-only. A
+  solver/process timeout is always `status: "inconclusive"`, **never**
+  `"equivalent"` (new exit code `4`, extending `klt sim`'s 0/1/2/3/4
+  precedent rather than `klt lvs`'s 0/1/2/3). An optional `gate.liberty` /
+  `gold.liberty` request field (read via `read_liberty -ignore_miss_func`,
+  no `-lib`) lets a post-synthesis gate-level netlist — e.g. `klt
+  synthesize`'s own `netlist_path` output — be compared directly against
+  its source RTL. See `docs/cli/equiv.md`.
+
 - 2026-08-11 — `klt gen guard_ring`: new additive `contacts_per_side_ns`/
   `contacts_per_side_ew` int params (#685), each defaulting to `0` (inherit
   `contacts_per_side`, so existing single-scalar callers are unaffected).
