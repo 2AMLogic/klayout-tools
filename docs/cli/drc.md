@@ -150,12 +150,20 @@ already produced a merged deck (e.g. by running the PDK's own `run_drc.py
   module's own "met2/via rule coverage" provenance note), which
   `pdk.drc_deck_file()`/this engine's resolver never reaches (it only
   resolves `<variant>.lydrc`, i.e. `sky130A.lydrc`, per its own naming
-  convention above). Cross-checking one of those four rules against the
-  resolved `sky130A.lydrc` therefore always reports the real deck as
-  `"clean"` — not because the geometry passes, but because that file has no
-  matching rule for met2/via1 at all. A caller who needs those four
-  cross-checked would have to point `--deck-file` at `sky130A_mr.drc`
-  explicitly.
+  convention above). This is a *provenance* difference, not a coverage gap:
+  the resolved `sky130A.lydrc` does carry its own met2/via1 rules in its
+  `BEOL` block (`m2.1`, `m2.2`, `m2.5`, `via.1a`, ...), so cross-checking
+  against it is meaningful — it is simply checking that file's rules, not
+  the `sky130A_mr.drc` text these four were transcribed from. Verified for
+  issue #747 against a real install: `met2.width.1`/`met2.space.1` agree
+  with the native deck outright (tripping `m2.1`/`m2.2` respectively),
+  while `via.width.1`/`via.space.1` disagree on their *clean* fixture
+  because `sky130A.lydrc`'s `via.1a` demands an **exact** 0.15um square
+  (`edges.without_length(0.15)`, i.e. min *and* max) where this engine's
+  `width_check` enforces only a minimum — recorded as an
+  `expected_disagreement` in `tests/golden_deck/sky130/manifest.json`. A
+  caller who specifically needs the `sky130A_mr.drc` formulation of these
+  rules would have to point `--deck-file` at that file explicitly.
 
 ### `"enclosing"` / `"enclosed"` also catch zero-overlap escapes
 

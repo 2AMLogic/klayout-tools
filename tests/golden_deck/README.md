@@ -45,20 +45,25 @@ Each `manifest.json` is a JSON object keyed by `DrcRule.id`:
 
 ```json
 {
-  "poly.width.1": {
+  "li1.width.1": {
     "check": "width",
-    "layer": [66, 20],
-    "threshold_dbu": 150,
+    "layer": [67, 20],
+    "threshold_dbu": 170,
     "violate": {
-      "shapes": [{"layer": [66, 20], "box": [0, 0, 100, 4000]}]
+      "shapes": [{"layer": [67, 20], "box": [0, 0, 115, 4000]}]
     },
     "clean": {
-      "shapes": [{"layer": [66, 20], "box": [0, 0, 200, 4000]}]
+      "shapes": [{"layer": [67, 20], "box": [0, 0, 225, 4000]}]
     },
     "expected_disagreement": null
   }
 }
 ```
+
+(`li1.width.1` is shown because its `expected_disagreement` really is
+`null`. Five of sky130's eleven entries carry a **non-null** annotation --
+see "Cross-check results" below -- so do not read this example as
+representative of the whole manifest.)
 
 - `check`/`layer`/`threshold_dbu` echo the rule's own fields (for readability
   and debugging -- the deck itself, not this manifest, remains the source of
@@ -73,8 +78,10 @@ Each `manifest.json` is a JSON object keyed by `DrcRule.id`:
   approximation (see its `DrcRule.description`/inline comment) is known to
   produce a genuine, reviewed disagreement between the curated engine and
   the real PDK-native deck for *this specific fixture* -- see "Cross-check
-  results" below. None of the 37 piloted rules need one today (verified
-  empirically, not assumed -- see that section).
+  results" below. **Five** of the 37 piloted rules carry one today, all in
+  sky130 (`diff.width.1`, `mcon.space.1`, `poly.width.1`, `via.space.1`,
+  `via.width.1`); each was established empirically against a real
+  `sky130A.lydrc`, not assumed -- see that section.
 
 ## Regenerating
 
@@ -141,18 +148,37 @@ Ran tier 3 against a real `volare`-fetched sky130A install
 covering all 11 sky130 width/space rules (22 fixtures: 11 violate + 11
 clean):
 
-**11/11 rules verified against the native deck, 0 documented
-approximations needed, 0 unexplained disagreements.**
+**11/11 rules verified against the native deck, 5 documented
+approximations, 0 unexplained disagreements.**
 
-Every violate fixture reported a violation under both the curated engine and
-the real `sky130A.lydrc`; every clean fixture reported none under both --
-including `diff.width.1`, whose own docstring notes the *general*
-`difftap = diff.or(tap)` approximation (checking `diff.drawing` alone
-understates the real `difftap.1` rule's scope when `tap` is also drawn):
-this pilot's fixtures draw only `diff.drawing`, so the union with an empty
-`tap` region is exactly `diff.drawing` and the two engines agree on this
-specific fixture, correctly not needing an `expected_disagreement` entry for
-it. No `expected_disagreement` entries were needed for any of the 37 piloted
-rules (all 11 sky130 rules empirically cross-checked directly; gf180mcu's 26
-rules are deferred per the scope above, so they carry no cross-check verdict
-either way yet -- not a claim of agreement).
+**Six** of the eleven agree outright on both fixtures -- `li1.width.1`,
+`li1.space.1`, `met1.width.1`, `met1.space.1`, `met2.width.1`,
+`met2.space.1`: each violate fixture trips the corresponding native BEOL
+rule (e.g. `met1.width.1` -> `m1.1`, `met2.width.1` -> `m2.1`,
+`met2.space.1` -> `m2.2`) and each clean fixture is clean under both
+engines. These six carry `"expected_disagreement": null`.
+
+**Five** genuinely disagree on one of their two fixtures, and each carries a
+non-null `expected_disagreement` in `sky130/manifest.json` recording why.
+These are documented approximations, not unexplained failures -- the tier-3
+test tolerates exactly these and still fails loudly on any *other*
+disagreement:
+
+| Rule id | Fixture that disagrees | Curated | Native `sky130A.lydrc` | Why (abridged -- full text in the manifest) |
+|---|---|---|---|---|
+| `diff.width.1` | `violate` | violations | clean | The script hard-codes `FEOL = false` ("do not change"), with no `-rd`-settable override, so this rule sits inside an `if FEOL ... end` block the native run never evaluates. |
+| `poly.width.1` | `violate` | violations | clean | Same `FEOL = false` gate as `diff.width.1`. |
+| `mcon.space.1` | `clean` | clean | violations (`ct.1`, `ct.4`) | A bare, isolated mcon shape -- all this single-layer pilot can build -- trips the native deck's `ct.1` (mcon edges must be exactly 0.17um) and `ct.4` (mcon must be covered by li), neither of which this pilot's geometry can satisfy. |
+| `via.width.1` | `clean` | clean | violations (`via.1a`, `m2.via`, `via.4c.5c`) | The native `via.1a` demands an *exact* 0.15um square (`edges.without_length(0.15)`), not a minimum width; any fixture wide enough to pass this engine's min-only `width_check` is by construction wider than the native max. |
+| `via.space.1` | `clean` | clean | violations (`m2.5`, `m2.via`, `via.1a`, `via.4c.5c`) | Same exact-size `via.1a` mismatch, plus the native deck's met2-enclosure rules that this single-layer fixture never draws. |
+
+Note in particular that `diff.width.1`'s disagreement is **not** about the
+`difftap = diff.or(tap)` approximation noted in its own docstring (this
+pilot's fixtures draw only `diff.drawing`, so that union is exactly
+`diff.drawing` and would agree) -- it is the `FEOL = false` gate above,
+which suppresses the native check entirely regardless of the input layout.
+
+gf180mcu's 26 rules are deferred per the scope above, so they carry no
+cross-check verdict either way yet -- their `expected_disagreement` fields
+are all `null` because none has been cross-checked, which is **not** a claim
+of agreement.

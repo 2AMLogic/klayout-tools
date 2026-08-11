@@ -494,7 +494,7 @@
         }
       ]
     },
-    "expected_disagreement": "sky130A_mr.drc's real via1 rule (\"via.1a\"/\"via.1a_b\") requires an exact 0.15um x 0.15um square (min *and* max), not just a minimum width -- already noted as an approximation in this rule's own DrcRule.description. Any fixture wide enough to stay clean under this engine's min-only width_check is, by construction, wider than the real deck's fixed max size, so the real deck reports it as a violation. No fixture can satisfy both engines' notion of \"clean\" at once.",
+    "expected_disagreement": "The resolved sky130A.lydrc's own via1 rule (\"via.1a\", an `edges.without_length(0.15)` check) requires an exact 0.15um x 0.15um square (min *and* max), not just a minimum width -- already noted as an approximation in this rule's own DrcRule.description, and stated the same way by sky130A_mr.drc's \"via.1a_a\"/\"via.1a_b\" pair that this rule was transcribed from. Any fixture wide enough to stay clean under this engine's min-only width_check is, by construction, wider than the real deck's fixed max size, so the real deck reports it as a violation (observed: \"via.1a\", alongside the met2-enclosure rules this single-layer fixture cannot satisfy). No fixture can satisfy both engines' notion of \"clean\" at once.",
     "layer": [
       68,
       44
@@ -547,7 +547,7 @@
         }
       ]
     },
-    "expected_disagreement": "sky130A_mr.drc's real via1 rule (\"via.1a\"/\"via.1a_b\") requires an exact 0.15um x 0.15um square (min *and* max), not just a minimum width -- already noted as an approximation in this rule's own DrcRule.description. Any fixture wide enough to stay clean under this engine's min-only width_check is, by construction, wider than the real deck's fixed max size, so the real deck reports it as a violation. No fixture can satisfy both engines' notion of \"clean\" at once.",
+    "expected_disagreement": "The resolved sky130A.lydrc's own via1 rule (\"via.1a\", an `edges.without_length(0.15)` check) requires an exact 0.15um x 0.15um square (min *and* max), not just a minimum width -- already noted as an approximation in this rule's own DrcRule.description, and stated the same way by sky130A_mr.drc's \"via.1a_a\"/\"via.1a_b\" pair that this rule was transcribed from. Any fixture wide enough to stay clean under this engine's min-only width_check is, by construction, wider than the real deck's fixed max size, so the real deck reports it as a violation (observed: \"via.1a\", alongside the met2-enclosure rules this single-layer fixture cannot satisfy). No fixture can satisfy both engines' notion of \"clean\" at once.",
     "layer": [
       68,
       44
