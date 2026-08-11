@@ -114,6 +114,20 @@ _HIDDEN_PARAMS = {
 #: size rule at all; gf180mcu's ``contact.width.1`` is 0.22um).
 CONTACT_SIZE_UM = 0.22
 
+#: The dbu (database unit, um) every ``_GeneratorSpec.dbu`` entry uses --
+#: see the literal ``dbu=0.001`` on each ``_GENERATOR_SPECS`` entry below.
+#: Used by :func:`_snap_square_box_um` to pre-round a contact's centre to
+#: the manufacturing grid *before* building its box, so the later,
+#: independent per-edge ``int(round(x / dbu))`` conversion in
+#: :func:`_insert_boxes` can never round one edge up and the other down and
+#: silently draw a contact 1 dbu narrower/shorter than ``CONTACT_SIZE_UM``
+#: -- exactly the ``contact.width.1`` failure mode diagnosed in issue #685
+#: (``CONTACT_SIZE_UM`` has zero DRC margin above gf180mcu's ``CO.1``
+#: threshold, so a single dbu of rounding slop is enough to trip it). If a
+#: generator ever ships with a different dbu, this needs to become a real
+#: parameter instead of a shared constant.
+_GRID_DBU_UM = 0.001
+
 #: Margin (um) an active/poly/tap region must keep around a contact it
 #: encloses -- exceeds both curated decks' enclosure rules (sky130
 #: ``diff.enclosing.licon.1``/``poly.enclosing.licon.1``: 0.04um/0.05um;
@@ -134,11 +148,22 @@ MIN_SAME_LAYER_SPACING_UM = 0.4
 #: gf180mcu (see :data:`_PDK_ROLE_LAYERS`'s ``"well"`` entries).
 WELL_ENCLOSURE_MARGIN_UM = 0.15
 
-#: A contact-to-contact edge gap (um) below this is *legal* under both
-#: curated decks' contact-spacing rules but close enough to the limit that a
-#: generator reports it via the response's ``drc_hints.notes`` rather than
-#: silently accepting it -- the spike's "advisory, not authoritative"
-#: `drc_hints` semantics (see ``docs/cli/gen.md``).
+#: A contact-to-contact edge gap (um) below this is *legal* under sky130's
+#: curated deck (which checks no ``licon1`` spacing rule at all) but close
+#: enough to gf180mcu's real ``contact.space.1`` limit (>= 0.25um) that it
+#: can measurably violate that rule -- issue #685 confirmed a 0.2118um gap
+#: fails it while a 0.255um gap (still under this 0.3um margin) is clean.
+#: ``_guard_ring_validate`` is PDK-agnostic (called before the resolved PDK
+#: family is known to it), so this can't be enforced as a hard rejection
+#: without also rejecting sky130 configurations that are genuinely DRC-clean
+#: on that family (sky130 has no spacing rule to violate at any gap down to
+#: 0). Instead ``_guard_ring_describe`` (which does know the family) flags a
+#: gap this tight via the response's ``drc_hints.notes`` -- callers targeting
+#: gf180mcu should treat a value close to this margin as worth double-
+#: checking with `klt drc`. Other generators that compose
+#: :func:`_ring_layout` with an internally-sized, non-caller-controlled
+#: contact count (``diff_pair``, ``bjt_array``, ``esd_device``) don't run
+#: this check at all -- their own defaults stay comfortably clear of it.
 CONTACT_GAP_SAFE_UM = 0.3
 
 #: Smallest unit-device/unit-resistor width (um) that leaves room for a
@@ -1206,11 +1231,46 @@ def _boxes_overlap(
     )
 
 
+def _snap_square_box_um(
+    cx_um: float, cy_um: float, half_um: float, dbu_um: float
+) -> tuple[float, float, float, float]:
+    """A ``2 * half_um``-wide square centred on ``(cx_um, cy_um)``, snapped
+    to the ``dbu_um`` manufacturing grid *before* the box edges are derived,
+    so the returned box's width and height are exactly ``2 * round(half_um /
+    dbu_um) * dbu_um`` regardless of where the un-snapped centre falls
+    relative to the grid.
+
+    This matters because :func:`_insert_boxes`/``_insert_ring``'s ``_to_box``
+    round each of a box's *four edges* to the dbu grid independently
+    (``int(round(x0 / dbu))`` ... ``int(round(x1 / dbu))``). Building the box
+    from an un-snapped float centre first (``cx - half``, ``cx + half``) lets
+    ordinary floating-point noise put one edge just below a half-dbu grid
+    boundary and the other just above it -- Python's banker's-rounding
+    ``round()`` can then round those two edges in *different* directions,
+    silently drawing a box 1 dbu narrower/shorter than intended. That is
+    exactly the ``contact.width.1`` failure mode diagnosed in issue #685:
+    ``CONTACT_SIZE_UM`` carries zero DRC margin above gf180mcu's ``CO.1``
+    threshold, so a single dbu of asymmetric rounding is enough to trip it.
+    Snapping the centre (and the half-width, which is already grid-exact for
+    every current caller) to integer dbu counts *first* makes both edges
+    derive from the same rounded integer, so they can never drift apart.
+    """
+    cx_dbu = round(cx_um / dbu_um)
+    cy_dbu = round(cy_um / dbu_um)
+    half_dbu = round(half_um / dbu_um)
+    return (
+        (cx_dbu - half_dbu) * dbu_um,
+        (cy_dbu - half_dbu) * dbu_um,
+        (cx_dbu + half_dbu) * dbu_um,
+        (cy_dbu + half_dbu) * dbu_um,
+    )
+
+
 def _ring_layout(
     inner_w_um: float,
     inner_h_um: float,
     ring_w_um: float,
-    contacts_per_side: int,
+    contacts_per_side: int | tuple[int, int],
     gap_side: str = "",
     gap_um: float = 0.0,
     gap_offset_um: float = 0.0,
@@ -1218,8 +1278,17 @@ def _ring_layout(
     """A tap/metal ring (drawn as an outer-box-minus-inner-box boolean, see
     :func:`_insert_ring`, so it is always one unbroken polygon -- no
     same-layer spacing violation between ring segments) around an
-    ``inner_w_um`` x ``inner_h_um`` protected area, with ``contacts_per_side``
-    contacts evenly spaced along each of the four sides.
+    ``inner_w_um`` x ``inner_h_um`` protected area, with contacts evenly
+    spaced along each of the four sides.
+
+    ``contacts_per_side`` is either a single ``int`` -- the historical
+    behaviour, applied uniformly to all four sides -- or an ``(ns, ew)``
+    tuple: ``ns`` contacts on each of the N/S (top/bottom) sides, spaced
+    along ``inner_w_um``, and ``ew`` contacts on each of the E/W (left/
+    right) sides, spaced along ``inner_h_um``. A caller sizing a ring around
+    a strongly non-square inner region can then target an independent pitch
+    on each axis instead of having the achievable count capped by whichever
+    side is shorter (issue #685).
 
     ``gap_side`` (``""`` = closed ring, the default) cuts one routing opening
     through the ring on that side (#434) -- see :func:`_ring_gap_layout`. A
@@ -1232,6 +1301,11 @@ def _ring_layout(
     outer_w = inner_w_um + 2 * ring_w_um
     outer_h = inner_h_um + 2 * ring_w_um
     contact_half = CONTACT_SIZE_UM / 2.0
+    contacts_ns, contacts_ew = (
+        contacts_per_side
+        if isinstance(contacts_per_side, tuple)
+        else (contacts_per_side, contacts_per_side)
+    )
 
     gap = (
         _ring_gap_layout(outer_w, outer_h, ring_w_um, gap_side, gap_um, gap_offset_um)
@@ -1240,20 +1314,19 @@ def _ring_layout(
     )
 
     centers: list[tuple[float, float]] = []
-    for i in range(contacts_per_side):
-        t = (i + 1) / (contacts_per_side + 1)
+    for i in range(contacts_ns):
+        t = (i + 1) / (contacts_ns + 1)
         cx = ring_w_um + t * inner_w_um
         centers.append((cx, outer_h - ring_w_um / 2.0))  # top
         centers.append((cx, ring_w_um / 2.0))  # bottom
-    for i in range(contacts_per_side):
-        t = (i + 1) / (contacts_per_side + 1)
+    for i in range(contacts_ew):
+        t = (i + 1) / (contacts_ew + 1)
         cy = ring_w_um + t * inner_h_um
         centers.append((ring_w_um / 2.0, cy))  # left
         centers.append((outer_w - ring_w_um / 2.0, cy))  # right
 
     contact_boxes = [
-        (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
-        for (cx, cy) in centers
+        _snap_square_box_um(cx, cy, contact_half, _GRID_DBU_UM) for (cx, cy) in centers
     ]
     if gap is not None:
         contact_boxes = [
@@ -2461,8 +2534,25 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "contacts_per_side",
                 self.TypeInt,
-                "Tap contacts evenly spaced along each ring side",
+                "Tap contacts evenly spaced along each ring side -- applied "
+                "uniformly to all four sides unless overridden per-axis by "
+                "contacts_per_side_ns/contacts_per_side_ew",
                 default=4,
+            )
+            self.param(
+                "contacts_per_side_ns",
+                self.TypeInt,
+                "Tap contacts on the N/S (top/bottom) sides, spaced along "
+                "inner_width_um -- 0 (default) inherits contacts_per_side, "
+                "so existing single-scalar callers are unaffected",
+                default=0,
+            )
+            self.param(
+                "contacts_per_side_ew",
+                self.TypeInt,
+                "Tap contacts on the E/W (left/right) sides, spaced along "
+                "inner_height_um -- 0 (default) inherits contacts_per_side",
+                default=0,
             )
             self.param(
                 "ring_gap_side",
@@ -2530,11 +2620,13 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_tap = self.layout.layer(self.tap_layer)
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
+            contacts_ns = self.contacts_per_side_ns or self.contacts_per_side
+            contacts_ew = self.contacts_per_side_ew or self.contacts_per_side
             info = _ring_layout(
                 self.inner_width_um,
                 self.inner_height_um,
                 self.ring_width_um,
-                self.contacts_per_side,
+                (contacts_ns, contacts_ew),
                 self.ring_gap_side,
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
@@ -3828,6 +3920,17 @@ def _ring_gap_notes(ring: dict[str, Any] | None, ring_gap_side: str) -> list[str
     ]
 
 
+def _guard_ring_axis_contacts(params: dict[str, Any]) -> tuple[int, int]:
+    """Resolve ``params``'s per-axis contact counts: ``contacts_per_side_ns``/
+    ``contacts_per_side_ew`` when set (non-zero), else ``contacts_per_side``
+    inherited on that axis -- the same "0 means inherit" rule the PCell's
+    ``produce_impl`` applies, kept in sync here so ``_guard_ring_validate``/
+    ``_guard_ring_describe`` never disagree with what actually gets drawn."""
+    contacts_ns = params["contacts_per_side_ns"] or params["contacts_per_side"]
+    contacts_ew = params["contacts_per_side_ew"] or params["contacts_per_side"]
+    return contacts_ns, contacts_ew
+
+
 def _guard_ring_validate(params: dict[str, Any]) -> None:
     if params["inner_width_um"] <= 0:
         raise GenError("generator 'guard_ring': params.inner_width_um must be > 0")
@@ -3839,16 +3942,38 @@ def _guard_ring_validate(params: dict[str, Any]) -> None:
         )
     if params["contacts_per_side"] < 1:
         raise GenError("generator 'guard_ring': params.contacts_per_side must be >= 1")
+    if params["contacts_per_side_ns"] < 0:
+        raise GenError(
+            "generator 'guard_ring': params.contacts_per_side_ns must be >= 0 "
+            "(0 inherits params.contacts_per_side)"
+        )
+    if params["contacts_per_side_ew"] < 0:
+        raise GenError(
+            "generator 'guard_ring': params.contacts_per_side_ew must be >= 0 "
+            "(0 inherits params.contacts_per_side)"
+        )
 
-    for label, straight in (
-        ("inner_width_um", params["inner_width_um"]),
-        ("inner_height_um", params["inner_height_um"]),
+    contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+
+    for label, straight, contacts, param_name in (
+        (
+            "inner_width_um",
+            params["inner_width_um"],
+            contacts_ns,
+            "contacts_per_side_ns",
+        ),
+        (
+            "inner_height_um",
+            params["inner_height_um"],
+            contacts_ew,
+            "contacts_per_side_ew",
+        ),
     ):
-        pitch = straight / (params["contacts_per_side"] + 1)
+        pitch = straight / (contacts + 1)
         if pitch <= CONTACT_SIZE_UM:
-            cps = params["contacts_per_side"]
             raise GenError(
-                f"generator 'guard_ring': contacts_per_side={cps} does not fit "
+                f"generator 'guard_ring': {param_name} (effectively {contacts}, "
+                "from params.contacts_per_side unless overridden) does not fit "
                 f"along {label}={straight}um without overlapping contacts"
             )
 
@@ -3866,11 +3991,12 @@ def _guard_ring_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     family = _pdk_family(pdk_info["variant"])
+    contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
     info = _ring_layout(
         params["inner_width_um"],
         params["inner_height_um"],
         params["ring_width_um"],
-        params["contacts_per_side"],
+        (contacts_ns, contacts_ew),
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
@@ -3889,14 +4015,22 @@ def _guard_ring_describe(
     )
 
     notes = _ring_gap_notes(info, params["ring_gap_side"])
-    for label, straight in (
-        ("inner_width_um", params["inner_width_um"]),
-        ("inner_height_um", params["inner_height_um"]),
+    # `_guard_ring_validate` only rejects a per-axis contact count that would
+    # literally overlap (see its own `pitch <= CONTACT_SIZE_UM` check) -- it
+    # can't reject on `CONTACT_GAP_SAFE_UM` alone since that margin's real
+    # violation only applies to gf180mcu (sky130's curated deck checks no
+    # contact-spacing rule at all), and `_guard_ring_validate` doesn't know
+    # the resolved PDK family. `_guard_ring_describe` does, so it flags a
+    # tight-but-still-accepted gap here instead, per-axis, so a caller
+    # targeting gf180mcu knows to double-check with `klt drc` (issue #685).
+    for label, straight, contacts in (
+        ("inner_width_um", params["inner_width_um"], contacts_ns),
+        ("inner_height_um", params["inner_height_um"], contacts_ew),
     ):
-        pitch = straight / (params["contacts_per_side"] + 1)
+        pitch = straight / (contacts + 1)
         if pitch - CONTACT_SIZE_UM < CONTACT_GAP_SAFE_UM:
             notes.append(
-                f"contacts_per_side={params['contacts_per_side']} leaves less than "
+                f"the resolved contact count ({contacts}) leaves less than "
                 f"{CONTACT_GAP_SAFE_UM}um between adjacent contacts along {label} -- "
                 "may violate the target PDK's minimum contact spacing rule"
             )
@@ -3914,8 +4048,9 @@ def _guard_ring_describe(
     )
 
     return {
-        # The contacts actually drawn -- `contacts_per_side * 4` unless a ring
-        # opening (params.ring_gap_side) clipped one or more of them away.
+        # The contacts actually drawn -- `2 * (contacts_ns + contacts_ew)`
+        # unless a ring opening (params.ring_gap_side) clipped one or more
+        # of them away.
         "device_count": len(info["contact_boxes_um"]),
         "ports": ports,
         "drc_hints": {

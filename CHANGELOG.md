@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt gen guard_ring` (and every generator that composes its
+  ring drawing: `diff_pair`, `bjt_array`, `esd_device`): a `contacts_per_side`
+  value `_guard_ring_validate` accepted as geometrically fine could still
+  draw a DRC-violating ring, with no signal in the response (#685). Root
+  cause: `_ring_layout` built each tap contact's box from an un-snapped float
+  centre (`cx - half`, `cx + half`); `_insert_boxes`'s later, independent
+  per-edge `int(round(x / dbu))` conversion could then round one edge up and
+  the other down when the un-rounded edge fell within float noise of a
+  half-dbu grid boundary, silently drawing a contact 1 dbu narrower/shorter
+  than `CONTACT_SIZE_UM` and tripping gf180mcu's `contact.width.1` (verified:
+  `contacts_per_side=3` and `=7` on the issue's `78.91 x 4.75um` repro
+  region, while `=2` and `=4` stayed clean). Contact boxes are now built by
+  snapping the centre to the manufacturing grid first (`_snap_square_box_um`),
+  so both edges derive from the same rounded integer and can never drift
+  apart — every `contacts_per_side` `_guard_ring_validate` now accepts draws
+  a full-size, DRC-clean contact. `_guard_ring_describe`'s existing
+  `CONTACT_GAP_SAFE_UM` advisory note (the mechanism that already caught the
+  issue's other failure mode, a genuine near-limit `contact.space.1` case) is
+  now applied per-axis too, so it still flags a tight resolved contact count
+  on either axis independently. See `docs/cli/gen.md`'s `guard_ring` section.
+
 - 2026-08-10 — `klt extract`: a material, non-empty `ignored_layers` result
   (any entry with `shapes > 0` — which is every entry, since empty layers
   are filtered before they reach this field) now also appends a single
@@ -223,6 +244,16 @@ not `klt --version`, if you need to detect this kind of drift.
   See `docs/cli/gen-compose.md`.
 
 ### Added since release
+
+- 2026-08-11 — `klt gen guard_ring`: new additive `contacts_per_side_ns`/
+  `contacts_per_side_ew` int params (#685), each defaulting to `0` (inherit
+  `contacts_per_side`, so existing single-scalar callers are unaffected).
+  `contacts_per_side_ns` sets the tap contact count on the N/S (top/bottom)
+  sides, spaced along `inner_width_um`; `contacts_per_side_ew` sets it on the
+  E/W (left/right) sides, spaced along `inner_height_um` — letting a caller
+  sizing a ring around a strongly non-square inner region target an
+  independent pitch on each axis instead of being capped by whichever side
+  is shorter. See `docs/cli/gen.md`'s `guard_ring` section.
 
 - 2026-08-11 — `klt extract`: new additive `dead_metal[]` field (#676)
   reporting every connected cluster of routing-stack geometry (the deck's

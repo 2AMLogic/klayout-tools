@@ -1741,6 +1741,198 @@ def test_guard_ring_overlapping_contacts_rejected(tmp_path, pdk_root):
         )
 
 
+# --- guard_ring: issue #685 (per-axis contacts_per_side, DRC-clean sweep) --- #
+
+#: The issue's exact repro region: a strongly elongated inner area where a
+#: uniform `contacts_per_side` used to both silently draw DRC-violating
+#: rings for some individually-legal values (n=3, n=7 -- a grid-rounding
+#: artifact) and cap the achievable count on the long axis at whatever the
+#: short axis could fit.
+_ISSUE_685_REPRO_PARAMS = {
+    "inner_width_um": 78.91,
+    "inner_height_um": 4.75,
+    "ring_width_um": 1.0,
+    "add_well": False,
+}
+
+
+@pytest.mark.parametrize("n", range(1, 11))
+def test_guard_ring_contacts_per_side_sweep_matches_drc_on_elongated_region(
+    tmp_path, both_pdk_root, n
+):
+    """Regression for issue #685: sweeping `contacts_per_side` 1..10 on the
+    issue's exact repro region against the curated gf180mcu deck, mirroring
+    the issue's own table exactly. n=1..9 must draw a DRC-clean ring --
+    previously n=3 and n=7 silently drew a `contact.width.1` violation (an
+    independent-per-edge dbu-rounding artifact) with no signal in the
+    response, while neighbouring values (n=2, n=4) stayed clean. n=10 is a
+    real, near-limit `contact.space.1` violation that the generator still
+    draws (fit alone doesn't reject it) but must never draw *silently* --
+    `drc_hints.notes` must flag it, so a caller can't miss it the way the
+    original issue's n=3/n=7 case went unflagged."""
+    output = tmp_path / f"sweep_{n}.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {**_ISSUE_685_REPRO_PARAMS, "contacts_per_side": n},
+            "options": {"output": str(output)},
+        }
+    )
+    drc_report = run_drc(str(output), "gf180mcu")
+    if n <= 9:
+        assert drc_report["status"] == "clean", drc_report["violations"]
+    else:
+        assert drc_report["status"] == "violations"
+        assert "contact.space.1" in drc_report["rule_counts"]
+        assert any("inner_height_um" in note for note in report["drc_hints"]["notes"])
+
+
+def test_guard_ring_gap_margin_note_does_not_fire_for_a_comfortable_gap(
+    tmp_path, both_pdk_root
+):
+    """`contacts_per_side=9` on the repro region leaves a 0.255um gap: real
+    per-family gf180mcu spacing check still passes (`klt drc` is clean), but
+    it is inside the purely advisory `CONTACT_GAP_SAFE_UM` (0.3um) band, so
+    `_guard_ring_describe` still flags it -- distinguishing "close to the
+    limit" from n=1..8's comfortably-clear gaps, none of which get a note."""
+    output = tmp_path / "gap_margin.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {**_ISSUE_685_REPRO_PARAMS, "contacts_per_side": 9},
+            "options": {"output": str(output)},
+        }
+    )
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert any(
+        "leaves less than 0.3um" in note for note in report["drc_hints"]["notes"]
+    )
+
+    output_8 = tmp_path / "gap_margin_8.gds"
+    report_8 = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {**_ISSUE_685_REPRO_PARAMS, "contacts_per_side": 8},
+            "options": {"output": str(output_8)},
+        }
+    )
+    assert report_8["drc_hints"]["notes"] == []
+
+
+def test_guard_ring_per_axis_contacts_targets_independent_pitch(
+    tmp_path, both_pdk_root
+):
+    """`contacts_per_side_ns`/`contacts_per_side_ew` (issue #685) let a
+    caller hit a pitch on the long axis of a non-square inner region that a
+    single scalar `contacts_per_side` cannot reach -- the repro region's
+    short axis caps a uniform count at 9, but the long axis alone has room
+    for many more."""
+    output = tmp_path / "per_axis.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                **_ISSUE_685_REPRO_PARAMS,
+                "contacts_per_side_ns": 30,
+                "contacts_per_side_ew": 4,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 2 * 30 + 2 * 4
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_guard_ring_per_axis_override_too_tight_is_flagged_not_silent(
+    tmp_path, both_pdk_root
+):
+    """A per-axis override that leaves too little room on just one axis is
+    not silently accepted: `drc_hints.notes` flags that axis specifically,
+    and `klt drc` independently confirms it is the one that actually
+    violates -- the generator's own response never disagrees with `klt drc`
+    about which axis is the problem."""
+    output = tmp_path / "tight_axis.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {**_ISSUE_685_REPRO_PARAMS, "contacts_per_side_ew": 10},
+            "options": {"output": str(output)},
+        }
+    )
+    assert any("inner_height_um" in note for note in report["drc_hints"]["notes"])
+    assert not any("inner_width_um" in note for note in report["drc_hints"]["notes"])
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "violations"
+    assert "contact.space.1" in drc_report["rule_counts"]
+
+
+def test_guard_ring_contacts_per_side_ns_ew_default_zero_inherits_scalar(
+    tmp_path, pdk_root
+):
+    """Omitting `contacts_per_side_ns`/`contacts_per_side_ew` (both default
+    `0`) draws exactly what the pre-#685 single-scalar `contacts_per_side`
+    drew -- existing callers are unaffected, and explicitly passing `0` for
+    both is equivalent to omitting them."""
+    a = tmp_path / "a.gds"
+    b = tmp_path / "b.gds"
+    for output, extra in (
+        (a, {}),
+        (b, {"contacts_per_side_ns": 0, "contacts_per_side_ew": 0}),
+    ):
+        generate(
+            {
+                "generator": "guard_ring",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"contacts_per_side": 3, **extra},
+                "options": {"output": str(output)},
+            }
+        )
+    _assert_gds_geometry_equal(a, b)
+
+
+def test_guard_ring_square_inner_region_device_count_unchanged(tmp_path, pdk_root):
+    """A square inner region (the default 3x3um) with a uniform
+    `contacts_per_side` still reports `contacts_per_side * 4` devices --
+    unchanged before/after the per-axis change, per the issue's edge-case
+    test plan (regression guard)."""
+    output = tmp_path / "square.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"contacts_per_side": 5},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 20  # 5 contacts/side * 4 sides
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"contacts_per_side_ns": -1},
+        {"contacts_per_side_ew": -1},
+    ],
+)
+def test_guard_ring_negative_axis_override_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError, match=">= 0"):
+        generate(
+            {
+                "generator": "guard_ring",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "params",
     [

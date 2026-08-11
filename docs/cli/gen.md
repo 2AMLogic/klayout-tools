@@ -246,21 +246,52 @@ neither a well layer nor a well rule would still get the documented no-op,
 reported via `drc_hints.notes`. Four ports —
 `TAP_N`/`TAP_S`/`TAP_E`/`TAP_W` — sit at the midpoint of each ring side.
 `device_count` is the number of tap contacts actually drawn
-(`contacts_per_side * 4`, less any the ring opening below clipped away).
+(`2 * (contacts_ns + contacts_ew)`, less any the ring opening below clipped
+away, where `contacts_ns`/`contacts_ew` are `contacts_per_side_ns`/
+`contacts_per_side_ew` when set, else `contacts_per_side` — see below).
 **`drc_hints.matched_group_id` is always `null`** — a guard ring has no
 matching concept (it is excluded from the matched-device generators: 1, 2,
 and 4).
 
-| `params` field      | Type   | Default | Description |
-| -------------------- | ------ | ------- | ----------- |
-| `inner_width_um`     | double | `3.0`   | Width of the protected inner area (µm). Must be `> 0`. |
-| `inner_height_um`    | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
-| `ring_width_um`      | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
-| `contacts_per_side`  | int    | `4`     | Tap contacts evenly spaced along each ring side. Must be `>= 1`, and must fit without overlapping (a `contacts_per_side` too large for `inner_width_um`/`inner_height_um` is rejected outright — a structural error, not a DRC-adjacent one). |
-| `ring_gap_side`      | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
-| `ring_gap_um`        | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
-| `ring_gap_offset_um` | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
-| `add_well`           | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
+| `params` field          | Type   | Default | Description |
+| ------------------------ | ------ | ------- | ----------- |
+| `inner_width_um`         | double | `3.0`   | Width of the protected inner area (µm). Must be `> 0`. |
+| `inner_height_um`        | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
+| `ring_width_um`          | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
+| `contacts_per_side`      | int    | `4`     | Tap contacts evenly spaced along each ring side, applied uniformly to all four sides unless overridden per-axis below. Must be `>= 1`. |
+| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`, so existing single-scalar callers are unaffected. Must be `>= 0`. |
+| `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W (left/right) sides, spaced along `inner_height_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
+| `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
+| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
+| `ring_gap_offset_um`     | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
+| `add_well`               | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
+
+For each axis, a resolved contact count (`contacts_per_side_ns`/
+`contacts_per_side_ew` when non-zero, else `contacts_per_side`) too large for
+`inner_width_um`/`inner_height_um` on that axis — one that would produce
+literally overlapping contacts — is rejected outright (`GenError`); this
+check is PDK-agnostic (a structural error, not a DRC-adjacent one). A count
+that fits but leaves less than `0.3um` between adjacent contacts on that
+axis is *not* rejected — it is DRC-clean on sky130 (whose curated deck
+checks no contact-spacing rule at all) but close enough to gf180mcu's real
+`contact.space.1` limit (`>= 0.25um`) to be worth a caller's attention, so
+`drc_hints.notes` flags it instead (per-axis) rather than rejecting a value
+that may be perfectly legal on the resolved family — issue #685.
+
+Independent per-axis contact counts (`contacts_per_side_ns`/
+`contacts_per_side_ew`) let a caller sizing a ring around a strongly
+non-square inner region target a pitch on the long axis that a single
+scalar `contacts_per_side` cannot reach — a uniform count is capped by
+whichever side is shorter. Before every `contacts_per_side` value the
+generator accepted was also confirmed DRC-clean (issue #685): independently
+rounding each contact box's four edges to the manufacturing grid could round
+one edge up and the other down, silently drawing a contact 1 dbu narrower or
+shorter than `CONTACT_SIZE_UM` and tripping gf180mcu's `contact.width.1` for
+some individually-legal `contacts_per_side` values (e.g. `3` and `7` on a
+`78.91 x 4.75um` inner region) while neighbouring values (`2`, `4`) stayed
+clean. Contact boxes are now built by snapping the contact's centre to the
+manufacturing grid first, so every accepted value draws a full-size,
+DRC-clean contact.
 
 #### Ring routing openings (`ring_gap_side`)
 
