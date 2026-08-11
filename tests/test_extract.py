@@ -5854,10 +5854,13 @@ def test_parasitics_summary_block_shape(tmp_path):
     assert set(para) == {
         "r_count",
         "c_count",
+        "cc_count",
         "total_resistance_ohm",
         "total_capacitance_ff",
+        "total_coupling_capacitance_ff",
         "nets",
         "metals_without_coefficient",
+        "overlap_pairs_without_coefficient",
         "model",
     }
     # `model` (issue #728) declares the parasitic model's own scope --
@@ -5865,15 +5868,22 @@ def test_parasitics_summary_block_shape(tmp_path):
     # exactly, not just be present.
     assert para["model"] == PARASITIC_MODEL_SCOPE
     assert set(para["model"]) == {"capacitance", "coupling", "resistance", "frequency"}
-    # sky130's PARASITICS.metals is fully populated (issue #547's regression
-    # target was gf180mcu, not sky130) -- no gap for this deck.
+    # sky130's PARASITICS.metals/metal_overlaps are fully populated (issue
+    # #547's regression target was gf180mcu, not sky130) -- no gap for this
+    # deck in either gap report.
     assert para["metals_without_coefficient"] == []
+    assert para["overlap_pairs_without_coefficient"] == []
     # r_count now counts every emitted resistor (one *or more* per net, issue
     # #592's star topology), so it is >= c_count (one capacitor per net,
     # unchanged) rather than always equal to it.
     assert para["r_count"] >= para["c_count"] == len(para["nets"])
     assert para["r_count"] >= 1
     assert para["total_capacitance_ff"] > 0.0
+    # This fixture's li1/met1 shapes never cross onto a *different* net on
+    # the adjacent level (issue #760) -- no coupling here, just the additive
+    # fields present and empty/zero.
+    assert para["cc_count"] == 0
+    assert para["total_coupling_capacitance_ff"] == 0.0
 
     names = [n["net"] for n in para["nets"]]
     assert names == sorted(names)  # deterministic, sorted by net name
@@ -5885,7 +5895,9 @@ def test_parasitics_summary_block_shape(tmp_path):
             "capacitance_ff",
             "hub_net",
             "terminals",
+            "coupled",
         }
+        assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
         for term in entry["terminals"]:
@@ -6047,6 +6059,34 @@ def test_parasitics_coefficients_sourced_from_pdk_tech():
     assert sky130.PARASITICS.diffusion is None
     assert gf180mcu.PARASITICS.diffusion is None
 
+    # Vertical-overlap coupling coefficients (issue #760, Extract Stage 2a),
+    # transcribed from each PDK's `defaultoverlap` entries -- same spot-check
+    # discipline as the R/C coefficients above.
+    #
+    # sky130: li1(idx0)<->met1(idx1) from sky130A.tech's nominal
+    # `variants (),(orig),(si)` block: `defaultoverlap allm1 metal1 allli
+    # locali 114.20` (aF/um^2).
+    assert sky130.PARASITICS.metal_overlaps[0] == pytest.approx(0.11420)
+    # sky130: met3(idx3)<->met4(idx4): `defaultoverlap allm4 metal4 allm3
+    # metal3 84.03`.
+    assert sky130.PARASITICS.metal_overlaps[3] == pytest.approx(0.08403)
+    # gf180mcu: Metal1(idx0)<->Metal2(idx1), unconditional across every
+    # THICKMET/metal-count option: `defaultoverlap allm2 metal2 allm1
+    # metal1 59.027`.
+    assert gf180mcu.PARASITICS.metal_overlaps[0] == pytest.approx(0.059027)
+    # gf180mcu: Metal4(idx3)<->Metal5(idx4), the 5-level stack's top pair,
+    # from the resolved, pre-built gf180mcuD.tech for the pinned PDK commit
+    # c6d73a35f524070e85faff4a6a9eef49553ebc2b (nominal `variants ()` corner
+    # block): `defaultoverlap allm5 metal5 allm4 metal4 39.351`.
+    assert gf180mcu.PARASITICS.metal_overlaps[3] == pytest.approx(0.039351)
+
+    # Every declared adjacent metal-level pair has a coupling coefficient for
+    # both shipped decks (one entry per `len(metals) - 1` pair) -- no gap.
+    assert len(sky130.PARASITICS.metal_overlaps) == len(sky130.PARASITICS.metals) - 1
+    assert (
+        len(gf180mcu.PARASITICS.metal_overlaps) == len(gf180mcu.PARASITICS.metals) - 1
+    )
+
 
 def test_gf180mcu_parasitics_metals_covers_full_stack():
     """Regression guard for issue #547: gf180mcu.PARASITICS.metals used to
@@ -6152,6 +6192,938 @@ def test_run_extract_warns_on_parasitics_metal_gap(monkeypatch, tmp_path):
         report_fixed["parasitics"]["total_capacitance_ff"]
         >= report["parasitics"]["total_capacitance_ff"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# Vertical-overlap (crossover) net-to-net coupling capacitance (issue #760,
+# Extract Stage 2a -- docs/design/extract-fidelity-roadmap.md Section 5)
+# --------------------------------------------------------------------------- #
+
+
+def _make_overlap_layout(top_name: str = "TOP") -> kdb.Layout:
+    """A minimal three-net fixture purpose-built for the vertical-overlap
+    coupling pass, with no transistors at all -- every net here is a
+    labelled, device-free floating cluster (issue #539's "a labelled
+    floating cluster is not dead" rule keeps each one alive as a real, named,
+    pinned net):
+
+    - Net ``A``: a 2x2 um li1 square.
+    - Net ``B``: a 1x1 um met1 square, a clean subset of ``A``'s footprint in
+      XY, with **no via** between them -- two genuinely distinct nets whose
+      conductors vertically overlap by exactly 1 um^2, the textbook Stage 2a
+      case. At sky130's li1<->met1 `defaultoverlap` coefficient (0.11420
+      fF/um^2), the expected coupling capacitance is exactly ``0.1142`` fF.
+    - Net ``C``: the same li1-under-met1 geometry as ``A``/``B``, but tied
+      together by a real `mcon` via -- a single net whose own via stack
+      happens to overlap itself vertically. Must contribute **zero**
+      coupling (same-net overlap is excluded by construction), the "Edge
+      cases" regression this issue's acceptance criteria name explicitly.
+    - Net ``vsubs``: a disconnected li1 pad labelled with the sky130 deck's
+      own substrate/ground net name, so `--parasitics`' fresh
+      ``circuit.create_net(ground_net_name)`` instead resolves this
+      already-registered, pin-promoted net -- letting an ngspice testbench
+      drive the deck's ground rail directly, the same way a real device's
+      NMOS body would via `connect_global` (never exercised here, since this
+      fixture draws no devices).
+
+    Every net is far enough apart in X that none of the three interacts with
+    either of the others -- ``A``/``B`` overlap only each other, ``C``
+    overlaps only itself.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # Net A (li1) / Net B (met1): distinct nets, genuine 1 um^2 overlap, no
+    # via -- the textbook Stage 2a coupling case.
+    draw(67, 20, kdb.Box(0, 0, 2000, 2000))  # li1, net A
+    label(67, 5, "A", 1000, 1000)
+    draw(68, 20, kdb.Box(500, 500, 1500, 1500))  # met1, net B
+    label(68, 5, "B", 1000, 1000)
+
+    # Net C: same-net li1/met1 via stack -- must produce zero coupling.
+    draw(67, 20, kdb.Box(3000, 0, 5000, 2000))  # li1, part of net C
+    draw(68, 20, kdb.Box(3500, 500, 4500, 1500))  # met1, part of net C
+    draw(67, 44, kdb.Box(3900, 900, 4100, 1100))  # mcon: li1<->met1, same net
+    label(67, 5, "C", 3600, 300)
+
+    # Disconnected li1 pad labelled with the deck's own substrate/ground net
+    # name -- promotes a real, externally drivable `vsubs` pin instead of
+    # `_inject_parasitics` creating one from scratch as a purely internal
+    # node (which an outside testbench could not reach).
+    draw(67, 20, kdb.Box(6000, 0, 6500, 500))
+    label(67, 5, "vsubs", 6100, 200)
+
+    return layout
+
+
+def test_parasitics_vertical_overlap_coupling_exact_values(tmp_path):
+    """Exact-value acceptance test for issue #760's core geometry/coefficient
+    math, on :func:`_make_overlap_layout`'s deterministic fixture.
+
+    Net A's li1 area is 4 um^2 (perimeter 8 um); net B's met1 area is 1 um^2
+    (perimeter 4 um), fully inside A's footprint, no via. Expected numbers,
+    each hand-computed from the deck's own coefficients
+    (`klayout_tools.decks.sky130.PARASITICS`: li1 `cap_area_ff_um2=0.037`,
+    `cap_perim_ff_um=0.0407`; met1 `cap_area_ff_um2=0.02578`,
+    `cap_perim_ff_um=0.04057`; li1<->met1 `metal_overlaps[0]=0.11420`):
+
+    - coupling C(A, B) = 1 um^2 * 0.11420 fF/um^2 = **0.1142 fF**.
+    - A's ground C = (4 - 1) um^2 * 0.037 + 8 um * 0.0407
+      = 0.111 + 0.3256 = **0.4366 fF** (only the *area* term loses the
+      overlapped 1 um^2; the perimeter/fringe term is untouched, per the
+      roadmap's "remove it from both nets' substrate-area term").
+    - B's ground C = (1 - 1) um^2 * 0.02578 + 4 um * 0.04057
+      = 0 + 0.16228 = **0.16228 fF** (B's *entire* area is claimed by the
+      overlap, but its fringe term survives -- this is also the "moved
+      entirely to coupling but still needs a hub" edge case).
+    """
+    path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
+    netlist_path = tmp_path / "overlap.spice"
+    report = run_extract(path, "sky130", output=str(netlist_path), parasitics=True)
+    para = report["parasitics"]
+
+    assert para["cc_count"] == 1
+    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.1142)
+
+    by_net = {entry["net"]: entry for entry in para["nets"]}
+    assert set(by_net) == {"A", "B", "C"}  # vsubs never gets its own stub
+
+    assert by_net["A"]["capacitance_ff"] == pytest.approx(0.4366)
+    assert by_net["A"]["coupled"] == [
+        {"net": "B", "capacitance_ff": 0.1142, "levels": [[0, 1]]}
+    ]
+    assert by_net["B"]["capacitance_ff"] == pytest.approx(0.16228)
+    assert by_net["B"]["coupled"] == [
+        {"net": "A", "capacitance_ff": 0.1142, "levels": [[0, 1]]}
+    ]
+
+    # Net C: a real li1/met1 via stack (one physical net) overlapping
+    # itself -- must produce exactly zero coupling, the explicit "same-net
+    # overlap is excluded by construction" edge case this issue's acceptance
+    # criteria name.
+    assert by_net["C"]["coupled"] == []
+
+    # `model.coupling` no longer reads "not modelled" as its leading clause
+    # (issue #728's mechanism, flipped by this issue) -- it now declares
+    # vertical overlap coupling as modelled, with lateral sidewall coupling
+    # named as the still-absent follow-on (Stage 2b).
+    assert not para["model"]["coupling"].startswith("not modelled")
+    assert "vertical overlap" in para["model"]["coupling"]
+    assert "lateral" in para["model"]["coupling"]
+
+    # The written SPICE carries one two-terminal `C` card directly between
+    # A's and B's hub nodes (both fall back to the no-device-terminal
+    # `<net>__par` hub, since this fixture draws no devices) -- not a
+    # capacitor to the ground/substrate net.
+    netlist_text = netlist_path.read_text()
+    cc_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("Ccc_")]
+    assert len(cc_lines) == 1
+    fields = cc_lines[0].split()
+    assert fields[1] == "A__par"
+    assert fields[2] == "B__par"
+    assert float(fields[3]) == pytest.approx(0.1142e-15)
+    # No coupling card ever names net C's hub.
+    assert not any("C__par" in ln for ln in cc_lines)
+
+
+def _make_via_stack_overlap_layout(top_name: str = "TOP") -> kdb.Layout:
+    """A three-level fixture whose middle net is claimed by a partner *above*
+    and a partner *below* over the **same** XY footprint -- the shape of an
+    ordinary straight via stack, and the geometry that distinguishes a
+    per-level Region *union* from a scalar area *sum* (PR #764 review).
+
+    - Net ``A``: a 1x1 um li1 square (level 0), 1 um^2.
+    - Net ``B``: a 3x1 um met1 bar (level 1), 3 um^2, perimeter 8 um. ``A``
+      sits under its leftmost 1 um^2.
+    - Net ``C``: a 1x1 um met2 square (level 2), directly over that *same*
+      leftmost 1 um^2 of ``B``.
+
+    So ``B``'s level-1 geometry contributes to two adjacent-level pairs --
+    (0,1) as the upper plate and (1,2) as the lower plate -- and both claim
+    the identical 1 um^2 patch. The area removed from ``B``'s ground term must
+    therefore be 1 um^2 (the set union), not 2 um^2 (the sum).
+
+    ``A`` and ``C`` never couple to each other: li1 and met2 are not adjacent
+    levels, so no ``metal_overlaps`` entry spans them.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(67, 20, kdb.Box(0, 0, 1000, 1000))  # li1, net A -- 1 um^2
+    label(67, 5, "A", 500, 500)
+    draw(68, 20, kdb.Box(0, 0, 3000, 1000))  # met1, net B -- 3 um^2, perim 8 um
+    label(68, 5, "B", 2500, 500)
+    draw(69, 20, kdb.Box(0, 0, 1000, 1000))  # met2, net C -- 1 um^2
+    label(69, 5, "C", 500, 500)
+
+    return layout
+
+
+def test_parasitics_via_stack_deduction_is_unioned_not_summed(tmp_path, monkeypatch):
+    """Regression test for the ground-side double-deduction found in PR #764's
+    review: a net whose level-`i` geometry is overlapped by a partner on level
+    `i-1` *and* a partner on level `i+1` at the same XY location must have that
+    area removed from its ground term exactly **once**.
+
+    Hand-computed from `klayout_tools.decks.sky130.PARASITICS` on
+    :func:`_make_via_stack_overlap_layout` (li1 `cap_area=0.037`,
+    `cap_perim=0.0407`; met1 `cap_area=0.02578`, `cap_perim=0.04057`; met2
+    `cap_area=0.0175`, `cap_perim=0.03776`; overlaps li1<->met1 `0.11420`,
+    met1<->met2 `0.13386`):
+
+    - coupling C(A, B) = 1 um^2 * 0.11420 = **0.1142 fF**
+    - coupling C(B, C) = 1 um^2 * 0.13386 = **0.13386 fF**
+    - A's ground C = (1 - 1) * 0.037 + 4 * 0.0407 = **0.1628 fF**
+    - C's ground C = (1 - 1) * 0.0175 + 4 * 0.03776 = **0.15104 fF**
+    - B's ground C = (3 - **1**) * 0.02578 + 8 * 0.04057
+      = 0.05156 + 0.32456 = **0.37612 fF**
+
+    B is the assertion that matters. Deducting the *union* of the two 1 um^2
+    overlap regions leaves 2 um^2 on ground (0.37612 fF); summing the two
+    overlap areas instead deducts 2 um^2, leaves 1 um^2, and reports 0.35034
+    fF -- 0.02578 fF of charge that goes to no coupling term and simply
+    vanishes. The coupling values are identical under both behaviours, which
+    is why the aggregate `gcd` bracket in
+    `test_gcd_parasitics_charge_conservation` cannot see this.
+    """
+    path = _write_gds(_make_via_stack_overlap_layout(), tmp_path / "via_stack.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "via_stack.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+
+    by_net = {entry["net"]: entry for entry in para["nets"]}
+    assert set(by_net) == {"A", "B", "C"}
+
+    # Coupling: both adjacent-level pairs charged in full, unaffected by the
+    # deduction fix.
+    assert para["cc_count"] == 2
+    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.1142 + 0.13386)
+    assert by_net["B"]["coupled"] == [
+        {"net": "A", "capacitance_ff": 0.1142, "levels": [[0, 1]]},
+        {"net": "C", "capacitance_ff": 0.13386, "levels": [[1, 2]]},
+    ]
+
+    # The middle net: deduct the union (1 um^2), not the sum (2 um^2).
+    assert by_net["B"]["capacitance_ff"] == pytest.approx(0.37612)
+    assert by_net["A"]["capacitance_ff"] == pytest.approx(0.1628)
+    assert by_net["C"]["capacitance_ff"] == pytest.approx(0.15104)
+
+    # Exact aggregate ground delta against the same layout extracted with the
+    # overlap coefficients removed -- no slack at all, unlike the 2.5x-wide
+    # closed-form bracket the `gcd` charge-conservation test has to use.
+    # Exactly three square microns of area are claimed once each: A's li1,
+    # B's met1 (the *union* patch), C's met2.
+    import klayout_tools.extract as extract_mod
+    from klayout_tools.decks import sky130
+
+    no_overlap_deck = dataclasses.replace(sky130.PARASITICS, metal_overlaps=())
+    monkeypatch.setattr(
+        extract_mod, "get_parasitics_deck", lambda name: no_overlap_deck
+    )
+    without = extract_mod.run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "via_stack_nocoupling.spice"),
+        parasitics=True,
+    )
+    assert without["parasitics"]["cc_count"] == 0
+    ground_delta = (
+        without["parasitics"]["total_capacitance_ff"] - para["total_capacitance_ff"]
+    )
+    # Union: 0.037 (A/li1) + 0.02578 (B/met1, once) + 0.0175 (C/met2).
+    # The pre-fix scalar sum charged B's patch twice, giving 0.10606.
+    assert ground_delta == pytest.approx(0.037 + 0.02578 + 0.0175)
+
+
+def test_describe_parasitics_overlap_gaps_reports_truncation_and_none_entries():
+    """Unit test for `_describe_parasitics_overlap_gaps` (issue #760),
+    mirroring `test_describe_parasitics_metal_gaps_reports_truncation_and_none_entries`
+    (#547) for the vertical-overlap coefficient family: a
+    ``ParasiticsDeck.metal_overlaps`` tuple shorter than ``len(metals) - 1``,
+    or carrying explicit ``None`` entries, is reported pair-by-pair rather
+    than silently producing zero coupling capacitance."""
+    from klayout_tools.decks import LayerRC, ParasiticsDeck, gf180mcu
+    from klayout_tools.extract import _describe_parasitics_overlap_gaps
+
+    coeff = LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.01, cap_perim_ff_um=0.03)
+    metals5 = (coeff,) * 5
+
+    # No gap: every adjacent pair (4, for a 5-level stack) has a coefficient.
+    full = ParasiticsDeck(metals=metals5, metal_overlaps=(0.05, 0.05, 0.05, 0.05))
+    assert _describe_parasitics_overlap_gaps(gf180mcu.EXTRACTION_DECK, full) == []
+
+    # Empty tuple (every deck's own default before it curates any overlap
+    # coefficients): every pair is a gap.
+    empty = ParasiticsDeck(metals=metals5)
+    gaps = _describe_parasitics_overlap_gaps(gf180mcu.EXTRACTION_DECK, empty)
+    assert [(g["lower_metal_index"], g["upper_metal_index"]) for g in gaps] == [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+    ]
+    for gap, lower, upper in zip(
+        gaps,
+        gf180mcu.EXTRACTION_DECK.metals[:-1],
+        gf180mcu.EXTRACTION_DECK.metals[1:],
+        strict=True,
+    ):
+        assert (gap["lower_layer"], gap["lower_datatype"]) == lower
+        assert (gap["upper_layer"], gap["upper_datatype"]) == upper
+
+    # Truncated tuple: only the first two pairs curated.
+    truncated = ParasiticsDeck(metals=metals5, metal_overlaps=(0.05, 0.05))
+    gaps = _describe_parasitics_overlap_gaps(gf180mcu.EXTRACTION_DECK, truncated)
+    assert [(g["lower_metal_index"], g["upper_metal_index"]) for g in gaps] == [
+        (2, 3),
+        (3, 4),
+    ]
+
+    # Explicit `None` entries interleaved with real coefficients.
+    sparse = ParasiticsDeck(metals=metals5, metal_overlaps=(0.05, None, 0.05, None))
+    gaps = _describe_parasitics_overlap_gaps(gf180mcu.EXTRACTION_DECK, sparse)
+    assert [(g["lower_metal_index"], g["upper_metal_index"]) for g in gaps] == [
+        (1, 2),
+        (3, 4),
+    ]
+
+    # A deck with fewer than two metal levels has no adjacent pair to check.
+    single_metal_deck = dataclasses.replace(
+        gf180mcu.EXTRACTION_DECK, metals=gf180mcu.EXTRACTION_DECK.metals[:1]
+    )
+    assert _describe_parasitics_overlap_gaps(single_metal_deck, ParasiticsDeck()) == []
+
+
+def test_run_extract_warns_on_parasitics_overlap_gap(monkeypatch, tmp_path):
+    """Integration guard mirroring `test_run_extract_warns_on_parasitics_metal_gap`
+    (#547) for issue #760's coupling coefficient family: a deck whose
+    `metal_overlaps` has no coefficient for the fixture's li1<->met1 pair
+    surfaces the gap in `parasitics.overlap_pairs_without_coefficient` and in
+    `warnings[]`, and the overlap area stays charged to ground in full
+    (understated, never silently dropped)."""
+    import klayout_tools.extract as extract_mod
+    from klayout_tools.decks import sky130
+
+    layout_path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
+
+    report_fixed = extract_mod.run_extract(
+        layout_path, "sky130", output=str(tmp_path / "fixed.spice"), parasitics=True
+    )
+    assert report_fixed["parasitics"]["overlap_pairs_without_coefficient"] == []
+    assert not any("no vertical-overlap" in w for w in report_fixed["warnings"])
+    assert report_fixed["parasitics"]["cc_count"] == 1
+
+    no_overlap_deck = dataclasses.replace(sky130.PARASITICS, metal_overlaps=())
+    monkeypatch.setattr(
+        extract_mod, "get_parasitics_deck", lambda name: no_overlap_deck
+    )
+
+    report = extract_mod.run_extract(
+        layout_path, "sky130", output=str(tmp_path / "gap.spice"), parasitics=True
+    )
+    gaps = report["parasitics"]["overlap_pairs_without_coefficient"]
+    assert (0, 1) in [(g["lower_metal_index"], g["upper_metal_index"]) for g in gaps]
+    assert any(
+        "Metal1/Metal2" in w and "no vertical-overlap" in w for w in report["warnings"]
+    )
+    # No coupling capacitor is emitted for the ungapped pair -- the area
+    # stays fully charged to ground instead (never a silent zero), so net
+    # A's ground capacitance is strictly higher than the fixed-deck run's
+    # (which moved some of it to the now-missing coupling capacitor).
+    assert report["parasitics"]["cc_count"] == 0
+    assert report["parasitics"]["total_coupling_capacitance_ff"] == 0.0
+    by_net = {entry["net"]: entry for entry in report["parasitics"]["nets"]}
+    by_net_fixed = {entry["net"]: entry for entry in report_fixed["parasitics"]["nets"]}
+    assert by_net["A"]["capacitance_ff"] > by_net_fixed["A"]["capacitance_ff"]
+
+
+def _gcd_parasitics_reports(tmp_path_factory):
+    """Extract `tests/corpus/place_and_route/gcd.gds.gz` with and without
+    the vertical-overlap coupling coefficients (issue #760), on the same
+    layout/deck otherwise -- shared by every gcd-scale acceptance test below
+    so the (multi-second) extraction only runs twice per test session, not
+    once per test."""
+    from klayout_tools.decks import sky130
+
+    tmp_path = tmp_path_factory.mktemp("gcd_parasitics")
+    layout_path = str(CORPUS_DIR / "place_and_route" / "gcd.gds.gz")
+
+    with_coupling = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "gcd_with_coupling.spice"),
+        parasitics=True,
+    )
+
+    no_overlap_deck = dataclasses.replace(sky130.PARASITICS, metal_overlaps=())
+    import klayout_tools.extract as extract_mod
+
+    original_get_parasitics_deck = extract_mod.get_parasitics_deck
+    extract_mod.get_parasitics_deck = lambda name: (
+        no_overlap_deck if name == "sky130" else original_get_parasitics_deck(name)
+    )
+    try:
+        without_coupling = run_extract(
+            layout_path,
+            "sky130",
+            output=str(tmp_path / "gcd_without_coupling.spice"),
+            parasitics=True,
+        )
+    finally:
+        extract_mod.get_parasitics_deck = original_get_parasitics_deck
+
+    return with_coupling, without_coupling
+
+
+@pytest.fixture(scope="module")
+def gcd_parasitics_reports(tmp_path_factory):
+    return _gcd_parasitics_reports(tmp_path_factory)
+
+
+def test_gcd_parasitics_charge_conservation(gcd_parasitics_reports):
+    """Charge-conservation acceptance criterion (issue #760): for every net
+    on the `gcd` corpus layout, `ground_C_after + sum(coupled_C) >=
+    ground_C_before` -- charge only ever moves from the ground term to a
+    coupling term, never duplicates or disappears.
+
+    Then the closed-form bound the roadmap's acceptance criteria call for.
+    Every unit of overlap area `a` on level pair `i` removes
+    `a * (areacap[i] + areacap[i+1])` from the ground total and adds
+    `a * overlap_coef[i]` to the coupling total, so per level pair the two
+    aggregates are in the *fixed* ratio
+    `r[i] = (areacap[i] + areacap[i+1]) / overlap_coef[i]`, determined
+    entirely by the deck's coefficient table. Summed over an unknown mix of
+    level pairs the exact ratio is unknown, but it is rigorously bracketed by
+    `min(r)` and `max(r)`:
+
+        total_coupled * min(r) <= (total_before - total_after)
+                               <= total_coupled * max(r)
+
+    This is what makes double-counting *fail* rather than merely look
+    plausible: charging an overlap to coupling without deducting it from
+    ground drives the ground delta to zero and breaks the lower bound;
+    deducting twice drives it above the upper bound. Neither needs a
+    reviewer to notice."""
+    with_coupling, without_coupling = gcd_parasitics_reports
+
+    before_by_net = {
+        n["net"]: n["capacitance_ff"] for n in without_coupling["parasitics"]["nets"]
+    }
+    after_by_net = {
+        n["net"]: n["capacitance_ff"] for n in with_coupling["parasitics"]["nets"]
+    }
+    coupled_by_net = {
+        n["net"]: sum(c["capacitance_ff"] for c in n["coupled"])
+        for n in with_coupling["parasitics"]["nets"]
+    }
+
+    checked = 0
+    for name, before_c in before_by_net.items():
+        after_c = after_by_net.get(name, 0.0)
+        coupled_c = coupled_by_net.get(name, 0.0)
+        assert after_c + coupled_c >= before_c - 1e-6, (
+            name,
+            before_c,
+            after_c,
+            coupled_c,
+        )
+        checked += 1
+    # A meaningful number of real nets were actually checked -- not a
+    # vacuous pass over an empty dict.
+    assert checked >= 500
+
+    total_before = without_coupling["parasitics"]["total_capacitance_ff"]
+    total_after = with_coupling["parasitics"]["total_capacitance_ff"]
+    total_coupled = with_coupling["parasitics"]["total_coupling_capacitance_ff"]
+    assert total_after + total_coupled >= total_before - 1e-6
+
+    # Closed-form bracket on the ground delta, derived from the deck's own
+    # coefficient table (see docstring). Nothing here is read back from the
+    # implementation's intermediate state -- only the two reported totals and
+    # the published coefficients.
+    from klayout_tools.decks import sky130
+
+    ratios = [
+        (
+            sky130.PARASITICS.metals[i].cap_area_ff_um2
+            + sky130.PARASITICS.metals[i + 1].cap_area_ff_um2
+        )
+        / coef
+        for i, coef in enumerate(sky130.PARASITICS.metal_overlaps)
+        if coef
+    ]
+    ground_delta = total_before - total_after
+    assert total_coupled > 0.0
+    assert ground_delta > 0.0
+    assert total_coupled * min(ratios) - 1e-6 <= ground_delta
+    assert ground_delta <= total_coupled * max(ratios) + 1e-6
+
+
+def test_gcd_parasitics_coupling_magnitude(gcd_parasitics_reports):
+    """Predicted-magnitude acceptance criterion (issue #760), measured
+    against `docs/design/extract-fidelity-roadmap.md` Section 1.5/5's own
+    numbers on this identical corpus file.
+
+    The roadmap's own `Region &`-between-merged-levels measurement on `gcd`
+    (Section 1.5's table) gives a **net-agnostic** upper bound of 146.33 fF
+    (every net pair's overlap, including same-net via stacks, charged at the
+    `defaultoverlap` coefficient) -- a rigorous ceiling this implementation's
+    real, net-pair-correct total must sit strictly below, since same-net
+    overlap (excluded by construction here) can only shrink the true
+    inter-net total relative to that net-agnostic figure.
+
+    The roadmap's stated ~121 fF-equivalent *floor*, by contrast, does not
+    survive contact with the connectivity, and the roadmap says as much in
+    advance: it comes from subtracting only the *via layer's own drawn
+    footprint* from the net-agnostic area, which Section 1.5 labels "a crude
+    floor, not a correction" in the same breath as "determining the inter-net
+    share requires the connectivity the implementation would supply". This
+    implementation supplies it, and the answer is a clean, exactly-closing
+    decomposition of that same 146.33 fF (measured on this corpus file, this
+    deck, by `_compute_parasitics` itself):
+
+        same-net (one net's own via stack / self-overlap)
+                              77.611 fF-equivalent  (53.0%)
+        same-*name*, distinct nets -- collapses to one node downstream,
+        so skipped and left on ground (see
+        `test_gcd_parasitics_no_self_coupled_pair`)
+                               0.324 fF-equivalent   (0.2%)
+        inter-net, reported as coupling
+                              68.393 fF-equivalent  (46.7%)
+        -----------------------------------------------------
+        total                146.328 fF  == the roadmap's net-agnostic 146.33
+
+    The same-net share is ~77.6 fF-equivalent, not the ~25 fF-equivalent the
+    via footprint accounts for, because a standard cell routes its *own* li1
+    directly beneath its *own* met1 pin/rail over long stretches that carry
+    no via at every point -- overlap that is genuinely same-net but that
+    subtracting the drawn via shapes cannot see. So the real inter-net total
+    lands *below* the roadmap's crude floor, and this test asserts the
+    rigorous ceiling plus the real measured value rather than a floor the
+    roadmap had already flagged as provisional.
+    """
+    with_coupling, _without_coupling = gcd_parasitics_reports
+    para = with_coupling["parasitics"]
+
+    total_coupled = para["total_coupling_capacitance_ff"]
+    # Rigorous ceiling (Section 1.5's net-agnostic, via-inclusive total): can
+    # never be exceeded, since excluding same-net overlap by construction
+    # only ever removes area from the coupling total, never adds any.
+    assert total_coupled < 146.33
+    # Real, reproducible band -- measured on this exact corpus file by this
+    # implementation (`klt extract tests/corpus/place_and_route/gcd.gds.gz
+    # --deck sky130 --parasitics --format json`), with headroom on both sides
+    # so a small, legitimate coefficient-precision change does not flake it.
+    assert 50.0 < total_coupled < 90.0
+
+    # Inter-net share, reported (roadmap AC: "with the inter-net share
+    # reported") -- the fraction of the *net-agnostic* overlap this
+    # implementation actually attributes net-to-net, for a human reading
+    # test output to see directly.
+    net_agnostic_upper_bound_ff = 146.33
+    inter_net_share = total_coupled / net_agnostic_upper_bound_ff
+    print(
+        f"gcd inter-net coupling share: {total_coupled:.3f} fF / "
+        f"{net_agnostic_upper_bound_ff:.2f} fF net-agnostic upper bound "
+        f"= {inter_net_share:.1%}"
+    )
+    assert 0.4 < inter_net_share < 0.6
+
+    assert para["cc_count"] > 0
+    assert para["overlap_pairs_without_coefficient"] == []
+
+
+def test_gcd_parasitics_no_self_coupled_pair(gcd_parasitics_reports):
+    """A coupling capacitor must never have both terminals on the same node
+    (issue #760). `gcd` is the case that makes this reachable: it has 105
+    genuinely distinct, un-strapped `VGND` rail-island nets and 88 `VPWR`
+    ones, i.e. many `parasitics.nets[]` entries sharing one `net` string.
+    Coupling pairs are keyed by that name, and `_inject_parasitics` attaches
+    each pair's `C` card between two per-*name* hubs (`hub_by_net`), so a
+    same-name pair would put both terminals on one hub net. Such overlap is
+    therefore skipped in `_compute_parasitics` rather than emitted as a
+    self-loop that would contribute nothing electrically while inflating
+    `total_coupling_capacitance_ff`. (Since issue #765 the ground entries
+    themselves resolve by `net_id`, and KLayout's SPICE writer renames
+    duplicate net names on write -- `VGND`, `VGND$1`, ... -- so the islands
+    are *not* collapsed into a single node downstream; the self-loop risk
+    lives in this pass's name-keyed pair/hub model.)
+
+    Also pins the aggregate invariant that keeping the pair list name-keyed
+    buys: `total_coupling_capacitance_ff` equals the sum over *distinct*
+    pairs, each counted exactly once rather than once per endpoint (the
+    per-net `coupled[]` view reports each pair from both sides, so a naive
+    sum over `nets[]` would double it)."""
+    with_coupling, _without_coupling = gcd_parasitics_reports
+    para = with_coupling["parasitics"]
+
+    # `nets[]` really does carry duplicate names on this layout -- otherwise
+    # this test would be vacuous (it would pass on any layout at all).
+    names = [entry["net"] for entry in para["nets"]]
+    assert len(names) > len(set(names))
+
+    for entry in para["nets"]:
+        for coupled in entry["coupled"]:
+            assert coupled["net"] != entry["net"], entry["net"]
+
+    # Reconstruct the distinct pair set from the per-net view and check it
+    # sums back to the reported total -- i.e. `total_coupling_capacitance_ff`
+    # counts each pair once, and `cc_count` is that pair count.
+    pairs: dict[tuple[str, str], float] = {}
+    for entry in para["nets"]:
+        for coupled in entry["coupled"]:
+            key = tuple(sorted((entry["net"], coupled["net"])))
+            pairs[key] = coupled["capacitance_ff"]
+    assert len(pairs) == para["cc_count"]
+    assert sum(pairs.values()) == pytest.approx(
+        para["total_coupling_capacitance_ff"], abs=1e-3
+    )
+
+
+def test_gcd_parasitics_no_regression_in_schematic_equivalent_view(
+    gcd_parasitics_reports,
+):
+    """No-regression acceptance criterion (issue #760): the coupling
+    correction changes only the `parasitics` block. `devices[]`/`nets[]` --
+    the schematic-equivalent view -- and every non-parasitics top-level
+    field stay byte-identical whether or not the coupling coefficients are
+    populated."""
+    with_coupling, without_coupling = gcd_parasitics_reports
+
+    assert with_coupling["devices"] == without_coupling["devices"]
+    assert with_coupling["nets"] == without_coupling["nets"]
+    assert with_coupling["device_count"] == without_coupling["device_count"]
+    assert with_coupling["net_count"] == without_coupling["net_count"]
+    assert with_coupling["pin_count"] == without_coupling["pin_count"]
+    assert with_coupling["device_counts"] == without_coupling["device_counts"]
+
+    # r_count/terminal star topology (issue #592) is likewise untouched --
+    # only capacitance moves between the ground and coupling terms.
+    assert (
+        with_coupling["parasitics"]["r_count"]
+        == without_coupling["parasitics"]["r_count"]
+    )
+    assert (
+        with_coupling["parasitics"]["total_resistance_ohm"]
+        == without_coupling["parasitics"]["total_resistance_ohm"]
+    )
+
+
+def test_parasitics_off_writes_byte_identical_netlist_with_coupling_populated(
+    tmp_path,
+):
+    """`test_parasitics_off_writes_byte_identical_netlist`'s invariant must
+    keep holding now that the sky130 deck curates real coupling coefficients
+    by default (issue #760): omitting `--parasitics` entirely is still
+    byte-identical to a pre-parasitics extraction, on a layout that *would*
+    produce non-zero coupling capacitance if asked."""
+    path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"), parasitics=False)
+    assert a["netlist_sha256"] == b["netlist_sha256"]
+    assert a["parasitics"] is None
+    assert b["parasitics"] is None
+
+
+@_SKIP_NO_NGSPICE
+def test_parasitics_coupling_crosstalk_capability(tmp_path):
+    """Crosstalk-capability acceptance criterion (issue #760) -- "the
+    sharpest single measurement" per the roadmap: before this feature, a
+    coupling capacitor between two nets does not exist anywhere in the
+    output, so an aggressor net slewing produces **identically zero**
+    disturbance on a victim net, by construction -- no tolerance argument
+    needed, any non-zero response is a strict improvement.
+
+    Uses :func:`_make_overlap_layout` (net A, the aggressor, li1; net B, the
+    victim, met1; 1 um^2 of genuine vertical overlap, no via): drives A with
+    a step, holds B's only DC path through a large (1 Gohm) bleed resistor
+    to ground (weak enough not to materially load the ~0.1 fF coupling cap
+    on a nanosecond transient), and measures B's peak transient deviation
+    from 0 V -- once with this repo's real (coupling-populated) sky130 deck,
+    once with a copy whose `metal_overlaps` is empty (the pre-#760 model).
+    """
+    import subprocess
+
+    from klayout_tools.decks import sky130
+
+    layout_path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
+
+    with_netlist = tmp_path / "with_coupling.spice"
+    run_extract(layout_path, "sky130", output=str(with_netlist), parasitics=True)
+
+    import klayout_tools.extract as extract_mod
+
+    no_overlap_deck = dataclasses.replace(sky130.PARASITICS, metal_overlaps=())
+    original = extract_mod.get_parasitics_deck
+    extract_mod.get_parasitics_deck = lambda name: (
+        no_overlap_deck if name == "sky130" else original(name)
+    )
+    try:
+        without_netlist = tmp_path / "without_coupling.spice"
+        run_extract(layout_path, "sky130", output=str(without_netlist), parasitics=True)
+    finally:
+        extract_mod.get_parasitics_deck = original
+
+    def _measure_victim_peak(netlist_path: Path) -> float:
+        testbench = tmp_path / f"tb_{netlist_path.stem}.spice"
+        testbench.write_text(
+            f'.include "{netlist_path}"\n'
+            ".model nfet nmos level=1\n"
+            ".model pfet pmos level=1\n"
+            "Vvsubs vsubs 0 DC 0\n"
+            "Va A 0 PULSE(0 1 0 1n 1n 10n 20n)\n"
+            "Rbleed B 0 1G\n"
+            "Rbleedc C 0 1G\n"
+            "Xtop A C vsubs B TOP\n"
+            ".control\n"
+            "tran 0.05n 20n\n"
+            "meas tran vb_peak MAX v(B) from=0 to=20n\n"
+            "meas tran vb_min MIN v(B) from=0 to=20n\n"
+            ".endc\n"
+            ".end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(testbench)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        peak = _parse_ngspice_meas(completed.stdout, "vb_peak")
+        trough = _parse_ngspice_meas(completed.stdout, "vb_min")
+        return max(abs(peak), abs(trough))
+
+    peak_without = _measure_victim_peak(without_netlist)
+    peak_with = _measure_victim_peak(with_netlist)
+
+    # Today's (pre-#760) model: identically zero -- no element couples A to
+    # B at all, so B never moves from its 0 V bleed-resistor bias.
+    assert peak_without == pytest.approx(0.0, abs=1e-9)
+    # With coupling: a genuine, non-zero disturbance -- the unambiguous
+    # fidelity improvement the roadmap's crosstalk check is designed to
+    # surface, no tolerance argument needed against a zero baseline.
+    assert peak_with > 0.01
+
+
+def _parse_ngspice_meas(stdout: str, name: str) -> float:
+    """Pull a `.meas tran <name> ...` result's numeric value out of
+    `ngspice -b`'s stdout (the `<name> = <value>` line it prints), shared by
+    this module's ngspice-integration tests that need the measured number
+    itself rather than just a pass/fail exit code."""
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{name} "):
+            return float(stripped.split("=")[1].split()[0])
+    raise AssertionError(f"ngspice output carries no '{name}' measurement: {stdout}")
+
+
+@_SKIP_NO_NGSPICE
+def test_gcd_parasitics_resim_delta_within_predicted_magnitude(
+    gcd_parasitics_reports, tmp_path
+):
+    """Re-sim-delta acceptance criterion (issue #760), using
+    `sky130_fd_sc_hd__dfxtp_2` -- one of the four gallery cells the roadmap
+    names (`inv_1`/`nand2_2`/`buf_4`/`dfxtp_2`), and the only one of the four
+    whose extracted geometry carries any coupling capacitance at all (a
+    2-device inverter or 3-input gate has essentially no vertical overlap
+    between *distinct* nets; a 26-device DFF's internal latch routing does).
+
+    Simple `nfet`/`pfet level=1` testbench (this file's existing convention,
+    e.g. `test_parasitic_netlist_feeds_klt_sim_unmodified`), not a real PDK
+    model -- the comparison is A/B on the identical generic-model netlist,
+    coupling coefficients populated vs. not, so device-model fidelity is
+    irrelevant to what is being measured. Clocks D through once and measures
+    the CLK-to-Q crossing time (an ngspice `.meas ... when v(q)=0.9 rise=1`,
+    `tcq`-equivalent), the same measurement class
+    `scripts/gallery_signals.py` uses. Expected magnitude, stated in advance
+    per the roadmap's own sensitivity arithmetic (Section 4): sub-percent --
+    the crossover term is order a percent of an isolated cell's own total C
+    (Section 1.5), so its marginal effect on one delay measurement is smaller
+    still. A materially larger shift is a defect signal, not a success.
+    """
+    import subprocess
+
+    from klayout_tools.decks import sky130
+
+    layout_path = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__dfxtp_2.gds"
+
+    with_netlist = tmp_path / "dfxtp2_with_coupling.spice"
+    with_report = run_extract(
+        str(layout_path), "sky130", output=str(with_netlist), parasitics=True
+    )
+    assert with_report["parasitics"]["cc_count"] > 0  # this cell has coupling
+
+    import klayout_tools.extract as extract_mod
+
+    no_overlap_deck = dataclasses.replace(sky130.PARASITICS, metal_overlaps=())
+    original = extract_mod.get_parasitics_deck
+    extract_mod.get_parasitics_deck = lambda name: (
+        no_overlap_deck if name == "sky130" else original(name)
+    )
+    try:
+        without_netlist = tmp_path / "dfxtp2_without_coupling.spice"
+        without_report = run_extract(
+            str(layout_path), "sky130", output=str(without_netlist), parasitics=True
+        )
+    finally:
+        extract_mod.get_parasitics_deck = original
+    assert without_report["parasitics"]["cc_count"] == 0
+
+    def _measure_tq_cross(netlist_path: Path) -> float:
+        testbench = tmp_path / f"tb_{netlist_path.stem}.spice"
+        testbench.write_text(
+            f'.include "{netlist_path}"\n'
+            ".model nfet nmos level=1\n"
+            ".model pfet pmos level=1\n"
+            "Vvpwr VPWR 0 DC 1.8\n"
+            "Vvpb VPB 0 DC 1.8\n"
+            "Vvgnd VGND 0 DC 0\n"
+            "Vvsubs vsubs 0 DC 0\n"
+            "Vd D 0 PULSE(0 1.8 0 0.1n 0.1n 100n 200n)\n"
+            "Vclk CLK 0 PULSE(0 1.8 5n 0.1n 0.1n 10n 20n)\n"
+            "Xdff CLK D Q VGND VPB VPWR vsubs sky130_fd_sc_hd__dfxtp_2\n"
+            ".control\n"
+            "tran 0.02n 60n uic\n"
+            "meas tran tq_cross when v(q)=0.9 rise=1 td=2n\n"
+            ".endc\n"
+            ".end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(testbench)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        return _parse_ngspice_meas(completed.stdout, "tq_cross")
+
+    tq_without = _measure_tq_cross(without_netlist)
+    tq_with = _measure_tq_cross(with_netlist)
+
+    delta_s = abs(tq_with - tq_without)
+    # CLK's own rising-edge crossing is at 5.05 ns (0.9 V on a 0.1 ns PULSE
+    # rise time starting at 5 ns) -- the CLK-to-Q delay itself, the
+    # meaningful denominator for a *relative* delta.
+    tcq_s = tq_with - 5.05e-9
+    assert tcq_s > 0  # sanity: Q genuinely follows CLK, not noise
+    relative_delta = delta_s / tcq_s
+    print(
+        f"dfxtp_2 CLK-to-Q delta from coupling: {delta_s * 1e12:.4f} ps "
+        f"on a {tcq_s * 1e12:.2f} ps delay ({relative_delta:.4%})"
+    )
+    # Sub-percent predicted magnitude, per the roadmap's Section 4
+    # sensitivity arithmetic -- generous headroom (5%) above the ~0.1%
+    # actually measured on this tree, so a legitimate small coefficient
+    # change does not flake this test, while still catching a genuinely
+    # defective (order-of-magnitude-larger) shift.
+    assert relative_delta < 0.05
+
+
+HAVE_MAGIC = shutil.which("magic") is not None
+_SKIP_NO_MAGIC = pytest.mark.skipif(
+    not HAVE_MAGIC,
+    reason=(
+        "magic is not installed on this machine -- this repo treats magic as "
+        "an oracle, never a runtime dependency (docs/design/lvs-extraction-"
+        "spike.md's 'Oracle, not runtime' framing), so this cross-check is "
+        "skipped rather than blocking on an install this repo never requires"
+    ),
+)
+
+
+@_SKIP_NO_MAGIC
+def test_parasitics_coupling_matches_magic_ext2spice(tmp_path):
+    """Independent geometry cross-check acceptance criterion (issue #760):
+    per-net coupling capacitance compared against magic's own `ext2spice`
+    coupling caps on the identical GDS.
+
+    **Circularity caveat (roadmap Section 4, restated so it is not
+    forgotten):** this repo's `defaultoverlap` coefficients and magic's are
+    transcribed from the *same* public sky130 tech file, so agreement here
+    is evidence of correct *geometry attribution* (the pairwise net-overlap
+    algorithm), never of correct *coefficient values* -- only a field solver
+    (`klt mom`, #718/#719) or silicon speaks to those. Magic stays
+    oracle-only per this repo's settled framing
+    (`docs/design/lvs-extraction-spike.md`); it is not, and must never
+    become, a runtime dependency of `klt extract`.
+
+    **Tolerance:** exact match is not expected -- magic's own overlap-area
+    algorithm (edge-based, with its own internal geometry engine) and
+    KLayout's `Region & Region` boolean are independent implementations of
+    the same geometric quantity, so this asserts agreement to within 1% of
+    :func:`_make_overlap_layout`'s deterministic 0.1142 fF expected value
+    (see `test_parasitics_vertical_overlap_coupling_exact_values`), not
+    bit-for-bit identity.
+    """
+    import subprocess
+
+    layout_path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
+    report = run_extract(
+        layout_path, "sky130", output=str(tmp_path / "overlap.spice"), parasitics=True
+    )
+    klt_coupling_ff = report["parasitics"]["total_coupling_capacitance_ff"]
+
+    magic_script = tmp_path / "extract.tcl"
+    magic_script.write_text(
+        "drc off\n"
+        f'gds read "{layout_path}"\n'
+        "load TOP\n"
+        "select top cell\n"
+        "extract no all\n"
+        "extract all\n"
+        "ext2spice lvs\n"
+        "ext2spice cthresh 0\n"
+        "ext2spice extresist off\n"
+        f'ext2spice -o "{tmp_path}/magic_overlap.spice"\n'
+        "quit -noprompt\n"
+    )
+    completed = subprocess.run(
+        ["magic", "-dnull", "-noconsole", str(magic_script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(tmp_path),
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    magic_spice_path = tmp_path / "magic_overlap.spice"
+    assert magic_spice_path.exists(), completed.stdout + completed.stderr
+    magic_text = magic_spice_path.read_text()
+
+    # Sum every `C` card magic emitted directly between net A and net B's
+    # nodes (magic's own node-naming convention may not match `A`/`B`
+    # literally -- so this greps for any capacitor card mentioning both,
+    # which is unambiguous on this two-net-overlap fixture).
+    magic_coupling_ff = 0.0
+    for line in magic_text.splitlines():
+        fields = line.split()
+        if not fields or not fields[0].upper().startswith("C"):
+            continue
+        if len(fields) < 4:
+            continue
+        nodes = {fields[1].lower(), fields[2].lower()}
+        if {"a", "b"} <= nodes:
+            magic_coupling_ff += float(fields[3]) * 1e15
+
+    assert magic_coupling_ff > 0.0, magic_text
+    assert klt_coupling_ff == pytest.approx(magic_coupling_ff, rel=0.01)
 
 
 def _make_poly_gate_net_layout(poly_y0, poly_y1, top_name="TOP"):

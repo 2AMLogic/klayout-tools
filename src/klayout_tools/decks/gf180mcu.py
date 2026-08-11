@@ -1555,4 +1555,36 @@ PARASITICS = ParasiticsDeck(
             sheet_res_ohm_sq=0.06, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
         ),
     ),
+    # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
+    # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`
+    # (lower plate) and `metals[i+1]` (upper plate), so a fully-populated
+    # table has `len(metals) - 1` = 4 entries for this 5-level stack.
+    #
+    # Transcribed from the resolved, pre-built `gf180mcuD.tech` for the
+    # pinned PDK commit c6d73a35f524070e85faff4a6a9eef49553ebc2b, nominal
+    # `variants ()` corner block -- the same source and corner Metal5's
+    # sheet resistance above is cited from (issue #572), chosen over the
+    # generic `gf180mcu.tech` because only the resolved file has the
+    # `#ifdef METALS5` Metal4/Metal5 rows already selected for this deck's
+    # actual 5-level stack. Only `allmN metalN allmM metalM` rows are used
+    # (metal-over-metal); the same blocks' `... nwell well` / `...
+    # allpolynonres active` rows describe metal-over-substrate/poly overlap,
+    # which the existing `cap_area_ff_um2` ground term already covers.
+    #
+    # Magic states these in aF/um^2; divided by 1000 to fF/um^2, matching
+    # `cap_area_ff_um2`'s convention above.
+    metal_overlaps=(
+        # Metal1 (idx0) <-> Metal2 (idx1): `defaultoverlap allm2 metal2
+        # allm1 metal1 59.027`.
+        0.059027,
+        # Metal2 (idx1) <-> Metal3 (idx2): `defaultoverlap allm3 metal3
+        # allm2 metal2 59.027`.
+        0.059027,
+        # Metal3 (idx2) <-> Metal4 (idx3): `defaultoverlap allm4 metal4
+        # allm3 metal3 59.027`.
+        0.059027,
+        # Metal4 (idx3) <-> Metal5 (idx4): `defaultoverlap allm5 metal5
+        # allm4 metal4 39.351`.
+        0.039351,
+    ),
 )

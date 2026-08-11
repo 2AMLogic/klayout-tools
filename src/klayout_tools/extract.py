@@ -227,13 +227,13 @@ _PARAM_PRECISION_OHM = 6
 _MIN_PARASITIC_R_OHM = 1e-3
 
 #: Machine-readable declaration of what `--parasitics` does and does not
-#: model (issue #728). Every `C` card `_inject_parasitics` emits hangs off
-#: the deck's ground/substrate net -- there is no inter-net coupling
-#: capacitor anywhere in the output -- but nothing in the emitted netlist or
-#: JSON said so before this field existed; a caller could only learn the
-#: model's scope by noticing that every capacitor's second terminal is the
-#: same ground net. This is a static description of the model itself (it
-#: does not vary net-to-net, deck-to-deck, or run-to-run), so it is a single
+#: model (issue #728, updated by #760). Most `C` cards `_inject_parasitics`
+#: emits hang off the deck's ground/substrate net; since issue #760 a net
+#: pair with vertical-overlap (crossover) coupling also gets a direct
+#: net-to-net `C` card between their hub nodes -- but nothing in the emitted
+#: netlist or JSON said what *was* and was not modelled before this field
+#: existed. This is a static description of the model itself (it does not
+#: vary net-to-net, deck-to-deck, or run-to-run), so it is a single
 #: module-level constant reused verbatim by both the `parasitics.model` JSON
 #: field (`run_extract`) and the written SPICE netlist's header comment
 #: (`_parasitic_model_header_comment`) -- one statement of the model's
@@ -241,15 +241,21 @@ _MIN_PARASITIC_R_OHM = 1e-3
 #: (`parasitics.model`)" in docs/cli/extract.md.
 PARASITIC_MODEL_SCOPE: dict[str, str] = {
     "capacitance": (
-        "net-to-ground only -- every capacitor's second terminal is the "
-        "deck's ground/substrate net; there is no inter-net coupling "
-        "capacitance in the model"
+        "net-to-ground for every net's own (non-coupled) area/perimeter, "
+        "plus net-to-net for the vertical-overlap coupling `coupling` "
+        "describes below -- a coupled net pair gets a direct capacitor "
+        "between their two hub nodes, not just capacitors to the deck's "
+        "ground/substrate net"
     ),
     "coupling": (
-        "not modelled -- a neighboring net's displacement current (e.g. a "
-        "slewing supply, clock, or big driver) contributes exactly zero to "
-        "any net's reported capacitance, whether or not the real layout "
-        "has significant coupling there"
+        "vertical overlap (crossover) only -- where one net's conductor on "
+        "an adjacent metal level sits directly over another *distinct* "
+        "net's conductor, that overlap area is charged between the two "
+        "nets instead of to ground (issue #760); lateral (same-layer, "
+        "sidewall) coupling and fringe shielding are still not modelled, "
+        "so a neighboring net's displacement current still contributes "
+        "exactly zero unless the two nets' conductors vertically overlap "
+        "on adjacent levels"
     ),
     "resistance": (
         "single lumped series resistance per net, distributed as a star "
@@ -755,6 +761,19 @@ def run_extract(
     is also appended to ``warnings`` when the list is non-empty. Always a
     list, empty when every declared metal level has a coefficient.
 
+    ``parasitics.overlap_pairs_without_coefficient`` (issue #760) is the same
+    gap report for the vertical-overlap *coupling* coefficient family: one
+    entry per adjacent metal-level pair the deck declares (``metals[i]``/
+    ``metals[i+1]``) with no matching entry in
+    ``ParasiticsDeck.metal_overlaps``. That pair's area still charges to
+    ground in full -- as if this feature did not exist -- rather than moving
+    to a coupling capacitor; see
+    :func:`_describe_parasitics_overlap_gaps` for the exact gap definition.
+    Present only inside the ``parasitics`` block; a matching prose entry is
+    also appended to ``warnings`` when non-empty. Always a list, empty when
+    every declared adjacent metal-level pair has a coupling coefficient
+    (true for both shipped decks today).
+
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
     name is unknown, ``deck_options`` names an unrecognised key/value, the
     PDK (when given) does not resolve, the top cell is missing/ambiguous, an
@@ -1085,17 +1104,20 @@ def run_extract(
 
     parasitics_report: dict[str, Any] | None = None
     if parasitic_nets is not None:
-        if circuit is not None and parasitic_nets:
+        ground_nets, coupled_pairs = parasitic_nets
+        if circuit is not None and (ground_nets or coupled_pairs):
             ground_net = deck.substrate_net
             parasitics_report = _inject_parasitics(
-                kdb, circuit, parasitic_nets, ground_net
+                kdb, circuit, ground_nets, coupled_pairs, ground_net
             )
         else:
             parasitics_report = {
                 "r_count": 0,
                 "c_count": 0,
+                "cc_count": 0,
                 "total_resistance_ohm": 0.0,
                 "total_capacitance_ff": 0.0,
+                "total_coupling_capacitance_ff": 0.0,
                 "nets": [],
             }
         # `parasitics_deck` is only non-None when `--parasitics` was given
@@ -1112,13 +1134,33 @@ def run_extract(
                 "net, understating the true value. See docs/cli/extract.md's "
                 "'Parasitic (RC) extraction' section."
             )
-        # Additive field (issue #728): declares the parasitic model's own
-        # scope machine-readably (net-to-ground-only capacitance, no
-        # inter-net coupling, single lumped series resistance per net,
-        # quasi-static) -- present on every `parasitics` block regardless of
-        # whether any net actually carried non-zero parasitics, since the
-        # model's scope does not depend on what was found. See
-        # `PARASITIC_MODEL_SCOPE`'s docstring.
+        # Additive field (issue #760): the `metals_without_coefficient`-style
+        # gap report for the vertical-overlap coupling coefficient family --
+        # see `_describe_parasitics_overlap_gaps`'s docstring.
+        overlap_gaps = _describe_parasitics_overlap_gaps(deck, parasitics_deck)
+        parasitics_report["overlap_pairs_without_coefficient"] = overlap_gaps
+        if overlap_gaps:
+            pairs = ", ".join(
+                f"Metal{gap['lower_metal_index'] + 1}/"
+                f"Metal{gap['upper_metal_index'] + 1}"
+                for gap in overlap_gaps
+            )
+            warnings.append(
+                f"'{deck_name}' deck's PARASITICS.metal_overlaps has no "
+                f"vertical-overlap coupling coefficient for {pairs} -- "
+                "--parasitics reports zero net-to-net coupling capacitance "
+                "for that adjacent metal-level pair, understating the true "
+                "value (the corresponding area still charges to ground, "
+                "unlike a pair with a curated coefficient). See "
+                "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
+            )
+        # Additive field (issue #728, updated by #760): declares the
+        # parasitic model's own scope machine-readably (net-to-ground
+        # capacitance plus vertical-overlap net-to-net coupling; single
+        # lumped series resistance per net; quasi-static) -- present on
+        # every `parasitics` block regardless of whether any net actually
+        # carried non-zero parasitics, since the model's scope does not
+        # depend on what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
         parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
 
     writer = (
@@ -1242,7 +1284,7 @@ def extract_netlist_from_layout(
     str,
     float,
     list[str],
-    list[dict[str, Any]] | None,
+    tuple[list[dict[str, Any]], list[dict[str, Any]]] | None,
     list[dict[str, Any]],
     int,
     list[dict[str, Any]],
@@ -1312,12 +1354,16 @@ def extract_netlist_from_layout(
     and takes no parasitics), no per-net RC geometry is computed and the
     returned ``parasitic_nets`` is ``None``. When a
     :class:`~klayout_tools.decks.ParasiticsDeck` is given, ``parasitic_nets``
-    is a list of ``{"net", "resistance_ohm", "capacitance_ff"}`` dicts (one
-    per net carrying non-zero parasitics) computed from
-    ``LayoutToNetlist.polygons_of_net`` per-net/per-layer geometry -- the
-    caller (:func:`run_extract`) injects them into the netlist as ``R``/``C``
-    devices before writing. The netlist itself is unchanged by this
-    computation (the parasitics are returned as data, not yet injected).
+    is the ``(ground_nets, coupled_pairs)`` 2-tuple :func:`_compute_parasitics`
+    returns: ``ground_nets`` a list of ``{"net", "resistance_ohm",
+    "capacitance_ff"}`` dicts (one per net carrying ground-eligible
+    geometry), ``coupled_pairs`` a list of ``{"net_a", "net_b",
+    "capacitance_ff", "levels"}`` dicts (one per distinct net pair with
+    non-zero vertical-overlap coupling capacitance, issue #760) -- both
+    computed from ``LayoutToNetlist.polygons_of_net`` per-net/per-layer
+    geometry. The caller (:func:`run_extract`) injects them into the netlist
+    as ``R``/``C`` devices before writing. The netlist itself is unchanged by
+    this computation (the parasitics are returned as data, not yet injected).
 
     Shared by :func:`run_extract` (this module, which additionally writes the
     netlist to disk and builds the ``devices``/``nets`` convenience view) and
@@ -2900,7 +2946,7 @@ def _extract_netlist(
 ) -> tuple[
     kdb.Netlist,
     list[str],
-    list[dict[str, Any]] | None,
+    tuple[list[dict[str, Any]], list[dict[str, Any]]] | None,
     list[dict[str, Any]],
     int,
     list[dict[str, Any]],
@@ -2941,9 +2987,12 @@ def _extract_netlist(
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
-    ``parasitics_deck`` is given, in which case it is the per-net lumped-RC
-    data computed from ``LayoutToNetlist.polygons_of_net`` while ``l2n`` is
-    still alive (see :func:`_compute_parasitics`). ``black_box_regions`` is
+    ``parasitics_deck`` is given, in which case it is the
+    ``(ground_nets, coupled_pairs)`` 2-tuple :func:`_compute_parasitics`
+    returns, computed from ``LayoutToNetlist.polygons_of_net`` while ``l2n``
+    is still alive (issue #760: ``coupled_pairs`` carries the vertical-overlap
+    net-to-net coupling capacitance alongside the pre-existing per-net
+    ground-RC list). ``black_box_regions`` is
     the JSON response's field (issue #293) -- see
     :func:`_resolve_black_box_regions` -- always a list, empty when the
     layout draws no reserved-annotation-layer geometry.
@@ -3814,7 +3863,7 @@ def _extract_netlist(
     # it here while the graph is still live. Returned as plain data; the R/C
     # devices are injected into the netlist by `run_extract` after it has
     # already captured the schematic-equivalent `devices[]`/`nets[]` view.
-    parasitic_nets: list[dict[str, Any]] | None = None
+    parasitic_nets: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
         parasitic_nets = _compute_parasitics(
@@ -4078,6 +4127,28 @@ def _net_area_perim_um(
     return area_um2, perim_um
 
 
+def _bbox_overlap(a: kdb.Box, b: kdb.Box) -> bool:
+    """Cheap bounding-box prefilter for the vertical-overlap coupling pass
+    (issue #760): wraps ``kdb.Box.overlaps`` so the (expensive, C++-side)
+    actual ``Region & Region`` boolean below only runs for net-pairs whose
+    per-level bounding boxes genuinely intersect. On a routed block the vast
+    majority of net-pairs on two adjacent levels do not share any XY
+    footprint at all, so this alone turns an ``O(n*m)`` candidate space into
+    a small fraction actually reaching the boolean AND -- no halo/neighbour
+    search structure needed, matching the roadmap's own cost estimate
+    (`docs/design/extract-fidelity-roadmap.md` Stage 2a: "no halo search, no
+    neighbour-search structure")."""
+    return a.overlaps(b)
+
+
+def _net_pair_key(name_a: str, name_b: str) -> tuple[str, str]:
+    """Canonical (order-independent) key for an unordered net pair, used to
+    accumulate a net-to-net coupling total across every contributing
+    adjacent-level pair (issue #760) -- sorted so ``(A, B)`` and ``(B, A)``
+    always collide into the same accumulator entry."""
+    return (name_a, name_b) if name_a <= name_b else (name_b, name_a)
+
+
 def _compute_parasitics(
     l2n: kdb.LayoutToNetlist,
     circuit: kdb.Circuit | None,
@@ -4086,18 +4157,25 @@ def _compute_parasitics(
     parasitics_deck: ParasiticsDeck,
     layer_index: dict[str, int],
     metal_index: list[int],
-) -> list[dict[str, Any]]:
-    """Compute one first-order lumped ``(R, C)`` per net from the extracted
-    per-net/per-layer geometry.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
+    vertical-overlap coupling capacitance, from the extracted per-net/
+    per-layer geometry (issue #760, Extract Stage 2a).
 
     For each net (except the deck's substrate/ground net, which is the AC
-    ground the capacitances return to):
+    ground the ground capacitances return to):
 
     - **C to ground** = sum over conductor roles of ``area_um2 * cap_area +
       perimeter_um * cap_perim`` (femtofarads), the lumped ground capacitance
-      of the net's interconnect.
+      of the net's interconnect -- with one correction (below): a metal
+      role's ``area_um2`` term has any area coupled to a *different* net on
+      an adjacent level (see next) subtracted out first, so that charge
+      moves from the ground term to the coupling term rather than being
+      counted in both.
     - **series R** = sum over conductor roles of ``sheet_res * n_squares``
-      (ohms), the net's lumped interconnect resistance.
+      (ohms), the net's lumped interconnect resistance. Unaffected by
+      coupling: resistance is a property of the conductor's own geometry, not
+      of what does or does not sit above/below it.
 
     Roles map to the registered geometry layers: ``poly`` the poly region with
     the transistor gate regions subtracted out (issue #226 -- gate capacitance
@@ -4105,14 +4183,51 @@ def _compute_parasitics(
     (index-aligned with the deck's ``metals``). The optional ``diffusion`` role
     (NMOS+PMOS source/drain) is left unset by the shipped decks: the M cards'
     ``AS``/``AD``/``PS``/``PD`` already feed the device model's junction
-    capacitance, so a diffusion cap term would double-count it. Net-to-net
-    coupling capacitance is explicitly **not** modeled (issue #216: ground
-    capacitance only in the first increment).
+    capacitance, so a diffusion cap term would double-count it.
 
-    Returns a list (sorted by ``(net name, net_id)`` for deterministic output)
-    of ``{"net", "net_id", "resistance_ohm", "capacitance_ff"}`` for every net
-    with a non-zero ground capacitance; nets with no eligible interconnect
-    geometry are omitted.
+    **Vertical-overlap coupling (issue #760):** for each adjacent pair of
+    metal levels ``(i, i+1)`` with a curated ``parasitics_deck.metal_overlaps``
+    coefficient, and each pair of *distinct* nets with geometry on that pair
+    of levels, the area of ``net_a``'s shapes on level ``i`` intersected with
+    ``net_b``'s shapes on level ``i+1`` (a plain ``Region & Region`` boolean,
+    KLayout's own already-registered per-net regions -- no halo/neighbour
+    search) becomes a coupling capacitance between ``net_a`` and ``net_b``
+    (``overlap_area_um2 * metal_overlaps[i]``), and is subtracted from
+    *both* nets' ground area term on their own respective level (``net_a``'s
+    on level ``i``, ``net_b``'s on level ``i+1``) -- charge is *moved*, never
+    duplicated. The per-level deduction is the **geometric union** of every
+    partner's overlap region with that net on that level, not the sum of
+    their areas: a level participates in two adjacent pairs (as upper plate
+    of ``(i-1, i)`` and lower plate of ``(i, i+1)``), so a straight via stack
+    would otherwise have the same square micron deducted twice and its charge
+    destroyed rather than moved. Same-net overlap (a via stack tying one net's
+    own two levels together) is excluded by construction: coupling is only
+    ever computed between two *distinct* nets, so a net's own via stack
+    contributes nothing
+    here (it is ordinary connectivity, already merged into one net upstream).
+    Lateral (same-layer, sidewall) coupling remains **not** modelled (Stage
+    2b, a named follow-on -- see the roadmap doc).
+
+    Returns a 2-tuple:
+
+    - Ground list (sorted by ``(net name, net_id)`` for deterministic
+      output): ``{"net", "net_id", "resistance_ohm", "capacitance_ff"}`` for
+      every net with non-zero *raw* (pre-coupling-deduction) ground-eligible
+      geometry --
+      including a net whose ground capacitance was fully moved to coupling
+      by the correction above (``capacitance_ff`` can be ``0.0`` in that
+      case; the net still needs a star/hub so a coupling ``C`` card has
+      somewhere to attach). A net with no eligible interconnect geometry at
+      all is omitted, exactly as before this feature existed.
+    - Coupled-pair list (sorted by ``(net_a, net_b)`` for deterministic
+      output): ``{"net_a", "net_b", "capacitance_ff", "levels"}`` for every
+      distinct net pair with non-zero vertical-overlap coupling.
+      ``capacitance_ff`` is the pair's total coupling capacitance, summed
+      across every contributing adjacent-level pair; ``levels`` is the
+      sorted list of ``[lower_metal_index, upper_metal_index]`` pairs that
+      contributed. Empty when ``parasitics_deck.metal_overlaps`` curates no
+      coefficient, or the layout has no vertical overlap between distinct
+      nets.
 
     ``net_id`` is ``net.cluster_id`` -- the id ``LayoutToNetlist`` already
     uses internally to key a net to its layout cluster (see the
@@ -4124,17 +4239,46 @@ def _compute_parasitics(
     distinguish same-named islands -- or :func:`_inject_parasitics`, which
     must resolve each entry back to the exact net object this function
     measured -- keys on ``net_id`` instead.
+
+    **Pairs are keyed by SPICE-safe net *name*, not by net object**, matching
+    the node the coupling ``C`` card actually lands on:
+    :func:`_inject_parasitics` hangs each pair between two **per-name** hubs
+    (its ``hub_by_net`` map is keyed on ``entry["net"]``), so when several
+    genuinely distinct net objects share one layout label -- the ``gcd``
+    corpus block has 105 separate, un-strapped ``VGND`` rail islands and 88
+    ``VPWR`` ones -- every pair naming that label resolves to a single
+    (last-registered) island's hub. Two consequences, both deliberate:
+    overlap between two same-named nets is **skipped entirely** (its charge
+    stays on ground) because both of its terminals would resolve to that one
+    same hub, making the "coupling capacitor" a self-loop that would inflate
+    the reported total while contributing nothing electrically; and overlap
+    between two *different* names accumulates into one pair however many net
+    objects on each side contributed, matching the one hub per name that the
+    card attaches to.
+
+    That name-keying is *this* pass's own aggregation choice, not something
+    forced on it from downstream. Since issue #765 the ground entries above
+    resolve by ``net_id``, and KLayout's ``NetlistSpiceWriter`` renames
+    duplicates when it writes them (two nets both labelled ``VGND`` are
+    written as the distinct nodes ``VGND`` and ``VGND$1``) -- so neither the
+    injection step nor the emitted netlist collapses same-labelled islands
+    into one node. Coupling is therefore modelled one level coarser than the
+    per-net ground terms; a per-net-object coupling model is a named
+    follow-on, not a behaviour this function claims today.
     """
     if circuit is None:
-        return []
+        return [], []
 
-    # (LayerRC, [include indices], [subtract indices]) for every role that has
-    # both a coefficient set and at least one present layer. The subtract list
-    # is empty except for the poly role, which removes the transistor gate
-    # regions (see below).
-    roles: list[tuple[Any, list[int], list[int]]] = []
+    import klayout.db as kdb
+
+    # (LayerRC, [include indices], [subtract indices]) for every non-metal
+    # role that has both a coefficient set and at least one present layer.
+    # The subtract list is empty except for the poly role, which removes the
+    # transistor gate regions (see below). Metal roles are handled separately
+    # below since they participate in the vertical-overlap coupling pass.
+    non_metal_roles: list[tuple[Any, list[int], list[int]]] = []
     if parasitics_deck.diffusion is not None:
-        roles.append(
+        non_metal_roles.append(
             (
                 parasitics_deck.diffusion,
                 [layer_index["nfet_sd"], layer_index["pfet_sd"]],
@@ -4148,18 +4292,15 @@ def _compute_parasitics(
         # nfet/pfet gate shapes are subtracted from the net's poly shapes before
         # measuring. These registrations back the device connectivity too and
         # are left untouched -- only the parasitic measurement subtracts them.
-        roles.append(
+        non_metal_roles.append(
             (
                 parasitics_deck.poly,
                 [layer_index["poly"]],
                 [layer_index["nfet_gate"], layer_index["pfet_gate"]],
             )
         )
-    for i, layer_rc in enumerate(parasitics_deck.metals):
-        if layer_rc is not None and i < len(metal_index):
-            roles.append((layer_rc, [metal_index[i]], []))
 
-    results: list[dict[str, Any]] = []
+    nets: list[kdb.Net] = []
     for net in circuit.each_net():
         name = net.expanded_name()
         if name == deck.substrate_net:
@@ -4178,9 +4319,26 @@ def _compute_parasitics(
             # it is the correct (and crash-free) answer for any future caller
             # that hands us a synthesised net.
             continue
+        nets.append(net)
+
+    # Pass 1: non-metal ground R/C (unaffected by coupling) plus, per net,
+    # each metal level's raw region/area/perimeter -- cached for the
+    # coupling pass below and for the final (possibly-reduced) ground C.
+    base_c_ff: dict[kdb.Net, float] = {}
+    base_r_ohm: dict[kdb.Net, float] = {}
+    num_metals = len(parasitics_deck.metals)
+    # metal_regions[i]: {net: Region} for every net with non-empty geometry
+    # on metal level i -- only populated for levels with a curated LayerRC
+    # (a level with none contributes no ground R/C either, matching the
+    # pre-existing `metals_without_coefficient` gap semantics).
+    metal_regions: list[dict[kdb.Net, kdb.Region]] = [dict() for _ in range(num_metals)]
+    net_metal_area_um2: dict[tuple[kdb.Net, int], float] = {}
+    net_metal_perim_um: dict[tuple[kdb.Net, int], float] = {}
+
+    for net in nets:
         r_ohm = 0.0
         c_ff = 0.0
-        for layer_rc, indices, subtract in roles:
+        for layer_rc, indices, subtract in non_metal_roles:
             area_um2, perim_um = _net_area_perim_um(l2n, net, dbu, indices, subtract)
             if area_um2 <= 0.0:
                 continue
@@ -4189,21 +4347,193 @@ def _compute_parasitics(
                 + perim_um * layer_rc.cap_perim_ff_um
             )
             r_ohm += layer_rc.sheet_res_ohm_sq * _n_squares(area_um2, perim_um)
-        if c_ff <= 0.0:
-            # No ground capacitance means no load to hang a series R off of --
-            # a bare series R to nothing is meaningless, so skip the net.
+        base_c_ff[net] = c_ff
+        base_r_ohm[net] = r_ohm
+
+        for i in range(num_metals):
+            layer_rc = parasitics_deck.metals[i]
+            if layer_rc is None or i >= len(metal_index):
+                continue
+            region = l2n.polygons_of_net(net, metal_index[i])
+            if region.is_empty():
+                continue
+            area_um2 = region.area() * dbu * dbu
+            perim_um = region.perimeter() * dbu
+            if area_um2 <= 0.0:
+                continue
+            net_metal_area_um2[(net, i)] = area_um2
+            net_metal_perim_um[(net, i)] = perim_um
+            base_r_ohm[net] += layer_rc.sheet_res_ohm_sq * _n_squares(
+                area_um2, perim_um
+            )
+            metal_regions[i][net] = region
+
+    # Pass 2: vertical-overlap coupling between adjacent metal levels.
+    # `deduction_regions[(net, i)]` accumulates the *geometry* of `net`'s
+    # level-i area that has been attributed to a coupling partner instead of
+    # ground, across every adjacent-level pair that touches level `i`.
+    #
+    # This is a Region union, not a scalar area sum, and that distinction is
+    # load-bearing (PR #764 review): level `i` participates in two adjacent
+    # pairs -- as the upper plate of `(i-1, i)` and as the lower plate of
+    # `(i, i+1)` -- so a straight via stack (a net with routing above *and*
+    # below the same XY footprint, pervasive in any routed block) has the same
+    # physical area claimed by two different partners. Summing the two overlap
+    # areas would deduct that area twice and silently destroy charge; unioning
+    # the overlap Regions and measuring once guarantees each square micron is
+    # removed from the ground term at most once, however many partners claim
+    # it. The coupling capacitors themselves are unaffected: each *pair* still
+    # gets the full mutual-overlap area, which is what the plate model wants.
+    deduction_regions: dict[tuple[kdb.Net, int], kdb.Region] = {}
+    # `coupling_ff[pair_key]` / `coupling_levels[pair_key]`: the accumulated
+    # coupling capacitance and contributing `[lower, upper]` level-index
+    # pairs for one unordered net pair.
+    coupling_ff: dict[tuple[str, str], float] = {}
+    coupling_levels: dict[tuple[str, str], set[tuple[int, int]]] = {}
+
+    for i in range(num_metals - 1):
+        coef = (
+            parasitics_deck.metal_overlaps[i]
+            if i < len(parasitics_deck.metal_overlaps)
+            else None
+        )
+        if coef is None:
+            continue
+        lower_nets = metal_regions[i]
+        upper_nets = metal_regions[i + 1]
+        if not lower_nets or not upper_nets:
+            continue
+        upper_items = [
+            (net_b, spice_safe_net_name(net_b.expanded_name()), region_b)
+            for net_b, region_b in upper_nets.items()
+        ]
+        for net_a, region_a in lower_nets.items():
+            bbox_a = region_a.bbox()
+            name_a = spice_safe_net_name(net_a.expanded_name())
+            for net_b, name_b, region_b in upper_items:
+                if net_a is net_b:
+                    # Same-net overlap (a via stack) is excluded by
+                    # construction: coupling is only ever between two
+                    # *distinct* nets (issue #760's explicit edge case).
+                    continue
+                if name_a == name_b:
+                    # Two *distinct* nets that carry the same layout label
+                    # (e.g. `gcd`'s 105 separate, un-strapped `VGND` rail
+                    # islands). Pairs here are keyed by SPICE-safe *name*
+                    # (`_net_pair_key`), and `_inject_parasitics` attaches
+                    # each pair's `C` card between two per-*name* hubs (its
+                    # `hub_by_net` map), so both terminals of a same-name
+                    # pair would land on one and the same hub net -- a
+                    # self-loop, contributing nothing electrically while
+                    # inflating `total_coupling_capacitance_ff`. (That is a
+                    # property of this name-keyed pair/hub model, not of the
+                    # netlist: since issue #765 the *ground* entries resolve
+                    # by `net_id`, and KLayout's SPICE writer renames a
+                    # duplicate net on write -- `VGND` and `VGND$1` -- so the
+                    # islands are not collapsed into one node downstream.)
+                    # Skipped *before* the
+                    # deduction below, so that area simply stays on the
+                    # ground term, exactly as it did pre-#760; charge is
+                    # still conserved.
+                    continue
+                if not _bbox_overlap(bbox_a, region_b.bbox()):
+                    continue
+                overlap = region_a & region_b
+                if overlap.is_empty():
+                    continue
+                overlap_area_um2 = overlap.area() * dbu * dbu
+                if overlap_area_um2 <= 0.0:
+                    continue
+
+                for ded_key in ((net_a, i), (net_b, i + 1)):
+                    acc = deduction_regions.get(ded_key)
+                    if acc is None:
+                        acc = kdb.Region()
+                        deduction_regions[ded_key] = acc
+                    # `insert` appends the overlap polygons unmerged; the
+                    # single `merged()` below collapses each accumulator once,
+                    # which is both cheaper and exactly the set union wanted.
+                    acc.insert(overlap)
+
+                key = _net_pair_key(name_a, name_b)
+                coupling_ff[key] = coupling_ff.get(key, 0.0) + overlap_area_um2 * coef
+                coupling_levels.setdefault(key, set()).add((i, i + 1))
+
+    # Collapse each (net, level) accumulator to a single non-overlapping area,
+    # once, now that every contributing partner has been folded in.
+    deduction_um2: dict[tuple[kdb.Net, int], float] = {
+        ded_key: region.merged().area() * dbu * dbu
+        for ded_key, region in deduction_regions.items()
+    }
+
+    # Pass 3: finalize each net's ground C, applying the coupling deduction
+    # (if any) to its metal-level area terms only -- perimeter/fringe and
+    # every non-metal role are untouched by coupling.
+    results: list[dict[str, Any]] = []
+    for net in nets:
+        raw_c_ff = base_c_ff.get(net, 0.0)
+        c_ff = raw_c_ff
+        for i in range(num_metals):
+            layer_rc = parasitics_deck.metals[i]
+            if layer_rc is None:
+                continue
+            area_um2 = net_metal_area_um2.get((net, i))
+            if area_um2 is None:
+                continue
+            perim_um = net_metal_perim_um[(net, i)]
+            raw_c_ff += (
+                area_um2 * layer_rc.cap_area_ff_um2
+                + perim_um * layer_rc.cap_perim_ff_um
+            )
+            deduction = deduction_um2.get((net, i), 0.0)
+            effective_area_um2 = max(0.0, area_um2 - deduction)
+            c_ff += (
+                effective_area_um2 * layer_rc.cap_area_ff_um2
+                + perim_um * layer_rc.cap_perim_ff_um
+            )
+        if raw_c_ff <= 0.0:
+            # `raw_c_ff` is exactly the pre-#760 ground capacitance (every
+            # role's full area *and* perimeter term, no coupling deduction),
+            # so this net-inclusion test is bit-for-bit the one this function
+            # applied before coupling existed: which nets appear in the
+            # output cannot change, only how much of each net's charge sits
+            # on the ground term vs. a coupling term.
+            #
+            # No ground-eligible geometry at all (before any coupling
+            # deduction) means no load to hang a series R off of -- a bare
+            # series R to nothing is meaningless, so skip the net. A net
+            # whose geometry exists but was *entirely* claimed by coupling
+            # still reaches here (raw_c_ff > 0), so it still gets a
+            # star/hub for a coupling `C` card to attach to, even though its
+            # own reported `capacitance_ff` can be `0.0`.
             continue
         results.append(
             {
-                "net": spice_safe_net_name(name),
+                "net": spice_safe_net_name(net.expanded_name()),
                 "net_id": net.cluster_id,
-                "resistance_ohm": round(r_ohm, 4),
-                "capacitance_ff": round(c_ff, 6),
+                "resistance_ohm": round(base_r_ohm.get(net, 0.0), 4),
+                "capacitance_ff": round(max(0.0, c_ff), 6),
             }
         )
 
     results.sort(key=lambda entry: (entry["net"], entry["net_id"]))
-    return results
+
+    coupled_pairs: list[dict[str, Any]] = []
+    for (name_a, name_b), cap_ff in coupling_ff.items():
+        if cap_ff <= 0.0:
+            continue
+        levels_sorted = sorted(coupling_levels[(name_a, name_b)])
+        coupled_pairs.append(
+            {
+                "net_a": name_a,
+                "net_b": name_b,
+                "capacitance_ff": round(cap_ff, 6),
+                "levels": [[lo, hi] for lo, hi in levels_sorted],
+            }
+        )
+    coupled_pairs.sort(key=lambda entry: (entry["net_a"], entry["net_b"]))
+
+    return results, coupled_pairs
 
 
 def _detect_dead_metal(
@@ -4351,27 +4681,43 @@ def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
     parasitic_nets: list[dict[str, Any]],
+    coupled_pairs: list[dict[str, Any]],
     ground_net_name: str,
 ) -> dict[str, Any]:
-    """Inject a star-topology parasitic RC per net into ``circuit`` and
-    return the JSON ``parasitics`` summary block (issue #592).
+    """Inject a star-topology parasitic RC per net, plus one two-terminal
+    coupling capacitor per net pair with non-zero vertical-overlap coupling
+    capacitance, into ``circuit`` and return the JSON ``parasitics`` summary
+    block (issue #592, extended by issue #760).
 
-    For each entry, the net itself becomes the star's **hub**. Every device
-    terminal that was connected directly to the net is moved onto a fresh
-    per-terminal "leg" net, and a series resistor bridges each leg back to
-    the hub -- so two terminals on the same net now sit in series through
-    two resistors (``leg_a --R--> hub --R--> leg_b``), instead of sharing one
-    node with no resistance between them (the pre-#592 topology this
-    replaces). A single capacitor still hangs the net's total lumped ground
-    capacitance off the hub (``hub --C--> <substrate_net>``), created if
-    absent. Each leg's resistance is the net's total computed resistance
-    distributed across its terminals by
+    For each ``parasitic_nets`` entry, the net itself becomes the star's
+    **hub**. Every device terminal that was connected directly to the net is
+    moved onto a fresh per-terminal "leg" net, and a series resistor bridges
+    each leg back to the hub -- so two terminals on the same net now sit in
+    series through two resistors (``leg_a --R--> hub --R--> leg_b``), instead
+    of sharing one node with no resistance between them (the pre-#592
+    topology this replaces). A single capacitor still hangs the net's total
+    lumped ground capacitance off the hub (``hub --C--> <substrate_net>``),
+    created if absent -- even when that capacitance rounds to ``0.0`` because
+    every bit of it moved to coupling (issue #760: the hub still needs to
+    exist for a coupling ``C`` card to attach to). Each leg's resistance is
+    the net's total computed resistance distributed across its terminals by
     :func:`_terminal_star_weights` -- a terminal farther from the net's
     other connections gets more of the total, and the weights always sum to
     ``1.0`` so a net's leg resistances sum back to its total. A net with no
     device terminal at all (real geometry with nothing electrically
     attached) falls back to exactly the pre-#592 Gamma-shunt: one resistor
     from the net to a fresh internal node, with the capacitor on that node.
+
+    After every ``parasitic_nets`` entry has its hub established, one
+    two-terminal ``C`` card is created per ``coupled_pairs`` entry, directly
+    between the two nets' **hub** nodes (not the raw net objects -- a net
+    with device terminals moved its own connectivity onto leg nets, so the
+    hub is the correct attachment point for anything that used to sit on the
+    net itself). A pair naming a net absent from ``parasitic_nets`` (should
+    not happen in practice: any net with coupling geometry has non-zero raw
+    ground-eligible area by construction, see :func:`_compute_parasitics`) is
+    silently skipped rather than raising, matching this function's existing
+    tolerance for an unresolvable net name.
 
     This is purely additive from the perspective of the schematic-equivalent
     view built *before* this call (`devices[]`/`nets[]`, see `run_extract`):
@@ -4438,7 +4784,27 @@ def _inject_parasitics(
     # gets a `_dup<n>` suffix.
     instance_name_counts: dict[str, int] = {}
 
+    # Per-net `coupled[]` view built from `coupled_pairs` before the main
+    # loop below, so each `report_nets` entry can carry its own counterpart
+    # list directly (issue #760).
+    coupled_by_net: dict[str, list[dict[str, Any]]] = {}
+    for pair in coupled_pairs:
+        for this_net, other_net in (
+            (pair["net_a"], pair["net_b"]),
+            (pair["net_b"], pair["net_a"]),
+        ):
+            coupled_by_net.setdefault(this_net, []).append(
+                {
+                    "net": other_net,
+                    "capacitance_ff": pair["capacitance_ff"],
+                    "levels": pair["levels"],
+                }
+            )
+    for entries in coupled_by_net.values():
+        entries.sort(key=lambda entry: entry["net"])
+
     report_nets: list[dict[str, Any]] = []
+    hub_by_net: dict[str, kdb.Net] = {}
     total_r = 0.0
     total_c_ff = 0.0
     total_r_count = 0
@@ -4517,6 +4883,7 @@ def _inject_parasitics(
         c_dev.connect_terminal("B", ground)
         c_dev.set_parameter("C", c_farad)
 
+        hub_by_net[entry["net"]] = hub
         total_r += r_total_ohm
         total_c_ff += entry["capacitance_ff"]
         report_nets.append(
@@ -4532,14 +4899,40 @@ def _inject_parasitics(
                 "capacitance_ff": entry["capacitance_ff"],
                 "hub_net": hub_name,
                 "terminals": terminal_reports,
+                "coupled": coupled_by_net.get(entry["net"], []),
             }
         )
+
+    # One two-terminal `C` card per coupled net pair, between the two nets'
+    # **hub** nodes -- built only after every entry above has established its
+    # hub, since a pair can name either side in either order (issue #760).
+    total_cc_ff = 0.0
+    cc_count = 0
+    for pair in coupled_pairs:
+        hub_a = hub_by_net.get(pair["net_a"])
+        hub_b = hub_by_net.get(pair["net_b"])
+        if hub_a is None or hub_b is None:
+            # Should not happen (see docstring): a net with coupling
+            # geometry always has non-zero raw ground-eligible area, so it
+            # always reaches `parasitic_nets` and gets a hub. Skipped rather
+            # than raised, matching this function's existing tolerance for
+            # an unresolvable net name a few lines up.
+            continue
+        cc_instance_name = _sanitize_instance_name(f"{pair['net_a']}_{pair['net_b']}")
+        cc_dev = circuit.create_device(cap_class, f"cc_{cc_instance_name}")
+        cc_dev.connect_terminal("A", hub_a)
+        cc_dev.connect_terminal("B", hub_b)
+        cc_dev.set_parameter("C", pair["capacitance_ff"] * 1e-15)
+        total_cc_ff += pair["capacitance_ff"]
+        cc_count += 1
 
     return {
         "r_count": total_r_count,
         "c_count": len(report_nets),
+        "cc_count": cc_count,
         "total_resistance_ohm": round(total_r, 4),
         "total_capacitance_ff": round(total_c_ff, 6),
+        "total_coupling_capacitance_ff": round(total_cc_ff, 6),
         "nets": report_nets,
     }
 
@@ -5038,6 +5431,59 @@ def _describe_parasitics_metal_gaps(
     for i, layer in enumerate(deck.metals):
         if i >= len(parasitics_deck.metals) or parasitics_deck.metals[i] is None:
             gaps.append({"metal_index": i, "layer": layer[0], "datatype": layer[1]})
+    return gaps
+
+
+def _describe_parasitics_overlap_gaps(
+    deck: ExtractionDeck, parasitics_deck: ParasiticsDeck
+) -> list[dict[str, Any]]:
+    """Build the ``parasitics.overlap_pairs_without_coefficient[]`` array
+    (issue #760) -- the ``metals_without_coefficient``-style (#547) gap
+    report for the vertical-overlap coupling coefficient family.
+
+    ``_compute_parasitics`` walks ``parasitics_deck.metal_overlaps``
+    index-aligned against **adjacent pairs** of ``deck.metals`` (pair ``i``
+    is between metal levels ``i`` and ``i+1``) and silently contributes zero
+    coupling capacitance for any adjacent pair that has no coefficient --
+    either because ``metal_overlaps`` is shorter than ``len(deck.metals) -
+    1`` (truncation, including the empty-tuple default every deck starts
+    from) or the entry at that pair index is explicitly ``None``. Both are
+    the same gap from a caller's perspective: that pair's area still charges
+    to ground in full, exactly as if this feature did not exist, with
+    nothing else in the JSON to say so -- a silent zero, not a silent
+    approximation.
+
+    Returns one entry per gap, ``{"lower_metal_index": int, "upper_metal_index":
+    int, "lower_layer": int, "lower_datatype": int, "upper_layer": int,
+    "upper_datatype": int}`` (0-based, matching ``deck.metals``' indexing --
+    pair index 0 is between the deck's bottom two metal levels), sorted by
+    ``lower_metal_index``. Empty when every declared adjacent metal-level
+    pair has a coupling coefficient -- true for both shipped decks today
+    (each curates one coefficient per adjacent pair its ``metals`` stack
+    declares), and always true when ``--parasitics`` was not requested
+    (callers only invoke this when ``parasitics_deck is not None``). A deck
+    with fewer than two metal levels declared has no adjacent pair at all,
+    so this is always empty for it, matching ``deck.metals`` having no
+    consecutive-index pair to check.
+    """
+    gaps: list[dict[str, Any]] = []
+    for i in range(len(deck.metals) - 1):
+        if (
+            i >= len(parasitics_deck.metal_overlaps)
+            or parasitics_deck.metal_overlaps[i] is None
+        ):
+            lower_layer = deck.metals[i]
+            upper_layer = deck.metals[i + 1]
+            gaps.append(
+                {
+                    "lower_metal_index": i,
+                    "upper_metal_index": i + 1,
+                    "lower_layer": lower_layer[0],
+                    "lower_datatype": lower_layer[1],
+                    "upper_layer": upper_layer[0],
+                    "upper_datatype": upper_layer[1],
+                }
+            )
     return gaps
 
 
