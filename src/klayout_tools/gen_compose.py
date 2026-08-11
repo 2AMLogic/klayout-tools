@@ -86,6 +86,7 @@ block, and never touches placement.
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -292,6 +293,73 @@ def _union_bbox(bboxes_um: list[dict[str, float]]) -> dict[str, float]:
         "x1": max(b["x1"] for b in bboxes_um),
         "y1": max(b["y1"] for b in bboxes_um),
     }
+
+
+def _bbox_clearance_um(bbox_a: dict[str, float], bbox_b: dict[str, float]) -> float:
+    """Axis-aligned clearance between two placed bboxes (#692).
+
+    ``0.0`` when the two bboxes overlap or touch on *both* axes (so there is
+    no gap to report at all). When they're separated on exactly one axis, the
+    clearance is the plain gap along that axis. When they're separated
+    diagonally -- neither bbox's x-range nor y-range overlaps the other's --
+    the nearest points are the two facing corners, so the clearance is the
+    Euclidean distance between them rather than either axis gap alone.
+
+    Used only by the ``"explicit"`` placement clearance advisory below;
+    :func:`_ring_gap_route_conflict` computes a related but distinct
+    route-vs-ring-opening clearance and is not reused here.
+    """
+    gap_x = max(bbox_a["x0"] - bbox_b["x1"], bbox_b["x0"] - bbox_a["x1"], 0.0)
+    gap_y = max(bbox_a["y0"] - bbox_b["y1"], bbox_b["y0"] - bbox_a["y1"], 0.0)
+    if gap_x > 0.0 and gap_y > 0.0:
+        return math.hypot(gap_x, gap_y)
+    return max(gap_x, gap_y)
+
+
+def _explicit_placement_clearance_warnings(
+    order: list[str],
+    blocks: dict[str, dict[str, Any]],
+    placed_bboxes_um: dict[str, dict[str, float]],
+) -> list[str]:
+    """Advisory-only clearance check for ``placement.strategy: "explicit"``
+    (#692).
+
+    For every ordered pair of distinct blocks ``(A, B)`` where ``A``'s own
+    ``generator_report.drc_hints.min_spacing_um`` (parsed by
+    :func:`_parse_blocks` into ``blocks[block_id]["min_spacing_um"]``) is
+    greater than zero, compares that declared minimum against the actual
+    placed clearance between ``A`` and ``B`` (:func:`_bbox_clearance_um`). A
+    caller who places a block flush against (or overlapping) a
+    ``guard_ring``-generated neighbour gets a composed GDS that passes `klt
+    drc` clean -- two same-layer shapes placed with zero clearance merge into
+    one polygon, which is not an illegal *shape* by any spacing rule -- and
+    the resulting short only otherwise surfaces later via `klt extract`'s
+    `merged_net_labels` diagnostic. This warning surfaces it at compose time
+    instead.
+
+    Never raises and never blocks composition -- geometry stays advisory here
+    exactly as :func:`resolve_explicit_offsets`'s docstring describes;
+    ``"row"`` placement is intentionally out of scope (its own uniform
+    ``spacing_um`` does not have the same silently-flush ergonomics trap).
+    """
+    clearance_warnings: list[str] = []
+    for owner_id in order:
+        min_spacing_um = blocks[owner_id].get("min_spacing_um", 0.0)
+        if not min_spacing_um > 0.0:
+            continue
+        owner_bbox = placed_bboxes_um[owner_id]
+        for other_id in order:
+            if other_id == owner_id:
+                continue
+            clearance_um = _bbox_clearance_um(owner_bbox, placed_bboxes_um[other_id])
+            if clearance_um < min_spacing_um:
+                clearance_warnings.append(
+                    f"block '{other_id}' is placed {clearance_um:.2f}um from "
+                    f"block '{owner_id}' (strategy: explicit), closer than "
+                    f"{owner_id}'s own declared drc_hints.min_spacing_um of "
+                    f"{min_spacing_um:.2f}um"
+                )
+    return clearance_warnings
 
 
 def _require_bbox(value: Any, where: str) -> dict[str, float]:
@@ -2320,6 +2388,18 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     warnings: list[str] = []
     notes: list[str] = []
+
+    # #692: "explicit" placement performs no overlap validation of its own
+    # (resolve_explicit_offsets's docstring) -- but a caller that places a
+    # block closer to a neighbour than that neighbour's own declared
+    # drc_hints.min_spacing_um can end up with a silent same-layer short that
+    # `klt drc` won't catch (a zero-clearance merge isn't an illegal shape by
+    # any spacing rule). Advisory-only, scoped to "explicit" -- "row"
+    # placement's own uniform spacing_um does not have this ergonomics trap.
+    if strategy == "explicit":
+        warnings.extend(
+            _explicit_placement_clearance_warnings(order, blocks, placed_bboxes_um)
+        )
 
     # --- Routing (phase 2) --------------------------------------------------
     # A connectivity[] net is routed only when routing.layer_role/width_um are

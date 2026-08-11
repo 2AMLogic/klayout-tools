@@ -632,6 +632,135 @@ def test_compose_explicit_allows_overlapping_origins(tmp_path, pdk_root):
     assert report["blocks"][1]["offset_um"] == {"x": 0.0, "y": 0.0}
 
 
+def test_compose_explicit_warns_on_insufficient_clearance(tmp_path, pdk_root):
+    # #692: b1 declares a real min_spacing_um (via generator_report drc_hints,
+    # resistor_strip's own spacing_um param) but is placed with 0um clearance
+    # from b2 under strategy: "explicit" -- gen-compose must not raise (still
+    # advisory), but must add a warning naming both blocks so a caller doesn't
+    # have to discover the resulting same-layer merge later via `klt
+    # extract`'s `merged_net_labels` diagnostic.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=1.0)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", spacing_um=0.0)
+    b1_x1 = r1["bbox_um"]["x1"]
+    output = tmp_path / "explicit_flush.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": {
+                    "b1": {"x": 0.0, "y": 0.0},
+                    # Touching b1's right edge exactly -- 0um clearance.
+                    "b2": {"x": b1_x1, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "explicit_flush_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert len(report["warnings"]) == 1
+    warning = report["warnings"][0]
+    assert "b1" in warning
+    assert "b2" in warning
+    assert "min_spacing_um" in warning
+    assert "explicit" in warning
+    assert "0.00um" in warning  # actual clearance found
+    assert "1.00um" in warning  # b1's declared min_spacing_um
+
+
+def test_compose_explicit_no_warning_when_clearance_sufficient(tmp_path, pdk_root):
+    # Companion to the insufficient-clearance case above: the same declared
+    # min_spacing_um, but placed far enough apart that no warning fires.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=1.0)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", spacing_um=0.0)
+    b1_x1 = r1["bbox_um"]["x1"]
+    output = tmp_path / "explicit_clear.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": {
+                    "b1": {"x": 0.0, "y": 0.0},
+                    # 2um clearance -- more than b1's declared 1.0um minimum.
+                    "b2": {"x": b1_x1 + 2.0, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "explicit_clear_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+
+
+def test_compose_explicit_no_warning_when_neither_block_declares_min_spacing(
+    tmp_path, pdk_root
+):
+    # Today's common/default case (Acceptance Criteria (c)): neither block
+    # declares a min_spacing_um (resistor_strip's spacing_um param set to 0),
+    # so even a fully overlapping placement gets no new warning.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=0.0)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", spacing_um=0.0)
+    output = tmp_path / "explicit_no_hint.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": {
+                    "b1": {"x": 0.0, "y": 0.0},
+                    "b2": {"x": 0.0, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "explicit_no_hint_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+
+
+def test_compose_row_strategy_has_no_clearance_warnings(tmp_path, pdk_root):
+    # #692's clearance advisory is scoped to strategy: "explicit" only --
+    # "row" placement must never gain a new warning from it, even when a
+    # block's own declared min_spacing_um exceeds the row's own spacing_um
+    # (here 0.0, so blocks are placed touching -- 0um clearance).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=5.0)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", spacing_um=5.0)
+    output = tmp_path / "row_no_warning.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": r1},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 0.0,
+            },
+            "options": {"cell_name": "row_no_warning_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+
+
 def test_compose_explicit_places_three_blocks_at_non_collinear_origins(
     tmp_path, pdk_root
 ):
