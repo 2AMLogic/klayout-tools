@@ -286,6 +286,20 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt extract --parasitics` now declares its own model scope
+  machine-readably (#728): a new `parasitics.model` object (`capacitance`,
+  `coupling`, `resistance`, `frequency` — static text, unchanged across every
+  extraction) states plainly that the model's capacitance is net-to-ground
+  only, coupling between neighboring nets is not modelled, resistance is a
+  single lumped series element distributed as a star per net (issue #592),
+  and the model is quasi-static (no frequency dependence). The same text is
+  also written as `*`-commented header lines at the top of the netlist
+  whenever `--parasitics` was given, so the model's scope is visible from the
+  raw SPICE alone, not only the JSON. Before this, the only way to learn the
+  model omits inter-net coupling was to notice that every emitted `C` card's
+  second terminal is the ground net — a silent omission indistinguishable
+  from "no coupling found." Purely additive, no `schema_version` bump. See
+  docs/cli/extract.md's "Parasitic model scope (`parasitics.model`)".
 - 2026-08-11 — new `klt size` verb (#721): Phase 0 of the analog-sizing
   epic (#705) — solve a single device's channel width from a gm/Id target
   and a current budget, with `ngspice` on the real PDK models as the

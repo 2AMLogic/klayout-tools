@@ -226,6 +226,61 @@ _PARAM_PRECISION_OHM = 6
 #: some readers reject) -- negligible against any real net's resistance.
 _MIN_PARASITIC_R_OHM = 1e-3
 
+#: Machine-readable declaration of what `--parasitics` does and does not
+#: model (issue #728). Every `C` card `_inject_parasitics` emits hangs off
+#: the deck's ground/substrate net -- there is no inter-net coupling
+#: capacitor anywhere in the output -- but nothing in the emitted netlist or
+#: JSON said so before this field existed; a caller could only learn the
+#: model's scope by noticing that every capacitor's second terminal is the
+#: same ground net. This is a static description of the model itself (it
+#: does not vary net-to-net, deck-to-deck, or run-to-run), so it is a single
+#: module-level constant reused verbatim by both the `parasitics.model` JSON
+#: field (`run_extract`) and the written SPICE netlist's header comment
+#: (`_parasitic_model_header_comment`) -- one statement of the model's
+#: limits, not two that could drift apart. See "Parasitic model scope
+#: (`parasitics.model`)" in docs/cli/extract.md.
+PARASITIC_MODEL_SCOPE: dict[str, str] = {
+    "capacitance": (
+        "net-to-ground only -- every capacitor's second terminal is the "
+        "deck's ground/substrate net; there is no inter-net coupling "
+        "capacitance in the model"
+    ),
+    "coupling": (
+        "not modelled -- a neighboring net's displacement current (e.g. a "
+        "slewing supply, clock, or big driver) contributes exactly zero to "
+        "any net's reported capacitance, whether or not the real layout "
+        "has significant coupling there"
+    ),
+    "resistance": (
+        "single lumped series resistance per net, distributed as a star "
+        "across that net's device terminals (issue #592) -- not a "
+        "per-segment, distributed RC ladder"
+    ),
+    "frequency": (
+        "quasi-static -- one frequency-independent R and C per net; no "
+        "skin effect, no distributed transmission-line behavior"
+    ),
+}
+
+
+def _parasitic_model_header_comment() -> str:
+    """Render :data:`PARASITIC_MODEL_SCOPE` as `*`-prefixed SPICE comment
+    lines for the written netlist's header (issue #728).
+
+    ``kdb.Netlist.write``'s ``description`` argument only `*`-comments its
+    *first* line -- every subsequent line is written verbatim, which would
+    otherwise land as unprefixed text a SPICE reader could try to parse as a
+    circuit element. Each line here is pre-prefixed with ``* `` so the whole
+    block stays a comment regardless of how many lines it spans. Called only
+    when ``--parasitics`` was given (``parasitics_report is not None`` in
+    ``run_extract``) -- a netlist with no parasitics has nothing to declare
+    the scope of.
+    """
+    lines = ["* parasitic model (--parasitics):"]
+    for key, value in PARASITIC_MODEL_SCOPE.items():
+        lines.append(f"* - {key}: {value}")
+    return "\n".join(lines)
+
 
 class ExtractError(Exception):
     """Raised when a layout cannot be extracted: bad file, unknown deck,
@@ -1057,6 +1112,14 @@ def run_extract(
                 "net, understating the true value. See docs/cli/extract.md's "
                 "'Parasitic (RC) extraction' section."
             )
+        # Additive field (issue #728): declares the parasitic model's own
+        # scope machine-readably (net-to-ground-only capacitance, no
+        # inter-net coupling, single lumped series resistance per net,
+        # quasi-static) -- present on every `parasitics` block regardless of
+        # whether any net actually carried non-zero parasitics, since the
+        # model's scope does not depend on what was found. See
+        # `PARASITIC_MODEL_SCOPE`'s docstring.
+        parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
 
     writer = (
         kdb.NetlistSpiceWriter(create_model_binding_delegate(model_bindings))
@@ -1064,10 +1127,11 @@ def run_extract(
         else kdb.NetlistSpiceWriter()
     )
     writer.use_net_names = True
+    netlist_description = f"extracted by klt extract --deck {deck_name}"
+    if parasitics_report is not None:
+        netlist_description += "\n" + _parasitic_model_header_comment()
     try:
-        netlist.write(
-            netlist_path, writer, f"extracted by klt extract --deck {deck_name}"
-        )
+        netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 

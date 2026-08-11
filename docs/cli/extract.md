@@ -1502,7 +1502,9 @@ above, and that carries no metal) — not because it lacks a label.
 - **Net-to-net coupling capacitance** is explicitly out of scope for this
   first increment (ground capacitance only). Coupling needs spacing-aware
   neighbor geometry the lumped-to-ground model does not capture; it is a
-  credible second increment once a friction log demands it.
+  credible second increment once a friction log demands it. This scope is
+  now self-declared in the output too — see "Parasitic model scope
+  (`parasitics.model`)" below (issue #728).
 - **Device connectivity, as reported in `devices[]`/`nets[]`, is untouched.**
   Those two fields are built from the schematic-equivalent netlist *before*
   parasitics injection and carry their exact documented meaning whether or
@@ -1730,7 +1732,13 @@ more per net) rather than always equalling `c_count`. See
       ]
     }
   ],
-  "metals_without_coefficient": []
+  "metals_without_coefficient": [],
+  "model": {
+    "capacitance": "net-to-ground only -- every capacitor's second terminal is the deck's ground/substrate net; there is no inter-net coupling capacitance in the model",
+    "coupling": "not modelled -- a neighboring net's displacement current (e.g. a slewing supply, clock, or big driver) contributes exactly zero to any net's reported capacitance, whether or not the real layout has significant coupling there",
+    "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder",
+    "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"
+  }
 }
 ```
 
@@ -1742,6 +1750,7 @@ more per net) rather than always equalling `c_count`. See
 | `total_capacitance_ff` | number          | Sum of the emitted ground capacitances (femtofarads).                                             |
 | `nets`                 | array\<object\> | One entry per net carrying parasitics, sorted by `net` for deterministic output. See below.       |
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
+| `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 
 Each `nets[]` entry:
 
@@ -1785,6 +1794,53 @@ shipped decks today. A non-empty list is also mirrored as a prose entry in
 top-level `warnings[]`, e.g. `"'gf180mcu' deck's PARASITICS.metals has no R/C
 coefficient for Metal3, Metal4 -- ..."`, so a caller checking only
 `warnings[]` still sees it.
+
+### Parasitic model scope (`parasitics.model`)
+
+Every capacitor `--parasitics` emits hangs off the deck's ground/substrate
+net — there is no card connecting two signal nets, and before issue #728
+nothing in the emitted netlist or JSON said so. A consumer could only learn
+the model's scope by noticing that every `C_*` card's second terminal is the
+same ground net, which reads back indistinguishable from "the tool looked for
+coupling here and found none."
+
+`parasitics.model` states the model's own boundaries machine-readably instead
+— a fixed, four-key object present on every `parasitics` block (including the
+all-zero case, when no net had eligible interconnect geometry to parasitize):
+
+| Key           | Value (verbatim)                                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `capacitance` | `"net-to-ground only -- every capacitor's second terminal is the deck's ground/substrate net; there is no inter-net coupling capacitance in the model"`       |
+| `coupling`    | `"not modelled -- a neighboring net's displacement current (e.g. a slewing supply, clock, or big driver) contributes exactly zero to any net's reported capacitance, whether or not the real layout has significant coupling there"` |
+| `resistance`  | `"single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder"` |
+| `frequency`   | `"quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"`                                       |
+
+The text is static — identical across every deck, cell, and run — so a
+downstream flow can assert the exact model it is relying on (e.g. "fail the
+run if `parasitics.model.coupling != 'not modelled'`" once/if a coupling-aware
+increment lands) instead of a human inferring the model's limits by grepping
+capacitor terminals. The same four lines are also written as `*`-commented
+header lines at the top of the SPICE netlist whenever `--parasitics` was
+given, immediately after the existing `* extracted by klt extract --deck
+<name>` line:
+
+```
+* extracted by klt extract --deck sky130
+* parasitic model (--parasitics):
+* - capacitance: net-to-ground only -- every capacitor's second terminal is the deck's ground/substrate net; there is no inter-net coupling capacitance in the model
+* - coupling: not modelled -- a neighboring net's displacement current (e.g. a slewing supply, clock, or big driver) contributes exactly zero to any net's reported capacitance, whether or not the real layout has significant coupling there
+* - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder
+* - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
+```
+
+so a reader of the raw netlist alone (not just the JSON) can see the model's
+scope without cross-referencing `klt extract`'s JSON output. Omitted (no
+header lines beyond the existing `* extracted by ...` line) whenever
+`--parasitics` was not given, matching `parasitics` itself being `null` in
+that case. This is item (1) of the near-term half of the Method-of-Moments
+epic (#701) laid out in issue #728 — declaring the model's scope, not
+changing what it computes; net-to-net coupling capacitance itself remains
+"Out of scope" below.
 
 ### Parasitic R/C instance names are sanitized, not literal net names
 
@@ -2007,6 +2063,9 @@ above, issue #217). The following remain out of scope:
   deliberately deferred (it needs spacing-aware neighbor geometry the
   lumped-to-ground model does not capture) and is a credible second
   increment. Without `--parasitics`, no interconnect R/C is extracted at all.
+  This gap is now declared machine-readably in the output itself rather than
+  only in this doc — see `parasitics.model` (issue #728, "Parasitic model
+  scope").
 - **Full distributed, per-segment RC (a PEX-style ladder).** `--parasitics`
   distributes each net's resistance as a coarse star from the net to each
   device terminal (issue #592 — see "Parasitic (RC) extraction" → "The
