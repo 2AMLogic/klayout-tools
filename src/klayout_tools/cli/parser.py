@@ -27,6 +27,7 @@ from . import (
     layout_metrics_cmd,
     lef_abstract_cmd,
     lvs_cmd,
+    mom_cmd,
     pdk_cmd,
     place_and_route_cmd,
     precheck_cmd,
@@ -1451,6 +1452,41 @@ def create_parser() -> argparse.ArgumentParser:
     trajectory_parser.set_defaults(func=trajectory_cmd.run)
 
     _add_kb_parser(subparsers)
+
+    mom_parser = subparsers.add_parser(
+        "mom",
+        help="quasi-static capacitance extraction (Method of Moments)",
+        description=(
+            "Discretise conductor surfaces from a GDSII/OASIS layout per a "
+            "stackup spec, fill the potential-coefficient matrix, and solve "
+            "for the Maxwell capacitance matrix -- issue #718, Phase 0/1 of "
+            "the Method-of-Moments epic #701. Numerics run in the "
+            "klt_mom_native Rust extension (native/mom/); see "
+            "docs/cli/mom.md for the spec-file schema, the JSON contract, "
+            "and how to build the extension."
+        ),
+    )
+    mom_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    mom_parser.add_argument(
+        "spec",
+        help=(
+            "path to a JSON spec file: a non-empty 'stackup' array mapping "
+            "GDS layer/datatype pairs to conductor names + z-extents, plus "
+            "'background_permittivity' and optional 'panel_size_um' -- see "
+            "docs/cli/mom.md's 'Spec file' section"
+        ),
+    )
+    mom_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to discretise when the stream has more than one "
+            "(required in that case -- klt mom operates on exactly one "
+            "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    _add_format_arg(mom_parser)
+    mom_parser.set_defaults(func=mom_cmd.run)
 
     return parser
 

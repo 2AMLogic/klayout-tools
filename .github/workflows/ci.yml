@@ -46,6 +46,71 @@ jobs:
       - name: ruff check
         run: uv run --frozen --extra dev ruff check .
 
+  native:
+    name: Native engines (Rust)
+    # `native/mom/` (issue #718) is this repo's first Rust component -- the
+    # `klt_mom_native` pyo3 extension behind `klt mom`. Its numerics have
+    # their own `cargo test` suite that the Python job never exercises, so it
+    # gets its own job: fmt + clippy + unit tests, plus a real end-to-end
+    # `klt mom` run through the built extension.
+    #
+    # No toolchain-install step: ubuntu-latest images ship a rustup-managed
+    # stable Rust, so `cargo` is already on PATH (matching how this repo
+    # avoids third-party actions elsewhere).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/mom
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo --version
+        run: cargo --version && rustc --version
+
+      - name: Cache cargo registry + build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/mom/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/mom/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        # GATES, like the ruff steps above -- do not add continue-on-error.
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build + install the extension, then run the klt mom tests
+        # `--group mom` resolves klt-mom-native from native/mom/ via
+        # pyproject.toml's [tool.uv.sources] and drives maturin to compile it.
+        # Without it, tests/test_mom.py skips itself wholesale (by design, so
+        # a Rust-less environment degrades gracefully) -- this job is what
+        # makes sure the skip is never the only thing CI ever sees.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group mom
+          uv run --frozen --extra dev --group mom pytest tests/test_mom.py -v
+
+      - name: Assert the klt mom tests actually ran (no silent skip)
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group mom python -c "import klt_mom_native" || {
+            echo "::error::klt_mom_native did not install -- tests/test_mom.py would have skipped"
+            exit 1
+          }
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

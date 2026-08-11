@@ -36,6 +36,11 @@ blocks/*/output/renders/*
 # examples/ in place must not stage generated build dirs/logs/results.
 .klt/
 
+# Cargo build output for the Rust engines under native/ (issue #718's
+# native/mom/ is the first). Cargo.lock IS tracked -- these crates build a
+# shipped extension module, so a reproducible dependency set is wanted.
+native/*/target/
+
 # macOS Finder droppings
 .DS_Store
 
