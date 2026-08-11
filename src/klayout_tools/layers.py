@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
-from ._layout import cells_in_hierarchy, load_layout
+from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout
 
 
 class LayersError(Exception):
@@ -23,29 +23,6 @@ class LayersError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback.
     """
-
-
-def _bbox_um(box: Any, dbu: float) -> dict[str, float]:
-    """Same convention as ``stats.py``'s private helper of the same name:
-    an all-zero box for an empty ``kdb.Box`` (no flattened shapes on this
-    layer), else the box's edges/size converted to micrometres."""
-    if box.empty():
-        return {
-            "left": 0.0,
-            "bottom": 0.0,
-            "right": 0.0,
-            "top": 0.0,
-            "width": 0.0,
-            "height": 0.0,
-        }
-    return {
-        "left": box.left * dbu,
-        "bottom": box.bottom * dbu,
-        "right": box.right * dbu,
-        "top": box.top * dbu,
-        "width": box.width() * dbu,
-        "height": box.height() * dbu,
-    }
 
 
 def _flattened_layer_stats(
@@ -92,7 +69,7 @@ def _flattened_layer_stats(
 
     result: dict[str, Any] = {
         "flattened_shapes": flattened_count,
-        "bbox_um": _bbox_um(bbox, dbu),
+        "bbox_um": bbox_um_dict(bbox, dbu),
         "contributors": [
             {"cell": name, "shapes": count}
             for name, count in sorted(contributors.items())
