@@ -1,0 +1,573 @@
+{
+  "diff.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real volare-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule lives inside the script's `if FEOL ... end` block, so `run_drc_klayout_engine` never evaluates it at all, regardless of the input layout. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      65,
+      20
+    ],
+    "threshold_dbu": 150,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            100,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "li1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            67,
+            20
+          ]
+        },
+        {
+          "box": [
+            2225,
+            0,
+            4225,
+            4000
+          ],
+          "layer": [
+            67,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      67,
+      20
+    ],
+    "threshold_dbu": 170,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            67,
+            20
+          ]
+        },
+        {
+          "box": [
+            2115,
+            0,
+            4115,
+            4000
+          ],
+          "layer": [
+            67,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "li1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            225,
+            4000
+          ],
+          "layer": [
+            67,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      67,
+      20
+    ],
+    "threshold_dbu": 170,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            115,
+            4000
+          ],
+          "layer": [
+            67,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "mcon.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            67,
+            44
+          ]
+        },
+        {
+          "box": [
+            2250,
+            0,
+            4250,
+            4000
+          ],
+          "layer": [
+            67,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "A bare, isolated mcon shape -- the only kind of fixture this single-rule, single-layer pilot manifest can build -- trips two real sky130A.lydrc rules unrelated to mcon.space.1's own spacing threshold: \"ct.1\" (every mcon edge must be exactly 0.17um -- this deck's curated rules have no mcon.width.1 counterpart to size a fixture against) and \"ct.4\" (mcon must be covered by li, which this single-layer fixture never draws). Reconciling both would require a realistic multi-layer contact structure, out of scope for this pilot's single-layer width/space geometry.",
+    "layer": [
+      67,
+      44
+    ],
+    "threshold_dbu": 190,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            67,
+            44
+          ]
+        },
+        {
+          "box": [
+            2130,
+            0,
+            4130,
+            4000
+          ],
+          "layer": [
+            67,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "met1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            2185,
+            0,
+            4185,
+            4000
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      68,
+      20
+    ],
+    "threshold_dbu": 140,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            2095,
+            0,
+            4095,
+            4000
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            185,
+            4000
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      68,
+      20
+    ],
+    "threshold_dbu": 140,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            95,
+            4000
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            2185,
+            0,
+            4185,
+            4000
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      69,
+      20
+    ],
+    "threshold_dbu": 140,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            2095,
+            0,
+            4095,
+            4000
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "met2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            185,
+            4000
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      69,
+      20
+    ],
+    "threshold_dbu": 140,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            95,
+            4000
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "poly.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real volare-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule lives inside the script's `if FEOL ... end` block, so `run_drc_klayout_engine` never evaluates it at all, regardless of the input layout. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      66,
+      20
+    ],
+    "threshold_dbu": 150,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            100,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "via.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            68,
+            44
+          ]
+        },
+        {
+          "box": [
+            2225,
+            0,
+            4225,
+            4000
+          ],
+          "layer": [
+            68,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The resolved sky130A.lydrc's own via1 rule (\"via.1a\", an `edges.without_length(0.15)` check) requires an exact 0.15um x 0.15um square (min *and* max), not just a minimum width -- already noted as an approximation in this rule's own DrcRule.description, and stated the same way by sky130A_mr.drc's \"via.1a_a\"/\"via.1a_b\" pair that this rule was transcribed from. Any fixture wide enough to stay clean under this engine's min-only width_check is, by construction, wider than the real deck's fixed max size, so the real deck reports it as a violation (observed: \"via.1a\", alongside the met2-enclosure rules this single-layer fixture cannot satisfy). No fixture can satisfy both engines' notion of \"clean\" at once.",
+    "layer": [
+      68,
+      44
+    ],
+    "threshold_dbu": 170,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            68,
+            44
+          ]
+        },
+        {
+          "box": [
+            2115,
+            0,
+            4115,
+            4000
+          ],
+          "layer": [
+            68,
+            44
+          ]
+        }
+      ]
+    }
+  },
+  "via.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            68,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The resolved sky130A.lydrc's own via1 rule (\"via.1a\", an `edges.without_length(0.15)` check) requires an exact 0.15um x 0.15um square (min *and* max), not just a minimum width -- already noted as an approximation in this rule's own DrcRule.description, and stated the same way by sky130A_mr.drc's \"via.1a_a\"/\"via.1a_b\" pair that this rule was transcribed from. Any fixture wide enough to stay clean under this engine's min-only width_check is, by construction, wider than the real deck's fixed max size, so the real deck reports it as a violation (observed: \"via.1a\", alongside the met2-enclosure rules this single-layer fixture cannot satisfy). No fixture can satisfy both engines' notion of \"clean\" at once.",
+    "layer": [
+      68,
+      44
+    ],
+    "threshold_dbu": 150,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            100,
+            4000
+          ],
+          "layer": [
+            68,
+            44
+          ]
+        }
+      ]
+    }
+  }
+}

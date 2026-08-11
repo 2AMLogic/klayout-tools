@@ -71,6 +71,64 @@ class DerivedLayer:
 
 
 @dataclass(frozen=True)
+class RuleProvenance:
+    """Machine-readable citation of the exact upstream PDK source a
+    :class:`DrcRule` was transcribed from (issue #747, the deck-compiler
+    proposal's `§5 item 2 <../../docs/design/deck-compiler-proposal.md>`_).
+
+    Every rule in ``sky130.py``/``gf180mcu.py`` already carries a *prose*
+    citation in its own inline comment (a source repo, file, and official
+    rule id -- e.g. ``# sky130.lydrc rule "poly.1a"``); that prose is real,
+    specific, and re-verifiable by a human, but not queryable. ``provenance``
+    turns the same information into a structured field so a caller (or a
+    coverage-audit script) can ask "which rules trace to open-pdks commit X"
+    without grepping Python source comments by hand.
+
+    ``source_repo`` is the upstream repository the value was transcribed
+    from, as ``"owner/repo"`` (e.g. ``"fossi-foundation/open-pdks"``,
+    ``"google/gf180mcu-pdk"``). ``source_path`` is the path *within* that
+    repo to the specific file the rule's threshold/geometry was read from --
+    a live ``.lydrc``/``.drc`` DRC-DSL script line for sky130, or a
+    published DRM section (``.rst`` + its numeric ``tables_clear/*.csv``)
+    for gf180mcu, per each deck module's own top-of-file provenance note.
+    ``rule_id`` is the *official* upstream rule id the value came from (e.g.
+    ``"poly.1a"``, ``"DF.1a"``) -- distinct from this deck's own
+    :attr:`DrcRule.id`, which follows this repo's own
+    ``"<layer>.<check>.<n>"`` dotted convention, not the PDK's. ``commit`` is
+    the upstream commit/tag the value was verified against, when the deck
+    module's own docstring pins one (empty string, the default, when it
+    does not).
+
+    **Distinct from the existing** :attr:`DrcRule.scope` **field (issue
+    #566)**: ``scope`` is coarser and deck-level-aggregated -- a DRM section
+    number (``"7.5 Comp"``) or a rule-id-family prefix (``"li"``, ``"m1"``)
+    *shared by every rule* transcribed from that section/family, rolled up
+    into ``coverage.deck_scope`` so a caller can diff "what sections does
+    this deck claim" against the DRM's own table of contents.
+    ``provenance`` is **per-rule and exact**: the one specific file and
+    official rule id *this individual rule* -- not its whole family --
+    was transcribed from, with no deck-wide aggregation. A caller wanting
+    "does this deck claim to cover the Nwell chapter" reads ``scope``/
+    ``coverage.deck_scope``; a caller wanting "what upstream source line did
+    ``nwell.space.1`` itself come from" reads ``provenance``. The two are
+    complementary, not redundant: many rules sharing one ``scope`` value
+    each carry a different ``provenance.rule_id``.
+
+    As of issue #747, populated only for the 37 width/space rules piloted
+    in that issue (sky130: 11, gf180mcu: 26) -- see
+    ``tests/golden_deck/README.md`` for the golden-pair manifest that
+    cross-checks those same 37 rules against the real PDK-native deck.
+    Unpopulated rules simply omit this field (``None``, the default),
+    exactly as an unset ``scope`` (``""``) does today.
+    """
+
+    source_repo: str
+    source_path: str
+    rule_id: str
+    commit: str = ""
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
@@ -136,6 +194,18 @@ class DrcRule:
     -- a deck rule that predates this field, or that intentionally declines to
     claim a specific DRM scope, extracts exactly as it did before the field
     existed.
+
+    ``provenance`` (issue #747) is a machine-readable, **per-rule** citation
+    of the exact upstream source line/table row this rule was transcribed
+    from -- see :class:`RuleProvenance` for its fields and how it differs
+    from the deck-level-aggregated ``scope`` above (short version: ``scope``
+    answers "what DRM section/rule-id family does this deck claim," shared
+    by many rules; ``provenance`` answers "what exact upstream file and
+    official rule id did *this* rule come from," unique per rule).
+    ``None`` (the default) means no structured provenance has been
+    backfilled for this rule yet -- the prose citation in its own inline
+    comment remains the only record, exactly as for every rule before this
+    field existed.
     """
 
     id: str
@@ -146,6 +216,7 @@ class DrcRule:
     other_layer: tuple[int, int] | None = None
     derived_layer: DerivedLayer | None = None
     scope: str = ""
+    provenance: RuleProvenance | None = None
 
 
 class UnknownDeckError(Exception):

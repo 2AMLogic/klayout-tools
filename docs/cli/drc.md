@@ -125,6 +125,45 @@ already produced a merged deck (e.g. by running the PDK's own `run_drc.py
   other kind (`edge-pair:`, `box:`, `edge:`, ...) still bounds `bbox` but
   leaves `polygon` `null`, matching the curated engine's own "`null` if the
   check produced a degenerate edge pair" convention for the analogous case.
+- **sky130A.lydrc's own `FEOL`/`BEOL` rule-group toggles are hard-coded Ruby
+  locals, not `-rd`-settable script variables** — verified for issue #747 by
+  running the golden-pair manifest's sky130 fixtures against a real,
+  `volare`-fetched `sky130A.lydrc`: the script literally sets `FEOL = false`
+  / `BEOL = true` (its own "do not change" comment) a few lines into the
+  file, and there is no `$`-prefixed global this engine's `-rd` mechanism
+  can override to flip it. **This means `--engine klayout` against sky130's
+  default-resolved deck never checks any front-end-of-line rule** (poly,
+  diff/difftap, tunm, vpp, capm, ...) **at all, regardless of what the
+  input layout actually draws** — only back-end-of-line rules (li, mcon,
+  m1, and everything after `if BEOL` in the script) are ever evaluated by
+  this invocation shape. A caller relying on this engine as a ground-truth
+  oracle for a FEOL-layer rule gets a silent `"clean"` for that layer's
+  violations, not a warning — the same trap issue #747's own golden-pair
+  cross-check hit and had to record as `expected_disagreement` rather than
+  "fix" (there is nothing in the curated deck to fix; the native deck
+  simply never ran that check). See `tests/golden_deck/README.md` for the
+  concrete rule ids affected.
+- **`met2`/`via1` (met1<->met2) rules live in a *different* script file,
+  `sky130A_mr.drc`, not `sky130A.lydrc`.** `sky130.py`'s own `met2.width.1`/
+  `met2.space.1`/`via.width.1`/`via.space.1` were transcribed from
+  `sky130A_mr.drc` (a separate, standalone rule-deck script — see that
+  module's own "met2/via rule coverage" provenance note), which
+  `pdk.drc_deck_file()`/this engine's resolver never reaches (it only
+  resolves `<variant>.lydrc`, i.e. `sky130A.lydrc`, per its own naming
+  convention above). This is a *provenance* difference, not a coverage gap:
+  the resolved `sky130A.lydrc` does carry its own met2/via1 rules in its
+  `BEOL` block (`m2.1`, `m2.2`, `m2.5`, `via.1a`, ...), so cross-checking
+  against it is meaningful — it is simply checking that file's rules, not
+  the `sky130A_mr.drc` text these four were transcribed from. Verified for
+  issue #747 against a real install: `met2.width.1`/`met2.space.1` agree
+  with the native deck outright (tripping `m2.1`/`m2.2` respectively),
+  while `via.width.1`/`via.space.1` disagree on their *clean* fixture
+  because `sky130A.lydrc`'s `via.1a` demands an **exact** 0.15um square
+  (`edges.without_length(0.15)`, i.e. min *and* max) where this engine's
+  `width_check` enforces only a minimum — recorded as an
+  `expected_disagreement` in `tests/golden_deck/sky130/manifest.json`. A
+  caller who specifically needs the `sky130A_mr.drc` formulation of these
+  rules would have to point `--deck-file` at that file explicitly.
 
 ### `"enclosing"` / `"enclosed"` also catch zero-overlap escapes
 
@@ -758,6 +797,64 @@ rule references them. A caller asserting "this deck claims the Nwell
 chapter" checks `"7.4 Nwell" in coverage.deck_scope`, distinct from (and a
 strictly coarser question than) "did this run actually check any Nwell
 geometry" (`coverage.layers_checked`).
+
+## Rule provenance and the golden-pair manifest
+
+Issue #747 (piloting `docs/design/deck-compiler-proposal.md` §5/§6) adds two
+things, both scoped to the 37 width/space `DrcRule` entries across
+`sky130.py` (11) and `gf180mcu.py` (26) as a pilot slice — not every rule in
+either deck yet:
+
+### `DrcRule.provenance`
+
+A machine-readable, **per-rule** citation of the exact upstream source a
+rule's threshold/geometry was transcribed from —
+[`RuleProvenance`](../../src/klayout_tools/decks/__init__.py): `source_repo`
+(`"owner/repo"`), `source_path` (the exact file within that repo — a live
+`.lydrc`/`.drc` script for sky130, a DRM CSV table for gf180mcu),
+`rule_id` (the *official* upstream rule id, e.g. `"poly.1a"`, `"DF.1a"` —
+distinct from this deck's own dotted `DrcRule.id`), and `commit` (the
+upstream commit/tag the value was verified against, when pinned).
+
+**Distinct from the existing [`DrcRule.scope`](../../src/klayout_tools/decks/__init__.py)
+field** (issue #566, see "`coverage.deck_scope`" above): `scope` is
+coarser and deck-level-aggregated — a DRM section number or rule-id-family
+prefix *shared by every rule* transcribed from it, rolled up into
+`coverage.deck_scope` so a caller can diff "what sections does this deck
+claim" against the DRM's own table of contents. `provenance` is **per-rule
+and exact** — the one specific file and official rule id *this individual
+rule* came from, with no deck-wide aggregation. Many rules sharing one
+`scope` value each carry a different `provenance.rule_id` (e.g. gf180mcu's
+`metal1.width.1`/`metal2.width.1`/`metal3.width.1`/`metal5.width.1` all
+share `scope="7.13 Metaln"` but each cites the DRM's own `"Mn.1"` row for
+their own metal level). `provenance` is not (yet) surfaced in `klt drc`'s
+JSON output — it lives on `DrcRule` itself, queryable by a caller that
+imports `klayout_tools.decks` directly (e.g. a coverage-audit script), the
+same way `scope` was before `coverage.deck_scope` aggregated it.
+
+As of this issue, `provenance` is populated only for the 37 piloted
+width/space rules; every other rule in both decks leaves it `None` (the
+default) — an unpopulated field, not a claim that no provenance exists (the
+prose citation in each rule's own inline comment remains the record for
+those rules, exactly as before this field existed).
+
+### The golden-pair manifest (`tests/golden_deck/`)
+
+A declarative, rule-id-keyed fixture manifest — one `"violate"` and one
+`"clean"` tiny-layout spec per piloted width/space rule,
+`tests/golden_deck/<deck>/manifest.json` (`sky130`/`gf180mcu`) — formalising
+the informal `_violation`/`_clean` test-function pairs `tests/test_drc.py`
+already carried for some of these rules into a single, coverage-checked
+artifact (`tests/test_golden_deck.py` asserts every piloted rule has both).
+Regenerated deterministically from each rule's own `layer`/`threshold_dbu`
+via `tests/golden_deck/generate_golden_deck.py` — see
+`tests/golden_deck/README.md` for the manifest schema, the regeneration
+workflow, and the sky130 native-deck (`--engine klayout`) cross-check
+results this issue ran against a real `sky130A.lydrc`. gf180mcu's own
+`--engine klayout` cross-check is deferred, matching this section's
+existing "no single runnable native deck" limitation above — the manifest
+itself still exists and is coverage-checked for gf180mcu, only the
+native-deck cross-check tier is sky130-only.
 
 ## Exit codes
 
