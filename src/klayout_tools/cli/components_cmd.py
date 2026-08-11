@@ -17,10 +17,9 @@ Exit codes (see ``docs/cli/components.md`` for the full table):
 from __future__ import annotations
 
 import argparse
-import json
-import os
 
 from ..components import ComponentsError, run_components_report
+from ._parsing import load_json_path_or_inline, load_region
 from .output import emit_error, emit_success, render_table
 
 
@@ -54,29 +53,7 @@ def _load_json_array(value: str, flag: str) -> list:
     JSON array: a path to a JSON file, or an inline JSON string -- the same
     "path-or-inline-JSON" convention ``klt ring-check --layers`` uses.
     """
-    if os.path.isfile(value):
-        try:
-            with open(value, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except OSError as exc:
-            raise ComponentsError(
-                f"could not read {flag} file '{value}': {exc}"
-            ) from exc
-        except json.JSONDecodeError as exc:
-            raise ComponentsError(
-                f"{flag} file '{value}' is not valid JSON: {exc}"
-            ) from exc
-    else:
-        try:
-            data = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ComponentsError(
-                f"{flag} must be a path to a JSON file or an inline JSON array: {exc}"
-            ) from exc
-
-    if not isinstance(data, list):
-        raise ComponentsError(f"{flag} must decode to a JSON array")
-    return data
+    return load_json_path_or_inline(value, flag, ComponentsError)
 
 
 def _load_region(value: str | None) -> tuple[float, float, float, float] | None:
@@ -84,37 +61,7 @@ def _load_region(value: str | None) -> tuple[float, float, float, float] | None:
     ``(left, bottom, right, top)`` crop window, or ``None`` when omitted --
     identical convention to ``klt ring-check --region``.
     """
-    if value is None:
-        return None
-
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise ComponentsError(
-            "--region must be an inline JSON array of four numbers "
-            f"[left, bottom, right, top] in micrometres: {exc}"
-        ) from exc
-
-    if (
-        not isinstance(data, list)
-        or len(data) != 4
-        or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in data
-        )
-    ):
-        raise ComponentsError(
-            "--region must be a JSON array of four numbers "
-            f"[left, bottom, right, top] in micrometres, got {data!r}"
-        )
-
-    left, bottom, right, top = (float(v) for v in data)
-    if right <= left or top <= bottom:
-        raise ComponentsError(
-            "--region must have right > left and top > bottom, got "
-            f"[{left}, {bottom}, {right}, {top}]"
-        )
-
-    return (left, bottom, right, top)
+    return load_region(value, ComponentsError)
 
 
 def _print_text(report: dict) -> None:
