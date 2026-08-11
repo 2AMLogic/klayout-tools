@@ -5880,6 +5880,7 @@ def test_parasitics_summary_block_shape(tmp_path):
     for entry in para["nets"]:
         assert set(entry) == {
             "net",
+            "net_id",
             "resistance_ohm",
             "capacitance_ff",
             "hub_net",
@@ -6377,6 +6378,159 @@ def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
     netlist_text = Path(report["netlist_path"]).read_text()
     r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
     assert len(r_lines) == report["parasitics"]["r_count"]
+
+
+# --------------------------------------------------------------------------- #
+# Same-label, distinct-net collision during parasitic injection (issue #765)
+# --------------------------------------------------------------------------- #
+
+
+def _make_two_disjoint_nmos_shared_label_layout() -> kdb.Layout:
+    """Two independent, non-touching NMOS devices on sky130 deck layers, like
+    :func:`_make_two_nmos_layout`, but both devices' source terminals carry
+    the *identical* layout label (``VGND``) -- two genuinely distinct,
+    electrically unconnected nets sharing one name, the exact shape issue
+    #765 reports (105 un-strapped ``VGND`` islands on the ``gcd`` corpus, all
+    sharing one label with nothing tying them together)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    def build_nmos(x0, gate_label, drain_label, source_label):
+        draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing (active)
+        draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1300))  # poly.drawing
+        draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
+        draw(67, 20, kdb.Box(x0, 200, x0 + 400, 800))  # li1 (S)
+        draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D)
+        draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D)
+        draw(66, 44, kdb.Box(x0 + 900, 1000, x0 + 1100, 1200))  # licon1 (G)
+        draw(67, 20, kdb.Box(x0 + 850, 950, x0 + 1150, 1250))  # li1 (G)
+        label(67, 5, source_label, x0 + 200, 500)
+        label(67, 5, drain_label, x0 + 1800, 500)
+        label(67, 5, gate_label, x0 + 1000, 1100)
+
+    # Both sources are labelled "VGND" -- geometrically disjoint (x=0 vs.
+    # x=6000, nothing straps them), so extraction sees two distinct nets
+    # that happen to share a name.
+    build_nmos(0, "AG", "AD", "VGND")
+    build_nmos(6000, "BG", "BD", "VGND")
+    return layout
+
+
+def test_parasitics_disjoint_same_label_nets_get_distinct_instance_names(tmp_path):
+    """Regression (issue #765): two genuinely distinct nets sharing the same
+    layout label (e.g. un-strapped `VGND` islands) must not collapse onto
+    the same net object during parasitic injection.
+
+    Before the fix, `_inject_parasitics()` resolved each `parasitics.nets[]`
+    entry back to a net object via a name-keyed dict (last-write-wins), so
+    every same-named entry resolved to whichever net object was inserted
+    last. Only that one net's terminal actually moved onto a star leg; every
+    other same-named entry found no terminals left, fell back to the
+    Gamma-shunt, and emitted a device instance name derived from the same
+    (colliding) net string -- duplicate SPICE instance names, and R/C
+    computed for one island silently attached to a different island's
+    device terminals."""
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "two_vgnd.spice"), parasitics=True
+    )
+
+    # Two genuinely distinct one-terminal nets both carry the "VGND" label
+    # in the schematic-equivalent view (built before parasitics injection).
+    vgnd_nets = [n for n in report["nets"] if n["name"] == "VGND"]
+    assert len(vgnd_nets) == 2
+    assert all(n["device_count"] == 1 for n in vgnd_nets)
+
+    para_nets = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(para_nets) == 2
+    # Additive `net_id` disambiguates the two same-named entries (issue
+    # #765) -- a caller can now build `{entry["net_id"]: entry}` without
+    # losing one of them.
+    assert para_nets[0]["net_id"] != para_nets[1]["net_id"]
+    assert isinstance(para_nets[0]["net_id"], int)
+
+    # Each entry keeps its own real terminal (its own island's nmos source)
+    # -- neither reports the other island's device, and neither degenerates
+    # to the zero-terminal Gamma-shunt fallback despite sharing a net name.
+    for entry in para_nets:
+        assert len(entry["terminals"]) == 1
+        assert entry["hub_net"] == "VGND"
+        assert entry["capacitance_ff"] > 0.0
+        assert entry["resistance_ohm"] > 0.0
+    owning_devices = {entry["terminals"][0]["device"] for entry in para_nets}
+    assert len(owning_devices) == 2  # distinct nmos devices, not the same one twice
+
+    # The written SPICE netlist emits no duplicate device instance names --
+    # the originally-reported symptom (issue #765).
+    netlist_text = Path(report["netlist_path"]).read_text()
+    instance_names = [
+        ln.split()[0] for ln in netlist_text.splitlines() if ln[:1] in ("R", "C")
+    ]
+    assert len(instance_names) == len(set(instance_names))
+    # And at least one pair of instance names is exactly the "_dupN"
+    # disambiguation this fix introduces -- confirming the collision was
+    # actually exercised, not merely absent by construction.
+    assert any(name.endswith("_dup1") for name in instance_names)
+
+
+def test_parasitics_three_disjoint_same_label_nets_all_get_distinct_names(tmp_path):
+    """Extends the regression above to three colliding same-named nets (not
+    just two), each with its own device terminal -- confirming the fix
+    scales past a single pairwise collision, closer to the real corpus's
+    105-way `VGND` collision (issue #765)."""
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    top = layout.cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    x0 = 12000
+    draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))
+    draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1300))
+    draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))
+    draw(67, 20, kdb.Box(x0, 200, x0 + 400, 800))
+    draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))
+    draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))
+    draw(66, 44, kdb.Box(x0 + 900, 1000, x0 + 1100, 1200))
+    draw(67, 20, kdb.Box(x0 + 850, 950, x0 + 1150, 1250))
+    label(67, 5, "VGND", x0 + 200, 500)
+    label(67, 5, "CD", x0 + 1800, 500)
+    label(67, 5, "CG", x0 + 1000, 1100)
+
+    path = _write_gds(layout, tmp_path / "three_vgnd.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "three_vgnd.spice"), parasitics=True
+    )
+
+    para_nets = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(para_nets) == 3
+    assert len({n["net_id"] for n in para_nets}) == 3  # all distinct
+    for entry in para_nets:
+        assert entry["hub_net"] == "VGND"
+        assert len(entry["terminals"]) == 1
+    owning_devices = {entry["terminals"][0]["device"] for entry in para_nets}
+    assert len(owning_devices) == 3  # three distinct nmos devices
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    instance_names = [
+        ln.split()[0] for ln in netlist_text.splitlines() if ln[:1] in ("R", "C")
+    ]
+    assert len(instance_names) == len(set(instance_names))
+    assert any(name.endswith("_dup2") for name in instance_names)
 
 
 # --------------------------------------------------------------------------- #
