@@ -914,16 +914,27 @@ EXTRACTION_DECK = ExtractionDeck(
     # conflict (see `ExtractionDeck.device_recognition_only_layers`'s
     # docstring): the bottom plate now genuinely merges with the surrounding
     # met3/met4 routing net the way real silicon does, on top of still being
-    # recognised as a MiM-cap terminal. No `top_plate_via`/
-    # `top_plate_via_metal`: sky130's real MiM stacks do have a landing via
-    # for each (`sky130.lvs`'s `connect(capm, via3)` / `connect(capm2,
-    # via4)`, see the module docstring's provenance note) -- `via3`/`via4`
-    # are now tracked `vias` entries too (issue #619), but wiring the
-    # top-plate mark layer itself to them is a separate, not-yet-modelled
-    # feature this issue does not add; see `CapacitorDevice`'s "Known
-    # limitation". No `bottom_plate_oversize_um` -- unlike gf180mcu's MiM
-    # stack, sky130's bottom plate is simply the conductor the purpose-drawn
-    # top-plate layer sits over, no "virtual bottom plate" derivation needed.
+    # recognised as a MiM-cap terminal.
+    #
+    # `top_plate_via`/`top_plate_via_metal` (issue #775, closing the gap
+    # #621/#619 opened: extending `metals`/`vias` to the full li1-met5 stack
+    # made met4/met5/via3/via4 tracked entries, the precondition these two
+    # fields need, but nobody had actually set them yet -- so a MiM cap's top
+    # plate stayed unroutable without either a false short or an orphaned
+    # net, exactly issue #364's own regression, just never invoked for this
+    # PDK) now name each stack's real top-plate via, transcribed from the
+    # same `sky130.lvs` `connect(capm, via3)` / `connect(capm2, via4)` lines
+    # quoted in the module docstring's provenance note above: `via3.drawing`
+    # (70/44, met3<->met4) lands the met3/`capm` stack's top plate on
+    # `met4.drawing` (71/20); `via4.drawing` (71/44, met4<->met5) lands the
+    # met4/`capm2` stack's top plate on `met5.drawing` (72/20). Both via/metal
+    # pairs are already tracked `vias`/`metals` entries above (issue #619),
+    # so this is a config-only change -- `extract.py`'s existing
+    # `top_plate_via`/`top_plate_via_metal` wiring (issue #314) plus its
+    # false-short exclusion (issue #364) does the rest. No
+    # `bottom_plate_oversize_um` -- unlike gf180mcu's MiM stack, sky130's
+    # bottom plate is simply the conductor the purpose-drawn top-plate layer
+    # sits over, no "virtual bottom plate" derivation needed.
     capacitors=(
         CapacitorDevice(
             name="sky130_fd_pr__model__cap_mim",
@@ -932,6 +943,8 @@ EXTRACTION_DECK = ExtractionDeck(
             # tt-corner camimc/cpmimc, see provenance note above (issue #512):
             area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2 (camimc, unchanged from LVS)
             perim_cap_f_um=1.9e-16,  # 0.19 fF/um (cpmimc, previously unmodelled)
+            top_plate_via=(70, 44),  # via3.drawing (met3<->met4)
+            top_plate_via_metal=(71, 20),  # met4.drawing
         ),
         CapacitorDevice(
             name="sky130_fd_pr__model__cap_mim_m4",
@@ -940,6 +953,8 @@ EXTRACTION_DECK = ExtractionDeck(
             # tt-corner camimc/cpmimc, see provenance note above (issue #512):
             area_cap_f_um2=2.0e-15,  # 2.0 fF/um^2 (camimc, unchanged from LVS)
             perim_cap_f_um=1.9e-16,  # 0.19 fF/um (cpmimc, previously unmodelled)
+            top_plate_via=(71, 44),  # via4.drawing (met4<->met5)
+            top_plate_via_metal=(72, 20),  # met5.drawing
         ),
     ),
     # Drawn poly precision resistors (issue #222, extended by #299): the

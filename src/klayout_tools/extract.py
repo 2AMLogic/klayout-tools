@@ -2686,10 +2686,32 @@ def _exclude_capacitor_top_via_overlap(
         top_via_region = _region(layout, top_cell, capacitor.top_plate_via)
         if top_via_region.is_empty():
             continue
-        _top_region, bottom_region = _capacitor_plate_regions(
+        top_region, bottom_region = _capacitor_plate_regions(
             layout, top_cell, capacitor
         )
-        if bottom_region.is_empty():
+        # Same "no PDK cap marker drawn anywhere on this layout" guard the
+        # main capacitor-recognition loop below applies before registering a
+        # device (issue #775 regression finding): for a deck whose
+        # `bottom_plate` is *not* clipped to the top plate's own footprint
+        # (`bottom_plate_oversize_um == 0`, e.g. sky130's MiM stacks --
+        # `_capacitor_plate_regions`'s zero-oversize branch returns the
+        # bottom conductor's *entire* drawn region, unscoped by whether any
+        # top-plate mark exists at all), `bottom_region` stays non-empty even
+        # when this capacitor's `top_plate` marker is never drawn on the
+        # layout -- the overwhelmingly common case for any digital/macro
+        # design that draws ordinary routing on the declared `bottom_plate`
+        # metal but no MiM cap. Without this check, `top_via_region` (every
+        # shape on the declared `top_plate_via` layer, e.g. sky130's real
+        # `via3`/`via4` routing vias used throughout ordinary signal
+        # routing) intersected with that unscoped, chip-wide `bottom_region`
+        # excludes essentially every legitimate via on that layer from the
+        # deck's generic `vias[]` connectivity -- a false disconnect across
+        # the whole design, not the narrow false-short exclusion this
+        # function exists to apply. gf180mcu's stack never hit this because
+        # its nonzero `bottom_plate_oversize_um` branch already derives
+        # `bottom_region` from `interacting(top_region)`, which is itself
+        # empty whenever `top_region` is.
+        if top_region.is_empty() or bottom_region.is_empty():
             continue
         overlap = top_via_region & bottom_region
         if overlap.is_empty():

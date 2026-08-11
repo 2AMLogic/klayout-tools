@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — sky130's two curated MiM-capacitor entries (`klt extract`'s
+  `sky130_fd_pr__model__cap_mim`/`..._cap_mim_m4`) now declare
+  `top_plate_via`/`top_plate_via_metal` (`via3`→`met4` for the met3/`capm`
+  stack, `via4`→`met5` for the met4/`capm2` stack, issue #775) — the same
+  mechanism gf180mcu's MiM stack already used (issues #314/#364). Before
+  this, a MiM cap's top plate drawn with a real, DRM-legal landing via was
+  either read as a false short between the two plates (the via's overlap
+  with the bottom plate merged into the deck's generic per-layer
+  connectivity) or, with no via declared at all, left the top plate an
+  orphaned, single-terminal net — neither is a usable two-terminal
+  capacitor for `klt lvs`. Fixed alongside a latent bug in the shared
+  `#364` false-short exclusion this change surfaced: for a deck whose
+  `bottom_plate` is not clipped to the top plate's own footprint
+  (`bottom_plate_oversize_um == 0`, sky130's case), the exclusion now also
+  skips capacitors whose `top_plate` marker is not drawn anywhere on the
+  layout — without this, declaring `top_plate_via` on a widely-used via
+  layer (`via3`/`via4`, ordinary sky130 signal routing) excluded nearly
+  every legitimate via on that layer from connectivity in any digital/macro
+  design that draws no MiM cap at all, a false disconnect across the whole
+  design. gf180mcu's stack never hit this because its nonzero
+  `bottom_plate_oversize_um` derivation already gates `bottom_region` on
+  `top_region`'s presence.
+
 - 2026-08-11 — A merged-label net (two drawn text labels shorted onto one
   electrical net, issue #470) now has exactly one spelling everywhere `klt
   extract`/`klt lvs` name it (#696). KLayout's own `Net.expanded_name()`

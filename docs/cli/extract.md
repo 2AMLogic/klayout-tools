@@ -538,28 +538,25 @@ Two consequences worth knowing:
     declare `Via4`/`Metal5` (the official deck's own `main.drc` connectivity,
     `top_via = via4` landing on `top_metal = metal5` for this stack), so the
     top terminal is tied in the same way.
-  - **sky130**: the bottom plate is wired, the top plate is not. `met3`/
-    `met4` (the two stacks' `bottom_plate` layers) became two of this
-    curated deck's own `metals` connectivity levels when `metals` grew from
-    `li1`/`met1`/`met2` to the full `li1`-through-`met5` stack (issue #619,
-    closing the gap that left `_ROUTING_LAYER_RANGE`'s promised `met1-met5`
-    signal-routing range one level short of what this deck could actually
-    merge), so each bottom plate now ties straight into the real met3/met4
-    routing net around it — the same "bottom plate matches a tracked
-    `metals` layer" mechanism gf180mcu's `Metal4` bottom plate already used.
-    While the real PDK's MiM stacks do have a landing via for the top plate
-    too (`sky130.lvs`'s `connect(capm, via3)` / `connect(capm2, via4)`), and
-    `via3`/`via4` are now tracked `vias` entries as of the same #619
-    extension, wiring the top-plate mark layer itself through them is a
-    separate, not-yet-modelled feature — `CapacitorDevice.top_plate_via` is
-    still left unset here. sky130's top-plate terminal therefore remains its
-    own isolated, self-connected connectivity node exactly as before #314:
-    multiple top-plate polygons that touch merge into one net (e.g. a shared
-    top plate across several caps), but the top plate's net does not extend
-    into any real routing. (A layer serving both a `metals` connectivity role
-    and a device-recognition role simultaneously — as met3/met4 now do — is
-    not a conflict; see "Device-recognition-only layers" below for the
-    reporting distinction this dual role motivated.)
+  - **sky130**: both plates are wired. `met3`/`met4` (the two stacks'
+    `bottom_plate` layers) became two of this curated deck's own `metals`
+    connectivity levels when `metals` grew from `li1`/`met1`/`met2` to the
+    full `li1`-through-`met5` stack (issue #619, closing the gap that left
+    `_ROUTING_LAYER_RANGE`'s promised `met1-met5` signal-routing range one
+    level short of what this deck could actually merge), so each bottom
+    plate ties straight into the real met3/met4 routing net around it — the
+    same "bottom plate matches a tracked `metals` layer" mechanism
+    gf180mcu's `Metal4` bottom plate already used. The real PDK's MiM stacks
+    also have a landing via for the top plate (`sky130.lvs`'s `connect(capm,
+    via3)` / `connect(capm2, via4)`); once #619 made `via3`/`via4`/`met4`/
+    `met5` tracked `vias`/`metals` entries, issue #775 set
+    `top_plate_via`/`top_plate_via_metal` on both curated entries
+    (`via3`→`met4` for the met3/`capm` stack, `via4`→`met5` for the
+    met4/`capm2` stack) — the same `top_plate_via`/`top_plate_via_metal`
+    mechanism gf180mcu's stack already used. (A layer serving both a
+    `metals` connectivity role and a device-recognition role simultaneously
+    — as met3/met4 now do — is not a conflict; see "Device-recognition-only
+    layers" below for the reporting distinction this dual role motivated.)
 
   In every case the *device* itself (a capacitor of the correct value
   between two correctly-shaped plates) is recognised identically; only an
