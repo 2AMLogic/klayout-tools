@@ -74,7 +74,7 @@ concrete precedent.
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
-deck — currently `drc`, `lvs`, `extract`, `sim`, and `precheck` — emit a
+deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, and `precheck` — emit a
 shared top-level `provenance` block so a "clean"/"pass"/"match" result is
 auditable and reproducible later. Two runs made against different deck
 revisions or PDK releases are otherwise indistinguishable in the output, so a

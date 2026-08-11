@@ -18,6 +18,10 @@ directory has its own README, start there.
   their SPICE testbenches and corner lib; `generate.py` regenerates.
 - [`sim-remote/`](sim-remote/) — the same sim matrix run on the local and
   remote backends, side by side. See its README.
+- [`size/`](size/) — a `klt size` gm/Id sizing request plus the tiny
+  synthetic device library it sizes against (a bare SPICE `level=1` MOSFET
+  pair, deliberately not a real PDK deck — see its `generate.py` docstring);
+  `generate.py` regenerates both.
 - [`spec-review/`](spec-review/) — the spec-review skill applied to a draft
   block spec: input spec and resulting review. See its README.
 

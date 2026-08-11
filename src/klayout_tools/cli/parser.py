@@ -35,6 +35,7 @@ from . import (
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
+    size_cmd,
     socket_check_cmd,
     stats_cmd,
     synthesize_cmd,
@@ -1328,6 +1329,43 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
+
+    size_parser = subparsers.add_parser(
+        "size",
+        help="solve a single device's operating point from a gm/Id target (ngspice)",
+        description=(
+            "Solve a single device's channel width from a gm/Id target and "
+            "a current budget declared by a request JSON file, scoring "
+            "every candidate against the real PDK models with ngspice -- "
+            "never a closed-form surrogate as the final word. Phase 0 of "
+            "the analog-sizing epic (#705); see docs/cli/size.md for the "
+            "request/response contract."
+        ),
+    )
+    size_parser.add_argument("request", help="path to a klt size request JSON file")
+    size_parser.add_argument(
+        "-o",
+        "--outdir",
+        default=None,
+        help=(
+            "override where the generated decks/logs are written when the "
+            "request sets options.keep_artifacts "
+            "(default: a `.klt/size/` directory next to the request file)"
+        ),
+    )
+    size_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "wall-clock budget in seconds for each ngspice invocation "
+            "(default: 180, or the request's `options.timeout_s`); "
+            "overrides the request field when given. See docs/cli/size.md."
+        ),
+    )
+    _add_format_arg(size_parser)
+    size_parser.set_defaults(func=size_cmd.run)
 
     report_parser = subparsers.add_parser(
         "report",

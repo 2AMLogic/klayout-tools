@@ -195,7 +195,7 @@ that command's own doc rather than re-describing it.
 | Output artifact | `klt.pipeline.sizing/1` (proposed): device parameter set (W/L, multiplier, bias currents, passive values) bound to the topology, plus the last sim result that produced it. |
 | Entry criteria | Topology selected (S4). |
 | Exit criteria | Loop A's convergence criterion (§1): every declared measurement passes across the declared corner matrix for a stable candidate. |
-| `klt` verbs | `klt sim` for corner feedback (schematic-level passes of Loop A, §1); no dedicated sizing/optimization verb exists — agent-side by recorded decision (below), not by omission. |
+| `klt` verbs | `klt sim` for corner feedback (schematic-level passes of Loop A, §1); `klt size` (Epic #705 Phase 0, issue #721) for the single-device gm/Id sub-case — solving one device's width from a gm/Id target and current budget, `ngspice`-scored. A general multi-device parameter-optimizer verb still does not exist — the #310 decision below (agent-side, not by omission) stands for that broader case; #705 is that decision's re-trigger for the narrower single-device lookup, not a reversal of it. |
 | Failure modes | Loop A's stuck condition (§1: non-monotonic margins, unresolved tradeoff, oscillation); local optimum that clears every declared measurement but is fragile to a corner not swept (an incompleteness in S3, surfacing here). |
 
 **Recorded scope decision (#310, 2026-08-09): candidate proposal stays

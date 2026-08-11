@@ -41,6 +41,7 @@ docs/
     ring-check.md
     signoff.md
     sim.md
+    size.md
     socket-check.md
     stats.md
     synthesize.md
