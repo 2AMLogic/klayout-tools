@@ -16,10 +16,9 @@ Exit codes (see ``docs/cli/ring-check.md`` for the full table):
 from __future__ import annotations
 
 import argparse
-import json
-import os
 
 from ..ring_check import RingCheckError, run_ring_check
+from ._parsing import load_json_path_or_inline, load_region, parse_layer_pairs
 from .output import emit_error, emit_success, render_table
 
 EXIT_CONTINUOUS = 0
@@ -53,47 +52,13 @@ def _load_layers(value: str) -> list[tuple[int, int]]:
     ``[[33, 0], [66, 44]]`` -- the same "path-or-inline-JSON array of
     [layer, datatype] pairs" convention ``klt precheck --allowed-layers`` uses.
     """
-    if os.path.isfile(value):
-        try:
-            with open(value, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except OSError as exc:
-            raise RingCheckError(
-                f"could not read --layers file '{value}': {exc}"
-            ) from exc
-        except json.JSONDecodeError as exc:
-            raise RingCheckError(
-                f"--layers file '{value}' is not valid JSON: {exc}"
-            ) from exc
-    else:
-        try:
-            data = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise RingCheckError(
-                "--layers must be a path to a JSON file or an inline JSON "
-                f"array of [layer, datatype] pairs: {exc}"
-            ) from exc
-
-    if not isinstance(data, list):
-        raise RingCheckError("--layers must decode to a JSON array")
-
-    layers: list[tuple[int, int]] = []
-    for entry in data:
-        if (
-            not isinstance(entry, list)
-            or len(entry) != 2
-            or not all(isinstance(v, int) and not isinstance(v, bool) for v in entry)
-        ):
-            raise RingCheckError(
-                "--layers entries must each be a [layer, datatype] pair of "
-                f"integers, got {entry!r}"
-            )
-        layers.append((entry[0], entry[1]))
-
-    if not layers:
-        raise RingCheckError("--layers must contain at least one layer")
-
-    return layers
+    data = load_json_path_or_inline(
+        value,
+        "--layers",
+        RingCheckError,
+        array_kind="array of [layer, datatype] pairs",
+    )
+    return parse_layer_pairs(data, "--layers", RingCheckError)
 
 
 def _load_region(value: str | None) -> tuple[float, float, float, float] | None:
@@ -104,37 +69,7 @@ def _load_region(value: str | None) -> tuple[float, float, float, float] | None:
     ``[0, 0, 100, 100]``. Omit it to check every shape on the layer set (the
     common case: a stream whose only geometry on those layers is the ring).
     """
-    if value is None:
-        return None
-
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise RingCheckError(
-            "--region must be an inline JSON array of four numbers "
-            f"[left, bottom, right, top] in micrometres: {exc}"
-        ) from exc
-
-    if (
-        not isinstance(data, list)
-        or len(data) != 4
-        or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in data
-        )
-    ):
-        raise RingCheckError(
-            "--region must be a JSON array of four numbers "
-            f"[left, bottom, right, top] in micrometres, got {data!r}"
-        )
-
-    left, bottom, right, top = (float(v) for v in data)
-    if right <= left or top <= bottom:
-        raise RingCheckError(
-            "--region must have right > left and top > bottom, got "
-            f"[{left}, {bottom}, {right}, {top}]"
-        )
-
-    return (left, bottom, right, top)
+    return load_region(value, RingCheckError)
 
 
 def _print_text(report: dict) -> None:

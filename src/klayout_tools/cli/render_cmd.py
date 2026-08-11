@@ -1,10 +1,9 @@
 """``klt render`` command: serialise the render report as text or JSON."""
 
 import argparse
-import json
-import os
 
 from ..render import RenderError, render_report
+from ._parsing import load_json_path_or_inline, parse_layer_pairs
 from .output import emit_error, emit_success
 
 
@@ -42,45 +41,13 @@ def _load_layers(value: str | None) -> list[tuple[int, int]] | None:
     if value is None:
         return None
 
-    if os.path.isfile(value):
-        try:
-            with open(value, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except OSError as exc:
-            raise RenderError(f"could not read --layers file '{value}': {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise RenderError(
-                f"--layers file '{value}' is not valid JSON: {exc}"
-            ) from exc
-    else:
-        try:
-            data = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise RenderError(
-                "--layers must be a path to a JSON file or an inline JSON "
-                f"array of [layer, datatype] pairs: {exc}"
-            ) from exc
-
-    if not isinstance(data, list):
-        raise RenderError("--layers must decode to a JSON array")
-
-    layers: list[tuple[int, int]] = []
-    for entry in data:
-        if (
-            not isinstance(entry, list)
-            or len(entry) != 2
-            or not all(isinstance(v, int) and not isinstance(v, bool) for v in entry)
-        ):
-            raise RenderError(
-                "--layers entries must each be a [layer, datatype] pair of "
-                f"integers, got {entry!r}"
-            )
-        layers.append((entry[0], entry[1]))
-
-    if not layers:
-        raise RenderError("--layers must contain at least one layer")
-
-    return layers
+    data = load_json_path_or_inline(
+        value,
+        "--layers",
+        RenderError,
+        array_kind="array of [layer, datatype] pairs",
+    )
+    return parse_layer_pairs(data, "--layers", RenderError)
 
 
 def _load_bbox(value: str | None) -> tuple[float, float, float, float] | None:
