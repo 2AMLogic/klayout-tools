@@ -62,6 +62,7 @@ docs/
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md
     pdk-device-corner-metadata-spike.md
+    place-and-route-improvements-survey.md
     remote-job-description.md
     remote-sim-backend-spike.md
     sc-leflib-evaluation.md
