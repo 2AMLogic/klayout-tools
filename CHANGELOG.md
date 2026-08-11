@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — A merged-label net (two drawn text labels shorted onto one
+  electrical net, issue #470) now has exactly one spelling everywhere `klt
+  extract`/`klt lvs` name it (#696). KLayout's own `Net.expanded_name()`
+  joins the labels with a comma (`Y,Y2`) — but a SPICE node token cannot
+  carry a comma, so the *written netlist*'s `.SUBCKT`/instance lines already
+  used the `|`-joined escape (`Y|Y2`) `NetlistSpiceWriter` writes instead.
+  Every net name this repo put into JSON (`klt extract`'s `nets[].name`,
+  `devices[].nets[...]`, `merged_net_labels[].net`, `parasitics.nets[].net`;
+  `klt lvs`'s `net_correspondence[]`/`mismatches[].net`) used the raw,
+  un-escaped comma form, so the same net was spelled two different ways
+  depending which artifact you read it from — a caller joining `klt
+  extract`'s JSON to its own written netlist by net name hit a `KeyError` on
+  exactly the nets where two labels legitimately named one node. Every net
+  name this repo reports is now rewritten through a shared
+  `spice_safe_net_name` helper to the netlist's own `|`-joined spelling
+  before it reaches the response, so it is a usable key into the netlist
+  rather than a separately-spelled alias of it. No `schema_version` bump on
+  either command — field names and types are unchanged; only the string
+  *value* of an already-documented field changes, and only for the narrow
+  case of a label-merged net. See docs/cli/extract.md's "Merged net labels"
+  and docs/cli/lvs.md's `net_correspondence[]` entries for the documented
+  spelling.
+
 - 2026-08-11 — `klt gen-compose`'s `placement.strategy: "explicit"` path now
   warns when a block is placed closer to a neighbour than that neighbour's
   own declared `generator_report.drc_hints.min_spacing_um` (#692). Before

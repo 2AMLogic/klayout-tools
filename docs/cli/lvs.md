@@ -579,7 +579,7 @@ isomorphism reimplemented downstream.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `layout` | string | The layout net's name (`Net.expanded_name()` — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases joined, e.g. `"VPWR|VDD"`). |
+| `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
 | `reference` | string | The paired reference net's name, same convention. |
 | `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
 

@@ -123,6 +123,7 @@ from .extract import (
     ExtractError,
     apply_resistor_fixed_offset_corrections,
     extract_netlist_from_layout,
+    spice_safe_net_name,
 )
 
 if TYPE_CHECKING:
@@ -1662,13 +1663,26 @@ def _apply_reference_device_bulk(
 
 
 def _name_or_none(obj: Any) -> str | None:
+    """The reported name of a KLayout ``Net``/``Device`` (or a test double
+    implementing the same protocol), or ``None`` for a missing side.
+
+    A ``Net``'s ``expanded_name()`` (the branch every real net/device object
+    hits) is passed through :func:`spice_safe_net_name` (issue #696) so a
+    label-merged net's name matches the exact spelling `klt extract`'s
+    ``nets[]``/``merged_net_labels[]`` and the written SPICE netlist already
+    use (`|`-joined) -- not KLayout's own un-escaped, comma-joined
+    ``Net.expanded_name()`` string. A no-op for every other name (device
+    names, and the ``.name`` fallback below never carry a comma in
+    practice).
+    """
     if obj is None:
         return None
     if hasattr(obj, "expanded_name"):
-        return obj.expanded_name()
+        return spice_safe_net_name(obj.expanded_name())
     if hasattr(obj, "name"):
         name = obj.name
-        return name() if callable(name) else name
+        name = name() if callable(name) else name
+        return spice_safe_net_name(name) if name is not None else None
     return None
 
 
