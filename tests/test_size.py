@@ -1115,3 +1115,329 @@ def test_cli_exit_code_error_status_from_non_sizing_corner(tmp_path, monkeypatch
     _install_synthetic_ngspice_stub(monkeypatch, error_temps={125.0})
 
     assert main(["size", str(request), "--format", "json"]) == 4
+
+
+# --------------------------------------------------------------------------- #
+# worst_case_margin objective (issue #769)
+# --------------------------------------------------------------------------- #
+
+
+def test_interp_gm_id_at_width_interpolates_and_clamps():
+    points = [
+        {"w_um": 1.0, "gm_id": 4.0},
+        {"w_um": 4.0, "gm_id": 10.0},
+    ]
+    # Exact grid points.
+    assert size._interp_gm_id_at_width(points, 1.0) == pytest.approx(4.0)
+    assert size._interp_gm_id_at_width(points, 4.0) == pytest.approx(10.0)
+    # Interior point: linear in ln(w). w=2 is the geometric mean of 1 and 4
+    # (ln(2) is exactly halfway between ln(1) and ln(4)), so gm_id should be
+    # exactly halfway between 4.0 and 10.0.
+    assert size._interp_gm_id_at_width(points, 2.0) == pytest.approx(7.0, rel=1e-6)
+    # Out of range clamps to the nearest endpoint rather than extrapolating.
+    assert size._interp_gm_id_at_width(points, 0.1) == pytest.approx(4.0)
+    assert size._interp_gm_id_at_width(points, 100.0) == pytest.approx(10.0)
+
+
+def test_parse_objective_defaults_to_sizing_corner():
+    assert size._parse_objective({}) == "sizing_corner"
+    assert size._parse_objective({"corner": {}}) == "sizing_corner"
+    assert size._parse_objective({"corners": {}}) == "sizing_corner"
+
+
+def test_parse_objective_reads_corners_block():
+    request = {"corners": {"objective": "worst_case_margin"}}
+    assert size._parse_objective(request) == "worst_case_margin"
+
+
+def test_parse_objective_invalid_raises():
+    request = {"corners": {"objective": "bogus"}}
+    with pytest.raises(size.SizeError, match="corners.objective"):
+        size._parse_objective(request)
+
+
+def test_run_size_worst_case_margin_invalid_objective_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+                "objective": "bogus",
+            },
+        ),
+    )
+
+    with pytest.raises(size.SizeError, match="corners.objective"):
+        size.run_size(str(request))
+
+
+def test_run_size_worst_case_margin_reports_corners_block(tmp_path, monkeypatch):
+    """The `worst_case_margin` objective echoes itself, populates
+    `corners.worst_case`, and reports a full-shaped result (operating point
+    + margins) per declared corner -- issue #769's "validated in ngspice
+    across the full corner set with per-corner margins reported"."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [-40, 27, 125],
+                "vdd_v": 1.8,
+                "objective": "worst_case_margin",
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    corners = report["corners"]
+    assert corners["objective"] == "worst_case_margin"
+    assert len(corners["declared"]) == 3
+    assert len(corners["results"]) == 3
+    assert corners["worst_case"] in {r["corner_id"] for r in corners["results"]}
+
+    for result in corners["results"]:
+        assert result["status"] in {"pass", "fail"}
+        assert result["operating_point"] is not None
+        assert result["margins"] is not None
+        assert isinstance(result["margins"]["gm_id_rel_error"], float)
+
+    # Top-level fields mirror the worst-margin corner's own confirmed result
+    # under this objective (not the declared sizing corner, unlike the
+    # default "sizing_corner" objective).
+    worst_result = next(
+        r for r in corners["results"] if r["corner_id"] == corners["worst_case"]
+    )
+    assert report["operating_point"] == worst_result["operating_point"]
+    assert report["margins"] == worst_result["margins"]
+    assert report["corner"]["corner_id"] == corners["worst_case"]
+
+    assert report["method"]["name"].startswith("worst-corner margin")
+    assert report["method"]["bracket_w_um"] is None
+    assert report["method"]["interpolated_w_um"] is not None
+
+
+def test_run_size_worst_case_margin_reduces_worst_case_error_vs_sizing_corner(
+    tmp_path, monkeypatch
+):
+    """The whole point of the objective: across a wide PVT spread, the width
+    it converges to should do at least as well on the *worst* per-corner
+    margin as the default `sizing_corner` objective, which only ever
+    targets the nominal corner and lets the rest fall where they may."""
+    _write_models_lib(tmp_path)
+    corners_spec = {
+        "process": ["tt"],
+        "temperature_c": [-40, 27, 125],
+        "vdd_v": 1.8,
+    }
+
+    nominal_request = _write_request(
+        tmp_path,
+        _base_request(corner=None, corners=corners_spec),
+        name="nominal.json",
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+    nominal_report = size.run_size(str(nominal_request))
+    nominal_worst = max(
+        abs(r["margins"]["gm_id_rel_error"])
+        for r in nominal_report["corners"]["results"]
+    )
+
+    worst_case_request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={**corners_spec, "objective": "worst_case_margin"},
+        ),
+        name="worst_case.json",
+    )
+    worst_case_report = size.run_size(str(worst_case_request))
+    worst_case_worst = max(
+        abs(r["margins"]["gm_id_rel_error"])
+        for r in worst_case_report["corners"]["results"]
+    )
+
+    assert worst_case_worst <= nominal_worst + 1e-9
+
+
+def test_run_size_worst_case_margin_single_corner_matches_sizing_corner(
+    tmp_path, monkeypatch
+):
+    """A single declared corner makes the two objectives mathematically
+    equivalent (this module's own documented claim) -- verify the solved
+    gm/Id actually agrees closely, even though the search algorithms
+    differ."""
+    _write_models_lib(tmp_path)
+    corners_spec = {"process": ["tt"], "temperature_c": [27], "vdd_v": 1.8}
+
+    sizing_request = _write_request(
+        tmp_path,
+        _base_request(corner=None, corners=corners_spec),
+        name="sizing.json",
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+    sizing_report = size.run_size(str(sizing_request))
+
+    worst_case_request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={**corners_spec, "objective": "worst_case_margin"},
+        ),
+        name="worst_case.json",
+    )
+    worst_case_report = size.run_size(str(worst_case_request))
+
+    assert worst_case_report["operating_point"]["gm_id"] == pytest.approx(
+        sizing_report["operating_point"]["gm_id"], rel=1e-3
+    )
+    assert worst_case_report["operating_point"]["w_um"] == pytest.approx(
+        sizing_report["operating_point"]["w_um"], rel=1e-3
+    )
+
+
+def test_run_size_legacy_corner_unaffected_by_objective_feature(tmp_path, monkeypatch):
+    """Regression (issue #769 acceptance criterion): a request using the
+    original single-`corner` shape has no `objective` field to set at all,
+    so it is bit-for-bit identical to a `corners` request with exactly one
+    declared point and the (default) `sizing_corner` objective."""
+    _write_models_lib(tmp_path)
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    legacy_request = _write_request(tmp_path, _base_request(), name="legacy.json")
+    legacy_report = size.run_size(str(legacy_request))
+
+    corners_request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={"process": ["tt"], "temperature_c": [27], "vdd_v": 1.8},
+        ),
+        name="corners.json",
+    )
+    corners_report = size.run_size(str(corners_request))
+
+    assert legacy_report["operating_point"] == corners_report["operating_point"]
+    assert legacy_report["margins"] == corners_report["margins"]
+    assert legacy_report["status"] == corners_report["status"]
+    assert corners_report["corners"]["objective"] == "sizing_corner"
+
+
+def test_run_size_worst_case_margin_all_corners_sweep_error_reports_error(
+    tmp_path, monkeypatch
+):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+                "objective": "worst_case_margin",
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch, error_temps={27.0, 125.0})
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    assert report["operating_point"] is None
+    assert report["margins"] is None
+    assert report["corners"]["results"] is None
+
+
+def test_run_size_worst_case_margin_partial_corner_error_forces_aggregate_error(
+    tmp_path, monkeypatch
+):
+    """One declared corner's sweep failing under `worst_case_margin` still
+    lets the search converge against the surviving corners' curves -- but
+    the aggregate `status` is still forced to `error`, mirroring the
+    `sizing_corner` objective's own error > fail > pass precedence."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [-40, 27, 125],
+                "vdd_v": 1.8,
+                "objective": "worst_case_margin",
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch, error_temps={125.0})
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    results_by_corner = {r["corner_id"]: r for r in report["corners"]["results"]}
+    assert results_by_corner["tt/125C"]["status"] == "error"
+    assert results_by_corner["tt/-40C"]["status"] in {"pass", "fail"}
+    assert results_by_corner["tt/27C"]["status"] in {"pass", "fail"}
+    # A trustworthy worst-case result is still reported from the surviving
+    # corners, exactly like the sizing_corner objective still reports the
+    # sizing corner's own result on a non-sizing corner's error.
+    assert report["operating_point"] is not None
+    assert report["margins"] is not None
+
+
+def test_run_size_worst_case_margin_infeasible_reports_boundary(tmp_path, monkeypatch):
+    """An unreachable target across every declared corner (even at the
+    widest allowed width) reports the boundary width instead of
+    extrapolating, mirroring the sizing_corner objective's own
+    infeasible-target handling."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+                "objective": "worst_case_margin",
+            },
+            target={"id_a": 2e-05, "gm_id": 1000.0},
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    report = size.run_size(str(request))
+
+    assert report["method"]["feasible"] is False
+    assert report["operating_point"]["w_um"] == pytest.approx(20.0, rel=1e-6)
+
+
+def test_cli_worst_case_margin_text_output_includes_objective(
+    tmp_path, monkeypatch, capsys
+):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            corner=None,
+            corners={
+                "process": ["tt"],
+                "temperature_c": [27, 125],
+                "vdd_v": 1.8,
+                "objective": "worst_case_margin",
+            },
+        ),
+    )
+    _install_synthetic_ngspice_stub(monkeypatch)
+
+    main(["size", str(request), "--format", "text"])
+    captured = capsys.readouterr()
+    assert "objective: worst_case_margin" in captured.out
+    assert "corners:" in captured.out

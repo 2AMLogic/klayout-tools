@@ -160,7 +160,8 @@ back to the single-corner default (`process: "tt"`, `temperature_c: 27`,
     "temperature_c": [27, -40, 125],
     "vdd_v": 1.8,
     "sizing": { "process": "tt", "temperature_c": 27 },
-    "exclude": [{ "process": "ff", "temperature_c": -40 }]
+    "exclude": [{ "process": "ff", "temperature_c": -40 }],
+    "objective": "sizing_corner"
   },
   "targets": { "hold_across_corners": false }
 }
@@ -171,15 +172,57 @@ back to the single-corner default (`process: "tt"`, `temperature_c: 27`,
 | `corners.process`         | array                    | Each entry is either a bare `.lib` section name (e.g. `"tt"`) or a multi-section bundle `{"name": str, "sections": [str, ...]}` (gf180mcu's named corners need several `.lib` cards -- see `docs/cli/sim.md`'s "Corner axes"). Defaults to a single `null`-process point (`"tt"`-equivalent) when omitted. |
 | `corners.temperature_c`   | array of numbers         | Defaults to `[27]` when omitted. |
 | `corners.vdd_v`           | number, required         | A single scalar supply across the whole set -- this command biases one fixed `Vdd`, never sweeps it (unlike `klt sim`'s `corners.supply_v`). |
-| `corners.sizing`          | object                   | `{"process": str, "temperature_c": number}` -- either key optional, both narrow the match. Selects the one declared point the width search actually runs at. Defaults to the first expanded point (process outer, temperature inner, in declaration order -- the same odometer order `klt sim` uses). |
+| `corners.sizing`          | object                   | `{"process": str, "temperature_c": number}` -- either key optional, both narrow the match. Selects the one declared point the width search actually runs at under the `"sizing_corner"` objective (still echoed and labeled `is_sizing` under `"worst_case_margin"`, but no longer the corner the search targets -- see "Worst-corner margin objective" below). Defaults to the first expanded point (process outer, temperature inner, in declaration order -- the same odometer order `klt sim` uses). |
 | `corners.exclude`         | array of objects          | Same shape as `klt sim`'s `corners.exclude` -- drops any expanded point matching every key of one entry. |
-| `targets.hold_across_corners` | boolean               | Defaults to `false`. See "Aggregate status across a corner set" below. |
+| `corners.objective`       | string                    | `"sizing_corner"` (default) or `"worst_case_margin"` -- selects the width-search strategy across the declared set. See "Worst-corner margin objective" below. Not available on the legacy single-`corner` request shape (it has no `corners` block to hold this field), so a single-corner request is unaffected by this option existing. |
+| `targets.hold_across_corners` | boolean               | Defaults to `false`. See "Aggregate status across a corner set" below. Only meaningful under the `"sizing_corner"` objective -- see "Worst-corner margin objective" below. |
+
+### `"sizing_corner"` objective (default)
 
 The device's width is solved **once**, at the sizing corner only -- re-solving
 per corner would return a different width per corner, which is not a device.
 The solved width is then **verified** (a fresh single-point confirmation, no
 further search) at every other declared corner, reporting each corner's own
 operating point and margins.
+
+### Worst-corner margin objective (`"worst_case_margin"`)
+
+Setting `corners.objective: "worst_case_margin"` instead searches for the
+single width that maximizes the *worst* per-corner gm/Id margin across
+**every** declared corner, rather than solving at one nominal corner and only
+reporting the spread elsewhere. It sweeps the full width grid at every
+declared corner (not just the sizing corner), then finds the width that
+minimizes the worst-case relative gm/Id error across all of them via a
+bisection search (each step reuses the already-swept per-corner curves --
+no additional ngspice invocation per step), and finally confirms that width
+with a fresh single-point ngspice run at **every** declared corner.
+
+Cost: one full-grid sweep invocation per declared corner, plus one
+single-point confirmation invocation per declared corner (`2N` invocations
+for `N` corners) -- more expensive than the `"sizing_corner"` objective's
+`N+1`, since every corner's own curve is now load-bearing to the search, not
+just the sizing corner's.
+
+**Response field differences from `"sizing_corner"`:**
+
+- The top-level `corner`/`operating_point`/`margins` fields mirror the
+  **worst-margin corner** among the confirmed results, not the declared
+  `corners.sizing` corner (which is still echoed in `corners.sizing` and
+  still flagged `is_sizing` in `corners.results`, but is no longer special to
+  the search itself).
+- `corners.worst_case` (see "`corners` response block" below) names which
+  declared corner that was.
+- The aggregate `status` is the *worst* corner's own `pass`/`fail` (an
+  evaluator error at any declared corner still forces `"error"`, same
+  precedence as `"sizing_corner"`) -- `targets.hold_across_corners` has no
+  additional effect here, since every corner already drives the objective.
+- `method.bracket_w_um` is always `null` (there is no single corner's
+  bracket under this objective); `method.interpolated_w_um` is the converged
+  width, and `method.feasible` is `false` only when every declared corner
+  sits on the same side of the target throughout `[w_min_um, w_max_um]` (the
+  boundary width closest to equalizing the margin is reported instead of
+  extrapolating, mirroring `"sizing_corner"`'s own infeasible-target
+  handling).
 
 ### Aggregate status across a corner set
 
@@ -211,7 +254,9 @@ choice of width holds it constant across a PVT matrix. So the top-level
       { "corner_id": "ff/125C", "process": "ff", "vdd_v": 1.8, "temperature_c": 125.0 }
     ],
     "sizing": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+    "objective": "sizing_corner",
     "hold_across_corners": false,
+    "worst_case": null,
     "results": [
       {
         "corner_id": "tt/27C", "process": "tt", "temperature_c": 27.0,
@@ -241,18 +286,30 @@ choice of width holds it constant across a PVT matrix. So the top-level
 - `corners.declared` -- every expanded corner point, in the same
   deterministic (process-outer, temperature-inner) order `_expand_corners`
   produces, echoed regardless of `status`.
-- `corners.sizing` -- the one declared point the width search ran at, same
-  shape as one `declared` entry.
+- `corners.sizing` -- the one declared point named by `corners.sizing`
+  (request field) or its default (first expanded point) -- same shape as one
+  `declared` entry. Under the `"sizing_corner"` objective this is also the
+  corner the width search ran at; under `"worst_case_margin"` it is purely
+  informational (see `corners.worst_case` below for the corner that actually
+  drove the result).
+- `corners.objective` -- echoes `request.corners.objective`
+  (`"sizing_corner"` by default).
+- `corners.worst_case` -- the `corner_id` of the worst-margin corner among
+  the confirmed results. Populated only under the `"worst_case_margin"`
+  objective; always `null` under `"sizing_corner"`.
 - `corners.results` -- one entry per `declared` point, same order, present
-  once (if) the verification pass ran; `null` when the sizing corner's own
-  search/confirmation errored (no solved width exists yet to verify anywhere
-  else). Each entry's `operating_point`/`margins` mirror the top-level
-  fields' shape; `diagnostic` is non-`null` only for `status: "error"`.
+  once (if) the verification pass ran; `null` when the search/confirmation
+  errored before any corner could be verified. Each entry's
+  `operating_point`/`margins` mirror the top-level fields' shape;
+  `diagnostic` is non-`null` only for `status: "error"`.
 - **Backward compatible**: the top-level `corner`/`operating_point`/`margins`
-  fields are unchanged and always mirror the sizing corner's own entry -- a
-  single-corner request (`request.corner`, no `request.corners`) still gets
-  the pre-#729 response shape, plus an additive `corners` block whose
-  `declared`/`results` each have exactly one entry.
+  fields are unchanged (still mirror the sizing corner's own entry) under the
+  default `"sizing_corner"` objective -- a single-corner request
+  (`request.corner`, no `request.corners`) still gets the pre-#729 response
+  shape, plus an additive `corners` block whose `declared`/`results` each
+  have exactly one entry. Under `"worst_case_margin"` those same top-level
+  fields instead mirror the worst-margin corner -- see "Worst-corner margin
+  objective" above.
 
 ### Response
 

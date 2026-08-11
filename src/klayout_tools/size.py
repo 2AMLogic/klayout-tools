@@ -101,6 +101,50 @@ via ``targets.hold_across_corners: true``; an evaluator error at *any*
 declared corner always makes the aggregate ``status`` ``"error"``, mirroring
 ``klt sim``'s own error > fail > pass precedence -- see
 ``docs/cli/size.md``'s "Corner sets" section for the full response shape.
+
+Worst-corner margin objective (issue #769)
+--------------------------------------------
+The above ("sizing_corner", the default) optimizes for exactly one nominal
+corner and only *reports* the spread elsewhere -- a device sized that way
+can still be the worst-margin choice across the declared PVT set. Setting
+``request.corners.objective: "worst_case_margin"`` instead searches for the
+single width that maximizes the *worst* per-corner gm/Id margin across
+*every* declared corner (:func:`_run_worst_case_margin`).
+
+Every declared corner's ``gm_id(w)`` curve is monotonically increasing in
+width at fixed current (this module's own documented, empirically verified
+assumption -- see "Method" above), so each corner's relative error
+``error_c(w) = (gm_id_c(w) - target) / target`` is monotonically increasing
+too, which makes both ``U(w) = max_c error_c(w)`` and ``L(w) = min_c
+error_c(w)`` monotonically non-decreasing in ``w`` (the max/min of a finite
+family of non-decreasing functions is itself non-decreasing). The width
+that minimizes the worst-case absolute error, ``max_c |error_c(w)| =
+max(U(w), -L(w))``, is therefore exactly the unique zero crossing of
+``h(w) = U(w) + L(w)`` (or a bound of ``[w_min_um, w_max_um]`` when ``h``
+never crosses zero within it -- every declared corner sits on the same side
+of the target throughout the searchable range). A plain bisection on
+``h(ln w)`` finds that crossing to :data:`_WORST_CASE_BISECTION_ITERS`
+digits of precision in pure Python against each corner's own already-swept
+curve -- no additional ngspice invocation per bisection step.
+
+Unlike the ``"sizing_corner"`` objective (one full-grid sweep, plus one
+single-point verification per *other* declared corner: ``N+1`` invocations
+total for ``N`` corners), this objective needs every corner's own full-grid
+curve to search against, so it costs one full-grid sweep invocation *per
+declared corner* plus one single-point confirmation invocation per corner
+at the converged width: ``2N`` invocations. The top-level ``corner``/
+``operating_point``/``margins`` fields mirror the *worst-margin* corner
+among those confirmations under this objective (not the declared
+``corners.sizing`` corner, which is still echoed and still flagged
+``is_sizing`` in ``corners.results`` for reference) -- see
+``docs/cli/size.md``'s "Worst-corner margin objective" section.
+
+A single declared corner makes ``"sizing_corner"`` and ``"worst_case_margin"``
+mathematically equivalent, but this module never routes a single-corner
+request through the new code path unless the request explicitly opts in via
+``corners.objective`` -- the legacy ``request.corner`` shape has no
+``objective`` field at all, so a single-corner request is bit-for-bit
+unaffected by this feature (issue #769's regression requirement).
 """
 
 from __future__ import annotations
@@ -128,6 +172,22 @@ SUPPORTED_ENGINES = ("ngspice",)
 #: which node ties to the supply -- see this module's docstring's "Method"
 #: section for the diode-connected bias each kind implies.
 SUPPORTED_DEVICE_KINDS = ("nmos", "pmos")
+
+#: ``request.corners.objective`` -- ``"sizing_corner"`` (default, unchanged
+#: since issue #729) solves the width at exactly one declared corner and
+#: verifies elsewhere; ``"worst_case_margin"`` (issue #769) instead searches
+#: for the width that maximizes the worst per-corner gm/Id margin across
+#: every declared corner -- see this module's docstring's "Worst-corner
+#: margin objective" section.
+SUPPORTED_OBJECTIVES = ("sizing_corner", "worst_case_margin")
+DEFAULT_OBJECTIVE = "sizing_corner"
+
+#: Bisection iterations for the worst-case-margin width search. Each step
+#: only interpolates against already-swept per-corner curves (no additional
+#: ngspice invocation), so this is cheap to make tight -- 60 steps gives
+#: ~2^-60 relative precision on the search interval, far finer than any
+#: physically meaningful width resolution.
+_WORST_CASE_BISECTION_ITERS = 60
 
 #: Points in the coarse, log-spaced width sweep run inside the single
 #: sweep invocation (see this module's docstring). Overridable via
@@ -410,18 +470,26 @@ def _corner_public(corner: dict[str, Any]) -> dict[str, Any]:
 
 
 def _corner_set_echo(
-    corner_points: list[dict[str, Any]], sizing_index: int, hold_across_corners: bool
+    corner_points: list[dict[str, Any]],
+    sizing_index: int,
+    hold_across_corners: bool,
+    objective: str,
 ) -> dict[str, Any]:
     """The ``corners`` response block's input-echo portion (``declared``/
-    ``sizing``/``hold_across_corners``) -- present on every response,
-    including an early evaluator-error one, per this module's "no stated
-    method is rejected" precedent. ``results`` is filled in by the caller
-    once (if) the per-corner verification pass actually runs."""
+    ``sizing``/``objective``/``hold_across_corners``) -- present on every
+    response, including an early evaluator-error one, per this module's "no
+    stated method is rejected" precedent. ``results`` is filled in by the
+    caller once (if) the per-corner verification pass actually runs;
+    ``worst_case`` is filled in only by the ``"worst_case_margin"``
+    objective's own search (see :func:`_run_worst_case_margin`) -- always
+    ``None`` under the default ``"sizing_corner"`` objective."""
     return {
         "declared": [_corner_public(c) for c in corner_points],
         "sizing": _corner_public(corner_points[sizing_index]),
+        "objective": objective,
         "hold_across_corners": hold_across_corners,
         "results": None,
+        "worst_case": None,
     }
 
 
@@ -441,6 +509,26 @@ def _parse_hold_across_corners(request: dict[str, Any]) -> bool:
     if not isinstance(value, bool):
         raise SizeError("request.targets.hold_across_corners must be a boolean")
     return value
+
+
+def _parse_objective(request: dict[str, Any]) -> str:
+    """``request.corners.objective`` -- selects the width-search strategy
+    across a declared corner set (see this module's docstring's "Worst-
+    corner margin objective" section). Only meaningful inside
+    ``request.corners`` (a corner *set*) -- the legacy single-``corner``
+    request shape has no equivalent field, so it always resolves to the
+    default (issue #769's regression requirement: a single declared corner
+    behaves exactly as it did before this field existed)."""
+    corners_spec = request.get("corners")
+    if not isinstance(corners_spec, dict):
+        return DEFAULT_OBJECTIVE
+    objective = corners_spec.get("objective", DEFAULT_OBJECTIVE)
+    if objective not in SUPPORTED_OBJECTIVES:
+        raise SizeError(
+            f"request.corners.objective must be one of {SUPPORTED_OBJECTIVES} "
+            f"(got {objective!r})"
+        )
+    return objective
 
 
 def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
@@ -494,7 +582,10 @@ def run_size(
     sizing_corner = corner_points[sizing_index]
     target = _parse_target(request["target"])
     hold_across_corners = _parse_hold_across_corners(request)
-    corners_echo = _corner_set_echo(corner_points, sizing_index, hold_across_corners)
+    objective = _parse_objective(request)
+    corners_echo = _corner_set_echo(
+        corner_points, sizing_index, hold_across_corners, objective
+    )
 
     models = request.get("models") or {}
     try:
@@ -544,6 +635,32 @@ def run_size(
 
     w_grid = _log_space(device["w_min_um"], device["w_max_um"], sweep_points)
 
+    provenance = build_provenance(
+        deck_name=os.path.basename(models_lib),
+        deck_path=models_lib,
+        pdk=provenance_pdk,
+    )
+
+    if objective == "worst_case_margin":
+        payload = _run_worst_case_margin(
+            device=device,
+            corner_points=corner_points,
+            sizing_index=sizing_index,
+            target=target,
+            models_lib=models_lib,
+            gm_id_rel_tol=gm_id_rel_tol,
+            w_grid=w_grid,
+            work_dir=work_dir,
+            timeout_s=timeout_s,
+            corners_echo=corners_echo,
+            provenance=provenance,
+        )
+        if keep_artifacts:
+            payload["environment"]["artifacts_dir"] = work_dir
+        else:
+            _cleanup_dir(work_dir)
+        return payload
+
     sweep_points_result, sweep_engine_version, sweep_log, sweep_diagnostic = _run_sweep(
         device=device,
         corner=sizing_corner,
@@ -570,11 +687,6 @@ def run_size(
         "engine_version": engine_version,
         "models_lib": models_lib,
     }
-    provenance = build_provenance(
-        deck_name=os.path.basename(models_lib),
-        deck_path=models_lib,
-        pdk=provenance_pdk,
-    )
 
     if len(valid_points) < 2:
         payload = _error_payload(
@@ -842,13 +954,23 @@ def _verify_corner(
     log_name: str,
     timeout_s: float,
     gm_id_rel_tol: float,
+    is_sizing: bool = False,
 ) -> dict[str, Any]:
-    """Verify the sizing corner's solved width ``w_star`` at one other
-    declared ``corner``: a single-point confirmation, no further search
-    (issue #729's "verify the solved width... across every declared
-    corner"). Never raises -- an evaluator failure at this corner yields a
-    ``"error"`` entry, exactly like the sizing corner's own confirmation
-    failure does via :func:`_error_payload`.
+    """Verify a solved width ``w_star`` at one declared ``corner``: a
+    single-point confirmation, no further search (issue #729's "verify the
+    solved width... across every declared corner"). Never raises -- an
+    evaluator failure at this corner yields an ``"error"`` entry, exactly
+    like the sizing corner's own confirmation failure does via
+    :func:`_error_payload`.
+
+    ``is_sizing`` defaults to ``False`` (the ``"sizing_corner"`` objective's
+    own usage -- called once per *other* declared corner, the sizing
+    corner's own entry is built inline by :func:`run_size`). The
+    ``"worst_case_margin"`` objective (:func:`_run_worst_case_margin`) calls
+    this uniformly for *every* declared corner instead, passing
+    ``is_sizing=True`` only for the one matching the request's declared
+    ``corners.sizing`` -- a purely informational echo under that objective,
+    since the width search itself no longer targets one corner specially.
     """
     points, _engine_version, _log_path, diagnostic = _run_sweep(
         device=device,
@@ -867,7 +989,7 @@ def _verify_corner(
             "corner_id": corner["corner_id"],
             "process": corner["process"],
             "temperature_c": corner["temperature_c"],
-            "is_sizing": False,
+            "is_sizing": is_sizing,
             "status": "error",
             "operating_point": None,
             "margins": None,
@@ -888,7 +1010,7 @@ def _verify_corner(
         "corner_id": corner["corner_id"],
         "process": corner["process"],
         "temperature_c": corner["temperature_c"],
-        "is_sizing": False,
+        "is_sizing": is_sizing,
         "status": status,
         "operating_point": operating_point,
         "margins": {
@@ -896,6 +1018,248 @@ def _verify_corner(
             "id_rel_error": id_rel_error,
         },
         "diagnostic": None,
+    }
+
+
+def _interp_gm_id_at_width(points: list[dict[str, Any]], w_um: float) -> float:
+    """Log-linear interpolate (or clamp at a boundary) the ``gm_id`` value
+    at an arbitrary width from one corner's own valid sweep points -- the
+    forward counterpart of :func:`_log_interp` (which solves the inverse:
+    the width at which a target ``gm_id`` is hit). ``points`` must be
+    sorted by ``w_um`` ascending and non-empty.
+    """
+    if w_um <= points[0]["w_um"]:
+        return points[0]["gm_id"]
+    if w_um >= points[-1]["w_um"]:
+        return points[-1]["gm_id"]
+    for lo, hi in zip(points, points[1:], strict=False):
+        if lo["w_um"] <= w_um <= hi["w_um"]:
+            if hi["w_um"] == lo["w_um"]:
+                return lo["gm_id"]
+            frac = (math.log(w_um) - math.log(lo["w_um"])) / (
+                math.log(hi["w_um"]) - math.log(lo["w_um"])
+            )
+            return lo["gm_id"] + frac * (hi["gm_id"] - lo["gm_id"])
+    return points[-1][
+        "gm_id"
+    ]  # pragma: no cover -- unreachable given the bounds checks above
+
+
+def _run_worst_case_margin(
+    *,
+    device: dict[str, Any],
+    corner_points: list[dict[str, Any]],
+    sizing_index: int,
+    target: dict[str, Any],
+    models_lib: str,
+    gm_id_rel_tol: float,
+    w_grid: list[float],
+    work_dir: str,
+    timeout_s: float,
+    corners_echo: dict[str, Any],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    """``request.corners.objective: "worst_case_margin"`` (issue #769): find
+    the single width that maximizes the *worst* per-corner gm/Id margin
+    across every declared corner -- see this module's docstring's "Worst-
+    corner margin objective" section for the minimax-bisection method and
+    its cost relative to the default ``"sizing_corner"`` objective
+    (:func:`run_size`, unchanged).
+    """
+    corner_curves: dict[int, list[dict[str, Any]]] = {}
+    corner_diagnostics: dict[int, tuple[str, str | None]] = {}
+    engine_version: str | None = None
+
+    for index, corner in enumerate(corner_points):
+        points, version, log_path, diagnostic = _run_sweep(
+            device=device,
+            corner=corner,
+            target=target,
+            models_lib=models_lib,
+            w_values=w_grid,
+            work_dir=work_dir,
+            deck_name=f"sweep_corner{index}.cir",
+            log_name=f"sweep_corner{index}.log",
+            timeout_s=timeout_s,
+        )
+        if version is not None:
+            engine_version = version
+        valid = [
+            p for p in points if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
+        ]
+        for p in valid:
+            p["gm_id"] = abs(p["gm_s"]) / abs(p["id_a"])
+        if len(valid) < 2:
+            corner_diagnostics[index] = (log_path, diagnostic)
+        else:
+            corner_curves[index] = sorted(valid, key=lambda p: p["w_um"])
+
+    environment = {
+        "engine": "ngspice",
+        "engine_version": engine_version,
+        "models_lib": models_lib,
+    }
+
+    if not corner_curves:
+        first_index = next(iter(corner_diagnostics))
+        log_path, diagnostic = corner_diagnostics[first_index]
+        reason = (
+            "ngspice did not return usable operating-point data for at "
+            "least 2 of the swept widths at any declared corner (first "
+            f"seen at {corner_points[first_index]['corner_id']}"
+            + (f": {diagnostic}" if diagnostic else "")
+            + f", see sweep log: {log_path})"
+        )
+        return _error_payload(
+            device=device,
+            corner=corner_points[sizing_index],
+            corners=corners_echo,
+            target=target,
+            environment=environment,
+            provenance=provenance,
+            reason=reason,
+        )
+
+    w_min_um, w_max_um = device["w_min_um"], device["w_max_um"]
+
+    def _bounds_error(w_um: float) -> tuple[float, float]:
+        errors = [
+            (_interp_gm_id_at_width(corner_curves[i], w_um) - target["gm_id"])
+            / target["gm_id"]
+            for i in corner_curves
+        ]
+        return max(errors), min(errors)
+
+    u_lo, l_lo = _bounds_error(w_min_um)
+    u_hi, l_hi = _bounds_error(w_max_um)
+    h_lo, h_hi = u_lo + l_lo, u_hi + l_hi
+
+    if h_lo >= 0:
+        # Every declared corner is already at or above target gm/Id even at
+        # the narrowest allowed width -- widening only makes it worse, so
+        # the least-bad achievable width is the lower bound.
+        w_star, feasible = w_min_um, False
+    elif h_hi <= 0:
+        # The mirror image: every corner is still below target gm/Id even
+        # at the widest allowed width.
+        w_star, feasible = w_max_um, False
+    else:
+        lo_ln, hi_ln = math.log(w_min_um), math.log(w_max_um)
+        for _ in range(_WORST_CASE_BISECTION_ITERS):
+            mid_ln = (lo_ln + hi_ln) / 2
+            u_mid, l_mid = _bounds_error(math.exp(mid_ln))
+            if u_mid + l_mid < 0:
+                lo_ln = mid_ln
+            else:
+                hi_ln = mid_ln
+        w_star, feasible = math.exp((lo_ln + hi_ln) / 2), True
+
+    corner_results: list[dict[str, Any] | None] = [None] * len(corner_points)
+    for index, corner in enumerate(corner_points):
+        if index in corner_curves:
+            corner_results[index] = _verify_corner(
+                device=device,
+                corner=corner,
+                target=target,
+                models_lib=models_lib,
+                w_star=w_star,
+                work_dir=work_dir,
+                deck_name=f"confirm_corner{index}.cir",
+                log_name=f"confirm_corner{index}.log",
+                timeout_s=timeout_s,
+                gm_id_rel_tol=gm_id_rel_tol,
+                is_sizing=(index == sizing_index),
+            )
+        else:
+            log_path, diagnostic = corner_diagnostics[index]
+            corner_results[index] = {
+                "corner_id": corner["corner_id"],
+                "process": corner["process"],
+                "temperature_c": corner["temperature_c"],
+                "is_sizing": index == sizing_index,
+                "status": "error",
+                "operating_point": None,
+                "margins": None,
+                "diagnostic": (
+                    "ngspice did not return usable operating-point data for "
+                    "this corner's own width sweep"
+                    + (f": {diagnostic}" if diagnostic else "")
+                ),
+            }
+    corners_echo["results"] = corner_results
+
+    usable = [
+        i for i, result in enumerate(corner_results) if result["margins"] is not None
+    ]
+    if not usable:
+        return _error_payload(
+            device=device,
+            corner=corner_points[sizing_index],
+            corners=corners_echo,
+            target=target,
+            environment=environment,
+            provenance=provenance,
+            reason=(
+                "ngspice confirmation at the worst-case-margin width did "
+                "not return usable operating-point data at any declared "
+                "corner -- see corners.results for the per-corner detail"
+            ),
+        )
+
+    worst_index = max(
+        usable, key=lambda i: abs(corner_results[i]["margins"]["gm_id_rel_error"])
+    )
+    worst = corner_results[worst_index]
+    corners_echo["worst_case"] = worst["corner_id"]
+
+    status = (
+        "error"
+        if any(result["status"] == "error" for result in corner_results)
+        else worst["status"]
+    )
+
+    corners_used = [corner_points[i]["corner_id"] for i in sorted(corner_curves)]
+    rationale = (
+        "Width chosen to maximize the worst per-corner gm/Id margin across "
+        f"{len(corners_used)} declared corner(s) ({', '.join(corners_used)}) via "
+        "a bisection on ln(W), balancing each corner's own gm/Id(W) curve "
+        "(swept once per corner, confirmed by a fresh ngspice operating-point "
+        f"run at the converged width): W={w_star:.6g}um, worst margin at "
+        f"'{worst['corner_id']}' (gm_id_rel_error="
+        f"{worst['margins']['gm_id_rel_error']:+.4g})."
+    )
+    if not feasible:
+        rationale += (
+            " Every declared corner sits on the same side of the target "
+            "throughout [w_min_um, w_max_um] -- reporting the boundary "
+            "width closest to equalizing the margin instead of "
+            "extrapolating."
+        )
+
+    method = {
+        "name": "worst-corner margin via minimax bisection across the declared PVT set",
+        "bias": "diode-connected (gate tied to drain, Vds=Vgs)",
+        "rationale": rationale,
+        "sweep_points": len(w_grid),
+        "valid_sweep_points": min(len(corner_curves[i]) for i in corner_curves),
+        "bracket_w_um": None,
+        "interpolated_w_um": w_star,
+        "feasible": feasible,
+    }
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "device": device,
+        "corner": _corner_public(corner_points[worst_index]),
+        "corners": corners_echo,
+        "target": target,
+        "tolerance": {"gm_id_rel": gm_id_rel_tol},
+        "operating_point": worst["operating_point"],
+        "margins": worst["margins"],
+        "method": method,
+        "environment": environment,
+        "provenance": provenance,
     }
 
 
