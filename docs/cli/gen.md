@@ -95,7 +95,9 @@ declares, so `klt extract`'s dummy-device suppression (see "Dummy devices:
 the `dummy` marker layer" in `docs/cli/extract.md`) drops it from the
 extracted netlist instead of reporting it as a spurious unmatched device
 under `klt lvs` — gf180mcu draws no equivalent marker (its curated deck
-declares no `dummy` layer). The first gate finger carries a **poly landing
+declares no `dummy` layer). For a single-finger unit device — and for the
+opt-in `finger_topology: "series"` shape described below — the first gate
+finger carries a **poly landing
 pad** that extends
 one `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
 diffusion's gate-side edge, so a contact can land on the gate *outside* the
@@ -113,7 +115,10 @@ reports `U<i>_G` on the `metal` role, symmetric with `U<i>_S`/`U<i>_D`. That
 is what makes a gate reachable by [`klt gen-compose`](gen-compose.md)'s
 router — a `connectivity[]` net naming a *bare-poly* gate port is rejected as
 unroutable (no via in the metals stack lands on poly), so without it a gate
-still has to be contacted by hand. Enabling it raises the landing pad's
+still has to be contacted by hand. (With the strapped `finger_topology:
+"parallel"` shape below, the contact and pad land on the shared gate comb
+instead of on a per-finger landing pad, already a full `0.4` µm clear of the
+drain rail's metal.) Enabling it raises the landing pad's
 contact region `0.4` µm clear of the diffusion edge before drawing on it: a
 contact-enclosure metal square centred on the bare `#461` pad would share an
 edge with the S/D local-metal pads either side and merge into one polygon,
@@ -123,6 +128,32 @@ moves with it. `gate_contact` defaults to `false`, which reproduces the
 bare-poly gate byte-for-byte — a gate you intend to name with
 `gen-compose`'s `pins[]` (on the `poly_label` layer) rather than route to
 wants the default.
+
+`fingers > 1` folds the unit device: `finger_topology` (issue #777) decides
+what that means electrically. The default `"parallel"` draws the
+conventional multi-finger device — the alternating source/drain segments are
+strapped to a **source rail** below the diffusion and a **drain rail** above
+it, and every gate stripe runs up past the drain rail into a shared **poly
+comb**, so the unit is one device of width `fingers * w_um` (`klt extract`
+reports `fingers` transistors between the same two S/D nets on one gate net,
+which `klt lvs`'s
+[`options.combine_devices`](lvs.md) folds into that single device). Every
+rail, stub, and clearance uses the same `0.42` µm width / `0.4` µm spacing
+budget the S/D pads use, so the strapping is DRC-clean on both curated decks;
+the column pitch is unchanged and only the unit's height grows. The gate comb
+crosses *under* the drain rail on `poly` — no contact, so no connection —
+which is how a single-routing-metal generator gets both rails and a gate
+terminal out of one cell.
+
+`"series"` draws the pre-#777 bare stripes with no straps at all: `fingers`
+transistors chained source-to-drain on `fingers` independent gate nets. Only
+the two end segments and the first finger's gate are reported as ports, and
+the interior gates have no landing pad, so they cannot be contacted at all —
+choosing it therefore emits a `warnings[]` entry saying so, plus a
+`drc_hints.notes` entry, rather than letting the shape surface in an LVS
+diff. It is the right choice only for a caller that intends to strap the
+stripes itself from the drawn geometry. `fingers=1` has nothing to strap, so
+`finger_topology` does not move a single edge or port there.
 
 Each unit device contributes three ports: `U<i>_S`/`U<i>_D`
 (local-metal) and `U<i>_G` (poly, or local-metal with `gate_contact`), where
@@ -150,7 +181,8 @@ all — output for the default case is unchanged.
 | -------------- | ------ | ------------------ | ----------- |
 | `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
 | `l_um`         | double | `0.28`             | Gate length (µm). Must be `> 0`; below `0.28`um risks violating a target PDK's poly-width or S/D metal-spacing rule (flagged via `drc_hints.notes`, not rejected). |
-| `fingers`      | int    | `1`                | Gate fingers per unit device. Must be `>= 1`. |
+| `fingers`      | int    | `1`                | Gate fingers per unit device. Must be `>= 1`. With `finger_topology: "parallel"` (the default) the unit device is one folded transistor of width `fingers * w_um`. |
+| `finger_topology` | string | `"parallel"`    | How a `fingers > 1` unit is wired: `"parallel"` (alternating S/D segments strapped, every gate tied — one folded device) or `"series"` (bare stripes, no straps: a chain of transistors with uncontactable interior gates, warned about in `warnings[]`). Must be `"parallel"` or `"series"`. No effect when `fingers` is `1`. |
 | `rows`/`cols`  | int    | `2`/`2`            | Array shape. Must each be `>= 1`. |
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |

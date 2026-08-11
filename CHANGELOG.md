@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt gen mos_array`'s `fingers > 1` now draws the
+  conventional **parallel** multi-finger device instead of an unstrapped
+  series chain (issue #777). Previously the generator drew N gate stripes
+  over a shared diffusion and stopped there: `klt extract` read that back as
+  N transistors chained source-to-drain on N *floating* gate nets, and the
+  shape could not be repaired from outside — the interior S/D segments had
+  no reported ports and the interior gates had no landing pad, so nothing
+  could contact them. It now straps the alternating S/D segments to a source
+  rail below the diffusion and a drain rail above it, and runs every gate
+  stripe up into a shared poly comb, so a `fingers=N` unit is one device of
+  width `N * w_um` (N transistors between the same two S/D nets on one gate
+  net, which `klt lvs`'s `options.combine_devices` folds into that single
+  device). A new `params.finger_topology` (`"parallel"`, the default, or
+  `"series"`) keeps the old unstrapped shape available for a caller that
+  intends to strap the stripes itself — and `"series"` now emits a
+  `warnings[]` entry stating that the interior terminals are unreported and
+  uncontactable, rather than letting that surface in an LVS diff. This moves
+  the reported `U<i>_S`/`U<i>_D`/`U<i>_G` port coordinates (they sit on the
+  rails and the comb) and grows the unit device's height for `fingers > 1`;
+  `fingers=1` — the default, and every existing consumer of it — is
+  byte-for-byte unchanged, as are `diff_pair` and `esd_device`, which keep
+  the unstrapped unit-device helper.
+
 - 2026-08-11 — sky130's two curated MiM-capacitor entries (`klt extract`'s
   `sky130_fd_pr__model__cap_mim`/`..._cap_mim_m4`) now declare
   `top_plate_via`/`top_plate_via_metal` (`via3`→`met4` for the met3/`capm`
