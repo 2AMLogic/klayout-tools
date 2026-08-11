@@ -6334,6 +6334,124 @@ def test_parasitics_vertical_overlap_coupling_exact_values(tmp_path):
     assert not any("C__par" in ln for ln in cc_lines)
 
 
+def _make_via_stack_overlap_layout(top_name: str = "TOP") -> kdb.Layout:
+    """A three-level fixture whose middle net is claimed by a partner *above*
+    and a partner *below* over the **same** XY footprint -- the shape of an
+    ordinary straight via stack, and the geometry that distinguishes a
+    per-level Region *union* from a scalar area *sum* (PR #764 review).
+
+    - Net ``A``: a 1x1 um li1 square (level 0), 1 um^2.
+    - Net ``B``: a 3x1 um met1 bar (level 1), 3 um^2, perimeter 8 um. ``A``
+      sits under its leftmost 1 um^2.
+    - Net ``C``: a 1x1 um met2 square (level 2), directly over that *same*
+      leftmost 1 um^2 of ``B``.
+
+    So ``B``'s level-1 geometry contributes to two adjacent-level pairs --
+    (0,1) as the upper plate and (1,2) as the lower plate -- and both claim
+    the identical 1 um^2 patch. The area removed from ``B``'s ground term must
+    therefore be 1 um^2 (the set union), not 2 um^2 (the sum).
+
+    ``A`` and ``C`` never couple to each other: li1 and met2 are not adjacent
+    levels, so no ``metal_overlaps`` entry spans them.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(67, 20, kdb.Box(0, 0, 1000, 1000))  # li1, net A -- 1 um^2
+    label(67, 5, "A", 500, 500)
+    draw(68, 20, kdb.Box(0, 0, 3000, 1000))  # met1, net B -- 3 um^2, perim 8 um
+    label(68, 5, "B", 2500, 500)
+    draw(69, 20, kdb.Box(0, 0, 1000, 1000))  # met2, net C -- 1 um^2
+    label(69, 5, "C", 500, 500)
+
+    return layout
+
+
+def test_parasitics_via_stack_deduction_is_unioned_not_summed(tmp_path, monkeypatch):
+    """Regression test for the ground-side double-deduction found in PR #764's
+    review: a net whose level-`i` geometry is overlapped by a partner on level
+    `i-1` *and* a partner on level `i+1` at the same XY location must have that
+    area removed from its ground term exactly **once**.
+
+    Hand-computed from `klayout_tools.decks.sky130.PARASITICS` on
+    :func:`_make_via_stack_overlap_layout` (li1 `cap_area=0.037`,
+    `cap_perim=0.0407`; met1 `cap_area=0.02578`, `cap_perim=0.04057`; met2
+    `cap_area=0.0175`, `cap_perim=0.03776`; overlaps li1<->met1 `0.11420`,
+    met1<->met2 `0.13386`):
+
+    - coupling C(A, B) = 1 um^2 * 0.11420 = **0.1142 fF**
+    - coupling C(B, C) = 1 um^2 * 0.13386 = **0.13386 fF**
+    - A's ground C = (1 - 1) * 0.037 + 4 * 0.0407 = **0.1628 fF**
+    - C's ground C = (1 - 1) * 0.0175 + 4 * 0.03776 = **0.15104 fF**
+    - B's ground C = (3 - **1**) * 0.02578 + 8 * 0.04057
+      = 0.05156 + 0.32456 = **0.37612 fF**
+
+    B is the assertion that matters. Deducting the *union* of the two 1 um^2
+    overlap regions leaves 2 um^2 on ground (0.37612 fF); summing the two
+    overlap areas instead deducts 2 um^2, leaves 1 um^2, and reports 0.35034
+    fF -- 0.02578 fF of charge that goes to no coupling term and simply
+    vanishes. The coupling values are identical under both behaviours, which
+    is why the aggregate `gcd` bracket in
+    `test_gcd_parasitics_charge_conservation` cannot see this.
+    """
+    path = _write_gds(_make_via_stack_overlap_layout(), tmp_path / "via_stack.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "via_stack.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+
+    by_net = {entry["net"]: entry for entry in para["nets"]}
+    assert set(by_net) == {"A", "B", "C"}
+
+    # Coupling: both adjacent-level pairs charged in full, unaffected by the
+    # deduction fix.
+    assert para["cc_count"] == 2
+    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.1142 + 0.13386)
+    assert by_net["B"]["coupled"] == [
+        {"net": "A", "capacitance_ff": 0.1142, "levels": [[0, 1]]},
+        {"net": "C", "capacitance_ff": 0.13386, "levels": [[1, 2]]},
+    ]
+
+    # The middle net: deduct the union (1 um^2), not the sum (2 um^2).
+    assert by_net["B"]["capacitance_ff"] == pytest.approx(0.37612)
+    assert by_net["A"]["capacitance_ff"] == pytest.approx(0.1628)
+    assert by_net["C"]["capacitance_ff"] == pytest.approx(0.15104)
+
+    # Exact aggregate ground delta against the same layout extracted with the
+    # overlap coefficients removed -- no slack at all, unlike the 2.5x-wide
+    # closed-form bracket the `gcd` charge-conservation test has to use.
+    # Exactly three square microns of area are claimed once each: A's li1,
+    # B's met1 (the *union* patch), C's met2.
+    import klayout_tools.extract as extract_mod
+    from klayout_tools.decks import sky130
+
+    no_overlap_deck = dataclasses.replace(sky130.PARASITICS, metal_overlaps=())
+    monkeypatch.setattr(
+        extract_mod, "get_parasitics_deck", lambda name: no_overlap_deck
+    )
+    without = extract_mod.run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "via_stack_nocoupling.spice"),
+        parasitics=True,
+    )
+    assert without["parasitics"]["cc_count"] == 0
+    ground_delta = (
+        without["parasitics"]["total_capacitance_ff"] - para["total_capacitance_ff"]
+    )
+    # Union: 0.037 (A/li1) + 0.02578 (B/met1, once) + 0.0175 (C/met2).
+    # The pre-fix scalar sum charged B's patch twice, giving 0.10606.
+    assert ground_delta == pytest.approx(0.037 + 0.02578 + 0.0175)
+
+
 def test_describe_parasitics_overlap_gaps_reports_truncation_and_none_entries():
     """Unit test for `_describe_parasitics_overlap_gaps` (issue #760),
     mirroring `test_describe_parasitics_metal_gaps_reports_truncation_and_none_entries`

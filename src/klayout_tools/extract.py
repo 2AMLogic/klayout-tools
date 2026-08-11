@@ -4195,9 +4195,15 @@ def _compute_parasitics(
     (``overlap_area_um2 * metal_overlaps[i]``), and is subtracted from
     *both* nets' ground area term on their own respective level (``net_a``'s
     on level ``i``, ``net_b``'s on level ``i+1``) -- charge is *moved*, never
-    duplicated. Same-net overlap (a via stack tying one net's own two levels
-    together) is excluded by construction: coupling is only ever computed
-    between two *distinct* nets, so a net's own via stack contributes nothing
+    duplicated. The per-level deduction is the **geometric union** of every
+    partner's overlap region with that net on that level, not the sum of
+    their areas: a level participates in two adjacent pairs (as upper plate
+    of ``(i-1, i)`` and lower plate of ``(i, i+1)``), so a straight via stack
+    would otherwise have the same square micron deducted twice and its charge
+    destroyed rather than moved. Same-net overlap (a via stack tying one net's
+    own two levels together) is excluded by construction: coupling is only
+    ever computed between two *distinct* nets, so a net's own via stack
+    contributes nothing
     here (it is ordinary connectivity, already merged into one net upstream).
     Lateral (same-layer, sidewall) coupling remains **not** modelled (Stage
     2b, a named follow-on -- see the roadmap doc).
@@ -4251,6 +4257,8 @@ def _compute_parasitics(
     """
     if circuit is None:
         return [], []
+
+    import klayout.db as kdb
 
     # (LayerRC, [include indices], [subtract indices]) for every non-metal
     # role that has both a coefficient set and at least one present layer.
@@ -4350,10 +4358,22 @@ def _compute_parasitics(
             metal_regions[i][net] = region
 
     # Pass 2: vertical-overlap coupling between adjacent metal levels.
-    # `deduction_um2[(net, i)]` accumulates the total area of `net`'s level-i
-    # geometry that has been attributed to a coupling partner instead of
+    # `deduction_regions[(net, i)]` accumulates the *geometry* of `net`'s
+    # level-i area that has been attributed to a coupling partner instead of
     # ground, across every adjacent-level pair that touches level `i`.
-    deduction_um2: dict[tuple[kdb.Net, int], float] = {}
+    #
+    # This is a Region union, not a scalar area sum, and that distinction is
+    # load-bearing (PR #764 review): level `i` participates in two adjacent
+    # pairs -- as the upper plate of `(i-1, i)` and as the lower plate of
+    # `(i, i+1)` -- so a straight via stack (a net with routing above *and*
+    # below the same XY footprint, pervasive in any routed block) has the same
+    # physical area claimed by two different partners. Summing the two overlap
+    # areas would deduct that area twice and silently destroy charge; unioning
+    # the overlap Regions and measuring once guarantees each square micron is
+    # removed from the ground term at most once, however many partners claim
+    # it. The coupling capacitors themselves are unaffected: each *pair* still
+    # gets the full mutual-overlap area, which is what the plate model wants.
+    deduction_regions: dict[tuple[kdb.Net, int], kdb.Region] = {}
     # `coupling_ff[pair_key]` / `coupling_levels[pair_key]`: the accumulated
     # coupling capacitance and contributing `[lower, upper]` level-index
     # pairs for one unordered net pair.
@@ -4409,16 +4429,26 @@ def _compute_parasitics(
                 if overlap_area_um2 <= 0.0:
                     continue
 
-                deduction_um2[(net_a, i)] = (
-                    deduction_um2.get((net_a, i), 0.0) + overlap_area_um2
-                )
-                deduction_um2[(net_b, i + 1)] = (
-                    deduction_um2.get((net_b, i + 1), 0.0) + overlap_area_um2
-                )
+                for ded_key in ((net_a, i), (net_b, i + 1)):
+                    acc = deduction_regions.get(ded_key)
+                    if acc is None:
+                        acc = kdb.Region()
+                        deduction_regions[ded_key] = acc
+                    # `insert` appends the overlap polygons unmerged; the
+                    # single `merged()` below collapses each accumulator once,
+                    # which is both cheaper and exactly the set union wanted.
+                    acc.insert(overlap)
 
                 key = _net_pair_key(name_a, name_b)
                 coupling_ff[key] = coupling_ff.get(key, 0.0) + overlap_area_um2 * coef
                 coupling_levels.setdefault(key, set()).add((i, i + 1))
+
+    # Collapse each (net, level) accumulator to a single non-overlapping area,
+    # once, now that every contributing partner has been folded in.
+    deduction_um2: dict[tuple[kdb.Net, int], float] = {
+        ded_key: region.merged().area() * dbu * dbu
+        for ded_key, region in deduction_regions.items()
+    }
 
     # Pass 3: finalize each net's ground C, applying the coupling deduction
     # (if any) to its metal-level area terms only -- perimeter/fringe and

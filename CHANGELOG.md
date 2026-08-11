@@ -299,9 +299,9 @@ not `klt --version`, if you need to detect this kind of drift.
   it is the first extracted netlist that can show crosstalk in `klt sim` at
   all — a disturbance that was previously zero *by construction*, not by
   measurement. On the `gcd` corpus block it emits 5 638 net-to-net
-  capacitors totalling 68.39 fF, taking 29.10 fF off the ground term
-  (2 617.23 → 2 588.13 fF) — the same geometry the PDK's own coefficients
-  price 2.35× higher between nets than to substrate, which is the
+  capacitors totalling 68.39 fF, taking 27.81 fF off the ground term
+  (2 617.23 → 2 589.42 fF) — the same geometry the PDK's own coefficients
+  price 2.46× higher between nets than to substrate, which is the
   misattribution this stage exists to correct. The same measurement
   decomposes that block's
   full 146.33 fF of crossover charge as 77.6 fF same-net (a net's own via
