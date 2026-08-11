@@ -1,0 +1,1404 @@
+{
+  "comp.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            2370,
+            0,
+            4370,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      22,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            2190,
+            0,
+            4190,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "comp.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            290,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      22,
+      0
+    ],
+    "threshold_dbu": 220,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            150,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "contact.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        },
+        {
+          "box": [
+            2330,
+            0,
+            4330,
+            4000
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      33,
+      0
+    ],
+    "threshold_dbu": 250,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        },
+        {
+          "box": [
+            2170,
+            0,
+            4170,
+            4000
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "contact.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            290,
+            4000
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      33,
+      0
+    ],
+    "threshold_dbu": 220,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            150,
+            4000
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        },
+        {
+          "box": [
+            2305,
+            0,
+            4305,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      34,
+      0
+    ],
+    "threshold_dbu": 230,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        },
+        {
+          "box": [
+            2155,
+            0,
+            4155,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            305,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      34,
+      0
+    ],
+    "threshold_dbu": 230,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            155,
+            4000
+          ],
+          "layer": [
+            34,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        },
+        {
+          "box": [
+            2370,
+            0,
+            4370,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      36,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        },
+        {
+          "box": [
+            2190,
+            0,
+            4190,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            370,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      36,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            190,
+            4000
+          ],
+          "layer": [
+            36,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal3.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        },
+        {
+          "box": [
+            2370,
+            0,
+            4370,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      42,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        },
+        {
+          "box": [
+            2190,
+            0,
+            4190,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal3.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            370,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      42,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            190,
+            4000
+          ],
+          "layer": [
+            42,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal5.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        },
+        {
+          "box": [
+            2370,
+            0,
+            4370,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      81,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        },
+        {
+          "box": [
+            2190,
+            0,
+            4190,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metal5.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            370,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      81,
+      0
+    ],
+    "threshold_dbu": 280,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            190,
+            4000
+          ],
+          "layer": [
+            81,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metaltop.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        },
+        {
+          "box": [
+            2480,
+            0,
+            4480,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      53,
+      0
+    ],
+    "threshold_dbu": 380,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "metaltop.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            460,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      53,
+      0
+    ],
+    "threshold_dbu": 360,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            260,
+            4000
+          ],
+          "layer": [
+            53,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "mim.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        },
+        {
+          "box": [
+            3300,
+            0,
+            5300,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      46,
+      0
+    ],
+    "threshold_dbu": 1200,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        },
+        {
+          "box": [
+            3100,
+            0,
+            5100,
+            4000
+          ],
+          "layer": [
+            46,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "nwell.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            21,
+            0
+          ]
+        },
+        {
+          "box": [
+            2700,
+            0,
+            4700,
+            4000
+          ],
+          "layer": [
+            21,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      21,
+      0
+    ],
+    "threshold_dbu": 600,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            21,
+            0
+          ]
+        },
+        {
+          "box": [
+            2500,
+            0,
+            4500,
+            4000
+          ],
+          "layer": [
+            21,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "poly2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            2320,
+            0,
+            4320,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      30,
+      0
+    ],
+    "threshold_dbu": 240,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            2160,
+            0,
+            4160,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "poly2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            240,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      30,
+      0
+    ],
+    "threshold_dbu": 180,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            120,
+            4000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via1.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            35,
+            0
+          ]
+        },
+        {
+          "box": [
+            2345,
+            0,
+            4345,
+            4000
+          ],
+          "layer": [
+            35,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      35,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            35,
+            0
+          ]
+        },
+        {
+          "box": [
+            2175,
+            0,
+            4175,
+            4000
+          ],
+          "layer": [
+            35,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via1.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            345,
+            4000
+          ],
+          "layer": [
+            35,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      35,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            175,
+            4000
+          ],
+          "layer": [
+            35,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via2.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            38,
+            0
+          ]
+        },
+        {
+          "box": [
+            2345,
+            0,
+            4345,
+            4000
+          ],
+          "layer": [
+            38,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      38,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            38,
+            0
+          ]
+        },
+        {
+          "box": [
+            2175,
+            0,
+            4175,
+            4000
+          ],
+          "layer": [
+            38,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via2.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            345,
+            4000
+          ],
+          "layer": [
+            38,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      38,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            175,
+            4000
+          ],
+          "layer": [
+            38,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via3.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            40,
+            0
+          ]
+        },
+        {
+          "box": [
+            2345,
+            0,
+            4345,
+            4000
+          ],
+          "layer": [
+            40,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      40,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            40,
+            0
+          ]
+        },
+        {
+          "box": [
+            2175,
+            0,
+            4175,
+            4000
+          ],
+          "layer": [
+            40,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via3.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            345,
+            4000
+          ],
+          "layer": [
+            40,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      40,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            175,
+            4000
+          ],
+          "layer": [
+            40,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via4.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            41,
+            0
+          ]
+        },
+        {
+          "box": [
+            2345,
+            0,
+            4345,
+            4000
+          ],
+          "layer": [
+            41,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      41,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            41,
+            0
+          ]
+        },
+        {
+          "box": [
+            2175,
+            0,
+            4175,
+            4000
+          ],
+          "layer": [
+            41,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "via4.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            345,
+            4000
+          ],
+          "layer": [
+            41,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      41,
+      0
+    ],
+    "threshold_dbu": 260,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            175,
+            4000
+          ],
+          "layer": [
+            41,
+            0
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -213,7 +213,18 @@ from . import (
     LayerRC,
     ParasiticsDeck,
     ResistorDevice,
+    RuleProvenance,
 )
+
+# `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
+# rule's provenance below (issue #747, piloted on this deck's 11 width/space
+# rules only -- see the module docstring's own citation of this repo/commit
+# for the resistor/capacitor coefficients above, the same `volare enable
+# sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b` fetch this deck's DRC
+# rule values were themselves verified against, per the "met2/via rule
+# coverage" note above).
+_OPEN_PDKS_REPO = "fossi-foundation/open-pdks"
+_OPEN_PDKS_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
@@ -232,6 +243,12 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "poly.1a": poly.width(0.15, euclidian)
         # -> "poly.1a : min. poly width : 0.15um"
         scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="poly.1a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="diff.width.1",
@@ -245,6 +262,12 @@ DECK: list[DrcRule] = [
         # threshold value (0.15um) is the real, unmodified source value.
         # -> "difftap.1 : min. difftap width : 0.15um"
         scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="difftap.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="li1.width.1",
@@ -257,6 +280,12 @@ DECK: list[DrcRule] = [
         # (the "not_in_cell5_li" exclusion covers a handful of named analog
         # macro cells not modelled here; general-case threshold is used.)
         scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="li.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="li1.space.1",
@@ -267,6 +296,12 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "li.3": not_in_cell5_li.space(0.17, euclidian)
         # -> "li.3 : min. li spacing : 0.17um"
         scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="li.3",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="met1.width.1",
@@ -277,6 +312,12 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "m1.1": m1.width(0.14, euclidian)
         # -> "m1.1 : min. m1 width : 0.14um"
         scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="m1.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="met1.space.1",
@@ -288,6 +329,12 @@ DECK: list[DrcRule] = [
         # -> "m1.2 : min. m1 spacing : 0.14um"
         # (the wide-metal 0.28um exception, "m1.3ab", is not modelled here.)
         scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="m1.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="met1.enclosing.mcon.1",
@@ -369,6 +416,12 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "ct.2": mcon.space(0.19, euclidian)
         # -> "ct.2 : min. mcon spacing : 0.19um"
         scope="ct",  # sky130.lydrc "ct.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130.lydrc",
+            rule_id="ct.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     # met2/via rule coverage (issue #513), mirroring the met1/mcon rule
     # shapes just above -- see the module docstring's own #513 note for
@@ -382,6 +435,12 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m2.1": m2.width(0.14, euclidian)
         # -> "m2.1 : min. m2 width : 0.14um"
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m2.1",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="met2.space.1",
@@ -395,6 +454,12 @@ DECK: list[DrcRule] = [
         # the same approximation met1.space.1 above already makes for its
         # own wide-metal exception, "m1.3ab".)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="m2.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="via.width.1",
@@ -415,6 +480,12 @@ DECK: list[DrcRule] = [
         # primitive only supports a minimum-width lower bound, so only the
         # min-size half of the rule is enforced here.)
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via.1a_a",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="via.space.1",
@@ -425,6 +496,12 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via.2": via.space(0.17, euclidian)
         # -> "via.2 : min. via spacing : 0.17um"
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+        provenance=RuleProvenance(
+            source_repo=_OPEN_PDKS_REPO,
+            source_path="sky130/klayout/sky130A_mr.drc",
+            rule_id="via.2",
+            commit=_OPEN_PDKS_COMMIT,
+        ),
     ),
     DrcRule(
         id="met1.enclosing.via.1",

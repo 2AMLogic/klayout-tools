@@ -306,7 +306,50 @@ from . import (
     ParasiticsDeck,
     ResistorDevice,
     ResistorFlavour,
+    RuleProvenance,
 )
+
+# `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
+# rule's provenance below (issue #747, piloted on this deck's 26 width/space
+# rules only) -- the same `google/gf180mcu-pdk` DRM repo/commit the module
+# docstring's own top-of-file provenance note already cites for every rule
+# transcribed from the published DRM tables (as opposed to the nine
+# `CO.*`/`Vn.*` conductor-over-cut enclosure rules re-derived from a
+# *different* repo/commit, `globalfoundries-pdk-libs-gf180mcu_fd_pv`
+# `999a6ff` -- none of those are width/space checks, so none are piloted
+# here).
+_GF180MCU_PDK_REPO = "google/gf180mcu-pdk"
+_GF180MCU_PDK_COMMIT = "de3240d"
+
+# DRM section (`DrcRule.scope`, issue #566) -> the numeric CSV table under
+# `docs/physical_verification/design_manual/tables_clear/` this deck's
+# width/space rule values were transcribed from, per the module docstring's
+# own section/table citation list above.
+_DRM_TABLES_DIR = "docs/physical_verification/design_manual/tables_clear"
+_GF180MCU_DRM_CSV: dict[str, str] = {
+    "7.4 Nwell": f"{_DRM_TABLES_DIR}/13_Nwell31.csv",
+    "7.5 Comp": f"{_DRM_TABLES_DIR}/14_COMP33_1.csv",
+    "7.7 Poly2": f"{_DRM_TABLES_DIR}/16_Poly2_42.csv",
+    "7.12 Contact": f"{_DRM_TABLES_DIR}/21_Contact_56.csv",
+    "7.13 Metaln": f"{_DRM_TABLES_DIR}/22_Metaln_58.csv",
+    "7.14 Vian": f"{_DRM_TABLES_DIR}/23_Vian_59.csv",
+    "7.15 MetalTop": f"{_DRM_TABLES_DIR}/24_MetalTop_61.csv",
+    "10.4.2 MIM Option B": f"{_DRM_TABLES_DIR}/35_MIM2_88.csv",
+}
+
+
+def _gf180mcu_provenance(scope: str, rule_id: str) -> RuleProvenance:
+    """Build a :class:`RuleProvenance` for a DRM-table-sourced gf180mcu
+    width/space rule (issue #747) -- `source_path` from `scope`'s own DRM
+    section via `_GF180MCU_DRM_CSV`, everything else shared across the whole
+    deck (see the module-level constants above)."""
+    return RuleProvenance(
+        source_repo=_GF180MCU_PDK_REPO,
+        source_path=_GF180MCU_DRM_CSV[scope],
+        rule_id=rule_id,
+        commit=_GF180MCU_PDK_COMMIT,
+    )
+
 
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001, same as sky130), so a threshold in micrometres
@@ -329,6 +372,7 @@ DECK: list[DrcRule] = [
         # the more permissive PL.1 value across the whole poly2 layer since
         # isolating gate poly2 needs a boolean layer expression.
         scope="7.7 Poly2",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.7 Poly2", "PL.1"),
     ),
     DrcRule(
         id="poly2.space.1",
@@ -341,6 +385,7 @@ DECK: list[DrcRule] = [
         # splits this by context (poly2 over COMP vs. over field oxide);
         # unified into one check since both values coincide.
         scope="7.7 Poly2",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.7 Poly2", "PL.3a"),
     ),
     DrcRule(
         id="poly2.enclosing.contact.1",
@@ -360,6 +405,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=220,  # 0.22 um
         # DRM 7.5 Comp, rule "DF.1a": "Min. COMP Width" -> 0.22 (3.3V column)
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.5 Comp", "DF.1a"),
     ),
     DrcRule(
         id="comp.space.1",
@@ -376,6 +422,7 @@ DECK: list[DrcRule] = [
         # expression (comp minus well/tap markers). Threshold value
         # unmodified.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.5 Comp", "DF.3a"),
     ),
     DrcRule(
         id="comp.enclosing.contact.1",
@@ -399,6 +446,7 @@ DECK: list[DrcRule] = [
         # lower bound; the "max" (fixed-size) half of the rule is not
         # checked. Threshold value unmodified.
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.12 Contact", "CO.1"),
     ),
     DrcRule(
         id="contact.space.1",
@@ -408,6 +456,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=250,  # 0.25 um
         # DRM 7.12 Contact, rule "CO.2a": "Space" -> 0.25um
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.12 Contact", "CO.2a"),
     ),
     DrcRule(
         id="metal1.enclosing.contact.1",
@@ -441,6 +490,7 @@ DECK: list[DrcRule] = [
         # rule is not checked -- same class of approximation as
         # contact.width.1's own CO.1 note above. Threshold value unmodified.
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
     DrcRule(
         id="via1.space.1",
@@ -456,6 +506,7 @@ DECK: list[DrcRule] = [
         # nwell.space.1/comp.space.1 already document. Threshold value
         # unmodified.
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.2a"),
     ),
     DrcRule(
         id="metal1.enclosing.via1.1",
@@ -498,6 +549,7 @@ DECK: list[DrcRule] = [
         # 0.26um. Approximation: see via1.width.1's note above (min-only
         # width_check; the fixed-size "max" half is not checked).
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
     DrcRule(
         id="via2.space.1",
@@ -510,6 +562,7 @@ DECK: list[DrcRule] = [
         # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
         # checked).
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.2a"),
     ),
     DrcRule(
         id="metal2.enclosing.via2.1",
@@ -544,6 +597,7 @@ DECK: list[DrcRule] = [
         # 0.26um. Approximation: see via1.width.1's note above (min-only
         # width_check; the fixed-size "max" half is not checked).
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
     DrcRule(
         id="via3.space.1",
@@ -556,6 +610,7 @@ DECK: list[DrcRule] = [
         # context; the tighter 4x4-array "Vn.2b" 0.36um threshold is not
         # checked).
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.2a"),
     ),
     DrcRule(
         id="metal3.enclosing.via3.1",
@@ -592,6 +647,7 @@ DECK: list[DrcRule] = [
         # coverage of Via4's own size, which that reference alone did not
         # provide (issue #546).
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
     DrcRule(
         id="via4.space.1",
@@ -606,6 +662,7 @@ DECK: list[DrcRule] = [
         # mim.enclosing.via4.1's other_layer; this rule adds coverage of
         # Via4's own spacing (issue #546).
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.14 Vian", "Vn.2a"),
     ),
     DrcRule(
         id="metal4.enclosing.via4.1",
@@ -644,6 +701,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=230,  # 0.23 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.23 (n = 1)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
     ),
     DrcRule(
         id="metal1.space.1",
@@ -653,6 +711,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=230,  # 0.23 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.23 (n = 1)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
     ),
     DrcRule(
         id="metal2.width.1",
@@ -662,6 +721,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
     ),
     DrcRule(
         id="metal2.space.1",
@@ -671,6 +731,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
     ),
     DrcRule(
         id="metal3.width.1",
@@ -680,6 +741,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
     ),
     DrcRule(
         id="metal3.space.1",
@@ -689,6 +751,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
     ),
     DrcRule(
         id="metal5.width.1",
@@ -698,6 +761,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.1": "Width" -> 0.28 (2 <= n <= 5)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.1"),
     ),
     DrcRule(
         id="metal5.space.1",
@@ -707,6 +771,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=280,  # 0.28 um
         # DRM 7.13 Metaln (n = 1 to 5), rule "Mn.2a": "Space" -> 0.28 (2 <= n <= 5)
         scope="7.13 Metaln",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.13 Metaln", "Mn.2a"),
     ),
     DrcRule(
         id="metaltop.width.1",
@@ -719,6 +784,7 @@ DECK: list[DrcRule] = [
         # angstrom MetalTop thickness option, which -- like the 5V/6V variant
         # elsewhere in this deck -- is not modeled here).
         scope="7.15 MetalTop",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.15 MetalTop", "MT.1"),
     ),
     DrcRule(
         id="metaltop.space.1",
@@ -730,6 +796,7 @@ DECK: list[DrcRule] = [
         # unstarred value; see metaltop.width.1's note on the thickness
         # option not modeled here).
         scope="7.15 MetalTop",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.15 MetalTop", "MT.2a"),
     ),
     DrcRule(
         id="mim.space.1",
@@ -747,6 +814,7 @@ DECK: list[DrcRule] = [
         # can't isolate; over-flags ordinary Metal4 routing). Threshold value
         # unmodified.
         scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("10.4.2 MIM Option B", "MIMTM.1"),
     ),
     DrcRule(
         id="mim.enclosing.fusetop.1",
@@ -814,6 +882,7 @@ DECK: list[DrcRule] = [
         # information, so this uses the less strict "NW.2a" value across the
         # whole Nwell drawn layer. Threshold value unmodified.
         scope="7.4 Nwell",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.4 Nwell", "NW.2a"),
     ),
     DrcRule(
         id="nwell.enclosing.comp.1",
