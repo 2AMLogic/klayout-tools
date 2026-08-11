@@ -55,6 +55,8 @@ def render_report(
     height: int = DEFAULT_HEIGHT,
     background: str = "#ffffff",
     top: str | None = None,
+    layers: list[tuple[int, int]] | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> dict[str, Any]:
     """Render one PNG per non-empty layer of a GDSII or OASIS stream.
 
@@ -71,10 +73,29 @@ def render_report(
         width: image width in pixels (must be positive).
         height: image height in pixels (must be positive).
         background: canvas color as a ``#rrggbb``/``#rgb`` hex string.
+        layers: optional set of ``(layer, datatype)`` pairs to restrict
+            rendering to (issue #673). ``None`` (the default) renders every
+            non-empty layer, unchanged from before this option existed. When
+            given, only layers whose pair is in this set are written to a
+            PNG (and included in the all-layers ``overview.png`` composite)
+            -- every other layer still appears in ``layers[]`` with
+            ``rendered: false, path: null``, exactly like a declared-but-
+            empty layer. An empty list is rejected (see below); a pair
+            absent from the stream simply matches nothing.
+        bbox: optional ``(left, bottom, right, top)`` physical crop window in
+            micrometres (issue #673). ``None`` (the default) fits the whole
+            layout, unchanged from before this option existed. When given,
+            the viewport is set via ``LayoutView.zoom_box()`` instead of
+            ``zoom_fit()`` -- which already expands the requested box to the
+            output image's pixel aspect ratio rather than stretching it (see
+            ``actual_extent`` below), so no manual aspect-ratio math is
+            needed here.
 
     Besides the per-layer PNGs, an all-layers composite is written as
     ``overview.png`` -- the "what does this block look like" image (gallery
-    thumbnails, agent quick-looks).
+    thumbnails, agent quick-looks). When ``layers`` is given, the overview
+    only shows the selected layers too, so it stays consistent with what was
+    actually asked for rather than leaking unrequested geometry.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/render.md``)::
@@ -89,6 +110,11 @@ def render_report(
             "overview": <path to the all-layers composite PNG>,
             "layer_count": <number of layers in the stream, int>,
             "rendered_count": <number of per-layer PNGs written, int>,
+            "requested_layers": [[layer, datatype], ...] | None,
+            "requested_bbox": {"left": float, "bottom": float,
+                                "right": float, "top": float} | None,
+            "actual_extent": {"left": float, "bottom": float,
+                               "right": float, "top": float},
             "layers": [
                 {
                     "layer": int,
@@ -104,12 +130,15 @@ def render_report(
         }
 
     ``schema_version`` is versioned independently per command (see
-    ``docs/json-contract.md``); it starts at ``1``.
+    ``docs/json-contract.md``); it starts at ``1``. ``requested_layers``,
+    ``requested_bbox``, and ``actual_extent`` are additive fields (issue
+    #673) -- no ``schema_version`` bump, per ``docs/json-contract.md``.
 
     Layers reporting ``shapes: 0`` (declared but empty -- see
-    ``layers_report()``) are listed but not rendered (``rendered: false``,
-    ``path: null``): an isolated render of an empty layer is a blank image,
-    which carries no information worth the render cost.
+    ``layers_report()``), or excluded by a caller-supplied ``layers`` set,
+    are listed but not rendered (``rendered: false``, ``path: null``): an
+    isolated render of an empty or unselected layer is either blank or not
+    what was asked for, neither of which is worth the render cost.
 
     Each ``layers[]`` entry's ``annotation`` field is passed straight through
     from ``layers_report()`` -- see its docstring -- so a layer in the
@@ -129,7 +158,9 @@ def render_report(
 
     Raises :class:`RenderError` if the file is missing, unreadable, not a
     recognisable layout stream, ``top`` names a cell absent from the
-    stream, or ``width``/``height`` is not positive.
+    stream, ``width``/``height`` is not positive, ``layers`` is an empty
+    (but non-``None``) list, or ``bbox`` does not satisfy
+    ``right > left and top > bottom``.
     """
     if width <= 0 or height <= 0:
         raise RenderError(f"invalid image size: {width}x{height}")
@@ -137,6 +168,15 @@ def render_report(
         raise RenderError(
             f"invalid background color '{background}' (expected #rrggbb or #rgb)"
         )
+    if layers is not None and not layers:
+        raise RenderError("--layers must contain at least one layer")
+    if bbox is not None:
+        bbox_left, bbox_bottom, bbox_right, bbox_top = bbox
+        if bbox_right <= bbox_left or bbox_top <= bbox_bottom:
+            raise RenderError(
+                "invalid --bbox: right/top must exceed left/bottom, got "
+                f"({bbox_left}, {bbox_bottom}, {bbox_right}, {bbox_top})"
+            )
 
     try:
         report = layers_report(path, top=top)
@@ -151,7 +191,10 @@ def render_report(
 
     # Imported lazily, mirroring layers.py's lazy `klayout.db` import, so
     # `klt --version` and argument parsing don't pay the module's load cost.
+    import klayout.db as kdb
     import klayout.lay as lay
+
+    selected_pairs = set(layers) if layers is not None else None
 
     view = lay.LayoutView()
     try:
@@ -177,28 +220,61 @@ def render_report(
         view.add_missing_layers()
         view.max_hier()
         view.resize(width, height)
-        view.zoom_fit()
+        if bbox is not None:
+            bbox_left, bbox_bottom, bbox_right, bbox_top = bbox
+            # `zoom_box()` already expands the requested box to the canvas's
+            # pixel aspect ratio (padding the shorter axis, centered on the
+            # request) rather than stretching the image to fit -- verified
+            # against the installed klayout package, 2026-08-11 -- so no
+            # manual aspect-ratio math is needed here, matching `zoom_fit()`'s
+            # existing whole-layout behaviour.
+            view.zoom_box(kdb.DBox(bbox_left, bbox_bottom, bbox_right, bbox_top))
+        else:
+            view.zoom_fit()
 
-        # All layers are still visible here: capture the composite overview
-        # before switching to per-layer isolation.
-        overview_path = os.path.join(resolved_output_dir, OVERVIEW_FILENAME)
-        try:
-            view.save_image(overview_path, width, height)
-        except Exception as exc:
-            raise RenderError(f"could not render overview: {exc}") from exc
+        actual_box = view.box()
+        actual_extent = {
+            "left": actual_box.left,
+            "bottom": actual_box.bottom,
+            "right": actual_box.right,
+            "top": actual_box.top,
+        }
 
         nodes = []
         it = view.begin_layers()
         while not it.at_end():
             nodes.append(it.current())
             it.next()
+
+        if selected_pairs is not None:
+            # Restrict visibility to the requested layer set before the
+            # overview capture below, so the composite reflects the
+            # selection instead of leaking unrequested geometry (issue
+            # #673). With no selection, visibility is left exactly as
+            # `add_missing_layers()` set it up -- today's unchanged default
+            # (every layer visible).
+            for node in nodes:
+                node.visible = (
+                    node.source_layer,
+                    node.source_datatype,
+                ) in selected_pairs
+
+        # Capture the composite overview before switching to per-layer
+        # isolation below.
+        overview_path = os.path.join(resolved_output_dir, OVERVIEW_FILENAME)
+        try:
+            view.save_image(overview_path, width, height)
+        except Exception as exc:
+            raise RenderError(f"could not render overview: {exc}") from exc
+
         for node in nodes:
             node.visible = False
 
         rendered: list[dict[str, Any]] = []
         for entry in report["layers"]:
             layer, datatype = entry["layer"], entry["datatype"]
-            if entry["shapes"] == 0:
+            is_selected = selected_pairs is None or (layer, datatype) in selected_pairs
+            if entry["shapes"] == 0 or not is_selected:
                 rendered.append({**entry, "path": None, "rendered": False})
                 continue
 
@@ -237,6 +313,22 @@ def render_report(
         "overview": overview_path,
         "layer_count": report["layer_count"],
         "rendered_count": sum(1 for entry in rendered if entry["rendered"]),
+        "requested_layers": (
+            [[layer, datatype] for layer, datatype in layers]
+            if layers is not None
+            else None
+        ),
+        "requested_bbox": (
+            {
+                "left": bbox[0],
+                "bottom": bbox[1],
+                "right": bbox[2],
+                "top": bbox[3],
+            }
+            if bbox is not None
+            else None
+        ),
+        "actual_extent": actual_extent,
         "layers": rendered,
     }
 

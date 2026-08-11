@@ -210,6 +210,9 @@ def test_json_contract(tmp_path, capsys):
         "overview",
         "layer_count",
         "rendered_count",
+        "requested_layers",
+        "requested_bbox",
+        "actual_extent",
         "layers",
     }
     assert isinstance(data["background"], str)
@@ -220,6 +223,9 @@ def test_json_contract(tmp_path, capsys):
     assert isinstance(data["height"], int)
     assert isinstance(data["layer_count"], int)
     assert isinstance(data["rendered_count"], int)
+    assert data["requested_layers"] is None
+    assert data["requested_bbox"] is None
+    assert set(data["actual_extent"].keys()) == {"left", "bottom", "right", "top"}
 
     for entry in data["layers"]:
         assert set(entry.keys()) == {
@@ -370,3 +376,371 @@ def test_cli_unknown_top_exits_one(tmp_path, capsys):
     )
     err = capsys.readouterr().err
     assert "top cell not found in stream: NOPE" in err
+
+
+# --- --layers / --bbox (issue #673) -----------------------------------------
+
+#: Full-chip geometry on layer (1, 0): fills the entire layout.
+_CHIP_UM = (0.0, 0.0, 100.0, 100.0)
+#: A small feature, deep inside the chip, on a distinct layer.
+_FEATURE_UM = (40.0, 40.0, 42.0, 42.0)
+
+
+def _make_chip_and_feature_layout() -> kdb.Layout:
+    """A synthetic GDS with large full-chip geometry plus a small feature on
+    a separate layer -- the exact shape the issue's acceptance criteria call
+    for. Without layer/bbox selection, the small feature is a handful of
+    pixels inside the full-chip render; ``--layers``/``--bbox`` isolate it.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    dbu = layout.dbu
+
+    def to_dbu(v: float) -> int:
+        return round(v / dbu)
+
+    chip = layout.layer(1, 0)
+    top.shapes(chip).insert(
+        kdb.Box(*(to_dbu(v) for v in _CHIP_UM)),
+    )
+
+    feature = layout.layer(2, 0)
+    top.shapes(feature).insert(
+        kdb.Box(*(to_dbu(v) for v in _FEATURE_UM)),
+    )
+
+    return layout
+
+
+def _write_chip_and_feature(tmp_path: Path, name: str = "chip.gds") -> Path:
+    path = tmp_path / name
+    _make_chip_and_feature_layout().write(str(path))
+    return path
+
+
+def test_layers_option_filters_report_and_skips_unselected_files(tmp_path):
+    """``layers`` restricts which per-layer PNGs get written -- an
+    unselected layer is reported ``rendered: false, path: None`` even though
+    it has shapes, and its PNG is never written to disk."""
+    path = _write_chip_and_feature(tmp_path)
+    out_dir = tmp_path / "out"
+
+    report = render_report(str(path), output_dir=str(out_dir), layers=[(2, 0)])
+
+    assert report["requested_layers"] == [[2, 0]]
+    by_pair = _by_pair(report["layers"])
+
+    chip_entry = by_pair[(1, 0)]
+    assert chip_entry["shapes"] > 0  # has geometry ...
+    assert chip_entry["rendered"] is False  # ... but was not selected
+    assert chip_entry["path"] is None
+    assert not (out_dir / "1_0.png").exists()
+
+    feature_entry = by_pair[(2, 0)]
+    assert feature_entry["rendered"] is True
+    assert Path(feature_entry["path"]).is_file()
+    assert (out_dir / "2_0.png").exists()
+
+    assert report["rendered_count"] == 1
+    # layer_count still reflects the full design, matching `klt layers`.
+    assert report["layer_count"] == 2
+
+
+def test_layers_option_absent_pair_matches_nothing(tmp_path):
+    """A requested pair not present in the stream matches nothing -- no
+    crash, just an all-unrendered report."""
+    path = _write_chip_and_feature(tmp_path)
+
+    report = render_report(
+        str(path), output_dir=str(tmp_path / "out"), layers=[(99, 0)]
+    )
+
+    assert report["requested_layers"] == [[99, 0]]
+    assert report["rendered_count"] == 0
+    assert all(not entry["rendered"] for entry in report["layers"])
+
+
+def test_layers_option_empty_list_raises(tmp_path):
+    path = _write_chip_and_feature(tmp_path)
+    with pytest.raises(RenderError, match="at least one layer"):
+        render_report(str(path), output_dir=str(tmp_path / "out"), layers=[])
+
+
+def test_layers_option_omitted_matches_default_behavior(tmp_path):
+    """``layers=None`` (the default) renders exactly like before this option
+    existed -- the no-option regression guard for issue #673."""
+    path = _write_chip_and_feature(tmp_path)
+
+    with_none = render_report(
+        str(path), output_dir=str(tmp_path / "out_a"), layers=None
+    )
+    omitted = render_report(str(path), output_dir=str(tmp_path / "out_b"))
+
+    strip = {"output_dir", "overview", "layers"}
+    assert {k: v for k, v in with_none.items() if k not in strip} == {
+        k: v for k, v in omitted.items() if k not in strip
+    }
+
+
+#: `LayoutView.zoom_box()` snaps the viewport to its internal pixel grid, so
+#: `view.box()` can differ from the literal request by a small sub-pixel
+#: amount (observed: a fraction of one pixel's physical size) even when no
+#: aspect-ratio padding is needed -- not a rounding bug this module
+#: introduces, just `zoom_box()`'s own quantization. Tolerance below is
+#: generous relative to that (well under one pixel at the sizes used here).
+_EXTENT_TOL_UM = 0.05
+
+
+def test_bbox_option_reports_requested_and_actual_extent(tmp_path):
+    """A square ``--bbox`` matching the canvas's own aspect ratio needs no
+    aspect-ratio padding, so ``actual_extent`` matches ``requested_bbox`` up
+    to `zoom_box()`'s own sub-pixel snapping."""
+    path = _write_chip_and_feature(tmp_path)
+    window = (38.0, 38.0, 44.0, 44.0)  # 6x6 um square, square canvas below
+
+    report = render_report(
+        str(path),
+        output_dir=str(tmp_path / "out"),
+        width=100,
+        height=100,
+        bbox=window,
+    )
+
+    assert report["requested_bbox"] == {
+        "left": 38.0,
+        "bottom": 38.0,
+        "right": 44.0,
+        "top": 44.0,
+    }
+    assert report["actual_extent"] == pytest.approx(
+        {"left": 38.0, "bottom": 38.0, "right": 44.0, "top": 44.0}, abs=_EXTENT_TOL_UM
+    )
+
+
+def test_bbox_option_pads_non_matching_aspect_ratio(tmp_path):
+    """A non-square ``--bbox`` against a non-matching canvas aspect ratio is
+    padded (not stretched) to the canvas's aspect ratio, centered on the
+    request -- `actual_extent` must (up to sub-pixel snapping) contain
+    `requested_bbox` and be wider without changing height."""
+    path = _write_chip_and_feature(tmp_path)
+    window = (38.0, 38.0, 44.0, 44.0)  # 1:1 aspect request ...
+
+    report = render_report(
+        str(path),
+        output_dir=str(tmp_path / "out"),
+        width=200,
+        height=100,  # ... against a 2:1 canvas
+        bbox=window,
+    )
+
+    extent = report["actual_extent"]
+    # Vertical extent (the matching axis) is essentially unchanged.
+    assert extent["bottom"] == pytest.approx(38.0, abs=_EXTENT_TOL_UM)
+    assert extent["top"] == pytest.approx(44.0, abs=_EXTENT_TOL_UM)
+    # Horizontal extent is padded to match the 2:1 canvas -- roughly double
+    # the requested 6 um width, not stretched to it.
+    width = extent["right"] - extent["left"]
+    assert width == pytest.approx(12.0, abs=_EXTENT_TOL_UM)
+    # Fully contains the requested window (up to sub-pixel snapping).
+    assert extent["left"] <= 38.0 + _EXTENT_TOL_UM
+    assert extent["right"] >= 44.0 - _EXTENT_TOL_UM
+    # Padded roughly symmetrically around the request (centered).
+    center_x = (extent["left"] + extent["right"]) / 2
+    assert center_x == pytest.approx(41.0, abs=_EXTENT_TOL_UM)
+
+
+def test_bbox_option_excludes_all_geometry_still_renders(tmp_path):
+    """A ``--bbox`` that misses all geometry on the selected layer still
+    renders successfully (a blank/background image), doesn't crash."""
+    path = _write_chip_and_feature(tmp_path)
+    out_dir = tmp_path / "out"
+
+    report = render_report(
+        str(path),
+        output_dir=str(out_dir),
+        layers=[(2, 0)],
+        bbox=(90.0, 90.0, 95.0, 95.0),  # far from the (40,40)-(42,42) feature
+    )
+
+    by_pair = _by_pair(report["layers"])
+    feature_entry = by_pair[(2, 0)]
+    # `rendered` reflects the layer's own (whole-layout) shape count, not
+    # bbox intersection -- an empty-in-window render still writes a file.
+    assert feature_entry["rendered"] is True
+    assert Path(feature_entry["path"]).is_file()
+    assert Path(feature_entry["path"]).stat().st_size > 0
+
+
+def test_bbox_invalid_ordering_raises(tmp_path):
+    path = _write_chip_and_feature(tmp_path)
+    with pytest.raises(RenderError, match="invalid --bbox"):
+        render_report(
+            str(path), output_dir=str(tmp_path / "out"), bbox=(10.0, 10.0, 10.0, 20.0)
+        )
+    with pytest.raises(RenderError, match="invalid --bbox"):
+        render_report(
+            str(path), output_dir=str(tmp_path / "out2"), bbox=(10.0, 20.0, 20.0, 10.0)
+        )
+
+
+def test_layers_and_bbox_combine(tmp_path):
+    """``layers`` and ``bbox`` compose: only the selected layer is rendered,
+    cropped to the requested window."""
+    path = _write_chip_and_feature(tmp_path)
+    out_dir = tmp_path / "out"
+
+    report = render_report(
+        str(path),
+        output_dir=str(out_dir),
+        layers=[(2, 0)],
+        bbox=(38.0, 38.0, 44.0, 44.0),
+    )
+
+    by_pair = _by_pair(report["layers"])
+    assert by_pair[(1, 0)]["rendered"] is False
+    assert by_pair[(2, 0)]["rendered"] is True
+    assert report["requested_layers"] == [[2, 0]]
+    assert report["requested_bbox"] == {
+        "left": 38.0,
+        "bottom": 38.0,
+        "right": 44.0,
+        "top": 44.0,
+    }
+    assert not (out_dir / "1_0.png").exists()
+    assert (out_dir / "2_0.png").exists()
+
+
+def test_cli_layers_flag_scopes_report(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(
+            [
+                "render",
+                str(path),
+                "-o",
+                str(tmp_path / "out"),
+                "--layers",
+                "[[2, 0]]",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    by_pair = _by_pair(data["layers"])
+    assert by_pair[(1, 0)]["rendered"] is False
+    assert by_pair[(2, 0)]["rendered"] is True
+    assert data["requested_layers"] == [[2, 0]]
+
+
+def test_cli_layers_malformed_json_exits_one(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(["render", str(path), "-o", str(tmp_path / "out"), "--layers", "not json"])
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "--layers" in err
+
+
+def test_cli_layers_empty_array_exits_one(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(["render", str(path), "-o", str(tmp_path / "out"), "--layers", "[]"]) == 1
+    )
+    err = capsys.readouterr().err
+    assert "at least one layer" in err
+
+
+def test_cli_bbox_flag_scopes_extent(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(
+            [
+                "render",
+                str(path),
+                "-o",
+                str(tmp_path / "out"),
+                "--bbox",
+                "38,38,44,44",
+                "--width",
+                "100",
+                "--height",
+                "100",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["requested_bbox"] == {
+        "left": 38.0,
+        "bottom": 38.0,
+        "right": 44.0,
+        "top": 44.0,
+    }
+    assert data["actual_extent"] == pytest.approx(
+        {"left": 38.0, "bottom": 38.0, "right": 44.0, "top": 44.0}, abs=_EXTENT_TOL_UM
+    )
+
+
+def test_cli_bbox_malformed_exits_one(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(["render", str(path), "-o", str(tmp_path / "out"), "--bbox", "not,a,box"])
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "--bbox" in err
+
+
+def test_cli_bbox_wrong_ordering_exits_one(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(["render", str(path), "-o", str(tmp_path / "out"), "--bbox", "10,10,5,5"])
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "--bbox" in err
+
+
+def test_cli_bbox_wrong_field_count_exits_one(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(["render", str(path), "-o", str(tmp_path / "out"), "--bbox", "1,2,3"]) == 1
+    )
+    err = capsys.readouterr().err
+    assert "--bbox" in err
+
+
+def test_cli_text_format_prints_requested_and_actual_extent(tmp_path, capsys):
+    path = _write_chip_and_feature(tmp_path)
+
+    assert (
+        main(
+            [
+                "render",
+                str(path),
+                "-o",
+                str(tmp_path / "out"),
+                "--layers",
+                "[[2, 0]]",
+                "--bbox",
+                "38,38,44,44",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "requested_layers: 2/0" in out
+    assert "requested_bbox: (38.0,38.0)-(44.0,44.0)" in out
+    assert "actual_extent:" in out
