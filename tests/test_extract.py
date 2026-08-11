@@ -3270,7 +3270,8 @@ def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
 
     The fixture's two labelled heads (``RA``/``RB``) both land on that one
     continuous, device-less net, so KLayout's ``Net.expanded_name()`` joins
-    them as ``"RA,RB"`` (issue #312) -- a genuinely *named* net. Issue #539
+    them into one name, reported as ``"RA|RB"`` -- the written netlist's own
+    spelling of that join (issue #312, #696) -- a genuinely *named* net. Issue #539
     requires ``_extract_netlist``'s purge step to preserve exactly this: a
     device-less net survives when it is named/labelled, unlike
     :func:`test_layout_with_no_devices_succeeds_with_zero_count`'s layout,
@@ -3290,7 +3291,7 @@ def test_unmarked_poly_bar_is_not_a_resistor(tmp_path, deck_name):
     # labelled -- the merged net survives as a single named, device-less,
     # promoted-to-pin net (issue #539) instead of the whole circuit purging
     # away.
-    assert report["nets"] == [{"name": "RA,RB", "pin": True, "device_count": 0}]
+    assert report["nets"] == [{"name": "RA|RB", "pin": True, "device_count": 0}]
 
 
 def test_purge_preserving_named_nets_generalizes_to_hierarchical_circuits():
@@ -3394,13 +3395,13 @@ def test_rescued_named_net_survives_parasitics_extraction(tmp_path, deck_name):
 
     # Same schematic-equivalent view as the non-parasitics run.
     assert report["device_count"] == 0
-    assert report["nets"] == [{"name": "RA,RB", "pin": True, "device_count": 0}]
+    assert report["nets"] == [{"name": "RA|RB", "pin": True, "device_count": 0}]
 
     # The rescued net's geometry is genuinely reachable, not merely
     # not-crashing: the poly bar's real R/C is reported for it.
     para = report["parasitics"]
     assert para is not None
-    assert [entry["net"] for entry in para["nets"]] == ["RA,RB"]
+    assert [entry["net"] for entry in para["nets"]] == ["RA|RB"]
     assert para["nets"][0]["capacitance_ff"] > 0.0
     assert para["nets"][0]["resistance_ohm"] > 0.0
 
@@ -3464,7 +3465,7 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
             path, "sky130", output=str(tmp_path / f"rpm_{mask[0]}.spice")
         )
         assert report["device_counts"] == {}
-        # A second warning (issue #539's `net 'RA,RB' merges ...` collision
+        # A second warning (issue #539's `net 'RA|RB' merges ...` collision
         # note) now also fires: with no device recognised, the two labelled
         # heads (`RA`/`RB`) merge onto one continuous, device-less net that
         # survives extraction instead of purging away -- see
@@ -3489,7 +3490,7 @@ def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_pa
 
     report = run_extract(path, "gf180mcu", output=str(tmp_path / "salicided.spice"))
     assert report["device_counts"] == {}
-    # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
+    # A second warning (issue #539's `net 'RA|RB' merges ...` collision note)
     # now also fires -- see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
     assert len(report["warnings"]) == 2
@@ -3537,7 +3538,7 @@ def test_unmarked_poly_bar_triggers_unmodelled_device_warning(tmp_path, deck_nam
     )
 
     assert report["device_count"] == 0
-    # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
+    # A second warning (issue #539's `net 'RA|RB' merges ...` collision note)
     # now also fires -- see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
     assert len(report["warnings"]) == 2
@@ -3558,7 +3559,7 @@ def test_unmodelled_poly_field_reports_bbox_and_reason_when_flagged(tmp_path):
     )
     report = run_extract(path, "sky130", output=str(tmp_path / "unmarked_bar.spice"))
 
-    # A second warning (issue #539's `net 'RA,RB' merges ...` collision note)
+    # A second warning (issue #539's `net 'RA|RB' merges ...` collision note)
     # now also fires -- see the matching comment in
     # `test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res`.
     assert len(report["warnings"]) == 2
@@ -5602,10 +5603,11 @@ def test_abstract_cells_preserves_devices_in_shared_called_cell(tmp_path):
     assert entry["instance_count"] == 1
 
     # The direct LEAF instance is not itself abstracted, so its own in-cell
-    # "A"/"Y" pin labels stay in the flat label walk and comma-merge with
+    # "A"/"Y" pin labels stay in the flat label walk and label-merge with
     # the parent net names on the same net -- not a regression, just how an
-    # un-abstracted instance's own labels always behave.
-    net_name_parts = {part for n in report["nets"] for part in n["name"].split(",")}
+    # un-abstracted instance's own labels always behave. The merged name is
+    # reported the way the netlist spells it, `|`-joined (issue #696).
+    net_name_parts = {part for n in report["nets"] for part in n["name"].split("|")}
     assert {"MACRO_A", "MACRO_Y", "DIRECT_A", "DIRECT_Y"}.issubset(net_name_parts)
 
     spice = Path(report["netlist_path"]).read_text()
@@ -6299,16 +6301,17 @@ def test_parasitics_sanitizes_unlabelled_net_instance_name(tmp_path):
 
 def test_parasitics_sanitizes_multi_label_net_instance_name(tmp_path):
     """Regression (issue #312): a net with two distinct text labels joins as
-    `Y,Y2` via `net.expanded_name()`. ngspice does not reject the comma --
-    it silently splits the card into an extra positional node, corrupting
-    the card's arity. The parasitic R/C *instance* name must be sanitized to
-    alnum/underscore only."""
+    `Y,Y2` via `net.expanded_name()` (reported as `Y|Y2`, the written
+    netlist's own spelling, since issue #696). ngspice does not reject the
+    comma -- it silently splits the card into an extra positional node,
+    corrupting the card's arity. The parasitic R/C *instance* name must be
+    sanitized to alnum/underscore only."""
     path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds")
     report = run_extract(
         path, "sky130", output=str(tmp_path / "multi.spice"), parasitics=True
     )
     para_names = [n["net"] for n in report["parasitics"]["nets"]]
-    assert any("," in name for name in para_names)  # sanity: repro present
+    assert any("|" in name for name in para_names)  # sanity: repro present
 
     netlist_text = Path(report["netlist_path"]).read_text()
     _assert_rc_cards_have_safe_instance_names(netlist_text)
@@ -6421,23 +6424,68 @@ def test_parasitic_netlist_feeds_klt_sim_unmodified(tmp_path):
 
 
 def test_merged_net_labels_reports_two_label_collision(tmp_path):
-    """A net carrying two distinct labels (`Y` and `Y2`, joined by KLayout as
-    `Y,Y2` via `Net.expanded_name()`) is surfaced structurally in
-    `merged_net_labels[]` and as a matching prose entry in `warnings[]` --
+    """A net carrying two distinct labels (`Y` and `Y2`, reported under the
+    netlist's own `Y|Y2` spelling -- see issue #696) is surfaced structurally
+    in `merged_net_labels[]` and as a matching prose entry in `warnings[]` --
     `net_count`/`nets[]`/`pin_count` stay unchanged (purely additive)."""
     path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds")
     report = run_extract(path, "sky130", output=str(tmp_path / "multi.spice"))
 
-    assert report["merged_net_labels"] == [{"net": "Y,Y2", "labels": ["Y", "Y2"]}]
-    assert any("Y,Y2" in w and "merges" in w for w in report["warnings"]), report[
+    assert report["merged_net_labels"] == [{"net": "Y|Y2", "labels": ["Y", "Y2"]}]
+    assert any("Y|Y2" in w and "merges" in w for w in report["warnings"]), report[
         "warnings"
     ]
 
     # nets[] still carries the joined net exactly once, under its full name.
     net_names = [n["name"] for n in report["nets"]]
-    assert "Y,Y2" in net_names
+    assert "Y|Y2" in net_names
     assert report["net_count"] == len(report["nets"])
     assert report["pin_count"] == sum(1 for n in report["nets"] if n["pin"])
+
+
+def test_merged_net_label_name_is_byte_identical_to_written_netlist(tmp_path):
+    """Issue #696: a merged-label net has exactly ONE spelling. The name in
+    `merged_net_labels[].net` is byte-identical to the token KLayout's own
+    SPICE writer put in the written netlist (its `.SUBCKT` pin list and the
+    device cards), and to `nets[].name`, `devices[].nets.*` and
+    `parasitics.nets[].net`/`hub_net`/`terminals[].leg_net` -- so a consumer
+    can build `{net_name: report_entry}` from the JSON and look the same net
+    up in the netlist without a separator-substitution guess."""
+    path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "multi.spice"), parasitics=True
+    )
+
+    assert len(report["merged_net_labels"]) == 1
+    name = report["merged_net_labels"][0]["net"]
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    subckt_line = next(
+        ln for ln in netlist_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    # Byte-identical: the report's name is a whole token of the pin list, not
+    # merely a substring of some differently-punctuated spelling.
+    assert name in subckt_line.split()[2:]
+
+    assert name in [entry["name"] for entry in report["nets"]]
+    assert any(name in device["nets"].values() for device in report["devices"]), report[
+        "devices"
+    ]
+
+    parasitic_entry = next(
+        entry for entry in report["parasitics"]["nets"] if entry["net"] == name
+    )
+    # The parasitic hub/leg nets derived from this net are real nets in the
+    # written netlist too -- they must carry the same spelling.
+    node_tokens = {
+        token
+        for line in netlist_text.splitlines()
+        if not line.startswith("*")
+        for token in line.split()
+    }
+    assert parasitic_entry["hub_net"] in node_tokens
+    for terminal in parasitic_entry["terminals"]:
+        assert terminal["leg_net"] in node_tokens
 
 
 def test_merged_net_labels_empty_when_no_collision(tmp_path):
@@ -6460,9 +6508,9 @@ def test_merged_net_labels_lists_all_three_plus_labels(tmp_path):
     report = run_extract(path, "sky130", output=str(tmp_path / "multi3.spice"))
 
     assert report["merged_net_labels"] == [
-        {"net": "Y,Y2,Y3", "labels": ["Y", "Y2", "Y3"]}
+        {"net": "Y|Y2|Y3", "labels": ["Y", "Y2", "Y3"]}
     ]
-    assert any("Y,Y2,Y3" in w for w in report["warnings"])
+    assert any("Y|Y2|Y3" in w for w in report["warnings"])
 
 
 # --------------------------------------------------------------------------- #

@@ -430,6 +430,20 @@ def run_extract(
     ``devices``/``nets`` are sorted by name for deterministic, diff-clean
     output (same discipline as ``drc.py``'s ``violations`` sort).
 
+    **Every net name in this response is the written netlist's own spelling**
+    (issue #696) -- ``nets[].name``, ``devices[].nets.*``,
+    ``merged_net_labels[].net``, ``single_terminal_nets[]``,
+    ``unbiased_pmos_body_nets[].net`` and ``parasitics.nets[]``'s
+    ``net``/``hub_net``/``terminals[].leg_net`` are byte-identical to the
+    node token the ``.spice`` file at ``netlist_path`` carries for that net,
+    so a caller can join the JSON report to the netlist by name with no
+    substitution guess. This only *looks* different from KLayout's raw Python
+    API for a net carrying more than one text label, which
+    ``Net.expanded_name()`` joins with ``,`` but KLayout's own SPICE writer
+    emits as ``|`` (``"EN|RESETn"``); :func:`netlist_net_name` reconciles the
+    two, and ``klt lvs``'s ``net_correspondence[]``/``mismatches[].net`` use
+    the same spelling.
+
     ``device_classes`` is what the *deck* is structurally capable of
     recognising (:attr:`klayout_tools.decks.ExtractionDeck.device_classes`)
     -- independent of what this particular layout happens to contain, unlike
@@ -578,15 +592,18 @@ def run_extract(
     overlapping MOS geometry.
 
     ``merged_net_labels`` (issue #470) reports every net whose KLayout-
-    assigned name is a comma-joined merge of 2+ distinct labels -- see
+    assigned name is a ``|``-joined merge of 2+ distinct labels -- see
     :func:`_detect_merged_net_labels` for the exact heuristic and
     ``docs/cli/extract.md``'s "Merged net labels" section for the false-
     positive limitation. One entry per affected net, each ``{"net": "<full
     joined name>", "labels": [str, ...]}`` -- ``labels`` is the joined name
-    split on ``,``, so a consumer does not have to re-derive the label list
-    from the string itself. A matching prose entry is also appended to
-    ``warnings`` for every affected net. Always a list, empty when no net
-    carries multiple labels.
+    split on ``|``, so a consumer does not have to re-derive the label list
+    from the string itself, and ``net`` is byte-identical to that net's
+    ``nets[].name`` *and* to its node token in the written netlist (issue
+    #696), so the entry is a usable key into both rather than a parallel
+    spelling. A matching prose entry is also appended to ``warnings`` for
+    every affected net. Always a list, empty when no net carries multiple
+    labels.
 
     ``unbiased_pmos_body_nets`` (issue #555) reports every extracted PMOS
     (``deck.pfet_class``) device whose body (``"b"``) terminal ties to an
@@ -808,9 +825,9 @@ def run_extract(
     else:
         devices, device_counts, nets = [], {}, []
 
-    # Nets whose KLayout-assigned name is a comma-joined multi-label merge
-    # (issue #470): `Net.expanded_name()` joins every distinct label found on
-    # one electrical net with `,` (see `tests/test_extract.py`'s
+    # Nets whose KLayout-assigned name is a multi-label merge (issue #470):
+    # KLayout joins every distinct label found on one electrical net into a
+    # single `A|B` name (see `tests/test_extract.py`'s
     # `_make_inverter_layout(extra_y_label=...)` fixture, built for issue
     # #312's SPICE-name-sanitization fix). That is a silent signal that two
     # differently-named nets were shorted together on the layout side --
@@ -819,10 +836,11 @@ def run_extract(
     # `merged_net_labels[]` entry (so a caller does not have to re-derive
     # the label list from the joined string) and a matching prose
     # `warnings[]` entry (so a caller checking only `warnings[]`, per the
-    # documented contract, still sees it). See docs/cli/extract.md's
-    # "Merged net labels" section for the false-positive limitation: a
-    # label that legitimately contains a literal comma is indistinguishable
-    # from a real collision by this heuristic.
+    # documented contract, still sees it). Both name the net exactly as the
+    # written netlist does (`netlist_net_name`, issue #696). See
+    # docs/cli/extract.md's "Merged net labels" section for the
+    # false-positive limitation: a label that legitimately contains the join
+    # character is indistinguishable from a real collision by this heuristic.
     merged_net_labels = _detect_merged_net_labels(nets)
     for merged_entry in merged_net_labels:
         labels_str = ", ".join(merged_entry["labels"])
@@ -830,7 +848,8 @@ def run_extract(
             f"net '{merged_entry['net']}' merges "
             f"{len(merged_entry['labels'])} distinct labels ({labels_str}) "
             "onto one net -- KLayout joins multiple labels found on the "
-            "same electrical net with ',' in Net.expanded_name(); this "
+            f"same electrical net with '{_NETLIST_LABEL_JOIN}' in the "
+            "written netlist and in every reported net name; this "
             "usually means two differently-named nets were shorted "
             "together in the layout -- see docs/cli/extract.md's "
             "'Merged net labels' section."
@@ -3621,7 +3640,12 @@ def _extract_netlist(
             netlist, top_cell.name, non_declared, demote=True
         )
         if demoted_by_declared_pins:
-            joined = ", ".join(demoted_by_declared_pins)
+            # Named the way the written netlist names them, like every other
+            # net name this command reports (issue #696) -- these come off
+            # `Net.name`, which spells a merged-label net with a comma.
+            joined = ", ".join(
+                netlist_net_name(name) for name in demoted_by_declared_pins
+            )
             warnings.append(
                 f"kept {len(demoted_by_declared_pins)} net(s) internal: not in "
                 f"the declared pin set (--pins / layout.declared_pins) "
@@ -4062,6 +4086,11 @@ def _compute_parasitics(
 
     results: list[dict[str, Any]] = []
     for net in circuit.each_net():
+        # Raw `expanded_name()` on purpose: this list is an *internal* handoff
+        # to `_inject_parasitics`, which looks each entry back up by this key
+        # and derives real `create_net()` names from it. The netlist spelling
+        # (`netlist_net_name`, issue #696) is applied there, on the way into
+        # the response, not here.
         name = net.expanded_name()
         if name == deck.substrate_net:
             continue
@@ -4311,6 +4340,13 @@ def _inject_parasitics(
     # #283: `_compute_parasitics` already measures these nets correctly (the
     # geometry is there), so this lookup must resolve them too or the R/C it
     # computed for them is discarded right here.
+    #
+    # Keyed by the *raw* `expanded_name()`, never `netlist_net_name()`: these
+    # keys are matched against `_compute_parasitics`'s own raw names and are
+    # the base for the parasitic hub/leg nets created below, which have to
+    # reach `create_net()` in the form KLayout's writer expects to substitute
+    # (issue #696 -- an already-piped name would be written back out as
+    # `\x7c`). Only the *reported* names are normalised.
     nets_by_name = {net.expanded_name(): net for net in circuit.each_net()}
     existing_names = set(nets_by_name)
 
@@ -4362,7 +4398,12 @@ def _inject_parasitics(
                     {
                         "device": device.expanded_name(),
                         "terminal": terminal_def.name,
-                        "leg_net": leg_name,
+                        # `leg_name` is derived from -- and created under --
+                        # the raw `expanded_name()` form so the netlist
+                        # writer's own separator substitution still applies
+                        # to it; the *report* names it the way the netlist
+                        # spells it (issue #696).
+                        "leg_net": netlist_net_name(leg_name),
                         "resistance_ohm": round(leg_r_ohm, 4),
                     }
                 )
@@ -4390,10 +4431,10 @@ def _inject_parasitics(
         total_c_ff += entry["capacitance_ff"]
         report_nets.append(
             {
-                "net": entry["net"],
+                "net": netlist_net_name(entry["net"]),
                 "resistance_ohm": entry["resistance_ohm"],
                 "capacitance_ff": entry["capacitance_ff"],
-                "hub_net": hub_name,
+                "hub_net": netlist_net_name(hub_name),
                 "terminals": terminal_reports,
             }
         )
@@ -4405,6 +4446,74 @@ def _inject_parasitics(
         "total_capacitance_ff": round(total_c_ff, 6),
         "nets": report_nets,
     }
+
+
+#: KLayout's ``Net.expanded_name()`` joins the distinct text labels found on
+#: one electrical net with this character.
+_EXPANDED_NAME_LABEL_JOIN = ","
+
+#: ...and KLayout's own ``NetlistSpiceWriter`` substitutes this one for it
+#: when it writes that net's node name into the SPICE netlist. See
+#: :func:`netlist_net_name`.
+_NETLIST_LABEL_JOIN = "|"
+
+
+def netlist_net_name(name: str) -> str:
+    """A net's name **as the written SPICE netlist spells it**, given the raw
+    ``Net.expanded_name()`` KLayout's Python API returns (issue #696).
+
+    These two are not the same string for a net carrying more than one text
+    label. ``expanded_name()`` joins the labels with ``,`` (``"EN,RESETn"``),
+    but KLayout's compiled ``NetlistSpiceWriter`` -- the writer
+    :func:`run_extract` hands the netlist to, not anything in this repo --
+    substitutes ``|`` for that comma when it emits the node name
+    (``"EN|RESETn"`` in the ``.SUBCKT`` pin list and on every device card).
+    Reporting the raw form left the JSON response and the netlist spelling
+    the same net two different ways, so a consumer building
+    ``{net_name: report_entry}`` from the response could not look that net's
+    node up in the netlist: a ``KeyError``, or -- with the natural defensive
+    ``.get()`` -- a silently dropped net, in exactly the cells where two
+    labels legitimately name one node.
+
+    Normalising toward the netlist (rather than rewriting the netlist to use
+    ``,``) is deliberate: ngspice does not reject a literal comma in a node
+    name, it silently splits the card into an extra positional node and
+    corrupts its arity -- the same class of bug issue #312 fixed for device
+    *instance* names -- and the substitution itself lives inside KLayout's
+    compiled writer, which is not reachable from Python.
+
+    Applied to every net name that reaches a JSON response
+    (``nets[].name``, ``devices[].nets.*``, ``merged_net_labels[].net``,
+    ``parasitics.nets[]``'s ``net``/``hub_net``/``terminals[].leg_net``, and
+    ``klt lvs``'s ``net_correspondence[]``/``mismatches[].net``), never to a
+    name fed back into ``kdb`` -- ``Circuit.create_net()`` with an
+    already-piped name would make the writer escape it as ``\\x7c`` and
+    reintroduce the very mismatch this closes. Known limitation, inherited
+    from the same heuristic ``_detect_merged_net_labels`` documents: a single
+    label that legitimately contains a comma is indistinguishable from a
+    two-label merge, here as there.
+    """
+    return name.replace(_EXPANDED_NAME_LABEL_JOIN, _NETLIST_LABEL_JOIN)
+
+
+def expanded_net_name(name: str) -> str:
+    """The inverse of :func:`netlist_net_name`: the raw
+    ``Net.expanded_name()`` form of a net name a caller quoted back to us in
+    the netlist's spelling (issue #696).
+
+    Needed only where a *reported* name is fed back into KLayout's own
+    lookups -- ``klt lvs``'s ``hints.same_nets``, whose
+    ``Circuit.net_by_name()`` matches the raw stored name. Callers try the
+    verbatim string first and fall back to this, so a label that genuinely
+    contains a ``|`` still resolves to itself rather than being rewritten.
+    """
+    return name.replace(_NETLIST_LABEL_JOIN, _EXPANDED_NAME_LABEL_JOIN)
+
+
+def has_netlist_label_join(name: str) -> bool:
+    """Whether ``name`` carries the netlist's multi-label join character --
+    i.e. whether :func:`expanded_net_name` could possibly change it."""
+    return _NETLIST_LABEL_JOIN in name
 
 
 _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
@@ -4476,8 +4585,10 @@ def _describe_devices(
         nets: dict[str, str | None] = {}
         for terminal in device_class.terminal_definitions():
             net = device.net_for_terminal(terminal.id())
+            # The written netlist's spelling of the net, so a terminal's net
+            # joins to `nets[].name` and to the `.spice` file (issue #696).
             nets[terminal.name.lower()] = (
-                net.expanded_name() if net is not None else None
+                netlist_net_name(net.expanded_name()) if net is not None else None
             )
 
         params: dict[str, float] = {}
@@ -4556,12 +4667,17 @@ def _describe_devices(
 
 
 def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
-    """Build the response's ``nets[]`` array."""
-    pin_nets = {pin.expanded_name() for pin in _each_pin_net(circuit)}
+    """Build the response's ``nets[]`` array.
+
+    Every ``name`` is the written netlist's own spelling of that net
+    (:func:`netlist_net_name`), so a caller can join ``nets[]`` to the
+    ``.spice`` file by name -- see issue #696.
+    """
+    pin_nets = {netlist_net_name(pin.expanded_name()) for pin in _each_pin_net(circuit)}
 
     nets: list[dict[str, Any]] = []
     for net in circuit.each_net():
-        name = net.expanded_name()
+        name = netlist_net_name(net.expanded_name())
         nets.append(
             {
                 "name": name,
@@ -4577,29 +4693,33 @@ def _describe_nets(circuit: kdb.Circuit) -> list[dict[str, Any]]:
 def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the response's ``merged_net_labels[]`` array (issue #470).
 
-    KLayout's ``Net.expanded_name()`` joins every distinct label found on one
-    electrical net with ``,`` (e.g. two labels ``Y`` and ``OUT`` shorted
-    together on layout come back as the single net name ``"Y,OUT"``,
-    verified for issue #312's SPICE-instance-name-sanitization fix). That
-    join is otherwise silent: `nets[]`' ``name`` field carries it, but
-    nothing calls it out as the layout asserting a connectivity equality the
-    caller may not have intended.
+    KLayout joins every distinct label found on one electrical net into a
+    single net name (e.g. two labels ``Y`` and ``OUT`` shorted together on
+    layout come back as the single net ``"Y|OUT"``, verified for issue
+    #312's SPICE-instance-name-sanitization fix). That join is otherwise
+    silent: `nets[]`' ``name`` field carries it, but nothing calls it out as
+    the layout asserting a connectivity equality the caller may not have
+    intended.
 
     Scans ``nets`` (the already-built ``nets[]`` array, so this reuses the
-    same ``name`` KLayout assigned rather than re-querying the circuit) for
-    any net whose name splits into 2+ parts on ``,``, and returns one entry
-    per match: ``{"net": "<full joined name>", "labels": ["Y", "OUT", ...]}``.
+    exact same ``name`` string that array reports -- the written netlist's
+    ``|``-joined spelling, see :func:`netlist_net_name` and issue #696) for
+    any net whose name splits into 2+ parts on that separator, and returns
+    one entry per match: ``{"net": "<full joined name>", "labels": ["Y",
+    "OUT", ...]}``. Because ``net`` is byte-identical to the ``nets[].name``
+    it was derived from, the entry is a usable key into both ``nets[]`` and
+    the written netlist rather than a parallel spelling of the same net.
     Always a list; empty when no net carries multiple labels.
 
     Known limitation (heuristic, not exact): a label that legitimately
-    contains a literal comma is indistinguishable from a real multi-label
-    collision by this substring split -- see docs/cli/extract.md's "Merged
-    net labels" section.
+    contains a literal comma (or pipe) is indistinguishable from a real
+    multi-label collision by this substring split -- see
+    docs/cli/extract.md's "Merged net labels" section.
     """
     merged: list[dict[str, Any]] = []
     for net in nets:
         name = net["name"]
-        labels = name.split(",")
+        labels = name.split(_NETLIST_LABEL_JOIN)
         if len(labels) < 2:
             continue
         merged.append({"net": name, "labels": labels})

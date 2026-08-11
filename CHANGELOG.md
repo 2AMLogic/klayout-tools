@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — a merged-label net now has **one** spelling across every
+  artifact `klt` produces (#696). `klt extract` wrote such a net into the
+  SPICE netlist as `EN|RESETn` (KLayout's own `NetlistSpiceWriter`
+  substitutes `|` for the comma its Python API joins labels with) but
+  reported it as `EN,RESETn` in `nets[]`, `devices[].nets.*`,
+  `merged_net_labels[]` and `parasitics.nets[]`, and `klt lvs`'s
+  `net_correspondence[]`/`mismatches[].net` used the comma form too — so a
+  consumer building `{net_name: report_entry}` from the JSON could not look
+  that net's node up in the written netlist: a `KeyError`, or (with the
+  natural defensive `.get()`) a **silently dropped net**, in exactly the
+  cells where two labels legitimately name one node. Every reported net name
+  is now the netlist's own spelling, byte-identical to the node token in the
+  `.spice` file; `klt lvs`'s `hints.same_nets` accepts either spelling on
+  input so a name read out of `net_correspondence[]` can be fed straight
+  back in. Normalisation runs toward the netlist, not away from it: a
+  literal comma in a SPICE node name is not rejected by ngspice, it is
+  silently read as a token separator and corrupts the card's arity (the
+  failure #312 fixed for device *instance* names). **Value change, no
+  `schema_version` bump**: no field's shape or documented meaning changed —
+  `nets[].name` was already documented as "the net's name in the written
+  netlist" and simply was not — but a consumer pinned on the literal string
+  `"EN,RESETn"` must update to `"EN|RESETn"`. See `docs/cli/extract.md`'s
+  "Merged net labels" section for the full contract.
+
 - 2026-08-11 — `klt gen-compose`'s `placement.strategy: "explicit"` path now
   warns when a block is placed closer to a neighbour than that neighbour's
   own declared `generator_report.drc_hints.min_spacing_um` (#692). Before

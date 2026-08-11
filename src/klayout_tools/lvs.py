@@ -122,7 +122,10 @@ from .decks import (
 from .extract import (
     ExtractError,
     apply_resistor_fixed_offset_corrections,
+    expanded_net_name,
     extract_netlist_from_layout,
+    has_netlist_label_join,
+    netlist_net_name,
 )
 
 if TYPE_CHECKING:
@@ -318,6 +321,19 @@ def run_lvs(request: str) -> dict[str, Any]:
     reference input, unknown deck, unsupported engine, engine error) --
     a documented ``status: "mismatch"`` is a successful run, not an error
     (see this module's docstring).
+
+    **Every net name in this response is the written netlist's own spelling**
+    (issue #696) -- ``net_correspondence[].layout``/``.reference`` and
+    ``mismatches[].net.*`` are byte-identical to the corresponding
+    ``klt extract`` response's ``nets[].name``/``merged_net_labels[].net``
+    and to the node token in the ``.spice`` file, so the artifacts can be
+    joined by name. This only *looks* different from KLayout's raw Python API
+    for a net carrying more than one text label, whose ``expanded_name()``
+    joins the labels with ``,`` while KLayout's own SPICE writer emits ``|``
+    (``"EN|RESETn"``); see
+    :func:`klayout_tools.extract.netlist_net_name`. ``hints.same_nets``
+    accepts either spelling on input, so a name read out of
+    ``net_correspondence[]`` can be fed straight back in.
 
     ``device_classes`` (issue #221) echoes the layout-side
     :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` -- what that
@@ -1370,6 +1386,28 @@ def _prune_extra_top_circuits(netlist: kdb.Netlist, keep: kdb.Circuit) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _net_by_reported_name(circuit: kdb.Circuit, name: str) -> Any:
+    """``circuit.net_by_name(name)``, additionally accepting the spelling
+    this module's own *responses* use for a merged-label net (issue #696).
+
+    ``net_by_name`` matches KLayout's raw stored name, which joins a net's
+    two labels with ``,`` (``"EN,RESETn"``), while every reported net name --
+    and the written ``.spice`` file -- spells that net ``"EN|RESETn"``.
+    Without this fallback a caller who copied a name out of
+    ``net_correspondence[]`` into ``hints.same_nets`` would be told the net
+    does not exist, which would make the documented spelling un-feedable.
+
+    Tries the caller's string verbatim first, so a label that genuinely
+    contains a ``|`` still resolves to itself.
+    """
+    net = circuit.net_by_name(name)
+    if net is not None:
+        return net
+    if not has_netlist_label_join(name):
+        return None
+    return circuit.net_by_name(expanded_net_name(name))
+
+
 def _apply_hints(
     comparer: kdb.NetlistComparer,
     hints: dict[str, Any],
@@ -1383,7 +1421,11 @@ def _apply_hints(
     top circuit (``NetlistComparer.same_nets(circuit_a, circuit_b, net_a,
     net_b, must_match=True)``). A hint naming a net that does not exist on
     the stated side is a malformed request (:class:`LvsError`), not a silent
-    no-op -- a typo'd hint should be visible, not swallowed.
+    no-op -- a typo'd hint should be visible, not swallowed. A merged-label
+    net may be named either the way every response field spells it
+    (``"EN|RESETn"``, see :func:`_net_name_or_none`) or the way KLayout's raw
+    API does (``"EN,RESETn"``) -- the documented spelling has to be feedable
+    back in, so both resolve (issue #696).
 
     ``equivalent_pins``: ``{"<subcircuit name>": [[pin_a, pin_b], ...], ...}``
     -- declares a group of swappable pins on the *reference*-side circuit of
@@ -1410,10 +1452,10 @@ def _apply_hints(
                 "hints.same_nets entries must be [layout_net, reference_net]"
             )
         layout_name, reference_name = entry
-        net_a = layout_circuit.net_by_name(layout_name)
+        net_a = _net_by_reported_name(layout_circuit, layout_name)
         if net_a is None:
             raise LvsError(f"hints.same_nets: layout net '{layout_name}' not found")
-        net_b = reference_circuit.net_by_name(reference_name)
+        net_b = _net_by_reported_name(reference_circuit, reference_name)
         if net_b is None:
             raise LvsError(
                 f"hints.same_nets: reference net '{reference_name}' not found"
@@ -1672,16 +1714,40 @@ def _name_or_none(obj: Any) -> str | None:
     return None
 
 
+def _net_name_or_none(net: Any) -> str | None:
+    """:func:`_name_or_none` for a *net*, reported the way the written SPICE
+    netlist spells it (issue #696).
+
+    Identical to ``_name_or_none`` for every ordinary net. It differs only
+    for a net carrying more than one text label, whose raw
+    ``Net.expanded_name()`` joins the labels with ``,`` while KLayout's own
+    SPICE writer emits ``|`` -- see
+    :func:`klayout_tools.extract.netlist_net_name`. Every net name this
+    module reports (``net_correspondence[].layout``/``.reference``,
+    ``mismatches[].net.*``) goes through here, so a merged-label net has one
+    spelling across ``klt lvs``, ``klt extract``'s JSON report, and the
+    ``.spice`` file itself -- and the three can be joined by name.
+
+    Device names keep using ``_name_or_none`` directly: they are not net
+    node names, and KLayout writes them through a different (instance-name)
+    path.
+    """
+    name = _name_or_none(net)
+    return None if name is None else netlist_net_name(name)
+
+
 def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     """Turn ``logger.net_matches`` (every successful net pairing the
     comparer produced -- unambiguous and ambiguous alike) into the
     documented ``net_correspondence[]`` response field (issue #311).
 
     Each entry names the layout net and its reference counterpart via
-    :func:`_name_or_none` (``expanded_name()``, the same helper
-    ``mismatches[].net`` already uses -- so a label-merged net's ``A|B``
-    alias join is represented identically here), plus a ``pin`` boolean:
-    whether the *layout* net is one of the circuit's declared pins
+    :func:`_net_name_or_none` (the same helper ``mismatches[].net`` uses --
+    so a label-merged net's ``A|B`` join is spelled here exactly as it is in
+    ``klt extract``'s ``nets[]``/``merged_net_labels[]`` and in the written
+    ``.spice`` file, and the three can be joined by name; issue #696), plus
+    a ``pin`` boolean: whether the *layout* net is one of the circuit's
+    declared pins
     (``Net.pin_count() > 0``). ``same_circuits`` pins the layout/reference
     top circuits together before the compare runs (see ``run_lvs``), so a
     matched pair's declared-pin status agrees on both sides by
@@ -1703,8 +1769,8 @@ def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     """
     seen: dict[tuple[int, str | None, str | None], dict[str, Any]] = {}
     for scope, layout_net, reference_net in logger.net_matches:
-        layout_name = _name_or_none(layout_net)
-        reference_name = _name_or_none(reference_net)
+        layout_name = _net_name_or_none(layout_net)
+        reference_name = _net_name_or_none(reference_net)
         key = (scope, layout_name, reference_name)
         if key in seen:
             continue
@@ -2290,8 +2356,8 @@ def _build_mismatches(
                 description,
                 "both",
                 net={
-                    "layout": _name_or_none(a),
-                    "reference": _name_or_none(b),
+                    "layout": _net_name_or_none(a),
+                    "reference": _net_name_or_none(b),
                 },
             )
         )
@@ -2306,6 +2372,11 @@ def _build_mismatches(
     # `log_entry` text -- this field's own contract (docs/cli/lvs.md,
     # "mismatches[].description") requires a curated description, never raw
     # `NetlistComparer` log text.
+    #
+    # The declared names arrive (and are keyed against `matched_net_keys`) in
+    # KLayout's raw `expanded_name()` form; the reported `net` block uses the
+    # written netlist's spelling like every other net name in this response
+    # (issue #696).
     top_scope = getattr(logger, "top_scope", None)
     matched_net_keys = set(getattr(logger, "matched_net_keys", None) or ())
     for layout_name, reference_name in same_nets_hints or ():
@@ -2318,7 +2389,10 @@ def _build_mismatches(
                     "hints.same_nets declared this pairing, but the "
                     "comparer did not confirm it as a topological match",
                     "both",
-                    net={"layout": layout_name, "reference": reference_name},
+                    net={
+                        "layout": netlist_net_name(layout_name),
+                        "reference": netlist_net_name(reference_name),
+                    },
                 )
             )
 
@@ -2849,7 +2923,7 @@ def _classify_net_mismatches(
                     "error",
                     "a reference net's role is divided across multiple layout nets",
                     "layout",
-                    net={"layout": _name_or_none(a), "reference": None},
+                    net={"layout": _net_name_or_none(a), "reference": None},
                 )
             )
     elif one_sided_layout:
@@ -2863,7 +2937,7 @@ def _classify_net_mismatches(
                     if explained
                     else "layout net has no reference counterpart",
                     "layout",
-                    net={"layout": _name_or_none(a), "reference": None},
+                    net={"layout": _net_name_or_none(a), "reference": None},
                 )
             )
 
@@ -2875,7 +2949,7 @@ def _classify_net_mismatches(
                     "error",
                     "multiple reference nets were collapsed into one layout net",
                     "reference",
-                    net={"layout": None, "reference": _name_or_none(b)},
+                    net={"layout": None, "reference": _net_name_or_none(b)},
                 )
             )
     elif one_sided_reference:
@@ -2889,7 +2963,7 @@ def _classify_net_mismatches(
                     if explained
                     else "reference net has no layout counterpart",
                     "reference",
-                    net={"layout": None, "reference": _name_or_none(b)},
+                    net={"layout": None, "reference": _net_name_or_none(b)},
                 )
             )
 
@@ -2905,7 +2979,10 @@ def _classify_net_mismatches(
                     "error",
                     "nets were paired despite a name/identity conflict",
                     "both",
-                    net={"layout": _name_or_none(a), "reference": _name_or_none(b)},
+                    net={
+                        "layout": _net_name_or_none(a),
+                        "reference": _net_name_or_none(b),
+                    },
                 )
             )
 

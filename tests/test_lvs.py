@@ -1741,6 +1741,105 @@ def test_keep_extracted_is_a_noop_for_pre_extracted_layout(tmp_path):
     assert report["environment"]["extracted_netlist"] is None
 
 
+def _write_merged_label_gds(path: Path) -> str:
+    """The sky130 corpus inverter with one extra, distinct li1 pin label
+    (``Y2``) drawn on the shape that already carries ``Y``, so extraction
+    resolves a single net carrying two labels -- the merged-label case issue
+    #696 is about. Written to ``path`` and returned."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(SKY130_INV))
+    top = layout.top_cell()
+    # 67/5 is sky130's li1 pin-label layer; (905, 1530) is where the corpus
+    # cell's own `Y` label sits, so `Y2` lands on the same li1 shape.
+    top.shapes(layout.layer(67, 5)).insert(kdb.Text("Y2", kdb.Trans(905, 1530)))
+    layout.write(str(path))
+    return str(path)
+
+
+def test_net_correspondence_spells_merged_label_net_as_the_netlist_does(tmp_path):
+    """Issue #696: a merged-label net has ONE spelling. `klt lvs`'s
+    `net_correspondence[].layout` names the two-label net byte-identically
+    to `klt extract`'s `nets[]`/`merged_net_labels[]` and to the token the
+    written SPICE netlist carries -- so the two artifacts can be joined by
+    name."""
+    from klayout_tools.extract import run_extract
+
+    layout_path = _write_merged_label_gds(tmp_path / "merged.gds")
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(layout_path, "sky130", output=reference_path)
+
+    assert len(extracted["merged_net_labels"]) == 1
+    name = extracted["merged_net_labels"][0]["net"]
+    assert name in [entry["name"] for entry in extracted["nets"]]
+    subckt_line = next(
+        ln
+        for ln in Path(reference_path).read_text().splitlines()
+        if ln.upper().startswith(".SUBCKT")
+    )
+    assert name in subckt_line.split()[2:]
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": layout_path, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    layout_names = [entry["layout"] for entry in report["net_correspondence"]]
+    assert name in layout_names, report["net_correspondence"]
+
+
+def test_same_nets_hint_accepts_the_reported_merged_net_spelling(tmp_path):
+    """Issue #696: the one documented spelling has to be feedable back in.
+    A `hints.same_nets` entry naming the merged net exactly as
+    `net_correspondence[]` reported it resolves, rather than failing with
+    "layout net '...' not found" against KLayout's raw comma form."""
+    from klayout_tools.extract import run_extract
+
+    layout_path = _write_merged_label_gds(tmp_path / "merged.gds")
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(layout_path, "sky130", output=reference_path)
+    name = extracted["merged_net_labels"][0]["net"]
+    assert "|" in name  # sanity: the merged-label repro is present
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": layout_path, "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+            "hints": {"same_nets": [[name, name]]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    # The hint was accepted *and* confirmed -- no `hints.rejected` entry.
+    assert not [
+        m for m in report["mismatches"] if m["category"] == lvs.CATEGORY_HINTS_REJECTED
+    ], report["mismatches"]
+
+
+def test_same_nets_hint_still_rejects_a_genuinely_unknown_net(tmp_path):
+    """The issue #696 fallback is narrow: a name that resolves under neither
+    spelling is still a loud `LvsError`, not a silent no-op."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "hints": {"same_nets": [["NOPE|ALSO_NOPE", "A"]]},
+        },
+    )
+    with pytest.raises(LvsError, match="layout net 'NOPE|ALSO_NOPE' not found"):
+        run_lvs(path)
+
+
 # --------------------------------------------------------------------------- #
 # device.body_unverified warning (issue #281): MOS body terminals extracted
 # onto deck-synthesized nets, not real schematic ones -- see docs/cli/lvs.md
