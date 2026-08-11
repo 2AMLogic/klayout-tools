@@ -1,18 +1,20 @@
 # `klt deck`
 
-Resolve one of klt's built-in DRC/LVS rule decks (`sky130`, `gf180mcu`) by
-content hash or by `(name, version)` against klayout-tools' own release
-history (issue #623). Answers "which klayout-tools git tag/PyPI version
-shipped *this exact* deck revision" — the tool-level piece that lets a
-committed report's pinned `provenance.deck.content_hash`
-([`docs/json-contract.md`](../json-contract.md)) be turned back into "what do
-I install to reproduce this", without hand-bisecting this repo's own git
-history when more than one `klt` build is installed locally.
+Look up which klayout-tools release shipped a given DRC/LVS rule deck
+(`sky130`, `gf180mcu`) revision, by content hash or by `(name, version)`,
+against klayout-tools' own generated release history (issue #623).
 
 ```
 klt deck resolve --content-hash <sha256:hex> [--deck <name>] [--format text|json]
 klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
 ```
+
+Answers "which klayout-tools git tag/PyPI version shipped *this exact* deck
+revision" — the tool-level piece that lets a committed report's pinned
+`provenance.deck.content_hash` ([`docs/json-contract.md`](../json-contract.md))
+be turned back into "what do I install to reproduce this", without
+hand-bisecting this repo's own git history when more than one `klt` build is
+installed locally.
 
 - `--content-hash sha256:<hex>` — resolve a deck content hash, e.g. as
   reported by `klt drc --deck sky130`'s `provenance.deck.content_hash`.
