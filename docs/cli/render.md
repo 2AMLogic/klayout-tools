@@ -4,7 +4,7 @@ Render one PNG image per non-empty layer of a GDSII or OASIS layout stream,
 built on the same layer enumeration as [`klt layers`](layers.md).
 
 ```
-klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrggbb] [--top <cell>] [--format text|json]
+klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrggbb] [--top <cell>] [--layers <json>] [--bbox xmin,ymin,xmax,ymax] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -20,7 +20,26 @@ klt render <file> [-o/--output DIR] [--width N] [--height N] [--background #rrgg
   per-layer shape counts (from `klt layers`) and the rendered geometry
   itself are both scoped to that cell's own hierarchy. A named cell absent
   from the stream exits `1` with a clean error.
+- `--layers` — restrict rendering to a caller-supplied layer set: a path to
+  a JSON file, or an inline JSON array, of `[layer, datatype]` pairs (e.g.
+  `'[[67, 20], [66, 44]]'`) — the same convention `klt ring-check --layers`
+  / `klt precheck --allowed-layers` use. Omit to render every non-empty
+  layer (today's default, unchanged). Layers outside the set still appear
+  in `layers[]` with `"rendered": false, "path": null`, exactly like a
+  declared-but-empty layer; the all-layers `overview.png` composite is
+  restricted to the selection too, so it doesn't leak unrequested geometry.
+- `--bbox` — crop the render to a physical window: four comma-separated
+  micrometre coordinates `xmin,ymin,xmax,ymax` (e.g. `'0,0,50,50'`). Omit to
+  fit the whole layout (today's default, unchanged). The requested window's
+  physical aspect ratio is preserved — the viewport is padded on the
+  shorter axis to match `--width`/`--height` rather than stretching the
+  image — so pixels outside the requested extent are simply absent, not
+  distorted. See `actual_extent` below for the extent actually rendered
+  after that padding.
 - `--format` — `text` (default, a human-readable table) or `json`.
+
+`--layers` and `--bbox` may be used independently or together, and compose
+with `--top` (each narrows what gets drawn/considered, in any combination).
 
 The command runs fully headless via KLayout's `klayout.lay.LayoutView`, which
 renders offscreen without a GUI, Qt display, or X server (no `xvfb` needed)
@@ -49,7 +68,17 @@ directory.
 Every layer `klt layers` reports is listed in the output, but only layers
 with `shapes > 0` are actually rendered — an isolated render of a declared-
 but-empty layer is a blank image, which carries no information worth the
-render cost. Skipped layers report `"rendered": false, "path": null`.
+render cost. Skipped layers report `"rendered": false, "path": null`. When
+`--layers` is given, a layer outside the requested set is skipped the same
+way, even if it has shapes.
+
+## Physical extent (`--bbox`)
+
+Coordinates are in micrometres, matching every other `klt` flag that takes a
+physical position (e.g. `klt ring-check --region`). Both `requested_bbox`
+(the window as given) and `actual_extent` (the window actually rendered,
+after aspect-ratio padding) use the same `{left, bottom, right, top}` shape
+as `klt cells`' `bbox_um` — see "JSON schema" below.
 
 ## JSON schema (the contract)
 
@@ -71,6 +100,9 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "overview": "design_dir/renders/overview.png",
   "layer_count": 3,
   "rendered_count": 2,
+  "requested_layers": null,
+  "requested_bbox": null,
+  "actual_extent": {"left": 0.0, "bottom": 0.0, "right": 0.03, "top": 0.03},
   "layers": [
     {
       "layer": 1,
@@ -116,6 +148,9 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | `height`          | integer         | Image height in pixels, as requested (or the default).             |
 | `layer_count`     | integer         | Number of entries in `layers` (matches `klt layers`' `layer_count`). |
 | `rendered_count`  | integer         | Number of `layers[]` entries with `rendered: true`.                |
+| `requested_layers` | array\<[int,int]\> \| null | The `--layers` selection as `[layer, datatype]` pairs, or `null` when `--layers` was omitted. |
+| `requested_bbox`  | object \| null  | The `--bbox` window as given (micrometres, `{left, bottom, right, top}`), or `null` when `--bbox` was omitted. |
+| `actual_extent`   | object          | The viewport actually rendered (micrometres, `{left, bottom, right, top}`) — the whole-layout fit when `--bbox` is omitted, or the `--bbox` window padded to `--width`/`--height`'s aspect ratio when given. |
 | `layers`          | array\<object\> | One entry per layer in the stream's layer table (see below).       |
 
 ### `layers[]` entries
@@ -143,6 +178,7 @@ output_dir: design_dir/renders
 size: 1024x768
 layers: 3
 rendered: 2
+actual_extent: (0.0,0.0)-(0.03,0.03)
 
 layer  datatype  name    shapes  annotation  path
 -----  --------  ------  ------  ----------  ------------------------------
@@ -151,12 +187,23 @@ layer  datatype  name    shapes  annotation  path
    66        20  -            3  -           design_dir/renders/66_20.png
 ```
 
+`requested_layers`/`requested_bbox` lines are only printed when the
+corresponding flag was given, e.g.:
+
+```
+$ klt render design.gds --layers '[[1, 0]]' --bbox 0,0,5,5
+...
+requested_layers: 1/0
+requested_bbox: (0.0,0.0)-(5.0,5.0)
+actual_extent: (0.0,0.0)-(5.0,5.0)
+```
+
 ## Exit codes and errors
 
 | Exit code | Meaning                                                              |
 | --------- | --------------------------------------------------------------------- |
 | `0`       | Success — report written to stdout, PNGs written to `output_dir`.     |
-| `1`       | The file is missing, unreadable, not a recognisable layout, `--top` names a cell absent from the stream, `--width`/`--height` is not positive, or `--background` is not a valid hex color. |
+| `1`       | The file is missing, unreadable, not a recognisable layout, `--top` names a cell absent from the stream, `--width`/`--height` is not positive, `--background` is not a valid hex color, `--layers` is malformed/empty, or `--bbox` is malformed or has `xmax <= xmin`/`ymax <= ymin`. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 On error, a concise message is written to **stderr** and nothing is written to

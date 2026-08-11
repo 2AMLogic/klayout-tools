@@ -549,6 +549,29 @@ def create_parser() -> argparse.ArgumentParser:
             "render every top cell"
         ),
     )
+    render_parser.add_argument(
+        "--layers",
+        default=None,
+        help=(
+            "layer set to restrict rendering to: a path to a JSON file, or "
+            "an inline JSON array, of [layer, datatype] pairs (e.g. "
+            "'[[67, 20], [66, 44]]'); omit to render every non-empty layer "
+            "(today's default, unchanged). Not validated by argparse -- a "
+            "malformed value exits 1 with a clean error rather than "
+            "argparse's usage-error exit 2."
+        ),
+    )
+    render_parser.add_argument(
+        "--bbox",
+        default=None,
+        help=(
+            "physical crop window as four comma-separated micrometre "
+            "coordinates 'xmin,ymin,xmax,ymax' (e.g. '0,0,50,50'); omit to "
+            "fit the whole layout (today's default, unchanged). The "
+            "physical aspect ratio is preserved -- the viewport is padded, "
+            "not stretched, to match --width/--height."
+        ),
+    )
     _add_format_arg(render_parser)
     render_parser.set_defaults(func=render_cmd.run)
 
