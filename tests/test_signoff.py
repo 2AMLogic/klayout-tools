@@ -1,10 +1,16 @@
-"""Tests for `klt signoff` and the `build_signoff` library function.
+"""Tests for `klt signoff` and the `build_signoff`/`build_tier_report`
+library functions.
 
 Fixtures are hand-built JSON envelope dicts matching the documented shapes
 of `klt drc` (docs/cli/drc.md), `klt lvs` (docs/cli/lvs.md), `klt extract`
 (docs/cli/extract.md), and `klt sim` (docs/cli/sim.md) -- no dependency on
 actually running those commands, mirroring tests/test_report.py's "no
 external corpus needed" convention.
+
+The tier-verdict report tests (issue #722, Phase 0 of epic #706) live in
+this same file rather than a separate one -- they exercise the same `klt
+signoff` CLI surface (`signoff_cmd.py`) and reuse this file's envelope
+fixtures, so splitting them out would only add a cross-file import.
 """
 
 from __future__ import annotations
@@ -15,7 +21,8 @@ import json
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.signoff import SignoffError, build_signoff
+from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
+from klayout_tools.signoff import SignoffError, build_signoff, build_tier_report
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -597,7 +604,297 @@ def test_cli_missing_file_exits_one_text_error(tmp_path, capsys):
     assert err.startswith("klt signoff:")
 
 
-def test_cli_no_files_is_usage_error():
-    with pytest.raises(SystemExit) as exc_info:
-        main(["signoff"])
-    assert exc_info.value.code == 2
+def test_cli_no_files_and_no_manifest_exits_one(capsys):
+    # `files` is `nargs="*"` (not `nargs="+"`) so that `--manifest`-only
+    # invocations (issue #722) don't require a dummy positional file; the
+    # "give me something to do" check moves from argparse (exit 2) to an
+    # application-level error (exit 1) instead.
+    exit_code = main(["signoff"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("klt signoff:")
+    assert "--manifest" in err
+
+
+# --------------------------------------------------------------------------- #
+# build_tier_report(): T1-T4 tier-verdict report (issue #722)
+# --------------------------------------------------------------------------- #
+
+
+def _manifest(**overrides) -> dict:
+    base = {"block": "demo-block", "kind": "analog", "evidence": {}}
+    base.update(overrides)
+    return base
+
+
+def test_analog_manifest_renders_ten_t1_items_plus_three_ladder_rows():
+    result = build_tier_report(_manifest(kind="analog"))
+
+    assert result["schema_version"] == 1
+    assert result["block"] == "demo-block"
+    assert result["kind"] == "analog"
+    assert result["t1_item_count"] == 10
+    assert result["t1_met_count"] == 0
+    assert result["tier"] is None
+    assert result["source_doc"] == "docs/design-evidence-tiers.md"
+
+    t1_items = [item for item in result["items"] if item["tier"] == "T1"]
+    ladder_items = [item for item in result["items"] if item["tier"] != "T1"]
+    assert [item["id"] for item in t1_items] == list(range(1, 11))
+    assert {item["tier"] for item in ladder_items} == {"T2", "T3", "T4"}
+    assert all(item["status"] == "unmet" for item in result["items"])
+
+
+def test_digital_manifest_uses_the_digital_column():
+    result = build_tier_report(_manifest(kind="digital"))
+
+    item_1 = next(item for item in result["items"] if item["id"] == 1)
+    assert "RTL" in item_1["text"]
+    assert "schematic" not in item_1["text"]
+
+
+def test_analog_manifest_uses_the_analog_column():
+    result = build_tier_report(_manifest(kind="analog"))
+
+    item_1 = next(item for item in result["items"] if item["id"] == 1)
+    assert "schematic" in item_1["text"]
+
+
+def test_mixed_signal_manifest_doubles_up_kind_independent_items():
+    result = build_tier_report(_manifest(kind="mixed-signal"))
+
+    # Items 1/2/5/7 split per-kind, items 3/4/6/8/9/10 are kind-independent
+    # but still rendered once per partition per the doc's mixed-signal
+    # guidance -- 10 items x 2 partitions.
+    t1_items = [item for item in result["items"] if item["tier"] == "T1"]
+    assert len(t1_items) == 20
+    assert result["t1_item_count"] == 20
+    partitions = {item["partition"] for item in t1_items}
+    assert partitions == {"analog", "digital"}
+
+
+def test_t2_t4_ladder_items_are_always_unmet_and_use_ladder_text():
+    result = build_tier_report(_manifest(kind="analog"))
+
+    t2 = next(item for item in result["items"] if item["tier"] == "T2")
+    assert t2["status"] == "unmet"
+    assert t2["citation"] is None
+    assert t2["id"] is None
+    assert "commercial" in t2["text"]
+
+
+def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"] == {
+        "file": drc_path,
+        "kind": "drc",
+        "check_status": "clean",
+        "content_hash": "sha256:layoutA",
+        "exit_status": 0,
+    }
+    assert result["t1_met_count"] == 1
+
+
+def test_failing_check_renders_unmet_with_no_citation(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["citation"] is None
+
+
+def test_no_evidence_renders_unmet_never_assumed_met():
+    result = build_tier_report(_manifest(evidence={}))
+
+    assert all(item["status"] == "unmet" for item in result["items"])
+    assert all(item["citation"] is None for item in result["items"])
+
+
+def test_missing_evidence_file_renders_unmet_not_an_error():
+    result = build_tier_report(_manifest(evidence={"3": "/nonexistent/path/drc.json"}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["citation"] is None
+
+
+def test_malformed_evidence_entry_renders_unmet_not_an_error():
+    result = build_tier_report(_manifest(evidence={"3": {"no_file_key": True}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+
+
+def test_stale_content_hash_renders_unmet_not_a_false_pass(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"3": {"file": drc_path, "content_hash": "sha256:stale-revision"}}
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["citation"] is None
+
+
+def test_matching_content_hash_renders_met(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": drc_path, "content_hash": "sha256:layoutA"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+
+
+def test_lvs_evidence_populates_lvs_kind_check(tmp_path):
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"4": lvs_path}))
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["status"] == "met"
+    assert item_4["citation"]["kind"] == "lvs"
+    # klt lvs's provenance.input is always null (docs/json-contract.md) --
+    # the citation still carries the field, just unpopulated.
+    assert item_4["citation"]["content_hash"] is None
+
+
+def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    evidence = {str(i): drc_path for i in range(1, 11)}
+    evidence["4"] = lvs_path
+
+    result = build_tier_report(_manifest(evidence=evidence))
+
+    assert result["t1_met_count"] == 10
+    assert result["tier"] == "T1"
+
+
+def test_non_object_manifest_raises():
+    with pytest.raises(SignoffError, match="must be a JSON object"):
+        build_tier_report(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+def test_missing_kind_raises():
+    with pytest.raises(SignoffError, match="kind"):
+        build_tier_report({"block": "demo"})
+
+
+def test_invalid_kind_raises():
+    with pytest.raises(SignoffError, match="kind"):
+        build_tier_report(_manifest(kind="bogus"))
+
+
+def test_non_object_evidence_raises():
+    with pytest.raises(SignoffError, match="evidence"):
+        build_tier_report(_manifest(evidence=["not", "a", "dict"]))
+
+
+def test_design_evidence_tiers_error_is_importable_alongside_signoff_error():
+    # A quick sanity check that both exception types are importable from
+    # `klayout_tools.signoff` (SignoffError natively, DesignEvidenceTiersError
+    # re-exported) for callers that want one `except (...)` clause -- the
+    # actual doc-parse-failure paths are covered in
+    # test_design_evidence_tiers.py.
+    assert issubclass(DesignEvidenceTiersError, Exception)
+
+
+# --------------------------------------------------------------------------- #
+# CLI (`klt signoff --manifest`)
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_manifest_json_output(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["t1_met_count"] == 1
+    assert exit_code == 3  # not every T1 item is met yet
+
+
+def test_cli_manifest_all_met_exits_zero(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    evidence = {str(i): drc_path for i in range(1, 11)}
+    evidence["4"] = lvs_path
+    manifest_path = _write(tmp_path, "manifest.json", _manifest(evidence=evidence))
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["tier"] == "T1"
+    assert exit_code == 0
+
+
+def test_cli_manifest_text_format_colors_unmet_items_red(tmp_path, capsys):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(["signoff", "--manifest", manifest_path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "\033[31m" in out  # unmet items render red
+    assert "UNMET" in out
+
+
+def test_cli_manifest_text_format_colors_met_items_green(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert "\033[32m" in out  # met items render green
+    assert "MET" in out
+
+
+def test_cli_manifest_and_files_together_is_an_error(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(
+        ["signoff", "--manifest", manifest_path, drc_path, "--format", "json"]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "manifest" in err["error"]["message"]
+
+
+def test_cli_manifest_invalid_kind_exits_one(tmp_path, capsys):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest(kind="bogus"))
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "signoff"
+
+
+def test_cli_manifest_missing_file_exits_one(tmp_path, capsys):
+    exit_code = main(
+        ["signoff", "--manifest", str(tmp_path / "nope.json"), "--format", "json"]
+    )
+
+    assert exit_code == 1

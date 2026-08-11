@@ -286,6 +286,24 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt signoff --manifest <file>` (#722, Phase 0 of epic
+  #706): a second, additive mode alongside the existing envelope-
+  aggregation mode. Renders the full T1-T4 evidence-tier item skeleton,
+  mechanically parsed from `docs/design-evidence-tiers.md` (never
+  duplicated in code, so the doc and this command can never drift), graded
+  against a block manifest's declared kind (`analog`/`digital`/
+  `mixed-signal`) and per-item evidence citations. An item is `"met"` only
+  when its evidence resolves to a passing, fresh `klt drc`/`lvs`/`extract`/
+  `sim` JSON envelope (a stale input-hash pairing or missing check renders
+  `"unmet"`, never assumed met); every `"met"` item's citation carries the
+  evidence file, check status, input content hash, and exit status. `T2`-
+  `T4` render as single always-`"unmet"` ladder-row items (this toolkit's
+  closed loop targets T1 only). This phase is the item model, doc parser,
+  and interface only — wiring the actual DRC/LVS/sim gates is a follow-on
+  phase. `--manifest` is mutually exclusive with the existing positional
+  `<file>...` envelope-aggregation arguments. See `docs/cli/signoff.md`'s
+  "Tier-verdict report" section.
+
 - 2026-08-11 — `klt gen guard_ring`: new additive `contacts_per_side_ns`/
   `contacts_per_side_ew` int params (#685), each defaulting to `0` (inherit
   `contacts_per_side`, so existing single-scalar callers are unaffected).
