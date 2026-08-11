@@ -880,10 +880,12 @@ class CapacitorDevice:
       a resistor's ``body``/``terminal`` layers). Left unset for a PDK/deck
       combination where the top plate's real via either does not exist or
       lands on a metal this curated deck's own ``metals`` stack does not
-      track (e.g. sky130's MiM stacks, whose real ``via3``/``via4`` land on
-      ``met4``/``met5`` -- neither tracked by this curated deck's ``li1``/
-      ``met1``-only ``metals`` stack) -- documented, not silently claimed as
-      fixed. When ``top_plate_via`` *is* one of the owning deck's own
+      track (e.g. gf180mcu's MiM stack sets both -- see ``gf180mcu.py``;
+      sky130's two MiM stacks likewise set both as of issue #775, once #619
+      extended sky130's own ``metals``/``vias`` to the full li1-met5 stack
+      their real ``via3``/``via4`` land on) -- documented, not silently
+      claimed as fixed for a deck whose ``metals`` stack genuinely does not
+      reach that far. When ``top_plate_via`` *is* one of the owning deck's own
       ``vias`` layers, ``extract.py`` also excludes the geometric overlap
       between the via and this capacitor's recognised ``bottom_plate``
       region from that ``vias[]`` layer before the deck's generic per-layer

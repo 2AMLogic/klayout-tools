@@ -1833,6 +1833,50 @@ def test_exclude_capacitor_top_via_overlap_only_cuts_the_overlapping_area():
     )
 
 
+def test_exclude_capacitor_top_via_overlap_is_noop_with_no_top_plate_marker_drawn():
+    """Issue #775 regression finding: a deck whose `bottom_plate` is *not*
+    clipped to the top plate's own footprint (`bottom_plate_oversize_um ==
+    0`, e.g. sky130's MiM stacks -- `_capacitor_plate_regions`'s
+    zero-oversize branch returns the bottom conductor's *entire* drawn
+    region, unscoped by whether any top-plate mark exists at all) must not
+    exclude anything when this capacitor's `top_plate` marker (`capm`) is
+    never drawn on the layout at all -- the overwhelmingly common case for
+    an ordinary digital/macro design that routes on the declared
+    `bottom_plate` metal (`met3`) and the declared `top_plate_via` layer
+    (`via3`, real routing vias, not this capacitor's) but draws no MiM cap.
+    Before this fix, `top_via_region` (every `via3` shape in the layout) was
+    intersected against the unscoped, chip-wide `bottom_region` (every
+    `met3` shape) regardless of `top_region`'s emptiness, excluding
+    essentially every legitimate `via3` from the deck's generic `vias[]`
+    connectivity -- a false disconnect across the whole design rather than
+    the narrow per-capacitor false-short exclusion this function exists to
+    apply (confirmed against `tests/test_lvs.py`'s
+    `test_pnr_gcd_fixture_self_compare_matches_cleanly` macro fixture, whose
+    net count regressed from 2133 to 2148 without this fix)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Ordinary met3/via3 routing -- no `capm`/`capm2` MiM-cap marker drawn
+    # anywhere in this layout.
+    draw(70, 20, _box_um(0, 0, 10, 10))  # met3.drawing
+    draw(70, 44, _box_um(2, 2, 8, 8))  # via3.drawing, lands inside met3
+
+    deck = get_extraction_deck("sky130")
+    top_cell = layout.top_cell()
+    vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+    via3_index = deck.vias.index((70, 44))
+    original_via3 = vias[via3_index]
+    assert not original_via3.is_empty()
+
+    excluded = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
+    excluded_via3 = excluded[via3_index]
+
+    assert excluded_via3.area() == pytest.approx(original_via3.area())
+
+
 @pytest.mark.parametrize(
     "met4, expected_class",
     [
@@ -1860,6 +1904,85 @@ def test_sky130_synthetic_mim_extracts_one_capacitor_device(
     assert device["params"]["c_f"] == pytest.approx(1.057e-13)
     assert device["params"]["area_um2"] == pytest.approx(50.0)
     assert device["params"]["perimeter_um"] == pytest.approx(30.0)
+
+
+def _make_sky130_mim_layout_with_drm_legal_top_via(*, met4: bool = False) -> kdb.Layout:
+    """Issue #364's minimal repro, transcribed onto sky130's own real layer
+    numbers (issue #775): a bottom-plate conductor, an inset top-plate mark
+    layer, and *only* a top-plate via landing inside both plates'
+    footprints -- the DRM-legal position sky130's own `via3`/`via4`
+    minimum-overlap rule requires (the bottom plate must enclose the via,
+    not clear it) -- plus a small landing pad on the next metal level,
+    touching only the via. No other routing anywhere in the layout, so the
+    only way the two plates could end up on the same net is the false short
+    issue #775 (and, before it, #364's own gf180mcu-only fixture) describes:
+    `via3`.drawing (70/44) landing inside both `met3.drawing` (70/20) and
+    `capm.drawing` (89/44) for the met3 stack; `via4.drawing` (71/44) inside
+    `met4.drawing` (71/20) and `capm2.drawing` (97/44) for the met4 stack."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    if met4:
+        draw(71, 20, _box_um(-20, -20, 20, 20))  # met4.drawing (bottom plate)
+        draw(97, 44, _box_um(0, 0, 10, 5))  # capm2.drawing (top plate)
+        # via4, entirely inside both capm2's own footprint and the met4
+        # bottom-plate conductor beneath it -- before the #775 fix (no
+        # `top_plate_via` declared at all) the top plate was simply its own
+        # isolated node; with `top_plate_via` declared but no #364-style
+        # exclusion this overlap would instead be read as an ordinary via
+        # shorting the two plates together.
+        draw(71, 44, _box_um(4, 1, 6, 3))  # via4.drawing
+        draw(72, 20, _box_um(3, 0, 7, 4))  # met5.drawing pad, touches only via4
+    else:
+        draw(70, 20, _box_um(-20, -20, 20, 20))  # met3.drawing (bottom plate)
+        draw(89, 44, _box_um(0, 0, 10, 5))  # capm.drawing (top plate)
+        # via3, entirely inside both capm's own footprint and the met3
+        # bottom-plate conductor beneath it.
+        draw(70, 44, _box_um(4, 1, 6, 3))  # via3.drawing
+        draw(71, 20, _box_um(3, 0, 7, 4))  # met4.drawing pad, touches only via3
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    "met4, expected_class",
+    [
+        (False, "sky130_fd_pr__model__cap_mim"),
+        (True, "sky130_fd_pr__model__cap_mim_m4"),
+    ],
+)
+def test_sky130_capacitor_drm_legal_top_via_does_not_short_plates(
+    tmp_path, met4, expected_class
+):
+    """Issue #775 (the sky130 counterpart of #364's gf180mcu-only fixture):
+    now that sky130's curated deck declares `top_plate_via`/
+    `top_plate_via_metal` for both MiM stacks, a top-plate via placed
+    exactly per sky130's own minimum-overlap rule -- landing *inside* the
+    bottom plate's footprint, as the rule requires -- must not merge the
+    capacitor's two plates into one net through the deck's generic
+    `metals[]`/`vias[]` connectivity loop (the false short #775 reports),
+    and must not leave the top plate an orphaned, disconnected node either
+    (the other failure mode #775 reports, for a via declared with no #364
+    exclusion). Extraction resolves to exactly one capacitor device on two
+    distinct nets."""
+    path = _write_gds(
+        _make_sky130_mim_layout_with_drm_legal_top_via(met4=met4),
+        tmp_path / "mim_drm_legal_top_via.gds",
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "mim_drm_legal_top_via.spice")
+    )
+
+    assert report["device_count"] == 1
+    assert report["device_counts"] == {expected_class: 1}
+    assert report["net_count"] == 2
+
+    (device,) = report["devices"]
+    assert device["class"] == expected_class
+    assert device["nets"]["a"] != device["nets"]["b"]
 
 
 def _make_gf180mcu_mim_square_layout(side_um: float) -> kdb.Layout:
