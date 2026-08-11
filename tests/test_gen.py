@@ -945,7 +945,22 @@ def _layer_bbox(gds_path, layer, datatype):
     ("generator", "params", "gate_prefix"),
     [
         ("mos_array", {"rows": 1, "cols": 1, "dummy": 0}, "U0_G"),
-        ("mos_array", {"rows": 2, "cols": 2, "dummy": 1, "fingers": 2}, "U0_G"),
+        # `finger_topology="series"` (#777) is the shape this landing pad was
+        # designed for: the pad sits directly on the first finger, a
+        # contact-enclosure height past the diffusion. The `"parallel"`
+        # default routes the gate to a comb above the drain strap instead --
+        # covered by `test_mos_array_parallel_fingers_gate_comb_*` below.
+        (
+            "mos_array",
+            {
+                "rows": 2,
+                "cols": 2,
+                "dummy": 1,
+                "fingers": 2,
+                "finger_topology": "series",
+            },
+            "U0_G",
+        ),
         ("diff_pair", {"splits": 1, "add_guard_ring": False}, "Q1_1_G"),
         ("diff_pair", {"splits": 2, "add_guard_ring": True}, "Q1_1_G"),
     ],
@@ -1125,6 +1140,204 @@ def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
     assert baseline.read_bytes() == explicit_off.read_bytes()
     gate = next(p for p in default_report["ports"] if p["name"] == "U0_G")
     assert gate["layer"] == {"layer": 66, "datatype": 20, "name": None}
+
+
+# --- mos_array multi-finger topology (issue #777) ---------------------------- #
+
+
+def _mos_unit_gds(tmp_path, pdk_root, name, **params):
+    """One single-unit `mos_array` (rows=cols=1, no dummies) written to GDS --
+    the shape the #777 repro uses so `klt extract`'s device list *is* the unit
+    device's finger topology, with nothing else in the cell."""
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "w_um": 1.0,
+                "l_um": 0.28,
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+                "topology": "array",
+                **params,
+            },
+            "options": {"cell_name": "u", "output": str(output)},
+        }
+    )
+    return output, report
+
+
+@pytest.mark.parametrize("fingers", [2, 3, 4])
+def test_mos_array_parallel_fingers_extract_as_one_folded_device(
+    tmp_path, pdk_root, fingers
+):
+    """#777's acceptance bar: `fingers > 1` must draw the conventional
+    *parallel* multi-finger device -- every finger between the same two S/D
+    nets, on one shared gate net, total width `fingers * w_um` -- not the
+    series chain of floating-gate transistors the unstrapped stripes extract
+    as. This is the issue's own repro (`klt gen mos_array ... fingers=N`,
+    then `klt extract`), asserted on the extracted netlist."""
+    gds_path, _ = _mos_unit_gds(tmp_path, pdk_root, "parallel", fingers=fingers)
+
+    report = run_extract(str(gds_path), "sky130")
+    devices = report["devices"]
+    assert len(devices) == fingers
+
+    # One gate net for the whole unit: every finger is tied to the comb.
+    gate_nets = {d["nets"]["g"] for d in devices}
+    assert len(gate_nets) == 1
+
+    # ...and exactly two S/D nets, with each finger spanning both of them --
+    # i.e. `fingers` transistors in parallel. The series chain the issue
+    # reported instead has `fingers + 1` distinct S/D nets.
+    sd_nets = {n for d in devices for n in (d["nets"]["s"], d["nets"]["d"])}
+    assert len(sd_nets) == 2
+    for device in devices:
+        assert device["nets"]["s"] != device["nets"]["d"]
+        assert {device["nets"]["s"], device["nets"]["d"]} == sd_nets
+
+    # Total device width is the folded device's: `fingers` x the unit width.
+    assert sum(d["params"]["w_um"] for d in devices) == pytest.approx(1.0 * fingers)
+    assert all(d["params"]["l_um"] == pytest.approx(0.28) for d in devices)
+
+
+def test_mos_array_parallel_fingers_terminals_are_reachable_at_reported_ports(
+    tmp_path, pdk_root
+):
+    """The three reported ports must land on the three *drawn* conductors the
+    strapping creates -- source strap, drain strap, gate comb -- and those
+    must be three distinct conductors (a merged pair would be a short, which
+    DRC cannot see because it is all one legal layer)."""
+    gds_path, report = _mos_unit_gds(
+        tmp_path, pdk_root, "reachable", fingers=4, gate_contact=True
+    )
+    ports = {p["name"]: p for p in report["ports"]}
+
+    conductors = {}
+    for name in ("U0_S", "U0_D", "U0_G"):
+        port = ports[name]
+        polygon = _merged_polygon_at(gds_path, 67, 20, port["x_um"], port["y_um"])
+        assert polygon is not None, f"{name} port is not on drawn local metal"
+        conductors[name] = polygon
+
+    assert conductors["U0_S"] != conductors["U0_D"]
+    assert conductors["U0_G"] != conductors["U0_S"]
+    assert conductors["U0_G"] != conductors["U0_D"]
+
+
+@pytest.mark.parametrize("deck", ["sky130", "gf180mcu"])
+@pytest.mark.parametrize("gate_contact", [False, True])
+def test_mos_array_parallel_fingers_are_drc_clean(
+    tmp_path, both_pdk_root, deck, gate_contact
+):
+    """The straps are drawn on the single local-metal role the phase-2
+    generators have, so they must clear every same-layer spacing/width rule
+    on both curated decks -- including between neighbouring array cells,
+    whose column/row pitch the straps now span end to end."""
+    variant = "sky130A" if deck == "sky130" else "gf180mcuD"
+    output = tmp_path / f"parallel_{deck}_{gate_contact}.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {
+                "rows": 2,
+                "cols": 2,
+                "dummy": 1,
+                "fingers": 3,
+                "flavor": "pfet",
+                "gate_contact": gate_contact,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), deck)
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_mos_array_series_finger_topology_is_opt_in_and_warns(tmp_path, pdk_root):
+    """`finger_topology="series"` keeps the pre-#777 unstrapped stripes for a
+    caller who wants to strap them itself -- but it no longer does so
+    silently: `warnings[]` says the interior S/D segments and gates are
+    neither reported nor contactable, and the extracted netlist is the series
+    chain the issue described."""
+    gds_path, report = _mos_unit_gds(
+        tmp_path, pdk_root, "series", fingers=4, finger_topology="series"
+    )
+
+    assert any("finger_topology" in w and "series" in w for w in report["warnings"])
+    assert any("not reported as ports" in w for w in report["warnings"])
+    assert any("series" in n for n in report["drc_hints"]["notes"])
+
+    extracted = run_extract(str(gds_path), "sky130")
+    devices = extracted["devices"]
+    assert len(devices) == 4
+    # A chain: one gate net per finger, and `fingers + 1` S/D nets.
+    assert len({d["nets"]["g"] for d in devices}) == 4
+    assert len({n for d in devices for n in (d["nets"]["s"], d["nets"]["d"])}) == 5
+
+
+def test_mos_array_parallel_is_the_default_finger_topology(tmp_path, pdk_root):
+    """The default matches what the `fingers` parameter's name implies -- the
+    conventional parallel folded device -- so a caller who never heard of
+    `finger_topology` gets it."""
+    implicit, implicit_report = _mos_unit_gds(tmp_path, pdk_root, "implicit", fingers=3)
+    explicit, explicit_report = _mos_unit_gds(
+        tmp_path, pdk_root, "explicit", fingers=3, finger_topology="parallel"
+    )
+
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert implicit_report["ports"] == explicit_report["ports"]
+    assert implicit_report["warnings"] == []
+    assert implicit_report["drc_hints"]["notes"] == []
+
+
+@pytest.mark.parametrize("gate_contact", [False, True])
+def test_mos_array_fingers_1_geometry_is_topology_independent(
+    tmp_path, pdk_root, gate_contact
+):
+    """A single-finger unit has nothing to strap, so `finger_topology` must
+    not move a single edge or port for `fingers=1` -- the default case every
+    existing consumer already depends on (#777 acceptance criterion)."""
+    parallel, parallel_report = _mos_unit_gds(
+        tmp_path, pdk_root, "one_parallel", fingers=1, gate_contact=gate_contact
+    )
+    series, series_report = _mos_unit_gds(
+        tmp_path,
+        pdk_root,
+        "one_series",
+        fingers=1,
+        gate_contact=gate_contact,
+        finger_topology="series",
+    )
+
+    _assert_gds_geometry_equal(parallel, series)
+    assert parallel_report["ports"] == series_report["ports"]
+    assert parallel_report["warnings"] == series_report["warnings"] == []
+
+
+def test_mos_array_rejects_unknown_finger_topology(tmp_path, pdk_root):
+    with pytest.raises(GenError) as excinfo:
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"finger_topology": "folded"},
+                "options": {"output": str(tmp_path / "bad.gds")},
+            }
+        )
+    assert "finger_topology" in str(excinfo.value)
+
+
+def test_list_generators_mos_array_declares_finger_topology():
+    report = list_generators()
+    mos_array = next(g for g in report["generators"] if g["name"] == "mos_array")
+    param = next(p for p in mos_array["params"] if p["name"] == "finger_topology")
+    assert param["type"] == "string"
+    assert param["default"] == "parallel"
 
 
 # --- res_array --------------------------------------------------------------- #

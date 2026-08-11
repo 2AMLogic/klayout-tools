@@ -787,17 +787,61 @@ def _grid_snapped(dbu: float, *values_um: float) -> bool:
     return any(_snapped(v) for v in values_um)
 
 
+def _mos_finger_positions(
+    l_um: float, fingers: int
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]], float]:
+    """``(seg_positions, poly_positions, total_len_um)`` for a ``fingers``-
+    finger MOS unit device: ``fingers + 1`` contact-sized source/drain
+    segments alternating with ``fingers`` ``l_um``-wide gate stripes, laid
+    out left to right from ``x = 0``.
+
+    Shared by both finger topologies (see :func:`_mos_unit_layout`) so the
+    along-the-diffusion arithmetic -- and therefore ``total_len_um``, the
+    array column pitch -- is identical whether or not the fingers are
+    strapped in parallel.
+    """
+    contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    seg_positions: list[tuple[float, float]] = []
+    poly_positions: list[tuple[float, float]] = []
+    x = 0.0
+    for i in range(fingers + 1):
+        seg_positions.append((x, x + contact_region_um))
+        x += contact_region_um
+        if i < fingers:
+            poly_positions.append((x, x + l_um))
+            x += l_um
+    return seg_positions, poly_positions, x
+
+
 def _mos_unit_layout(
-    w_um: float, l_um: float, fingers: int, gate_contact: bool = False
+    w_um: float,
+    l_um: float,
+    fingers: int,
+    gate_contact: bool = False,
+    finger_topology: str = "series",
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
     segment (``fingers + 1`` of them) between/around the gates.
 
-    Only the two end segments (the leftmost/rightmost, i.e. this unit's
-    overall source/drain) are exposed as ports -- interior segments (for
-    ``fingers > 1``) are drawn but not individually reported, mirroring
-    ``resistor_strip``'s P1/P2-only precedent.
+    ``finger_topology`` selects what ``fingers > 1`` *means* electrically
+    (issue #777). ``"parallel"`` -- what "an N-finger device" conventionally
+    denotes -- straps the alternating S/D segments and ties every gate, so
+    the unit is one device of width ``fingers * w_um``; that geometry is
+    built by :func:`_mos_unit_strapped_layout`. ``"series"`` (this
+    function's own body, and the default so
+    :func:`_diff_pair_layout`/:func:`_esd_device_layout` keep their existing
+    output) draws the bare fingers with no straps at all, which extracts as
+    ``fingers`` transistors chained source-to-drain on ``fingers``
+    independent gate nets.
+
+    In the ``"series"`` shape only the two end segments (the
+    leftmost/rightmost, i.e. this unit's overall source/drain) are exposed
+    as ports -- interior segments (for ``fingers > 1``) are drawn but not
+    individually reported, mirroring ``resistor_strip``'s P1/P2-only
+    precedent, and the interior gates are drawn without a landing pad and so
+    cannot be contacted at all. ``mos_array`` warns about exactly that (see
+    :func:`_mos_array_describe`).
 
     The first gate finger additionally carries a **poly landing pad** that
     extends past the diffusion's top edge, so a contact can be placed on the
@@ -827,17 +871,11 @@ def _mos_unit_layout(
     contact's centre. Left at ``False`` (the default) the drawn geometry and
     the reported gate port are byte-for-byte the pre-#492 bare-poly gate.
     """
+    if finger_topology == "parallel" and fingers > 1:
+        return _mos_unit_strapped_layout(w_um, l_um, fingers, gate_contact)
+
     contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-    seg_positions: list[tuple[float, float]] = []
-    poly_positions: list[tuple[float, float]] = []
-    x = 0.0
-    for i in range(fingers + 1):
-        seg_positions.append((x, x + contact_region_um))
-        x += contact_region_um
-        if i < fingers:
-            poly_positions.append((x, x + l_um))
-            x += l_um
-    total_len_um = x
+    seg_positions, poly_positions, total_len_um = _mos_finger_positions(l_um, fingers)
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
         "active": [(0.0, 0.0, total_len_um, w_um)],
@@ -913,6 +951,148 @@ def _mos_unit_layout(
         "d_xy": d_xy,
         "g_xy": g_xy,
         "g_width_um": g_width_um,
+        # Perpendicular width of the reported S/D ports. Equal to the bare
+        # diffusion height here (the ports sit on the S/D pads, which span
+        # it); the strapped topology reports its strap-rail height instead
+        # (see `_mos_unit_strapped_layout`).
+        "sd_width_um": w_um,
+        "finger_topology": "series",
+    }
+
+
+def _mos_unit_strapped_layout(
+    w_um: float, l_um: float, fingers: int, gate_contact: bool = False
+) -> dict[str, Any]:
+    """One **parallel** multi-finger MOS unit device (issue #777): the same
+    ``fingers``-stripe diffusion :func:`_mos_unit_layout` draws, plus the
+    straps that actually make it one device of width ``fingers * w_um``.
+
+    Conventionally "an N-finger device" means N gate stripes over a shared
+    diffusion with the alternating S/D segments strapped together and all N
+    gates tied -- the whole reason to fold a wide device rather than place N
+    separate unit devices. Drawing only the stripes (what
+    :func:`_mos_unit_layout`'s ``"series"`` shape does) instead yields N
+    transistors chained source-to-drain on N floating gates, which is not a
+    device any caller asked for and cannot be repaired from outside: the
+    interior segments and gates have no reported ports and no landing pads.
+
+    The strapping is two full-width ``metal`` rails plus a ``poly`` comb,
+    drawn bottom to top on the single role pair the phase-2 generators have.
+    There is no second routing metal to cross on, so the two S/D rails go on
+    *opposite* sides of the diffusion and the gate stripes cross **under**
+    the drain rail on ``poly`` to reach their comb -- legal on both curated
+    decks, and no contact there means no connection::
+
+        y = 0                    source rail  (metal, full width)
+        + MIN_SAME_LAYER_SPACING_UM           source stubs (even segments)
+        + w_um                   diffusion + per-segment S/D pads
+        + MIN_SAME_LAYER_SPACING_UM           drain stubs (odd segments)
+        + CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+                                 drain rail   (metal, full width)
+        + MIN_SAME_LAYER_SPACING_UM           gate stripes crossing under it
+        + CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+                                 gate comb    (poly, ties every finger)
+
+    Even-indexed S/D segments (0, 2, ...) drop a stub to the source rail and
+    odd-indexed ones (1, 3, ...) raise a stub to the drain rail, so every
+    finger sits between the two rails -- i.e. ``fingers`` transistors in
+    parallel on one gate net, which ``klt lvs``'s
+    ``options.combine_devices`` folds into the single ``W = fingers * w_um``
+    device the schematic states. Each gate stripe is simply extended past
+    the drain rail into the comb (so the whole gate net stays one connected
+    poly region, no per-finger landing pad needed), and the reported gate
+    terminal (with
+    ``gate_contact``, a contact + local-metal pad; without it, bare poly, as
+    ``mos_array``'s pre-#492 default) sits at the comb's centre, a full
+    :data:`MIN_SAME_LAYER_SPACING_UM` clear of the drain rail's metal.
+
+    Every clearance is :data:`MIN_SAME_LAYER_SPACING_UM`, which already
+    exceeds both curated decks' same-layer spacing rules, and every rail and
+    stub is :data:`CONTACT_SIZE_UM` + 2 * :data:`ENCLOSURE_MARGIN_UM` wide
+    -- the same width budget the S/D pads use -- so no minimum-width rule
+    binds either. ``total_len_um`` is identical to the series shape's, so
+    the array column pitch does not move; only ``bbox_height_um`` grows.
+    """
+    contact_region_um = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
+    clearance_um = MIN_SAME_LAYER_SPACING_UM
+    seg_positions, poly_positions, total_len_um = _mos_finger_positions(l_um, fingers)
+
+    source_rail_y1 = contact_region_um
+    diff_y0 = source_rail_y1 + clearance_um
+    diff_y1 = diff_y0 + w_um
+    drain_rail_y0 = diff_y1 + clearance_um
+    drain_rail_y1 = drain_rail_y0 + contact_region_um
+    comb_y0 = drain_rail_y1 + clearance_um
+    comb_y1 = comb_y0 + contact_region_um
+
+    boxes: dict[str, list[tuple[float, float, float, float]]] = {
+        "active": [(0.0, diff_y0, total_len_um, diff_y1)],
+        # Each gate stripe runs the diffusion height and then up past the
+        # drain rail into the comb, keeping the whole gate net one connected
+        # poly region.
+        "poly": [(px0, diff_y0, px1, comb_y0) for (px0, px1) in poly_positions],
+        "contact": [],
+        "metal": [
+            (0.0, 0.0, total_len_um, source_rail_y1),
+            (0.0, drain_rail_y0, total_len_um, drain_rail_y1),
+        ],
+    }
+    boxes["poly"].append(
+        (poly_positions[0][0], comb_y0, poly_positions[-1][1], comb_y1)
+    )
+
+    contact_half = CONTACT_SIZE_UM / 2.0
+    for i, (sx0, sx1) in enumerate(seg_positions):
+        boxes["metal"].append((sx0, diff_y0, sx1, diff_y1))
+        cx = (sx0 + sx1) / 2.0
+        cy = (diff_y0 + diff_y1) / 2.0
+        boxes["contact"].append(
+            (cx - contact_half, cy - contact_half, cx + contact_half, cy + contact_half)
+        )
+        if i % 2 == 0:
+            boxes["metal"].append((sx0, source_rail_y1, sx1, diff_y0))
+        else:
+            boxes["metal"].append((sx0, diff_y1, sx1, drain_rail_y0))
+
+    # S/D terminals are reported on their rails, at the end the series shape
+    # reported them at (west for source, east for drain) so a consumer's
+    # `direction_deg`-driven stub still exits the cell the same way.
+    s_xy = (contact_region_um / 2.0, source_rail_y1 / 2.0)
+    d_xy = (
+        total_len_um - contact_region_um / 2.0,
+        (drain_rail_y0 + drain_rail_y1) / 2.0,
+    )
+
+    g_cx = (poly_positions[0][0] + poly_positions[-1][1]) / 2.0
+    g_cy = (comb_y0 + comb_y1) / 2.0
+    if gate_contact:
+        pad_half = contact_region_um / 2.0
+        boxes["contact"].append(
+            (
+                g_cx - contact_half,
+                g_cy - contact_half,
+                g_cx + contact_half,
+                g_cy + contact_half,
+            )
+        )
+        boxes["metal"].append(
+            (g_cx - pad_half, g_cy - pad_half, g_cx + pad_half, g_cy + pad_half)
+        )
+
+    return {
+        "total_len_um": total_len_um,
+        "height_um": w_um,
+        "bbox_height_um": comb_y1,
+        "gate_ext_um": comb_y1 - diff_y1,
+        "boxes_um": boxes,
+        "s_xy": s_xy,
+        "d_xy": d_xy,
+        "g_xy": (g_cx, g_cy),
+        "g_width_um": contact_region_um,
+        # The S/D ports sit on the strap rails, not on the diffusion pads,
+        # so their perpendicular width is the rail height.
+        "sd_width_um": contact_region_um,
+        "finger_topology": "parallel",
     }
 
 
@@ -957,16 +1137,21 @@ def _mos_array_layout(
     dummy: int,
     topology: str,
     gate_contact: bool = False,
+    finger_topology: str = "parallel",
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
+
+    ``finger_topology`` is forwarded to :func:`_mos_unit_layout` and decides
+    whether a ``fingers > 1`` unit is one parallel folded device (the
+    default) or an unstrapped series chain (issue #777).
 
     Also computes ``well_box_um`` -- a single well shape (per
     :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
     used only when the caller requests ``flavor="pfet"``."""
-    unit = _mos_unit_layout(w_um, l_um, fingers, gate_contact)
+    unit = _mos_unit_layout(w_um, l_um, fingers, gate_contact, finger_topology)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
 
@@ -2158,7 +2343,15 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         (see :func:`_centroid_order`). ``flavor="pfet"`` additionally
         encloses every unit device (real and dummy) in a shared well on PDK
         families whose curated deck checks one (see ``well_present``);
-        ``flavor="nfet"`` (the default) draws no well shape at all (#208)."""
+        ``flavor="nfet"`` (the default) draws no well shape at all (#208).
+
+        ``finger_topology`` (#777) selects what a ``fingers > 1`` unit
+        device *is*: ``"parallel"`` (the default) straps the alternating
+        S/D segments and ties every gate, so the unit is one folded device
+        of width ``fingers * w_um``; ``"series"`` draws the bare, unstrapped
+        stripes -- a chain of transistors whose interior terminals are
+        neither reported nor contactable (warned about by
+        :func:`_mos_array_describe`)."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -2171,6 +2364,17 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
             self.param(
                 "fingers", self.TypeInt, "Gate fingers per unit device", default=1
+            )
+            self.param(
+                "finger_topology",
+                self.TypeString,
+                "How a multi-finger unit device is wired: 'parallel' "
+                "(default -- alternating S/D segments strapped and every "
+                "gate tied, i.e. one folded device of width fingers*w_um) "
+                "or 'series' (bare stripes, no straps: fingers transistors "
+                "chained source-to-drain on independent, uncontactable "
+                "gates). No effect when fingers is 1",
+                default="parallel",
             )
             self.param("rows", self.TypeInt, "Array rows", default=2)
             self.param("cols", self.TypeInt, "Array columns", default=2)
@@ -2273,6 +2477,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.dummy,
                 self.topology,
                 self.gate_contact,
+                self.finger_topology,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"] + info["dummy_cells"]:
@@ -3585,6 +3790,11 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         )
     if params["flavor"] not in ("nfet", "pfet"):
         raise GenError("generator 'mos_array': params.flavor must be 'nfet' or 'pfet'")
+    if params["finger_topology"] not in ("parallel", "series"):
+        raise GenError(
+            "generator 'mos_array': params.finger_topology must be 'parallel' "
+            "or 'series'"
+        )
 
 
 def _mos_array_describe(
@@ -3600,6 +3810,7 @@ def _mos_array_describe(
         params["dummy"],
         params["topology"],
         params["gate_contact"],
+        params["finger_topology"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -3625,7 +3836,7 @@ def _mos_array_describe(
                 "layer": metal_layer,
                 "x_um": c["x0_um"] + sx,
                 "y_um": c["y0_um"] + sy,
-                "width_um": unit["height_um"],
+                "width_um": unit["sd_width_um"],
                 "direction_deg": 180,
             }
         )
@@ -3636,7 +3847,7 @@ def _mos_array_describe(
                 "layer": metal_layer,
                 "x_um": c["x0_um"] + dx,
                 "y_um": c["y0_um"] + dy,
-                "width_um": unit["height_um"],
+                "width_um": unit["sd_width_um"],
                 "direction_deg": 0,
             }
         )
@@ -3664,6 +3875,15 @@ def _mos_array_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
+    series_fingers = params["finger_topology"] == "series" and params["fingers"] > 1
+    if series_fingers:
+        notes.append(
+            "params.finger_topology is 'series', so each unit device's "
+            f"{params['fingers']} fingers are drawn unstrapped -- they extract as "
+            f"{params['fingers']} transistors chained source-to-drain, not one "
+            f"parallel device of width {params['fingers']} x {params['w_um']}um"
+        )
+
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     grid = f"{params['rows']}x{params['cols']}"
     # `flavor` is not folded into `matched_group_id` -- a matched group is
@@ -3684,6 +3904,21 @@ def _mos_array_describe(
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
+            else []
+        )
+        # #777: the unstrapped series shape's interior S/D segments and
+        # interior gates have no reported ports and no landing pads, so a
+        # caller cannot reach them -- that has to surface at generate time,
+        # not as a surprise in an extracted netlist or an LVS diff.
+        + (
+            [
+                f"params.finger_topology 'series' with fingers={params['fingers']}: "
+                "the interior S/D segments and all but the first gate are drawn "
+                "but not reported as ports and cannot be contacted -- the unit "
+                "extracts as a series chain of transistors with floating gates "
+                "(use the default 'parallel' for one folded device)"
+            ]
+            if series_fingers
             else []
         ),
     }
