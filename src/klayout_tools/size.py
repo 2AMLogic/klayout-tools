@@ -1,6 +1,8 @@
-"""``klt size``: solve a single device's operating point from a gm/Id target
-and a current budget, with ``ngspice`` on the real PDK models as the
-evaluator -- never a closed-form surrogate as the final word.
+"""``klt size``: solve device operating points from gm/Id targets and a
+current budget, with ``ngspice`` on the real PDK models as the evaluator --
+never a closed-form surrogate as the final word. A request declares either a
+single ``device`` (Phase 0, everything up to "Corner *set* input" below) or
+a coupled ``topology`` (Phase 1, see "Coupled multi-device sizing" below).
 
 Phase 0 (issue #721) of the analog-sizing epic #705: define the request/
 response interface, wire ``ngspice`` in as the in-loop evaluator (reusing
@@ -145,6 +147,34 @@ request through the new code path unless the request explicitly opts in via
 ``corners.objective`` -- the legacy ``request.corner`` shape has no
 ``objective`` field at all, so a single-corner request is bit-for-bit
 unaffected by this feature (issue #769's regression requirement).
+
+Coupled multi-device sizing (issue #768)
+------------------------------------------
+Everything above sizes **one** device in isolation. A request that declares
+``topology`` instead of ``device`` sizes a whole coupled analog cell in one
+call: a source-coupled differential pair, its current-mirror load, and the
+tail current source that biases both branches -- the "5T OTA" cell
+(``kb/entries/five-transistor-ota.json``; this repo's own hand-sized sky130
+canary at ``examples/design-pipeline/ota_5t.spice`` is exactly it).
+``topology`` and ``device`` are mutually exclusive; :func:`run_size`
+enforces "exactly one" and dispatches to :func:`_run_topology_size`.
+
+These three roles cannot be sized correctly by three independent
+single-device runs, which is the whole point of this phase: the tail current
+sets both branches' bias by KCL, and the mirror's own diode-connected
+``Vgs`` *is* the pair's actual ``Vds``, so each role's operating point
+depends on the others' widths. Candidate points are therefore evaluated
+against the **real coupled netlist** in ngspice (see
+:func:`_write_topology_deck` for the exact connectivity), never against a
+diode-connected surrogate for the pair or the mirror.
+
+The search is: size the tail independently as the diode-connected bias
+replica it physically is (:func:`_solve_tail_device`), then converge the
+pair and mirror widths against the coupled deck by a fixed-point iteration
+(:func:`_run_topology_size`), then confirm both final widths with a fresh
+joint ngspice run. Response shape, request fields, and known limitations
+(NMOS input pair only; single ``request.corner`` only) are documented in
+``docs/cli/size.md``'s "Coupled multi-device sizing" section.
 """
 
 from __future__ import annotations
@@ -209,6 +239,34 @@ DEFAULT_TIMEOUT_S = 180
 #: ``request.tolerance.gm_id_rel``.
 DEFAULT_GM_ID_TOLERANCE = 0.03
 
+#: ``request.topology.kind`` -- the only coupled multi-device topology this
+#: phase implements: a source-coupled differential pair, biased by a single
+#: tail current source, loaded by a current mirror (the "5T OTA" -- see
+#: ``kb/entries/five-transistor-ota.json`` and this repo's own hand-sized
+#: sky130 canary, ``examples/design-pipeline/``). See this module's
+#: docstring's "Coupled multi-device sizing" section.
+SUPPORTED_TOPOLOGY_KINDS = ("diff_pair_mirror_tail",)
+
+#: ``request.topology.pair.kind`` -- only an NMOS input pair (PMOS mirror
+#: load, NMOS tail) is implemented in this phase; a PMOS input pair (mirror
+#: image: PMOS pair, NMOS mirror load, PMOS tail sourced from Vdd) is a
+#: documented known limitation, not a silent gap -- see
+#: ``docs/cli/size.md``'s "Known limitations" for the coupled topology.
+SUPPORTED_PAIR_KINDS = ("nmos",)
+
+#: Fixed-point iterations for the coupled pair/mirror width search (see
+#: ``_run_topology_size``'s docstring) -- each round costs one full-grid
+#: pair sweep plus one full-grid mirror sweep against the *real* coupled
+#: circuit (never a diode-connected surrogate for either device), so this
+#: stays small; the loop also exits early once both widths stop moving
+#: (see ``_TOPOLOGY_CONVERGENCE_REL``).
+_TOPOLOGY_FIXED_POINT_ITERS = 3
+
+#: Early-exit threshold for the fixed-point loop above: stop once neither
+#: solved width moved by more than this fraction of its own value between
+#: rounds.
+_TOPOLOGY_CONVERGENCE_REL = 1e-3
+
 _MARKER_RE = re.compile(r"^KLT_SIZE_POINT\s+(\d+)\s+(\S+)\s*$")
 _OP_VALUE_RE = re.compile(r"^@\S+\[(\w+)\]\s*=\s*([-+0-9.eEgGnN]+)\s*$")
 _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
@@ -260,7 +318,12 @@ def load_request(request_path: str) -> dict[str, Any]:
         request,
         "request file",
         error_cls=SizeError,
-        required_fields=("device", "models", "target"),
+        # `device`/`topology` are mutually exclusive alternatives (see
+        # run_size's dispatch and this module's docstring's "Coupled
+        # multi-device sizing" section) -- neither is unconditionally
+        # required here so the shared shape check can't reject one path in
+        # favour of the other; run_size itself enforces "exactly one".
+        required_fields=("models", "target"),
     )
 
 
@@ -539,6 +602,129 @@ def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
     return {"id_a": id_a, "gm_id": gm_id}
 
 
+# --------------------------------------------------------------------------- #
+# Coupled multi-device sizing (`request.topology`, issue #768, Phase 1 of the
+# analog-sizing epic #705): a differential pair + current-mirror load + tail
+# current source, sized as one problem rather than three independent
+# single-device sweeps -- see `_run_topology_size`'s docstring for the method.
+# --------------------------------------------------------------------------- #
+
+
+def _parse_topology_role(spec: Any, prefix: str, kind: str) -> dict[str, Any]:
+    """Parse one topology role's device declaration (``pair``/``mirror``/
+    ``tail``) by delegating to :func:`_parse_device` with ``kind`` injected --
+    a role never states its own ``kind`` (it is implied by the topology's
+    ``pair.kind`` -- see :func:`_parse_topology`), but every other field
+    (``model``/``l_um``/``w_min_um``/``w_max_um``/``nf``/``mult``/
+    ``op_point_element``) is identical in shape and validation to a
+    single-device request's ``device`` block, so this reuses that validation
+    verbatim rather than duplicating it.
+    """
+    if not isinstance(spec, dict):
+        raise SizeError(f"{prefix} must be a JSON object")
+    merged = dict(spec)
+    merged["kind"] = kind
+    try:
+        return _parse_device(merged)
+    except SizeError as exc:
+        raise SizeError(f"{prefix}: {exc}") from exc
+
+
+def _parse_topology(topology: Any) -> dict[str, Any]:
+    if not isinstance(topology, dict):
+        raise SizeError("request.topology must be a JSON object")
+
+    kind = topology.get("kind", SUPPORTED_TOPOLOGY_KINDS[0])
+    if kind not in SUPPORTED_TOPOLOGY_KINDS:
+        raise SizeError(
+            f"request.topology.kind must be one of {SUPPORTED_TOPOLOGY_KINDS} "
+            f"(got {kind!r})"
+        )
+
+    vcm_v = topology.get("vcm_v")
+    if vcm_v is None:
+        raise SizeError("request.topology.vcm_v is required")
+    if isinstance(vcm_v, bool) or not isinstance(vcm_v, (int, float)):
+        raise SizeError("request.topology.vcm_v must be a number")
+    vcm_v = float(vcm_v)
+
+    pair_spec = topology.get("pair")
+    if not isinstance(pair_spec, dict):
+        raise SizeError("request.topology.pair must be a JSON object")
+    pair_kind = pair_spec.get("kind", "nmos")
+    if pair_kind not in SUPPORTED_PAIR_KINDS:
+        raise SizeError(
+            f"request.topology.pair.kind must be one of {SUPPORTED_PAIR_KINDS} "
+            f"(got {pair_kind!r}) -- only an NMOS input pair (PMOS mirror "
+            "load, NMOS tail) is implemented in this phase; see docs/cli/"
+            "size.md's 'Known limitations'"
+        )
+    mirror_kind = "pmos" if pair_kind == "nmos" else "nmos"
+    tail_kind = pair_kind
+
+    pair = _parse_topology_role(pair_spec, "request.topology.pair", pair_kind)
+
+    mirror_spec = topology.get("mirror")
+    mirror = _parse_topology_role(mirror_spec, "request.topology.mirror", mirror_kind)
+    ratio = mirror_spec.get("ratio", 1.0) if isinstance(mirror_spec, dict) else 1.0
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or ratio <= 0:
+        raise SizeError("request.topology.mirror.ratio must be a positive number")
+    mirror["ratio"] = float(ratio)
+
+    tail_spec = topology.get("tail")
+    tail = _parse_topology_role(tail_spec, "request.topology.tail", tail_kind)
+
+    return {
+        "kind": kind,
+        "vcm_v": vcm_v,
+        "pair": pair,
+        "mirror": mirror,
+        "tail": tail,
+    }
+
+
+def _parse_topology_target(target: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(target, dict):
+        raise SizeError("request.target must be a JSON object")
+    id_tail_a = _require_positive_number(
+        target.get("id_tail_a"), "request.target.id_tail_a"
+    )
+    pair_gm_id = _require_positive_number(
+        target.get("pair_gm_id"), "request.target.pair_gm_id"
+    )
+    mirror_gm_id = _require_positive_number(
+        target.get("mirror_gm_id"), "request.target.mirror_gm_id"
+    )
+    tail_gm_id = _require_positive_number(
+        target.get("tail_gm_id"), "request.target.tail_gm_id"
+    )
+    return {
+        "id_tail_a": id_tail_a,
+        "pair_gm_id": pair_gm_id,
+        "mirror_gm_id": mirror_gm_id,
+        "tail_gm_id": tail_gm_id,
+    }
+
+
+def _topology_role_public(role: dict[str, Any]) -> dict[str, Any]:
+    """Response-facing echo of one parsed topology role -- same fields
+    :func:`_parse_device` already returns for a single-device ``device``
+    block, plus ``ratio`` when present (the mirror role only)."""
+    out = {
+        "kind": role["kind"],
+        "model": role["model"],
+        "l_um": role["l_um"],
+        "w_min_um": role["w_min_um"],
+        "w_max_um": role["w_max_um"],
+        "nf": role["nf"],
+        "mult": role["mult"],
+        "op_point_element": role["op_point_element"],
+    }
+    if "ratio" in role:
+        out["ratio"] = role["ratio"]
+    return out
+
+
 def run_size(
     request_path: str,
     *,
@@ -575,6 +761,26 @@ def run_size(
     if engine not in SUPPORTED_ENGINES:
         raise SizeError(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
+        )
+
+    has_device = "device" in request
+    has_topology = "topology" in request
+    if has_device and has_topology:
+        raise SizeError(
+            "request must declare either 'device' (single-device sizing) or "
+            "'topology' (coupled multi-device sizing), not both"
+        )
+    if has_topology:
+        return _run_topology_size(
+            request,
+            request_dir=request_dir,
+            artifacts_dir=artifacts_dir,
+            timeout_s=timeout_s,
+        )
+    if not has_device:
+        raise SizeError(
+            "request must declare either 'device' (single-device sizing) or "
+            "'topology' (coupled multi-device sizing)"
         )
 
     device = _parse_device(request["device"])
@@ -921,7 +1127,18 @@ def _op_point_from_confirmed(
         # square-law model in saturation. Flagged as approximate in the
         # rationale below -- not accurate for a model where Vdsat and Vov
         # genuinely diverge (e.g. velocity-saturated short-channel BSIM).
-        vov = vdsat
+        #
+        # Magnitude, not the raw value: ngspice reports a PMOS's `vgs`/`vth`
+        # op-point vectors as *magnitudes* (both positive, so the primary
+        # `vgs - vth` branch above already yields a positive overdrive for
+        # either polarity), but reports `vdsat` *signed* (negative for a
+        # PMOS). Taking the raw value here would put every PMOS that falls
+        # back to Vdsat into `_classify_inversion`'s `<= 0` bucket -- i.e.
+        # reported as "weak" no matter how hard it is driven -- purely
+        # because of a sign convention that differs between the two vectors
+        # ngspice exposes. Latent until #768's coupled topology, whose
+        # current-mirror role is always a PMOS when the input pair is NMOS.
+        vov = abs(vdsat)
         vov_is_approx = True
     else:
         vov = None
@@ -1306,6 +1523,860 @@ def _error_payload(
     }
 
 
+def _bracket_or_boundary(
+    points: list[dict[str, Any]], target_gm_id: float
+) -> tuple[float, bool, str]:
+    """Shared "solve one free width from a monotonic gm/Id(W) curve" step:
+    bracket-and-interpolate when the target falls inside the swept range,
+    else report the boundary point closest to it (never extrapolate) -- the
+    same policy :func:`run_size`'s single-device path applies inline, pulled
+    out here so :func:`_run_topology_size` (three width searches: pair,
+    mirror, tail) and any future caller share one implementation. Returns
+    ``(w_star, feasible, note)``.
+    """
+    bracket, note = _find_bracket(points, target_gm_id)
+    if bracket is None:
+        boundary = min(points, key=lambda p: abs(p["gm_id"] - target_gm_id))
+        return boundary["w_um"], False, note
+    lo, hi = bracket
+    w_star = _log_interp(lo["w_um"], lo["gm_id"], hi["w_um"], hi["gm_id"], target_gm_id)
+    return w_star, True, ""
+
+
+def _write_topology_deck(
+    *,
+    deck_path: str,
+    topology: dict[str, Any],
+    corner: dict[str, Any],
+    id_tail_a: float,
+    models_lib: str,
+    sweep_role: str,
+    sweep_values: list[float],
+    fixed_w_pair_um: float,
+    fixed_w_mirror_um: float,
+) -> None:
+    """Generate the coupled diff-pair+mirror+tail deck: the *actual* 5T-OTA
+    connectivity (see this module's docstring's "Coupled multi-device
+    sizing" section and ``examples/design-pipeline/ota_5t.spice``, this
+    repo's own hand-sized sky130 canary using the identical topology) rather
+    than a diode-connected surrogate for the pair or the mirror --
+
+    - an ideal DC current source sinks the full tail current budget out of
+      the shared source node (``tail``), so both pair branches' currents are
+      forced to sum to it exactly (KCL), but -- unlike the single-device
+      diode-connected method -- are *not* assumed to split exactly in half:
+      the pair devices' drains sit at genuinely different node voltages
+      (``n1``, the mirror's diode-connected reference node, vs ``out``, the
+      mirror's output node), so channel-length modulation makes the true
+      split only approximately even. ngspice's own DC operating-point solver
+      resolves the real split; that is the point of a *coupled* sizing.
+    - the mirror's diode-connected reference device (``XM3``, ``w_mirror``)
+      and its output device (``XM4``, ``w_mirror * mirror.ratio``) sit in
+      the real circuit, not in isolation -- ``XM3``'s own Vgs (and hence the
+      pair's actual Vds) depends on ``w_mirror``, which is exactly the
+      pair<->mirror coupling a set of three independent single-device
+      sizings cannot capture.
+
+    Both pair gates are tied to the same ``vcm_v`` bias (the balanced,
+    zero-differential-input operating point gm/Id sizing targets) rather
+    than driven differentially -- consistent with every other role in this
+    topology being characterized at its DC bias point, not a transient/AC
+    response.
+
+    ``sweep_role`` selects which width is swept across ``sweep_values``
+    inside one ngspice invocation (via ``alterparam``/``reset``, mirroring
+    :func:`_write_sweep_deck`'s own single-parameter sweep) and which
+    device's own internal op-point vector is probed at each point -- the
+    *other* role's width stays fixed at its own ``fixed_w_*_um`` value for
+    the whole invocation. :func:`_run_topology_size` alternates which role is
+    swept across a small fixed-point iteration (see that function's
+    docstring) rather than searching both widths in one pass, since a 2-D
+    joint search would need far more ngspice invocations for the same
+    resolution.
+    """
+    pair = topology["pair"]
+    mirror = topology["mirror"]
+    vdd = corner["vdd_v"]
+    vcm = topology["vcm_v"]
+
+    if sweep_role not in ("pair", "mirror"):
+        raise ValueError(f"sweep_role must be 'pair' or 'mirror' (got {sweep_role!r})")
+
+    lines = [
+        "* klt size -- generated coupled diff-pair+mirror+tail sweep deck, do not edit"
+    ]
+    if sweep_role == "pair":
+        lines.append(f".param w_pair={sweep_values[0]!r}")
+        lines.append(f".param w_mirror={fixed_w_mirror_um!r}")
+    else:
+        lines.append(f".param w_pair={fixed_w_pair_um!r}")
+        lines.append(f".param w_mirror={sweep_values[0]!r}")
+    lines.append(f".param w_mirror_out={{w_mirror*{mirror['ratio']!r}}}")
+
+    process_sections = corner.get("process_sections")
+    if process_sections:
+        for section in process_sections:
+            lines.append(f".lib {models_lib} {section}")
+    else:
+        lines.append(f".lib {models_lib} {corner['process']}")
+
+    lines.append(f"Vdd vdd 0 DC {vdd!r}")
+    lines.append(f"Vcm cm 0 DC {vcm!r}")
+    # Ideal tail current sink: pulls the full tail-current budget out of the
+    # shared pair-source node down to ground -- the same "an ideal source
+    # fixes the current budget exactly, width is the only free variable"
+    # convention _write_sweep_deck's own Idc uses (see this module's
+    # docstring's "Method" section), just at the shared node two devices'
+    # currents sum into rather than one device's own drain.
+    lines.append(f"Itail tail 0 DC {id_tail_a!r}")
+
+    pair_params = (
+        f"l={pair['l_um']!r} w={{w_pair}} nf={pair['nf']!r} mult={pair['mult']!r}"
+    )
+    mirror_ref_params = (
+        f"l={mirror['l_um']!r} w={{w_mirror}} nf={mirror['nf']!r} "
+        f"mult={mirror['mult']!r}"
+    )
+    mirror_out_params = (
+        f"l={mirror['l_um']!r} w={{w_mirror_out}} nf={mirror['nf']!r} "
+        f"mult={mirror['mult']!r}"
+    )
+    lines.append(f"XM1 n1  cm tail 0   {pair['model']} {pair_params}")
+    lines.append(f"XM2 out cm tail 0   {pair['model']} {pair_params}")
+    lines.append(f"XM3 n1  n1 vdd vdd  {mirror['model']} {mirror_ref_params}")
+    lines.append(f"XM4 out n1 vdd vdd  {mirror['model']} {mirror_out_params}")
+    lines.append(f".temp {corner['temperature_c']!r}")
+
+    probe_element = "xm1" if sweep_role == "pair" else "xm3"
+    probe_role = pair if sweep_role == "pair" else mirror
+
+    lines.append(".control")
+    for index, value in enumerate(sweep_values):
+        if index > 0:
+            param = "w_pair" if sweep_role == "pair" else "w_mirror"
+            lines.append(f"alterparam {param}={value!r}")
+            lines.append("reset")
+        lines.append("op")
+        lines.append(f"echo KLT_SIZE_POINT {index} {value!r}")
+        for param in _OP_PARAMS:
+            lines.append(
+                f"print @m.{probe_element}.{probe_role['op_point_element']}[{param}]"
+            )
+    lines.append("quit")
+    lines.append(".endc")
+    lines.append(".end")
+
+    with open(deck_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def _run_topology_sweep(
+    *,
+    topology: dict[str, Any],
+    corner: dict[str, Any],
+    id_tail_a: float,
+    models_lib: str,
+    sweep_role: str,
+    sweep_values: list[float],
+    fixed_w_pair_um: float,
+    fixed_w_mirror_um: float,
+    work_dir: str,
+    deck_name: str,
+    log_name: str,
+    timeout_s: float,
+) -> tuple[list[dict[str, Any]], str | None, str, str | None]:
+    """The coupled-deck counterpart of :func:`_run_sweep`: write, invoke, and
+    parse one ``ngspice`` run of :func:`_write_topology_deck`, returning
+    ``(points, engine_version, log_path, diagnostic)`` in the same shape
+    (each point carries ``w_um`` plus the raw ``_OP_PARAM_KEYS`` fields).
+    """
+    deck_path = os.path.join(work_dir, deck_name)
+    log_path = os.path.join(work_dir, log_name)
+    _write_topology_deck(
+        deck_path=deck_path,
+        topology=topology,
+        corner=corner,
+        id_tail_a=id_tail_a,
+        models_lib=models_lib,
+        sweep_role=sweep_role,
+        sweep_values=sweep_values,
+        fixed_w_pair_um=fixed_w_pair_um,
+        fixed_w_mirror_um=fixed_w_mirror_um,
+    )
+    points, engine_version, diagnostic = _invoke_ngspice(
+        deck_path=deck_path,
+        log_path=log_path,
+        timeout_s=timeout_s,
+        w_values=sweep_values,
+    )
+    return points, engine_version, log_path, diagnostic
+
+
+def _solve_tail_device(
+    *,
+    tail: dict[str, Any],
+    corner: dict[str, Any],
+    id_tail_a: float,
+    target_gm_id: float,
+    models_lib: str,
+    gm_id_rel_tol: float,
+    w_grid: list[float],
+    work_dir: str,
+    timeout_s: float,
+) -> dict[str, Any]:
+    """Size the tail role independently, via the exact same diode-connected
+    single-device method :func:`run_size`'s own ``device`` path uses (reusing
+    :func:`_run_sweep` directly), at the full tail current budget
+    ``id_tail_a``.
+
+    This is a deliberate simplification, not an oversight: a tail branch is
+    conventionally its own replica-bias generator (a diode-connected
+    reference mirrored 1:1 onto the actual tail device -- see
+    ``examples/design-pipeline/05-sizing.json``'s ``M5b``/``M5``, which this
+    topology's ``tail`` role models), characterized and sized on its own
+    merits (output impedance / CMRR floor) independent of the differential
+    pair it biases, exactly as real analog design flows and this repo's own
+    hand-sized canary treat it. The pair+mirror branch (see
+    :func:`_run_topology_size`) is where the genuinely novel *coupling* this
+    issue targets lives -- the pair's actual Vds and the mirror's actual Vgs
+    are mutually dependent in a way three independent single-device sizings
+    cannot capture; the tail bias generator is not.
+
+    Returns a dict with ``status`` (``"pass"``/``"fail"``/``"error"``) plus,
+    on anything but ``"error"``, ``operating_point``/``margins``/
+    ``feasible``/``sweep_points``/``valid_sweep_points``; on ``"error"``,
+    a ``diagnostic`` string instead. ``engine_version`` is always present
+    (``None`` if ngspice never reported one).
+    """
+    sweep_points, engine_version, sweep_log, sweep_diag = _run_sweep(
+        device=tail,
+        corner=corner,
+        target={"id_a": id_tail_a},
+        models_lib=models_lib,
+        w_values=w_grid,
+        work_dir=work_dir,
+        deck_name="tail_sweep.cir",
+        log_name="tail_sweep.log",
+        timeout_s=timeout_s,
+    )
+    valid = [
+        p
+        for p in sweep_points
+        if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
+    ]
+    for p in valid:
+        p["gm_id"] = abs(p["gm_s"]) / abs(p["id_a"])
+    if len(valid) < 2:
+        return {
+            "status": "error",
+            "engine_version": engine_version,
+            "diagnostic": (
+                "ngspice did not return usable operating-point data for at "
+                "least 2 of the swept tail widths"
+                + (f": {sweep_diag}" if sweep_diag else "")
+            ),
+        }
+
+    w_star, feasible, note = _bracket_or_boundary(valid, target_gm_id)
+
+    confirm_points, confirm_version, confirm_log, confirm_diag = _run_sweep(
+        device=tail,
+        corner=corner,
+        target={"id_a": id_tail_a},
+        models_lib=models_lib,
+        w_values=[w_star],
+        work_dir=work_dir,
+        deck_name="tail_confirm.cir",
+        log_name="tail_confirm.log",
+        timeout_s=timeout_s,
+    )
+    confirmed = confirm_points[0] if confirm_points else None
+    if confirmed is None or confirmed["gm_s"] is None or not confirmed["id_a"]:
+        return {
+            "status": "error",
+            "engine_version": confirm_version or engine_version,
+            "diagnostic": (
+                "ngspice confirmation run for the tail device did not "
+                "return usable operating-point data"
+                + (f": {confirm_diag}" if confirm_diag else "")
+            ),
+        }
+
+    operating_point, gm_id, vov, vov_is_approx = _op_point_from_confirmed(
+        confirmed, tail
+    )
+    gm_id_rel_error = (gm_id - target_gm_id) / target_gm_id
+    id_rel_error = (abs(confirmed["id_a"]) - id_tail_a) / id_tail_a
+    status = "pass" if (feasible and abs(gm_id_rel_error) <= gm_id_rel_tol) else "fail"
+
+    return {
+        "status": status,
+        "engine_version": confirm_version or engine_version,
+        "operating_point": operating_point,
+        "vov_v": vov,
+        "vov_is_approx": vov_is_approx,
+        "margins": {"gm_id_rel_error": gm_id_rel_error, "id_rel_error": id_rel_error},
+        "feasible": feasible,
+        "bracket_note": note,
+        "sweep_points": len(sweep_points),
+        "valid_sweep_points": len(valid),
+    }
+
+
+def _role_rationale_clause(
+    label: str, op: dict[str, Any], vov: float | None, vov_is_approx: bool
+) -> str:
+    """One role's *own* gm/Id + inversion-level rationale sentence.
+
+    Issue #768's third acceptance criterion is per-device, not per-cell:
+    "every device's result states its gm/Id and inversion-level rationale".
+    A coupled solve therefore emits one of these per role rather than a
+    single aggregate sentence, so a reader of ``method.rationale`` can tell
+    *which* device was sized where in the gm/Id plane and on what evidence
+    its inversion level was classified (a true ``Vov = Vgs - Vth``, the
+    ``Vov ~= Vdsat`` fallback when the model does not expose ``Vth``, or
+    neither).
+    """
+    if vov is None:
+        derivation = " (Vth/Vdsat not exposed by this device model)"
+    elif vov_is_approx:
+        derivation = (
+            f" from Vov~=Vdsat={vov:.4g}V (Vth not exposed by this device model)"
+        )
+    else:
+        derivation = f" from Vov={vov:.4g}V"
+    return (
+        f"{label}: confirmed gm/Id={op['gm_id']:.6g} S/A at Id="
+        f"{op['id_a']:.6g}A, W={op['w_um']:.6g}um / L={op['l_um']:.6g}um; "
+        f"inversion level '{op['inversion_level']}'{derivation}."
+    )
+
+
+def _topology_error_payload(
+    *,
+    topology: dict[str, Any],
+    corner: dict[str, Any],
+    target: dict[str, Any],
+    environment: dict[str, Any],
+    provenance: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """The ``status: "error"`` response shape for a coupled topology
+    request -- mirrors :func:`_error_payload`'s "no stated method is
+    rejected, even on error" precedent, adapted to the ``topology``/
+    ``devices`` response shape (see ``docs/cli/size.md``'s "Coupled
+    multi-device sizing" section)."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "error",
+        "topology": {
+            "kind": topology["kind"],
+            "vcm_v": topology["vcm_v"],
+            "pair": _topology_role_public(topology["pair"]),
+            "mirror": _topology_role_public(topology["mirror"]),
+            "tail": _topology_role_public(topology["tail"]),
+        },
+        "corner": _corner_public(corner),
+        "target": target,
+        "tolerance": None,
+        "devices": None,
+        "method": {
+            "name": (
+                "coupled diff-pair+mirror+tail sizing via a real-circuit gm/Id search"
+            ),
+            "rationale": f"Evaluator error: {reason}",
+            "iterations": None,
+            "feasible": None,
+        },
+        "environment": environment,
+        "provenance": provenance,
+    }
+
+
+def _run_topology_size(
+    request: dict[str, Any],
+    *,
+    request_dir: str,
+    artifacts_dir: str | None,
+    timeout_s: float | None,
+) -> dict[str, Any]:
+    """Solve ``request.topology``'s coupled differential-pair + current-
+    mirror + tail devices as one sizing problem (issue #768, Phase 1 of the
+    analog-sizing epic #705) -- called from :func:`run_size` when the
+    request declares ``topology`` instead of a single ``device``.
+
+    Method
+    ------
+    The tail role is sized independently (see :func:`_solve_tail_device`'s
+    docstring for why that is a legitimate simplification, not a shortcut
+    around the coupling this issue targets). The pair and mirror roles are
+    solved jointly against the *real* coupled circuit (see
+    :func:`_write_topology_deck`'s docstring for the exact netlist) via a
+    fixed-point iteration: sweep the pair's width (mirror held at its
+    current value) to bracket ``target.pair_gm_id``, then sweep the mirror's
+    width (pair held at its just-solved value) to bracket
+    ``target.mirror_gm_id`` -- repeating up to
+    :data:`_TOPOLOGY_FIXED_POINT_ITERS` times, stopping early once neither
+    width moves by more than :data:`_TOPOLOGY_CONVERGENCE_REL` between
+    rounds. This converges quickly because the coupling is one-directional
+    to first order (the mirror's diode-connected Vgs sets the pair's actual
+    Vds, a second-order channel-length-modulation effect on the pair's own
+    gm/Id; the pair's width does not materially move the mirror's own
+    diode-connected operating point at all, since the mirror's Id is set by
+    KCL, not by the pair's width directly).
+
+    A single request declares one corner only (``request.corner``, the
+    legacy single-corner shape) -- ``request.corners`` (a corner *set*) is
+    not yet supported for topology sizing; see "Known limitations" in
+    ``docs/cli/size.md``.
+
+    Returns a dict matching the documented ``topology``-response JSON shape.
+    Raises :class:`SizeError` for anything that prevents the search from
+    starting at all; once it starts, the response always carries a
+    ``status`` and a populated ``method``, mirroring the single-device
+    path's own "no stated method is rejected" bar.
+    """
+    if "corners" in request:
+        raise SizeError(
+            "request.topology sizing does not yet support request.corners "
+            "(a corner set) -- declare a single request.corner instead; "
+            "see docs/cli/size.md's 'Known limitations'"
+        )
+
+    topology = _parse_topology(request["topology"])
+    corner = _parse_corner(request.get("corner") or {})
+    corner["corner_id"] = _corner_label(corner["process"], corner["temperature_c"])
+    target = _parse_topology_target(request["target"])
+
+    models = request.get("models") or {}
+    try:
+        models_lib = _resolve_models_lib(models, request_dir)
+    except SimError as exc:
+        raise SizeError(str(exc)) from exc
+
+    provenance_pdk: dict[str, Any] | None = None
+    if models.get("pdk") or models.get("pdk_root"):
+        try:
+            provenance_pdk = find_pdk(
+                variant=models.get("pdk"), root=models.get("pdk_root")
+            )
+        except PdkNotFoundError:
+            provenance_pdk = None
+
+    tolerance = request.get("tolerance") or {}
+    gm_id_rel_tol = _require_positive_number(
+        tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE),
+        "request.tolerance.gm_id_rel",
+    )
+
+    options = request.get("options") or {}
+    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
+    if (
+        isinstance(sweep_points, bool)
+        or not isinstance(sweep_points, int)
+        or sweep_points < MIN_SWEEP_POINTS
+    ):
+        raise SizeError(
+            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
+        )
+
+    timeout_s = timeout_s if timeout_s is not None else options.get("timeout_s")
+    timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
+    timeout_s = _require_positive_number(timeout_s, "request.options.timeout_s")
+
+    keep_artifacts = bool(options.get("keep_artifacts", False))
+    if artifacts_dir is None:
+        artifacts_dir = os.path.join(request_dir, ".klt", "size")
+    if keep_artifacts:
+        work_dir = artifacts_dir
+        os.makedirs(work_dir, exist_ok=True)
+    else:
+        work_dir = tempfile.mkdtemp(prefix="klt-size-topology-")
+
+    provenance = build_provenance(
+        deck_name=os.path.basename(models_lib), deck_path=models_lib, pdk=provenance_pdk
+    )
+    environment: dict[str, Any] = {
+        "engine": "ngspice",
+        "engine_version": None,
+        "models_lib": models_lib,
+    }
+    topology_echo = {
+        "kind": topology["kind"],
+        "vcm_v": topology["vcm_v"],
+        "pair": _topology_role_public(topology["pair"]),
+        "mirror": _topology_role_public(topology["mirror"]),
+        "tail": _topology_role_public(topology["tail"]),
+    }
+
+    def _finish(payload: dict[str, Any]) -> dict[str, Any]:
+        if keep_artifacts:
+            payload["environment"]["artifacts_dir"] = work_dir
+        else:
+            _cleanup_dir(work_dir)
+        return payload
+
+    # --- Step 1: tail (independent, diode-connected -- see
+    # `_solve_tail_device`'s docstring) ---
+    tail_w_grid = _log_space(
+        topology["tail"]["w_min_um"], topology["tail"]["w_max_um"], sweep_points
+    )
+    tail_result = _solve_tail_device(
+        tail=topology["tail"],
+        corner=corner,
+        id_tail_a=target["id_tail_a"],
+        target_gm_id=target["tail_gm_id"],
+        models_lib=models_lib,
+        gm_id_rel_tol=gm_id_rel_tol,
+        w_grid=tail_w_grid,
+        work_dir=work_dir,
+        timeout_s=timeout_s,
+    )
+    if tail_result.get("engine_version"):
+        environment["engine_version"] = tail_result["engine_version"]
+    if tail_result["status"] == "error":
+        return _finish(
+            _topology_error_payload(
+                topology=topology,
+                corner=corner,
+                target=target,
+                environment=environment,
+                provenance=provenance,
+                reason=f"tail device: {tail_result['diagnostic']}",
+            )
+        )
+
+    # --- Steps 2-3: pair + mirror, jointly, against the real coupled
+    # circuit -- fixed-point iteration (see this function's docstring). ---
+    pair_w_grid = _log_space(
+        topology["pair"]["w_min_um"], topology["pair"]["w_max_um"], sweep_points
+    )
+    mirror_w_grid = _log_space(
+        topology["mirror"]["w_min_um"], topology["mirror"]["w_max_um"], sweep_points
+    )
+    w_pair = pair_w_grid[len(pair_w_grid) // 2]
+    w_mirror = mirror_w_grid[len(mirror_w_grid) // 2]
+    pair_feasible = mirror_feasible = False
+    pair_note = mirror_note = ""
+    rounds_run = 0
+
+    for iteration in range(_TOPOLOGY_FIXED_POINT_ITERS):
+        rounds_run += 1
+        pair_points, engine_version, _pair_log, pair_diag = _run_topology_sweep(
+            topology=topology,
+            corner=corner,
+            id_tail_a=target["id_tail_a"],
+            models_lib=models_lib,
+            sweep_role="pair",
+            sweep_values=pair_w_grid,
+            fixed_w_pair_um=w_pair,
+            fixed_w_mirror_um=w_mirror,
+            work_dir=work_dir,
+            deck_name=f"pair_sweep_{iteration}.cir",
+            log_name=f"pair_sweep_{iteration}.log",
+            timeout_s=timeout_s,
+        )
+        if engine_version:
+            environment["engine_version"] = engine_version
+        valid_pair = [
+            p
+            for p in pair_points
+            if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
+        ]
+        for p in valid_pair:
+            p["gm_id"] = abs(p["gm_s"]) / abs(p["id_a"])
+        if len(valid_pair) < 2:
+            return _finish(
+                _topology_error_payload(
+                    topology=topology,
+                    corner=corner,
+                    target=target,
+                    environment=environment,
+                    provenance=provenance,
+                    reason=(
+                        "pair sweep: ngspice did not return usable "
+                        "operating-point data for at least 2 of the swept "
+                        "widths" + (f": {pair_diag}" if pair_diag else "")
+                    ),
+                )
+            )
+        new_w_pair, pair_feasible, pair_note = _bracket_or_boundary(
+            valid_pair, target["pair_gm_id"]
+        )
+
+        mirror_points, engine_version, _mirror_log, mirror_diag = _run_topology_sweep(
+            topology=topology,
+            corner=corner,
+            id_tail_a=target["id_tail_a"],
+            models_lib=models_lib,
+            sweep_role="mirror",
+            sweep_values=mirror_w_grid,
+            fixed_w_pair_um=new_w_pair,
+            fixed_w_mirror_um=w_mirror,
+            work_dir=work_dir,
+            deck_name=f"mirror_sweep_{iteration}.cir",
+            log_name=f"mirror_sweep_{iteration}.log",
+            timeout_s=timeout_s,
+        )
+        if engine_version:
+            environment["engine_version"] = engine_version
+        valid_mirror = [
+            p
+            for p in mirror_points
+            if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
+        ]
+        for p in valid_mirror:
+            p["gm_id"] = abs(p["gm_s"]) / abs(p["id_a"])
+        if len(valid_mirror) < 2:
+            return _finish(
+                _topology_error_payload(
+                    topology=topology,
+                    corner=corner,
+                    target=target,
+                    environment=environment,
+                    provenance=provenance,
+                    reason=(
+                        "mirror sweep: ngspice did not return usable "
+                        "operating-point data for at least 2 of the swept "
+                        "widths" + (f": {mirror_diag}" if mirror_diag else "")
+                    ),
+                )
+            )
+        new_w_mirror, mirror_feasible, mirror_note = _bracket_or_boundary(
+            valid_mirror, target["mirror_gm_id"]
+        )
+
+        converged = (
+            abs(new_w_pair - w_pair) <= _TOPOLOGY_CONVERGENCE_REL * w_pair
+            and abs(new_w_mirror - w_mirror) <= _TOPOLOGY_CONVERGENCE_REL * w_mirror
+        )
+        w_pair, w_mirror = new_w_pair, new_w_mirror
+        if converged:
+            break
+
+    # --- Step 4: joint confirmation at the converged (w_pair, w_mirror) --
+    # a fresh ngspice run of the real coupled circuit at both final widths
+    # simultaneously, never trusting the per-role sweep grids alone. ---
+    confirm_pair_points, engine_version, _cp_log, pair_confirm_diag = (
+        _run_topology_sweep(
+            topology=topology,
+            corner=corner,
+            id_tail_a=target["id_tail_a"],
+            models_lib=models_lib,
+            sweep_role="pair",
+            sweep_values=[w_pair],
+            fixed_w_pair_um=w_pair,
+            fixed_w_mirror_um=w_mirror,
+            work_dir=work_dir,
+            deck_name="confirm_pair.cir",
+            log_name="confirm_pair.log",
+            timeout_s=timeout_s,
+        )
+    )
+    if engine_version:
+        environment["engine_version"] = engine_version
+    confirm_mirror_points, engine_version, _cm_log, mirror_confirm_diag = (
+        _run_topology_sweep(
+            topology=topology,
+            corner=corner,
+            id_tail_a=target["id_tail_a"],
+            models_lib=models_lib,
+            sweep_role="mirror",
+            sweep_values=[w_mirror],
+            fixed_w_pair_um=w_pair,
+            fixed_w_mirror_um=w_mirror,
+            work_dir=work_dir,
+            deck_name="confirm_mirror.cir",
+            log_name="confirm_mirror.log",
+            timeout_s=timeout_s,
+        )
+    )
+    if engine_version:
+        environment["engine_version"] = engine_version
+
+    confirmed_pair = confirm_pair_points[0] if confirm_pair_points else None
+    confirmed_mirror = confirm_mirror_points[0] if confirm_mirror_points else None
+    if (
+        confirmed_pair is None
+        or confirmed_pair["gm_s"] is None
+        or not confirmed_pair["id_a"]
+        or confirmed_mirror is None
+        or confirmed_mirror["gm_s"] is None
+        or not confirmed_mirror["id_a"]
+    ):
+        return _finish(
+            _topology_error_payload(
+                topology=topology,
+                corner=corner,
+                target=target,
+                environment=environment,
+                provenance=provenance,
+                reason=(
+                    "joint confirmation run did not return usable "
+                    "operating-point data for the pair and/or mirror device"
+                    + (f" (pair: {pair_confirm_diag})" if pair_confirm_diag else "")
+                    + (
+                        f" (mirror: {mirror_confirm_diag})"
+                        if mirror_confirm_diag
+                        else ""
+                    )
+                ),
+            )
+        )
+
+    pair_op, pair_gm_id, pair_vov, pair_vov_approx = _op_point_from_confirmed(
+        confirmed_pair, topology["pair"]
+    )
+    id_tail_half = target["id_tail_a"] / 2
+    pair_margins = {
+        "gm_id_rel_error": (pair_gm_id - target["pair_gm_id"]) / target["pair_gm_id"],
+        "id_rel_error": (abs(confirmed_pair["id_a"]) - id_tail_half) / id_tail_half,
+    }
+    pair_status = (
+        "pass"
+        if (pair_feasible and abs(pair_margins["gm_id_rel_error"]) <= gm_id_rel_tol)
+        else "fail"
+    )
+
+    mirror_op, mirror_gm_id, mirror_vov, mirror_vov_approx = _op_point_from_confirmed(
+        confirmed_mirror, topology["mirror"]
+    )
+    mirror_op["ratio"] = topology["mirror"]["ratio"]
+    mirror_op["w_output_um"] = mirror_op["w_um"] * topology["mirror"]["ratio"]
+    mirror_margins = {
+        "gm_id_rel_error": (
+            (mirror_gm_id - target["mirror_gm_id"]) / target["mirror_gm_id"]
+        ),
+        "id_rel_error": (abs(confirmed_mirror["id_a"]) - id_tail_half) / id_tail_half,
+    }
+    mirror_status = (
+        "pass"
+        if (mirror_feasible and abs(mirror_margins["gm_id_rel_error"]) <= gm_id_rel_tol)
+        else "fail"
+    )
+
+    tail_role_result = {
+        "role": (
+            "tail current source (diode-connected bias replica, mirrored "
+            "onto the actual tail device)"
+        ),
+        "status": tail_result["status"],
+        "operating_point": tail_result["operating_point"],
+        "margins": tail_result["margins"],
+    }
+    pair_role_result = {
+        "role": "input differential pair (M1/M2, matched, balanced at vcm_v)",
+        "status": pair_status,
+        "operating_point": pair_op,
+        "margins": pair_margins,
+    }
+    mirror_role_result = {
+        "role": (
+            "current-mirror load (diode-connected reference device; the "
+            "mirrored output device is ratio * this width)"
+        ),
+        "status": mirror_status,
+        "operating_point": mirror_op,
+        "margins": mirror_margins,
+    }
+    devices = {
+        "pair": pair_role_result,
+        "mirror": mirror_role_result,
+        "tail": tail_role_result,
+    }
+
+    statuses = [tail_result["status"], pair_status, mirror_status]
+    if "error" in statuses:
+        status = "error"
+    elif "fail" in statuses:
+        status = "fail"
+    else:
+        status = "pass"
+
+    rationale_parts = [
+        "Coupled diff-pair+mirror+tail sizing: the tail role is sized "
+        "independently as a diode-connected bias replica at the full tail "
+        f"current budget ({target['id_tail_a']:.6g}A); the input pair and "
+        "current-mirror load are then solved jointly against the real "
+        "coupled circuit (never a diode-connected surrogate for either) "
+        f"via {rounds_run} fixed-point round(s) alternating a pair-width "
+        "sweep and a mirror-width sweep, each bracketing its own gm/Id "
+        "target, until neither width moved by more than "
+        f"{_TOPOLOGY_CONVERGENCE_REL:.2%} between rounds -- then confirmed "
+        "with a fresh joint ngspice run at both final widths."
+    ]
+    if not pair_feasible:
+        rationale_parts.append(
+            f"Pair target gm/Id={target['pair_gm_id']:.6g} is not reachable "
+            f"within [{topology['pair']['w_min_um']}, "
+            f"{topology['pair']['w_max_um']}]um -- {pair_note}; reporting "
+            "the closest boundary point actually achieved."
+        )
+    if not mirror_feasible:
+        rationale_parts.append(
+            f"Mirror target gm/Id={target['mirror_gm_id']:.6g} is not "
+            f"reachable within [{topology['mirror']['w_min_um']}, "
+            f"{topology['mirror']['w_max_um']}]um -- {mirror_note}; "
+            "reporting the closest boundary point actually achieved."
+        )
+    # Per-device rationale (AC #3): one clause per role, each stating that
+    # device's own confirmed gm/Id and how its inversion level was derived.
+    rationale_parts.append(
+        _role_rationale_clause("Input pair (M1/M2)", pair_op, pair_vov, pair_vov_approx)
+    )
+    rationale_parts.append(
+        _role_rationale_clause(
+            "Mirror load reference (M3; output device M4 is ratio x this "
+            f"width, ratio={topology['mirror']['ratio']:.6g})",
+            mirror_op,
+            mirror_vov,
+            mirror_vov_approx,
+        )
+    )
+    rationale_parts.append(
+        _role_rationale_clause(
+            "Tail current source (M5/M5b)",
+            tail_result["operating_point"],
+            tail_result["vov_v"],
+            tail_result["vov_is_approx"],
+        )
+    )
+    # The pair's true per-branch current is a KCL-forced outcome of the real
+    # coupled circuit, not an assumption -- surface how far it drifted from
+    # the naive "tail current split exactly in half" expectation, since that
+    # drift is itself the signal that a set of independent single-device
+    # sizings would have missed.
+    rationale_parts.append(
+        "Actual per-branch current split from the coupled solve: pair="
+        f"{abs(confirmed_pair['id_a']):.6g}A, mirror-output-side implied="
+        f"{abs(confirmed_mirror['id_a']):.6g}A (nominal half-tail="
+        f"{id_tail_half:.6g}A) -- a real circuit's channel-length "
+        "modulation keeps this only approximately even, which is exactly "
+        "the coupling three independent single-device sizings cannot see."
+    )
+
+    method = {
+        "name": "coupled diff-pair+mirror+tail sizing via a real-circuit gm/Id search",
+        "rationale": " ".join(rationale_parts),
+        "iterations": rounds_run,
+        "feasible": pair_feasible and mirror_feasible and tail_result["feasible"],
+    }
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "topology": topology_echo,
+        "corner": _corner_public(corner),
+        "target": target,
+        "tolerance": {"gm_id_rel": gm_id_rel_tol},
+        "devices": devices,
+        "method": method,
+        "environment": environment,
+        "provenance": provenance,
+    }
+    return _finish(payload)
+
+
 def _classify_inversion(vov: float | None) -> str:
     if vov is None:
         return "unknown"
@@ -1472,6 +2543,26 @@ def _run_sweep(
         w_values=w_values,
     )
 
+    points, engine_version, diagnostic = _invoke_ngspice(
+        deck_path=deck_path, log_path=log_path, timeout_s=timeout_s, w_values=w_values
+    )
+    return points, engine_version, log_path, diagnostic
+
+
+def _invoke_ngspice(
+    *, deck_path: str, log_path: str, timeout_s: float, w_values: list[float]
+) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    """Invoke ``ngspice -b <deck_path> -o <log_path>``, parse the resulting
+    log for ``len(w_values)`` ``KLT_SIZE_POINT``-marked operating points, and
+    scan it for a fatal-error diagnostic.
+
+    Shared by :func:`_run_sweep` (the single-device diode-connected deck) and
+    :func:`_run_topology_sweep` (the coupled diff-pair+mirror+tail deck) --
+    both decks emit the same marker/op-point-vector log shape (see this
+    module's docstring), only the deck *generator* differs. Never raises -- a
+    launch failure or timeout yields ``gm_s: None`` for every point and a
+    synthetic diagnostic instead.
+    """
     engine_version: str | None = None
     launch_diagnostic: str | None = None
     try:
@@ -1503,7 +2594,7 @@ def _run_sweep(
             diagnostic = _line_containing(log_text, fatal_match.start())
 
     points = _parse_sweep_log(log_text, len(w_values), w_values)
-    return points, engine_version, log_path, diagnostic
+    return points, engine_version, diagnostic
 
 
 def _parse_sweep_log(

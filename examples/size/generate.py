@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Generate the `klt size` worked example fixtures: a tiny synthetic
 device library (an nmos/pmos subcircuit pair wrapping a bare SPICE
-``level=1`` MOSFET model) and the request JSON that sizes an ``nmos_demo``
-instance from a gm/Id target (see `docs/cli/size.md`).
+``level=1`` MOSFET model), the request JSON that sizes an ``nmos_demo``
+instance from a gm/Id target, and the request JSON that sizes a coupled
+diff-pair+mirror+tail topology against the same library (see
+`docs/cli/size.md`).
 
 These fixtures are deliberately **not** a real PDK deck -- CLAUDE.md's "open
 PDKs only" rule is about design-rule/model data this repo *vendors*; a
@@ -104,6 +106,62 @@ def write_request() -> None:
     print(f"wrote {path}")
 
 
+def write_topology_request() -> None:
+    """The coupled diff-pair+mirror+tail worked example (issue #768, Phase 1
+    of the analog-sizing epic #705) -- sizes the same ``nmos_demo``/
+    ``pmos_demo`` synthetic library's devices as a 5T-OTA-shaped topology
+    (NMOS input pair, PMOS current-mirror load, NMOS tail bias replica)
+    rather than one device in isolation. Targets mirror the single-device
+    worked example above (``gm/Id=8`` at the tail's full 20uA budget, so the
+    pair/tail see 8.0 at their own ``Id=10uA``/``20uA``); the mirror's own
+    target (``6.0``) is a different value on purpose, to exercise the
+    request's three independent per-role targets rather than one value
+    copy-pasted three times.
+    """
+    request = {
+        "topology": {
+            "kind": "diff_pair_mirror_tail",
+            "vcm_v": 0.9,
+            "pair": {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            },
+            "mirror": {
+                "model": "pmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 40,
+                "ratio": 1.0,
+            },
+            "tail": {
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            },
+        },
+        "models": {"lib": "models.lib"},
+        "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+        "target": {
+            "id_tail_a": 2e-05,
+            "pair_gm_id": 8.0,
+            "mirror_gm_id": 6.0,
+            "tail_gm_id": 8.0,
+        },
+        "tolerance": {"gm_id_rel": 0.02},
+        "options": {"sweep_points": 20},
+    }
+    path = os.path.join(_DIR, "topology-request.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {path}")
+
+
 if __name__ == "__main__":
     write_models_lib()
     write_request()
+    write_topology_request()

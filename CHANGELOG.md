@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt size` no longer reports a strongly-overdriven **PMOS**
+  as `inversion_level: "weak"` when the device model exposes no `Vth`
+  (#768). ngspice reports a PMOS's `vgs`/`vth` op-point vectors as
+  *magnitudes* — so the primary `Vov = Vgs - Vth` path already yielded a
+  positive overdrive for either polarity — but reports `vdsat` *signed*
+  (negative for a PMOS). The `Vdsat` fallback (used for a compact model
+  that does not expose `Vth`, e.g. a bare SPICE `level=1` device) passed
+  that raw negative value into the classification, whose thresholds
+  (`Vov <= 0`: weak; `0 < Vov < 0.1V`: moderate; `Vov >= 0.1V`: strong)
+  are stated for a positive overdrive — so every such PMOS landed in the
+  `<= 0` "weak" bucket no matter how hard it was driven, contradicting the
+  `gm/Id` reported alongside it. The fallback now uses `|Vdsat|`;
+  `vdsat_v` is still reported exactly as ngspice gives it, and `vov_v` is
+  now always the overdrive in the positive convention the thresholds use.
+  Latent until #768's coupled topology, whose current-mirror role is always
+  a PMOS when the input pair is NMOS. No `schema_version` bump: field names
+  and types are unchanged. See `docs/cli/size.md`'s "Inversion-level
+  classification".
+
 - 2026-08-11 — A merged-label net (two drawn text labels shorted onto one
   electrical net, issue #470) now has exactly one spelling everywhere `klt
   extract`/`klt lvs` name it (#696). KLayout's own `Net.expanded_name()`
@@ -451,6 +470,36 @@ not `klt --version`, if you need to detect this kind of drift.
   feature existing. Purely additive (`corners.objective` defaults to
   `"sizing_corner"`), no `schema_version` bump. See `docs/cli/size.md`'s
   "Worst-corner margin objective" section.
+- 2026-08-11 — `klt size` now sizes a **coupled multi-device topology** in
+  one call (#768, Phase 1 of the analog-sizing epic #705): a request may
+  declare `topology` (a source-coupled differential pair + current-mirror
+  load + tail current source — the 5T OTA cell) instead of a single
+  `device`, and every role is solved *jointly*, evaluated in ngspice against
+  the real coupled netlist per candidate point rather than against a
+  diode-connected surrogate for each device. This is the first thing `klt
+  size` does that three independent single-device runs cannot: the tail
+  current sets both branches' bias by KCL, and the mirror's own
+  diode-connected `Vgs` *is* the pair's actual `Vds`, so the pair's gm/Id at
+  a given width depends on the mirror's width. The pair and mirror widths
+  are converged by a fixed-point iteration (alternating a pair-width sweep
+  and a mirror-width sweep against the coupled deck, at most three rounds,
+  exiting early once neither width moves by more than 0.1%), then confirmed
+  by a fresh joint ngspice run at both final widths; the tail role is sized
+  as the diode-connected bias replica it physically is. The response carries
+  `topology` + a `devices` block with one entry per role, each stating its
+  own confirmed `gm/Id`, inversion level, and margins, and
+  `method.rationale` names every device's gm/Id and inversion-level
+  derivation plus the per-branch current split the coupled solve actually
+  produced. Validated against this repo's own hand-sized, corner-verified
+  sky130 5T OTA canary (`examples/design-pipeline/`, `05-sizing.json` +
+  `ota_5t.spice`) on the real sky130A models. Purely additive —
+  `topology` and `device` are mutually exclusive alternatives, the
+  single-device request/response shape is untouched, and no
+  `schema_version` bump. Known limitations (all rejected explicitly, never
+  silently mis-biased): NMOS input pair only, single `request.corner` only
+  (no corner *set* yet). See `docs/cli/size.md`'s "Coupled multi-device
+  sizing" section and the worked example at
+  `examples/size/topology-request.json`.
 - 2026-08-11 — `klt signoff --manifest <file>` (#722, Phase 0 of epic
   #706): a second, additive mode alongside the existing envelope-
   aggregation mode. Renders the full T1-T4 evidence-tier item skeleton,

@@ -1313,14 +1313,18 @@ def create_parser() -> argparse.ArgumentParser:
 
     size_parser = subparsers.add_parser(
         "size",
-        help="solve a single device's operating point from a gm/Id target (ngspice)",
+        help="solve device operating points from gm/Id targets (ngspice)",
         description=(
-            "Solve a single device's channel width from a gm/Id target and "
-            "a current budget declared by a request JSON file, scoring "
-            "every candidate against the real PDK models with ngspice -- "
-            "never a closed-form surrogate as the final word. Phase 0 of "
-            "the analog-sizing epic (#705); see docs/cli/size.md for the "
-            "request/response contract."
+            "Solve channel widths from gm/Id targets and a current budget "
+            "declared by a request JSON file, scoring every candidate "
+            "against the real PDK models with ngspice -- never a "
+            "closed-form surrogate as the final word. The request declares "
+            "either a single `device` (sized in isolation from a "
+            "diode-connected bias sweep) or a coupled `topology` (a "
+            "differential pair + current-mirror load + tail current "
+            "source, sized jointly against the real coupled circuit). "
+            "Phase 0/1 of the analog-sizing epic (#705); see "
+            "docs/cli/size.md for the request/response contract."
         ),
     )
     size_parser.add_argument("request", help="path to a klt size request JSON file")

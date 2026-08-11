@@ -1,0 +1,46 @@
+{
+  "topology": {
+    "kind": "diff_pair_mirror_tail",
+    "vcm_v": 0.9,
+    "pair": {
+      "kind": "nmos",
+      "model": "nmos_demo",
+      "l_um": 0.5,
+      "w_min_um": 0.5,
+      "w_max_um": 20
+    },
+    "mirror": {
+      "model": "pmos_demo",
+      "l_um": 0.5,
+      "w_min_um": 0.5,
+      "w_max_um": 40,
+      "ratio": 1.0
+    },
+    "tail": {
+      "model": "nmos_demo",
+      "l_um": 0.5,
+      "w_min_um": 0.5,
+      "w_max_um": 20
+    }
+  },
+  "models": {
+    "lib": "models.lib"
+  },
+  "corner": {
+    "process": "tt",
+    "vdd_v": 1.8,
+    "temperature_c": 27
+  },
+  "target": {
+    "id_tail_a": 2e-05,
+    "pair_gm_id": 8.0,
+    "mirror_gm_id": 6.0,
+    "tail_gm_id": 8.0
+  },
+  "tolerance": {
+    "gm_id_rel": 0.02
+  },
+  "options": {
+    "sweep_points": 20
+  }
+}

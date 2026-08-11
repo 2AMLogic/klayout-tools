@@ -1,19 +1,27 @@
 # `klt size`
 
-Solve a single device's channel width from a gm/Id target and a current
-budget, headlessly -- with `ngspice` on the real PDK models as the in-loop
-evaluator, never a closed-form surrogate as the final word.
+Solve channel widths from gm/Id targets and a current budget, headlessly --
+with `ngspice` on the real PDK models as the in-loop evaluator, never a
+closed-form surrogate as the final word.
 
 ```
 klt size <request.json> [-o|--outdir <dir>] [--timeout-s <seconds>] [--format text|json]
 ```
 
-This is Phase 0 of the analog-sizing epic
+A request declares **either** a single `device` (Phase 0: one device, sized
+in isolation from a diode-connected bias sweep -- everything up to
+"Inversion-level classification" below) **or** a coupled `topology` (Phase 1:
+a differential pair + current-mirror load + tail current source, sized
+*jointly* against the real coupled circuit -- see "Coupled multi-device
+sizing" below). Never both; never neither.
+
+This command is Phase 0/1 of the analog-sizing epic
 ([#705](https://github.com/2AMLogic/klayout-tools/issues/705)): define the
 `klt size` request/response interface, wire `ngspice` in as the in-loop
-evaluator, and solve the single-device gm/Id MVP. Later phases extend this to
-multi-device topologies (a differential pair, a mirror, a full single-stage
-amplifier) and a real optimizer core -- see epic #705.
+evaluator, solve the single-device gm/Id MVP, then extend it to the first
+coupled multi-device topology. Later phases extend this to further
+topologies (a full single-stage amplifier, a two-stage Miller amplifier) and
+a real optimizer core -- see epic #705.
 
 - `<request.json>` -- path to a request document (see "Request" below). A
   *reference*, not inline JSON on the command line, mirroring every other
@@ -396,6 +404,15 @@ MVP):
 | `0` to `0.1V` (exclusive/exclusive) | `"moderate"` |
 | `>= 0.1V` | `"strong"` |
 
+The thresholds above are stated for a positive overdrive. ngspice reports a
+PMOS's `vgs`/`vth` op-point vectors as **magnitudes**, so the primary
+`Vov = Vgs - Vth` path already yields a positive overdrive for either
+polarity -- but it reports `vdsat` **signed** (negative for a PMOS). The
+`Vdsat` fallback therefore uses `|Vdsat|`, so a PMOS that exposes no `Vth`
+is not reported as `"weak"` no matter how hard it is driven. `vdsat_v`
+itself is reported exactly as ngspice gives it (signed); `vov_v` is always
+the overdrive in the positive convention the table above uses.
+
 When the device model does not expose `Vth` (e.g. a bare SPICE `level=1`
 model), `Vdsat` is used as an approximation for `Vov` instead (exact for a
 square-law model in saturation, less accurate for a model where the two
@@ -403,6 +420,189 @@ genuinely diverge) -- `method.rationale` states which path was taken. When
 neither is available, `inversion_level` is `"unknown"` and `method.rationale`
 says so explicitly -- `operating_point`/`status` are still reported; only
 the inversion-level narrative is degraded.
+
+## Coupled multi-device sizing (`request.topology`)
+
+Everything above sizes **one** device in isolation. A request that declares
+`topology` instead of `device` sizes a whole coupled analog cell in one
+call: a source-coupled **differential pair**, its **current-mirror load**,
+and the **tail current source** that biases both branches. These three roles
+cannot be sized correctly by three independent single-device runs -- the
+tail current sets both branches' bias, and the mirror's own diode-connected
+`Vgs` *is* the pair's actual `Vds`, so each role's operating point depends
+on the others' widths. `klt size` therefore evaluates candidate points
+against the real coupled netlist in ngspice, not against a diode-connected
+surrogate for each device.
+
+`topology` and `device` are mutually exclusive: a request that declares both
+(or neither) is rejected with exit code `1` before ngspice runs.
+
+### Method: fixed-point search on the real coupled circuit
+
+The generated deck is the actual 5T-OTA connectivity -- the same topology as
+this repo's own hand-sized sky130 canary
+([`examples/design-pipeline/ota_5t.spice`](../../examples/design-pipeline/ota_5t.spice),
+`kb:five-transistor-ota`):
+
+```
+Itail  tail 0   DC <target.id_tail_a>      * ideal tail sink, KCL-exact
+XM1    n1  cm tail 0    <pair.model>   w={w_pair}
+XM2    out cm tail 0    <pair.model>   w={w_pair}
+XM3    n1  n1 vdd vdd   <mirror.model> w={w_mirror}
+XM4    out n1 vdd vdd   <mirror.model> w={w_mirror * mirror.ratio}
+```
+
+Both pair gates are tied to the same `topology.vcm_v` bias -- the balanced,
+zero-differential-input operating point that gm/Id sizing targets. The tail
+current is enforced exactly by an ideal sink at the shared source node, so
+the two branch currents are forced by KCL to sum to it; how they *split* is
+resolved by ngspice's own DC solver rather than assumed (see
+`method.rationale`, which reports the split actually achieved).
+
+The search proceeds in three steps:
+
+1. **Tail**, sized independently by the same diode-connected single-device
+   method described under "Method" above, at the full `target.id_tail_a`
+   budget. This is deliberate, not a shortcut: a tail branch is
+   conventionally its own replica-bias generator (a diode-connected
+   reference mirrored onto the actual tail device -- the canary's `M5b`/`M5`
+   pair), sized on its own merits independent of the pair it biases.
+2. **Pair + mirror, jointly**, by a fixed-point iteration against the
+   coupled deck above: sweep the pair's width (mirror held fixed) to bracket
+   `target.pair_gm_id`, then sweep the mirror's width (pair held at its
+   just-solved value) to bracket `target.mirror_gm_id`; repeat up to three
+   rounds, stopping early once neither width moves by more than 0.1%. Each
+   sweep is one ngspice invocation using `alterparam`/`reset` between points
+   (the same one-parse-per-sweep economy the single-device path uses -- see
+   "Performance" above). Convergence is fast because the coupling is
+   one-directional to first order: the mirror's diode `Vgs` sets the pair's
+   `Vds` (a channel-length-modulation effect on the pair's gm/Id), while the
+   mirror's own `Id` is fixed by KCL rather than by the pair's width.
+3. **Joint confirmation**: a fresh ngspice run of the coupled circuit at
+   *both* final widths simultaneously. As in the single-device path, the
+   reported `operating_point` is always the confirmed one, never the
+   interpolated one.
+
+Bracketing follows the same never-extrapolate policy as the single-device
+path: when a role's target falls outside its swept width range, the closest
+boundary point actually achieved is reported, `method.feasible` is `false`,
+and `method.rationale` says which role and why.
+
+### Request
+
+```json
+{
+  "topology": {
+    "kind": "diff_pair_mirror_tail",
+    "vcm_v": 0.9,
+    "pair":   { "kind": "nmos", "model": "sky130_fd_pr__nfet_01v8", "l_um": 0.5, "w_min_um": 1.0, "w_max_um": 40.0 },
+    "mirror": { "model": "sky130_fd_pr__pfet_01v8", "l_um": 1.0, "w_min_um": 1.0, "w_max_um": 30.0, "ratio": 1.0 },
+    "tail":   { "model": "sky130_fd_pr__nfet_01v8", "l_um": 1.0, "w_min_um": 1.0, "w_max_um": 40.0 }
+  },
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "corner": { "process": "tt", "vdd_v": 1.8, "temperature_c": 27 },
+  "target": { "id_tail_a": 2e-05, "pair_gm_id": 17.0, "mirror_gm_id": 10.0, "tail_gm_id": 10.0 },
+  "tolerance": { "gm_id_rel": 0.03 },
+  "options": { "sweep_points": 10, "timeout_s": 900 }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `topology.kind` | string | Only `"diff_pair_mirror_tail"` is implemented. Defaults to it. |
+| `topology.vcm_v` | number, required | Input common-mode bias applied to both pair gates. |
+| `topology.pair.kind` | string | Only `"nmos"` is implemented (PMOS mirror load, NMOS tail) -- see "Known limitations" below. Defaults to `"nmos"`. The mirror's and tail's own `kind` are *derived* (mirror = opposite of the pair, tail = same as the pair) and must not be stated. |
+| `topology.<role>.model` / `l_um` / `w_min_um` / `w_max_um` / `nf` / `mult` / `op_point_element` | -- | Identical in shape, defaults, and validation to the single-device `device` block above, for each of the three roles `pair`, `mirror`, `tail`. |
+| `topology.mirror.ratio` | number | Width ratio of the mirror's *output* device (`XM4`) to its diode-connected reference device (`XM3`). Positive; defaults to `1.0`. The solved `w_um` is always the reference device's; `w_output_um` reports `ratio * w_um`. |
+| `models` / `corner` / `tolerance.gm_id_rel` / `options.*` | -- | Identical to the single-device request above. |
+| `target.id_tail_a` | number, required | Total tail current budget (amps), enforced exactly by the ideal tail sink. Each pair branch nominally carries half of it. |
+| `target.pair_gm_id` | number, required | Target `gm/Id` for one input-pair device, at its own half-tail current. |
+| `target.mirror_gm_id` | number, required | Target `gm/Id` for the mirror's diode-connected reference device. |
+| `target.tail_gm_id` | number, required | Target `gm/Id` for the tail device, at the full tail current. |
+
+### Response
+
+```json
+{
+  "schema_version": 1,
+  "status": "pass",
+  "topology": { "kind": "diff_pair_mirror_tail", "vcm_v": 0.9,
+                "pair": { "...": "..." }, "mirror": { "...": "...", "ratio": 1.0 }, "tail": { "...": "..." } },
+  "corner": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+  "target": { "id_tail_a": 2e-05, "pair_gm_id": 8.0, "mirror_gm_id": 6.0, "tail_gm_id": 8.0 },
+  "tolerance": { "gm_id_rel": 0.02 },
+  "devices": {
+    "pair": {
+      "role": "input differential pair (M1/M2, matched, balanced at vcm_v)",
+      "status": "pass",
+      "operating_point": { "w_um": 1.3107814281672074, "l_um": 0.5, "nf": 1, "mult": 1,
+                           "id_a": 1e-05, "gm_s": 7.998734e-05, "gm_id": 7.998734,
+                           "vgs_v": 0.7780266, "vth_v": null, "vov_v": 0.2500396,
+                           "vdsat_v": 0.2500396, "inversion_level": "strong" },
+      "margins": { "gm_id_rel_error": -0.00015825, "id_rel_error": 0.0 }
+    },
+    "mirror": { "role": "current-mirror load (...)", "status": "pass",
+                "operating_point": { "...": "...", "ratio": 1.0, "w_output_um": 2.2058592038 },
+                "margins": { "...": "..." } },
+    "tail":   { "role": "tail current source (...)", "status": "pass",
+                "operating_point": { "...": "..." }, "margins": { "...": "..." } }
+  },
+  "method": {
+    "name": "coupled diff-pair+mirror+tail sizing via a real-circuit gm/Id search",
+    "rationale": "...",
+    "iterations": 3,
+    "feasible": true
+  },
+  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": "/abs/path/models.lib" },
+  "provenance": { "...": "..." }
+}
+```
+
+- The response's discriminator is the top-level key: a coupled result
+  carries `topology` + `devices` where a single-device result carries
+  `device` + `operating_point` + `margins`. A consumer should branch on
+  which of `topology`/`device` is present.
+- `status` -- the same trichotomy and the same exit codes as the
+  single-device path, aggregated across the three roles: `"error"` if any
+  role's evaluator failed, else `"fail"` if any role missed its target, else
+  `"pass"`. `devices` is `null` only for `status: "error"`.
+- `devices.<role>` -- one entry per role (`pair`, `mirror`, `tail`), each
+  with its own `status`, its own `operating_point` (identical in shape to
+  the single-device response's, including `gm_id` and `inversion_level`),
+  and its own `margins`. `margins.id_rel_error` is measured against that
+  role's nominal share of the tail budget (half for `pair`/`mirror`, the
+  full budget for `tail`), so a non-zero value is a real signal about the
+  coupled circuit's actual split rather than noise.
+- `devices.<role>.role` -- a human-readable sentence naming the role's
+  function in the topology, so a text or JSON consumer never has to infer it
+  from the key alone.
+- `devices.mirror.operating_point.ratio` / `.w_output_um` -- present only on
+  the mirror role: the declared ratio, and the mirrored output device's
+  width (`ratio * w_um`).
+- `method.rationale` -- **always populated**, on every `status`, and always
+  states, per device, that device's own `gm/Id` and how its inversion level
+  was derived (from `Vov = Vgs - Vth`, or from `Vov ~= Vdsat` when the model
+  does not expose `Vth`), plus the per-branch current split the coupled
+  solve actually produced against the nominal half-tail. `method.iterations`
+  is the number of fixed-point rounds run.
+
+### Known limitations
+
+- **NMOS input pair only.** `topology.pair.kind: "pmos"` (the mirror-image
+  cell: PMOS pair, NMOS mirror load, PMOS tail sourced from `Vdd`) is
+  rejected rather than silently mis-biased.
+- **Single corner only.** `request.corners` (a corner *set*, see "Corner
+  sets" above) is not yet supported for `topology` requests -- declare a
+  single `request.corner`. A request that declares both is rejected.
+- **`mirror.ratio != 1` has no balanced DC output bias.** With a non-unity
+  ratio the output node rails and the mirror's *output* device (`XM4`)
+  leaves saturation; the two probed devices (`XM1`, `XM3`) both sit on the
+  well-behaved diode branch, so their reported operating points remain
+  valid, but the output device's own bias is not characterized. Verify a
+  non-unity-ratio design with `klt sim` against the actual loaded circuit.
+- **Balanced operating point only.** Both pair gates are tied to the same
+  `vcm_v`; differential/AC response is out of scope for a sizing command --
+  use `klt sim` for that.
 
 ## Exit codes
 
@@ -433,6 +633,16 @@ re-derives the expected width from the fixture's own textbook square-law
 equations (not by calling `klt size` a second time) and asserts the tool
 reproduces it.
 
+The same directory's `topology-request.json` is the **coupled** worked
+example: the same synthetic library wired as a 5T-OTA-shaped
+diff-pair + mirror + tail, with three independent per-role gm/Id targets at
+a 20 uA tail budget. `test_topology_worked_example_passes` runs it live, and
+`test_topology_reproduces_hand_derived_coupled_reference` re-derives the
+expected pair/mirror widths from the fixture's own square-law equations and
+asserts the coupled solver lands within 8% of them (the residual is the real
+channel-length-modulation coupling the diode-connected hand-derivation
+cannot see).
+
 ## Canary reproduction (real PDK)
 
 `tests/test_size.py`'s `test_reproduces_canary_5t_ota_input_pair` sizes the
@@ -451,3 +661,37 @@ this MVP biases the device diode-connected rather than at the OTA's actual
 *ngspice* model library is installed -- including CI, which installs only
 the sky130 liberty subset -- so the offline square-law reproduction above
 is what gates every PR.
+
+### Joint (coupled) reproduction of the same canary
+
+`test_topology_reproduces_canary_5t_ota` sizes that same canary's **whole
+topology at once** -- input pair, mirror load, and tail -- through a single
+coupled `topology` request on the real sky130A models, at the canary's own
+20 uA tail budget and the same `ugf`-derived pair target (~17.0 S/A):
+
+| Role | `klt size` (coupled) | Canary hand-sized | Confirmed `gm/Id` |
+| ---- | -------------------- | ----------------- | ----------------- |
+| Input pair (`M1`/`M2`, L=0.5 um) | **5.39 um** | 8 um (0.67x) | 17.03 S/A |
+| Mirror reference (`M3`/`M4`, L=1 um) | **8.54 um** | 6 um (1.42x) | 9.99 S/A |
+| Tail (`M5`/`M5b`, L=1 um) | **4.43 um** | 10 um (0.44x) | 9.96 S/A |
+
+Measured against sky130A `open_pdks c6d73a35f524` with ngspice 46; the whole
+solve is one `klt size` invocation returning `status: "pass"` for all three
+roles. The pair lands essentially where the single-device reproduction above
+does (5.39 um coupled vs. 5.44 um diode-connected), which is the expected
+result on this cell: the pair's `Vds` shift from `Vgs` to the mirror's own
+diode `Vgs` is a channel-length-modulation-scale effect.
+
+**Only the pair carries a numeric "reproduces the hand-sized width" bar**
+(the same factor-of-two band, for the same reasons, as the single-device
+test). The mirror and tail have no committed small-signal evidence to derive
+a gm/Id target from -- the canary's sizing rationale states only a
+qualitative "raise `ro`" / "high output impedance" intent, never a gm/Id
+number -- so asserting a guessed target reproduces their hand-sized widths
+would conflate "the coupled solver works" with "this target happens to match
+a width chosen for an unrelated reason". The tail row above shows exactly
+that: `L = 1 um for high output impedance` was not optimizing gm/Id, so a
+representative 10 S/A target lands 0.44x off. For those two roles the test
+asserts what a coupled solver actually owes -- a self-consistent,
+ngspice-confirmed `"pass"` against their own stated targets at a physically
+sane inversion level.

@@ -271,13 +271,44 @@ def test_load_request_non_object(tmp_path):
         size.load_request(str(path))
 
 
-@pytest.mark.parametrize("missing_field", ["device", "models", "target"])
+@pytest.mark.parametrize("missing_field", ["models", "target"])
 def test_load_request_missing_required_field(tmp_path, missing_field):
     request = _base_request()
     del request[missing_field]
     path = _write_request(tmp_path, request)
     with pytest.raises(size.SizeError, match=missing_field):
         size.load_request(str(path))
+
+
+def test_load_request_device_not_unconditionally_required(tmp_path):
+    """``device`` is not a `load_request`-level required field: it is one of
+    two mutually exclusive alternatives (`device` vs `topology`, issue
+    #768) `run_size` itself enforces -- see
+    `test_run_size_neither_device_nor_topology_raises` /
+    `test_run_size_both_device_and_topology_raises` below."""
+    request = _base_request()
+    del request["device"]
+    path = _write_request(tmp_path, request)
+    loaded = size.load_request(str(path))
+    assert "device" not in loaded
+
+
+def test_run_size_neither_device_nor_topology_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_request()
+    del request["device"]
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="device.*topology"):
+        size.run_size(str(path))
+
+
+def test_run_size_both_device_and_topology_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_request()
+    request["topology"] = {"kind": "diff_pair_mirror_tail"}
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="not both"):
+        size.run_size(str(path))
 
 
 # --------------------------------------------------------------------------- #
@@ -567,6 +598,47 @@ def test_run_size_pmos_pass(tmp_path):
 
 
 @_SKIP_NO_NGSPICE
+def test_run_size_pmos_inversion_level_uses_vdsat_magnitude(tmp_path):
+    """ngspice reports a PMOS's `vgs`/`vth` op-point vectors as magnitudes
+    (so the primary `Vov = Vgs - Vth` path already yields a positive
+    overdrive for either polarity) but reports `vdsat` *signed*. A PMOS that
+    falls back to Vdsat -- as `pmos_demo`, a bare level=1 model that exposes
+    no Vth, does -- must therefore be classified on `|Vdsat|`, or every such
+    device lands in `_classify_inversion`'s `<= 0` "weak" bucket no matter
+    how hard it is driven.
+
+    At `gm/Id = 6 S/A` this device is unambiguously in strong inversion
+    (weak inversion on this fixture sits nearer `gm/Id ~ 25`), so `"weak"`
+    here would be a plain contradiction of the reported operating point.
+
+    Latent until #768's coupled topology, whose current-mirror role is
+    always a PMOS when the input pair is NMOS.
+    """
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            device={
+                "kind": "pmos",
+                "model": "pmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            },
+            target={"id_a": 2e-05, "gm_id": 6.0},
+        ),
+    )
+
+    op = size.run_size(str(request))["operating_point"]
+
+    assert op["vth_v"] is None, "fixture must exercise the Vdsat fallback path"
+    assert op["vdsat_v"] < 0, "ngspice reports a PMOS's Vdsat signed (negative)"
+    assert op["vov_v"] == pytest.approx(abs(op["vdsat_v"]))
+    assert op["vov_v"] >= 0.1
+    assert op["inversion_level"] == "strong"
+
+
+@_SKIP_NO_NGSPICE
 def test_run_size_infeasible_target_reports_fail(tmp_path):
     _write_models_lib(tmp_path)
     request = _write_request(
@@ -826,6 +898,467 @@ def test_run_size_keep_artifacts_writes_decks(tmp_path):
     assert (outdir / "sweep.cir").is_file()
     assert (outdir / "confirm.cir").is_file()
     assert report["environment"]["artifacts_dir"] == str(outdir)
+
+
+# --------------------------------------------------------------------------- #
+# Coupled multi-device sizing (`request.topology`, issue #768, Phase 1 of the
+# analog-sizing epic #705): a differential pair + current-mirror load + tail
+# current source, sized jointly against the real coupled circuit.
+# --------------------------------------------------------------------------- #
+
+
+def _base_topology_request(models_lib_name: str = "models.lib", **overrides) -> dict:
+    request = {
+        "topology": {
+            "kind": "diff_pair_mirror_tail",
+            "vcm_v": 0.9,
+            "pair": {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            },
+            "mirror": {
+                "model": "pmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 40,
+                "ratio": 1.0,
+            },
+            "tail": {
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            },
+        },
+        "models": {"lib": models_lib_name},
+        "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+        "target": {
+            "id_tail_a": 2e-05,
+            "pair_gm_id": 8.0,
+            "mirror_gm_id": 6.0,
+            "tail_gm_id": 8.0,
+        },
+        "options": {"sweep_points": 15},
+    }
+    request.update(overrides)
+    return request
+
+
+def test_parse_topology_requires_object():
+    with pytest.raises(size.SizeError, match="topology"):
+        size._parse_topology([1, 2, 3])
+
+
+def test_parse_topology_unsupported_kind_raises():
+    topology = _base_topology_request()["topology"]
+    topology["kind"] = "two_stage_miller"
+    with pytest.raises(size.SizeError, match="topology.kind"):
+        size._parse_topology(topology)
+
+
+def test_parse_topology_missing_vcm_raises():
+    topology = _base_topology_request()["topology"]
+    del topology["vcm_v"]
+    with pytest.raises(size.SizeError, match="vcm_v"):
+        size._parse_topology(topology)
+
+
+def test_parse_topology_missing_pair_raises():
+    topology = _base_topology_request()["topology"]
+    del topology["pair"]
+    with pytest.raises(size.SizeError, match="pair"):
+        size._parse_topology(topology)
+
+
+def test_parse_topology_pmos_pair_unsupported_raises():
+    topology = _base_topology_request()["topology"]
+    topology["pair"]["kind"] = "pmos"
+    with pytest.raises(size.SizeError, match="pair.kind"):
+        size._parse_topology(topology)
+
+
+def test_parse_topology_mirror_ratio_must_be_positive():
+    topology = _base_topology_request()["topology"]
+    topology["mirror"]["ratio"] = -1.0
+    with pytest.raises(size.SizeError, match="ratio"):
+        size._parse_topology(topology)
+
+
+def test_parse_topology_mirror_kind_derived_opposite_of_pair():
+    topology = size._parse_topology(_base_topology_request()["topology"])
+    assert topology["pair"]["kind"] == "nmos"
+    assert topology["mirror"]["kind"] == "pmos"
+    assert topology["tail"]["kind"] == "nmos"
+    assert topology["mirror"]["ratio"] == 1.0
+
+
+def test_parse_topology_default_mirror_ratio_is_one():
+    topology_spec = _base_topology_request()["topology"]
+    del topology_spec["mirror"]["ratio"]
+    topology = size._parse_topology(topology_spec)
+    assert topology["mirror"]["ratio"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["id_tail_a", "pair_gm_id", "mirror_gm_id", "tail_gm_id"],
+)
+def test_parse_topology_target_missing_field_raises(missing_field):
+    target = _base_topology_request()["target"]
+    del target[missing_field]
+    with pytest.raises(size.SizeError, match=missing_field):
+        size._parse_topology_target(target)
+
+
+def test_bracket_or_boundary_interpolates_inside_range():
+    points = [
+        {"w_um": 1.0, "gm_id": 4.0},
+        {"w_um": 2.0, "gm_id": 8.0},
+        {"w_um": 4.0, "gm_id": 16.0},
+    ]
+    w_star, feasible, note = size._bracket_or_boundary(points, 6.0)
+    assert feasible is True
+    assert note == ""
+    assert 1.0 < w_star < 2.0
+
+
+def test_bracket_or_boundary_reports_boundary_when_unreachable():
+    points = [
+        {"w_um": 1.0, "gm_id": 4.0},
+        {"w_um": 2.0, "gm_id": 8.0},
+    ]
+    w_star, feasible, note = size._bracket_or_boundary(points, 100.0)
+    assert feasible is False
+    assert note != ""
+    assert w_star == 2.0
+
+
+def test_run_size_topology_both_corner_and_corners_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request()
+    request["corners"] = {"process": ["tt", "ss"], "vdd_v": 1.8}
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="corners"):
+        size.run_size(str(path))
+
+
+@_SKIP_NO_NGSPICE
+def test_topology_worked_example_passes(tmp_path):
+    request = _write_request(tmp_path, _base_topology_request())
+    _write_models_lib(tmp_path)
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", report["method"]["rationale"]
+    assert report["schema_version"] == size.SCHEMA_VERSION
+    assert set(report["devices"]) == {"pair", "mirror", "tail"}
+    for role in ("pair", "mirror", "tail"):
+        entry = report["devices"][role]
+        assert entry["status"] == "pass"
+        op = entry["operating_point"]
+        assert op["inversion_level"] in {"weak", "moderate", "strong", "unknown"}
+        assert op["gm_id"] > 0
+    assert report["devices"]["mirror"]["operating_point"]["ratio"] == 1.0
+    assert report["method"]["feasible"] is True
+    assert "coupled" in report["method"]["rationale"]
+    assert report["environment"]["engine"] == "ngspice"
+
+    # AC #3: *every* device's result states its own gm/Id and
+    # inversion-level rationale -- not one aggregate sentence for the cell.
+    rationale = report["method"]["rationale"]
+    for label in ("Input pair", "Mirror load reference", "Tail current source"):
+        assert label in rationale
+    for role in ("pair", "mirror", "tail"):
+        op = report["devices"][role]["operating_point"]
+        assert f"gm/Id={op['gm_id']:.6g} S/A" in rationale
+        assert f"inversion level '{op['inversion_level']}'" in rationale
+
+    # The PMOS mirror's overdrive sits well past the strong-inversion
+    # threshold; it must not be reported as "weak" purely because ngspice
+    # reports a PMOS's Vdsat signed (see
+    # `test_run_size_pmos_inversion_level_uses_vdsat_magnitude`).
+    mirror_op = report["devices"]["mirror"]["operating_point"]
+    assert mirror_op["vdsat_v"] < 0
+    assert mirror_op["vov_v"] >= 0.1
+    assert mirror_op["inversion_level"] == "strong"
+
+
+@_SKIP_NO_NGSPICE
+def test_topology_cli_exit_code_pass(tmp_path):
+    request = _write_request(tmp_path, _base_topology_request())
+    _write_models_lib(tmp_path)
+
+    assert main(["size", str(request), "--format", "json"]) == 0
+    assert main(["size", str(request), "--format", "text"]) == 0
+
+
+@_SKIP_NO_NGSPICE
+def test_topology_reproduces_hand_derived_coupled_reference(tmp_path):
+    """Independently re-derive the expected pair/mirror widths from
+    `nmos_demo`/`pmos_demo`'s own textbook level=1 square-law equations
+    under the diode-connected approximation (Id = tail/2 exactly, Vds = Vgs)
+    -- *without* calling `klt size` -- then assert the coupled solver's
+    ngspice-confirmed widths land close to that approximation.
+
+    This is not expected to match bit-exactly: unlike the single-device
+    diode-connected method, the coupled circuit's pair devices sit at their
+    *actual* in-circuit Vds (the mirror's own diode-connected Vgs), not at
+    Vds=Vgs, so their true operating point differs from the diode-connected
+    approximation by a real (if here, at lambda=0.02, second-order) amount.
+    A 8% relative band comfortably covers that physical effect while still
+    catching a gross implementation error (wrong current split, ratio not
+    applied, wrong exponent, etc.) -- see `_run_topology_size`'s docstring's
+    "Method" section for why the coupling is expected to be small here.
+    """
+
+    def _solve_diode_connected_w(kp, vto, lam, l_um, id_a, target_gm_id):
+        def gm_id_at(w):
+            lo, hi = 1e-6, 5.0
+
+            def f(vov):
+                vgs = vov + vto
+                return 0.5 * kp * (w / l_um) * vov**2 * (1 + lam * abs(vgs)) - id_a
+
+            flo = f(lo)
+            for _ in range(200):
+                mid = (lo + hi) / 2
+                fm = f(mid)
+                if (fm > 0) == (flo > 0):
+                    lo, flo = mid, fm
+                else:
+                    hi = mid
+            vov = (lo + hi) / 2
+            gm = kp * (w / l_um) * vov * (1 + lam * abs(vov + vto))
+            return gm / id_a
+
+        lo, hi = 0.1, 50.0
+        flo = gm_id_at(lo) - target_gm_id
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            fm = gm_id_at(mid) - target_gm_id
+            if (fm > 0) == (flo > 0):
+                lo, flo = mid, fm
+            else:
+                hi = mid
+        return (lo + hi) / 2
+
+    request_dict = _base_topology_request()
+    id_tail_a = request_dict["target"]["id_tail_a"]
+    id_half = id_tail_a / 2
+    hand_pair_w_um = _solve_diode_connected_w(
+        120e-6, 0.5, 0.02, 0.5, id_half, request_dict["target"]["pair_gm_id"]
+    )
+    hand_mirror_w_um = _solve_diode_connected_w(
+        40e-6, -0.5, 0.02, 0.5, id_half, request_dict["target"]["mirror_gm_id"]
+    )
+
+    request = _write_request(tmp_path, request_dict)
+    _write_models_lib(tmp_path)
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", report["method"]["rationale"]
+    pair_w_um = report["devices"]["pair"]["operating_point"]["w_um"]
+    mirror_w_um = report["devices"]["mirror"]["operating_point"]["w_um"]
+    assert pair_w_um == pytest.approx(hand_pair_w_um, rel=0.08)
+    assert mirror_w_um == pytest.approx(hand_mirror_w_um, rel=0.08)
+
+
+@_SKIP_NO_NGSPICE
+def test_topology_infeasible_pair_target_reports_boundary(tmp_path):
+    request_dict = _base_topology_request()
+    # gm/Id=100 is unreachable within the pair's declared width bounds at
+    # this current -- klt size must report the closest boundary point
+    # rather than extrapolate (mirrors the single-device path's own
+    # infeasible-target handling).
+    request_dict["target"]["pair_gm_id"] = 100.0
+    request = _write_request(tmp_path, request_dict)
+    _write_models_lib(tmp_path)
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "fail"
+    assert report["devices"]["pair"]["status"] == "fail"
+    assert report["method"]["feasible"] is False
+    pair_w_um = report["devices"]["pair"]["operating_point"]["w_um"]
+    assert pair_w_um == pytest.approx(
+        request_dict["topology"]["pair"]["w_max_um"], rel=1e-6
+    )
+
+
+@_SKIP_NO_NGSPICE
+def test_topology_keep_artifacts_writes_decks(tmp_path):
+    _write_models_lib(tmp_path)
+    outdir = tmp_path / "artifacts"
+    request = _write_request(
+        tmp_path,
+        _base_topology_request(options={"sweep_points": 8, "keep_artifacts": True}),
+    )
+
+    report = size.run_size(str(request), artifacts_dir=str(outdir))
+
+    assert report["status"] == "pass"
+    assert (outdir / "tail_sweep.cir").is_file()
+    assert (outdir / "tail_confirm.cir").is_file()
+    assert (outdir / "pair_sweep_0.cir").is_file()
+    assert (outdir / "mirror_sweep_0.cir").is_file()
+    assert (outdir / "confirm_pair.cir").is_file()
+    assert (outdir / "confirm_mirror.cir").is_file()
+    assert report["environment"]["artifacts_dir"] == str(outdir)
+
+
+@_SKIP_NO_NGSPICE
+def test_topology_evaluator_error_reports_status_error(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _base_topology_request())
+    _write_models_lib(tmp_path)
+
+    def fake_run(cmd, capture_output, text, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(size.subprocess, "run", fake_run)
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "error"
+    assert report["devices"] is None
+    assert "Evaluator error" in report["method"]["rationale"]
+
+
+@_SKIP_NO_SKY130_NGSPICE
+def test_topology_reproduces_canary_5t_ota(tmp_path):
+    """Reproduce a hand-sized *coupled* topology reference from an existing
+    analog canary, on the real PDK models (issue #768's second acceptance
+    criterion: "reproduces or beats the hand-sized operating point of an
+    existing canary's hand-sized OTA/error-amp on the same spec").
+
+    The canary is this repo's own sky130 5T OTA worked example
+    (`examples/design-pipeline/`, Epic #105 Phase 3, `05-sizing.json` /
+    `ota_5t.spice`): a hand-sized NMOS input pair (`M1`/`M2`, W/L=8/0.5um),
+    PMOS mirror load (`M3`/`M4`, W/L=6/1um, 1:1 ratio), and NMOS tail bias
+    replica (`M5`/`M5b`, W/L=10/1um) at a 20uA tail budget -- exactly the
+    topology this command implements.
+
+    The pair's gm/Id target is derived from the canary's own committed AC
+    simulation evidence (`sim-ac.result.json`'s unity-gain-frequency
+    measurement), the same derivation
+    `test_reproduces_canary_5t_ota_input_pair` (the single-device sizing
+    test) uses -- its sized width is checked against the hand-sized 8um
+    within the same factor-of-two band that test uses, for the same
+    documented reasons (this command's own known limitations plus the
+    canary's `tt`-corner spread).
+
+    The mirror/tail roles have no equivalent committed small-signal
+    evidence to derive a gm/Id target from (the canary's own sizing
+    rationale states only a qualitative "raise ro" / "high output
+    impedance" intent, never a gm/Id number) -- picking an arbitrary
+    representative target for either and asserting it reproduces the
+    hand-sized width would conflate "the topology's own coupled solver
+    works" with "this test's guessed target happens to match a width
+    chosen for an unrelated reason" (measured while writing this test: a
+    10 S/A tail target versus the hand-sized 10um lands outside even a
+    factor-of-two band on sky130's real tail device -- gm/Id is simply not
+    what `L=1um for high output impedance` was optimizing for). So this
+    test instead asserts what a coupled solver actually owes for those two
+    roles: the joint solve converges to a self-consistent, ngspice-
+    confirmed `status: "pass"` against their own stated targets, with a
+    physically sane inversion level -- the pair role alone carries the
+    numeric "reproduces the hand-sized width" bar.
+    """
+    sizing = json.loads((CANARY_DIR / "05-sizing.json").read_text())
+    ac_result = json.loads((CANARY_DIR / "sim-ac.result.json").read_text())
+
+    pair_device = sizing["devices"]["M1"]
+    mirror_device = sizing["devices"]["M3"]
+    tail_device = sizing["devices"]["M5"]
+    id_tail_a = sizing["bias"]["tail_current_ua"] * 1e-6
+    cl_f = sizing["load_cap_pf"] * 1e-12
+
+    tt_ugf = [
+        measurement["value"]
+        for corner in ac_result["corners"]
+        if corner["process"] == "tt"
+        for measurement in corner["measurements"]
+        if measurement["name"] == "ugf"
+    ]
+    assert len(tt_ugf) == 4, "canary AC result no longer has four tt corners"
+    ugf_mean = sum(tt_ugf) / len(tt_ugf)
+    pair_target_gm_id = (2 * math.pi * cl_f * ugf_mean) / (id_tail_a / 2)
+
+    request = _write_request(
+        tmp_path,
+        {
+            "topology": {
+                "kind": "diff_pair_mirror_tail",
+                "vcm_v": 0.9,
+                "pair": {
+                    "kind": "nmos",
+                    "model": pair_device["model"],
+                    "l_um": pair_device["l_um"],
+                    "w_min_um": 1.0,
+                    "w_max_um": 40.0,
+                },
+                "mirror": {
+                    "model": mirror_device["model"],
+                    "l_um": mirror_device["l_um"],
+                    "w_min_um": 1.0,
+                    "w_max_um": 30.0,
+                    "ratio": 1.0,
+                },
+                "tail": {
+                    "model": tail_device["model"],
+                    "l_um": tail_device["l_um"],
+                    "w_min_um": 1.0,
+                    "w_max_um": 40.0,
+                },
+            },
+            "models": {
+                "pdk": "sky130A",
+                "lib": "libs.tech/ngspice/sky130.lib.spice",
+            },
+            "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+            "target": {
+                "id_tail_a": id_tail_a,
+                "pair_gm_id": pair_target_gm_id,
+                "mirror_gm_id": 10.0,
+                "tail_gm_id": 10.0,
+            },
+            "options": {
+                "sweep_points": 10,
+                # Six ngspice invocations per fixed-point round (pair/
+                # mirror sweeps + tail sweep+confirm) against the full
+                # sky130A corner deck -- generous per-invocation budget for
+                # the same host-contention reason
+                # `test_reproduces_canary_5t_ota_input_pair` documents (#730).
+                "timeout_s": 900,
+            },
+        },
+        name="canary_topology.json",
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass", (
+        f"status={report['status']!r}, rationale="
+        f"{report.get('method', {}).get('rationale')!r}"
+    )
+
+    # The pair alone is checked against the canary's hand-sized width --
+    # see this test's docstring for why the mirror/tail roles are not.
+    pair_w_um = report["devices"]["pair"]["operating_point"]["w_um"]
+    hand_sized_pair_w_um = pair_device["w_um"]
+    assert hand_sized_pair_w_um / 2 <= pair_w_um <= hand_sized_pair_w_um * 2, (
+        f"pair: sized W={pair_w_um:.3g}um is not within a factor of two of "
+        f"the canary's hand-sized W={hand_sized_pair_w_um}um"
+    )
+
+    for role in ("pair", "mirror", "tail"):
+        assert report["devices"][role]["status"] == "pass"
+        op = report["devices"][role]["operating_point"]
+        assert op["inversion_level"] in {"weak", "moderate", "strong"}
+        assert op["w_um"] > 0
 
 
 # --------------------------------------------------------------------------- #
