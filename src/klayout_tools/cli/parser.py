@@ -80,7 +80,25 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "top cell to report on when the stream has more than one; omit "
-            "to report shape counts summed across every top cell"
+            "to report shape counts summed across every top cell. Also "
+            "selects the flattening root for --flattened"
+        ),
+    )
+    layers_parser.add_argument(
+        "--flattened",
+        action="store_true",
+        help=(
+            "also report per-layer instantiated (hierarchy- and "
+            "transform-flattened) shape counts, physical bounding boxes, "
+            "and instance-weighted contributing cells"
+        ),
+    )
+    layers_parser.add_argument(
+        "--include-text",
+        action="store_true",
+        help=(
+            "also report per-layer flattened text occurrence counts and "
+            "unique text strings (requires --flattened)"
         ),
     )
     _add_format_arg(layers_parser)

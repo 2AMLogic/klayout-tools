@@ -238,6 +238,18 @@ not `klt --version`, if you need to detect this kind of drift.
   `--label-layers` reports which GDS text touches each component; optional
   `--region` crops to a window and flags components that touch its edge.
   See `docs/cli/components.md`.
+- 2026-08-10 — `klt layers`: new opt-in `--flattened`/`--include-text` flags
+  (#675). Without `--flattened`, `layers[]` entries report only per-cell-
+  **definition** shape counts, unchanged since before this flag existed.
+  With `--flattened`, each entry additionally reports `flattened_shapes`
+  (every physical placement of a shape on that layer, hierarchy- and
+  transform-flattened via `Cell.begin_shapes_rec`), `bbox_um` (the union of
+  every placement's transformed physical extents), and `contributors`
+  (every contributing cell definition, instance-weighted, sorted by name).
+  `--include-text` (requires `--flattened`) additionally reports
+  `text_count` and `texts` (distinct text strings with flattened occurrence
+  counts, sorted by string). All new fields are purely additive —
+  `schema_version` stays `1`. See `docs/cli/layers.md`.
 - 2026-08-09 — new `klt signoff` verb (#309): aggregates one or more `klt
   drc`/`klt lvs`/`klt extract`/`klt sim` `--format json` envelopes into a
   single pass/fail signoff verdict. Combines each input's own status
