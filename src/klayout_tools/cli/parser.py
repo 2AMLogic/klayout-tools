@@ -58,6 +58,21 @@ def _add_format_arg(
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
 
 
+def _no_subcommand_handler(parser: argparse.ArgumentParser):
+    """Build a ``func`` default that prints ``parser``'s help and exits 2.
+
+    Shared by every grouped-verb parser (``pdk``, ``deck``, ``kb``, ...) so
+    invoking the group with no subcommand reports usage instead of silently
+    no-op'ing.
+    """
+
+    def _handler(_args: argparse.Namespace) -> int:
+        parser.print_help(sys.stderr)
+        return 2
+
+    return _handler
+
+
 def _add_pdk_args(
     parser: argparse.ArgumentParser,
     *,
@@ -1513,11 +1528,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     pdk_sub = pdk_parser.add_subparsers(dest="pdk_command", metavar="<subcommand>")
 
-    def _no_subcommand(_args: argparse.Namespace) -> int:
-        pdk_parser.print_help(sys.stderr)
-        return 2
-
-    pdk_parser.set_defaults(func=_no_subcommand)
+    pdk_parser.set_defaults(func=_no_subcommand_handler(pdk_parser))
 
     find_parser = pdk_sub.add_parser(
         "find",
@@ -1667,11 +1678,7 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
 
-    def _no_subcommand(_args: argparse.Namespace) -> int:
-        deck_parser.print_help(sys.stderr)
-        return 2
-
-    deck_parser.set_defaults(func=_no_subcommand)
+    deck_parser.set_defaults(func=_no_subcommand_handler(deck_parser))
 
     resolve_parser = deck_sub.add_parser(
         "resolve",
@@ -1731,11 +1738,7 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     kb_sub = kb_parser.add_subparsers(dest="kb_command", metavar="<subcommand>")
 
-    def _no_subcommand(_args: argparse.Namespace) -> int:
-        kb_parser.print_help(sys.stderr)
-        return 2
-
-    kb_parser.set_defaults(func=_no_subcommand)
+    kb_parser.set_defaults(func=_no_subcommand_handler(kb_parser))
 
     list_parser = kb_sub.add_parser(
         "list",
