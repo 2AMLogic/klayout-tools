@@ -664,7 +664,17 @@ def test_reproduces_canary_5t_ota_input_pair(tmp_path):
             },
             "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
             "target": {"id_a": id_a, "gm_id": target_gm_id},
-            "options": {"sweep_points": 12},
+            "options": {
+                "sweep_points": 12,
+                # This is the only test in the file exercising the real
+                # sky130A ngspice deck; the sweep + confirm run's wall-clock
+                # cost is dominated by host contention (other processes'
+                # CPU share), not by the work itself, so give it a generous
+                # ceiling well above size.DEFAULT_TIMEOUT_S (180s) rather
+                # than let a busy dev machine time it out under the default
+                # budget (#730).
+                "timeout_s": 900,
+            },
         },
         name="canary.json",
     )
@@ -672,8 +682,14 @@ def test_reproduces_canary_5t_ota_input_pair(tmp_path):
     report = size.run_size(str(request))
 
     # ngspice -- not the interpolator -- confirms the returned point hits
-    # the canary-derived target.
-    assert report["status"] == "pass"
+    # the canary-derived target. On failure, surface the method rationale
+    # (which carries the ngspice timeout/error diagnostic) instead of a bare
+    # status mismatch, so a starved host reads as a timeout, not a broken
+    # sizer (#730).
+    assert report["status"] == "pass", (
+        f"status={report['status']!r}, rationale="
+        f"{report.get('method', {}).get('rationale')!r}"
+    )
     assert report["operating_point"]["gm_id"] == pytest.approx(target_gm_id, rel=0.03)
     assert report["operating_point"]["id_a"] == pytest.approx(id_a, rel=1e-3)
     assert report["operating_point"]["l_um"] == input_pair["l_um"]
