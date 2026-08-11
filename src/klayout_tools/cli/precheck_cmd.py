@@ -15,10 +15,9 @@ Exit codes (see ``docs/cli/precheck.md`` for the full table):
 from __future__ import annotations
 
 import argparse
-import json
-import os
 
 from ..precheck import PrecheckError, run_precheck
+from ._parsing import load_json_path_or_inline, parse_layer_pairs
 from .output import emit_error, emit_success
 
 EXIT_PASS = 0
@@ -61,44 +60,19 @@ def _load_allowed_layers(value: str | None) -> list[tuple[int, int]] | None:
     if value is None:
         return None
 
-    if os.path.isfile(value):
-        try:
-            with open(value, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except OSError as exc:
-            raise PrecheckError(
-                f"could not read --allowed-layers file '{value}': {exc}"
-            ) from exc
-        except json.JSONDecodeError as exc:
-            raise PrecheckError(
-                f"--allowed-layers file '{value}' is not valid JSON: {exc}"
-            ) from exc
-    else:
-        try:
-            data = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise PrecheckError(
-                "--allowed-layers must be a path to a JSON file or an inline "
-                f"JSON array of [layer, datatype] pairs: {exc}"
-            ) from exc
-
-    if not isinstance(data, list):
-        raise PrecheckError("--allowed-layers must decode to a JSON array")
-
-    layers: list[tuple[int, int]] = []
-    for entry in data:
-        if (
-            not isinstance(entry, list)
-            or len(entry) != 2
-            or not all(isinstance(v, int) for v in entry)
-        ):
-            raise PrecheckError(
-                "--allowed-layers entries must each be a [layer, datatype] "
-                f"pair of integers, got {entry!r}"
-            )
-        layers.append((entry[0], entry[1]))
-
-    return layers
+    data = load_json_path_or_inline(
+        value,
+        "--allowed-layers",
+        PrecheckError,
+        inline_hint="an inline JSON array of [layer, datatype] pairs",
+    )
+    return parse_layer_pairs(
+        data,
+        "--allowed-layers",
+        PrecheckError,
+        reject_bool=False,
+        require_nonempty=False,
+    )
 
 
 def _print_text(report: dict) -> None:
