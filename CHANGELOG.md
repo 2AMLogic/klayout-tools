@@ -440,6 +440,31 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — New verb `klt yield-sensitivity` ranks a completed Monte
+  Carlo campaign's device/process parameters by their contribution to an
+  output metric's variance — issue #923, Phase 3 of the statistical/yield
+  epic #710. Reads a sensitivity sample document (per-sample parameter
+  draws paired with a resulting output value) and emits a ranking, sorted
+  descending by `|contribution|`, using a standardized regression
+  coefficient (solved from the parameter-parameter correlation matrix) as
+  the primary metric when the sample count supports it, with a
+  Pearson-correlation fallback otherwise; Pearson `r` and Spearman `rho` are
+  reported per parameter as corroborating measures, and every response
+  states the method's own limitations (linear/monotonic effects only, no
+  confidence interval on the ranking itself) rather than leaving them
+  implicit. Deliberately correlation/regression-based, not a full
+  Sobol/variance-based decomposition — a stated simplification, not an
+  oversight. Ships in the same `klt_yield_native` Rust crate `klt yield`
+  already uses (`native/yield/src/sensitivity.rs`), with a new
+  `SENSITIVITY_SCHEMA_VERSION` independent of `klt yield`'s own
+  `schema_version`. Validated against a synthetic campaign
+  (`examples/yield-sensitivity/`) where one injected mismatch term is
+  scaled 10x the others — the ranking correctly surfaces it first, an order
+  of magnitude above every other parameter's contribution. See
+  `docs/cli/yield-sensitivity.md`. Independent of #924 (wiring this ranking
+  into the analog-sizing engine for design centering), which is not
+  required for this ranking to be useful on its own.
+
 - 2026-08-12 — `klt signoff --fleet`'s fleet-wide roll-up now resolves a
   canary's real verdict on the statistical (item 6, `klt yield`, #870) and
   post-layout (item 7, `klt pex`, #871) T1 items, instead of always naming

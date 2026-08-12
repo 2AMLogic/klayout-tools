@@ -441,3 +441,95 @@ pub struct VarianceReducedSampleSize {
     /// `"sufficient"` / `"insufficient"` -- precision only.
     pub verdict: String,
 }
+
+// --------------------------------------------------------------------------- //
+// Sensitivity ranking (`klt yield-sensitivity`, issue #923, Phase 3 of the
+// statistical/yield epic #710)
+// --------------------------------------------------------------------------- //
+
+/// Independently versioned from [`SCHEMA_VERSION`] above -- `klt
+/// yield-sensitivity` is its own command per `docs/json-contract.md`
+/// ("versioned per command, not globally").
+pub const SENSITIVITY_SCHEMA_VERSION: u32 = 1;
+
+/// Floor on usable samples per measurement. Below this, a correlation is not
+/// so much noisy as undefined in spirit -- 4 points is the minimum this
+/// crate considers worth ranking at all (2 would let a single pair of
+/// samples dictate the entire ranking).
+pub const SENSITIVITY_MIN_SAMPLES: usize = 4;
+
+#[derive(Debug, Deserialize)]
+pub struct SensitivityRequest {
+    pub measurements: Vec<SensitivityMeasurementRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SensitivityMeasurementRequest {
+    pub name: String,
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Per-sample parameter draws, one inner map per sample -- every sample
+    /// must declare the same parameter name set (the Python reader enforces
+    /// this before the request ever reaches this crate).
+    pub parameters: Vec<std::collections::BTreeMap<String, f64>>,
+    /// The output metric value for each sample, index-aligned with
+    /// `parameters`.
+    pub output: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SensitivityResponse {
+    pub schema_version: u32,
+    pub measurement_count: usize,
+    pub measurements: Vec<SensitivityMeasurementReport>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SensitivityMeasurementReport {
+    pub name: String,
+    pub unit: Option<String>,
+    pub n: u64,
+    pub parameter_count: usize,
+    pub method: SensitivityMethod,
+    /// `null` when the regression could not be fit (see
+    /// `method.regression_solvable`) -- the standardized-coefficient
+    /// ranking's `R^2` has nothing to report in that case.
+    pub r_squared: Option<f64>,
+    /// Descending by `|contribution|`; ties broken by parameter name so the
+    /// order is stable and checkable.
+    pub ranking: Vec<SensitivityRankingEntry>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SensitivityMethod {
+    /// `"standardized_regression_coefficient"` or `"pearson_correlation"`
+    /// (the fallback used when the regression is not solvable -- see
+    /// `regression_solvable`).
+    pub primary: String,
+    pub description: String,
+    pub limitations: Vec<String>,
+    /// `false` when `n` was too small relative to `parameter_count`, or the
+    /// parameter-correlation matrix was numerically singular (e.g. two
+    /// perfectly collinear parameters) -- `ranking[].standardized_coefficient`
+    /// is `null` for every entry in that case, and `primary` falls back to
+    /// `"pearson_correlation"`.
+    pub regression_solvable: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SensitivityRankingEntry {
+    /// 1-indexed position in the ranking.
+    pub rank: usize,
+    pub parameter: String,
+    /// The value `ranking` is sorted (descending, by absolute value) on --
+    /// mirrors `standardized_coefficient` when the regression is solvable,
+    /// `pearson_r` otherwise. Always present, so a consumer never has to
+    /// branch on `method.primary` just to sort or thereshold.
+    pub contribution: f64,
+    /// `null` when `method.regression_solvable` is `false`.
+    pub standardized_coefficient: Option<f64>,
+    pub pearson_r: f64,
+    pub spearman_rho: f64,
+}

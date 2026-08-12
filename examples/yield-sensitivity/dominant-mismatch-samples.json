@@ -1,0 +1,1810 @@
+{
+  "measurements": [
+    {
+      "name": "offset_mv",
+      "unit": "mV",
+      "samples": [
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.808233,
+            "vth_mismatch_m2": 0.280206,
+            "beta_mismatch_m1": 0.083055,
+            "beta_mismatch_m2": -1.969299
+          },
+          "output": 10.295897
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.675264,
+            "vth_mismatch_m2": 0.671195,
+            "beta_mismatch_m1": -1.140246,
+            "beta_mismatch_m2": 0.068789
+          },
+          "output": -7.118856
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.385941,
+            "vth_mismatch_m2": -1.048655,
+            "beta_mismatch_m1": -0.391601,
+            "beta_mismatch_m2": 0.487384
+          },
+          "output": -5.750102
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.800651,
+            "vth_mismatch_m2": -0.448631,
+            "beta_mismatch_m1": -1.699983,
+            "beta_mismatch_m2": -0.182849
+          },
+          "output": 5.95049
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.303442,
+            "vth_mismatch_m2": -0.936965,
+            "beta_mismatch_m1": 1.27654,
+            "beta_mismatch_m2": 0.541466
+          },
+          "output": -13.326492
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.938175,
+            "vth_mismatch_m2": -1.177183,
+            "beta_mismatch_m1": -0.786646,
+            "beta_mismatch_m2": -0.398734
+          },
+          "output": 7.923231
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.131495,
+            "vth_mismatch_m2": 0.112677,
+            "beta_mismatch_m1": -0.632314,
+            "beta_mismatch_m2": -1.152953
+          },
+          "output": 2.369223
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.059679,
+            "vth_mismatch_m2": 0.833576,
+            "beta_mismatch_m1": 1.889162,
+            "beta_mismatch_m2": -0.376946
+          },
+          "output": -7.482995
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.847939,
+            "vth_mismatch_m2": 0.259687,
+            "beta_mismatch_m1": 0.722662,
+            "beta_mismatch_m2": 1.762575
+          },
+          "output": -9.144326
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.589958,
+            "vth_mismatch_m2": 0.676278,
+            "beta_mismatch_m1": 0.407425,
+            "beta_mismatch_m2": -0.455234
+          },
+          "output": -4.371361
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.464185,
+            "vth_mismatch_m2": 0.447699,
+            "beta_mismatch_m1": -0.660498,
+            "beta_mismatch_m2": 0.800993
+          },
+          "output": -5.918931
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.942816,
+            "vth_mismatch_m2": 0.497044,
+            "beta_mismatch_m1": 0.963729,
+            "beta_mismatch_m2": -0.771699
+          },
+          "output": -17.064729
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.100812,
+            "vth_mismatch_m2": 0.808653,
+            "beta_mismatch_m1": -0.369799,
+            "beta_mismatch_m2": 0.50974
+          },
+          "output": 10.678259
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.308554,
+            "vth_mismatch_m2": -1.690011,
+            "beta_mismatch_m1": -1.49374,
+            "beta_mismatch_m2": 0.407814
+          },
+          "output": -0.394029
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.801769,
+            "vth_mismatch_m2": 0.39322,
+            "beta_mismatch_m1": 0.22634,
+            "beta_mismatch_m2": -2.240614
+          },
+          "output": -15.183925
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.929645,
+            "vth_mismatch_m2": 0.253319,
+            "beta_mismatch_m1": 1.778759,
+            "beta_mismatch_m2": -0.367925
+          },
+          "output": 21.650802
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.953499,
+            "vth_mismatch_m2": 0.686209,
+            "beta_mismatch_m1": -1.337427,
+            "beta_mismatch_m2": -0.751616
+          },
+          "output": -9.302113
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.431237,
+            "vth_mismatch_m2": 1.216446,
+            "beta_mismatch_m1": 0.48041,
+            "beta_mismatch_m2": 1.785552
+          },
+          "output": 4.307365
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.755034,
+            "vth_mismatch_m2": -1.083612,
+            "beta_mismatch_m1": -2.33954,
+            "beta_mismatch_m2": -0.451565
+          },
+          "output": 14.455386
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.345653,
+            "vth_mismatch_m2": 0.921831,
+            "beta_mismatch_m1": -0.010457,
+            "beta_mismatch_m2": 1.071449
+          },
+          "output": -13.65516
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.625882,
+            "vth_mismatch_m2": -1.082971,
+            "beta_mismatch_m1": -0.685287,
+            "beta_mismatch_m2": -1.622518
+          },
+          "output": -6.321351
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.620958,
+            "vth_mismatch_m2": -1.455706,
+            "beta_mismatch_m1": 1.111919,
+            "beta_mismatch_m2": -0.782358
+          },
+          "output": -5.65341
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.814431,
+            "vth_mismatch_m2": 0.985544,
+            "beta_mismatch_m1": 0.344394,
+            "beta_mismatch_m2": 0.209694
+          },
+          "output": -17.168102
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.918923,
+            "vth_mismatch_m2": 1.680836,
+            "beta_mismatch_m1": -0.131966,
+            "beta_mismatch_m2": 0.248564
+          },
+          "output": -8.186266
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.761702,
+            "vth_mismatch_m2": -0.128883,
+            "beta_mismatch_m1": -0.186403,
+            "beta_mismatch_m2": -0.851149
+          },
+          "output": -7.157118
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.750284,
+            "vth_mismatch_m2": -1.360569,
+            "beta_mismatch_m1": -0.807388,
+            "beta_mismatch_m2": 0.009393
+          },
+          "output": 5.124026
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.160749,
+            "vth_mismatch_m2": -0.189288,
+            "beta_mismatch_m1": 0.3668,
+            "beta_mismatch_m2": -0.299001
+          },
+          "output": -1.009309
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.219816,
+            "vth_mismatch_m2": -0.60876,
+            "beta_mismatch_m1": 1.157811,
+            "beta_mismatch_m2": 0.484288
+          },
+          "output": -2.173293
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.071478,
+            "vth_mismatch_m2": -0.856089,
+            "beta_mismatch_m1": -0.212008,
+            "beta_mismatch_m2": -1.100663
+          },
+          "output": 0.716629
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.964846,
+            "vth_mismatch_m2": -0.937756,
+            "beta_mismatch_m1": -2.284792,
+            "beta_mismatch_m2": -0.319428
+          },
+          "output": 6.647296
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.891468,
+            "vth_mismatch_m2": 1.027675,
+            "beta_mismatch_m1": -0.446965,
+            "beta_mismatch_m2": -0.986522
+          },
+          "output": 10.253179
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.70187,
+            "vth_mismatch_m2": -0.074502,
+            "beta_mismatch_m1": 1.844366,
+            "beta_mismatch_m2": -0.467782
+          },
+          "output": 19.094862
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.540511,
+            "vth_mismatch_m2": 0.793454,
+            "beta_mismatch_m1": -1.534433,
+            "beta_mismatch_m2": -0.090127
+          },
+          "output": 4.701978
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.779514,
+            "vth_mismatch_m2": -1.582437,
+            "beta_mismatch_m1": -0.991368,
+            "beta_mismatch_m2": 1.565364
+          },
+          "output": -11.77549
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.89384,
+            "vth_mismatch_m2": -1.575663,
+            "beta_mismatch_m1": -0.132833,
+            "beta_mismatch_m2": -0.368925
+          },
+          "output": 7.641848
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.085127,
+            "vth_mismatch_m2": 0.504114,
+            "beta_mismatch_m1": 0.199688,
+            "beta_mismatch_m2": 1.970546
+          },
+          "output": -0.482999
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.677745,
+            "vth_mismatch_m2": 0.35576,
+            "beta_mismatch_m1": -0.051928,
+            "beta_mismatch_m2": 1.157578
+          },
+          "output": 15.587757
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.621384,
+            "vth_mismatch_m2": 2.462183,
+            "beta_mismatch_m1": -0.036969,
+            "beta_mismatch_m2": -0.021203
+          },
+          "output": 8.38927
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.406835,
+            "vth_mismatch_m2": -0.310771,
+            "beta_mismatch_m1": -0.035774,
+            "beta_mismatch_m2": -0.026487
+          },
+          "output": -4.460036
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.06732,
+            "vth_mismatch_m2": -0.576891,
+            "beta_mismatch_m1": -1.085032,
+            "beta_mismatch_m2": 1.34853
+          },
+          "output": -13.742705
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.458417,
+            "vth_mismatch_m2": 0.504312,
+            "beta_mismatch_m1": -1.34134,
+            "beta_mismatch_m2": -0.133651
+          },
+          "output": -5.41182
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.070113,
+            "vth_mismatch_m2": -1.273627,
+            "beta_mismatch_m1": -0.561704,
+            "beta_mismatch_m2": -2.417175
+          },
+          "output": -0.198772
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.795832,
+            "vth_mismatch_m2": -0.256072,
+            "beta_mismatch_m1": -1.137745,
+            "beta_mismatch_m2": 1.051216
+          },
+          "output": -20.42642
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.788496,
+            "vth_mismatch_m2": -0.22916,
+            "beta_mismatch_m1": -1.139655,
+            "beta_mismatch_m2": 0.175848
+          },
+          "output": -19.442754
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.187163,
+            "vth_mismatch_m2": -0.080458,
+            "beta_mismatch_m1": -1.071861,
+            "beta_mismatch_m2": 1.229929
+          },
+          "output": -0.628486
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.919519,
+            "vth_mismatch_m2": -1.043507,
+            "beta_mismatch_m1": 0.112128,
+            "beta_mismatch_m2": -1.688165
+          },
+          "output": 9.737334
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.692915,
+            "vth_mismatch_m2": -0.199625,
+            "beta_mismatch_m1": -0.251556,
+            "beta_mismatch_m2": 0.339125
+          },
+          "output": 16.223077
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.092483,
+            "vth_mismatch_m2": -0.840675,
+            "beta_mismatch_m1": 0.678967,
+            "beta_mismatch_m2": -0.180742
+          },
+          "output": 1.032702
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.996297,
+            "vth_mismatch_m2": 1.019085,
+            "beta_mismatch_m1": 1.090602,
+            "beta_mismatch_m2": -0.487079
+          },
+          "output": -7.429498
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.116915,
+            "vth_mismatch_m2": -0.139097,
+            "beta_mismatch_m1": 1.206733,
+            "beta_mismatch_m2": 0.835458
+          },
+          "output": -0.944971
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.169584,
+            "vth_mismatch_m2": 0.721844,
+            "beta_mismatch_m1": -0.917565,
+            "beta_mismatch_m2": 0.261372
+          },
+          "output": -1.891432
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.446555,
+            "vth_mismatch_m2": 0.081308,
+            "beta_mismatch_m1": -0.501044,
+            "beta_mismatch_m2": -0.513767
+          },
+          "output": 14.590667
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.277579,
+            "vth_mismatch_m2": 0.371837,
+            "beta_mismatch_m1": -1.018422,
+            "beta_mismatch_m2": -0.989197
+          },
+          "output": -2.282514
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.570182,
+            "vth_mismatch_m2": -1.704643,
+            "beta_mismatch_m1": -0.189261,
+            "beta_mismatch_m2": -0.905728
+          },
+          "output": -6.511589
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.523644,
+            "vth_mismatch_m2": -0.05784,
+            "beta_mismatch_m1": 0.976641,
+            "beta_mismatch_m2": 0.786927
+          },
+          "output": 5.131619
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -2.295248,
+            "vth_mismatch_m2": -0.988837,
+            "beta_mismatch_m1": -0.163234,
+            "beta_mismatch_m2": 0.294255
+          },
+          "output": -24.60024
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.199465,
+            "vth_mismatch_m2": 1.805992,
+            "beta_mismatch_m1": 0.227302,
+            "beta_mismatch_m2": 0.180906
+          },
+          "output": -0.104669
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.060102,
+            "vth_mismatch_m2": 0.48526,
+            "beta_mismatch_m1": -0.842316,
+            "beta_mismatch_m2": 0.03034
+          },
+          "output": -11.05661
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.113974,
+            "vth_mismatch_m2": 0.72304,
+            "beta_mismatch_m1": 0.749717,
+            "beta_mismatch_m2": 0.162753
+          },
+          "output": 0.240225
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.278033,
+            "vth_mismatch_m2": -0.535596,
+            "beta_mismatch_m1": -1.291667,
+            "beta_mismatch_m2": 0.215785
+          },
+          "output": 0.698689
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.765189,
+            "vth_mismatch_m2": 1.306159,
+            "beta_mismatch_m1": -1.973515,
+            "beta_mismatch_m2": 0.02441
+          },
+          "output": 6.884846
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.231088,
+            "vth_mismatch_m2": -0.621679,
+            "beta_mismatch_m1": 0.534169,
+            "beta_mismatch_m2": -0.644305
+          },
+          "output": 3.263088
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.436601,
+            "vth_mismatch_m2": -1.354606,
+            "beta_mismatch_m1": 0.910905,
+            "beta_mismatch_m2": 0.534911
+          },
+          "output": 3.841927
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.478813,
+            "vth_mismatch_m2": -0.970533,
+            "beta_mismatch_m1": 0.807683,
+            "beta_mismatch_m2": 0.036989
+          },
+          "output": 4.683876
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.837449,
+            "vth_mismatch_m2": -0.206016,
+            "beta_mismatch_m1": -0.812913,
+            "beta_mismatch_m2": -0.603554
+          },
+          "output": -18.734256
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.70274,
+            "vth_mismatch_m2": 1.010613,
+            "beta_mismatch_m1": -0.396529,
+            "beta_mismatch_m2": -0.843499
+          },
+          "output": 8.82276
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.028629,
+            "vth_mismatch_m2": -0.337945,
+            "beta_mismatch_m1": -1.391844,
+            "beta_mismatch_m2": 0.290223
+          },
+          "output": -1.677331
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.291738,
+            "vth_mismatch_m2": -2.261266,
+            "beta_mismatch_m1": -0.124626,
+            "beta_mismatch_m2": 0.190604
+          },
+          "output": -5.375927
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.166408,
+            "vth_mismatch_m2": 0.511038,
+            "beta_mismatch_m1": -0.481647,
+            "beta_mismatch_m2": 1.742874
+          },
+          "output": -3.327128
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.180478,
+            "vth_mismatch_m2": 0.439895,
+            "beta_mismatch_m1": 0.508826,
+            "beta_mismatch_m2": -0.641167
+          },
+          "output": -0.126109
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.022313,
+            "vth_mismatch_m2": 0.827737,
+            "beta_mismatch_m1": 0.508776,
+            "beta_mismatch_m2": 1.15317
+          },
+          "output": 0.209035
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.525438,
+            "vth_mismatch_m2": -0.785743,
+            "beta_mismatch_m1": -0.008574,
+            "beta_mismatch_m2": 2.126661
+          },
+          "output": 2.286279
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.294582,
+            "vth_mismatch_m2": -0.379489,
+            "beta_mismatch_m1": -0.565458,
+            "beta_mismatch_m2": -1.990553
+          },
+          "output": -1.968814
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.47413,
+            "vth_mismatch_m2": -1.814961,
+            "beta_mismatch_m1": -1.146429,
+            "beta_mismatch_m2": 0.719172
+          },
+          "output": 1.053804
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -2.3849,
+            "vth_mismatch_m2": -1.33969,
+            "beta_mismatch_m1": 1.921221,
+            "beta_mismatch_m2": 1.470428
+          },
+          "output": -24.733627
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.896463,
+            "vth_mismatch_m2": -0.918144,
+            "beta_mismatch_m1": 0.486585,
+            "beta_mismatch_m2": 0.215643
+          },
+          "output": -9.685736
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.257699,
+            "vth_mismatch_m2": 0.883098,
+            "beta_mismatch_m1": 0.643184,
+            "beta_mismatch_m2": 0.382828
+          },
+          "output": 13.611791
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.884161,
+            "vth_mismatch_m2": -2.38907,
+            "beta_mismatch_m1": -1.030434,
+            "beta_mismatch_m2": -0.614675
+          },
+          "output": -11.65957
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.130931,
+            "vth_mismatch_m2": -0.260113,
+            "beta_mismatch_m1": 0.271429,
+            "beta_mismatch_m2": -0.564452
+          },
+          "output": -0.613824
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.471339,
+            "vth_mismatch_m2": -0.05813,
+            "beta_mismatch_m1": 0.394541,
+            "beta_mismatch_m2": 0.527924
+          },
+          "output": -5.099938
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.084376,
+            "vth_mismatch_m2": -0.118787,
+            "beta_mismatch_m1": 1.349592,
+            "beta_mismatch_m2": 1.268606
+          },
+          "output": 0.802536
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.15857,
+            "vth_mismatch_m2": -1.547067,
+            "beta_mismatch_m1": 0.175535,
+            "beta_mismatch_m2": 0.464299
+          },
+          "output": -0.360281
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.177582,
+            "vth_mismatch_m2": -0.580986,
+            "beta_mismatch_m1": -0.805361,
+            "beta_mismatch_m2": 1.328881
+          },
+          "output": -4.426634
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.083107,
+            "vth_mismatch_m2": -0.149104,
+            "beta_mismatch_m1": 0.929963,
+            "beta_mismatch_m2": 0.460054
+          },
+          "output": -10.394495
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.153539,
+            "vth_mismatch_m2": 0.606801,
+            "beta_mismatch_m1": 0.950641,
+            "beta_mismatch_m2": 0.161925
+          },
+          "output": 2.924803
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.548439,
+            "vth_mismatch_m2": -0.985306,
+            "beta_mismatch_m1": 0.481651,
+            "beta_mismatch_m2": -0.14344
+          },
+          "output": -6.007178
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.032149,
+            "vth_mismatch_m2": 0.074682,
+            "beta_mismatch_m1": 0.321239,
+            "beta_mismatch_m2": 0.06449
+          },
+          "output": 0.773605
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.615754,
+            "vth_mismatch_m2": 0.444449,
+            "beta_mismatch_m1": -1.969885,
+            "beta_mismatch_m2": 0.135994
+          },
+          "output": 14.601199
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.917943,
+            "vth_mismatch_m2": 1.254059,
+            "beta_mismatch_m1": -0.158464,
+            "beta_mismatch_m2": -0.340002
+          },
+          "output": 10.766965
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.582724,
+            "vth_mismatch_m2": 0.365463,
+            "beta_mismatch_m1": -0.314274,
+            "beta_mismatch_m2": 0.179478
+          },
+          "output": 15.63768
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.204533,
+            "vth_mismatch_m2": -0.69198,
+            "beta_mismatch_m1": -1.464821,
+            "beta_mismatch_m2": -0.678912
+          },
+          "output": 10.591743
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.165722,
+            "vth_mismatch_m2": 0.040549,
+            "beta_mismatch_m1": -1.881674,
+            "beta_mismatch_m2": 0.797986
+          },
+          "output": -4.468486
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -2.245685,
+            "vth_mismatch_m2": 1.175202,
+            "beta_mismatch_m1": 0.825977,
+            "beta_mismatch_m2": 0.577299
+          },
+          "output": -20.904867
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.49942,
+            "vth_mismatch_m2": 2.126513,
+            "beta_mismatch_m1": -1.02451,
+            "beta_mismatch_m2": -1.838907
+          },
+          "output": -2.179906
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.985244,
+            "vth_mismatch_m2": -0.454742,
+            "beta_mismatch_m1": 1.371892,
+            "beta_mismatch_m2": -0.369697
+          },
+          "output": -18.640066
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.126259,
+            "vth_mismatch_m2": -0.345868,
+            "beta_mismatch_m1": 0.481739,
+            "beta_mismatch_m2": 0.658742
+          },
+          "output": 0.529148
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.764069,
+            "vth_mismatch_m2": 1.348809,
+            "beta_mismatch_m1": 0.591368,
+            "beta_mismatch_m2": 0.292383
+          },
+          "output": 9.095921
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.539419,
+            "vth_mismatch_m2": -0.394081,
+            "beta_mismatch_m1": -1.6184,
+            "beta_mismatch_m2": -0.413183
+          },
+          "output": 13.872811
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.241677,
+            "vth_mismatch_m2": -0.204758,
+            "beta_mismatch_m1": -0.820643,
+            "beta_mismatch_m2": -0.521622
+          },
+          "output": -3.007029
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.568983,
+            "vth_mismatch_m2": 1.562361,
+            "beta_mismatch_m1": 0.677016,
+            "beta_mismatch_m2": -1.24681
+          },
+          "output": 9.002227
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.341526,
+            "vth_mismatch_m2": 0.623092,
+            "beta_mismatch_m1": -0.466856,
+            "beta_mismatch_m2": -0.454887
+          },
+          "output": 4.254911
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.337663,
+            "vth_mismatch_m2": -0.523598,
+            "beta_mismatch_m1": 2.147514,
+            "beta_mismatch_m2": 0.106046
+          },
+          "output": -2.014164
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.859801,
+            "vth_mismatch_m2": -1.070168,
+            "beta_mismatch_m1": 1.225255,
+            "beta_mismatch_m2": -1.246633
+          },
+          "output": 9.784987
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.296247,
+            "vth_mismatch_m2": -0.67686,
+            "beta_mismatch_m1": 0.205102,
+            "beta_mismatch_m2": 0.849416
+          },
+          "output": -14.236349
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.037743,
+            "vth_mismatch_m2": 1.407868,
+            "beta_mismatch_m1": 0.057332,
+            "beta_mismatch_m2": -1.280763
+          },
+          "output": -7.643801
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.402788,
+            "vth_mismatch_m2": -1.19984,
+            "beta_mismatch_m1": -0.030165,
+            "beta_mismatch_m2": 1.319267
+          },
+          "output": -6.720818
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.943156,
+            "vth_mismatch_m2": 0.623316,
+            "beta_mismatch_m1": 2.01394,
+            "beta_mismatch_m2": 1.594247
+          },
+          "output": 10.42009
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.794305,
+            "vth_mismatch_m2": -0.560205,
+            "beta_mismatch_m1": -0.990472,
+            "beta_mismatch_m2": -1.84319
+          },
+          "output": -7.84486
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.737737,
+            "vth_mismatch_m2": -1.359471,
+            "beta_mismatch_m1": 0.914074,
+            "beta_mismatch_m2": 0.308506
+          },
+          "output": 6.615422
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.184159,
+            "vth_mismatch_m2": 1.409467,
+            "beta_mismatch_m1": 0.65011,
+            "beta_mismatch_m2": 0.52255
+          },
+          "output": 3.133002
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.349835,
+            "vth_mismatch_m2": 0.783525,
+            "beta_mismatch_m1": -2.229136,
+            "beta_mismatch_m2": -0.892108
+          },
+          "output": -13.90474
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.618353,
+            "vth_mismatch_m2": 0.64653,
+            "beta_mismatch_m1": 0.446527,
+            "beta_mismatch_m2": 0.830459
+          },
+          "output": -5.776699
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.727685,
+            "vth_mismatch_m2": 0.91765,
+            "beta_mismatch_m1": 0.769852,
+            "beta_mismatch_m2": -0.227271
+          },
+          "output": 9.174456
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.712831,
+            "vth_mismatch_m2": -2.138279,
+            "beta_mismatch_m1": -1.357664,
+            "beta_mismatch_m2": 0.620745
+          },
+          "output": -21.140469
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.158016,
+            "vth_mismatch_m2": 0.769336,
+            "beta_mismatch_m1": -2.292628,
+            "beta_mismatch_m2": -0.868364
+          },
+          "output": 10.787142
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.11734,
+            "vth_mismatch_m2": -1.073661,
+            "beta_mismatch_m1": 1.11814,
+            "beta_mismatch_m2": 0.520359
+          },
+          "output": -1.65996
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.90533,
+            "vth_mismatch_m2": 0.088221,
+            "beta_mismatch_m1": -0.193279,
+            "beta_mismatch_m2": 1.728327
+          },
+          "output": -20.884419
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.540145,
+            "vth_mismatch_m2": 1.93464,
+            "beta_mismatch_m1": -0.369572,
+            "beta_mismatch_m2": 0.808674
+          },
+          "output": -4.769636
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.043673,
+            "vth_mismatch_m2": -0.316468,
+            "beta_mismatch_m1": 0.278589,
+            "beta_mismatch_m2": -0.226172
+          },
+          "output": 0.709837
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.06204,
+            "vth_mismatch_m2": 1.188479,
+            "beta_mismatch_m1": 0.499727,
+            "beta_mismatch_m2": -2.813502
+          },
+          "output": 14.936323
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.15699,
+            "vth_mismatch_m2": 0.993089,
+            "beta_mismatch_m1": -0.549175,
+            "beta_mismatch_m2": 0.330864
+          },
+          "output": 1.778769
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.326143,
+            "vth_mismatch_m2": 0.899327,
+            "beta_mismatch_m1": -1.103286,
+            "beta_mismatch_m2": -0.833482
+          },
+          "output": -2.753848
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.315065,
+            "vth_mismatch_m2": 0.986967,
+            "beta_mismatch_m1": -0.788556,
+            "beta_mismatch_m2": 0.619416
+          },
+          "output": 2.912343
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.206817,
+            "vth_mismatch_m2": 0.479489,
+            "beta_mismatch_m1": 0.28602,
+            "beta_mismatch_m2": -1.122163
+          },
+          "output": 4.029847
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.04474,
+            "vth_mismatch_m2": 0.726492,
+            "beta_mismatch_m1": 1.103777,
+            "beta_mismatch_m2": 0.91576
+          },
+          "output": 0.45857
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.265389,
+            "vth_mismatch_m2": -0.973788,
+            "beta_mismatch_m1": 0.193752,
+            "beta_mismatch_m2": -0.399535
+          },
+          "output": 12.108874
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.165515,
+            "vth_mismatch_m2": 0.03936,
+            "beta_mismatch_m1": 0.740483,
+            "beta_mismatch_m2": -1.427335
+          },
+          "output": 0.563378
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.838632,
+            "vth_mismatch_m2": 1.311134,
+            "beta_mismatch_m1": 0.494639,
+            "beta_mismatch_m2": 0.003764
+          },
+          "output": 10.139999
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.164768,
+            "vth_mismatch_m2": -2.249675,
+            "beta_mismatch_m1": -0.594166,
+            "beta_mismatch_m2": -1.357741
+          },
+          "output": -13.202352
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.215087,
+            "vth_mismatch_m2": -2.079158,
+            "beta_mismatch_m1": 0.206493,
+            "beta_mismatch_m2": 0.412823
+          },
+          "output": 9.98724
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.848921,
+            "vth_mismatch_m2": -1.679313,
+            "beta_mismatch_m1": 1.575604,
+            "beta_mismatch_m2": 0.284396
+          },
+          "output": -9.000251
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.019373,
+            "vth_mismatch_m2": -0.364623,
+            "beta_mismatch_m1": -0.256499,
+            "beta_mismatch_m2": 0.746893
+          },
+          "output": -1.324434
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.230492,
+            "vth_mismatch_m2": 0.692974,
+            "beta_mismatch_m1": 0.798805,
+            "beta_mismatch_m2": 1.485726
+          },
+          "output": 12.183445
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.716043,
+            "vth_mismatch_m2": -1.212848,
+            "beta_mismatch_m1": 1.579513,
+            "beta_mismatch_m2": -0.78358
+          },
+          "output": 8.306104
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 2.412467,
+            "vth_mismatch_m2": 1.07234,
+            "beta_mismatch_m1": 1.073172,
+            "beta_mismatch_m2": 0.47425
+          },
+          "output": 25.702333
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.217375,
+            "vth_mismatch_m2": -1.193377,
+            "beta_mismatch_m1": -0.148409,
+            "beta_mismatch_m2": -0.666323
+          },
+          "output": 1.602437
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 2.699671,
+            "vth_mismatch_m2": -0.030516,
+            "beta_mismatch_m1": -1.095642,
+            "beta_mismatch_m2": 0.451725
+          },
+          "output": 25.515102
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.72026,
+            "vth_mismatch_m2": -0.757231,
+            "beta_mismatch_m1": 0.252045,
+            "beta_mismatch_m2": -0.055478
+          },
+          "output": 6.713185
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.121777,
+            "vth_mismatch_m2": 0.229825,
+            "beta_mismatch_m1": -1.539503,
+            "beta_mismatch_m2": 2.340029
+          },
+          "output": -4.784722
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.738528,
+            "vth_mismatch_m2": 0.145502,
+            "beta_mismatch_m1": -0.448037,
+            "beta_mismatch_m2": -0.421227
+          },
+          "output": 7.487825
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.689353,
+            "vth_mismatch_m2": 0.602066,
+            "beta_mismatch_m1": -0.170675,
+            "beta_mismatch_m2": 0.083541
+          },
+          "output": -6.623755
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -2.058924,
+            "vth_mismatch_m2": -1.308703,
+            "beta_mismatch_m1": -0.418159,
+            "beta_mismatch_m2": -0.410646
+          },
+          "output": -22.103883
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.764683,
+            "vth_mismatch_m2": -1.97231,
+            "beta_mismatch_m1": 0.709399,
+            "beta_mismatch_m2": 0.104474
+          },
+          "output": -9.203818
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.289726,
+            "vth_mismatch_m2": -0.066768,
+            "beta_mismatch_m1": -0.09687,
+            "beta_mismatch_m2": 0.158806
+          },
+          "output": 2.558705
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.415835,
+            "vth_mismatch_m2": -1.18603,
+            "beta_mismatch_m1": -1.739047,
+            "beta_mismatch_m2": -1.398016
+          },
+          "output": 12.605035
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.669327,
+            "vth_mismatch_m2": 0.922354,
+            "beta_mismatch_m1": -0.796127,
+            "beta_mismatch_m2": 1.141303
+          },
+          "output": 15.615761
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.293313,
+            "vth_mismatch_m2": -1.124138,
+            "beta_mismatch_m1": -0.592856,
+            "beta_mismatch_m2": -0.684225
+          },
+          "output": 1.773649
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.76462,
+            "vth_mismatch_m2": 0.623876,
+            "beta_mismatch_m1": -0.79916,
+            "beta_mismatch_m2": 0.112148
+          },
+          "output": -7.673176
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.612175,
+            "vth_mismatch_m2": 1.034181,
+            "beta_mismatch_m1": 0.299375,
+            "beta_mismatch_m2": -1.151147
+          },
+          "output": -3.550793
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.411491,
+            "vth_mismatch_m2": -0.119859,
+            "beta_mismatch_m1": -0.265623,
+            "beta_mismatch_m2": 1.302468
+          },
+          "output": -5.93999
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.880041,
+            "vth_mismatch_m2": 1.299343,
+            "beta_mismatch_m1": -1.698959,
+            "beta_mismatch_m2": -0.228622
+          },
+          "output": 8.776547
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.279776,
+            "vth_mismatch_m2": -0.277668,
+            "beta_mismatch_m1": -0.833471,
+            "beta_mismatch_m2": 0.672644
+          },
+          "output": 1.109468
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.218884,
+            "vth_mismatch_m2": 0.730794,
+            "beta_mismatch_m1": -1.258949,
+            "beta_mismatch_m2": 0.95216
+          },
+          "output": -3.46179
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.448201,
+            "vth_mismatch_m2": -0.442085,
+            "beta_mismatch_m1": -0.058792,
+            "beta_mismatch_m2": 0.920808
+          },
+          "output": 2.888803
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.477387,
+            "vth_mismatch_m2": 0.493509,
+            "beta_mismatch_m1": -1.773543,
+            "beta_mismatch_m2": 1.128699
+          },
+          "output": 2.491863
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.845959,
+            "vth_mismatch_m2": -0.142991,
+            "beta_mismatch_m1": 0.229586,
+            "beta_mismatch_m2": -1.56565
+          },
+          "output": 20.136291
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.893765,
+            "vth_mismatch_m2": -1.315417,
+            "beta_mismatch_m1": 0.405791,
+            "beta_mismatch_m2": 1.218067
+          },
+          "output": -11.13084
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.194995,
+            "vth_mismatch_m2": 1.990515,
+            "beta_mismatch_m1": 1.569623,
+            "beta_mismatch_m2": -1.232802
+          },
+          "output": 16.747386
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.324388,
+            "vth_mismatch_m2": -1.051005,
+            "beta_mismatch_m1": 1.196816,
+            "beta_mismatch_m2": 0.016852
+          },
+          "output": -3.314903
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.886912,
+            "vth_mismatch_m2": -0.826422,
+            "beta_mismatch_m1": -1.806994,
+            "beta_mismatch_m2": -0.804272
+          },
+          "output": -10.724898
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.496723,
+            "vth_mismatch_m2": 0.481092,
+            "beta_mismatch_m1": 0.577763,
+            "beta_mismatch_m2": 0.363517
+          },
+          "output": 5.749052
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.823407,
+            "vth_mismatch_m2": -0.883976,
+            "beta_mismatch_m1": 0.862078,
+            "beta_mismatch_m2": -0.586981
+          },
+          "output": 18.719924
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.369039,
+            "vth_mismatch_m2": -2.242414,
+            "beta_mismatch_m1": 0.934306,
+            "beta_mismatch_m2": -0.014553
+          },
+          "output": 2.473276
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.667578,
+            "vth_mismatch_m2": -2.090493,
+            "beta_mismatch_m1": -0.434997,
+            "beta_mismatch_m2": 0.541428
+          },
+          "output": -10.024884
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.761243,
+            "vth_mismatch_m2": -1.419249,
+            "beta_mismatch_m1": -1.690391,
+            "beta_mismatch_m2": -1.06329
+          },
+          "output": -9.947507
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.855598,
+            "vth_mismatch_m2": 0.357473,
+            "beta_mismatch_m1": -0.373269,
+            "beta_mismatch_m2": 2.585083
+          },
+          "output": -11.226046
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.450334,
+            "vth_mismatch_m2": 0.223627,
+            "beta_mismatch_m1": -0.978048,
+            "beta_mismatch_m2": -0.176378
+          },
+          "output": 14.069342
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.316536,
+            "vth_mismatch_m2": -1.465705,
+            "beta_mismatch_m1": -0.168293,
+            "beta_mismatch_m2": -1.20214
+          },
+          "output": 2.806697
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.385797,
+            "vth_mismatch_m2": -0.756119,
+            "beta_mismatch_m1": 0.86805,
+            "beta_mismatch_m2": -0.189508
+          },
+          "output": -3.488876
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.626497,
+            "vth_mismatch_m2": -0.543914,
+            "beta_mismatch_m1": -1.585213,
+            "beta_mismatch_m2": -1.468563
+          },
+          "output": 15.518054
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.49784,
+            "vth_mismatch_m2": -0.524325,
+            "beta_mismatch_m1": 1.441931,
+            "beta_mismatch_m2": 0.714228
+          },
+          "output": -14.828111
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.200166,
+            "vth_mismatch_m2": -0.862095,
+            "beta_mismatch_m1": 0.784992,
+            "beta_mismatch_m2": -0.312269
+          },
+          "output": -1.877049
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.937461,
+            "vth_mismatch_m2": 1.111218,
+            "beta_mismatch_m1": -2.219156,
+            "beta_mismatch_m2": -0.560886
+          },
+          "output": -9.988573
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.634995,
+            "vth_mismatch_m2": -2.029909,
+            "beta_mismatch_m1": 0.038877,
+            "beta_mismatch_m2": -1.073966
+          },
+          "output": -7.358432
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.15094,
+            "vth_mismatch_m2": -0.503935,
+            "beta_mismatch_m1": -0.513224,
+            "beta_mismatch_m2": -1.934311
+          },
+          "output": -10.788126
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.229906,
+            "vth_mismatch_m2": -1.000842,
+            "beta_mismatch_m1": 0.143848,
+            "beta_mismatch_m2": -1.220988
+          },
+          "output": 2.998366
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.595334,
+            "vth_mismatch_m2": -1.636529,
+            "beta_mismatch_m1": -0.811511,
+            "beta_mismatch_m2": 0.386116
+          },
+          "output": -8.819012
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.503341,
+            "vth_mismatch_m2": -0.717926,
+            "beta_mismatch_m1": -0.850398,
+            "beta_mismatch_m2": -1.185002
+          },
+          "output": -15.380148
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -2.093189,
+            "vth_mismatch_m2": -0.655663,
+            "beta_mismatch_m1": 0.892284,
+            "beta_mismatch_m2": 0.847169
+          },
+          "output": -21.70486
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.271036,
+            "vth_mismatch_m2": -1.504472,
+            "beta_mismatch_m1": -0.695337,
+            "beta_mismatch_m2": 0.666676
+          },
+          "output": 9.724056
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.488307,
+            "vth_mismatch_m2": 1.450938,
+            "beta_mismatch_m1": 0.257059,
+            "beta_mismatch_m2": 1.910574
+          },
+          "output": -15.12326
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.040707,
+            "vth_mismatch_m2": -1.060192,
+            "beta_mismatch_m1": 0.053806,
+            "beta_mismatch_m2": -0.496081
+          },
+          "output": -0.145536
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.085333,
+            "vth_mismatch_m2": -0.69626,
+            "beta_mismatch_m1": -1.092754,
+            "beta_mismatch_m2": -1.194688
+          },
+          "output": -1.527366
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.945497,
+            "vth_mismatch_m2": 0.159785,
+            "beta_mismatch_m1": -0.954895,
+            "beta_mismatch_m2": -0.557217
+          },
+          "output": -19.723008
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.110397,
+            "vth_mismatch_m2": -0.224979,
+            "beta_mismatch_m1": -1.379279,
+            "beta_mismatch_m2": 0.381333
+          },
+          "output": 9.11818
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.050986,
+            "vth_mismatch_m2": 0.098704,
+            "beta_mismatch_m1": 0.277604,
+            "beta_mismatch_m2": -0.285217
+          },
+          "output": 1.049001
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.844735,
+            "vth_mismatch_m2": 1.669442,
+            "beta_mismatch_m1": -0.559598,
+            "beta_mismatch_m2": 2.010961
+          },
+          "output": 7.48392
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.1054,
+            "vth_mismatch_m2": -0.436276,
+            "beta_mismatch_m1": 1.101106,
+            "beta_mismatch_m2": -0.871513
+          },
+          "output": 0.73861
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -1.227654,
+            "vth_mismatch_m2": -0.907055,
+            "beta_mismatch_m1": 0.383022,
+            "beta_mismatch_m2": -1.061496
+          },
+          "output": -11.781532
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.857159,
+            "vth_mismatch_m2": 0.166355,
+            "beta_mismatch_m1": -1.556195,
+            "beta_mismatch_m2": -1.113471
+          },
+          "output": -8.72249
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.950141,
+            "vth_mismatch_m2": -0.500478,
+            "beta_mismatch_m1": -0.527476,
+            "beta_mismatch_m2": 0.167144
+          },
+          "output": -10.740906
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.682742,
+            "vth_mismatch_m2": 0.479405,
+            "beta_mismatch_m1": 0.820312,
+            "beta_mismatch_m2": 0.847499
+          },
+          "output": 7.368224
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.761082,
+            "vth_mismatch_m2": 0.548695,
+            "beta_mismatch_m1": 1.603633,
+            "beta_mismatch_m2": -0.463453
+          },
+          "output": -5.197159
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.360028,
+            "vth_mismatch_m2": 1.199086,
+            "beta_mismatch_m1": -0.893022,
+            "beta_mismatch_m2": 1.926027
+          },
+          "output": 11.934402
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.737436,
+            "vth_mismatch_m2": 0.740273,
+            "beta_mismatch_m1": 0.865754,
+            "beta_mismatch_m2": 1.028481
+          },
+          "output": -6.697548
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 0.292857,
+            "vth_mismatch_m2": -0.853409,
+            "beta_mismatch_m1": 0.458214,
+            "beta_mismatch_m2": -1.175094
+          },
+          "output": 3.702208
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.295751,
+            "vth_mismatch_m2": 0.756993,
+            "beta_mismatch_m1": 0.410178,
+            "beta_mismatch_m2": 0.224895
+          },
+          "output": -2.083046
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.180647,
+            "vth_mismatch_m2": 0.080211,
+            "beta_mismatch_m1": -2.117622,
+            "beta_mismatch_m2": -1.210139
+          },
+          "output": 11.017168
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": -0.488707,
+            "vth_mismatch_m2": 1.468137,
+            "beta_mismatch_m1": -1.123737,
+            "beta_mismatch_m2": 0.313437
+          },
+          "output": -4.540653
+        },
+        {
+          "parameters": {
+            "vth_mismatch_m1": 1.15627,
+            "vth_mismatch_m2": 0.797502,
+            "beta_mismatch_m1": 0.05347,
+            "beta_mismatch_m2": 1.027719
+          },
+          "output": 11.234925
+        }
+      ]
+    }
+  ]
+}

@@ -382,6 +382,130 @@ pub fn excess_kurtosis(xs: &[f64]) -> Option<f64> {
     Some(central_moment(xs, 4) / (m2 * m2) - 3.0)
 }
 
+/// Sample covariance (Bessel-corrected, divisor `n - 1`), matching
+/// [`sample_stddev`]'s convention so `covariance(xs, xs) == sample_stddev(xs)
+/// ^ 2`. `xs` and `ys` must be the same (non-zero) length -- caller's
+/// responsibility, mirroring every other function in this module.
+pub fn covariance(xs: &[f64], ys: &[f64]) -> f64 {
+    let mx = mean(xs);
+    let my = mean(ys);
+    let ss: f64 = xs
+        .iter()
+        .zip(ys.iter())
+        .map(|(x, y)| (x - mx) * (y - my))
+        .sum();
+    ss / (xs.len() as f64 - 1.0)
+}
+
+/// Pearson product-moment correlation coefficient. `None` when either series
+/// has zero spread (undefined, not `0.0` -- a constant series correlates
+/// with nothing, it does not correlate at zero).
+pub fn pearson_r(xs: &[f64], ys: &[f64]) -> Option<f64> {
+    let sx = sample_stddev(xs)?;
+    let sy = sample_stddev(ys)?;
+    if sx <= 0.0 || sy <= 0.0 {
+        return None;
+    }
+    Some(covariance(xs, ys) / (sx * sy))
+}
+
+/// Fractional (mid-)ranks, average-ranking ties -- the standard input to a
+/// rank correlation. E.g. `[10, 20, 20, 5]` ranks to `[2.0, 3.5, 3.5, 1.0]`.
+fn fractional_ranks(xs: &[f64]) -> Vec<f64> {
+    let n = xs.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| xs[a].partial_cmp(&xs[b]).unwrap());
+
+    let mut ranks = vec![0.0; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && xs[order[j + 1]] == xs[order[i]] {
+            j += 1;
+        }
+        // Ranks are 1-indexed; positions `i..=j` (in sort order) tie, so
+        // they all get the average of that block's 1-indexed rank span.
+        let avg_rank = ((i + 1) + (j + 1)) as f64 / 2.0;
+        for &pos in &order[i..=j] {
+            ranks[pos] = avg_rank;
+        }
+        i = j + 1;
+    }
+    ranks
+}
+
+/// Spearman rank correlation: Pearson's `r` computed on each series'
+/// fractional ranks -- a monotone (not necessarily linear) association
+/// measure, unlike [`pearson_r`]. `None` under the same degenerate condition
+/// (a series with every value tied has zero rank-spread, same as zero
+/// value-spread).
+pub fn spearman_rho(xs: &[f64], ys: &[f64]) -> Option<f64> {
+    pearson_r(&fractional_ranks(xs), &fractional_ranks(ys))
+}
+
+/// Solve a small dense linear system `a * x = b` by Gaussian elimination
+/// with partial pivoting. `a` is consumed as its own augmented-matrix
+/// workspace (row-major, `p` rows of `p` coefficients). Returns `None` when
+/// the system is (numerically) singular -- a pivot magnitude that collapses
+/// to noise, e.g. from two perfectly collinear predictors -- rather than
+/// dividing by a near-zero number and returning a number nobody should
+/// trust.
+///
+/// `p` is small here (the parameter count of one sensitivity ranking, not a
+/// general-purpose solve), so `O(p^3)` elimination is the right tool over
+/// pulling in an external linear-algebra crate -- consistent with this
+/// module's "no statrs/nalgebra" dependency-free convention.
+pub fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+    let p = b.len();
+    if a.len() != p || a.iter().any(|row| row.len() != p) {
+        return None;
+    }
+    // Augmented matrix: p rows, p + 1 columns (the last is `b`).
+    let mut m: Vec<Vec<f64>> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(row, &bi)| {
+            let mut r = row.clone();
+            r.push(bi);
+            r
+        })
+        .collect();
+
+    const SINGULAR_TOL: f64 = 1e-10;
+
+    for col in 0..p {
+        // Partial pivot: the largest-magnitude entry in this column, at or
+        // below the diagonal.
+        let (pivot_row, pivot_val) = (col..p)
+            .map(|r| (r, m[r][col].abs()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())?;
+        if pivot_val < SINGULAR_TOL {
+            return None;
+        }
+        m.swap(col, pivot_row);
+
+        let pivot = m[col][col];
+        for entry in m[col].iter_mut().skip(col) {
+            *entry /= pivot;
+        }
+        let pivot_row = m[col].clone();
+        for (r, row) in m.iter_mut().enumerate() {
+            if r == col {
+                continue;
+            }
+            let factor = row[col];
+            if factor == 0.0 {
+                continue;
+            }
+            for (entry, &pivot_entry) in row.iter_mut().zip(pivot_row.iter()).skip(col) {
+                *entry -= factor * pivot_entry;
+            }
+        }
+    }
+
+    Some((0..p).map(|r| m[r][p]).collect())
+}
+
 /// Linearly interpolated quantile of an already-sorted slice, using the
 /// same `(n - 1) * q` order-statistic interpolation `klt sim`'s
 /// `monte_carlo.quantiles` documents.
@@ -568,6 +692,55 @@ mod tests {
     fn sample_stddev_is_bessel_corrected_and_undefined_below_two() {
         assert!(sample_stddev(&[1.0]).is_none());
         close(sample_stddev(&[1.0, 3.0]).unwrap(), 2.0f64.sqrt(), 1e-15);
+    }
+
+    #[test]
+    fn pearson_r_is_plus_one_for_a_perfect_line_and_undefined_for_a_constant() {
+        let xs = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let ys = [2.0, 4.0, 6.0, 8.0, 10.0];
+        close(pearson_r(&xs, &ys).unwrap(), 1.0, 1e-12);
+
+        let ys_neg = [10.0, 8.0, 6.0, 4.0, 2.0];
+        close(pearson_r(&xs, &ys_neg).unwrap(), -1.0, 1e-12);
+
+        let constant = [5.0, 5.0, 5.0, 5.0, 5.0];
+        assert!(pearson_r(&xs, &constant).is_none());
+    }
+
+    #[test]
+    fn spearman_rho_is_plus_one_for_any_monotone_map_pearson_would_miss() {
+        // y = x^3 is monotone but not linear -- Pearson's r on this exact
+        // set is < 1, while Spearman's rank correlation is exactly 1.
+        let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let ys: Vec<f64> = xs.iter().map(|x: &f64| x.powi(3)).collect();
+        close(spearman_rho(&xs, &ys).unwrap(), 1.0, 1e-12);
+        assert!(pearson_r(&xs, &ys).unwrap() < 1.0 - 1e-6);
+    }
+
+    #[test]
+    fn spearman_rho_average_ranks_ties() {
+        // Textbook tie case: [10, 20, 20, 5] ranks to [2, 3.5, 3.5, 1].
+        let xs = [10.0, 20.0, 20.0, 5.0];
+        let ranks = fractional_ranks(&xs);
+        assert_eq!(ranks, vec![2.0, 3.5, 3.5, 1.0]);
+    }
+
+    #[test]
+    fn solve_linear_system_matches_a_known_2x2_solution() {
+        // [2 1][x]   [5]      x = 2, y = 1 (verified: 2*2+1=5, 1*2+3*1=5)
+        // [1 3][y] = [5]
+        let a = vec![vec![2.0, 1.0], vec![1.0, 3.0]];
+        let b = vec![5.0, 5.0];
+        let x = solve_linear_system(&a, &b).unwrap();
+        close(x[0], 2.0, 1e-10);
+        close(x[1], 1.0, 1e-10);
+    }
+
+    #[test]
+    fn solve_linear_system_reports_singular_for_collinear_rows() {
+        let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
+        let b = vec![3.0, 6.0];
+        assert!(solve_linear_system(&a, &b).is_none());
     }
 
     #[test]
