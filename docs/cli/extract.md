@@ -1573,6 +1573,123 @@ i.e. the first extracted netlist that can show crosstalk in `klt sim` at all.
 the crossover charge better *attributed* and better *sized*; it does not make
 `--parasitics` a PEX tool. See "What it does *not* do" below.
 
+### `klt mom` cross-check for one net (`--mom-net`, issue #798)
+
+`--parasitics` (above) is a fast, curated-coefficient model — the same
+lumped-RC table for every net on a given metal level, regardless of that
+net's actual neighbours. Epic #701's Method-of-Moments field solver
+([`klt mom`](mom.md)) is the opposite: a real per-shape electrostatic solve,
+too slow to run for every net in a design but exact for the one you point it
+at. `--mom-net <net>` wires the two together for exactly one net at a time —
+Phase 1b of the epic, "prove the shipped MoM solver improves real extraction
+fidelity, not just canonical benchmarks":
+
+```
+klt extract cell.gds --deck sky130 --parasitics --mom-net Y --format json
+```
+
+- **Requires `--parasitics`.** There is nothing to cross-check against
+  otherwise; given alone, `--mom-net` is a clean error.
+- **Requires the `klt_mom_native` extension** to be built — see
+  [`docs/cli/mom.md#building-the-native-extension`](mom.md#building-the-native-extension).
+  An unbuilt extension, a `<net>` matching no net with ground-eligible
+  parasitics geometry, or a solver-level failure (e.g. the panel-count guard)
+  is a clean `ExtractError`, not a silent fallback to the lumped-RC value —
+  this flag is an explicit request for a specific net's MoM-derived number,
+  so silently substituting a different model would hide exactly the failure
+  a caller invoking it wants to know about.
+- **Genuinely replaces**, not merely reports alongside: the named net's
+  ground capacitance in both the written SPICE `C` card and its
+  `parasitics.nets[]` entry becomes the MoM-solved value. Every other net's
+  parasitics are completely unaffected.
+- **The comparison is also reported**, in a new `parasitics.mom_crosscheck`
+  object — see "JSON `parasitics` block" below for the field list.
+
+**Method.** The named net's geometry on each of the deck's `metals` roles
+(`PARASITICS.metals` — see "The coefficients are curated per-PDK-family"
+above) is read via the same `LayoutToNetlist.polygons_of_net` call
+`--parasitics` itself uses, and each constituent shape's axis-aligned
+bounding box becomes a `klt mom` conductor panel for that net (the same
+bbox-based discretisation `klt mom`'s own GDS path uses — see
+[`docs/cli/mom.md`](mom.md#spec-file)). A second conductor, a synthesized
+ground plate, is placed directly beneath each such shape:
+
+1. **z-gap.** `PARASITICS.metals[i].cap_area_ff_um2` is the PDK's own
+   area-capacitance coefficient — inverting the parallel-plate formula
+   (`C/A = ε₀·εᵣ/d`) at a fixed relative permittivity (εᵣ = 3.9, SiO₂ — the
+   same value [`docs/cli/mom.md`](mom.md)'s own worked examples use) gives
+   the z-gap `d` an idealised infinite parallel plate at that permittivity
+   would need to reproduce the coefficient's area term. This does **not**
+   claim to recover the real physical li1/met1-to-substrate distance — this
+   repo's decks curate no such stackup height (`ParasiticsDeck` has no
+   `z0_um`/`z1_um` field) — it is a modelling choice, stated plainly rather
+   than left implicit.
+2. **Ground plate size.** A plate exactly the same size as the net's own
+   shape loses a large share of its edge field lines to open space instead
+   of terminating them on the plate below (the deck's own coefficient
+   implicitly assumes an effectively infinite plane — see
+   `docs/design/extract-fidelity-roadmap.md` section 2.2). The synthesized
+   plate is padded by 3× the implied z-gap in every direction, a factor
+   chosen from a convergence sweep run during this feature's implementation
+   (moving from 2× to 5× padding changed the answer by under 0.3% at a fixed
+   panel size on a representative net).
+3. **Panel size.** `min(0.5, gap / 4)` micrometers, keeping the solve inside
+   [`docs/design/mom-validation.md`](mom-validation.md)'s ~1%-accuracy band
+   for a `gap`-scale panel while staying well under the 8000-panel guard for
+   a single standard-cell-scale net.
+4. **Solve.** `klt mom`'s native solver runs directly on this synthesized
+   two-conductor request (no intermediate GDS/spec-file round trip — see
+   `klayout_tools.mom.solve_capacitance_matrix`), and the returned matrix's
+   `net`/`net` diagonal — the capacitance between the net and the ground
+   plate in this isolated two-conductor system, the same reading
+   [`docs/cli/mom.md`](mom.md#reading-the-matrix)'s own parallel-plate
+   worked example uses — is the reported `mom_capacitance_ff`.
+
+**Scope, stated plainly.** Only the deck's `metals` roles are modelled — a
+net whose lumped-RC ground capacitance also draws on the `poly`/`diffusion`
+roles (when a deck curates them; sky130 curates no `diffusion` role at all)
+is not fully represented by the MoM side of the comparison, and
+`mom_crosscheck.warnings` always says so explicitly. This is a genuine,
+deliberate limitation — pick a net whose interconnect is entirely metal
+(most output/routing nets) for the cleanest comparison; a gate net that also
+draws poly will show a correspondingly larger, and honestly-flagged, delta.
+
+**Worked example.** `tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds`'s output
+net `Y` is exactly the net `docs/design/extract-fidelity-roadmap.md` section
+4 already cites as this repo's committed schematic-vs-extracted
+sensitivity-floor example, and its ground capacitance comes entirely from a
+single li1 shape — the cleanest possible case (no poly/diffusion
+contribution to exclude):
+
+```
+$ klt extract tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds \
+    --deck sky130 --parasitics --mom-net Y --format json
+```
+
+Measured result (reproducible against the pinned corpus fixture and deck —
+re-running the command above reproduces it exactly):
+
+| Field | Value |
+|---|---|
+| `lumped_rc_capacitance_ff` | `0.23966` |
+| `mom_capacitance_ff` | `0.17338` |
+| `delta_ff` | `-0.06628` |
+| `delta_pct` | `-27.656` |
+| `panel_size_um` | `0.23332` |
+| `panel_count` | `834` |
+
+MoM's ab-initio electrostatic solve reports about 28% *less* capacitance for
+this net than the lumped-RC coefficient table's area+fringe sum — the
+lumped model's `cap_perim_ff_um` fringe term (itself a PDK-curated,
+field-solver-derived approximation for an *arbitrary* neighbouring
+environment) does not, for this specific net's actual isolated geometry,
+match a direct solve as closely as the area term alone would suggest. This
+is exactly Epic #701's stated Phase 1b goal: a **measured**, not asserted,
+fidelity delta on a real corpus net — read as "these two models disagree by
+this much on this net," not as a verdict that either number is the "true"
+capacitance (silicon or a full non-idealised field solve would be needed for
+that).
+
 ### What it does *not* do
 
 - **Lateral (same-layer, sidewall) coupling capacitance and fringe
@@ -1799,6 +1916,16 @@ change got. Values of `nets[].capacitance_ff` and `total_capacitance_ff` move
 (crossover charge relocates to the new coupling term) without their
 definitions changing.
 
+**Additive field, no `schema_version` bump (issue #798):** `mom_crosscheck`
+is new (`null` unless `--mom-net` was given). When `--mom-net` names a net,
+that net's `capacitance_ff` (in both `nets[]` and the written SPICE, and
+therefore also in `total_capacitance_ff`) becomes the `klt mom`-solved value
+instead of the lumped-RC one — a material value change, but strictly
+opt-in and per-net, and recorded in `CHANGELOG.md` per the same
+pre-1.0-caveat precedent issue #547's R/C value change and issue #760's
+`model.coupling` value change already established. `--mom-net` omitted (the
+default) leaves every field byte-identical to before this feature existed.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -1860,6 +1987,23 @@ definitions changing.
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 | `overlap_pairs_without_coefficient` | array\<object\> | Adjacent metal-level pairs the deck declares but its `PARASITICS.metal_overlaps` table has no vertical-overlap coefficient for (issue #760). See below. Empty for both shipped decks. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
+| `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
+
+`mom_crosscheck` (present only when `--mom-net` was given):
+
+| Field | Type | Description |
+|---|---|---|
+| `net` | string | The `--mom-net` value, echoed back. |
+| `lumped_rc_capacitance_ff` | number | The net's ground capacitance **before** the swap — what `--parasitics` alone would have reported. |
+| `mom_capacitance_ff` | number | The `klt mom`-solved value — also what `nets[].capacitance_ff` for this net (and the written SPICE `C` card) now carry. |
+| `delta_ff` | number | `mom_capacitance_ff - lumped_rc_capacitance_ff`. |
+| `delta_pct` | number \| null | `100 * delta_ff / lumped_rc_capacitance_ff`; `null` in the degenerate case `lumped_rc_capacitance_ff == 0.0`. |
+| `background_permittivity` | number | The relative permittivity assumed for the z-gap derivation (3.9, SiO₂ — see the method description above). |
+| `panel_size_um` | number | The discretisation panel size the solve used. |
+| `panel_count` | integer | Total panel count across both synthesized conductors (informational, mirrors `klt mom`'s own `panel_count`). |
+| `ground_pad_factor` | number | How far beyond each net shape's own bbox the synthesized ground plate extends, as a multiple of that shape's implied z-gap (`3.0` — see the method description above). |
+| `method` | string | One-line prose description of the cross-check method, for a human reading the JSON without this doc open. |
+| `warnings` | array\<string\> | Cross-check-specific caveats (always includes the metals-only scope note above); also mirrored into the top-level `warnings[]`. |
 
 Each `nets[]` entry:
 

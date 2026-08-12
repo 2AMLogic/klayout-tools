@@ -95,6 +95,11 @@ def run(args: argparse.Namespace) -> int:
             # given, unchanged from every call site that predates them.
             abstract_cell_patterns=tuple(args.abstract_cells or ()),
             abstract_cell_lef_paths=tuple(args.abstract_cell_lef or ()),
+            # `--mom-net` (issue #798): cross-checks (and replaces) one
+            # net's --parasitics ground capacitance against `klt mom`.
+            # `None` when the flag was never given, unchanged from every
+            # call site that predates it.
+            mom_net=args.mom_net,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -146,6 +151,16 @@ def _print_text(report: dict) -> None:
             print(
                 f"parasitics_coupling: CC={parasitics['cc_count']}  "
                 f"total_CC={parasitics['total_coupling_capacitance_ff']} fF"
+            )
+        # Additive (issue #798): only printed when --mom-net was given.
+        mom_crosscheck = parasitics.get("mom_crosscheck")
+        if mom_crosscheck is not None:
+            print(
+                f"mom_crosscheck: net={mom_crosscheck['net']}  "
+                f"lumped_rc={mom_crosscheck['lumped_rc_capacitance_ff']} fF  "
+                f"mom={mom_crosscheck['mom_capacitance_ff']} fF  "
+                f"delta={mom_crosscheck['delta_ff']} fF "
+                f"({mom_crosscheck['delta_pct']}%)"
             )
 
     device_counts = report["device_counts"]

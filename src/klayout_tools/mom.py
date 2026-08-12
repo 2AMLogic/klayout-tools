@@ -149,6 +149,55 @@ def _stackup_boxes(
     return order, boxes
 
 
+def solve_capacitance_matrix(
+    conductors: list[dict[str, Any]],
+    background_permittivity: float,
+    *,
+    panel_size_um: float = DEFAULT_PANEL_SIZE_UM,
+) -> dict[str, Any]:
+    """Solve the Maxwell capacitance matrix for box geometry already in
+    memory -- the programmatic sibling of :func:`run_mom` (issue #798).
+
+    ``run_mom`` is file-oriented: it reads a GDS layout plus a stackup spec
+    from disk and returns this command's own documented envelope
+    (``schema_version``/``file``/``spec``/...). A caller that already has
+    conductor geometry as plain Python data (e.g. `klt extract`'s
+    ``--mom-net`` cross-check, which derives idealised box geometry from an
+    extracted net's own per-layer regions rather than re-reading a GDS file)
+    does not want that round trip -- it wants the native solver's answer
+    directly.
+
+    ``conductors`` -- ``[{"name": str, "boxes": [{"x0_um", "y0_um",
+    "x1_um", "y1_um", "z0_um", "z1_um"}, ...]}, ...]``, exactly
+    ``solve_mom_json``'s own ``conductors`` request field (see
+    ``native/mom/src/contract.rs``'s ``MomRequest``) -- the same shape
+    :func:`run_mom` builds internally from a stackup spec's matched GDS
+    shapes.
+
+    Returns the native solver's response dict verbatim: ``{"conductors",
+    "capacitance_matrix_ff", "panel_count", "warnings"}`` -- deliberately
+    *not* wrapped in :func:`run_mom`'s ``schema_version``/``file``/``spec``
+    envelope, since those fields describe a file-based invocation this
+    function never makes; a programmatic caller builds its own envelope
+    around this result.
+
+    Raises :class:`MomError` for a missing/unbuilt extension or a
+    solver-level failure (a singular potential-coefficient matrix, or the
+    panel-count guard), matching :func:`run_mom`.
+    """
+    native = _load_native()
+    request = {
+        "background_permittivity": float(background_permittivity),
+        "panel_size_um": float(panel_size_um),
+        "conductors": conductors,
+    }
+    try:
+        response_json = native.solve_mom_json(json.dumps(request))
+    except ValueError as exc:
+        raise MomError(str(exc)) from exc
+    return json.loads(response_json)
+
+
 def run_mom(
     file: str,
     spec_path: str,

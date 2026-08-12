@@ -349,6 +349,39 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt extract --parasitics --mom-net <net>` cross-checks (and
+  replaces) one net's lumped-RC ground capacitance with `klt mom`'s
+  Method-of-Moments field solver (#798, Phase 1b of the MoM epic #701 —
+  "prove the shipped MoM solver improves real extraction fidelity, not just
+  canonical benchmarks"). The named net's geometry on each of the deck's
+  `metals` roles is read via the same `LayoutToNetlist.polygons_of_net` call
+  `--parasitics` itself uses; each shape's bbox becomes a `klt mom` conductor
+  panel, paired with a synthesized ground plate directly beneath it (z-gap
+  inverted from the deck's own `cap_area_ff_um2` coefficient at a fixed 3.9
+  relative permittivity, padded 3× that gap in every direction — a factor
+  chosen from a convergence sweep during implementation, not tuned to any one
+  net; see docs/cli/extract.md's "`klt mom` cross-check for one net" for the
+  full derivation). Both the written SPICE `C` card and the
+  `parasitics.nets[]` entry for that one net now carry the MoM value; every
+  other net is untouched. On `tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds`
+  net `Y` — the exact canary net `docs/design/extract-fidelity-roadmap.md`
+  section 4 already cites as this repo's committed schematic-vs-extracted
+  sensitivity-floor example, and a clean single-role (li1-only) case —
+  the measured delta is **-27.66%** (lumped RC 0.23966 fF vs. MoM 0.17338 fF):
+  MoM's ab-initio solve reports meaningfully less capacitance than the
+  lumped model's area+fringe sum for this net's actual isolated geometry.
+  **No `schema_version` bump** — the new `parasitics.mom_crosscheck` field is
+  additive (`null` unless `--mom-net` was given), and every other documented
+  field keeps its meaning; `--mom-net` omitted (the default) is
+  byte-identical to before this feature existed. Requires the
+  `klt_mom_native` extension to be built (docs/cli/mom.md); an unbuilt
+  extension, an unresolvable net name, or a solver-level failure is a clean
+  `ExtractError`. Only the deck's `metals` roles are modelled — a net whose
+  ground capacitance also draws on a `poly`/`diffusion` role is honestly
+  flagged as out of scope in `mom_crosscheck.warnings` rather than silently
+  compared apples-to-oranges. See docs/cli/extract.md's "`klt mom` cross-check
+  for one net" section.
+
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on

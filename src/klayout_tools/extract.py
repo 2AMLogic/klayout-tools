@@ -288,6 +288,222 @@ def _parasitic_model_header_comment() -> str:
     return "\n".join(lines)
 
 
+#: Relative permittivity assumed for the `klt mom` cross-check
+#: (`--mom-net`, issue #798): SiO2's textbook value, the same
+#: ``background_permittivity`` `docs/cli/mom.md`'s own worked examples use.
+#: The cross-check needs *some* single value (the deck's curated
+#: ``cap_area_ff_um2``/``cap_perim_ff_um`` coefficients do not themselves
+#: carry a declared permittivity -- see `_mom_ground_capacitance_for_net`'s
+#: docstring for how it is used to invert an implied z-gap from them), and
+#: this keeps it identical to `klt mom`'s own existing convention rather
+#: than inventing a second one.
+MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY = 3.9
+
+#: Vacuum permittivity, F/m (CODATA 2018) -- mirrors
+#: `tests/test_mom_validation.py`'s own `EPS0_F_PER_M`, the constant this
+#: repo's `klt mom` validation already grades the solver against.
+_EPS0_F_PER_M = 8.854_187_812_8e-12
+
+#: How far beyond a net shape's own bounding box the synthesized ground
+#: plate (`_mom_ground_capacitance_for_net`) extends, as a multiple of that
+#: shape's own implied z-gap. A ground plate exactly the same size as the
+#: net's own footprint loses a large share of the net's edge field lines to
+#: open space rather than terminating them on the plate below -- the deck's
+#: own `cap_area_ff_um2` coefficient implicitly assumes an effectively
+#: infinite plane, the same assumption a real PDK's field-solver-derived
+#: coefficient table is built from (see `docs/design/extract-fidelity-
+#: roadmap.md` section 2.2). `3.0` is not a free parameter tuned to match
+#: any particular net -- it was chosen from a convergence sweep run during
+#: this feature's implementation (issue #798's PR description records the
+#: measured numbers): the self-capacitance of a representative
+#: single-shape net moves by less than 0.3% between `2x` and `5x` padding
+#: at a fixed panel size, so `3x` sits solidly in the "additional padding no
+#: longer changes the answer" regime without materially growing the panel
+#: count.
+_MOM_CROSSCHECK_GROUND_PAD_FACTOR = 3.0
+
+
+def _mom_crosscheck_gap_um(cap_area_ff_um2: float, eps_r: float) -> float:
+    """Invert the parallel-plate formula ``C/A = eps0 * eps_r / d`` to the
+    z-gap ``d`` (in um) a PDK's own ``cap_area_ff_um2`` coefficient implies
+    at relative permittivity ``eps_r``.
+
+    This is the exact formula ``tests/test_mom_validation.py``'s
+    ``parallel_plate_ff`` (the closed form `klt mom` is graded against)
+    computes capacitance *from* -- ``parallel_plate_ff(area, gap, eps_r) ==
+    EPS0_F_PER_M * eps_r * (area / gap) * 1e9``, i.e. ``C/A == EPS0_F_PER_M *
+    1e9 * eps_r / gap``, solved here for ``gap`` given a *known* ``C/A``
+    (the deck's own curated coefficient) instead of a known ``gap``. It does
+    not claim to recover the real physical li1/met1-to-substrate distance
+    (this repo's decks curate no such stackup height -- see
+    :class:`~klayout_tools.decks.ParasiticsDeck`); it is the spacing an
+    idealised, infinite parallel plate at relative permittivity ``eps_r``
+    would need to reproduce that coefficient's area term. See
+    `_mom_ground_capacitance_for_net`'s docstring for how it is used.
+    """
+    return _EPS0_F_PER_M * 1e9 * eps_r / cap_area_ff_um2
+
+
+def _mom_ground_capacitance_for_net(
+    l2n: kdb.LayoutToNetlist,
+    net: kdb.Net,
+    dbu: float,
+    parasitics_deck: ParasiticsDeck,
+    metal_index: list[int],
+    background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
+) -> dict[str, Any]:
+    """Cross-check one net's lumped-RC ground capacitance against `klt
+    mom`'s Method-of-Moments field solver (issue #798, Phase 1b of epic
+    #701) -- ``klt extract --mom-net <net>``'s implementation.
+
+    For each of the deck's ``metals`` roles with a curated
+    :class:`~klayout_tools.decks.LayerRC` and non-empty geometry on
+    ``net`` (read via ``l2n.polygons_of_net``, the same per-net/per-layer
+    API :func:`_compute_parasitics` uses), every constituent shape's
+    axis-aligned bounding box becomes one `klt mom` conductor panel for
+    ``net``, at an idealised z-height derived from *that role's own*
+    ``cap_area_ff_um2`` coefficient (see :func:`_mom_crosscheck_gap_um`) --
+    a role with a larger area-capacitance coefficient implies a closer
+    (smaller-gap) plane, a smaller coefficient a farther one, exactly the
+    inverse relationship the parallel-plate formula states. A second
+    conductor, ``"gnd"``, is synthesized directly beneath each such shape:
+    a plate at ``z=0`` covering that shape's own bbox padded by
+    :data:`_MOM_CROSSCHECK_GROUND_PAD_FACTOR` times its implied gap in every
+    direction (see that constant's docstring for why a same-size plate
+    underestimates the capacitance a real, effectively-infinite ground
+    plane would show). `klt mom`'s solver is then run on this synthesized
+    two-conductor request directly (:func:`~klayout_tools.mom.
+    solve_capacitance_matrix`, no GDS/spec-file round trip), and the
+    ``"net"``/``"net"`` diagonal of the returned Maxwell capacitance matrix
+    -- the capacitance between ``net`` and ``gnd`` in this isolated
+    two-conductor system, the same reading `docs/cli/mom.md`'s own
+    parallel-plate worked example uses -- is this net's MoM-derived ground
+    capacitance.
+
+    **Scope, stated plainly (this is a cross-check, not a general-purpose
+    field solve):** only the deck's ``metals`` roles are modelled -- a net
+    whose lumped-RC ground capacitance also draws on the ``poly``/
+    ``diffusion`` roles (when a deck curates them; sky130 curates no
+    ``diffusion`` role at all, see ``decks/sky130.py``) is not fully
+    represented here, and this function always says so in its returned
+    ``warnings``. The synthesized ``gnd`` plate is a *modelling choice*
+    (an idealised infinite-plane stand-in), not a measurement of this
+    layout's real substrate/well geometry -- exactly the same idealisation
+    the lumped-RC coefficient it is compared against already makes (see
+    `docs/design/extract-fidelity-roadmap.md` section 2.2's description of
+    how a PDK's own area/fringe coefficient table is derived).
+
+    Returns ``{"net", "mom_capacitance_ff", "background_permittivity",
+    "panel_size_um", "panel_count", "ground_pad_factor", "warnings"}``.
+    ``mom_capacitance_ff`` is ``None`` (with an explanatory ``warnings``
+    entry, never a silent zero) when ``net`` has no ground-eligible geometry
+    on any curated ``metals`` role. Raises :class:`~klayout_tools.mom.
+    MomError` (via ``solve_capacitance_matrix``) for a missing/unbuilt
+    ``klt_mom_native`` extension or a solver-level failure (a singular
+    matrix, or the panel-count guard) -- the caller (`run_extract`) turns
+    that into a clean :class:`ExtractError`, matching how every other
+    engine-dependency failure in this module is surfaced.
+    """
+    from . import mom as mom_module
+
+    net_boxes: list[dict[str, float]] = []
+    gnd_boxes: list[dict[str, float]] = []
+    min_gap_um: float | None = None
+    warning_notes = [
+        "the `--mom-net` cross-check covers only the deck's `metals` roles "
+        "(e.g. li1..met5 for sky130) -- a `poly`/`diffusion` ground-"
+        "capacitance role, when curated, is not included in this "
+        "comparison, and the synthesized ground plate is an idealised "
+        "stand-in, not a measurement of this layout's real substrate/well "
+        "geometry; see docs/cli/extract.md's `--mom-net` section"
+    ]
+
+    for i, layer_rc in enumerate(parasitics_deck.metals):
+        if layer_rc is None or i >= len(metal_index):
+            continue
+        region = l2n.polygons_of_net(net, metal_index[i])
+        if region.is_empty():
+            continue
+        gap_um = _mom_crosscheck_gap_um(
+            layer_rc.cap_area_ff_um2, background_permittivity
+        )
+        min_gap_um = gap_um if min_gap_um is None else min(min_gap_um, gap_um)
+        pad_um = _MOM_CROSSCHECK_GROUND_PAD_FACTOR * gap_um
+        region.merged_semantics = False
+        for polygon in region.each():
+            box = polygon.bbox()
+            x0_um = box.left * dbu
+            y0_um = box.bottom * dbu
+            x1_um = box.right * dbu
+            y1_um = box.top * dbu
+            net_boxes.append(
+                {
+                    "x0_um": x0_um,
+                    "y0_um": y0_um,
+                    "x1_um": x1_um,
+                    "y1_um": y1_um,
+                    "z0_um": gap_um,
+                    "z1_um": gap_um,
+                }
+            )
+            gnd_boxes.append(
+                {
+                    "x0_um": x0_um - pad_um,
+                    "y0_um": y0_um - pad_um,
+                    "x1_um": x1_um + pad_um,
+                    "y1_um": y1_um + pad_um,
+                    "z0_um": 0.0,
+                    "z1_um": 0.0,
+                }
+            )
+
+    if not net_boxes or min_gap_um is None:
+        return {
+            "net": spice_safe_net_name(net.expanded_name()),
+            "mom_capacitance_ff": None,
+            "background_permittivity": background_permittivity,
+            "panel_size_um": None,
+            "panel_count": None,
+            "ground_pad_factor": _MOM_CROSSCHECK_GROUND_PAD_FACTOR,
+            "warnings": [
+                "net has no ground-eligible geometry on any of the deck's "
+                "curated `metals` roles -- no `klt mom` cross-check is "
+                "possible"
+            ],
+        }
+
+    panel_size_um = min(mom_module.DEFAULT_PANEL_SIZE_UM, min_gap_um / 4.0)
+    try:
+        response = mom_module.solve_capacitance_matrix(
+            [
+                {"name": "net", "boxes": net_boxes},
+                {"name": "gnd", "boxes": gnd_boxes},
+            ],
+            background_permittivity,
+            panel_size_um=panel_size_um,
+        )
+    except mom_module.MomError as exc:
+        # Re-raised as `ExtractError` (this module's own engine-failure
+        # exception) rather than left as `MomError`: every other
+        # engine-dependency failure `run_extract` can hit (an unresolvable
+        # PDK, a bad deck) surfaces as `ExtractError`, and `run_extract`
+        # does not otherwise know to catch `MomError` -- see this function's
+        # docstring.
+        raise ExtractError(f"--mom-net cross-check failed: {exc}") from exc
+    net_index = response["conductors"].index("net")
+    mom_capacitance_ff = response["capacitance_matrix_ff"][net_index][net_index]
+
+    return {
+        "net": spice_safe_net_name(net.expanded_name()),
+        "mom_capacitance_ff": round(mom_capacitance_ff, 6),
+        "background_permittivity": background_permittivity,
+        "panel_size_um": round(panel_size_um, 6),
+        "panel_count": response["panel_count"],
+        "ground_pad_factor": _MOM_CROSSCHECK_GROUND_PAD_FACTOR,
+        "warnings": warning_notes + list(response["warnings"]),
+    }
+
+
 class ExtractError(Exception):
     """Raised when a layout cannot be extracted: bad file, unknown deck,
     unresolvable PDK, missing/ambiguous top cell, or an engine error.
@@ -311,6 +527,8 @@ def run_extract(
     deck_options: Mapping[str, str] | None = None,
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_cell_lef_paths: tuple[str, ...] = (),
+    mom_net: str | None = None,
+    mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -399,6 +617,32 @@ def run_extract(
     :func:`klayout_tools.pdk.find_pdk` and an unresolvable PDK is an
     :class:`ExtractError`; when both are omitted, resolution is skipped
     entirely (see the module docstring's "Deviation from the spike").
+
+    ``mom_net`` (``klt extract --mom-net <net>``, issue #798, requires
+    ``parasitics=True``) names exactly one net whose ground capacitance is
+    cross-checked against `klt mom`'s Method-of-Moments field solver (see
+    :func:`_mom_ground_capacitance_for_net`) instead of the deck's lumped-RC
+    coefficient table -- Epic #701 Phase 1b's "wire `klt mom` as a
+    high-fidelity `klt extract` backend for one critical net." The MoM value
+    *replaces* that one net's ``capacitance_ff`` in both the written SPICE
+    ``C`` card and the JSON ``parasitics.nets[]`` entry (every other net is
+    unaffected); the pre-swap lumped-RC value and the measured delta between
+    the two are reported in the new ``parasitics.mom_crosscheck`` block --
+    see ``docs/cli/extract.md``'s ``--mom-net`` section for the full field
+    list and a worked example. Requires the ``klt_mom_native`` extension to
+    be built (see ``docs/cli/mom.md#building-the-native-extension``); an
+    unbuilt extension, a name matching no net with ground-eligible
+    parasitics geometry, or a solver-level failure is an
+    :class:`ExtractError` (this is an explicit request for a specific net's
+    value, not a best-effort diagnostic -- unlike, say, ``metals_without_
+    coefficient``, silently falling back to the lumped-RC value would hide
+    exactly the failure a caller invoking this flag wants to know about).
+    ``mom_background_permittivity`` (not currently exposed as its own CLI
+    flag) overrides :data:`MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY`, the
+    relative permittivity assumed when inverting each metal role's
+    ``cap_area_ff_um2`` coefficient to a z-gap for the solve. ``mom_net``
+    omitted (the default) skips this entirely -- byte-identical to before
+    this feature existed.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
@@ -828,6 +1072,16 @@ def run_extract(
         except UnknownExtractionDeckError as exc:
             raise ExtractError(str(exc)) from exc
 
+    # `--mom-net` (issue #798) requires `--parasitics`: it cross-checks (and
+    # replaces) one net's lumped-RC ground capacitance, so there is nothing
+    # to cross-check against without the lumped-RC pass this flag piggybacks
+    # on. An explicit error here, before the (potentially expensive) real
+    # extraction runs, matches this module's existing "a flag naming
+    # something invalid is an error, not a silent no-op" convention (e.g.
+    # `--abstract-cell-lef` without `--abstract-cells` above).
+    if mom_net is not None and not parasitics:
+        raise ExtractError("--mom-net requires --parasitics")
+
     (
         netlist,
         top_cell_name,
@@ -840,6 +1094,7 @@ def run_extract(
         voltage_domain_warnings,
         abstracted_cells,
         dead_metal,
+        mom_crosscheck,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -851,7 +1106,16 @@ def run_extract(
         deck_options=deck_options,
         abstract_cell_patterns=abstract_cell_patterns,
         abstract_cell_lef_paths=abstract_cell_lef_paths,
+        mom_net=mom_net,
+        mom_background_permittivity=mom_background_permittivity,
     )
+
+    if mom_net is not None:
+        if mom_crosscheck is None:
+            raise ExtractError(f"--mom-net {mom_net!r} matches no net in this layout")
+        if mom_crosscheck["mom_capacitance_ff"] is None:
+            reason = "; ".join(mom_crosscheck["warnings"]) or "no reason given"
+            raise ExtractError(f"--mom-net {mom_net!r}: {reason}")
 
     import klayout.db as kdb
 
@@ -1102,9 +1366,60 @@ def run_extract(
         path, deck
     )
 
+    mom_crosscheck_report: dict[str, Any] | None = None
     parasitics_report: dict[str, Any] | None = None
     if parasitic_nets is not None:
         ground_nets, coupled_pairs = parasitic_nets
+        # `--mom-net` (issue #798): swap this one net's lumped-RC ground
+        # capacitance for `klt mom`'s field-solved value *before*
+        # `_inject_parasitics` reads `ground_nets` below, so both the
+        # written SPICE `C` card and `parasitics.nets[]` for this net carry
+        # the MoM value -- "extracted via klt mom instead of lumped RC" per
+        # the epic's own Phase 1b acceptance criterion, not merely reported
+        # alongside it. Every other net's entry is untouched. Validated
+        # above (an unresolvable net or a solve with no metal-role geometry
+        # already raised `ExtractError`), so `mom_crosscheck` here is always
+        # a dict with a non-`None` `mom_capacitance_ff` when `mom_net` was
+        # given.
+        if mom_net is not None:
+            assert mom_crosscheck is not None
+            matched_entry = next(
+                (entry for entry in ground_nets if entry["net"] == mom_net), None
+            )
+            if matched_entry is None:
+                raise ExtractError(
+                    f"--mom-net {mom_net!r} matches no net with "
+                    "ground-eligible parasitics geometry in this layout"
+                )
+            lumped_rc_capacitance_ff = matched_entry["capacitance_ff"]
+            mom_capacitance_ff = mom_crosscheck["mom_capacitance_ff"]
+            matched_entry["capacitance_ff"] = mom_capacitance_ff
+            delta_ff = mom_capacitance_ff - lumped_rc_capacitance_ff
+            mom_crosscheck_report = {
+                "net": mom_net,
+                "lumped_rc_capacitance_ff": round(lumped_rc_capacitance_ff, 6),
+                "mom_capacitance_ff": round(mom_capacitance_ff, 6),
+                "delta_ff": round(delta_ff, 6),
+                "delta_pct": (
+                    round(100.0 * delta_ff / lumped_rc_capacitance_ff, 3)
+                    if lumped_rc_capacitance_ff
+                    else None
+                ),
+                "background_permittivity": mom_crosscheck["background_permittivity"],
+                "panel_size_um": mom_crosscheck["panel_size_um"],
+                "panel_count": mom_crosscheck["panel_count"],
+                "ground_pad_factor": mom_crosscheck["ground_pad_factor"],
+                "method": (
+                    "klt mom (Method of Moments) two-conductor solve between "
+                    "this net's own metal-role geometry and a synthesized "
+                    "ground plate, derived from the deck's own lumped-RC "
+                    "coefficient table -- see docs/cli/extract.md's "
+                    "'--mom-net' section for the full derivation and "
+                    "reproduction steps."
+                ),
+                "warnings": list(mom_crosscheck["warnings"]),
+            }
+            warnings.extend(mom_crosscheck["warnings"])
         if circuit is not None and (ground_nets or coupled_pairs):
             ground_net = deck.substrate_net
             parasitics_report = _inject_parasitics(
@@ -1162,6 +1477,11 @@ def run_extract(
         # carried non-zero parasitics, since the model's scope does not
         # depend on what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
         parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
+        # Additive field (issue #798): `None` unless `--mom-net` was given,
+        # in which case it is the swap-and-measure report built above -- see
+        # `run_extract`'s `mom_net` docstring paragraph and
+        # `docs/cli/extract.md`'s `--mom-net` section.
+        parasitics_report["mom_crosscheck"] = mom_crosscheck_report
 
     writer = (
         kdb.NetlistSpiceWriter(create_model_binding_delegate(model_bindings))
@@ -1279,6 +1599,8 @@ def extract_netlist_from_layout(
     deck_options: Mapping[str, str] | None = None,
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_cell_lef_paths: tuple[str, ...] = (),
+    mom_net: str | None = None,
+    mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -1291,12 +1613,13 @@ def extract_netlist_from_layout(
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    dict[str, Any] | None,
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
-    voltage_domain_warnings, abstracted_cells, dead_metal)``.
+    voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck)``.
 
     ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
     ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
@@ -1364,6 +1687,13 @@ def extract_netlist_from_layout(
     geometry. The caller (:func:`run_extract`) injects them into the netlist
     as ``R``/``C`` devices before writing. The netlist itself is unchanged by
     this computation (the parasitics are returned as data, not yet injected).
+
+    ``mom_net``/``mom_background_permittivity`` (``klt extract --mom-net
+    <net>``, issue #798) forward straight to :func:`_extract_netlist`, which
+    computes ``mom_crosscheck`` alongside ``parasitic_nets`` for the same
+    "``l2n`` must still be alive" reason -- see its docstring. ``None`` (the
+    default) skips the cross-check entirely, ``mom_crosscheck`` is then
+    always ``None`` too, byte-identical to before this feature existed.
 
     Shared by :func:`run_extract` (this module, which additionally writes the
     netlist to disk and builds the ``devices``/``nets`` convenience view) and
@@ -1436,6 +1766,7 @@ def extract_netlist_from_layout(
         unmodelled_poly,
         abstracted_cells,
         dead_metal,
+        mom_crosscheck,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -1447,6 +1778,8 @@ def extract_netlist_from_layout(
         abstract_cell_patterns=abstract_cell_patterns,
         abstract_instances=abstract_instances,
         lef_macros=lef_macros,
+        mom_net=mom_net,
+        mom_background_permittivity=mom_background_permittivity,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -1473,6 +1806,7 @@ def extract_netlist_from_layout(
         voltage_domain_warnings,
         abstracted_cells,
         dead_metal,
+        mom_crosscheck,
     )
 
 
@@ -2965,6 +3299,8 @@ def _extract_netlist(
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] | None = None,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
+    mom_net: str | None = None,
+    mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -2974,6 +3310,7 @@ def _extract_netlist(
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    dict[str, Any] | None,
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -3005,7 +3342,8 @@ def _extract_netlist(
     algebra.
 
     Returns ``(netlist, warnings, parasitic_nets, black_box_regions,
-    dummy_devices_dropped, unmodelled_poly, abstracted_cells, dead_metal)``.
+    dummy_devices_dropped, unmodelled_poly, abstracted_cells, dead_metal,
+    mom_crosscheck)``.
     ``warnings`` is built from the extractor's own log entries (e.g. a gate
     touching no diffusion) -- non-fatal notes surfaced in the JSON response's
     ``warnings`` field. ``parasitic_nets`` is ``None`` unless
@@ -3014,7 +3352,17 @@ def _extract_netlist(
     returns, computed from ``LayoutToNetlist.polygons_of_net`` while ``l2n``
     is still alive (issue #760: ``coupled_pairs`` carries the vertical-overlap
     net-to-net coupling capacitance alongside the pre-existing per-net
-    ground-RC list). ``black_box_regions`` is
+    ground-RC list). ``mom_crosscheck`` (issue #798, ``klt extract
+    --mom-net <net>``) is ``None`` unless ``mom_net`` is given, in which case
+    it is :func:`_mom_ground_capacitance_for_net`'s result for the net named
+    ``mom_net`` -- computed here, alongside ``parasitic_nets``, for the same
+    reason: it needs ``l2n``/``circuit`` while they are still alive. A
+    ``mom_net`` naming no net with ground-eligible parasitics geometry still
+    returns a dict (with ``mom_capacitance_ff: None`` and an explanatory
+    ``warnings`` entry), never ``None`` -- ``run_extract`` is what turns an
+    unresolvable ``mom_net`` into a clean :class:`ExtractError`, matching
+    every other "the caller asked for something that does not exist"
+    validation in this module. ``black_box_regions`` is
     the JSON response's field (issue #293) -- see
     :func:`_resolve_black_box_regions` -- always a list, empty when the
     layout draws no reserved-annotation-layer geometry.
@@ -3886,6 +4234,7 @@ def _extract_netlist(
     # devices are injected into the netlist by `run_extract` after it has
     # already captured the schematic-equivalent `devices[]`/`nets[]` view.
     parasitic_nets: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None
+    mom_crosscheck: dict[str, Any] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
         parasitic_nets = _compute_parasitics(
@@ -3897,6 +4246,27 @@ def _extract_netlist(
             layer_index,
             metal_index,
         )
+        # `klt extract --mom-net <net>` (issue #798): computed here, not in
+        # `run_extract`, for the same "`l2n` must still be alive" reason as
+        # `parasitic_nets` immediately above -- `polygons_of_net` is a live
+        # `LayoutToNetlist` API, unusable once this function returns.
+        if mom_net is not None and circuit is not None:
+            matched_net = None
+            for candidate in circuit.each_net():
+                if candidate.cluster_id == 0:
+                    continue
+                if spice_safe_net_name(candidate.expanded_name()) == mom_net:
+                    matched_net = candidate
+                    break
+            if matched_net is not None:
+                mom_crosscheck = _mom_ground_capacitance_for_net(
+                    l2n,
+                    matched_net,
+                    layout.dbu,
+                    parasitics_deck,
+                    metal_index,
+                    mom_background_permittivity,
+                )
 
     # `l2n` (and the Region/Texts objects it owns) would otherwise be
     # garbage-collected once this function returns, which invalidates the
@@ -3911,6 +4281,7 @@ def _extract_netlist(
         unmodelled_poly,
         abstracted_cells,
         dead_metal,
+        mom_crosscheck,
     )
 
 
