@@ -67,12 +67,6 @@ from . import sim
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from .yield_analysis import YieldError, run_yield
 
-#: Mirrors ``yield_analysis.SCHEMA_VERSION`` -- the response is a yield
-#: report (Phase 1's own shape) plus one added ``campaign`` block, so this
-#: command's schema version tracks yield's own rather than inventing a
-#: second, independent one.
-SCHEMA_VERSION = 1
-
 #: A campaign spec is a `klt sim` request with a mandatory `monte_carlo`
 #: block -- these are the fields `sim.load_request` itself already requires
 #: (`netlist`/`analysis`), checked again here (before any seed resolution or

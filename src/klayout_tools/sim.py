@@ -595,17 +595,12 @@ def run_sim(
     corners_spec = request.get("corners") or {}
     models = request.get("models") or {}
     models_lib: str | None = None
-    if corners_spec.get("process"):
-        # Only the process axis needs a model library -- supply/temperature
-        # are plain netlist/control-block mutations (see this module's
-        # docstring and the spike's "Native PVT sweeping" survey row).
-        models_lib = _resolve_models_lib(models, request_dir)
 
     # Best-effort PDK resolution for the shared `provenance` block: `models`
     # may name a PDK variant (`models.pdk`) whose release stamps the run's
-    # model library. Never fatal -- the sweep already resolved `models_lib`
-    # above; if the variant can't be found here, provenance.pdk is null
-    # rather than fabricated (see `_provenance.build_provenance`).
+    # model library. Independent of whether `models_lib` itself ends up
+    # resolved below; if the variant can't be found here, provenance.pdk is
+    # null rather than fabricated (see `_provenance.build_provenance`).
     provenance_pdk: dict[str, Any] | None = None
     if models.get("pdk") or models.get("pdk_root"):
         try:
@@ -717,6 +712,17 @@ def run_sim(
             monte_carlo_info["quantiles"] = list(quantiles)
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
+
+    # Gated on the *actually dispatched* `corner_points`, not `corners_spec`,
+    # so a fleet shard reconstructed from `_explicit_points` (which pops
+    # `corners` entirely -- see `_build_remote_request`) still resolves a
+    # model library when its own points carry a `process` value, even though
+    # the pushed request's `corners_spec` is empty on the remote box.
+    if any(point.process for point in corner_points):
+        # Only the process axis needs a model library -- supply/temperature
+        # are plain netlist/control-block mutations (see this module's
+        # docstring and the spike's "Native PVT sweeping" survey row).
+        models_lib = _resolve_models_lib(models, request_dir)
 
     # Resumability (issue #473): only active when the caller opts in, and
     # only for the backends whose corner reports this process itself

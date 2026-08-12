@@ -3998,6 +3998,63 @@ def test_run_sim_remote_fleet_shards_dispatch_and_merge_in_unit_order(
         assert member["attempts"] == 1
 
 
+def test_run_sim_remote_fleet_shard_resolves_models_lib_for_process_corner(
+    tmp_path, monkeypatch
+):
+    """Regression test: a fleet shard's pushed request carries
+    ``_explicit_points`` instead of ``corners`` (`_build_remote_request` pops
+    `corners` entirely), so `run_sim`'s `models_lib` gate must key off the
+    *dispatched* `corner_points` rather than the (now-empty) `corners_spec`
+    on the remote box -- otherwise every corner deck on every shard gets a
+    literal `.lib None <process>` line instead of a real model library
+    include whenever the campaign sweeps `corners.process` (the flagship
+    fleet use case)."""
+    _write_body(tmp_path)
+    lib_path = _write_corner_lib(tmp_path)
+    base = _remote_fleet_base_request(
+        corners={"process": ["tt", "ss"]},
+        models={"pdk": "sky130A", "lib": str(lib_path)},
+        options={"keep_artifacts": True},
+    )
+
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    remote_request = _write_request(tmp_path, base, name="remote.json")
+
+    remote_side_dir = tmp_path / "remote_side"
+    remote_side_dir.mkdir()
+    _install_fake_remote_transport(
+        monkeypatch,
+        remote_report_factory=_make_shard_remote_report_factory(remote_side_dir),
+    )
+    _fake_run_fleet_success(monkeypatch)
+
+    remote_report = sim.run_sim(str(remote_request), hosts=2)
+
+    assert remote_report["status"] == "pass"
+    deck_paths = sorted(remote_side_dir.rglob("corner.cir"))
+    # Two process points across two shards -- one deck per dispatched corner.
+    assert len(deck_paths) == 2
+    for deck_path in deck_paths:
+        lib_lines = [
+            line
+            for line in deck_path.read_text().splitlines()
+            if line.startswith(".lib")
+        ]
+        assert lib_lines, f"{deck_path} has no .lib line"
+        for line in lib_lines:
+            assert "None" not in line, (
+                f"{deck_path} emitted a broken .lib line: {line!r}"
+            )
+            assert line.startswith(f".lib {lib_path} ")
+
+
 def test_run_sim_remote_fleet_preserves_mc_seeds_vs_unsharded_local_run(
     tmp_path, monkeypatch
 ):
