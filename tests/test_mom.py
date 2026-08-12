@@ -129,7 +129,8 @@ def test_run_mom_parallel_plate(tmp_path):
 
     report = run_mom(str(gds), str(spec))
 
-    assert report["schema_version"] == 1
+    # Bumped 1 -> 2 by #797 (inductance/resistance fields).
+    assert report["schema_version"] == 2
     assert report["file"] == str(gds)
     assert report["spec"] == str(spec)
     assert report["background_permittivity"] == 3.9
@@ -433,12 +434,24 @@ def test_cli_json_contract(tmp_path, capsys):
         "spec",
         "background_permittivity",
         "panel_size_um",
+        "filament_subdivisions",
         "conductors",
         "capacitance_matrix_ff",
+        "inductance_matrix_nh",
+        "resistance_ohm",
         "panel_count",
+        "filament_count",
         "warnings",
     }
-    assert data["schema_version"] == 1
+    # Bumped 1 -> 2 by #797 (inductance/resistance fields).
+    assert data["schema_version"] == 2
+    # This spec declares no conductivity, so the PEEC fields are present but
+    # null -- a consumer can key on them unconditionally (see
+    # docs/cli/mom.md's "JSON schema").
+    assert data["inductance_matrix_nh"] is None
+    assert data["resistance_ohm"] is None
+    assert data["filament_subdivisions"] is None
+    assert data["filament_count"] == 0
 
 
 def test_cli_text_output(tmp_path, capsys):

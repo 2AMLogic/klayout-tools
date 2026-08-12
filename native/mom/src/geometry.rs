@@ -1,6 +1,19 @@
-//! Surface discretisation: turn each conductor's axis-aligned box(es) into a
-//! flat set of constant-charge-density panels for the potential-coefficient
-//! matrix fill in `solver.rs`.
+//! Geometry discretisation, in two independent flavours:
+//!
+//! - [`discretize`] -- *surface* discretisation: each conductor's
+//!   axis-aligned box(es) become a flat set of constant-charge-density
+//!   panels for the potential-coefficient matrix fill in `solver.rs`.
+//! - [`discretize_filaments`] -- *volumetric* discretisation: each box
+//!   becomes one or more current-carrying rectangular bars (filaments) with
+//!   a defined current-flow axis, for the PEEC partial-inductance fill in
+//!   `peec.rs`.
+//!
+//! The two are deliberately separate rather than one shared mesh. A surface
+//! panel is a zero-thickness lamina with an area and no cross-section; a
+//! PEEC filament is a solid bar whose cross-sectional area is exactly what
+//! current is pushed through. A flat plate is a perfectly good capacitance
+//! conductor and a nonsensical current path, so the capacitance path keeps
+//! accepting `z0_um == z1_um` while the PEEC path rejects it (issue #797).
 
 use crate::contract::{BoxRequest, ConductorRequest};
 
@@ -258,6 +271,273 @@ fn subdivide_1d(lo: f64, hi: f64, panel_size: f64) -> Vec<(f64, f64)> {
     (0..n).map(|i| (lo + (i as f64 + 0.5) * len, len)).collect()
 }
 
+// --- volumetric (PEEC) discretisation ---------------------------------------
+
+/// One rectangular current-carrying bar: an axis-aligned volume plus the
+/// axis its current flows along.
+///
+/// `weight` is the fraction of its parent box's total current this filament
+/// carries. Sub-filaments split *across* the box's cross-section share the
+/// current (uniform DC current density is assumed), while sub-filaments
+/// split *along* the current-flow axis are in series and each carry the
+/// whole of it -- so `weight` is `1 / n_cross` for every filament of a box
+/// split into `n_cross` parallel cross-sectional cells, regardless of how
+/// many segments it was cut into lengthwise. With that weighting,
+/// `sum_ij w_i w_j Lp_ij` reproduces the parent box's partial inductance
+/// exactly (the volume double integral splits additively over sub-volumes;
+/// see `peec.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct Filament {
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
+    /// Current-flow axis: `0` = x, `1` = y, `2` = z.
+    pub axis: usize,
+    pub weight: f64,
+    pub conductor_index: usize,
+}
+
+impl Filament {
+    /// Length along the current-flow axis, micrometers.
+    pub fn length_um(&self) -> f64 {
+        self.hi[self.axis] - self.lo[self.axis]
+    }
+
+    /// Cross-sectional area perpendicular to the current-flow axis,
+    /// micrometers squared.
+    pub fn cross_area_um2(&self) -> f64 {
+        let (u, v) = transverse_axes(self.axis);
+        (self.hi[u] - self.lo[u]) * (self.hi[v] - self.lo[v])
+    }
+}
+
+/// The two axes perpendicular to `axis`, in ascending order.
+pub fn transverse_axes(axis: usize) -> (usize, usize) {
+    match axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    }
+}
+
+/// Upper bound on total filament count. The partial-inductance matrix is
+/// dense and `O(n^2)` to fill, and each entry costs a 64-term closed-form
+/// evaluation, so this cap is a good deal tighter than `MAX_PANELS` -- it is
+/// sized so a worst-case fill stays around a second, not so a matrix fits in
+/// memory. `filament_subdivisions` multiplies the box count by `n^3`, which
+/// is the usual way to hit it.
+const MAX_FILAMENTS: usize = 512;
+
+/// Aspect ratio (longest box extent / next-longest) below which "the
+/// longest axis is the current-flow axis" stops being a defensible reading
+/// of the geometry. See `discretize_filaments`' doc comment.
+const MIN_BAR_ASPECT_RATIO: f64 = 2.0;
+
+/// Discretise every conductor's boxes into current-carrying filaments,
+/// splitting each box into `subdivisions^3` sub-bars (`subdivisions` along
+/// the current-flow axis and along each transverse axis).
+///
+/// **Current-flow direction is taken to be each box's longest axis.** The
+/// MVP's boxes carry no port or direction information (`BoxRequest` is six
+/// coordinates and nothing else), so the direction has to be inferred, and
+/// "current runs the long way down a wire" is the standard PEEC MVP reading
+/// for bar-shaped conductors. It is *not* defensible for a box that is not
+/// bar-shaped -- a square pad has no long way -- so a box whose longest
+/// extent is less than `MIN_BAR_ASPECT_RATIO` times its next-longest gets a
+/// warning naming the conductor. It is a warning rather than a hard error to
+/// match the precedent `solver::physicality_warnings` already sets for the
+/// capacitance path: return the numbers, and say plainly that they should
+/// not be trusted.
+///
+/// Returns `(filaments, warnings)`, or an error string when a conductor has
+/// no boxes, a box has zero extent along any axis (a flat plate has no
+/// cross-section to push current through), `subdivisions` is out of range,
+/// or the filament count would exceed `MAX_FILAMENTS`.
+pub fn discretize_filaments(
+    conductors: &[ConductorRequest],
+    subdivisions: usize,
+) -> Result<(Vec<Filament>, Vec<String>), String> {
+    if conductors.is_empty() {
+        return Err("at least one conductor is required".to_string());
+    }
+    if subdivisions == 0 {
+        return Err("filament_subdivisions must be at least 1".to_string());
+    }
+    if subdivisions > crate::contract::MAX_FILAMENT_SUBDIVISIONS {
+        return Err(format!(
+            "filament_subdivisions must be at most {} (each box becomes \
+             subdivisions^3 filaments, and the partial-inductance fill is \
+             O(filaments^2)), got {subdivisions}",
+            crate::contract::MAX_FILAMENT_SUBDIVISIONS
+        ));
+    }
+
+    let box_count: usize = conductors.iter().map(|c| c.boxes.len()).sum();
+    let per_box = subdivisions.saturating_pow(3);
+    if box_count.saturating_mul(per_box) > MAX_FILAMENTS {
+        return Err(format!(
+            "geometry would discretise into more than {MAX_FILAMENTS} PEEC \
+             filaments ({box_count} boxes x {per_box} filaments each) -- the \
+             partial-inductance fill is dense and O(n^2); reduce \
+             filament_subdivisions or split the request"
+        ));
+    }
+
+    let mut filaments = Vec::with_capacity(box_count * per_box);
+    let mut warnings = Vec::new();
+    for (conductor_index, conductor) in conductors.iter().enumerate() {
+        if conductor.boxes.is_empty() {
+            return Err(format!(
+                "conductor {:?} has no boxes -- every conductor needs at least one",
+                conductor.name
+            ));
+        }
+        for b in &conductor.boxes {
+            let bounds = sorted_bounds(b);
+            let extents = [
+                bounds[0].1 - bounds[0].0,
+                bounds[1].1 - bounds[1].0,
+                bounds[2].1 - bounds[2].0,
+            ];
+            if let Some(flat) = extents.iter().position(|e| *e < EPS_UM) {
+                return Err(format!(
+                    "conductor {:?} has a box with zero extent along {} -- a PEEC \
+                     current path needs a real cross-sectional area, so a \
+                     zero-thickness (z0_um == z1_um) plate cannot carry current; \
+                     give it a thickness, or drop conductivity_S_per_m to run the \
+                     capacitance-only solve",
+                    conductor.name,
+                    axis_name(flat)
+                ));
+            }
+
+            let axis = longest_axis(&extents);
+            let (u, v) = transverse_axes(axis);
+            let next_longest = extents[u].max(extents[v]);
+            if extents[axis] < MIN_BAR_ASPECT_RATIO * next_longest {
+                warnings.push(format!(
+                    "conductor {:?} has a box that is not bar-shaped ({:.4} x {:.4} \
+                     x {:.4} um, aspect ratio {:.2}:1) -- PEEC takes the longest \
+                     axis ({}) as the current-flow direction, which is only \
+                     meaningful for a wire-like box; treat its inductance and \
+                     resistance contribution as unreliable",
+                    conductor.name,
+                    extents[0],
+                    extents[1],
+                    extents[2],
+                    extents[axis] / next_longest,
+                    axis_name(axis)
+                ));
+            }
+
+            let weight = 1.0 / (subdivisions * subdivisions) as f64;
+            let cuts: Vec<Vec<(f64, f64)>> = (0..3)
+                .map(|k| split_axis(bounds[k].0, bounds[k].1, subdivisions))
+                .collect();
+            for &(x0, x1) in &cuts[0] {
+                for &(y0, y1) in &cuts[1] {
+                    for &(z0, z1) in &cuts[2] {
+                        filaments.push(Filament {
+                            lo: [x0, y0, z0],
+                            hi: [x1, y1, z1],
+                            axis,
+                            weight,
+                            conductor_index,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok((filaments, warnings))
+}
+
+fn sorted_bounds(b: &BoxRequest) -> [(f64, f64); 3] {
+    [
+        minmax(b.x0_um, b.x1_um),
+        minmax(b.y0_um, b.y1_um),
+        minmax(b.z0_um, b.z1_um),
+    ]
+}
+
+fn axis_name(axis: usize) -> &'static str {
+    match axis {
+        0 => "x",
+        1 => "y",
+        _ => "z",
+    }
+}
+
+/// Index of the largest of three extents; ties resolve to the lowest axis
+/// index, so the choice is deterministic for a cube.
+fn longest_axis(extents: &[f64; 3]) -> usize {
+    let mut best = 0;
+    for (i, e) in extents.iter().enumerate() {
+        if *e > extents[best] {
+            best = i;
+        }
+    }
+    best
+}
+
+/// Split `[lo, hi]` into exactly `n` equal `(lo, hi)` sub-intervals.
+fn split_axis(lo: f64, hi: f64, n: usize) -> Vec<(f64, f64)> {
+    let step = (hi - lo) / n as f64;
+    (0..n)
+        .map(|i| (lo + i as f64 * step, lo + (i + 1) as f64 * step))
+        .collect()
+}
+
+/// Per-conductor DC series resistance in ohms, assembled from the same
+/// filaments the partial-inductance fill uses:
+/// `R = sum_i w_i^2 * l_i / (sigma * A_i)`.
+///
+/// That weighting is the exact series/parallel reduction of a box cut into
+/// `n^3` sub-bars, and it collapses to the textbook `l / (sigma * A)` for
+/// the whole box regardless of `filament_subdivisions` -- `n_axial` segments
+/// in series, each `n_cross` cells in parallel:
+/// `n_axial * (l/n_axial) / (sigma * (A/n_cross) * n_cross) = l / (sigma A)`.
+/// It is expressed per filament rather than per box so inductance and
+/// resistance are read off one shared discretisation (`peec.rs` assembles
+/// `sum_ij w_i w_j Lp_ij` from the same weights), which is what makes
+/// `resistance_is_independent_of_filament_subdivisions` a meaningful check
+/// rather than a tautology about box arithmetic.
+///
+/// **The boxes of one conductor are assumed to be in series** along the
+/// current path (the usual case for a routed net expressed as a chain of
+/// segments). Boxes that are actually in *parallel* are not detected, so
+/// their resistance is over-counted -- documented in docs/cli/mom.md's
+/// "Scope and limitations" rather than guessed at, since the MVP has no
+/// connectivity information to tell the two apart.
+pub fn dc_resistance_ohm(
+    conductors: &[ConductorRequest],
+    filaments: &[Filament],
+) -> Result<Vec<f64>, String> {
+    let mut sigmas = Vec::with_capacity(conductors.len());
+    for conductor in conductors {
+        let sigma = conductor
+            .conductivity_s_per_m
+            .ok_or_else(|| format!("conductor {:?} has no conductivity_S_per_m", conductor.name))?;
+        if sigma <= 0.0 || !sigma.is_finite() {
+            return Err(format!(
+                "conductor {:?} has a non-positive or non-finite \
+                 conductivity_S_per_m ({sigma})",
+                conductor.name
+            ));
+        }
+        sigmas.push(sigma);
+    }
+
+    let mut totals = vec![0.0; conductors.len()];
+    for filament in filaments {
+        let index = filament.conductor_index;
+        // length [um] / (sigma [S/m] * area [um^2]) with um -> m:
+        // (l * 1e-6) / (sigma * A * 1e-12) = 1e6 * l / (sigma * A).
+        totals[index] += filament.weight * filament.weight * 1e6 * filament.length_um()
+            / (sigmas[index] * filament.cross_area_um2());
+    }
+    Ok(totals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +546,7 @@ mod tests {
         ConductorRequest {
             name: name.to_string(),
             boxes: vec![b],
+            conductivity_s_per_m: None,
         }
     }
 
@@ -400,5 +681,189 @@ mod tests {
         );
         let err = discretize(&[tiny, big], 0.001).unwrap_err();
         assert!(err.contains("panels"), "unexpected error message: {err}");
+    }
+
+    // --- volumetric (PEEC) discretisation ------------------------------------
+
+    /// Copper, in S/m -- the value the docs quote as the worked example.
+    const COPPER_S_PER_M: f64 = 5.8e7;
+
+    fn wire(name: &str, length_um: f64, w_um: f64, t_um: f64) -> ConductorRequest {
+        ConductorRequest {
+            name: name.to_string(),
+            boxes: vec![BoxRequest {
+                x0_um: 0.0,
+                y0_um: 0.0,
+                x1_um: length_um,
+                y1_um: w_um,
+                z0_um: 0.0,
+                z1_um: t_um,
+            }],
+            conductivity_s_per_m: Some(COPPER_S_PER_M),
+        }
+    }
+
+    #[test]
+    fn a_bar_becomes_one_filament_along_its_longest_axis() {
+        let (filaments, warnings) = discretize_filaments(&[wire("m1", 20.0, 1.0, 0.5)], 1).unwrap();
+        assert_eq!(filaments.len(), 1);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let f = &filaments[0];
+        assert_eq!(f.axis, 0, "current must run along the 20 um x extent");
+        assert_relative_eq(f.length_um(), 20.0);
+        assert_relative_eq(f.cross_area_um2(), 0.5);
+        assert_relative_eq(f.weight, 1.0);
+    }
+
+    #[test]
+    fn subdivisions_split_a_box_into_n_cubed_filaments_with_cross_sectional_weights() {
+        let (filaments, _) = discretize_filaments(&[wire("m1", 20.0, 1.0, 0.5)], 3).unwrap();
+        assert_eq!(filaments.len(), 27);
+        // 3 cross-sectional cuts per transverse axis => 9 parallel paths.
+        assert!(filaments
+            .iter()
+            .all(|f| (f.weight - 1.0 / 9.0).abs() < 1e-12));
+        // The pieces tile the parent exactly.
+        let volume: f64 = filaments
+            .iter()
+            .map(|f| (f.hi[0] - f.lo[0]) * (f.hi[1] - f.lo[1]) * (f.hi[2] - f.lo[2]))
+            .sum();
+        assert_relative_eq(volume, 20.0 * 1.0 * 0.5);
+    }
+
+    #[test]
+    fn a_zero_thickness_plate_cannot_carry_current() {
+        let plate = ConductorRequest {
+            name: "plate".to_string(),
+            boxes: vec![BoxRequest {
+                x0_um: 0.0,
+                y0_um: 0.0,
+                x1_um: 10.0,
+                y1_um: 10.0,
+                z0_um: 1.0,
+                z1_um: 1.0,
+            }],
+            conductivity_s_per_m: Some(COPPER_S_PER_M),
+        };
+        let err = discretize_filaments(&[plate], 1).unwrap_err();
+        assert!(err.contains("zero extent along z"), "got: {err}");
+        assert!(err.contains("capacitance-only"), "got: {err}");
+    }
+
+    #[test]
+    fn a_non_bar_shaped_box_warns_about_the_current_direction_assumption() {
+        // A 10 x 8 x 0.5 um pad: the longest axis beats the next-longest by
+        // only 1.25:1, so "current runs the long way" is not defensible.
+        let pad = ConductorRequest {
+            name: "pad".to_string(),
+            boxes: vec![BoxRequest {
+                x0_um: 0.0,
+                y0_um: 0.0,
+                x1_um: 10.0,
+                y1_um: 8.0,
+                z0_um: 0.0,
+                z1_um: 0.5,
+            }],
+            conductivity_s_per_m: Some(COPPER_S_PER_M),
+        };
+        let (filaments, warnings) = discretize_filaments(&[pad], 1).unwrap();
+        assert_eq!(filaments.len(), 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("\"pad\""), "got: {}", warnings[0]);
+        assert!(
+            warnings[0].contains("not bar-shaped"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn filament_subdivisions_out_of_range_are_rejected() {
+        let c = wire("m1", 20.0, 1.0, 0.5);
+        assert!(discretize_filaments(std::slice::from_ref(&c), 0)
+            .unwrap_err()
+            .contains("at least 1"));
+        assert!(discretize_filaments(
+            std::slice::from_ref(&c),
+            crate::contract::MAX_FILAMENT_SUBDIVISIONS + 1
+        )
+        .unwrap_err()
+        .contains("at most"));
+    }
+
+    #[test]
+    fn excessive_filament_count_is_a_clean_error_not_a_panic() {
+        let many: Vec<ConductorRequest> = (0..20)
+            .map(|i| wire(&format!("m{i}"), 20.0, 1.0, 0.5))
+            .collect();
+        // 20 boxes x 8^3 = 10240 filaments, well past the cap.
+        let err = discretize_filaments(&many, 8).unwrap_err();
+        assert!(err.contains("filaments"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn dc_resistance_matches_the_exact_closed_form() {
+        // R = l / (sigma A). l = 20 um, A = 1 x 0.5 um^2, sigma = 5.8e7 S/m
+        //   = 20e-6 / (5.8e7 * 0.5e-12) = 0.689655... ohm.
+        let c = wire("m1", 20.0, 1.0, 0.5);
+        let (filaments, _) = discretize_filaments(std::slice::from_ref(&c), 1).unwrap();
+        let r = dc_resistance_ohm(std::slice::from_ref(&c), &filaments).unwrap();
+        let exact = 20e-6 / (COPPER_S_PER_M * 1.0e-6 * 0.5e-6);
+        assert!(
+            (r[0] - exact).abs() / exact < 1e-12,
+            "got {} want {exact}",
+            r[0]
+        );
+    }
+
+    #[test]
+    fn resistance_is_independent_of_filament_subdivisions() {
+        let c = wire("m1", 20.0, 1.0, 0.5);
+        let reference = {
+            let (f, _) = discretize_filaments(std::slice::from_ref(&c), 1).unwrap();
+            dc_resistance_ohm(std::slice::from_ref(&c), &f).unwrap()[0]
+        };
+        for n in [2, 3, 4] {
+            let (f, _) = discretize_filaments(std::slice::from_ref(&c), n).unwrap();
+            let r = dc_resistance_ohm(std::slice::from_ref(&c), &f).unwrap()[0];
+            assert!(
+                (r - reference).abs() / reference < 1e-12,
+                "n = {n}: {r} vs {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn boxes_of_one_conductor_add_in_series() {
+        let mut c = wire("m1", 20.0, 1.0, 0.5);
+        c.boxes.push(BoxRequest {
+            x0_um: 20.0,
+            y0_um: 0.0,
+            x1_um: 30.0,
+            y1_um: 1.0,
+            z0_um: 0.0,
+            z1_um: 0.5,
+        });
+        let (filaments, _) = discretize_filaments(std::slice::from_ref(&c), 1).unwrap();
+        let r = dc_resistance_ohm(std::slice::from_ref(&c), &filaments).unwrap();
+        let exact = 30e-6 / (COPPER_S_PER_M * 1.0e-6 * 0.5e-6);
+        assert!((r[0] - exact).abs() / exact < 1e-12, "got {}", r[0]);
+    }
+
+    #[test]
+    fn non_positive_conductivity_is_rejected() {
+        let mut c = wire("m1", 20.0, 1.0, 0.5);
+        c.conductivity_s_per_m = Some(-1.0);
+        let (filaments, _) = discretize_filaments(std::slice::from_ref(&c), 1).unwrap();
+        assert!(dc_resistance_ohm(std::slice::from_ref(&c), &filaments)
+            .unwrap_err()
+            .contains("non-positive"));
+    }
+
+    fn assert_relative_eq(got: f64, want: f64) {
+        assert!(
+            (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+            "got {got}, want {want}"
+        );
     }
 }

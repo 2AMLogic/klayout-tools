@@ -101,16 +101,19 @@ jobs:
         # thing CI ever sees.
         #
         # --capture=tee-sys so the closed-form comparison and
-        # convergence-rate tables tests/test_mom_validation.py prints (issue
-        # #719 requires the observed rate to be *reported*, not just asserted)
-        # land in this job's log on a green run too, not only on failure. It
-        # still captures, so test_mom.py's capsys-based CLI assertions are
-        # unaffected -- unlike -s / --capture=no, which would break them.
+        # convergence-rate tables tests/test_mom_validation.py and
+        # tests/test_mom_inductance.py print (issues #719/#797 require the
+        # observed rate and the measured tolerances to be *reported*, not just
+        # asserted) land in this job's log on a green run too, not only on
+        # failure. It still captures, so test_mom.py's capsys-based CLI
+        # assertions are unaffected -- unlike -s / --capture=no, which would
+        # break them.
         working-directory: .
         run: |
           uv sync --locked --extra dev --group mom
           uv run --frozen --extra dev --group mom pytest \
-            tests/test_mom.py tests/test_mom_validation.py -v --capture=tee-sys
+            tests/test_mom.py tests/test_mom_validation.py \
+            tests/test_mom_inductance.py -v --capture=tee-sys
 
       - name: Assert the klt mom tests actually ran (no silent skip)
         working-directory: .

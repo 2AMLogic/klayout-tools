@@ -80,8 +80,9 @@ when all three hold:
 `pyproject.toml` through a PEP 735 dependency group plus `[tool.uv.sources]`.
 That keeps the Rust toolchain an **optional** build dependency — the rest of
 `klt` installs and runs without it — and keeps every other command's
-packaging untouched. `native/mom/` (the `klt mom` capacitance solver, issue
-#718) established this convention and is the reference for the next one.
+packaging untouched. `native/mom/` (the `klt mom` MoM capacitance + PEEC
+inductance/resistance solver, issues #718/#797) established this convention
+and is the reference for the next one.
 
 Good early targets: the geometry layer — GDSII/OASIS parsing, polygon
 ops, hierarchy traversal, eventually a DRC engine. Poor targets: SPICE

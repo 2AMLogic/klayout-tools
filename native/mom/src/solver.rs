@@ -191,6 +191,7 @@ mod tests {
                 z0_um: z,
                 z1_um: z,
             }],
+            conductivity_s_per_m: None,
         }
     }
 

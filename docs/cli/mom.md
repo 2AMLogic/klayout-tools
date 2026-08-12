@@ -1,17 +1,27 @@
 # `klt mom`
 
-Quasi-static **capacitance** extraction via the Method of Moments (MoM):
-discretise conductor surfaces from a GDSII/OASIS layout, fill the
-potential-coefficient matrix, and solve for the Maxwell capacitance matrix.
+Quasi-static **RLC** extraction from a GDSII/OASIS layout:
+
+- **C** — the Method of Moments (MoM): discretise conductor surfaces, fill the
+  potential-coefficient matrix, and solve for the Maxwell capacitance matrix.
+- **L, R** — PEEC (Partial Element Equivalent Circuit): discretise the same
+  conductors into current-carrying *filaments*, fill the partial-inductance
+  matrix in closed form, and sum each conductor's DC series resistance.
+  **Opt-in** — see `conductivity_S_per_m` in "Spec file" below.
+
 Phase 0/1 of the Method-of-Moments epic ([#701](https://github.com/2AMLogic/klayout-tools/issues/701)),
-delivered by [#718](https://github.com/2AMLogic/klayout-tools/issues/718).
-This command's own bar is "produces a numeric capacitance-matrix result".
+delivered by [#718](https://github.com/2AMLogic/klayout-tools/issues/718)
+(capacitance) and [#797](https://github.com/2AMLogic/klayout-tools/issues/797)
+(inductance/resistance).
+This command's own bar is "produces a numeric result".
 How close those numbers are to the true answer is a separate question,
 answered by [`docs/design/mom-validation.md`](../design/mom-validation.md)
 ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)): the solver is
-checked against the parallel-plate and coaxial closed forms and shown to
-converge under mesh refinement. Read it before trusting a number from here —
-in particular for what `panel_size_um` you need for a given accuracy.
+checked against the parallel-plate and coaxial closed forms, against the
+mean-distance asymptote for a straight bar's partial self inductance and the
+exact `l/(σA)` resistance, and shown to converge under mesh refinement. Read
+it before trusting a number from here — in particular for what
+`panel_size_um` you need for a given accuracy.
 
 ```
 klt mom <file> <spec> [--top <cell>] [--format text|json]
@@ -69,8 +79,9 @@ FEM/DG solver once that integration lands.
 
 `klt_mom_native.solve_mom_json(request_json: str) -> str` is documented in
 `native/mom/src/contract.rs`'s `MomRequest`/`MomResponse` structs. It is a
-narrower, Rust-internal contract (axis-aligned box lists in micrometers +
-a background permittivity, in; a capacitance matrix, out) — the Python layer
+narrower, Rust-internal contract (axis-aligned box lists in micrometers, a
+background permittivity and optional per-conductor conductivities, in;
+capacitance / partial-inductance matrices and resistances, out) — the Python layer
 above is what turns real GDS geometry into that request and wraps the
 response into `klt`'s shared envelope (`docs/json-contract.md`). Consumers of
 `klt mom` should use the CLI/`run_mom()` contract documented below, not call
@@ -140,13 +151,29 @@ The spec file is a JSON object with three keys:
 }
 ```
 
+…plus two optional keys that turn on the PEEC (inductance/resistance) path:
+
+```json
+{
+  "background_permittivity": 3.9,
+  "panel_size_um": 0.2,
+  "filament_subdivisions": 1,
+  "stackup": [
+    { "layer": "1/0", "conductor": "sig", "z0_um": 0.0, "z1_um": 0.5,
+      "conductivity_S_per_m": 5.8e7 },
+    { "layer": "2/0", "conductor": "gnd", "z0_um": 0.0, "z1_um": 0.5,
+      "conductivity_S_per_m": 5.8e7 }
+  ]
+}
+```
+
 - `background_permittivity` (required, number) — relative permittivity of
   the uniform dielectric surrounding every conductor. The MVP solves a
   single homogeneous medium (see "Scope and limitations" below).
 - `panel_size_um` (optional, number, default `0.5`) — target discretisation
   panel edge length in micrometers. Smaller values give more panels (more
   accurate, more expensive); the solver rejects a request whose panel count
-  would exceed an internal safety cap (see "Panel-count guard" below) rather
+  would exceed an internal safety cap (see "Panel-count and filament-count guards" below) rather
   than risk exhausting memory. **Keep it at or below the smallest
   conductor-to-conductor separation in the geometry** — a coarser value
   breaks the point-collocation fill down and is reported in `warnings` (see
@@ -165,6 +192,42 @@ The spec file is a JSON object with three keys:
     common case for a simple parallel-plate test); `z1_um > z0_um` models a
     conductor with real thickness (all six faces of the resulting
     rectangular prism are discretised).
+  - `conductivity_S_per_m` (optional, number) — the conductor's bulk DC
+    conductivity in siemens per metre (copper ≈ `5.8e7`, aluminium ≈
+    `3.77e7`). **Declaring it on any entry switches the whole solve into
+    PEEC mode** (see below). Conductivity is a property of the *conductor*,
+    not of the layer, so when several `stackup` entries share a `conductor`
+    name they must all give the same value (a disagreement is rejected
+    rather than silently resolved).
+- `filament_subdivisions` (optional, integer, default `1`, max `8`) —
+  sub-filaments per axis for the PEEC discretisation; each box becomes
+  `filament_subdivisions³` filaments. Consulted only in PEEC mode. Because
+  the partial-element integrals are evaluated in closed form, refining this
+  is a **self-consistency** knob, not an accuracy knob — it must reproduce
+  the same numbers (measured drift under refinement: `< 8e-11` relative, see
+  [`docs/design/mom-validation.md`](../design/mom-validation.md)). Raise it
+  only when you want the finer mesh for its own sake; the fill is dense and
+  `O(n_filaments²)`, and a total above 512 filaments is rejected.
+
+### Turning on inductance and resistance (PEEC mode)
+
+`klt mom` extracts capacitance only unless a `conductivity_S_per_m` appears
+somewhere in the `stackup`. That is deliberate rather than a default:
+the capacitance path happily accepts a zero-thickness plate, which has no
+cross-section to push current through, so silently inventing a current path
+for one would be worse than not extracting an inductance at all.
+
+In PEEC mode:
+
+- **Every** conductor must declare a conductivity. A partial declaration is
+  an error, not an implicit "perfect conductor" — a silently-zero resistance
+  is exactly the kind of number that gets trusted by mistake.
+- Every box must have a real extent along all three axes. A
+  `z0_um == z1_um` plate is rejected with a message telling you to give it a
+  thickness or drop the conductivity.
+- The response gains `inductance_matrix_nh`, `resistance_ohm` and
+  `filament_count` (see "JSON schema" below). Without it they are `null` /
+  `0` and the capacitance result is byte-for-byte what it was before.
 
 Every shape on a `stackup` entry's GDS layer, within the selected top cell,
 is read via its **axis-aligned bounding box** — not its exact outline. This
@@ -184,36 +247,50 @@ or the command fails with a clear "matched no shapes" error.
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
 the shared envelope (`schema_version`, error shape, exit codes).
 
+Below is a real solve, not an illustration: two 100 × 1 × 1 µm copper bars on
+a 10 µm pitch in vacuum (`tests/test_mom_inductance.py`'s fixture).
+
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "coupled_lines.gds",
   "spec": "coupled_lines.mom.json",
-  "background_permittivity": 3.9,
-  "panel_size_um": 0.5,
-  "conductors": ["top", "bottom"],
+  "background_permittivity": 1.0,
+  "panel_size_um": 1.0,
+  "filament_subdivisions": 1,
+  "conductors": ["sig", "gnd"],
   "capacitance_matrix_ff": [
-    [0.386710, -0.184208],
-    [-0.184208, 0.386710]
+    [1.409361, -0.596003],
+    [-0.596003, 1.409361]
   ],
-  "panel_count": 32,
+  "inductance_matrix_nh": [
+    [0.102172, 0.041866],
+    [0.041866, 0.102172]
+  ],
+  "resistance_ohm": [1.724138, 1.724138],
+  "panel_count": 804,
+  "filament_count": 2,
   "warnings": []
 }
 ```
 
 | Field                     | Type              | Description                                                                                     |
 | ------------------------- | ----------------- | ------------------------------------------------------------------------------------------------- |
-| `schema_version`          | integer           | Version of this command's JSON shape (starts at `1`).                                             |
+| `schema_version`          | integer           | Version of this command's JSON shape (`2` since [#797](https://github.com/2AMLogic/klayout-tools/issues/797) added the inductance/resistance fields). |
 | `file`                    | string            | The input layout path exactly as provided.                                                        |
 | `spec`                    | string            | The spec file path exactly as provided.                                                           |
 | `background_permittivity` | number            | Resolved from the spec (echoed for provenance).                                                   |
 | `panel_size_um`           | number            | Resolved panel size — the spec's value, or the `0.5` default when omitted.                        |
-| `conductors`              | array\<string\>   | Conductor names, in the same order as `capacitance_matrix_ff`'s rows/columns (first-seen order in `stackup`). |
-| `capacitance_matrix_ff`   | array\<array\<number\>\> | The Maxwell (short-circuit) capacitance matrix, in femtofarads — see "Reading the matrix" below. |
+| `filament_subdivisions`   | integer \| null   | Resolved PEEC subdivision count, or `null` on a capacitance-only solve (so a report never implies a knob that was not consulted). |
+| `conductors`              | array\<string\>   | Conductor names, in the same order as every matrix's rows/columns and as `resistance_ohm` (first-seen order in `stackup`). |
+| `capacitance_matrix_ff`   | array\<array\<number\>\> | The Maxwell (short-circuit) capacitance matrix, in femtofarads — see "Reading the capacitance matrix" below. |
+| `inductance_matrix_nh`    | array\<array\<number\>\> \| null | The PEEC **partial**-inductance matrix, in nanohenries; `null` unless PEEC mode was requested. See "Reading the inductance matrix" below. |
+| `resistance_ohm`          | array\<number\> \| null | Per-conductor DC series resistance in ohms; `null` unless PEEC mode was requested. |
 | `panel_count`             | integer           | Total discretisation panel count across every conductor (informational).                          |
-| `warnings`                | array\<string\>   | Non-fatal physicality diagnostics — empty on a well-resolved solve. See "Warnings" below.          |
+| `filament_count`          | integer           | Total PEEC filament count across every conductor (`0` on a capacitance-only solve) — the inductance-side analogue of `panel_count`. |
+| `warnings`                | array\<string\>   | Non-fatal physicality/geometry diagnostics — empty on a well-resolved solve. See "Warnings" below.          |
 
-### Reading the matrix
+### Reading the capacitance matrix
 
 `capacitance_matrix_ff[j][k]` is the charge (in femtofarads, i.e. per volt)
 induced on conductor `j` when conductor `k` is held at 1V and every other
@@ -225,6 +302,57 @@ system. Diagonal entries are positive; off-diagonal entries are typically
 a grounded neighbour. This is the raw solver output, not yet a SPICE
 "coupling capacitance" convention (`C_coupling(j,k) = -C_jk`); a consumer
 wiring this into a netlist should apply that sign flip itself.
+
+### Reading the inductance matrix
+
+`inductance_matrix_nh[j][k]` is the **partial** mutual inductance between
+conductor `j`'s and conductor `k`'s current paths, in nanohenries; the
+diagonal is each conductor's partial *self* inductance. The matrix is
+symmetric by construction (only the upper triangle of filament pairs is
+evaluated), and its entries are positive for parallel conductors whose
+current-flow axes point the same way.
+
+**"Partial" is load-bearing.** In Ruehli's formulation a partial inductance
+is defined for a conductor *segment on its own*, with no reference to a
+return path — the return path's contribution is a separate partial element
+that a caller adds in when it closes the circuit. A single number from this
+matrix is therefore **not** a loop inductance and not what you would measure
+on a physical two-terminal structure. The loop inductance of a signal
+returning on a ground conductor is `L_loop = Lp_ss + Lp_gg − 2 Lp_sg`; other
+topologies compose differently. Feeding a raw diagonal entry into a netlist
+as "the inductance of this wire" will over-predict it, usually badly.
+
+Two consequences of the MVP's geometry model worth stating plainly:
+
+- **Current flows along each box's longest axis.** `BoxRequest` is six
+  coordinates and carries no port or direction information, so the direction
+  has to be inferred, and "current runs the long way down a wire" is the
+  standard PEEC reading for a bar-shaped conductor. A box whose longest
+  extent is less than **2×** its next-longest is not bar-shaped (a square
+  pad has no long way), and gets a `warnings` entry naming the conductor
+  rather than a hard error — the same "return the numbers, say plainly they
+  should not be trusted" convention the capacitance path's physicality
+  warnings use.
+- **Perpendicular segments do not couple.** The Neumann integrand carries a
+  `dl_a · dl_b` factor, so the partial mutual inductance between an x-running
+  and a y-running filament is exactly zero. An L-shaped path needs no special
+  handling; it also means a conductor made of boxes along different axes gets
+  no cross-terms between them, which is correct for partial inductance and
+  *not* the same as the loop inductance of the bend.
+
+### Reading the resistances
+
+`resistance_ohm[j]` is conductor `j`'s DC series resistance,
+`Σ_boxes l / (σ · A)` with `l` the box's length along its current-flow axis
+and `A` its cross-section perpendicular to it. This is exact for a straight
+bar (no approximation is involved) and is independent of
+`filament_subdivisions` to round-off.
+
+**The boxes of one conductor are assumed to be in series.** That is the usual
+case for a routed net expressed as a chain of segments, but the MVP has no
+connectivity information, so boxes that are actually in *parallel* have their
+resistance over-counted rather than combined. It is DC only: there is no skin
+or proximity effect, so the number is a low-frequency floor.
 
 ### Warnings
 
@@ -332,11 +460,25 @@ See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
   [`docs/design/mom-validation.md`](../design/mom-validation.md). The kernel's
   known failure mode — panels wider than the gap they face — is detected and
   surfaced in `warnings` rather than returned silently (see "Warnings").
-- **No ports/S-parameters.** This is a pure electrostatic (capacitance-only)
-  solve — no ports, no frequency dependence, no inductance/resistance. Those
-  are separate, later phases of epic #701.
+- **Partial elements, not loop quantities.** The inductance matrix holds
+  Ruehli *partial* inductances, defined per segment without a return path;
+  turning them into a loop inductance is the caller's job (see "Reading the
+  inductance matrix"). There is no mesh/loop reduction, no port definition,
+  and no `L`-`C` co-solve producing an impedance.
+- **Current direction is inferred from box shape.** Each box's longest axis
+  is taken as its current-flow axis; a box that is not bar-shaped (aspect
+  ratio below 2:1) is warned about, not rejected. A conductor whose real
+  current path does not follow its bounding boxes' long axes — a bend
+  expressed as one square box, a plane, a via array — is outside what this
+  MVP models.
+- **Conductor boxes are assumed to be in series** for resistance. Parallel
+  boxes are over-counted; the MVP has no connectivity to distinguish them.
+- **DC only.** No skin effect, no proximity effect, no frequency dependence,
+  no S-parameters. `resistance_ohm` is a low-frequency floor and the partial
+  inductances are the DC (uniform current density) limit. Frequency-dependent
+  extraction is a later phase of epic #701.
 
-### Panel-count guard
+### Panel-count and filament-count guards
 
 The dense potential-coefficient matrix is `O(n^2)` in memory and `O(n^3)` in
 solve time. A request whose discretisation would exceed an internal 8000-panel
@@ -345,12 +487,19 @@ most commonly triggered by a `panel_size_um` sized for a small conductor
 being reused against a much larger one in the same request (a scale
 mismatch). Increase `panel_size_um`, or split the request, to work around it.
 
+The PEEC path has its own, much tighter cap: **512 filaments**. The
+partial-inductance matrix is dense and `O(n²)` to fill, each entry costing a
+64-term closed-form evaluation, so the cap is sized for a fill that takes
+about a second rather than for a matrix that fits in memory. Since
+`filament_subdivisions` multiplies the box count by `n³`, that knob is the
+usual way to hit it.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
-| `0`       | Success — the capacitance matrix was computed and returned.                                |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, or the panel-count guard above). |
+| `0`       | Success — the matrices were computed and returned.                                         |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, a bad `conductivity_S_per_m` / `filament_subdivisions` in the spec, a PEEC request whose geometry cannot carry current (a zero-thickness plate) or that declares a conductivity on only some conductors, or a solver-level failure (e.g. a singular potential-coefficient matrix, or either count guard above). |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                        |
 
 ## See also

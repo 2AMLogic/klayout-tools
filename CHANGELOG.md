@@ -349,6 +349,50 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt mom` now extracts **inductance and resistance** alongside
+  capacitance (#797, Phase 1a of the Method-of-Moments epic #701), via PEEC
+  (Partial Element Equivalent Circuit) partial elements. **`schema_version`
+  bumps `1` → `2`** for this command: the response gains
+  `inductance_matrix_nh` (the Ruehli partial-inductance matrix, nanohenries),
+  `resistance_ohm` (per-conductor DC series resistance), `filament_count` and
+  `filament_subdivisions`. The three new payload fields are always *present*
+  — `null`/`0` on a capacitance-only solve — so a consumer can key on them
+  unconditionally; the bump is because the shape gained required keys, not
+  because anything was renamed or retyped, and `capacitance_matrix_ff` is
+  byte-identical to before for an unchanged spec.
+
+  **The PEEC path is opt-in**: it runs only when a stackup entry declares the
+  new `conductivity_S_per_m` field, because the capacitance path accepts
+  zero-thickness plates and a plate has no cross-section to carry current.
+  A partial declaration (some conductors but not all) is rejected rather than
+  silently read as "perfect conductor". A new optional
+  `filament_subdivisions` spec key (default `1`, max `8`) refines the
+  volumetric discretisation; because the partial-element integrals are
+  closed-form it is a self-consistency knob, not an accuracy one.
+
+  The partial-inductance closed form is Hoer & Love's (NBS J. Res. 69C,
+  1965) exact rectangular-bar integral in Ruehli's (IBM J. Res. Dev. 16,
+  1972) partial-element formulation. It is validated four independent ways,
+  each with a measured tolerance recorded in
+  `docs/design/mom-validation.md`: the transcribed `f` is checked against its
+  *defining* property (`∂⁶f/∂x²∂y²∂z² = 1/R`, by finite differencing) so no
+  coefficient is taken on trust; against independent Gauss-Legendre
+  quadrature; against Grover's exact thin-filament formula in the far field;
+  and against the classical mean-distance asymptote for a straight bar,
+  whose GMD/AMD constants are themselves re-derived by quadrature from their
+  integral definitions rather than transcribed. Measured end to end on a
+  100 × 1 × 1 µm bar: partial self inductance **1.3e-6** relative to the
+  asymptote, DC resistance **bit-exact** against `l/(σA)`, both invariant
+  under filament refinement to `2e-10` / `1e-15`.
+
+  **These are *partial* elements, not loop quantities** — a diagonal entry is
+  not "the inductance of this wire" and will over-predict badly if used as
+  one; `L_loop = Lp_ss + Lp_gg − 2 Lp_sg` for a signal/return pair. Current
+  direction is inferred from each box's longest axis, with a `warnings[]`
+  entry for any box that is not bar-shaped; conductor boxes are assumed to be
+  in series; the extraction is DC (no skin or proximity effect). All four
+  limits are documented in `docs/cli/mom.md`'s "Scope and limitations".
+
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on
