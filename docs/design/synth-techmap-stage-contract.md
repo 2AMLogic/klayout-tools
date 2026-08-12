@@ -339,12 +339,20 @@ issue creates no crate — #874 does.
 
 ## 8. Open questions carried forward (not resolved here)
 
-- **Constant nets.** How a tie-hi/tie-lo net in `generic_netlist` is
-  represented (a reserved net name? a dedicated `$const0`/`$const1`
-  pseudo-cell?) and how this stage resolves it to a real Liberty tie cell
-  (or, absent one, directly to a power/ground net) is left to #874's
-  implementation to propose and land as an additive schema field, not
-  guessed here.
+- **Constant nets — resolved by #874.** A tie-hi/tie-lo net is represented
+  as a **reserved net name**, not a dedicated pseudo-cell: `"$const0"`/
+  `"$const1"` may appear anywhere a real net name is valid in
+  `cells[].connections` (the schema's `connections` field already accepts
+  any non-empty string, so this needed no schema-shape change — only this
+  documented convention). `native/techmap`'s `map.rs` resolves each
+  reference it finds to a single shared instance of the cheapest liberty
+  cell whose output `function` text is the literal `"0"`/`"1"`
+  (`sky130_fd_sc_hd__conb_1`'s `LO`/`HI` pins) — a real tie cell, not a
+  directly-wired power rail, which is not a valid logic net for a
+  standard-cell input pin. See `native/techmap/README.md` "Constant nets"
+  for the full reasoning and `tests/corpus/techmap/yosys_to_generic.py`
+  for the interim converter emitting this convention from Yosys's own
+  `"0"`/`"1"` constant bit markers.
 - **`$dff` variants.** §2.2's generic flip-flop is deliberately minimal
   (single global clock, active-high async reset, optional enable) — no
   synchronous reset, no active-low polarity, no scan. Whether `v1` needs
