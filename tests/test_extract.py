@@ -2495,8 +2495,9 @@ def test_pdk_resolved_binds_capacitor_gf180mcu(tmp_path):
 def test_pdk_resolved_binds_bipolar_sky130(tmp_path):
     """--pdk binds sky130's recognised `pnp` to a real `sky130_fd_pr__pnp_05v5`
     geometry-named variant chosen by measured emitter area (the small synthetic
-    emitter, AE=0.16um^2, is nearest the W0p68L0p68 cell), emitting the four
-    `c b e s` terminals -- not the bare `Q`-card form (#339)."""
+    emitter, AE=0.16um^2, is nearest the W0p68L0p68 cell), emitting the three
+    `c b e` terminals the real vendor subcircuit declares -- not the bare
+    `Q`-card form, and not a phantom fourth node (#339, #787)."""
     path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
     out = str(tmp_path / "bjt.spice")
     report = run_extract(
@@ -2510,10 +2511,69 @@ def test_pdk_resolved_binds_bipolar_sky130(tmp_path):
     (card,) = _device_cards(out)
     assert card.startswith("X")
     assert " sky130_fd_pr__pnp_05v5_W0p68L0p68" in card
-    # c b e s: collector (= substrate) / base / emitter / substrate again.
+    # c b e: collector (= substrate) / base / emitter -- the real vendor
+    # subcircuit only declares three ports, so no fourth node is repeated.
     substrate = get_extraction_deck("sky130").substrate_net
-    assert card.split()[1:5] == [substrate, "BASE", "EMIT", substrate]
+    fields = card.split()
+    assert fields[1:4] == [substrate, "BASE", "EMIT"]
+    assert fields[4] == "sky130_fd_pr__pnp_05v5_W0p68L0p68"
     assert not card.startswith("Q")
+
+
+@_SKIP_NO_NGSPICE
+def test_pdk_resolved_bipolar_x_card_loads_in_ngspice_sky130(tmp_path):
+    """Integration regression (issue #787): before the arity fix, the emitted
+    `X` card repeated the collector net onto a phantom fourth pin (`c b e c`)
+    against a subcircuit that only declares `c b e mult=1` -- ngspice bails
+    out with "Too many parameters for subcircuit type" rather than loading
+    the netlist, breaking the "extracted netlist is directly simulatable"
+    promise from #339. Confirms the corrected three-node card elaborates
+    cleanly in `ngspice -b` against an accurately-shaped stub declaration of
+    the real vendor subcircuit (skipped when ngspice is not installed,
+    matching this file's `HAVE_NGSPICE` gate elsewhere)."""
+    import subprocess
+
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    netlist_path = tmp_path / "bjt.spice"
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=str(netlist_path),
+    )
+    assert report["device_counts"] == {"pnp": 1}
+
+    deck_path = tmp_path / "deck.cir"
+    deck_path.write_text(
+        "* issue #787 regression -- sky130 pnp binding arity\n"
+        f'.include "{netlist_path}"\n'
+        # Accurately-shaped stub of the real vendor subcircuit: only three
+        # ports (`c b e`), confirmed against a real fetched sky130A install
+        # (see pdk_models.py's module docstring).
+        ".subckt sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e mult=1\n"
+        "Rstub c e 1e6\n"
+        ".ends sky130_fd_pr__pnp_05v5_W0p68L0p68\n"
+        "Vbase BASE 0 DC 0.7\n"
+        "Vemit EMIT 0 DC 0\n"
+        "Vsubs vsubs 0 DC 1.8\n"
+        "Xbjt BASE EMIT vsubs TOP\n"
+        ".control\n"
+        "op\n"
+        "quit\n"
+        ".endc\n"
+        ".end\n"
+    )
+
+    completed = subprocess.run(
+        ["ngspice", "-b", str(deck_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    combined_output = completed.stdout + completed.stderr
+    assert "Too many parameters" not in combined_output
+    assert completed.returncode == 0, combined_output
 
 
 def test_pdk_bipolar_variant_selected_by_emitter_area():

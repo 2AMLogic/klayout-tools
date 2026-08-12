@@ -189,14 +189,14 @@ comment):
   family**, not one parameterized cell: only two discrete emitter sizes exist,
   ``sky130_fd_pr__pnp_05v5_W0p68L0p68`` (emitter 0.68x0.68um, AE=0.4624um^2)
   and ``sky130_fd_pr__pnp_05v5_W3p40L3p40`` (3.40x3.40um, AE=11.56um^2), each a
-  four-terminal ``c b e s`` subcircuit. Confirmed in
+  three-terminal ``c b e`` subcircuit. Confirmed in
   ``~/.volare/sky130A/libs.tech/combined/continuous/models_bjt.spice``
-  (``.subckt  sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e s mult=1``). The writer
+  (``.subckt  sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e mult=1``). The writer
   selects the variant whose nominal emitter area is nearest the device's
   measured ``AE`` (there is no continuously-parameterized cell to pass a
-  geometry to), and emits the collector net a second time for the substrate
-  (``s``) pin -- for this vertical PNP the collector *is* the substrate, and
-  the extraction deck already ties the collector to ``substrate_net``.
+  geometry to); there is no separate substrate pin to tie off -- for this
+  vertical PNP the collector *is* the substrate, and the subcircuit's body
+  ties to it internally.
 
 Geometry values on every new ``X`` card use the same explicit
 micrometre-unit-suffixed literal (``...U``) the MOS path uses (see the
@@ -416,9 +416,10 @@ class DeviceBinding:
     - ``"capacitor"`` -- terminals ``A B``, plate ``L``/``W`` derived from the
       device's ``A``/``P`` via :func:`equivalent_rectangle_um` (the extractor
       exposes area/perimeter, not ``L``/``W``).
-    - ``"bipolar"`` -- terminals ``C B E`` plus the collector net repeated for
-      the four-terminal subcircuit's substrate pin; no ``L``/``W`` params (the
-      geometry is encoded by :attr:`variants`, selected by measured ``AE``).
+    - ``"bipolar"`` -- terminals ``C B E`` (the sky130 ``pnp_05v5`` subcircuits
+      are three-terminal; there is no separate substrate pin to tie off); no
+      ``L``/``W`` params (the geometry is encoded by :attr:`variants`,
+      selected by measured ``AE``).
 
     ``length_param``/``width_param`` are the subcircuit's own spellings of its
     length/width parameters (``l``/``w`` for sky130, ``r_length``/``r_width``
@@ -579,7 +580,7 @@ def resolve_device_bindings(
         bindings[bipolar.class_name] = DeviceBinding(
             "bipolar",
             "",
-            ("C", "B", "E", "C"),
+            ("C", "B", "E"),
             variants=variants,
             dropped_params=_BIPOLAR_DROPPED_PARAMS,
         )

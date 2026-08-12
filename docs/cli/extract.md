@@ -1268,7 +1268,7 @@ subcircuit call against the resolved PDK's real device library instead:
 X$1 Y A VGND vsubs sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U AS=0.234P AD=0.234P PS=1.6U PD=1.6U
 X$7 RA RB sky130_fd_pr__res_generic_po l=6U w=1U
 X$8 net1 net2 sky130_fd_pr__cap_mim_m3_1 l=10U w=5U
-X$9 vsubs BASE EMIT vsubs sky130_fd_pr__pnp_05v5_W0p68L0p68
+X$9 vsubs BASE EMIT sky130_fd_pr__pnp_05v5_W0p68L0p68
 ```
 
 The device is bound via small curated per-class tables in
@@ -1301,8 +1301,10 @@ computes from that flavour's own sheet rho either way.
 Bipolar note: sky130's `pnp_05v5` ships as discrete geometry-named cells
 (`…_W0p68L0p68`, `…_W3p40L3p40`), not one parameterized cell, so the writer
 selects the variant whose nominal emitter area is nearest the device's
-measured `AE` and emits its four `c b e s` terminals (the collector net,
-tied by extraction to the substrate, is repeated for the substrate pin).
+measured `AE` and emits its three `c b e` terminals — matching the real
+vendor subcircuit's declared arity (`.subckt … c b e mult=1`); there is no
+separate substrate pin, since for this vertical PNP the collector *is* the
+substrate.
 
 **Scope limits** (deliberately narrower than the general PDK-device-metadata
 resolver `docs/design/pdk-device-corner-metadata-spike.md` proposes as a
