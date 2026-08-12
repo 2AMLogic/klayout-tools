@@ -120,6 +120,34 @@ class RuleProvenance:
     cross-checks those same 37 rules against the real PDK-native deck.
     Unpopulated rules simply omit this field (``None``, the default),
     exactly as an unset ``scope`` (``""``) does today.
+
+    **Reused for LVS device-extraction rules (issue #868, Epic #711 Phase
+    2a).** Everything above was written for :class:`DrcRule`, but the type
+    itself is check-kind-agnostic -- ``source_repo``/``source_path``/
+    ``rule_id``/``commit`` describe "which upstream source line does this
+    deck value come from" regardless of whether the deck value is a DRC
+    threshold or a device-recognition coefficient. :class:`ResistorDevice`,
+    :class:`CapacitorDevice`, :class:`BipolarDevice`, and :class:`DiodeDevice`
+    each carry their own ``provenance`` field of this same type (their
+    per-device-class geometry/coefficient citation), and
+    :class:`ExtractionDeck` carries ``nfet_provenance``/``pfet_provenance``
+    (MOS has no per-entry list the way resistor/capacitor/bipolar/diode do --
+    a deck declares exactly one NMOS and one PMOS recognition rule via its
+    own ``active``/``poly``/``nwell`` fields, so the two provenance citations
+    live directly on the deck rather than on a nested per-entry dataclass).
+    For these, ``source_path``/``rule_id`` typically cite the PDK's
+    **KLayout LVS deck** (e.g. sky130's ``sky130.lvs``, a different upstream
+    file than the DRC-side ``.lydrc``/``.drc`` script :class:`DrcRule`
+    entries cite) and its official device-class name (e.g.
+    ``"sky130_fd_pr__nfet_01v8"``, ``"sky130_fd_pr__res_generic_po"``) as
+    ``rule_id`` -- the LVS analogue of a DRC rule id, naming *which specific
+    device* this entry's geometry/coefficients were transcribed from rather
+    than a numbered check. See each deck module's own device-declaration
+    comments (``sky130.py``'s ``EXTRACTION_DECK``) for the concrete
+    citations, and ``docs/cli/extract.md``'s "Device rule provenance"
+    section for the JSON-visibility caveat this shares with ``DrcRule``'s
+    own (not yet surfaced in ``klt extract``'s JSON output; queryable only
+    by a caller that imports ``klayout_tools.decks`` directly).
     """
 
     source_repo: str
@@ -424,6 +452,16 @@ class ResistorDevice:
     ``flavours`` at its empty default has no selectable flavour: passing
     ``deck_options`` naming a key no entry declares is itself an
     :class:`InvalidDeckOptionError`, not a silent no-op.
+
+    ``provenance`` (issue #868) is a machine-readable citation of the exact
+    upstream PDK-LVS-deck source this entry's ``sheet_rho_ohm_sq`` (and, when
+    set, ``fixed_offset_ohm``) was transcribed/measured from -- the
+    device-recognition analogue of :class:`DrcRule.provenance` (see
+    :class:`RuleProvenance`'s own docstring for the shared type and how it
+    generalises beyond DRC). ``None`` (the default) means no structured
+    provenance has been backfilled for this entry yet -- the prose citation
+    in the deck module's own inline comment remains the only record, exactly
+    as for every entry before this field existed.
     """
 
     name: str
@@ -437,6 +475,7 @@ class ResistorDevice:
     fixed_offset_ohm: float = 0.0
     flavour_option: str | None = None
     flavours: tuple[ResistorFlavour, ...] = ()
+    provenance: RuleProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -570,6 +609,20 @@ class ExtractionDeck:
     a deck with no curated diode recognition; non-empty decks may declare
     more than one entry (e.g. gf180mcu's n+/p-substrate and p+/Nwell
     junction flavours).
+
+    ``nfet_provenance``/``pfet_provenance`` (issue #868) are machine-readable
+    citations of the exact upstream PDK-LVS-deck source line each MOS
+    recognition rule was transcribed from -- the device-recognition analogue
+    of :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s own
+    docstring), applied to the two MOS device classes this deck *always*
+    recognises via its own ``active``/``poly``/``nwell`` fields above. Unlike
+    ``bipolars``/``capacitors``/``resistors``/``diodes``, MOS recognition has
+    no per-entry list to attach a ``provenance`` field to (a deck declares
+    exactly one NMOS and one PMOS recognition rule, not a variable-length
+    collection), so these two citations live directly on the deck instead.
+    Both default to ``None`` -- no structured provenance backfilled yet, the
+    same "prose comment remains the record" default every other
+    ``provenance`` field in this module carries.
     """
 
     active: tuple[int, int]
@@ -590,6 +643,8 @@ class ExtractionDeck:
     capacitors: tuple[CapacitorDevice, ...] = ()
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
+    nfet_provenance: RuleProvenance | None = None
+    pfet_provenance: RuleProvenance | None = None
 
     @property
     def device_classes(self) -> tuple[str, ...]:
@@ -870,6 +925,15 @@ class BipolarDevice:
     class (``devices[].class`` in the JSON response, and one of the values
     :attr:`ExtractionDeck.device_classes` reports for a deck that declares
     this entry).
+
+    ``provenance`` (issue #868) is a machine-readable citation of the exact
+    upstream PDK-LVS-deck source this entry's recognition geometry was
+    transcribed from -- the device-recognition analogue of
+    :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s own
+    docstring). ``None`` (the default) means no structured provenance has
+    been backfilled for this entry yet -- the prose citation in the deck
+    module's own inline comment remains the only record, exactly as for
+    every entry before this field existed.
     """
 
     base: tuple[int, int]
@@ -879,6 +943,7 @@ class BipolarDevice:
     emitter_requires: tuple[tuple[int, int], ...] = ()
     emitter_excludes: tuple[tuple[int, int], ...] = ()
     class_name: str = "bjt"
+    provenance: RuleProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -1015,6 +1080,15 @@ class CapacitorDevice:
     carries this documented approximation -- the same "curated starter
     subset, not the full metal stack" scope guard the rest of this deck
     already carries (see ``docs/cli/extract.md`` -> "Coverage").
+
+    ``provenance`` (issue #868) is a machine-readable citation of the exact
+    upstream PDK-LVS-deck source this entry's ``area_cap_f_um2`` (and, when
+    set, ``perim_cap_f_um``) was transcribed from -- the device-recognition
+    analogue of :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s
+    own docstring). ``None`` (the default) means no structured provenance
+    has been backfilled for this entry yet -- the prose citation in the deck
+    module's own inline comment remains the only record, exactly as for
+    every entry before this field existed.
     """
 
     name: str
@@ -1029,6 +1103,7 @@ class CapacitorDevice:
     top_plate_via: tuple[int, int] | None = None
     top_plate_via_metal: tuple[int, int] | None = None
     perim_cap_f_um: float = 0.0
+    provenance: RuleProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -1116,6 +1191,15 @@ class DiodeDevice:
     written ``D`` card, and one of the values
     :attr:`ExtractionDeck.device_classes` reports for a deck that declares
     this entry).
+
+    ``provenance`` (issue #868) is a machine-readable citation of the exact
+    upstream PDK-LVS-deck source this entry's recognition geometry was
+    transcribed from -- the device-recognition analogue of
+    :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s own
+    docstring). ``None`` (the default) means no structured provenance has
+    been backfilled for this entry yet -- the prose citation in the deck
+    module's own inline comment remains the only record, exactly as for
+    every entry before this field existed.
     """
 
     name: str
@@ -1126,6 +1210,7 @@ class DiodeDevice:
     anode_excludes: tuple[tuple[int, int], ...] = ()
     cathode_requires: tuple[tuple[int, int], ...] = ()
     cathode_excludes: tuple[tuple[int, int], ...] = ()
+    provenance: RuleProvenance | None = None
 
 
 @dataclass(frozen=True)

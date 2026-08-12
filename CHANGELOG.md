@@ -440,6 +440,26 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — LVS device-extraction rules now carry the same machine-readable
+  `RuleProvenance` citation `DrcRule.provenance` introduced for DRC rules in
+  issue #747 — issue #868, Phase 2a of the DRC/LVS deck compiler epic #711.
+  `ResistorDevice`, `CapacitorDevice`, `BipolarDevice`, and `DiodeDevice` each
+  gain an optional `provenance` field, and `ExtractionDeck` gains
+  `nfet_provenance`/`pfet_provenance` for MOS recognition (which has no
+  per-entry list the way the others do — a deck declares exactly one NMOS and
+  one PMOS rule). sky130's curated `EXTRACTION_DECK` backfills all five: MOS
+  (`nfet`/`pfet`), all three resistor entries, both MiM-capacitor entries, and
+  the one bipolar (PNP) entry, each citing the real upstream `sky130.lvs`
+  device-class name (e.g. `"sky130_fd_pr__nfet_01v8"`,
+  `"sky130_fd_pr__res_generic_po"`) from `efabless/sky130_klayout_pdk` — a
+  different upstream repo than the DRC-side `.lydrc`/`.drc` scripts
+  `DrcRule.provenance` cites. gf180mcu's entries are left unpopulated
+  (`None`) for this pass. Validated against golden layout→netlist pairs for
+  all three of the issue's named device classes (MOSFET, resistor,
+  capacitor) — see `tests/test_lvs_device_provenance.py` and
+  `docs/cli/extract.md`'s "Device rule provenance" section. Like
+  `DrcRule.provenance`, not yet surfaced in `klt extract`'s JSON output.
+
 - 2026-08-12 — New verb `klt erc` builds a per-gate, layer-by-layer
   connectivity model — issue #859, Phase 1a of the antenna + ERC signoff
   epic #713. A JSON spec declares a `stackup` (fabrication order from the

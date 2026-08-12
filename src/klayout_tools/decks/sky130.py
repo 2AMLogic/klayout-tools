@@ -284,6 +284,41 @@ def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
     )
 
 
+# `RuleProvenance` for `EXTRACTION_DECK`'s device-recognition entries (issue
+# #868, Epic #711 Phase 2a). Unlike the DRC rules above (transcribed from
+# `sky130.lydrc`/`sky130A_mr.drc`, both vendored into `fossi-foundation/
+# open-pdks` itself), device-recognition/extraction rules are transcribed
+# from the companion **KLayout LVS deck**, `sky130.lvs` -- a different
+# upstream repo, `efabless/sky130_klayout_pdk`, per this module's own
+# docstring provenance note above (the MiM-capacitor/resistor section).
+# `source_path` below is that repo's own path to the file
+# (`libs.tech/klayout/lvs/sky130.lvs`, confirmed against the same real
+# sky130A install -- volare -- this module's other provenance notes cite).
+# `commit` reuses `_OPEN_PDKS_COMMIT`: that hash is the `volare enable sky130
+# <hash>` fetch pinning the *whole* PDK install (including `sky130.lvs`,
+# vendored in by `open_pdks`' own build), the same reproducible pin this
+# module's resistor/capacitor coefficients (§ "MiM capacitors"/"Drawn poly
+# precision resistors" above) already cite for verification -- not a claim
+# that `efabless/sky130_klayout_pdk` and `fossi-foundation/open-pdks` share a
+# commit history, just that both were fetched together at that one pin.
+_LVS_REPO = "efabless/sky130_klayout_pdk"
+_LVS_SOURCE_PATH = "libs.tech/klayout/lvs/sky130.lvs"
+
+
+def _sky130_lvs_provenance(rule_id: str) -> RuleProvenance:
+    """Build a :class:`RuleProvenance` for a sky130 LVS device-recognition
+    entry (issue #868) -- `source_repo`/`source_path`/`commit` shared across
+    every `EXTRACTION_DECK` device entry (see the module-level constants
+    above), `rule_id` (the official upstream device-class name, e.g.
+    `"sky130_fd_pr__nfet_01v8"`) per call."""
+    return RuleProvenance(
+        source_repo=_LVS_REPO,
+        source_path=_LVS_SOURCE_PATH,
+        rule_id=rule_id,
+        commit=_OPEN_PDKS_COMMIT,
+    )
+
+
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
 # threshold_dbu. `run_drc()` rescales threshold_dbu by NOMINAL_DBU_UM /
@@ -1224,6 +1259,25 @@ EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
     nwell=(64, 20),  # nwell.drawing
+    # MOS device-recognition provenance (issue #868): `sky130.lvs`'s core
+    # 1.8V devices --
+    #   extract_devices(mos4("sky130_fd_pr__nfet_01v8"),
+    #     { "SD" => nsd, "G" => ngate_1p8v, "tS" => nsd, "tD" => nsd,
+    #       "tG" => poly_con, "W" => sub })
+    #   extract_devices(mos4("sky130_fd_pr__pfet_01v8"),
+    #     { "SD" => psd, "G" => pgate_1p8v, "tS" => psd, "tD" => psd,
+    #       "tG" => poly_con, "W" => nwell })
+    # -- both extracted off exactly this deck's own `active`/`poly`/`nwell`
+    # split (NMOS = active outside nwell, PMOS = active inside nwell). Real
+    # sky130 draws several other voltage/threshold flavours off the *same*
+    # split, keyed by additional implant/marker layers this curated deck
+    # does not model (`nfet_01v8_lvt`, `pfet_g5v0d10v5`, ...) -- this
+    # citation names the one flavour `nfet_class`/`pfet_class`'s generic
+    # `"nfet"`/`"pfet"` labels actually correspond to (the plain-active,
+    # no-implant-marker core device), not a claim that every sky130 MOS
+    # flavour is modelled.
+    nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8"),
+    pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8"),
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
     well_label=(64, 5),  # nwell.pin
     poly_label=(66, 5),  # poly.pin -- names a bare-poly gate node (#210)
@@ -1351,6 +1405,16 @@ EXTRACTION_DECK = ExtractionDeck(
             emitter=(65, 20),  # diff.drawing
             marker=(82, 44),  # pnp.drawing
             class_name="pnp",
+            # sky130.lvs extracts two fixed-size PNP variants off this same
+            # base/emitter/marker geometry (issue #868):
+            #   extract_devices(bjt3("sky130_fd_pr__pnp_05v5_W0p68L0p68"), ...)
+            #   extract_devices(bjt3("sky130_fd_pr__pnp_05v5_W3p40L3p40"), ...)
+            # -- this curated deck merges both into one flat "pnp" class (no
+            # per-size device-class split, the same length-merging
+            # approximation `resistors` below already documents for
+            # `res_high_po`/`res_xhigh_po`); cites the smaller variant as
+            # representative.
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__pnp_05v5_W0p68L0p68"),
         ),
     ),
     # MiM capacitors (issue #225, see the module docstring's provenance note
@@ -1397,6 +1461,10 @@ EXTRACTION_DECK = ExtractionDeck(
             perim_cap_f_um=1.9e-16,  # 0.19 fF/um (cpmimc, previously unmodelled)
             top_plate_via=(70, 44),  # via3.drawing (met3<->met4)
             top_plate_via_metal=(71, 20),  # met4.drawing
+            # `extract_devices(capacitor("sky130_fd_pr__model__cap_mim", 2e-15,
+            # MIMCap), { "P1" => met3_con, "P2" => capm })` -- see the module
+            # docstring's own MiM-cap provenance note above (issue #868).
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__model__cap_mim"),
         ),
         CapacitorDevice(
             name="sky130_fd_pr__model__cap_mim_m4",
@@ -1407,6 +1475,9 @@ EXTRACTION_DECK = ExtractionDeck(
             perim_cap_f_um=1.9e-16,  # 0.19 fF/um (cpmimc, previously unmodelled)
             top_plate_via=(71, 44),  # via4.drawing (met4<->met5)
             top_plate_via_metal=(72, 20),  # met5.drawing
+            # `extract_devices(capacitor("sky130_fd_pr__model__cap_mim_m4",
+            # 2e-15, MIMCap), { "P1" => met4_con, "P2" => capm2 })` (issue #868).
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__model__cap_mim_m4"),
         ),
     ),
     # Drawn poly precision resistors (issue #222, extended by #299): the
@@ -1426,6 +1497,10 @@ EXTRACTION_DECK = ExtractionDeck(
                 (86, 20),  # rpm  -> sky130_fd_pr__res_high_po_*  (see below, #518)
                 (79, 20),  # urpm -> sky130_fd_pr__res_xhigh_po_* (2 kohm/sq)
             ),
+            # `extract_devices(resistor("sky130_fd_pr__res_generic_po", 48.2,
+            # NResistor), { "R" => poly_res_generic, "C" => poly_con })`
+            # (issue #868).
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_generic_po"),
         ),
         ResistorDevice(
             name="res_high_po",  # sky130_fd_pr__res_high_po_* (lengths merged)
@@ -1447,6 +1522,12 @@ EXTRACTION_DECK = ExtractionDeck(
                 (79, 20),  # urpm -- mutually exclusive with rpm, see above
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            # `sky130.lvs` extracts five fixed-length variants off this same
+            # geometry (`..._0p35` through `..._5p73`, all sharing the same
+            # 319.8 ohm/sq `sheet_rho_ohm_sq` -- see the module comment above
+            # for why this deck merges them into one flat class); cites the
+            # shortest as representative (issue #868).
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_high_po_0p35"),
         ),
         ResistorDevice(
             name="res_xhigh_po",  # sky130_fd_pr__res_xhigh_po_* (lengths merged)
@@ -1463,6 +1544,9 @@ EXTRACTION_DECK = ExtractionDeck(
                 (86, 20),  # rpm -- mutually exclusive with urpm, see above
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            # Same five-length-variant merge as `res_high_po` above; cites
+            # the shortest as representative (issue #868).
+            provenance=_sky130_lvs_provenance("sky130_fd_pr__res_xhigh_po_0p35"),
         ),
     ),
 )
