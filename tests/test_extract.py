@@ -2544,8 +2544,9 @@ def test_pdk_resolved_binds_capacitor_gf180mcu(tmp_path):
 def test_pdk_resolved_binds_bipolar_sky130(tmp_path):
     """--pdk binds sky130's recognised `pnp` to a real `sky130_fd_pr__pnp_05v5`
     geometry-named variant chosen by measured emitter area (the small synthetic
-    emitter, AE=0.16um^2, is nearest the W0p68L0p68 cell), emitting the four
-    `c b e s` terminals -- not the bare `Q`-card form (#339)."""
+    emitter, AE=0.16um^2, is nearest the W0p68L0p68 cell), emitting exactly the
+    three `c b e` terminals the vendor subcircuit declares -- not a fabricated
+    4th substrate pin, and not the bare `Q`-card form (#339, fixed by #787)."""
     path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
     out = str(tmp_path / "bjt.spice")
     report = run_extract(
@@ -2559,9 +2560,12 @@ def test_pdk_resolved_binds_bipolar_sky130(tmp_path):
     (card,) = _device_cards(out)
     assert card.startswith("X")
     assert " sky130_fd_pr__pnp_05v5_W0p68L0p68" in card
-    # c b e s: collector (= substrate) / base / emitter / substrate again.
+    # c b e: collector (= substrate, tied internally by extraction) / base /
+    # emitter -- exactly the vendor `.subckt ... c b e mult=1` arity, no
+    # duplicated substrate pin.
     substrate = get_extraction_deck("sky130").substrate_net
-    assert card.split()[1:5] == [substrate, "BASE", "EMIT", substrate]
+    assert card.split()[1:4] == [substrate, "BASE", "EMIT"]
+    assert card.split()[4] == "sky130_fd_pr__pnp_05v5_W0p68L0p68"
     assert not card.startswith("Q")
 
 
@@ -7748,6 +7752,71 @@ def test_parasitics_sanitizes_multi_label_net_instance_name(tmp_path):
 
     netlist_text = Path(report["netlist_path"]).read_text()
     _assert_rc_cards_have_safe_instance_names(netlist_text)
+
+
+@_SKIP_NO_NGSPICE
+def test_pdk_resolved_bipolar_x_card_loads_in_ngspice(tmp_path):
+    """Integration regression (issue #787): before the terminal-count fix,
+    the `--pdk`-bound bipolar `X` card carried a fabricated 4th node (the
+    collector repeated as a fake substrate pin), which ngspice rejected with
+    "Too many parameters for subcircuit type" against the real 3-terminal
+    `sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e mult=1` declaration. Confirms
+    the corrected 3-node card loads and elaborates cleanly in `ngspice -b`
+    against an accurately-shaped stub of that subcircuit (mirrors
+    `test_parasitics_multi_label_net_loads_in_ngspice` below)."""
+    import subprocess
+
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    netlist_path = tmp_path / "bjt.spice"
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=str(netlist_path),
+    )
+    assert report["device_counts"] == {"pnp": 1}
+
+    netlist_text = netlist_path.read_text()
+    subckt_line = next(
+        ln for ln in netlist_text.splitlines() if ln.upper().startswith(".SUBCKT")
+    )
+    pins = subckt_line.split()[2:]
+
+    model_path = tmp_path / "pnp_stub.spice"
+    model_path.write_text(
+        "* accurately-shaped stub of sky130's real pnp_05v5 vendor subcircuit\n"
+        "* -- ships as `c b e mult=1` (3 terminals), never a 4th substrate pin.\n"
+        ".subckt sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e mult=1\n"
+        "q0 c b e qmod\n"
+        ".model qmod pnp level=1\n"
+        ".ends sky130_fd_pr__pnp_05v5_W0p68L0p68\n"
+    )
+
+    deck_path = tmp_path / "deck.cir"
+    ties = "\n".join(f"V{i} {pin} 0 DC 0" for i, pin in enumerate(pins, start=1))
+    deck_path.write_text(
+        "* issue #787 regression -- bound bipolar X card loads in ngspice\n"
+        f'.include "{model_path}"\n'
+        f'.include "{netlist_path}"\n'
+        f"{ties}\n"
+        f"Xpnp {' '.join(pins)} TOP\n"
+        ".control\n"
+        "op\n"
+        "quit\n"
+        ".endc\n"
+        ".end\n"
+    )
+
+    completed = subprocess.run(
+        ["ngspice", "-b", str(deck_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    combined_output = completed.stdout + completed.stderr
+    assert "too many parameters" not in combined_output.lower()
+    assert completed.returncode == 0, combined_output
 
 
 @_SKIP_NO_NGSPICE
