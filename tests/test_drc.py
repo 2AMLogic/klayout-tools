@@ -3493,6 +3493,28 @@ def test_run_drc_sky130_capm2_width_violation(tmp_path):
     assert violation["layer"] == "capm2.drawing"
 
 
+def test_run_drc_sky130_capm2_space_violation(tmp_path):
+    """Two capm2 shapes closer than the 840 dbu (0.84 um) `capm2.space.1`
+    threshold trip exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    capm2 = layout.layer(97, 44)
+    layout.set_info(capm2, kdb.LayerInfo(97, 44, "capm2.drawing"))
+    top.shapes(capm2).insert(kdb.Box(0, 0, 1200, 1200))
+    top.shapes(capm2).insert(kdb.Box(1600, 0, 2800, 1200))  # 400 dbu gap < 840
+    path = tmp_path / "capm2_space_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"capm2.space.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "capm2.space.1"
+    assert violation["check"] == "space"
+    assert violation["layer"] == "capm2.drawing"
+
+
 def test_run_drc_sky130_met4_enclosing_capm2_violation(tmp_path):
     """A capm2 shape hanging off the edge of its met4 bottom-plate by less
     than the 140 dbu (0.14 um) `met4.enclosing.capm2.1` margin trips exactly
