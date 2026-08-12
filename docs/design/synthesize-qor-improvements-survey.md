@@ -557,6 +557,34 @@ recommendation, argued on measurement grounds rather than on beating ABC.
 
 ### 3.7 Native-Rust gate-level static timing — the one Rust recommendation (Priority 7 to build, but see below)
 
+> **Spiked (issue #809): Go**, on both halves of this section's own gate —
+> the native-Rust engine (`native/statime/`) matched OpenSTA's worst-path
+> delay within 0.36–1.34% on all three corpus designs tested (`gcd`,
+> `mult8`, `modexp`; always a slight *under*-estimate, never over), and is
+> **1.5–2.1× faster per call** than the realistic "wrap OpenSTA" comparison
+> (a subprocess per call, matching how this repo already invokes every
+> other engine, and requiring no new infrastructure). **Correction, same
+> PR, caught during self-review**: an earlier draft of this spike reported
+> "~30–40×" and "still ~1.5–2× faster even in the most sympathetic
+> scenario," both wrong — the first mixed native's warm number against
+> OpenSTA's cold number, the second used a heavier OpenROAD/LEF-requiring
+> image when a lighter, LEF-free standalone OpenSTA build (`openroad/opensta`
+> on Docker Hub) exists. Re-measured apples-to-apples: the realistic
+> (cold, no-new-engineering) comparison is a real 1.5–2.1× on every design,
+> and the hand-engineered-persistent-session comparison is **within noise**
+> (native is faster on one design, slower on another, at parity on the
+> third) — a materially more honest and more modest result than first
+> reported, and the Go verdict now rests on the cold-regime comparison
+> alone, not the (retracted) sympathetic-scenario claim. See
+> `native/statime/README.md` for the full corrected measured comparison,
+> the two real bugs the OpenSTA comparison caught and fixed along the way
+> (rise/fall collapse, NLDM clamp-vs-extrapolate), and the documented
+> Python↔Rust boundary / CI story this issue's acceptance criteria also
+> asked for. Not yet wired into `klt synthesize`'s response contract — that
+> is a separate follow-on issue now that the verdict is known. This
+> section's own reasoning below is left unchanged as the historical record
+> of the proposal that was tested.
+
 - **Technique:** a Rust liberty parser plus a topological critical-path
   engine over the mapped netlist: NLDM lookup-table interpolation for
   cell delay/transition, longest-path propagation over the timing graph,
