@@ -11,12 +11,18 @@ corpus (`gcd`, `mult8`, `modexp`) prior Epic #704 phases already use — see
 
 ## What this is
 
-Not (yet) a `klt` subcommand — per the contract's section 1, wiring this
-into `klt synthesize`/a future `klt synth` and gating it with `klt equiv`
-is issue #875's job. This crate is a standalone binary
-(`klt-techmap <request.json>`) plus library, following `native/statime/`'s
-own precedent (issue #809) of shipping the engine and its own CLI first,
-production integration later.
+Not (yet) folded into `klt synthesize`/a future `klt synth` — this crate is
+still a standalone binary (`klt-techmap <request.json>`) plus library,
+following `native/statime/`'s own precedent (issue #809) of shipping the
+engine and its own CLI first, production integration later. Issue #875 did
+wire its own correctness gate in from the Python side though: `klt techmap`
+(`src/klayout_tools/cli/techmap_cmd.py`,
+`klayout_tools.techmap.run_techmap`) invokes this same binary as a
+subprocess and, with `--verify-equivalence`, proves the mapped netlist
+equivalent to its own pre-mapping generic netlist via `klt equiv` — see
+`docs/design/synth-techmap-stage-contract.md` section 9 for the full
+picture, and this crate's own `verilog::write_generic` (below) for the
+generic-netlist-as-Verilog emitter that gate needs.
 
 **Pipeline** (`src/`):
 
@@ -28,7 +34,7 @@ production integration later.
 | `nldm.rs` | Bilinear NLDM interpolation, forked from `native/statime/src/nldm.rs` (same table shape, same extrapolation convention) — used for a single representative-operating-point delay estimate, not a path-based STA graph. |
 | `genlist.rs` | Parses/validates `klt.synth.generic-netlist/1` (this stage's own input, `docs/schemas/synth-generic-netlist.schema.json`). |
 | `map.rs` | The mapping algorithm itself: picks a candidate per generic cell, realises `$dff`'s optional `RST`/`EN` pins (including via an inserted `$mux2` feedback chain when no single liberty cell combines async-reset and clock-enable — see "Cell chains" below), resolves `$const0`/`$const1` tie nets to a shared tie-cell instance. |
-| `verilog.rs` | Emits the mapped netlist in **exactly** the dialect `native/statime/src/netlist.rs` already parses (contract section 4/5) — verified against the real parser, not just a shape check (see "Results" below). |
+| `verilog.rs` | Two emitters: `write` emits the mapped netlist in **exactly** the dialect `native/statime/src/netlist.rs` already parses (contract section 4/5) — verified against the real parser, not just a shape check (see "Results" below). `write_generic` (issue #875) emits the *pre-mapping* generic netlist as self-contained behavioral Verilog (`assign`/`always @(posedge ...)`, no liberty needed) — `klt equiv`'s own `gold` side for the equivalence gate against `write`'s `gate` side. |
 | `request.rs` / `main.rs` | `klt.synth.techmap.request/1` → `klt.synth.techmap.response/1`, per contract section 6. |
 
 ## Cell selection: the area/delay score
@@ -192,11 +198,14 @@ by `compare.py` if missing).
 
 ## Not in scope (per the issue)
 
-Wiring this crate into `klt synthesize`/a future `klt synth` and gating it
-with `klt equiv` — issue #875. A native elaboration/logic-optimization
-stage that would emit `klt.synth.generic-netlist/1` directly (rather than
-via the interim Yosys-derived on-ramp this issue's own corpus harness
-uses) — Epic #704 Phase 1/3, already-shipped/future work this issue
-doesn't touch. A `pyo3`/`maturin` production-integration surface — deferred
-until a "Go" verdict on wiring this stage in for real, following
+Wiring this crate into `klt synthesize`, or a unified future `klt synth`
+command spanning RTL elaboration through place-and-route — issue #875 wired
+this crate's own `klt equiv` acceptance gate in (see "What this is" above)
+but deliberately left `klt-techmap` a standalone binary, not folded into
+`klt synthesize` itself. A native elaboration/logic-optimization stage that
+would emit `klt.synth.generic-netlist/1` directly (rather than via the
+interim Yosys-derived on-ramp this issue's own corpus harness uses) — Epic
+#704 Phase 1/3, already-shipped/future work this issue doesn't touch. A
+`pyo3`/`maturin` production-integration surface — deferred until a "Go"
+verdict on wiring this stage in for real, following
 `native/statime/README.md`'s own precedent.

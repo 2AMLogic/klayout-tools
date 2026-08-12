@@ -74,6 +74,16 @@ its own standalone CLI for corpus benchmarking first; wiring it into
 `klt synthesize`/a future `klt synth` and gating it with `klt equiv` is
 #875's job, not this issue's.
 
+**Update (issue #875, closed):** the equivalence gate named above is wired
+in — `klayout_tools.techmap.run_techmap` (a new `klt techmap` CLI verb,
+`src/klayout_tools/cli/techmap_cmd.py`) invokes the `klt-techmap` binary
+this contract specifies as a subprocess and, with `--verify-equivalence`,
+proves the mapped netlist equivalent to its own pre-mapping generic
+netlist via `klt equiv` — see §10 below. `klt-techmap` itself is still the
+same standalone binary; #875 did not fold it into `klt synthesize` or
+introduce a `klt synth` command (a bigger, still-open follow-on scope) —
+it wired the correctness gate this section named as the next open item.
+
 ## 2. Input: the generic netlist
 
 ### 2.1 Why a new format, not Yosys's `write_json`
@@ -293,6 +303,7 @@ this repo already agree on.
 | `instance_counts_by_type` | object\<string, int\> | Per-cell-type instance counts, keys sorted — same shape as `klt synthesize`'s own field. |
 | `timing` | object \| null | `{source, critical_path_ps, delay_target_ps}` once a delay-aware engine is wired in (`source: "statime"`, per the accepted `native/statime` spike, issue #809) — or `null` until that wiring lands (§8). `delay_target_ps` echoes `constraints.clock_period_ns × 1000` when given, `null` otherwise — matching `klt synthesize`'s own `timing.delay_target_ps` semantics exactly. |
 | `mapped_netlist_path` | string | The mapped gate-level netlist, absolute path — see §4/§5. |
+| `generic_netlist_verilog_path` | string | **Additive, issue #875.** The same pre-mapping generic netlist (`request.generic_netlist`), re-emitted as self-contained behavioral Verilog (`assign`/`always @(posedge ...)`, no cell instances, no liberty needed to resolve it) by `native/techmap/src/verilog.rs::write_generic` — the `klt equiv` `gold` side §10 checks `mapped_netlist_path` against. Absolute path, same directory as `mapped_netlist_path`. Per `docs/json-contract.md`'s convention this field's addition does not bump `schema_version` — every existing field is unchanged. |
 
 ### Exit codes
 
@@ -368,13 +379,65 @@ issue creates no crate — #874 does.
   `docs/cli/synthesize.md`'s own "Out of scope" section already follows for
   sequential `klt equiv`.
 
-## 9. Related
+## 9. Acceptance gate (issue #875)
+
+Mirrors Phase 1b's `klt synthesize --verify-equivalence` gate
+(`src/klayout_tools/synthesize.py`'s `_verify_synthesis_equivalence`,
+`docs/cli/synthesize.md` "Equivalence gate") one stage later in the
+pipeline: a mapped netlist is not accepted as correct until `klt equiv`
+(`klayout_tools.equiv.run_equiv`, #726) proves it equivalent to the
+**pre-mapping generic netlist** it was mapped from, rather than to the
+original RTL.
+
+- **Where it lives:** `klayout_tools.techmap.run_techmap`
+  (`src/klayout_tools/techmap.py`), a thin Python wrapper that invokes the
+  real, compiled `klt-techmap` binary as a subprocess (never re-implements
+  the mapping algorithm) and, exposed as the new `klt techmap` CLI verb
+  (`src/klayout_tools/cli/techmap_cmd.py`).
+- **The gate itself, `--verify-equivalence`** (default off, additive —
+  same opt-in posture as `klt synthesize`'s own flag): builds a `klt
+  equiv` request with `gold` = `generic_netlist_verilog_path` (§6's new
+  field — the same generic netlist re-emitted as self-contained
+  behavioral Verilog, no `liberty`, since it is plain RTL) and `gate` =
+  `mapped_netlist_path` with `liberty` attached (so its standard-cell
+  instances resolve as real logic, not an undefined blackbox — mirrors
+  `klayout_tools.equiv._resolve_side`'s own reasoning). A non-
+  `"equivalent"` verdict (`"counterexample"` or `"inconclusive"`) — or an
+  `EquivError` (e.g. a generic netlist using `$dff`, outside `klt equiv`'s
+  combinational-only Phase 0 MVP scope, `docs/cli/equiv.md` "Scope") — is
+  a hard `TechmapError`, never a silent warning.
+- **Why a new Verilog emitter, not the mapped-netlist dialect reused for
+  both sides:** `klt equiv` needs both `gold` and `gate` as Verilog
+  sources, but §2's generic-cell `type` strings (`$and2`, ...) are not
+  legal Verilog module-instance identifiers (a bare `$` prefix is
+  Verilog's own system-task/function namespace) — `verilog.rs`'s new
+  `write_generic` function expresses each generic cell's already-known
+  Boolean function directly (`assign y = a & b;` for `$and2`, an `always
+  @(posedge clk)` block for `$dff`), self-contained RTL requiring no
+  liberty to resolve, rather than inventing a library of primitive-cell
+  module definitions to instantiate by escaped identifier.
+- **Proven on a real, deliberately-broken mapping, not just asserted:**
+  `tests/test_techmap_equiv_gate.py` seeds a real mismatch (a generic
+  netlist using `$or2` where the design under test declares `$and2` — "a
+  cell substituted for one with different logic function" — genuinely
+  mapped by the real binary, then substituted for the correct mapped
+  netlist) and asserts the gate raises, mirroring
+  `tests/test_synthesize_equiv_gate.py`'s own "real broken artifact, never
+  hand-edited Verilog" discipline.
+- **Not in this issue's scope:** folding `klt-techmap` into `klt
+  synthesize` itself, or a unified `klt synth` command spanning RTL
+  elaboration → technology mapping → place-and-route — `klt-techmap`
+  remains the same standalone binary this contract specifies; #875 only
+  wired its own correctness gate in from the Python side.
+
+## 10. Related
 
 - [Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) — RTL
   synthesis for `klt`.
 - #874 — implement Liberty-driven cell selection for technology mapping,
   benchmarked against Yosys/abc, against this contract.
-- #875 — wire `klt equiv` as this stage's own acceptance gate.
+- #875 — wire `klt equiv` as this stage's own acceptance gate. Closed —
+  see §9 above.
 - #809 / `native/statime/` — the accepted native-Rust gate-level STA spike
   this stage's `timing` field is designed to plug into.
 - #700 — `klt place-and-route`, the consumer this stage's

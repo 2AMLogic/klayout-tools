@@ -1,15 +1,22 @@
 //! `klt-techmap` -- the standalone CLI for issue #874's technology-mapping
 //! crate. Not (yet) a `klt` subcommand -- per
 //! `docs/design/synth-techmap-stage-contract.md` section 1, wiring this
-//! into `klt synthesize`/a future `klt synth` and gating it with `klt
-//! equiv` is #875's job. This binary exists so the corpus-benchmark
-//! harness (`tests/corpus/techmap/compare.py`) has something real to
-//! invoke, mirroring `native/statime`'s own `klt-statime critical-path`
-//! CLI at the equivalent point in that issue.
+//! into `klt synthesize`/a future `klt synth` is left to a follow-on issue;
+//! #875 wires **the equivalence gate** in from the Python side
+//! (`klayout_tools.techmap.run_techmap`, `--verify-equivalence`), invoking
+//! this same binary as a subprocess (mirroring `native/statime`'s own
+//! `klt-statime critical-path` CLI at the equivalent point in that issue)
+//! rather than duplicating the mapping algorithm in Python. This binary
+//! also backs the corpus-benchmark harness
+//! (`tests/corpus/techmap/compare.py`).
 //!
 //! Usage: `klt-techmap <request.json>` -- a `klt.synth.techmap.request/1`
 //! document (section 6). Prints the `klt.synth.techmap.response/1` JSON to
-//! stdout on success.
+//! stdout on success -- including, since #875, the additive
+//! `generic_netlist_verilog_path` field (the pre-mapping generic netlist
+//! re-emitted as behavioral Verilog, `verilog::write_generic`) alongside
+//! `mapped_netlist_path`, so a caller has both sides ready to hand to `klt
+//! equiv` without a separate conversion step.
 //!
 //! Exit codes (contract section 6):
 //!   0 -- mapping succeeded.
@@ -105,8 +112,23 @@ fn run() -> Result<request::Response, (u8, String)> {
             ),
         )
     })?;
-
     let out_path_abs = fs::canonicalize(&out_path).unwrap_or(out_path);
+
+    // Issue #875: the same generic netlist, re-emitted as self-contained
+    // behavioral Verilog -- `klt equiv`'s own `gold` side against
+    // `mapped_netlist_path`'s `gate` side.
+    let generic_out_path = out_dir.join(format!("{}_generic.v", netlist.top));
+    let generic_verilog_text = verilog::write_generic(&netlist).map_err(|e| (1, format!("{e}")))?;
+    fs::write(&generic_out_path, generic_verilog_text).map_err(|e| {
+        (
+            1,
+            format!(
+                "failed to write generic-netlist Verilog '{}': {e}",
+                generic_out_path.display()
+            ),
+        )
+    })?;
+    let generic_out_path_abs = fs::canonicalize(&generic_out_path).unwrap_or(generic_out_path);
 
     Ok(request::Response {
         schema_version: 1,
@@ -117,6 +139,7 @@ fn run() -> Result<request::Response, (u8, String)> {
         instance_counts_by_type: mapped.instance_counts_by_type,
         timing: None,
         mapped_netlist_path: out_path_abs.display().to_string(),
+        generic_netlist_verilog_path: generic_out_path_abs.display().to_string(),
     })
 }
 
