@@ -1,0 +1,33 @@
+[package]
+name = "klt-techmap-native"
+version = "0.1.0"
+edition = "2021"
+description = "Native-Rust Liberty-driven technology mapping for `klt` (2AMLogic/klayout-tools, issue #874 -- Epic #704 Phase 2b), against the contract issue #873 defines"
+license = "MIT"
+publish = false
+
+# Deliberately a plain `cargo build`/`cargo test` binary crate -- no
+# `pyo3`/`maturin` wiring, following `native/statime/`'s and
+# `native/legalize/`'s precedent (issues #809/#784) rather than
+# `native/mom/`'s production shape. Per
+# `docs/design/synth-techmap-stage-contract.md` section 7 ("Where it
+# lives"): this issue creates the crate and its own standalone CLI for
+# corpus benchmarking; wiring it into `klt synthesize`/a future `klt synth`
+# and gating it with `klt equiv` is a follow-on issue's job (#875), which
+# is also where a `pyo3` extension-module shape (`native/mom/Cargo.toml`'s
+# own comments document that shape) would land if warranted.
+
+[[bin]]
+name = "klt-techmap"
+path = "src/main.rs"
+
+[lib]
+name = "klt_techmap_native"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
