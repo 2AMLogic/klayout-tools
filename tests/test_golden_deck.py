@@ -1,12 +1,16 @@
 """Golden-pair manifest tests (issue #747), piloting
-`docs/design/deck-compiler-proposal.md` §5/§6 on the 37 width/space
-`DrcRule` entries in `sky130.py` (11) and `gf180mcu.py` (26).
+`docs/design/deck-compiler-proposal.md` §5/§6 on `sky130.py`'s/`gf180mcu.py`'s
+width/space `DrcRule` entries. Issue #904 (Epic #711 Phase 3a) widens
+gf180mcu's own coverage to its full 42-rule DRC deck (also `enclosing`/
+`separation`) -- see `generate_golden_deck.py`'s `ALLOWED_CHECKS` and its own
+module docstring for why sky130's scope is deliberately left at width/space.
 
 Three tiers, mirroring `tests/test_drc_klayout_engine.py`'s own
 mocked-unit/real-binary split:
 
-1. **Coverage** -- every width/space `DrcRule` in both decks has both a
-   `"violate"` and a `"clean"` manifest entry (no `klayout` binary needed).
+1. **Coverage** -- every `DrcRule` a deck's own `ALLOWED_CHECKS` entry covers
+   has both a `"violate"` and a `"clean"` manifest entry (no `klayout`
+   binary needed).
 2. **Curated-engine agreement** -- each fixture, run through `run_drc`
    (the curated engine), reports the status its manifest entry declares
    (no `klayout` binary needed -- this is the existing regression-test
@@ -18,9 +22,10 @@ mocked-unit/real-binary split:
    against the real `sky130A.lydrc`, asserting the same violate/clean
    *status* agrees between engines, unless the manifest entry carries an
    `expected_disagreement` explaining a known, documented approximation.
-   gf180mcu's cross-check is explicitly deferred (its native deck has no
-   single runnable file -- see `docs/cli/drc.md`'s "Engine" -> "klayout"
-   limitation and this issue's own corrected scope).
+   gf180mcu's cross-check remains explicitly deferred (its native DRC deck
+   still has no single runnable file -- see `docs/cli/drc.md`'s "Engine" ->
+   "klayout" limitation, re-verified unchanged as of issue #904) -- noted
+   explicitly here, not silently skipped.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import shutil
 
 import pytest
 
+from golden_deck.generate_golden_deck import ALLOWED_CHECKS
 from golden_deck.manifest import DECK_NAMES, load_manifest, write_layout
 from klayout_tools import pdk
 from klayout_tools.decks import get_deck
@@ -71,18 +77,19 @@ _SKIP_NO_SKY130_CROSS_CHECK = pytest.mark.skipif(
 
 @pytest.mark.parametrize("deck_name", DECK_NAMES)
 def test_golden_manifest_covers_every_width_space_rule(deck_name: str) -> None:
-    """Coverage check (issue #747 AC2): `len(manifest) == len(width/space
-    DrcRule entries)` per deck, and every entry actually declares shapes for
-    both `"violate"` and `"clean"` -- an entry present but empty would pass
-    a naive `set(manifest) == expected_ids` check while still leaving that
-    rule with no real negative control."""
+    """Coverage check (issue #747 AC2; widened for gf180mcu by issue #904):
+    `len(manifest) == len(<deck's ALLOWED_CHECKS> DrcRule entries)` per deck,
+    and every entry actually declares shapes for both `"violate"` and
+    `"clean"` -- an entry present but empty would pass a naive
+    `set(manifest) == expected_ids` check while still leaving that rule with
+    no real negative control."""
     manifest = load_manifest(deck_name)
     deck = get_deck(deck_name)
-    expected_ids = {rule.id for rule in deck if rule.check in ("width", "space")}
+    expected_ids = {rule.id for rule in deck if rule.check in ALLOWED_CHECKS[deck_name]}
 
     assert set(manifest) == expected_ids, (
         f"{deck_name}: golden-pair manifest does not exactly match the "
-        f"deck's own width/space DrcRule ids -- missing "
+        f"deck's own {ALLOWED_CHECKS[deck_name]} DrcRule ids -- missing "
         f"{expected_ids - set(manifest)}, extra {set(manifest) - expected_ids}"
     )
     for rule_id, entry in manifest.items():
@@ -92,15 +99,17 @@ def test_golden_manifest_covers_every_width_space_rule(deck_name: str) -> None:
 
 @pytest.mark.parametrize("deck_name", DECK_NAMES)
 def test_piloted_rules_have_provenance_populated(deck_name: str) -> None:
-    """Every width/space `DrcRule` piloted by this issue carries a populated
-    `provenance` field (issue #747 AC3), distinct from -- not a replacement
-    for -- the coarser, deck-level `scope` field (issue #566): both are
-    expected to be set on every piloted rule, and `provenance.rule_id` (the
-    *official* upstream rule id) is never equal to this deck's own dotted
-    `DrcRule.id`, confirming the two identify different things."""
+    """Every `DrcRule` piloted by this issue (per the deck's own
+    `ALLOWED_CHECKS`) carries a populated `provenance` field (issue #747
+    AC3; widened for gf180mcu by issue #904), distinct from -- not a
+    replacement for -- the coarser, deck-level `scope` field (issue #566):
+    both are expected to be set on every piloted rule, and
+    `provenance.rule_id` (the *official* upstream rule id) is never equal to
+    this deck's own dotted `DrcRule.id`, confirming the two identify
+    different things."""
     deck = get_deck(deck_name)
-    piloted = [rule for rule in deck if rule.check in ("width", "space")]
-    assert piloted, f"{deck_name}: no width/space rules found"
+    piloted = [rule for rule in deck if rule.check in ALLOWED_CHECKS[deck_name]]
+    assert piloted, f"{deck_name}: no piloted rules found"
 
     for rule in piloted:
         assert rule.provenance is not None, (

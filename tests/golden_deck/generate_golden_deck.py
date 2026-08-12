@@ -1,18 +1,38 @@
-"""Regenerate the golden width/space manifest for both decks (issue #747).
+"""Regenerate the golden manifest for both decks (issue #747; issue #904,
+Epic #711 Phase 3a extends this to gf180mcu's `enclosing`/`separation`
+rules).
 
-Run this whenever a piloted `DrcRule`'s `layer`/`threshold_dbu` changes, or a
-width/space rule is added to/removed from `sky130.py`/`gf180mcu.py`:
+Run this whenever a piloted `DrcRule`'s `layer`/`threshold_dbu`/
+`derived_layer` changes, or a rule matching a deck's `ALLOWED_CHECKS` is
+added to/removed from `sky130.py`/`gf180mcu.py`:
 
     python tests/golden_deck/generate_golden_deck.py
 
-For every `check in {"width", "space"}` `DrcRule` in each deck's `DECK`,
-derives a violate/clean box-pair fixture spec directly from that rule's own
-`layer`/`threshold_dbu` -- deterministic, so re-running this script with no
-deck change reproduces byte-identical manifests (mirrors
+For every `DrcRule` in each deck's `DECK` whose `check` is in that deck's own
+`ALLOWED_CHECKS` entry below, derives a violate/clean fixture spec directly
+from that rule's own `layer`/`other_layer`/`threshold_dbu` -- deterministic,
+so re-running this script with no deck change reproduces byte-identical
+manifests (mirrors
 `tests/corpus/generate_golden.py`/`tests/golden_metrics/generate_golden_metrics.py`'s
-"committed fixture + generator script" pattern). Every rule with `check not
-in {"width", "space"}` (e.g. this pilot's out-of-scope `enclosing`/
-`separation` rules) is skipped, not merely left unpopulated.
+"committed fixture + generator script" pattern). Every other rule is skipped,
+not merely left unpopulated.
+
+`ALLOWED_CHECKS` is deliberately **per-deck**: issue #747 piloted `width`/
+`space` on *both* decks; issue #904 widens gf180mcu's own set to also cover
+`enclosing`/`separation` (completing gf180mcu's full 42-rule DRC deck, per
+Epic #711 Phase 3a's "every rule ships a golden pair" acceptance criterion),
+but deliberately leaves sky130's set at its original `width`/`space` pilot
+scope -- extending sky130's own enclosure coverage is a separate, unscoped
+follow-on (`docs/design/deck-compiler-proposal.md`'s own "narrow go"
+recommendation), not something issue #904 (a gf180mcu-focused phase) should
+fold in as a side effect of a shared generator.
+
+One rule is a documented exception to the generic `enclosing`-pair builder
+below: gf180mcu's `mim.enclosing.via4.1` scopes its checked region via a
+`DerivedLayer` (three real drawn layers -- FuseTop/Metal4/Via4 -- not the
+plain two-layer `layer`/`other_layer` shape every other rule uses), so its
+fixture is hand-authored in `_DERIVED_LAYER_FIXTURES` below rather than
+derived generically.
 
 `"expected_disagreement"` is a deliberately **hand-authored** annotation (see
 `README.md`), never derived from geometry -- regeneration preserves each
@@ -44,6 +64,18 @@ DECKS: dict[str, list[DrcRule]] = {
     "sky130": sky130.DECK,
     "gf180mcu": gf180mcu.DECK,
     "sg13g2": sg13g2.DECK,
+}
+
+#: Per-deck set of `DrcRule.check` kinds this manifest covers -- see the
+#: module docstring's "deliberately per-deck" note above.
+ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
+    "sky130": ("width", "space"),
+    "gf180mcu": ("width", "space", "enclosing", "separation"),
+    # sg13g2 (issue #905/#911, Epic #711 Phase 3b): width/space rules go
+    # through this manifest mechanism (14 entries); its 5 enclosing/
+    # separation rules ship as hand-written violate/clean pairs directly in
+    # `tests/test_drc.py` instead -- see that deck's own module docstring.
+    "sg13g2": ("width", "space"),
 }
 
 #: Fixed bar dimensions (database units), independent of any individual
@@ -137,17 +169,175 @@ def _space_pair(
     return pair(violate_gap), pair(clean_gap)
 
 
+#: Fixed size (database units) of the "enclosed"/"other_layer" shape an
+#: `"enclosing"` fixture draws (e.g. a contact/via/pad-opening) -- large
+#: enough to clear every width/space threshold in either deck's DECK on its
+#: own (so drawing it never *also* trips an unrelated width/space rule on the
+#: same layer, see `_enclosing_pair`'s own docstring), independent of the
+#: enclosing rule's own threshold.
+_ENCLOSED_SHAPE_SIZE_DBU = 2000
+
+#: The width (database units) of the "escape" strip an `"enclosing"`
+#: fixture's `"violate"` case leaves uncovered by the enclosing layer -- see
+#: `_enclosing_pair`'s own docstring for why every `"violate"` fixture here
+#: uses this "escape" mechanism (`_run_check`'s `outside_region` term, #318)
+#: rather than a marginal-distance violation.
+_ENCLOSING_ESCAPE_WIDTH_DBU = 500
+
+
+def _enclosing_pair(
+    layer: tuple[int, int], other_layer: tuple[int, int], threshold_dbu: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a violate/clean pair for an `"enclosing"` `DrcRule` (`layer`
+    encloses `other_layer`, e.g. metal encloses a contact/via).
+
+    `"clean"`: `other_layer` is a fixed `_ENCLOSED_SHAPE_SIZE_DBU` square,
+    `layer` fully surrounds it with a margin of `threshold_dbu +
+    _margin_dbu(threshold_dbu)` on every side -- clears the rule for both a
+    positive threshold (a `Region.enclosing_check` marginal-distance pass)
+    and a zero threshold (`metal1.enclosing.via1.1`'s `0.0um`, where any
+    positive margin already satisfies the check).
+
+    `"violate"`: `layer` covers only part of `other_layer` (a
+    `_ENCLOSING_ESCAPE_WIDTH_DBU`-wide strip is left uncovered but still
+    touching `layer` elsewhere), tripping `_run_check`'s `outside_region`
+    zero-overlap-escape term under this rule's own id -- chosen uniformly
+    (rather than a marginal-distance violation) because it is the one
+    mechanism that reliably trips regardless of whether `threshold_dbu` is
+    zero or positive (a `0.0um` threshold's own `enclosing_check` never
+    reports a marginal violation at all, see `metal1.enclosing.via1.1`'s own
+    docstring in `gf180mcu.py`)."""
+    margin = threshold_dbu + _margin_dbu(threshold_dbu)
+    other_box = [0, 0, _ENCLOSED_SHAPE_SIZE_DBU, _ENCLOSED_SHAPE_SIZE_DBU]
+    clean_layer_box = [
+        -margin,
+        -margin,
+        _ENCLOSED_SHAPE_SIZE_DBU + margin,
+        _ENCLOSED_SHAPE_SIZE_DBU + margin,
+    ]
+    violate_layer_box = [
+        0,
+        0,
+        _ENCLOSED_SHAPE_SIZE_DBU - _ENCLOSING_ESCAPE_WIDTH_DBU,
+        _ENCLOSED_SHAPE_SIZE_DBU,
+    ]
+    other_list = list(other_layer)
+    layer_list = list(layer)
+    violate = {
+        "shapes": [
+            {"layer": other_list, "box": other_box},
+            {"layer": layer_list, "box": violate_layer_box},
+        ]
+    }
+    clean = {
+        "shapes": [
+            {"layer": other_list, "box": other_box},
+            {"layer": layer_list, "box": clean_layer_box},
+        ]
+    }
+    return violate, clean
+
+
+def _separation_pair(
+    layer: tuple[int, int], other_layer: tuple[int, int], threshold_dbu: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a violate/clean pair for a `"separation"` `DrcRule` (`layer`
+    must keep `threshold_dbu` away from `other_layer`) -- the two-layer
+    sibling of `_space_pair` above (same bar dimensions/margin, one bar per
+    layer instead of two bars on the same layer)."""
+    margin = _margin_dbu(threshold_dbu)
+    violate_gap = max(threshold_dbu - margin, 1)
+    clean_gap = threshold_dbu + margin
+    layer_list = list(layer)
+    other_list = list(other_layer)
+
+    def pair(gap: int) -> dict[str, Any]:
+        return {
+            "shapes": [
+                {
+                    "layer": layer_list,
+                    "box": [0, 0, _SPACE_BAR_WIDTH_DBU, _SPACE_BAR_LENGTH_DBU],
+                },
+                {
+                    "layer": other_list,
+                    "box": [
+                        _SPACE_BAR_WIDTH_DBU + gap,
+                        0,
+                        2 * _SPACE_BAR_WIDTH_DBU + gap,
+                        _SPACE_BAR_LENGTH_DBU,
+                    ],
+                },
+            ]
+        }
+
+    return pair(violate_gap), pair(clean_gap)
+
+
+#: Hand-authored fixtures for rules whose checked region is not the plain
+#: `(layer, other_layer)` pair `_enclosing_pair`/`_separation_pair` above
+#: assume -- see the module docstring's "documented exception" note.
+#: gf180mcu's `mim.enclosing.via4.1` scopes its "enclosing" side to a
+#: `DerivedLayer` (`FuseTop.sized(1.06um) & Metal4.interacting(FuseTop)`,
+#: `decks/gf180mcu.py`'s own `derived_layer` field): drawing a
+#: comfortably-oversized `Metal4` box (`(46, 0)`) fully covering a `FuseTop`
+#: box (`(75, 0)`) makes the derived region exactly `FuseTop.sized(1.06um)`
+#: (`[-1060, -1060, 7060, 7060]` for a `[0, 0, 6000, 6000]` FuseTop box);
+#: `Via4` (`(41, 0)`) is then placed with a `threshold_dbu(400) +
+#: _margin_dbu(400)(100) = 500` dbu margin inside that derived region for
+#: `"clean"`, or straddling its right edge (an `outside_region` escape, the
+#: same mechanism `_enclosing_pair` uses) for `"violate"`. Verified (this
+#: issue) to not incidentally trip any other gf180mcu `DrcRule` -- neither
+#: fixture draws Via1/Via2/Via3/MetalTop/Pad/Nwell/Comp/Poly2/Contact, the
+#: only other layers any *other* rule in this deck reads, and every
+#: single-layer width/space rule on Metal4/FuseTop/Via4 clears its own
+#: threshold by construction (a lone polygon has no `space_check` neighbour;
+#: `_ENCLOSED_SHAPE_SIZE_DBU`-plus geometry clears every width threshold).
+_DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+    "mim.enclosing.via4.1": (
+        {  # violate: Via4 straddles the derived region's right edge (x=7060)
+            "shapes": [
+                {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
+                {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
+                {"layer": [41, 0], "box": [6800, 0, 8000, 2000]},  # Via4 (escapes)
+            ]
+        },
+        {  # clean: Via4 sits >= 500 dbu inside the derived region on every side
+            "shapes": [
+                {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
+                {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
+                {"layer": [41, 0], "box": [-560, -560, 6560, 6560]},  # Via4
+            ]
+        },
+    ),
+}
+
+
 def build_manifest(
-    deck_rules: list[DrcRule], existing: dict[str, dict[str, Any]]
+    deck_name: str,
+    deck_rules: list[DrcRule],
+    existing: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
+    allowed_checks = ALLOWED_CHECKS[deck_name]
     manifest: dict[str, dict[str, Any]] = {}
     for rule in deck_rules:
-        if rule.check not in ("width", "space"):
+        if rule.check not in allowed_checks:
             continue
-        if rule.check == "width":
+        if rule.id in _DERIVED_LAYER_FIXTURES:
+            violate, clean = _DERIVED_LAYER_FIXTURES[rule.id]
+        elif rule.check == "width":
             violate, clean = _width_pair(rule.layer, rule.threshold_dbu)
-        else:
+        elif rule.check == "space":
             violate, clean = _space_pair(rule.layer, rule.threshold_dbu)
+        elif rule.check == "enclosing":
+            assert rule.other_layer is not None, rule.id
+            violate, clean = _enclosing_pair(
+                rule.layer, rule.other_layer, rule.threshold_dbu
+            )
+        else:  # "separation"
+            assert rule.other_layer is not None, rule.id
+            violate, clean = _separation_pair(
+                rule.layer, rule.other_layer, rule.threshold_dbu
+            )
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {
             "check": rule.check,
@@ -170,7 +360,7 @@ def main() -> int:
         existing: dict[str, dict[str, Any]] = {}
         if out_path.exists():
             existing = json.loads(out_path.read_text(encoding="utf-8"))
-        manifest = build_manifest(deck_rules, existing)
+        manifest = build_manifest(deck_name, deck_rules, existing)
         out_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

@@ -1922,6 +1922,8 @@ def run_extract_klayout_engine(
     lvs_deck_file: str,
     top: str | None = None,
     timeout_s: float = EXTRACT_KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S,
+    extra_rd: Mapping[str, str] | None = None,
+    bare_length_area_units: bool = True,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout LVS-DSL rule-deck script's own **device
     extraction** (``lvs_deck_file``, typically resolved via
@@ -1966,7 +1968,20 @@ def run_extract_klayout_engine(
 
         klayout -b -r <lvs_deck_file> -rd input=<path> -rd report=<tmp>.lvsdb \\
             -rd target_netlist=<tmp>.cir -rd schematic=<tmp-stub>.cir \\
-            -rd net_only=true -rd top_lvl_pins=true
+            -rd net_only=true -rd top_lvl_pins=true [-rd <extra_rd key>=<value> ...]
+
+    ``extra_rd`` (issue #904, Epic #711 Phase 3a) appends additional
+    ``-rd key=value`` pairs after the six standard ones above -- needed for a
+    native deck whose own variant-selection globals default to a stack this
+    repo's compiled deck does not model. For example, gf180mcu's
+    ``gf180mcu.lvs`` defaults ``$metal_level`` to ``'6LM'``
+    (``topmin1_metal`` = ``Metal5``), but ``decks/gf180mcu.py``'s own MiM
+    capacitor models the 5LM variant (``Metal4`` as the MiM stack's bottom
+    plate, per its own docstring) -- cross-checking that entry needs
+    ``extra_rd={"metal_level": "5LM"}`` to point the native deck's own
+    variant selection at the same stack the compiled deck assumes. ``None``
+    (the default) appends nothing, matching this function's pre-#904
+    behaviour exactly.
 
     Mirrors ``run_drc_klayout_engine``'s completion discipline exactly:
 
@@ -1991,20 +2006,37 @@ def run_extract_klayout_engine(
     ``RBA::NetlistSpiceWriterDelegate``) emits each device parameter's raw
     internal value directly (already in klayout's native micron/micron^2
     representation, since this deck runs with ``device_scaling`` off) --
-    *not* rescaled to plain-SPICE meter/meter^2 convention. Reading that
-    file back through a plain ``kdb.NetlistSpiceReader()`` (no custom
-    delegate) re-applies the *opposite* assumption: it treats a MOS/resistor
-    device class's declared length-typed parameters (``L``/``W``/``P``/
-    ``PS``/``PD``) as meters and rescales by 1e6 to store them internally
-    (and area-typed ``A``/``AS``/``AD`` by 1e12) -- verified empirically for
-    this issue (a written ``L=0.4`` round-trips as ``400000.0``, a written
-    ``A=6`` as ``6000000000000.0``; ``R``/``C`` are untouched, confirming
-    only the length/area-typed parameters carry this reader-side rescale).
-    This function undoes exactly that known, fixed factor
+    *not* rescaled to plain-SPICE meter/meter^2 convention, and with no
+    engineering-notation unit suffix on the written number at all (a bare
+    ``L=0.4``, not ``L=0.4U``). Reading that file back through a plain
+    ``kdb.NetlistSpiceReader()`` (no custom delegate) re-applies the
+    *opposite* assumption for a bare, suffix-less number: it treats a
+    MOS/resistor device class's declared length-typed parameters
+    (``L``/``W``/``P``/``PS``/``PD``) as meters and rescales by 1e6 to store
+    them internally (and area-typed ``A``/``AS``/``AD`` by 1e12) -- verified
+    empirically for issue #869 (a written ``L=0.4`` round-trips as
+    ``400000.0``, a written ``A=6`` as ``6000000000000.0``; ``R``/``C`` are
+    untouched, confirming only the length/area-typed parameters carry this
+    reader-side rescale). ``bare_length_area_units=True`` (the default,
+    preserving pre-#904 behaviour) undoes exactly that known, fixed factor
     (:data:`_NATIVE_LVS_LENGTH_PARAMS` / 1e6, :data:`_NATIVE_LVS_AREA_PARAMS`
     / 1e12) on read-back, so ``devices[].params`` reports the same
     micron/micron^2/ohm/farad convention :func:`run_extract`'s own
     ``devices[].params`` does, comparable value-for-value.
+
+    **Not every native writer shares this bare-number quirk** (issue #904,
+    Epic #711 Phase 3a): gf180mcu's ``gf180mcu.lvs`` uses KLayout's own
+    built-in ``write_spice(...)`` (no custom delegate), which *does* emit an
+    explicit engineering-notation unit suffix on length/area values
+    (``L=0.4U``, ``AS=0.8P``) -- and ``kdb.NetlistSpiceReader()`` parses that
+    suffix correctly on read-back, so the value comes back already in the
+    same micron/micron^2 convention :func:`run_extract` uses, needing *no*
+    further rescale at all (verified empirically for issue #904: a written
+    ``L=0.4U`` round-trips as plain ``0.4``, not ``400000.0``). Pass
+    ``bare_length_area_units=False`` for a native deck confirmed to write
+    unit-suffixed numbers this way, to skip the sky130-specific undo instead
+    of silently mis-scaling every length/area parameter by a further,
+    incorrect factor of 1e6/1e12.
 
     Returns a dict shaped closely enough to :func:`run_extract`'s own
     ``devices``/``device_counts`` fields to compare directly (see
@@ -2059,6 +2091,8 @@ def run_extract_klayout_engine(
             "-rd",
             "top_lvl_pins=true",
         ]
+        for key, value in (extra_rd or {}).items():
+            cmd.extend(["-rd", f"{key}={value}"])
         try:
             completed = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout_s
@@ -2111,10 +2145,11 @@ def run_extract_klayout_engine(
             params: dict[str, float] = {}
             for param_def in device_class.parameter_definitions():
                 raw = device.parameter(param_def.name)
-                if param_def.name in _NATIVE_LVS_LENGTH_PARAMS:
-                    raw /= 1.0e6
-                elif param_def.name in _NATIVE_LVS_AREA_PARAMS:
-                    raw /= 1.0e12
+                if bare_length_area_units:
+                    if param_def.name in _NATIVE_LVS_LENGTH_PARAMS:
+                        raw /= 1.0e6
+                    elif param_def.name in _NATIVE_LVS_AREA_PARAMS:
+                        raw /= 1.0e12
                 params[param_def.name] = raw
             devices.append(
                 {

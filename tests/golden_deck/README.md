@@ -1,25 +1,41 @@
-# Golden-pair manifest (`klt drc` width/space rules)
+# Golden-pair manifest (`klt drc` rules)
 
-Declarative, rule-id-keyed golden violate/clean fixture manifest for the 37
-width/space `DrcRule` entries across `sky130.py` (11) and `gf180mcu.py` (26)
--- issue #747, the first, narrow-go increment of
+Declarative, rule-id-keyed golden violate/clean fixture manifest for
+`sky130.py`'s width/space `DrcRule` entries (27), `sg13g2.py`'s width/space
+`DrcRule` entries (14, issue #905/#911), and **all** of `gf180mcu.py`'s
+`DrcRule` entries (42: 12 width, 14 space, 15 enclosing, 1 separation) --
+issue #747 (the first, narrow-go increment of
 [`docs/design/deck-compiler-proposal.md`](../../docs/design/deck-compiler-proposal.md)
-§5/§6. Formalises the informal `_violation`/`_clean` test-function pairs
+§5/§6, width/space only, sky130+gf180mcu) extended to gf180mcu's full DRC
+deck by issue #904 (Epic #711 Phase 3a, the gf180mcu PDK-generality proof).
+Formalises the informal `_violation`/`_clean` test-function pairs
 `tests/test_drc.py` already carried for some of these rules into a single,
 coverage-checked artifact, distinct from (not a replacement for)
 `tests/test_drc.py`'s own broader regression coverage.
 
-## Why width/space only
+## Why width/space only for sky130/sg13g2, but full coverage for gf180mcu
 
-Per the proposal's §6, this pilot is scoped to `check in {"width", "space"}`
-rules -- the only two check kinds (of `width`/`space`/`notch`/`separation`/
-`enclosing`/`enclosed`/`overlap`) requiring **zero new check primitives** and
-no second drawn layer, keeping the manifest's fixture geometry uniform (a
-single layer, one or two boxes) across every entry. `enclosing`/`separation`
-rules and the `area`/`density`/`antenna` check kinds that don't exist yet in
-this engine at all (see `DrcRule`'s docstring) are explicitly out of scope
-here -- named follow-ons per the proposal's own sequencing, not something
-this manifest silently skips.
+Per the proposal's §6, issue #747's pilot scoped sky130+gf180mcu to
+`check in {"width", "space"}` -- the only two check kinds (of
+`width`/`space`/`notch`/`separation`/`enclosing`/`enclosed`/`overlap`)
+requiring **zero new check primitives** and no second drawn layer, keeping
+the manifest's fixture geometry uniform (a single layer, one or two boxes)
+across every entry. Issue #904 (Epic #711 Phase 3a's "every compiled rule
+ships a golden pair" acceptance criterion) widens gf180mcu's own coverage to
+also include `enclosing`/`separation` (see `generate_golden_deck.py`'s
+`_enclosing_pair`/`_separation_pair` builders) -- gf180mcu's DRC deck has no
+`area`/`density`/`antenna` rules to omit, so `enclosing`+`separation`
+completes its full 42-rule `DECK`. sky130's own manifest is deliberately left
+at its original width/space pilot scope (`generate_golden_deck.py`'s
+`ALLOWED_CHECKS` is per-deck): extending sky130's enclosure coverage is a
+separate, unscoped follow-on issue #904 (a gf180mcu-focused phase) does not
+fold in as a side effect of sharing one generator. sg13g2 (issue #905/#911,
+Epic #711 Phase 3b, landed independently of #904) made the same "width/space
+via this manifest, enclosing/separation as hand-written `test_drc.py` pairs"
+choice for its own deck, so `ALLOWED_CHECKS["sg13g2"]` is `("width",
+"space")` too. The `area`/`density`/`antenna` check kinds still don't exist
+in this engine at all (see `DrcRule`'s docstring) -- out of scope for every
+deck.
 
 ## File layout
 
@@ -28,12 +44,13 @@ tests/golden_deck/
   __init__.py            # package marker (tests/ import convention, see below)
   manifest.py            # load_manifest() / build_layout() / write_layout()
   generate_golden_deck.py  # regeneration script (see "Regenerating" below)
-  sky130/manifest.json     # 27 entries (11 at issue #747, grown since)
-  gf180mcu/manifest.json   # 26 entries
+  sky130/manifest.json     # 27 entries (11 at issue #747, width/space-only, grown since)
+  gf180mcu/manifest.json   # 42 entries (full DRC deck, issue #904)
   sg13g2/manifest.json     # 14 entries (issue #905, Epic #711 Phase 3b --
-                            # see that deck's own module docstring; this
-                            # manifest mechanism is unchanged, only DECK_NAMES/
-                            # DECKS grew a third entry)
+                            # see that deck's own module docstring; width/
+                            # space only, same split as sky130 -- its 5
+                            # enclosing/separation rules ship as hand-written
+                            # pairs in tests/test_drc.py instead)
 ```
 
 `tests/test_golden_deck.py` is the consuming test module (not under this
@@ -120,12 +137,13 @@ own `tol_pct`.
 Three tiers:
 
 1. **Coverage** -- `test_golden_manifest_covers_every_width_space_rule`:
-   `set(manifest) == {rule.id for rule in DECK if rule.check in ("width",
-   "space")}` per deck, and every entry has non-empty `violate`/`clean`
-   shapes. `test_piloted_rules_have_provenance_populated` additionally
-   confirms every piloted rule's `DrcRule.provenance` (see
-   `src/klayout_tools/decks/__init__.py`) is populated and distinct from its
-   own `DrcRule.id`.
+   `set(manifest) == {rule.id for rule in DECK if rule.check in
+   ALLOWED_CHECKS[deck_name]}` per deck (sky130: width/space; gf180mcu:
+   width/space/enclosing/separation, issue #904), and every entry has
+   non-empty `violate`/`clean` shapes. `test_piloted_rules_have_provenance_
+   populated` additionally confirms every piloted rule's `DrcRule.provenance`
+   (see `src/klayout_tools/decks/__init__.py`) is populated and distinct from
+   its own `DrcRule.id`.
 2. **Curated-engine agreement** -- `test_golden_pair_curated_engine_agrees`:
    each `"violate"` fixture trips exactly its own rule id under `run_drc`
    (the curated engine); each `"clean"` fixture is fully clean. No `klayout`
@@ -139,10 +157,17 @@ Three tiers:
    `expected_disagreement`. Gated `skipif` on both a real `klayout` binary
    on `$PATH` **and** a resolvable sky130A install (mirrors
    `tests/test_drc_klayout_engine.py`'s own `HAVE_KLAYOUT_BINARY` gate) --
-   skips cleanly, never fails, in an environment with neither. gf180mcu's
-   own `--engine klayout` cross-check is explicitly deferred (its native
-   deck has no single runnable file -- see `docs/cli/drc.md`'s "Engine" ->
-   "klayout" limitation); tiers 1 and 2 still cover its 26 rules in full.
+   skips cleanly, never fails, in an environment with neither. gf180mcu's own
+   `--engine klayout` **DRC** cross-check remains explicitly deferred as of
+   issue #904 -- re-verified unchanged: gf180mcu's native *DRC* deck still
+   has no single runnable file (see `docs/cli/drc.md`'s "Engine" ->
+   "klayout" limitation); tiers 1 and 2 cover all 42 of its rules in full.
+   **Unlike the DRC side, gf180mcu's native *LVS* deck is single-file and
+   directly runnable** -- issue #904 cross-checks gf180mcu's LVS
+   device-extraction rules against it separately; see
+   `tests/test_lvs_native_extraction_cross_check_gf180mcu.py` and
+   `docs/cli/extract.md`'s "gf180mcu native-deck LVS device-extraction
+   cross-check" section (not this DRC-side manifest).
 
 ## Cross-check results (issue #747, verified 2026-08-11)
 
@@ -182,7 +207,14 @@ pilot's fixtures draw only `diff.drawing`, so that union is exactly
 `diff.drawing` and would agree) -- it is the `FEOL = false` gate above,
 which suppresses the native check entirely regardless of the input layout.
 
-gf180mcu's 26 rules are deferred per the scope above, so they carry no
-cross-check verdict either way yet -- their `expected_disagreement` fields
-are all `null` because none has been cross-checked, which is **not** a claim
-of agreement.
+gf180mcu's 42 rules have no native-*DRC*-deck cross-check verdict either
+way (deferred per the scope above -- no single runnable native DRC deck
+exists to cross-check against, re-verified unchanged as of issue #904); their
+`expected_disagreement` fields are all `null` because none has been
+cross-checked, which is **not** a claim of agreement. This is explicitly
+noted, not a silent skip: gf180mcu's DRC rules are still validated by tiers 1
+and 2 above (coverage + curated-engine self-consistency) on all 42 rules, and
+issue #904 additionally cross-checks gf180mcu's *LVS* device-extraction
+rules against a real, directly-runnable native deck (see the tier-3 note
+above) -- the DRC-side gap and the LVS-side result are two different
+questions with two different answers, not one deferred item.

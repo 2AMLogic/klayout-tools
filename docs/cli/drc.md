@@ -859,9 +859,13 @@ geometry" (`coverage.layers_checked`).
 ## Rule provenance and the golden-pair manifest
 
 Issue #747 (piloting `docs/design/deck-compiler-proposal.md` §5/§6) adds two
-things, both scoped to the 37 width/space `DrcRule` entries across
-`sky130.py` (11) and `gf180mcu.py` (26) as a pilot slice — not every rule in
-either deck yet:
+things, originally scoped to the 37 width/space `DrcRule` entries across
+`sky130.py` (11) and `gf180mcu.py` (26) as a pilot slice. **Issue #904 (Epic
+#711 Phase 3a) widens gf180mcu's own coverage to all 42 of its `DrcRule`
+entries** (adding `enclosing`/`separation`, its only two remaining check
+kinds) — sky130's own scope stays at its original 11-rule width/space pilot,
+a deliberate, unscoped-by-#904 decision (see `tests/golden_deck/README.md`'s
+"Why width/space only for sky130, but full coverage for gf180mcu"):
 
 ### `DrcRule.provenance`
 
@@ -890,29 +894,37 @@ JSON output — it lives on `DrcRule` itself, queryable by a caller that
 imports `klayout_tools.decks` directly (e.g. a coverage-audit script), the
 same way `scope` was before `coverage.deck_scope` aggregated it.
 
-As of this issue, `provenance` is populated only for the 37 piloted
-width/space rules; every other rule in both decks leaves it `None` (the
-default) — an unpopulated field, not a claim that no provenance exists (the
-prose citation in each rule's own inline comment remains the record for
-those rules, exactly as before this field existed).
+As of issue #747, `provenance` was populated only for the 37 piloted
+width/space rules. As of issue #904, it is populated for **all 42** of
+gf180mcu's `DrcRule` entries — sky130's own remaining (non-width/space)
+rules still leave it `None` (the default), an unpopulated field, not a
+claim that no provenance exists (the prose citation in each rule's own
+inline comment remains the record for those rules, exactly as before this
+field existed).
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
 A declarative, rule-id-keyed fixture manifest — one `"violate"` and one
-`"clean"` tiny-layout spec per piloted width/space rule,
+`"clean"` tiny-layout spec per piloted rule,
 `tests/golden_deck/<deck>/manifest.json` (`sky130`/`gf180mcu`) — formalising
 the informal `_violation`/`_clean` test-function pairs `tests/test_drc.py`
 already carried for some of these rules into a single, coverage-checked
 artifact (`tests/test_golden_deck.py` asserts every piloted rule has both).
-Regenerated deterministically from each rule's own `layer`/`threshold_dbu`
-via `tests/golden_deck/generate_golden_deck.py` — see
+Regenerated deterministically from each rule's own `layer`/`other_layer`/
+`threshold_dbu` via `tests/golden_deck/generate_golden_deck.py` — see
 `tests/golden_deck/README.md` for the manifest schema, the regeneration
 workflow, and the sky130 native-deck (`--engine klayout`) cross-check
 results this issue ran against a real `sky130A.lydrc`. gf180mcu's own
-`--engine klayout` cross-check is deferred, matching this section's
-existing "no single runnable native deck" limitation above — the manifest
-itself still exists and is coverage-checked for gf180mcu, only the
-native-deck cross-check tier is sky130-only.
+`--engine klayout` cross-check remains deferred as of issue #904 (its
+native *DRC* deck still has no single runnable file — matching this
+section's existing "no single runnable native deck" limitation above), even
+though its golden-pair manifest now covers all 42 of its `DrcRule` entries
+(issue #904) — the manifest and coverage/curated-engine tiers are complete
+for gf180mcu, only the native-DRC-deck cross-check tier is sky130-only.
+gf180mcu's *LVS* device-extraction rules are cross-checked against a real,
+directly-runnable native deck instead — a DRC/LVS split, not a contradiction
+— see [`docs/cli/extract.md`](extract.md)'s "gf180mcu native-deck LVS
+device-extraction cross-check" section.
 
 ## Exit codes
 
