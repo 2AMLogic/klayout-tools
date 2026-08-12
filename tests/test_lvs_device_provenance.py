@@ -36,14 +36,22 @@ Three tiers, mirroring `tests/test_golden_deck.py`'s split for the DRC side:
   source citation through to netlist output, not just that the field is
   populated.
 - **Coverage discipline**
-  (`test_golden_pairs_cover_every_provenanced_sky130_device_rule`): mirrors
+  (`test_golden_pairs_cover_every_provenanced_device_rule`): mirrors
   `test_golden_deck.py`'s own `test_golden_manifest_covers_every_width_
-  space_rule` -- asserts the set of upstream `rule_id`s exercised by the
-  golden-pair tests above exactly equals the set of `rule_id`s
-  `EXTRACTION_DECK` actually declares `provenance` for, so a future
-  provenance-backfilled device rule with no golden pair (or a golden pair
-  for a rule_id the deck no longer declares) fails loudly instead of
-  silently under-covering.
+  space_rule` -- asserts, per deck, that the set of upstream `rule_id`s
+  exercised by the golden-pair tests above exactly equals the set of
+  `rule_id`s that deck's own `EXTRACTION_DECK` declares `provenance` for, so
+  a future provenance-backfilled device rule with no golden pair (or a
+  golden pair for a rule_id the deck no longer declares) fails loudly
+  instead of silently under-covering.
+
+Issue #904 (Epic #711 Phase 3a) extends all three tiers to gf180mcu: its
+`EXTRACTION_DECK` was previously the sole deck with *no* backfilled
+`provenance` at all (a deliberate negative control, per issue #868's own
+single-deck-first pilot scope); this module now backfills all eight of its
+provenance-eligible device entries (MOS x2, resistors x2, the one
+capacitor, the one bipolar, diodes x2) and ships a golden layout->netlist
+pair for each, mirroring sky130's own #867/#868 discipline exactly.
 """
 
 from __future__ import annotations
@@ -151,19 +159,98 @@ def test_sky130_bipolar_provenance_cites_sky130_lvs():
     assert pnp.provenance.source_repo == "efabless/sky130_klayout_pdk"
 
 
-def test_gf180mcu_devices_have_no_backfilled_provenance_yet():
-    """Issue #868 backfills provenance on sky130 only, mirroring issue
-    #747's own single-deck-first pilot scope for `DrcRule.provenance` --
-    gf180mcu's device entries leave the field at its `None` default (an
-    unpopulated field, not a claim that no provenance exists; the prose
-    citation in `gf180mcu.py`'s own inline comments remains the record)."""
-    assert GF180MCU_DECK.nfet_provenance is None
-    assert GF180MCU_DECK.pfet_provenance is None
-    assert GF180MCU_DECK.resistors, "sanity: deck still declares resistors"
-    assert all(resistor.provenance is None for resistor in GF180MCU_DECK.resistors)
-    assert all(capacitor.provenance is None for capacitor in GF180MCU_DECK.capacitors)
-    assert all(bipolar.provenance is None for bipolar in GF180MCU_DECK.bipolars)
-    assert all(diode.provenance is None for diode in GF180MCU_DECK.diodes)
+def test_gf180mcu_mos_provenance_cites_lvs_deck():
+    """`EXTRACTION_DECK.nfet_provenance`/`pfet_provenance` cite the real
+    device-class names the module docstring's own `UNMODELED_VOLTAGE_
+    MARKERS` note already states MOS recognition always binds
+    (`gf180mcu_fd_pr__nfet_03v3`/`...pfet_03v3`) -- issue #904, the
+    gf180mcu counterpart of #868's sky130 backfill."""
+    assert GF180MCU_DECK.nfet_provenance == RuleProvenance(
+        source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
+        source_path="libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs",
+        rule_id="gf180mcu_fd_pr__nfet_03v3",
+        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+    )
+    assert GF180MCU_DECK.pfet_provenance == RuleProvenance(
+        source_repo="google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
+        source_path="libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs",
+        rule_id="gf180mcu_fd_pr__pfet_03v3",
+        commit="c6d73a35f524070e85faff4a6a9eef49553ebc2b",
+    )
+
+
+def test_gf180mcu_resistor_provenance_cites_lvs_deck():
+    """Both of gf180mcu's curated resistor entries carry a `provenance`
+    citing the real `res_extraction.lvs` device-class name their
+    `sheet_rho_ohm_sq` was transcribed from (issue #904)."""
+    by_name = {r.name: r for r in GF180MCU_DECK.resistors}
+    assert set(by_name) == {"ppolyf_u", "ppolyf_u_1k"}
+
+    for resistor in GF180MCU_DECK.resistors:
+        assert resistor.provenance is not None
+        assert (
+            resistor.provenance.source_repo
+            == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+        )
+        assert (
+            resistor.provenance.source_path
+            == "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs"
+        )
+
+    assert by_name["ppolyf_u"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
+    assert by_name["ppolyf_u_1k"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u_1k"
+
+
+def test_gf180mcu_capacitor_provenance_cites_lvs_deck():
+    """gf180mcu's one curated MiM-capacitor entry carries a `provenance`
+    citing the real `mimcap_extraction.lvs` `extract_devices(capacitor(...))`
+    call its `area_cap_f_um2`/`perim_cap_f_um` were refined from (issue
+    #904)."""
+    (capacitor,) = GF180MCU_DECK.capacitors
+    assert capacitor.provenance is not None
+    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+    assert (
+        capacitor.provenance.source_repo
+        == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+    )
+    assert (
+        capacitor.provenance.source_path
+        == "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs"
+    )
+
+
+def test_gf180mcu_bipolar_provenance_cites_drm_bjt_mark_layer():
+    """Unlike sky130's `pnp_05v5`, gf180mcu's generic `bjt` recognition has
+    no positively-identified official LVS device-class name (see
+    `gf180mcu.py`'s own docstring note); its `provenance` instead cites the
+    DRM rule that defines the `DRC_BJT` marker geometry this entry
+    recognises on -- the same rule `bjt.separation.comp.1`'s own DRC-side
+    `provenance` cites (issue #904)."""
+    (bjt,) = GF180MCU_DECK.bipolars
+    assert bjt.class_name == "bjt"
+    assert bjt.provenance is not None
+    assert bjt.provenance.rule_id == "BJT.3"
+    assert bjt.provenance.source_repo == "google/gf180mcu-pdk"
+
+
+def test_gf180mcu_diode_provenance_cites_lvs_deck():
+    """Both of gf180mcu's curated junction-diode entries carry a
+    `provenance` citing the real `diode_extraction.lvs` device-class name
+    their recognition geometry was transcribed from (issue #904)."""
+    by_name = {d.name: d for d in GF180MCU_DECK.diodes}
+    assert set(by_name) == {"diode_nd2ps_06v0", "diode_pd2nw_06v0"}
+
+    for diode in GF180MCU_DECK.diodes:
+        assert diode.provenance is not None
+        assert diode.provenance.rule_id == f"gf180mcu_fd_pr__{diode.name}"
+        assert (
+            diode.provenance.source_repo
+            == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+        )
+        assert (
+            diode.provenance.source_path
+            == "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -583,8 +670,369 @@ def test_golden_pair_sky130_pnp_extracts_with_provenance_cited_device(
 
 
 # --------------------------------------------------------------------------- #
+# Golden layout -> netlist pairs, gf180mcu (issue #904, Epic #711 Phase 3a):
+# one per provenance-backfilled device entry above, mirroring the sky130
+# section's discipline exactly -- MOS x2, resistors x2, the one capacitor,
+# the one bipolar, diodes x2 (8 entries total, matching sky130's own 8).
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_nfet_layout() -> kdb.Layout:
+    """One drawn NMOS on gf180mcu's curated MOS-recognition layers: a
+    2x1um `Comp` strip crossed by a 0.4um-wide `Poly2` gate bar (active
+    outside `Nwell`, so it recognises as NMOS) -- the exact device
+    `EXTRACTION_DECK.nfet_provenance` cites
+    (`gf180mcu_fd_pr__nfet_03v3`)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(22, 0, _box_um(0, 0, 2, 1))  # Comp, W=1um
+    draw(30, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # Poly2 gate, L=0.4um
+
+    draw(33, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Contact (source side)
+    draw(33, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Contact (drain side)
+    draw(34, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    draw(34, 0, _box_um(1.6, 0.2, 2.0, 0.8))  # Metal1 (drain pad)
+    label(34, 10, "S", 0.2, 0.5)
+    label(34, 10, "D", 1.8, 0.5)
+
+    draw(33, 0, _box_um(0.9, 1.0, 1.1, 1.2))  # gate contact
+    draw(34, 0, _box_um(0.85, 0.95, 1.15, 1.25))  # gate pad
+    label(34, 10, "G", 1.0, 1.1)
+
+    return layout
+
+
+def test_golden_pair_gf180mcu_nfet_l_w_matches_drawn_geometry(tmp_path: Path):
+    """A drawn 0.4um-gate / 1um-active-width NMOS extracts with exactly
+    those `l_um`/`w_um` -- validating `EXTRACTION_DECK.nfet_provenance`'s
+    `gf180mcu_fd_pr__nfet_03v3` citation end-to-end (issue #904)."""
+    path = _write_gds(_make_gf180mcu_nfet_layout(), tmp_path / "nfet.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "nfet.spice"))
+
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["params"]["l_um"] == pytest.approx(0.4)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert GF180MCU_DECK.nfet_provenance.rule_id == "gf180mcu_fd_pr__nfet_03v3"
+
+
+def _make_gf180mcu_pfet_layout() -> kdb.Layout:
+    """`_make_gf180mcu_nfet_layout`'s identical geometry wrapped in
+    `Nwell.drawing` (active *inside* `Nwell` recognises as PMOS) -- the
+    exact device `EXTRACTION_DECK.pfet_provenance` cites
+    (`gf180mcu_fd_pr__pfet_03v3`). Unlike sky130, gf180mcu declares no
+    `well_label`, so the body/well net is left unasserted here (an
+    anonymous net) -- see `gf180mcu.py`'s own docstring on this documented
+    limitation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(21, 0, _box_um(-1, -1, 3, 2))  # Nwell, encloses active -> PMOS
+
+    draw(22, 0, _box_um(0, 0, 2, 1))  # Comp, W=1um
+    draw(30, 0, _box_um(0.8, -0.2, 1.2, 1.2))  # Poly2 gate, L=0.4um
+
+    draw(33, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Contact (source side)
+    draw(33, 0, _box_um(1.7, 0.3, 1.9, 0.7))  # Contact (drain side)
+    draw(34, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (source pad)
+    draw(34, 0, _box_um(1.6, 0.2, 2.0, 0.8))  # Metal1 (drain pad)
+    label(34, 10, "S", 0.2, 0.5)
+    label(34, 10, "D", 1.8, 0.5)
+
+    draw(33, 0, _box_um(0.9, 1.0, 1.1, 1.2))  # gate contact
+    draw(34, 0, _box_um(0.85, 0.95, 1.15, 1.25))  # gate pad
+    label(34, 10, "G", 1.0, 1.1)
+
+    return layout
+
+
+def test_golden_pair_gf180mcu_pfet_l_w_matches_drawn_geometry(tmp_path: Path):
+    """A drawn 0.4um-gate / 1um-active-width PMOS (active wrapped in
+    `Nwell`) extracts with exactly those `l_um`/`w_um` -- validating
+    `EXTRACTION_DECK.pfet_provenance`'s `gf180mcu_fd_pr__pfet_03v3`
+    citation end-to-end (issue #904)."""
+    path = _write_gds(_make_gf180mcu_pfet_layout(), tmp_path / "pfet.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "pfet.spice"))
+
+    assert report["device_counts"] == {"pfet": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "pfet"
+    assert device["params"]["l_um"] == pytest.approx(0.4)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert GF180MCU_DECK.pfet_provenance.rule_id == "gf180mcu_fd_pr__pfet_03v3"
+
+
+_GF180MCU_RES_SQUARES = 6.0  # 6um marked segment / 1um width
+
+
+def _make_gf180mcu_resistor_layout(
+    extra_layers: tuple[tuple[int, int], ...],
+) -> kdb.Layout:
+    """A 12x1um `Poly2` bar with a 6um-long `RES_MK`-marked segment
+    (`L=6um`/`W=1um`, 6.0 squares), plus one or more `extra_layers` drawn
+    over that same segment to narrow it to a specific gf180mcu resistor
+    flavour (`ppolyf_u`: `Pplus`+`SAB`; `ppolyf_u_1k`: `SAB`+`Resistor`) --
+    mirrors `test_extract.py`'s own `_make_poly_resistor_layout`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(30, 0, _box_um(0, 0, 12, 1))  # Poly2 bar, W=1um
+    draw(110, 5, _box_um(3, 0, 9, 1))  # RES_MK marker, 6um segment -> L=6um
+    for layer, datatype in extra_layers:
+        draw(layer, datatype, _box_um(2.8, -0.2, 9.2, 1.2))
+
+    draw(33, 0, _box_um(0.1, 0.3, 0.3, 0.7))  # Contact (head A)
+    draw(33, 0, _box_um(11.7, 0.3, 11.9, 0.7))  # Contact (head B)
+    draw(34, 0, _box_um(0.0, 0.2, 0.4, 0.8))  # Metal1 (head A pad)
+    draw(34, 0, _box_um(11.6, 0.2, 12.0, 0.8))  # Metal1 (head B pad)
+    label(34, 10, "RA", 0.2, 0.5)
+    label(34, 10, "RB", 11.8, 0.5)
+
+    return layout
+
+
+def test_golden_pair_gf180mcu_ppolyf_u_r_ohm_matches_provenance_coefficient(
+    tmp_path: Path,
+):
+    """A drawn 6-square `Poly2` bar marked `RES_MK` and narrowed by
+    `Pplus`+`SAB` extracts as `ppolyf_u` with `R = squares *
+    sheet_rho_ohm_sq`, computed directly from the deck's own
+    provenance-cited entry (issue #904)."""
+    resistor = next(r for r in GF180MCU_DECK.resistors if r.name == "ppolyf_u")
+    assert resistor.provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
+
+    layout = _make_gf180mcu_resistor_layout(((31, 0), (49, 0)))  # Pplus, SAB
+    path = _write_gds(layout, tmp_path / "ppolyf_u.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "ppolyf_u.spice"))
+
+    assert report["device_counts"] == {"ppolyf_u": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "ppolyf_u"
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    assert device["params"]["r_ohm"] == pytest.approx(
+        _GF180MCU_RES_SQUARES * resistor.sheet_rho_ohm_sq
+    )
+
+
+def test_golden_pair_gf180mcu_ppolyf_u_1k_r_ohm_matches_provenance_coefficient(
+    tmp_path: Path,
+):
+    """The `ppolyf_u` golden pair's sibling for the high-sheet-rho
+    `ppolyf_u_1k` flavour: the same marked `Poly2` bar, narrowed instead by
+    `SAB`+`Resistor` (issue #904)."""
+    resistor = next(r for r in GF180MCU_DECK.resistors if r.name == "ppolyf_u_1k")
+    assert resistor.provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u_1k"
+
+    layout = _make_gf180mcu_resistor_layout(((49, 0), (62, 0)))  # SAB, Resistor
+    path = _write_gds(layout, tmp_path / "ppolyf_u_1k.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "ppolyf_u_1k.spice"))
+
+    assert report["device_counts"] == {"ppolyf_u_1k": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "ppolyf_u_1k"
+    assert device["params"]["r_ohm"] == pytest.approx(
+        _GF180MCU_RES_SQUARES * resistor.sheet_rho_ohm_sq
+    )
+
+
+def test_golden_pair_gf180mcu_capacitor_c_f_matches_provenance_coefficients(
+    tmp_path: Path,
+):
+    """A drawn 10x10um `FuseTop` top plate (marked `CAP_MK`/`MIM_L_MK`) over
+    a larger `Metal4` bottom plate extracts with `C = area * area_cap_f_um2
+    + perimeter * perim_cap_f_um`, computed directly from the deck's own
+    provenance-cited `cap_mim_2f0_m4m5_noshield` entry (issue #904)."""
+    (capacitor,) = GF180MCU_DECK.capacitors
+    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(46, 0, _box_um(-20, -20, 20, 20))  # Metal4 (bottom plate)
+    draw(75, 0, _box_um(0, 0, 10, 10))  # FuseTop (top plate, 10x10um)
+    draw(117, 5, _box_um(-5, -5, 15, 15))  # CAP_MK
+    draw(117, 10, _box_um(-5, -5, 15, 15))  # MIM_L_MK
+
+    path = _write_gds(layout, tmp_path / "cap.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "cap.spice"))
+
+    assert report["device_counts"] == {"cap_mim_2f0_m4m5_noshield": 1}
+    (device,) = report["devices"]
+    area_um2 = 100.0
+    perimeter_um = 40.0
+    expected_c_f = (
+        area_um2 * capacitor.area_cap_f_um2 + perimeter_um * capacitor.perim_cap_f_um
+    )
+    assert device["params"]["area_um2"] == pytest.approx(area_um2)
+    assert device["params"]["perimeter_um"] == pytest.approx(perimeter_um)
+    assert device["params"]["c_f"] == pytest.approx(expected_c_f)
+
+
+def _make_gf180mcu_bjt_layout() -> kdb.Layout:
+    """One drawn vertical bipolar on gf180mcu's curated bipolar-recognition
+    layers: an `Nwell.drawing` base marked with `DRC_BJT.drawing`, a `Comp`
+    emitter inside it (contacted + labelled) -- the exact device
+    `EXTRACTION_DECK.bipolars[0].provenance` cites (DRM rule `BJT.3`). No
+    drawn base tap in this fixture (gf180mcu's curated deck has no distinct
+    well-tie layer, mirroring `test_extract.py`'s own
+    `_make_gf180mcu_bjt_layout`), so the base net is anonymous."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(21, 0, _box_um(0, 0, 2, 2))  # Nwell (base)
+    draw(127, 5, _box_um(0, 0, 2, 2))  # DRC_BJT (device-mark)
+
+    draw(22, 0, _box_um(0.8, 0.8, 1.2, 1.2))  # Comp (emitter)
+    draw(33, 0, _box_um(0.9, 0.9, 1.1, 1.1))  # Contact over the emitter
+    draw(34, 0, _box_um(0.85, 0.85, 1.15, 1.15))  # Metal1 over the emitter
+    label(34, 10, "EMIT", 1.0, 1.0)
+
+    return layout
+
+
+def test_golden_pair_gf180mcu_bjt_extracts_with_provenance_cited_device(
+    tmp_path: Path,
+):
+    """A drawn vertical bipolar (base=`Nwell`, emitter=`Comp`, marker=
+    `DRC_BJT`) extracts as exactly one `bjt` device with its emitter
+    terminal resolved to its labelled net and the collector tied to the
+    deck's substrate global -- validating
+    `EXTRACTION_DECK.bipolars[0].provenance`'s `BJT.3` citation end-to-end
+    (issue #904). Like sky130's own `pnp` golden pair, there is no
+    per-rule numeric coefficient to cross-check here (this device rule's
+    citation names *which marker geometry* is recognised, not a geometric
+    coefficient) -- correct class + net resolution is this golden pair's
+    full "expected SPICE device out"."""
+    (bjt,) = GF180MCU_DECK.bipolars
+    assert bjt.provenance.rule_id == "BJT.3"
+
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bjt.spice"))
+
+    assert report["device_counts"] == {"bjt": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "bjt"
+    assert device["nets"]["e"] == "EMIT"
+    assert device["nets"]["c"] == GF180MCU_DECK.substrate_net
+
+
+def _make_gf180mcu_diode_layout() -> kdb.Layout:
+    """A minimal dual-diode ESD clamp on gf180mcu's curated diode layers --
+    mirrors `test_extract.py`'s own `_make_gf180mcu_diode_layout` (same
+    topology and coordinates), one `diode_nd2ps_06v0` (n+/p-substrate) and
+    one `diode_pd2nw_06v0` (p+/Nwell) junction, each 1um x 1um (area
+    1.0um^2, perimeter 4.0um)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: float, y: float) -> None:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    # diode_nd2ps_06v0: n+ diffusion in the p-substrate.
+    draw(115, 5, _box_um(-0.2, -0.2, 1.2, 1.2))  # diode_mk
+    draw(55, 0, _box_um(-0.2, -0.2, 1.2, 1.2))  # Dualgate (6V flavour)
+    draw(22, 0, _box_um(0, 0, 1, 1))  # Comp (cathode)
+    draw(32, 0, _box_um(0, 0, 1, 1))  # Nplus (n+ doped)
+    draw(33, 0, _box_um(0.3, 0.3, 0.7, 0.7))  # Contact over the cathode
+    draw(34, 0, _box_um(0.2, 0.2, 0.8, 0.8))  # Metal1 over the cathode
+    label(34, 10, "CATH", 0.5, 0.5)
+
+    # diode_pd2nw_06v0: p+ diffusion in Nwell.
+    draw(21, 0, _box_um(4, 0, 7, 3))  # Nwell (cathode)
+    draw(115, 5, _box_um(4.8, 0.8, 6.2, 2.2))  # diode_mk
+    draw(55, 0, _box_um(4.8, 0.8, 6.2, 2.2))  # Dualgate (6V flavour)
+    draw(22, 0, _box_um(5, 1, 6, 2))  # Comp (anode)
+    draw(31, 0, _box_um(5, 1, 6, 2))  # Pplus (p+ doped)
+    draw(33, 0, _box_um(5.3, 1.3, 5.7, 1.7))  # Contact over the anode
+    draw(34, 0, _box_um(5.2, 1.2, 5.8, 1.8))  # Metal1 over the anode
+    label(34, 10, "ANOD", 5.5, 1.5)
+
+    return layout
+
+
+def test_golden_pair_gf180mcu_diodes_extract_with_provenance_cited_devices(
+    tmp_path: Path,
+):
+    """The synthetic dual-diode clamp extracts exactly the two `D` devices
+    its topology describes, each matching its own provenance-cited entry --
+    validating `EXTRACTION_DECK.diodes[].provenance`'s
+    `gf180mcu_fd_pr__diode_nd2ps_06v0`/`...diode_pd2nw_06v0` citations
+    end-to-end (issue #904)."""
+    by_name = {d.name: d for d in GF180MCU_DECK.diodes}
+    assert by_name["diode_nd2ps_06v0"].provenance.rule_id == (
+        "gf180mcu_fd_pr__diode_nd2ps_06v0"
+    )
+    assert by_name["diode_pd2nw_06v0"].provenance.rule_id == (
+        "gf180mcu_fd_pr__diode_pd2nw_06v0"
+    )
+
+    path = _write_gds(_make_gf180mcu_diode_layout(), tmp_path / "diode.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode.spice"))
+
+    assert report["device_counts"] == {
+        "diode_nd2ps_06v0": 1,
+        "diode_pd2nw_06v0": 1,
+    }
+    by_class = {device["class"]: device for device in report["devices"]}
+    nd2ps = by_class["diode_nd2ps_06v0"]
+    assert nd2ps["nets"] == {"a": GF180MCU_DECK.substrate_net, "c": "CATH"}
+    assert nd2ps["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+    pd2nw = by_class["diode_pd2nw_06v0"]
+    assert pd2nw["nets"]["a"] == "ANOD"
+    assert pd2nw["params"] == {"area_um2": 1.0, "perimeter_um": 4.0}
+
+
+# --------------------------------------------------------------------------- #
 # Coverage discipline (issue #867 AC: "every compiled device rule ships a
-# golden pair")
+# golden pair"; issue #904 extends the same discipline to gf180mcu)
 # --------------------------------------------------------------------------- #
 
 
@@ -625,32 +1073,53 @@ def _provenanced_device_rule_ids(deck) -> set[str]:
 #: BJT -- is structurally distinct). A rule_id landing here with no
 #: corresponding test above, or a golden-pair test above whose rule_id is
 #: missing here, is caught by `_provenanced_device_rule_ids` not matching
-#: this set, not by silent under-coverage.
-_GOLDEN_PAIR_TESTED_RULE_IDS = frozenset(
-    {
-        "sky130_fd_pr__nfet_01v8",
-        "sky130_fd_pr__pfet_01v8",
-        "sky130_fd_pr__res_generic_po",
-        "sky130_fd_pr__res_high_po_0p35",
-        "sky130_fd_pr__res_xhigh_po_0p35",
-        "sky130_fd_pr__model__cap_mim",
-        "sky130_fd_pr__model__cap_mim_m4",
-        "sky130_fd_pr__pnp_05v5_W0p68L0p68",
-    }
-)
+#: this set, not by silent under-coverage. Keyed by deck name (issue #904
+#: adds the gf180mcu entry, mirroring sky130's own 8-rule set).
+_GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
+    "sky130": frozenset(
+        {
+            "sky130_fd_pr__nfet_01v8",
+            "sky130_fd_pr__pfet_01v8",
+            "sky130_fd_pr__res_generic_po",
+            "sky130_fd_pr__res_high_po_0p35",
+            "sky130_fd_pr__res_xhigh_po_0p35",
+            "sky130_fd_pr__model__cap_mim",
+            "sky130_fd_pr__model__cap_mim_m4",
+            "sky130_fd_pr__pnp_05v5_W0p68L0p68",
+        }
+    ),
+    "gf180mcu": frozenset(
+        {
+            "gf180mcu_fd_pr__nfet_03v3",
+            "gf180mcu_fd_pr__pfet_03v3",
+            "gf180mcu_fd_pr__ppolyf_u",
+            "gf180mcu_fd_pr__ppolyf_u_1k",
+            "cap_mim_2f0_m4m5_noshield",
+            "BJT.3",
+            "gf180mcu_fd_pr__diode_nd2ps_06v0",
+            "gf180mcu_fd_pr__diode_pd2nw_06v0",
+        }
+    ),
+}
+
+_DECKS_BY_NAME = {"sky130": EXTRACTION_DECK, "gf180mcu": GF180MCU_DECK}
 
 
-def test_golden_pairs_cover_every_provenanced_sky130_device_rule():
+@pytest.mark.parametrize("deck_name", sorted(_DECKS_BY_NAME))
+def test_golden_pairs_cover_every_provenanced_device_rule(deck_name: str) -> None:
     """Issue #867's own acceptance criterion: 'every compiled device rule
     ships a golden pair (layout in, expected SPICE device out) the deck
-    correctly extracts.' `EXTRACTION_DECK`'s provenance-cited device rules
-    (issue #868, Phase 2a: MOS, all three resistors, both capacitors, the
-    one bipolar -- 8 entries total) are all backfilled and, as of this
-    module's golden-pair tests above, all individually validated -- this
-    coverage test is what keeps that true: a new provenance-backfilled
-    device rule added without a matching golden-pair test (or a stale
-    `_GOLDEN_PAIR_TESTED_RULE_IDS` entry for a rule_id the deck no longer
-    declares) fails this assertion, exactly like
+    correctly extracts' -- issue #904 (Epic #711 Phase 3a) extends this to
+    gf180mcu. Each deck's provenance-cited device rules (sky130, issue #868
+    Phase 2a: MOS, all three resistors, both capacitors, the one bipolar --
+    8 entries; gf180mcu, issue #904: MOS, both resistors, the one
+    capacitor, the one bipolar, both diodes -- 8 entries) are all backfilled
+    and, as of this module's golden-pair tests above, all individually
+    validated -- this coverage test is what keeps that true: a new
+    provenance-backfilled device rule added without a matching golden-pair
+    test (or a stale `_GOLDEN_PAIR_TESTED_RULE_IDS` entry for a rule_id the
+    deck no longer declares) fails this assertion, exactly like
     `test_golden_deck.py`'s `test_golden_manifest_covers_every_width_
     space_rule` does for the DRC side."""
-    assert _provenanced_device_rule_ids(EXTRACTION_DECK) == _GOLDEN_PAIR_TESTED_RULE_IDS
+    deck = _DECKS_BY_NAME[deck_name]
+    assert _provenanced_device_rule_ids(deck) == _GOLDEN_PAIR_TESTED_RULE_IDS[deck_name]

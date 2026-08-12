@@ -324,7 +324,12 @@ _GF180MCU_PDK_COMMIT = "de3240d"
 # DRM section (`DrcRule.scope`, issue #566) -> the numeric CSV table under
 # `docs/physical_verification/design_manual/tables_clear/` this deck's
 # width/space rule values were transcribed from, per the module docstring's
-# own section/table citation list above.
+# own section/table citation list above. "9.1 Bond Pad" and "10.7 DRC_BJT
+# Mark Layer" (issue #904, Epic #711 Phase 3a) extend this to the two DRM
+# sections the module docstring's own citation list already names
+# (`tables_clear/29_BondPad1_70.csv`, `tables_clear/38_DRC_BJT_103.csv`) but
+# that had no `_GF180MCU_DRM_CSV` entry yet -- needed to backfill
+# `pad.enclosing.metal5.1`/`bjt.separation.comp.1`'s provenance below.
 _DRM_TABLES_DIR = "docs/physical_verification/design_manual/tables_clear"
 _GF180MCU_DRM_CSV: dict[str, str] = {
     "7.4 Nwell": f"{_DRM_TABLES_DIR}/13_Nwell31.csv",
@@ -335,19 +340,58 @@ _GF180MCU_DRM_CSV: dict[str, str] = {
     "7.14 Vian": f"{_DRM_TABLES_DIR}/23_Vian_59.csv",
     "7.15 MetalTop": f"{_DRM_TABLES_DIR}/24_MetalTop_61.csv",
     "10.4.2 MIM Option B": f"{_DRM_TABLES_DIR}/35_MIM2_88.csv",
+    "9.1 Bond Pad": f"{_DRM_TABLES_DIR}/29_BondPad1_70.csv",
+    "10.7 DRC_BJT Mark Layer": f"{_DRM_TABLES_DIR}/38_DRC_BJT_103.csv",
 }
 
 
 def _gf180mcu_provenance(scope: str, rule_id: str) -> RuleProvenance:
     """Build a :class:`RuleProvenance` for a DRM-table-sourced gf180mcu
-    width/space rule (issue #747) -- `source_path` from `scope`'s own DRM
-    section via `_GF180MCU_DRM_CSV`, everything else shared across the whole
-    deck (see the module-level constants above)."""
+    rule -- `source_path` from `scope`'s own DRM section via
+    `_GF180MCU_DRM_CSV`, everything else shared across the whole deck (see
+    the module-level constants above). Originally scoped to the 26
+    width/space rules piloted by issue #747; issue #904 (Epic #711 Phase 3a)
+    reuses it unchanged for the DRM-table-sourced subset of the deck's
+    remaining enclosing/separation rules (the other subset -- the nine
+    `CO.*`/`Vn.*` conductor-over-cut rules re-derived from *executable* rule
+    -deck code rather than a DRM table -- uses
+    `_gf180mcu_klayout_deck_provenance` below instead)."""
     return RuleProvenance(
         source_repo=_GF180MCU_PDK_REPO,
         source_path=_GF180MCU_DRM_CSV[scope],
         rule_id=rule_id,
         commit=_GF180MCU_PDK_COMMIT,
+    )
+
+
+# `RuleProvenance` for the nine `CO.*`/`Vn.*` conductor-over-cut enclosure
+# rules re-derived from *executable* rule-deck code (issue #551's own
+# "CO.*/Vn.* re-derivation note", a few lines below) rather than from the DRM
+# tables `_gf180mcu_provenance` above cites -- issue #904 (Epic #711 Phase
+# 3a) backfills these nine rules' `provenance`. `source_repo` is the same
+# companion KLayout-runnable DRC deck the module docstring's own top-of-file
+# "Provenance note" paragraph already names
+# (`google/globalfoundries-pdk-libs-gf180mcu_fd_pv`); `commit` is the
+# specific `volare enable gf180mcu` pin the re-derivation note itself cites
+# for these nine rules -- *not* the `999a6ff` DRC-only snapshot the
+# top-of-file note describes for the bulk of this deck's width/space/
+# enclosure transcription (that snapshot predates these nine rules, per the
+# re-derivation note's own "unlike the 999a6ff DRC-only snapshot" wording).
+_GF180MCU_KLAYOUT_DRC_DECK_REPO = "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+_GF180MCU_KLAYOUT_DRC_DECK_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+
+
+def _gf180mcu_klayout_deck_provenance(source_file: str, rule_id: str) -> RuleProvenance:
+    """Build a :class:`RuleProvenance` for one of the nine `CO.*`/`Vn.*`
+    conductor-over-cut enclosure rules re-derived from the real, executable
+    `libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`
+    (issue #551's re-derivation note) rather than a DRM table.
+    `source_file` is the bare file stem (e.g. `"contact"`, `"via1"`)."""
+    return RuleProvenance(
+        source_repo=_GF180MCU_KLAYOUT_DRC_DECK_REPO,
+        source_path=f"libs.tech/klayout/drc/rule_decks/{source_file}.drc",
+        rule_id=rule_id,
+        commit=_GF180MCU_KLAYOUT_DRC_DECK_COMMIT,
     )
 
 
@@ -396,6 +440,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=70,  # 0.07 um
         # DRM 7.12 Contact, rule "CO.3": "Poly2 overlap of contact" -> 0.07um
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.12 Contact", "CO.3"),
     ),
     DrcRule(
         id="comp.width.1",
@@ -433,6 +478,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=70,  # 0.07 um
         # DRM 7.12 Contact, rule "CO.4": "COMP overlap of contact" -> 0.07um
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.12 Contact", "CO.4"),
     ),
     DrcRule(
         id="contact.width.1",
@@ -476,6 +522,7 @@ DECK: list[DrcRule] = [
         # `drc.py`), so this transcription is exact, not an approximation.
         # The end-of-line companions "CO.6a"/"CO.6b" are *not* modeled -- see
         # the module docstring's end-of-line coverage note (issue #551).
+        provenance=_gf180mcu_klayout_deck_provenance("contact", "CO.6"),
     ),
     DrcRule(
         id="via1.width.1",
@@ -524,6 +571,7 @@ DECK: list[DrcRule] = [
         # `outside_region` escape term, see `drc.py`). Via1 is the one via
         # level whose *lower* conductor carries a 0.0um requirement; Via2-
         # Via4 use 0.01um ("Vn.3b"), below.
+        provenance=_gf180mcu_klayout_deck_provenance("via1", "V1.3a"),
     ),
     DrcRule(
         id="metal2.enclosing.via1.1",
@@ -538,6 +586,7 @@ DECK: list[DrcRule] = [
         # exactly the pair of conditions our "enclosing" check reports.
         # The end-of-line companions "V1.4b"/"V1.4c" are not modeled (see
         # the module docstring's end-of-line coverage note).
+        provenance=_gf180mcu_klayout_deck_provenance("via1", "V1.4a"),
     ),
     DrcRule(
         id="via2.width.1",
@@ -575,6 +624,7 @@ DECK: list[DrcRule] = [
         # -> 0.01um. Re-derived from `rule_decks/via2.drc`, whose V2.3b is
         # `via2.not(metal2) OR via2.enclosed(metal2, 0.01.um, euclidian)` --
         # exactly the pair of conditions our "enclosing" check reports.
+        provenance=_gf180mcu_klayout_deck_provenance("via2", "V2.3b"),
     ),
     DrcRule(
         id="metal3.enclosing.via2.1",
@@ -586,6 +636,7 @@ DECK: list[DrcRule] = [
         # DRM 7.14 Vian (n = 1 to 5), rule "V2.4a": "metal3 overlap of via2"
         # -> 0.01um. Re-derived from `rule_decks/via2.drc` (same
         # `enclosed(...) OR not(...)` form as V2.3b above).
+        provenance=_gf180mcu_klayout_deck_provenance("via2", "V2.4a"),
     ),
     DrcRule(
         id="via3.width.1",
@@ -622,6 +673,7 @@ DECK: list[DrcRule] = [
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.3b": "metal3 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc` (same
         # `not(...) OR enclosed(...)` form as V2.3b above).
+        provenance=_gf180mcu_klayout_deck_provenance("via3", "V3.3b"),
     ),
     DrcRule(
         id="metal4.enclosing.via3.1",
@@ -632,6 +684,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.4a": "metal4 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc`.
+        provenance=_gf180mcu_klayout_deck_provenance("via3", "V3.4a"),
     ),
     DrcRule(
         id="via4.width.1",
@@ -680,6 +733,7 @@ DECK: list[DrcRule] = [
         # MiM or routing -- must also satisfy (a genuine MiM bottom plate
         # clears 0.01um by two orders of magnitude, so the two never
         # conflict).
+        provenance=_gf180mcu_klayout_deck_provenance("via4", "V4.3b"),
     ),
     DrcRule(
         id="metal5.enclosing.via4.1",
@@ -692,6 +746,7 @@ DECK: list[DrcRule] = [
         # -> 0.01um. Re-derived from `rule_decks/via4.drc`. Scoped, like
         # `pad.enclosing.metal5.1`, to the 5LM variant this deck models
         # (Metal5 as the conductor above Via4).
+        provenance=_gf180mcu_klayout_deck_provenance("via4", "V4.4a"),
     ),
     DrcRule(
         id="metal1.width.1",
@@ -826,6 +881,7 @@ DECK: list[DrcRule] = [
         # DRM 10.4.2 MIM Option B, rule "MIMTM.3": "Minimum MiM bottom plate
         # overlap of Top plate" -> 0.6um.
         scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("10.4.2 MIM Option B", "MIMTM.3"),
     ),
     DrcRule(
         id="mim.enclosing.via4.1",
@@ -852,6 +908,7 @@ DECK: list[DrcRule] = [
         # routing throughout any layout, ordinary interconnect this deck's
         # `metals`/`vias` stack draws everywhere), not merely conservative.
         scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("10.4.2 MIM Option B", "MIMTM.2"),
     ),
     DrcRule(
         id="pad.enclosing.metal5.1",
@@ -867,6 +924,7 @@ DECK: list[DrcRule] = [
         # (Metal5/81,0 as top metal) -- 6LM's MetalTop/53,0 case is not
         # covered; this deck has no variant-selection mechanism today.
         scope="9.1 Bond Pad",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("9.1 Bond Pad", "PAD.4"),
     ),
     DrcRule(
         id="nwell.space.1",
@@ -899,6 +957,7 @@ DECK: list[DrcRule] = [
         # layer expression our engine does not evaluate. Threshold value
         # unmodified.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.5 Comp", "DF.4d"),
     ),
     DrcRule(
         id="bjt.separation.comp.1",
@@ -915,6 +974,7 @@ DECK: list[DrcRule] = [
         # legitimately part of the same BJT structure. Threshold value
         # unmodified.
         scope="10.7 DRC_BJT Mark Layer",  # DRM section transcribed from (#566)
+        provenance=_gf180mcu_provenance("10.7 DRC_BJT Mark Layer", "BJT.3"),
         #
         # Follow-up (issue #223): `DRC_BJT` is now *also* consumed for
         # device-recognition purposes (not just this DRC mark/separation
@@ -1290,6 +1350,50 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 #   holes in the well terminal wherever poly crosses it, for no
 #   disambiguation benefit (the marked diffusion side already decides
 #   whether the device exists).
+
+# `RuleProvenance` for `EXTRACTION_DECK`'s device-recognition entries (issue
+# #904, Epic #711 Phase 3a -- the gf180mcu counterpart of sky130's own
+# `_sky130_lvs_provenance`/issue #868). `source_repo`/`commit` are the same
+# companion KLayout LVS deck repo/pin this module's own resistor/capacitor/
+# diode derivation comments above already cite ("a real fetched PDK install:
+# volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b") --
+# distinct from `_GF180MCU_PDK_COMMIT` (`de3240d`), which pins the *DRM*
+# repo the DRC-side rules above transcribe from, and from
+# `_GF180MCU_KLAYOUT_DRC_DECK_COMMIT` (same hash, different repo: the
+# DRC-side re-derivation cites this same commit against the *DRC* rule
+# decks, `klayout/drc/...`, not the LVS ones below).
+_GF180MCU_LVS_REPO = "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+_GF180MCU_LVS_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+
+
+def _gf180mcu_lvs_provenance(source_path: str, rule_id: str) -> RuleProvenance:
+    """Build a :class:`RuleProvenance` for a gf180mcu LVS device-recognition
+    entry (issue #904) -- `source_repo`/`commit` shared across every
+    `EXTRACTION_DECK` device entry (see the module-level constants above),
+    `source_path`/`rule_id` (the official upstream device-class name, e.g.
+    `"gf180mcu_fd_pr__ppolyf_u"`) per call."""
+    return RuleProvenance(
+        source_repo=_GF180MCU_LVS_REPO,
+        source_path=source_path,
+        rule_id=rule_id,
+        commit=_GF180MCU_LVS_COMMIT,
+    )
+
+
+# The official KLayout LVS deck's own per-device-family file, following the
+# naming convention this module's own derivation comments above already
+# verify for three sibling families (`res_derivations.lvs`/
+# `res_extraction.lvs`, `diode_derivations.lvs`/`diode_extraction.lvs`,
+# `mimcap_derivations.lvs`/`mimcap_extraction.lvs`, all under
+# `libs.tech/klayout/lvs/rule_decks/`) -- `"mos_extraction.lvs"` for the MOS
+# family is inferred from that same, independently-verified convention
+# rather than read from a fetched file directly (unlike the three siblings
+# above, no `extract_devices(mos4(...))` snippet for gf180mcu is quoted
+# anywhere in this module), so treat this one `source_path` as
+# lower-confidence than the others below until independently re-verified
+# against a real fetched install.
+_GF180MCU_MOS_LVS_SOURCE_PATH = "libs.tech/klayout/lvs/rule_decks/mos_extraction.lvs"
+
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -1345,6 +1449,17 @@ EXTRACTION_DECK = ExtractionDeck(
                 (32, 0),
             ),  # Nplus -- an n+ base tie is not the p+ emitter
             class_name="bjt",
+            # Unlike sky130's `pnp_05v5`, this deck has no positively-
+            # identified official LVS device-class name for its generic
+            # "bjt" recognition (see this section's own docstring note above:
+            # "unlike sky130's pnp_05v5 this repo has no positively-
+            # identified single device-cell name to attribute a specific
+            # polarity to") -- so this cites the DRM rule that defines the
+            # `DRC_BJT` marker geometry this entry recognises on
+            # (`bjt.separation.comp.1` above cites the same rule for the DRC
+            # side) rather than fabricating a device-class name that does
+            # not exist upstream.
+            provenance=_gf180mcu_provenance("10.7 DRC_BJT Mark Layer", "BJT.3"),
         ),
     ),
     capacitors=(
@@ -1373,6 +1488,10 @@ EXTRACTION_DECK = ExtractionDeck(
             # stack -- see the module docstring's "10.4 MIM Capacitor" note.
             top_plate_via=(41, 0),  # Via4
             top_plate_via_metal=(81, 0),  # Metal5
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
+                "cap_mim_2f0_m4m5_noshield",
+            ),
         ),
     ),
     resistors=(
@@ -1392,6 +1511,10 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "gf180mcu_fd_pr__ppolyf_u",
+            ),
         ),
         # High-sheet-rho flavour (issue #299, made caller-selectable by
         # #595), see the module docstring's `ppolyf_u_1k` note above for the
@@ -1431,6 +1554,10 @@ EXTRACTION_DECK = ExtractionDeck(
                     value="3k", name="ppolyf_u_3k", sheet_rho_ohm_sq=3000.0
                 ),
             ),
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/res_extraction.lvs",
+                "gf180mcu_fd_pr__ppolyf_u_1k",
+            ),
         ),
     ),
     # Junction diodes (issue #542) -- see the provenance note above for the
@@ -1460,6 +1587,10 @@ EXTRACTION_DECK = ExtractionDeck(
                 (110, 5),  # RES_MK  | modelled subset of `diode_exclude`
                 (127, 5),  # DRC_BJT /
             ),
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
+                "gf180mcu_fd_pr__diode_nd2ps_06v0",
+            ),
         ),
         DiodeDevice(
             name="diode_pd2nw_06v0",  # gf180mcu_fd_pr__diode_pd2nw_06v0
@@ -1479,7 +1610,23 @@ EXTRACTION_DECK = ExtractionDeck(
             cathode_excludes=(
                 (12, 0),  # DNWELL -> the `_dn` deep-nwell variant
             ),
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
+                "gf180mcu_fd_pr__diode_pd2nw_06v0",
+            ),
         ),
+    ),
+    # MOS recognition always binds the 3.3V models (issue #904) -- the
+    # module docstring's own `UNMODELED_VOLTAGE_MARKERS` note above already
+    # states this explicitly ("extraction always binds the 3.3V models
+    # (nfet_03v3/pfet_03v3) even to a transistor drawn entirely inside
+    # Dualgate"), so `nfet_03v3`/`pfet_03v3` are the official upstream
+    # device-class names cited here, not a new claim.
+    nfet_provenance=_gf180mcu_lvs_provenance(
+        _GF180MCU_MOS_LVS_SOURCE_PATH, "gf180mcu_fd_pr__nfet_03v3"
+    ),
+    pfet_provenance=_gf180mcu_lvs_provenance(
+        _GF180MCU_MOS_LVS_SOURCE_PATH, "gf180mcu_fd_pr__pfet_03v3"
     ),
 )
 

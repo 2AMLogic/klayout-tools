@@ -1194,13 +1194,19 @@ device* an entry's geometry/coefficients were transcribed from.
 `provenance` is populated for sky130's curated MOS (`nfet`/`pfet`), all
 three resistor entries, both capacitor entries, and the one bipolar entry —
 8 device rules total — see `decks/sky130.py`'s `EXTRACTION_DECK` for the
-concrete citations. gf180mcu's device entries are left unpopulated (`None`,
-the default) — the prose citation each entry's own inline comment already
-carries remains the record for those entries, exactly as an unset
-`DrcRule.provenance` does. Like `DrcRule.provenance`, this field is not
-(yet) surfaced in `klt extract`'s JSON output; it is queryable only by a
-caller that imports `klayout_tools.decks` directly (e.g. a coverage-audit
-script).
+concrete citations. **Issue #904 (Epic #711 Phase 3a) backfills the
+gf180mcu counterpart**: MOS (`nfet`/`pfet`), both resistor entries, the one
+capacitor entry, the one bipolar entry, and both diode entries — 8 device
+rules total, mirroring sky130's own count — see `decks/gf180mcu.py`'s
+`EXTRACTION_DECK` for the concrete citations. Unlike sky130's citations
+(which name an official upstream device-class name for every entry), the
+generic `bjt` bipolar entry has no positively-identified official LVS
+device-class name upstream (see `decks/gf180mcu.py`'s own docstring note),
+so its `provenance` instead cites the DRM rule (`BJT.3`) that defines the
+`DRC_BJT` marker geometry it recognises on. Like `DrcRule.provenance`, this
+field is not (yet) surfaced in `klt extract`'s JSON output; it is queryable
+only by a caller that imports `klayout_tools.decks` directly (e.g. a
+coverage-audit script).
 
 Issue #868 (Phase 2a, the rule-model pilot) validated one entry per named
 device *class* against a golden layout→netlist pair (MOSFET: `nfet` only;
@@ -1217,12 +1223,16 @@ bipolar — whose citation is a fixed device-class-name selection with no
 per-rule numeric coefficient the way a resistor's `sheet_rho_ohm_sq` or a
 capacitor's `area_cap_f_um2` is — the correct device class and net
 resolution). See `tests/test_lvs_device_provenance.py`, whose own
-`test_golden_pairs_cover_every_provenanced_sky130_device_rule` enforces this
-1:1 coverage: it fails if a future provenance-backfilled device rule ships
-without a matching golden pair, mirroring `tests/golden_deck/`'s own
-coverage test for `klt drc`'s width/space rules. Epic #711's Phase 2c
-(cross-checking the compiled sky130 LVS device rules against the
-hand-written deck on the #520 corpus) is the next section.
+`test_golden_pairs_cover_every_provenanced_device_rule` (parametrized per
+deck) enforces this 1:1 coverage: it fails if a future provenance-backfilled
+device rule ships without a matching golden pair, mirroring
+`tests/golden_deck/`'s own coverage test for `klt drc`'s rules. **Issue #904
+(Epic #711 Phase 3a) extends this same golden-pair discipline to all eight
+of gf180mcu's provenance-backfilled device rules** (MOS x2, resistors x2,
+the one capacitor, the one bipolar, diodes x2), in the same test module.
+Epic #711's Phase 2c (cross-checking the compiled sky130 LVS device rules
+against the hand-written deck on the #520 corpus) is the next section;
+Phase 3a's own gf180mcu counterpart follows it.
 
 ## sky130 native-deck (`sky130.lvs`) LVS device-extraction cross-check (issue #869)
 
@@ -1297,8 +1307,96 @@ drc` — this issue's acceptance criteria ask for the cross-check to be run
 and reported, not for a new user-facing engine flag; promoting it to a CLI
 surface (JSON contract, docs, exit codes) is a separate, explicitly-scoped
 follow-on if a caller ever needs to run this oracle outside of tests.
-gf180mcu is out of scope here (its device entries carry no `RuleProvenance`
-citations yet to cross-check against — see "Device rule provenance" above).
+gf180mcu was out of scope for issue #869 (its device entries carried no
+`RuleProvenance` citations yet to cross-check against at the time) — see the
+next section for issue #904's own gf180mcu cross-check, once that
+provenance backfill landed.
+
+## gf180mcu native-deck (`gf180mcu.lvs`) LVS device-extraction cross-check (issue #904)
+
+Epic #711 Phase 3a's own AC4: "if an existing hand-written gf180 deck exists
+in klt, the compiled deck's agreement with it is measured on a corpus and
+reported (not asserted)." This section is the gf180mcu counterpart of the
+sky130 section immediately above, reusing the exact same infrastructure
+(`run_extract_klayout_engine`) and reporting discipline.
+
+**Unlike gf180mcu's own DRC deck** (which ships only as unassembled
+per-feature fragments under `libs.tech/klayout/drc/rule_decks/*.drc` with no
+single runnable file, per `docs/cli/drc.md`'s "Engine" → "klayout"
+limitation — the reason gf180mcu's *DRC*-side native cross-check remains
+deferred), **gf180mcu's native LVS deck ships as a single, directly-runnable
+`libs.tech/klayout/lvs/gf180mcu.lvs`** — verified against a real
+`volare`-fetched `gf180mcuD` install for this issue, resolved the same way
+`sky130.lvs` is via `klayout_tools.pdk.lvs_deck_file` (whose own docstring
+already flagged this exact possibility as of issue #869: "a future caller
+is free to attempt it").
+
+**A generalization `run_extract_klayout_engine` needed for a second PDK.**
+sky130.lvs's own custom SPICE-writer delegate emits length/area parameters
+as bare, suffix-less numbers, which `kdb.NetlistSpiceReader()` then
+mis-reads as meters and rescales internally by a fixed, known factor
+(1e6/1e12) that `run_extract_klayout_engine` was undoing unconditionally
+(see "Unit round-trip" in that function's own docstring). gf180mcu.lvs uses
+KLayout's own built-in `write_spice(...)` instead, which *does* write an
+explicit engineering-notation unit suffix (`L=0.4U`, not a bare `L=0.4`) —
+and the reader parses that suffix correctly, so the sky130-specific undo
+would silently *mis*-scale every gf180mcu length/area parameter by a further
+incorrect factor if applied unconditionally (verified empirically: a written
+`L=0.4U` round-trips as plain `0.4`, not `400000.0`). Issue #904 adds a
+`bare_length_area_units` parameter (default `True`, preserving pre-#904
+sky130 behaviour exactly) so a caller can opt out for a native writer
+confirmed to already emit unit-suffixed numbers. It also adds an `extra_rd`
+parameter (a `{key: value}` mapping of additional `-rd` globals appended to
+the invocation), needed below for gf180mcu's own MiM-capacitor variant
+selection.
+
+**Results** (verified against a real, `volare`-fetched gf180mcuD install and
+a real KLayout binary): **5 of the 8 provenanced device rules were run; 4
+agree exactly, 1 agrees with a documented refinement disagreement; 3 are
+deferred** (investigated, not executed — the same "well-reasoned,
+explicitly-documented scoping decision" issue #869 allowed for sky130's own
+`pnp`).
+
+- `nfet`/`pfet`: **exact** (L, W). The native deck's `mos4(...)` recognition
+  needs an explicit `Nplus`/`Pplus` implant layer covering the active area
+  that the compiled deck does not model — the gf180mcu counterpart of issue
+  #869's own sky130 `nsdm`/`psdm` finding.
+- `ppolyf_u`/`ppolyf_u_1k`: **exact** (R). Plain sheet-rho × squares on both
+  sides; the native deck's default `$poly_res` (`'1k'`) already matches the
+  compiled deck's own default flavour, so no `extra_rd` override is needed
+  here.
+- `cap_mim_2f0_m4m5_noshield`: **documented disagreement** — the native
+  deck's raw single-term area coefficient (`2.0e-15` F/µm²) vs. the compiled
+  deck's own refined two-term fit (`area_cap_f_um2=1.99e-15`,
+  `perim_cap_f_um=2.383e-16`, issue #512's perimeter-term refinement) — the
+  gf180mcu counterpart of issue #869's own `cap_mim`/`cap_mim_m4` finding.
+  Needs `extra_rd={"metal_level": "5LM"}`: the native deck's own
+  `$metal_level` global defaults to `'6LM'` (top-metal stack = Metal6/Via5),
+  while `decks/gf180mcu.py`'s MiM capacitor models the 5LM variant (Metal4
+  as the stack's bottom plate, per that module's own docstring) — without
+  the override the native deck would not recognise a `Metal4` bottom plate
+  as the MiM stack's conductor at all.
+- `BJT.3` (the generic `bjt` bipolar) and both diodes
+  (`gf180mcu_fd_pr__diode_nd2ps_06v0`, `...diode_pd2nw_06v0`): **deferred**.
+  The native deck's bipolar recognition is a family of *exact-geometry*
+  device classes gated on the emitter's drawn area **and** edge length
+  simultaneously (e.g. an emitter within 0.5% of an exact 10×10µm square) —
+  the same class of gap as sky130's own deferred `pnp`. The two diodes are
+  topologically different devices than the compiled deck's simpler
+  recognition: `diode_nd2ps_06v0`'s native `'P'` terminal is an `LVPWELL`
+  region the compiled deck's own recognition never draws at all, and
+  `diode_pd2nw_06v0`'s native `'N'` terminal requires an actual `Nwell`
+  tap/tie region interacting with n+ diffusion, not just the bare `Nwell`
+  polygon.
+
+Every non-exact-agreement rule's disagreement/deferral is either a
+*deliberate, previously documented* refinement this deck already carries a
+code-comment citation for (issue #512, discovered independently by this
+cross-check, not introduced by it), or a genuinely different native
+device-recognition topology investigated and written up, not silently
+dropped. See `tests/test_lvs_native_extraction_cross_check_gf180mcu.py`'s
+own module docstring for the full per-rule table and each test's docstring
+for the underlying geometry/coefficient detail.
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 
