@@ -1,7 +1,8 @@
 """Define ``klt erc``: the layer-by-layer connectivity model (issue #859,
-Phase 1a), the per-gate antenna-ratio verdict (issue #860, Phase 1b), and
-the core ERC finding checks (issue #861, Phase 1c) -- all part of the
-antenna + ERC signoff epic #713.
+Phase 1a), the per-gate antenna-ratio verdict (issue #860, Phase 1b), the
+core ERC finding checks (issue #861, Phase 1c), and antenna-violation fix
+guidance (issue #908, Phase 3) -- all part of the antenna + ERC signoff epic
+#713.
 
 Pure library: :func:`run_erc` returns plain Python data (a JSON-serialisable
 ``dict``) and never prints -- serialisation and human-readable formatting
@@ -25,7 +26,11 @@ core electrical-correctness rules (floating gate, unconnected/multiply-
 driven net, missing substrate/well tie, supply short), computed from the
 same connectivity model plus two new optional spec sections (``nets``,
 ``ties``) -- see "ERC finding checks" below and "Phase scope" /
-"ERC finding checks" in ``docs/cli/erc.md``.
+"ERC finding checks" in ``docs/cli/erc.md``. **Phase 3** (#908) additively
+delivers ``levels[].remedy``: for every ``verdict: "violate"`` level, a
+standard-fix recommendation (diode insertion, or layer jumping when a
+neighbouring level has margin) naming the specific net and layer -- see
+:func:`_antenna_remedy`.
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
 purely for wire/via connectivity (no device recognition registered) --
@@ -87,13 +92,14 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 
-#: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860) and Phase
-#: 1c (#861) both add fields additively -- no bump needed, per
-#: docs/cli/erc.md's "Phase scope" and docs/json-contract.md's additive-
-#: envelope design: `pdk`/`gates[].antenna_verdict`/`levels[].antenna_ratio`/
-#: `levels[].antenna_ratio_max`/`levels[].antenna_ratio_source`/
-#: `levels[].verdict` (Phase 1b), and `erc_findings`/`erc_finding_count`
-#: (Phase 1c).
+#: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
+#: (#861), and Phase 3 (#908) all add fields additively -- no bump needed,
+#: per docs/cli/erc.md's "Phase scope" and docs/json-contract.md's
+#: additive-envelope design: `pdk`/`gates[].antenna_verdict`/
+#: `levels[].antenna_ratio`/`levels[].antenna_ratio_max`/
+#: `levels[].antenna_ratio_source`/`levels[].verdict` (Phase 1b),
+#: `erc_findings`/`erc_finding_count` (Phase 1c), and `levels[].remedy`
+#: (Phase 3).
 SCHEMA_VERSION = 1
 
 
@@ -442,6 +448,95 @@ def _bbox_dict(box: Any) -> dict[str, int]:
     return {"left": box.left, "bottom": box.bottom, "right": box.right, "top": box.top}
 
 
+def _antenna_remedy(
+    levels: list[dict[str, Any]], index: int, net: str | None
+) -> dict[str, Any]:
+    """``levels[].remedy`` for a single ``verdict: "violate"`` level (issue
+    #908, epic #713 Phase 3 -- "fix guidance"): recommend the standard
+    antenna-violation fix -- diode insertion or layer jumping -- naming the
+    specific net and layer, so the violation is directly actionable rather
+    than just flagged.
+
+    Layer jumping is recommended only when both hold:
+
+    - **the violation is layer-local**: the immediately preceding
+      ``stackup`` level (``levels[index - 1]``, when one exists) does *not*
+      itself violate. When a lower level already violates, that excess is
+      already baked into every level above it (``cumulative_area_um2``
+      only ever grows going up the stackup) -- redistributing this net's
+      routing to an adjacent layer cannot undo a violation that originated
+      lower down, so jumping is not a real fix there.
+    - **an adjacent stackup level has margin**: either neighbour
+      (``levels[index - 1]`` or ``levels[index + 1]``, whichever exists)
+      reports ``verdict == "pass"`` -- i.e. it has headroom under its own
+      limit, so shifting more of this net's routing onto that layer is a
+      real option. The higher neighbour is preferred when both qualify
+      (continuing the route forward, onto the next fabrication step, is
+      the more common real remedy); the lower neighbour is used when only
+      it has margin (e.g. the violating level is the last in the stackup).
+
+    Every other case falls back to diode insertion -- the general-purpose
+    remedy (an antenna diode bleeds off accumulated charge regardless of
+    which layer is at fault), used whenever the layer-jumping
+    preconditions above are not met.
+    """
+    level = levels[index]
+    layer = level["layer"]
+    ratio = level["antenna_ratio"]
+    limit = level["antenna_ratio_max"]
+    # `net` is `None` for an unlabelled gate (see `gates[].net`) -- name it
+    # in prose rather than interpolating the bare Python `None` repr.
+    net_desc = f"net {net!r}" if net is not None else "this unlabelled net"
+
+    lower = levels[index - 1] if index > 0 else None
+    higher = levels[index + 1] if index + 1 < len(levels) else None
+
+    layer_local = lower is None or lower["verdict"] != "violate"
+    higher_margin = higher is not None and higher["verdict"] == "pass"
+    lower_margin = lower is not None and lower["verdict"] == "pass"
+
+    if layer_local and (higher_margin or lower_margin):
+        target = higher if higher_margin else lower
+        return {
+            "type": "layer_jumping",
+            "net": net,
+            "layer": layer,
+            "target_layer": target["layer"],
+            "justification": (
+                f"{net_desc} exceeds the antenna-ratio limit at {layer!r} "
+                f"(ratio {ratio:.3g} > {limit:.3g}); {target['layer']!r} has "
+                f"margin (ratio {target['antenna_ratio']:.3g} <= "
+                f"{target['antenna_ratio_max']:.3g}) -- route more of this "
+                f"net's connection through {target['layer']!r} instead of "
+                f"continuing to accumulate area on {layer!r}"
+            ),
+        }
+
+    if layer_local:
+        reason = (
+            "no adjacent stackup level has margin to absorb the excess "
+            "routing (a layer-local violation with no jump target)"
+        )
+    else:
+        reason = (
+            "the violation is already present at the preceding stackup "
+            f"level ({lower['layer']!r}), so it carries forward regardless "
+            f"of how routing on {layer!r} is redistributed"
+        )
+    return {
+        "type": "diode_insertion",
+        "net": net,
+        "layer": layer,
+        "target_layer": None,
+        "justification": (
+            f"{net_desc} exceeds the antenna-ratio limit at {layer!r} "
+            f"(ratio {ratio:.3g} > {limit:.3g}); {reason} -- insert an "
+            f"antenna diode on this net at {layer!r} to bleed off "
+            "accumulated charge"
+        ),
+    }
+
+
 def _floating_gate_findings(
     gate_entries_and_regions: list[tuple[dict[str, Any], Any]], gate_role: str
 ) -> list[dict[str, Any]]:
@@ -707,11 +802,11 @@ def run_erc(
     ``"unchecked"`` everywhere (no PDK limit to compare against).
 
     Returns a dict matching the documented ``klt erc`` JSON schema (see
-    ``docs/cli/erc.md``), including ``schema_version`` and (issue #861)
-    ``erc_findings``/``erc_finding_count``. Raises :class:`ErcError` for a
-    malformed spec, an unknown ``pdk``, an unresolvable layout/top cell, or
-    a layout in which no net carries any geometry on the declared gate role
-    at all.
+    ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
+    ``erc_findings``/``erc_finding_count``, and (issue #908) each violating
+    ``levels[].remedy``. Raises :class:`ErcError` for a malformed spec, an
+    unknown ``pdk``, an unresolvable layout/top cell, or a layout in which
+    no net carries any geometry on the declared gate role at all.
     """
     antenna_limits = _resolve_antenna_limits(pdk)
 
@@ -862,6 +957,18 @@ def run_erc(
                     "antenna_ratio_source": antenna_ratio_source,
                     "verdict": verdict,
                 }
+            )
+
+        # Fix guidance (issue #908, epic #713 Phase 3) -- a second pass over
+        # the now-complete `levels` list, since a remedy for level `i` may
+        # look at `levels[i + 1]` (see `_antenna_remedy`). `None` for every
+        # non-violating level (including every level when `pdk` was omitted,
+        # since `verdict` is then always "unchecked").
+        for i, level in enumerate(levels):
+            level["remedy"] = (
+                _antenna_remedy(levels, i, net.name or None)
+                if level["verdict"] == "violate"
+                else None
             )
 
         level_verdicts = {level["verdict"] for level in levels}

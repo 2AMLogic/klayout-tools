@@ -1037,10 +1037,12 @@ def create_parser() -> argparse.ArgumentParser:
             "layer, accumulate that net's connected conductor area at each "
             "fabrication step (the spec's stackup order), and, when --pdk "
             "is given, compare each level's cumulative-area/gate-area "
-            "ratio against that PDK's real antenna-ratio limit. The ERC "
-            "finding list (Phase 1c) is a later phase that adds response "
-            "fields additively. See docs/cli/erc.md for the spec-file "
-            "schema and the JSON contract."
+            "ratio against that PDK's real antenna-ratio limit. Also "
+            "reports the ERC finding list (issue #861, Phase 1c) and, for "
+            "every antenna violation, a diode-insertion/layer-jumping "
+            "remedy naming the specific net and layer (issue #908, "
+            "Phase 3). See docs/cli/erc.md for the spec-file schema and "
+            "the JSON contract."
         ),
     )
     erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")

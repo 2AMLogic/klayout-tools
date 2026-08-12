@@ -480,6 +480,122 @@ def test_antenna_golden_violate_pass_pair_per_layer(
     assert pass_report["gates"][0]["antenna_verdict"] == "pass"
 
 
+# --- run_erc: antenna-violation fix guidance (issue #908, epic #713 Phase 3)
+
+
+def test_antenna_remedy_is_null_when_no_violation(tmp_path):
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "pass.gds"
+    _antenna_fixture(gds, li1_um2=0.2, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    for level in report["gates"][0]["levels"]:
+        assert level["verdict"] != "violate"
+        assert level["remedy"] is None
+
+
+def test_antenna_remedy_is_null_for_every_level_without_pdk(tmp_path):
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "no_pdk.gds"
+    # Would violate li1's limit if checked, but no --pdk means every
+    # verdict is "unchecked", not "violate" -- so no remedy either.
+    _antenna_fixture(gds, li1_um2=80.0)
+
+    report = run_erc(str(gds), str(spec))
+    for level in report["gates"][0]["levels"]:
+        assert level["verdict"] == "unchecked"
+        assert level["remedy"] is None
+
+
+def test_antenna_remedy_layer_jumping_targets_higher_layer_with_margin(tmp_path):
+    """li1 violates (ratio 80 > 75) but met1's own limit (400) is loose
+    enough that the same carried-over cumulative area (80) still passes
+    there -- a layer-local violation with margin one level up, so the
+    standard remedy is to jump the routing forward onto met1 rather than
+    diode insertion.
+    """
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "li1_violate.gds"
+    _antenna_fixture(gds, li1_um2=80.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    levels = {lvl["layer"]: lvl for lvl in report["gates"][0]["levels"]}
+    assert levels["li1"]["verdict"] == "violate"
+    assert levels["met1"]["verdict"] == "pass"
+
+    remedy = levels["li1"]["remedy"]
+    assert remedy is not None
+    assert remedy["type"] == "layer_jumping"
+    assert remedy["net"] == report["gates"][0]["net"]
+    assert remedy["layer"] == "li1"
+    assert remedy["target_layer"] == "met1"
+    assert "li1" in remedy["justification"]
+    assert "met1" in remedy["justification"]
+
+    # The non-violating levels this violation carries into (met1, met2)
+    # still get no remedy of their own -- they never violate.
+    assert levels["met1"]["remedy"] is None
+    assert levels["met2"]["remedy"] is None
+
+
+def test_antenna_remedy_layer_jumping_targets_lower_layer_when_last_level(tmp_path):
+    """met2 is the last stackup level (no level above it to jump forward
+    to), but met1 -- immediately below -- has ample margin (ratio 1.2 vs.
+    its own 400 limit), so the remedy targets it instead.
+    """
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "met2_violate.gds"
+    _antenna_fixture(gds, li1_um2=0.2, met1_um2=1.0, met2_um2=450.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    levels = {lvl["layer"]: lvl for lvl in report["gates"][0]["levels"]}
+    assert levels["met2"]["verdict"] == "violate"
+    assert levels["met1"]["verdict"] == "pass"
+
+    remedy = levels["met2"]["remedy"]
+    assert remedy is not None
+    assert remedy["type"] == "layer_jumping"
+    assert remedy["layer"] == "met2"
+    assert remedy["target_layer"] == "met1"
+
+
+def test_antenna_remedy_diode_insertion_when_violation_cascades(tmp_path):
+    """li1 already violates (ratio 80 > 75); met1 and met2 both inherit
+    and compound that excess (cumulative area only grows) and violate
+    their own looser 400 limits too -- no adjacent level anywhere in the
+    stack has margin, so every violating level falls back to diode
+    insertion rather than a jump target that would not actually help.
+    """
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "cascading_violate.gds"
+    _antenna_fixture(gds, li1_um2=80.0, met1_um2=350.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    levels = {lvl["layer"]: lvl for lvl in report["gates"][0]["levels"]}
+    assert levels["li1"]["verdict"] == "violate"
+    assert levels["met1"]["verdict"] == "violate"
+    assert levels["met2"]["verdict"] == "violate"
+
+    for layer in ("li1", "met1", "met2"):
+        remedy = levels[layer]["remedy"]
+        assert remedy is not None, layer
+        assert remedy["type"] == "diode_insertion", layer
+        assert remedy["layer"] == layer
+        assert remedy["target_layer"] is None
+        assert layer in remedy["justification"]
+        # `_antenna_fixture` never labels its net -- `remedy["net"]` is
+        # `None`, and the justification prose should read naturally rather
+        # than interpolating the bare Python `None` repr.
+        assert remedy["net"] is None
+        assert "unlabelled net" in remedy["justification"]
+        assert "None" not in remedy["justification"]
+
+
 # --- run_erc: cross-check against klayout's own built-in antenna engine -----
 
 
@@ -1121,6 +1237,34 @@ def test_cli_pdk_text_output(tmp_path, capsys):
     assert "pdk: sky130" in out
     assert "antenna_verdict=" in out
     assert "verdict=" in out
+
+
+def test_cli_text_output_prints_remedy_for_violating_level(tmp_path, capsys):
+    gds = tmp_path / "li1_violate.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    _antenna_fixture(gds, li1_um2=80.0)
+
+    assert main(["erc", str(gds), str(spec), "--pdk", "sky130"]) == 0
+    out = capsys.readouterr().out
+    assert "verdict=violate" in out
+    assert "remedy: layer_jumping -> met1" in out
+
+
+def test_cli_json_contract_includes_remedy_field(tmp_path, capsys):
+    gds = tmp_path / "li1_violate.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    _antenna_fixture(gds, li1_um2=80.0)
+
+    assert (
+        main(["erc", str(gds), str(spec), "--pdk", "sky130", "--format", "json"]) == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    li1_level = next(lvl for lvl in data["gates"][0]["levels"] if lvl["layer"] == "li1")
+    assert li1_level["verdict"] == "violate"
+    assert li1_level["remedy"]["type"] == "layer_jumping"
+    assert li1_level["remedy"]["target_layer"] == "met1"
 
 
 def test_cli_unknown_pdk_exits_one_with_clean_message(tmp_path, capsys):
