@@ -57,6 +57,17 @@ survey section 3.5/3.6 found no working recipe for a Yosys-native timing
 report against a liberty-mapped netlist (every mapped standard-cell type is
 reported "not recognised" by ``sta``); deferred to Phase 4's OpenROAD/OpenSTA
 step, which already must run STA for place-and-route signoff.
+
+**Acceptance gate**: :func:`run_synthesize`'s ``verify_equivalence`` flag
+(the CLI's ``--verify-equivalence``, default off/additive) wires the just-
+produced netlist through ``klt equiv``
+(:func:`klayout_tools.equiv.run_equiv`, #726) against the same source RTL
+this run just synthesized -- a synthesized netlist is not considered done
+until ``klt equiv`` reports it ``"equivalent"`` to its own RTL. A non-
+equivalent or inconclusive verdict is a hard :class:`SynthesizeError`, never
+a silent warning. Combinational designs only, matching ``klt equiv``'s own
+Phase 0 scope (#707) -- see ``docs/cli/synthesize.md``'s "Equivalence gate"
+section. This is Phase 1 of Epic #704.
 """
 
 from __future__ import annotations
@@ -70,6 +81,7 @@ from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance, sha256_file
+from .equiv import EquivError, run_equiv
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -121,6 +133,8 @@ def run_synthesize(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    verify_equivalence: bool = False,
+    equiv_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
 
@@ -133,12 +147,33 @@ def run_synthesize(
     conventional prefixes) in effect, unchanged from before this parameter
     existed.
 
+    ``verify_equivalence`` (the CLI's ``--verify-equivalence`` flag; default
+    ``False``, additive/opt-in -- unchanged behaviour for every existing
+    caller) gates the produced netlist through ``klt equiv`` (:func:`
+    klayout_tools.equiv.run_equiv`) against the same ``sources``/
+    ``hdl_toplevel`` this request just synthesized, before returning: the
+    just-produced ``netlist_path`` (with ``liberty`` set to the same
+    resolved liberty this synthesis run used, so standard-cell instances
+    resolve as real logic rather than an undefined blackbox) is proven
+    equivalent to the RTL that was fed into Yosys. A non-``"equivalent"``
+    verdict (``"counterexample"`` or ``"inconclusive"``) -- or an
+    :class:`~klayout_tools.equiv.EquivError`, e.g. a **sequential** design
+    (this MVP's ``klt equiv`` is combinational-only -- see
+    ``docs/cli/equiv.md``'s "Scope" section; a design containing flip-flops/
+    latches/memories cannot use this flag today) -- is a hard
+    :class:`SynthesizeError`, never a silent warning: a synthesized netlist
+    this gate cannot prove faithful to its own source RTL is not "done".
+    ``equiv_timeout_s`` (the CLI's ``--equiv-timeout-s``) overrides ``klt
+    equiv``'s own default proof timeout; ``None`` leaves
+    :data:`klayout_tools.equiv.DEFAULT_TIMEOUT_S` in effect.
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
     section 4). Raises :class:`SynthesizeError` for anything that prevents a
     netlist from being produced at all -- bad request, unreadable RTL
     source, elaboration/hierarchy error, unresolvable ``pdk.cell_library``/
-    ``corner``, or a Yosys/ABC engine error.
+    ``corner``, a Yosys/ABC engine error, or (when ``verify_equivalence`` is
+    set) a failed/inconclusive equivalence check.
 
     The generated ``.ys`` script and mapped netlist are written to
     ``.klt/synthesize/`` next to the request file (the same "next to the
@@ -223,6 +258,17 @@ def run_synthesize(
     if len(resolved_sources) > 1:
         provenance["input"] = {"content_hash": _combined_content_hash(resolved_sources)}
 
+    equivalence = None
+    if verify_equivalence:
+        equivalence = _verify_synthesis_equivalence(
+            synthesize_output_dir=output_dir,
+            resolved_sources=resolved_sources,
+            hdl_toplevel=hdl_toplevel,
+            netlist_path=netlist_path,
+            liberty_path=liberty_path,
+            timeout_s=equiv_timeout_s,
+        )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
@@ -243,7 +289,117 @@ def run_synthesize(
         "netlist_path": netlist_path,
         "script_path": script_path,
         "provenance": provenance,
+        "equivalence": equivalence,
     }
+
+
+def _verify_synthesis_equivalence(
+    *,
+    synthesize_output_dir: str,
+    resolved_sources: list[str],
+    hdl_toplevel: str,
+    netlist_path: str,
+    liberty_path: str,
+    timeout_s: float | None,
+) -> dict[str, Any]:
+    """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
+    successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
+    existing request contract, with ``gold`` set to the same RTL ``sources``
+    this synthesis run just read and ``gate`` set to the netlist it just
+    produced (``liberty`` attached so the standard-cell instances resolve as
+    real logic, not an undefined blackbox -- see
+    :func:`klayout_tools.equiv._resolve_side`'s own docs).
+
+    The equiv request is written to a real file under
+    ``synthesize_output_dir`` (this run's own ``.klt/synthesize/`` -- never
+    passed as an inline JSON string) so
+    :func:`klayout_tools.equiv.run_equiv` resolves its own artifacts
+    directory as ``.klt/synthesize/.klt/equiv/``, right alongside this run's
+    own script/netlist -- rather than the process's current working
+    directory (the inline-JSON form's own relative-path anchor, per
+    :func:`klayout_tools.equiv.load_request_arg`'s docs), which would
+    silently scatter equivalence-check artifacts somewhere unrelated to the
+    request being synthesized.
+
+    Returns a small summary dict (attached to the response's
+    ``equivalence`` field) on an ``"equivalent"`` verdict. Raises
+    :class:`SynthesizeError` -- a hard failure, never a silent warning --
+    for every other outcome: a proven ``"counterexample"`` (the synthesized
+    netlist diverges from its own source RTL), an ``"inconclusive"`` verdict
+    (a solver/process timeout -- never treated as a pass), or an
+    :class:`~klayout_tools.equiv.EquivError` (e.g. a sequential design,
+    outside this MVP's combinational-only ``klt equiv`` scope).
+    """
+    equiv_request_path = os.path.join(
+        synthesize_output_dir, f"equiv_request_{hdl_toplevel}.json"
+    )
+    equiv_request = {
+        "gold": {"sources": resolved_sources, "top": hdl_toplevel},
+        "gate": {
+            "sources": [netlist_path],
+            "top": hdl_toplevel,
+            "liberty": liberty_path,
+        },
+    }
+    try:
+        with open(equiv_request_path, "w", encoding="utf-8") as handle:
+            json.dump(equiv_request, handle, indent=2)
+    except OSError as exc:
+        raise SynthesizeError(
+            f"could not write equivalence-check request '{equiv_request_path}': {exc}"
+        ) from exc
+
+    try:
+        equiv_report = run_equiv(equiv_request_path, timeout_s=timeout_s)
+    except EquivError as exc:
+        raise SynthesizeError(
+            f"equivalence check against source RTL could not be completed: {exc}"
+        ) from exc
+
+    status = equiv_report["status"]
+    if status != "equivalent":
+        raise SynthesizeError(_equivalence_failure_message(status, equiv_report))
+
+    return {
+        "status": status,
+        "engine": equiv_report["engine"],
+        "engine_version": equiv_report["engine_version"],
+        "timeout_s": equiv_report["timeout_s"],
+        "elapsed_s": equiv_report["elapsed_s"],
+        "artifacts": equiv_report["artifacts"],
+    }
+
+
+def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
+    """An actionable :class:`SynthesizeError` message for a non-
+    ``"equivalent"`` ``klt equiv`` verdict against a just-produced netlist
+    -- names the diverging outputs for a proven ``"counterexample"``, or the
+    first diagnostic for an ``"inconclusive"`` (timeout) verdict."""
+    log_path = equiv_report.get("artifacts", {}).get("log_path")
+    if status == "counterexample":
+        counterexample = equiv_report.get("counterexample") or {}
+        diverging = counterexample.get("diverging_outputs") or []
+        confirmed = counterexample.get("confirmed_by_simulation")
+        detail = (
+            f"diverging outputs: {', '.join(diverging)}"
+            if diverging
+            else "no diverging outputs reported"
+        )
+        message = (
+            "synthesized netlist is NOT equivalent to its source RTL "
+            f"(klt equiv reported 'counterexample'; {detail}; "
+            f"confirmed_by_simulation={confirmed})"
+        )
+    else:
+        diagnostics = equiv_report.get("diagnostics") or []
+        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
+        message = (
+            "equivalence check against source RTL did not reach a verdict "
+            f"(klt equiv reported '{status}'): {detail}"
+        )
+    if log_path:
+        message += f" -- see {log_path} for the full proof"
+    return message
 
 
 def _resolve_sources(sources: Any, request_dir: str) -> list[str]:

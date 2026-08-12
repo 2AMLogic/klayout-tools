@@ -5,15 +5,21 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/synthesize.md`` for the full table):
-    0 - synthesis succeeded, netlist written
+    0 - synthesis succeeded, netlist written (and, with `--verify-
+        equivalence`, proven equivalent to its source RTL)
     1 - failed to run (bad request, unreadable RTL source, elaboration/
         hierarchy error, unresolvable pdk.cell_library/corner, a Yosys/ABC
-        engine error) -- returned by ``emit_error`` as
-        ``output.ERROR_EXIT_CODE``
+        engine error) -- or, with `--verify-equivalence`, a non-equivalent
+        or inconclusive `klt equiv` verdict against the produced netlist --
+        returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. There is no exit code 3 -- synthesis has no pass/fail concept of
 its own, matching ``klt extract``'s reasoning exactly; see
-``docs/design/digital-flow-contracts-spike.md`` section 4.)
+``docs/design/digital-flow-contracts-spike.md`` section 4. A failed
+equivalence gate is folded into exit 1 rather than reusing `klt equiv`'s own
+3/4 split -- `klt synthesize` itself still has no pass/fail concept beyond
+"did a netlist come out that this run trusts", see docs/cli/synthesize.md's
+"Equivalence gate" section.)
 """
 
 import argparse
@@ -25,7 +31,11 @@ from .output import emit_error, emit_success
 def run(args: argparse.Namespace) -> int:
     try:
         report = run_synthesize(
-            args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            args.request,
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
+            verify_equivalence=args.verify_equivalence,
+            equiv_timeout_s=args.equiv_timeout_s,
         )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
@@ -53,3 +63,8 @@ def _print_text(report: dict) -> None:
     print()
     print(f"netlist_path: {report['netlist_path']}")
     print(f"script_path: {report['script_path']}")
+
+    equivalence = report.get("equivalence")
+    if equivalence is not None:
+        print()
+        print(f"equivalence: {equivalence['status']}")

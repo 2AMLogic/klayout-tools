@@ -42,6 +42,7 @@ import pytest
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize
 from klayout_tools.cli import main
+from klayout_tools.equiv import EquivError
 from klayout_tools.synthesize import SynthesizeError, load_request, run_synthesize
 
 _GCD_RTL = """\
@@ -809,6 +810,265 @@ def test_cli_missing_request_arg_is_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["synthesize"])
     assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# `verify_equivalence` gate (issue #808, Phase 1 of Epic #704): wires `klt
+# equiv` (#726) in as `klt synthesize`'s acceptance gate. Stubbed here (both
+# `synthesize.subprocess.run` and `synthesize.run_equiv` itself replaced by
+# fakes) so this tier runs fast and deterministically in every environment,
+# with no real `yosys`/`iverilog` binary required -- the real, unmocked
+# end-to-end demonstration (a genuine pass and a genuine seeded-mismatch
+# hard failure through real Yosys/Icarus) lives in
+# `tests/test_synthesize_equiv_gate.py`.
+# --------------------------------------------------------------------------- #
+
+_FAKE_EQUIV_EQUIVALENT = {
+    "status": "equivalent",
+    "engine": "yosys",
+    "engine_version": "0.67+post",
+    "timeout_s": 60.0,
+    "elapsed_s": 0.05,
+    "counterexample": None,
+    "diagnostics": [],
+    "artifacts": {
+        "script_path": "/fake/.klt/equiv/equiv.ys",
+        "netlist_path": "/fake/.klt/equiv/equiv_netlist.v",
+        "log_path": "/fake/.klt/equiv/equiv.log",
+    },
+}
+
+_FAKE_EQUIV_COUNTEREXAMPLE = {
+    "status": "counterexample",
+    "engine": "yosys",
+    "engine_version": "0.67+post",
+    "timeout_s": 60.0,
+    "elapsed_s": 0.05,
+    "counterexample": {
+        "diverging_outputs": ["result"],
+        "confirmed_by_simulation": True,
+    },
+    "diagnostics": [],
+    "artifacts": {
+        "script_path": "/fake/.klt/equiv/equiv.ys",
+        "netlist_path": "/fake/.klt/equiv/equiv_netlist.v",
+        "log_path": "/fake/.klt/equiv/equiv.log",
+    },
+}
+
+_FAKE_EQUIV_INCONCLUSIVE = {
+    "status": "inconclusive",
+    "engine": "yosys",
+    "engine_version": "0.67+post",
+    "timeout_s": 60.0,
+    "elapsed_s": 60.02,
+    "counterexample": None,
+    "diagnostics": [
+        {
+            "severity": "error",
+            "code": "process_timeout",
+            "message": "yosys did not complete within 60.0s",
+        }
+    ],
+    "artifacts": {
+        "script_path": "/fake/.klt/equiv/equiv.ys",
+        "netlist_path": None,
+        "log_path": "/fake/.klt/equiv/equiv.log",
+    },
+}
+
+
+def test_verify_equivalence_default_off_never_calls_equiv(tmp_path, monkeypatch):
+    """`verify_equivalence` defaults to `False` -- additive/opt-in, no
+    behaviour change for every pre-existing caller. `report["equivalence"]`
+    is explicitly `None` (always present, per the module's `timing: null`
+    precedent), and `run_equiv` is never even called."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(synthesize, "run_equiv", lambda *a, **k: calls.append(1))
+
+    report = run_synthesize(request_path)
+
+    assert report["equivalence"] is None
+    assert calls == []
+
+
+def test_verify_equivalence_true_attaches_report_on_pass(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    captured_request_paths = []
+
+    def fake_run_equiv(request, *, timeout_s=None):
+        captured_request_paths.append(request)
+        return _FAKE_EQUIV_EQUIVALENT
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+
+    report = run_synthesize(request_path, verify_equivalence=True)
+
+    assert report["status"] == "ok"
+    assert report["equivalence"]["status"] == "equivalent"
+    assert report["equivalence"]["engine"] == "yosys"
+    assert (
+        report["equivalence"]["artifacts"]["log_path"] == "/fake/.klt/equiv/equiv.log"
+    )
+
+    # `run_equiv` is called with a **request file path** (never an inline
+    # JSON string -- see `_verify_synthesis_equivalence`'s own docs) so its
+    # own `.klt/equiv/` artifacts land next to the synthesize request, not
+    # the process's cwd. `gold` = the same source RTL synthesis just read,
+    # `gate` = the netlist synthesis just produced, `gate.liberty` set to
+    # the same resolved liberty synthesis used.
+    assert len(captured_request_paths) == 1
+    equiv_request_path = captured_request_paths[0]
+    assert os.path.isabs(equiv_request_path)
+    assert os.path.dirname(equiv_request_path) == os.path.join(
+        os.path.dirname(request_path), ".klt", "synthesize"
+    )
+    with open(equiv_request_path, encoding="utf-8") as handle:
+        equiv_request = json.load(handle)
+    assert equiv_request["gold"]["top"] == "gcd"
+    assert equiv_request["gold"]["sources"][0].endswith("gcd.v")
+    assert equiv_request["gate"]["top"] == "gcd"
+    assert equiv_request["gate"]["sources"] == [report["netlist_path"]]
+    assert equiv_request["gate"]["liberty"].endswith(
+        "sky130_fd_sc_hd__tt_025C_1v80.lib"
+    )
+
+
+def test_verify_equivalence_counterexample_is_hard_failure_not_warning(
+    tmp_path, monkeypatch
+):
+    """Acceptance criterion #1: a non-equivalent result is a hard failure
+    (`SynthesizeError`, exit 1 via the CLI), never a silent warning folded
+    into a successful `status: "ok"` response."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize,
+        "run_equiv",
+        lambda request, *, timeout_s=None: _FAKE_EQUIV_COUNTEREXAMPLE,
+    )
+
+    with pytest.raises(SynthesizeError, match="NOT equivalent") as exc_info:
+        run_synthesize(request_path, verify_equivalence=True)
+    assert "result" in str(exc_info.value)
+    assert "confirmed_by_simulation=True" in str(exc_info.value)
+
+
+def test_verify_equivalence_inconclusive_is_hard_failure_never_treated_as_pass(
+    tmp_path, monkeypatch
+):
+    """A solver/process timeout (`"inconclusive"`) must never be treated as
+    a pass -- mirrors `klt equiv`'s own "timeout is never equivalent"
+    discipline, one level up."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize,
+        "run_equiv",
+        lambda request, *, timeout_s=None: _FAKE_EQUIV_INCONCLUSIVE,
+    )
+
+    with pytest.raises(SynthesizeError, match="did not reach a verdict"):
+        run_synthesize(request_path, verify_equivalence=True)
+
+
+def test_verify_equivalence_wraps_equiv_error(tmp_path, monkeypatch):
+    """An `EquivError` (e.g. a sequential design -- outside `klt equiv`'s
+    combinational-only MVP scope) is not attempted-to-be-recovered from --
+    it surfaces as a `SynthesizeError`, still a hard failure."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    def fake_run_equiv(request, *, timeout_s=None):
+        raise EquivError("combinational-only MVP: gold contains sequential elements")
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+
+    with pytest.raises(SynthesizeError, match="could not be completed"):
+        run_synthesize(request_path, verify_equivalence=True)
+
+
+def test_verify_equivalence_timeout_s_passed_through(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    captured_timeouts = []
+
+    def fake_run_equiv(request, *, timeout_s=None):
+        captured_timeouts.append(timeout_s)
+        return _FAKE_EQUIV_EQUIVALENT
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+
+    run_synthesize(request_path, verify_equivalence=True, equiv_timeout_s=12.5)
+
+    assert captured_timeouts == [12.5]
+
+
+def test_cli_verify_equivalence_flag_wires_through_and_exits_zero(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize,
+        "run_equiv",
+        lambda request, *, timeout_s=None: _FAKE_EQUIV_EQUIVALENT,
+    )
+
+    exit_code = main(
+        ["synthesize", request_path, "--verify-equivalence", "--format", "json"]
+    )
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["equivalence"]["status"] == "equivalent"
+
+
+def test_cli_verify_equivalence_flag_hard_fails_exits_one(
+    tmp_path, monkeypatch, capsys
+):
+    """A non-equivalent verdict exits `1` through the CLI -- not a distinct
+    "equivalence failed" exit code (synthesis has no pass/fail concept of
+    its own beyond "did a netlist come out that this run trusts", see
+    `cli/synthesize_cmd.py`'s exit-code docstring) and not `0`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize,
+        "run_equiv",
+        lambda request, *, timeout_s=None: _FAKE_EQUIV_COUNTEREXAMPLE,
+    )
+
+    exit_code = main(
+        ["synthesize", request_path, "--verify-equivalence", "--format", "json"]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "synthesize"
+    assert "NOT equivalent" in err["error"]["message"]
+
+
+def test_cli_verify_equivalence_not_given_defaults_false(tmp_path, monkeypatch, capsys):
+    """Omitting `--verify-equivalence` never calls `klt equiv` -- backward
+    compatible with every pre-existing `klt synthesize` invocation."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    calls = []
+    monkeypatch.setattr(synthesize, "run_equiv", lambda *a, **k: calls.append(1))
+
+    exit_code = main(["synthesize", request_path, "--format", "json"])
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["equivalence"] is None
+    assert calls == []
 
 
 # --------------------------------------------------------------------------- #

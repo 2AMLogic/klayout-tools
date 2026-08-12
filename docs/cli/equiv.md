@@ -8,6 +8,10 @@ correctness loop-closer
 [#704](https://github.com/2AMLogic/klayout-tools/issues/704) (RTL
 synthesis) and [#700](https://github.com/2AMLogic/klayout-tools/issues/700)
 (place-and-route) both name as their own verification step.
+[`klt synthesize --verify-equivalence`](synthesize.md#equivalence-gate)
+wires this command in directly as `klt synthesize`'s own acceptance gate
+(#704 Phase 1) — see that flag's docs for the wired, one-command version of
+the "synthesize, then check" flow this document describes standalone.
 
 ```
 klt equiv <request> [--timeout-s <seconds>] [--format text|json]
