@@ -92,6 +92,27 @@ _PDK_NAME = "pdk.name"
 _PDK_VERSION = "pdk.version"
 _INPUT_HASH = "input.content_hash"
 
+#: ``reason`` values a tier-report item can carry when its ``status`` is
+#: ``"unmet"`` -- see :func:`_grade_evidence` and :func:`_build_tier_item`.
+#: Issue #826 (Phase 1b of epic #706): the whole point of this enum is that
+#: "no runnable check exists for this item" (:data:`_REASON_NO_EVIDENCE`,
+#: :data:`_REASON_INVALID_EVIDENCE`, :data:`_REASON_UNREADABLE_EVIDENCE`,
+#: :data:`_REASON_UNRECOGNIZED_ENVELOPE`, :data:`_REASON_TIER_NOT_SUPPORTED`)
+#: must never collapse, in the JSON output, into the same shape as "a check
+#: ran and did not pass" (:data:`_REASON_CHECK_ERRORED`,
+#: :data:`_REASON_CHECK_FAILED`, :data:`_REASON_STALE_EVIDENCE`) -- a reader
+#: (human or agent) parsing the report must be able to tell "nobody ever
+#: checked this" apart from "somebody checked this and it failed" without
+#: cross-referencing anything outside the item itself.
+_REASON_NO_EVIDENCE = "no_evidence"
+_REASON_INVALID_EVIDENCE = "invalid_evidence"
+_REASON_UNREADABLE_EVIDENCE = "unreadable_evidence"
+_REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
+_REASON_CHECK_ERRORED = "check_errored"
+_REASON_CHECK_FAILED = "check_failed"
+_REASON_STALE_EVIDENCE = "stale_evidence"
+_REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
+
 
 class SignoffError(Exception):
     """Raised when an envelope cannot even be read/parsed, or does not match
@@ -502,6 +523,7 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
                     "text": "latest `klt drc` JSON report: ...",
                     "notes": [],
                     "status": "met",
+                    "reason": None,
                     "citation": {
                         "file": "drc.json",
                         "kind": "drc",
@@ -527,6 +549,39 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
     shape, or a failing check) also renders ``"unmet"``: this phase never
     infers a ``"met"`` verdict for an item with no runnable check behind it.
 
+    An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
+    names *why*, machine-readably, so a reader never has to guess whether an
+    item was skipped or actually failed:
+
+    - ``"no_evidence"`` -- the manifest gave no ``evidence`` entry for this
+      item at all.
+    - ``"invalid_evidence"`` -- the manifest's entry for this item is
+      present but malformed (not a string, and not an object with a string
+      ``"file"``).
+    - ``"unreadable_evidence"`` -- the named evidence file does not exist,
+      is not readable, or is not valid JSON.
+    - ``"unrecognized_envelope"`` -- the evidence file parsed as JSON but is
+      not a JSON object, or is a JSON object that does not match any
+      recognised ``klt`` envelope shape (:func:`_classify`).
+    - ``"check_errored"`` -- the evidence resolved to a ``klt`` ``error``
+      envelope: the underlying command itself failed to run to completion.
+    - ``"check_failed"`` -- the evidence resolved to a recognised, non-error
+      envelope, but that check's own verdict did not pass (e.g. DRC
+      violations, an LVS mismatch, a failed sim corner).
+    - ``"stale_evidence"`` -- the check passed, but its
+      ``provenance.input.content_hash`` does not match the manifest's
+      pinned ``content_hash`` -- the check ran against a different layout
+      revision than the one being claimed.
+    - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
+      repository has no mechanism to run a T2+ check at all.
+
+    ``reason`` is ``None`` (and omitted from a plain-text reading, but
+    always present as a JSON key) exactly when ``status`` is ``"met"``. The
+    first four reasons above ("no runnable check exists for this item") and
+    the last are always distinct, in the JSON, from the three "a check ran
+    and did not pass" reasons -- never collapsed into one ambiguous
+    ``"unmet"`` with no further signal.
+
     A ``"met"`` item's ``citation`` always carries the evidence file, the
     envelope's own status, its input content hash (``None`` when the
     envelope's own provenance doesn't populate one -- ``klt lvs``/``klt
@@ -538,9 +593,9 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
     T2-T4 render as single ladder-row items (per the doc's "The ladder"
     table -- a Curator correction on issue #722: only T1 has an itemized
     checklist, T2-T4 are each one gated condition layered on top) and are
-    always ``"unmet"`` in this phase: this toolkit's closed loop targets T1,
-    and T2+ require commercial tools/fab access this repo has no mechanism
-    to check.
+    always ``"unmet"`` in this phase (``reason: "tier_not_supported"``):
+    this toolkit's closed loop targets T1, and T2+ require commercial
+    tools/fab access this repo has no mechanism to check.
 
     ``tier`` is ``"T1"`` only when every rendered T1 item (across every
     partition, for a ``mixed-signal`` block) is ``"met"``; otherwise
@@ -609,6 +664,7 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
                 "text": f"{ladder_row['claim']} ({ladder_row['demonstrated_by']})",
                 "notes": [],
                 "status": "unmet",
+                "reason": _REASON_TIER_NOT_SUPPORTED,
                 "citation": None,
             }
         )
@@ -673,6 +729,59 @@ def _normalize_evidence_entry(raw: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _grade_evidence(
+    file: str, expected_hash: str | None
+) -> tuple[str, str | None, dict[str, Any] | None]:
+    """Grade one resolved evidence ``file`` (plus its optional pinned
+    ``expected_hash``) and return ``(status, reason, citation)``.
+
+    ``status`` is ``"met"`` or ``"unmet"``. ``reason`` is ``None`` when
+    ``status == "met"``, otherwise one of the ``_REASON_*`` constants
+    identifying exactly why this evidence does not back a ``"met"``
+    verdict -- see :func:`build_tier_report`'s docstring for what each
+    reason means. ``citation`` is populated only when ``status == "met"``.
+
+    This is a pure grading step over an already-resolved file path -- it
+    does not decide *whether* evidence was given at all (that is
+    :func:`_build_tier_item`'s job, via :data:`_REASON_NO_EVIDENCE` /
+    :data:`_REASON_INVALID_EVIDENCE`), only what a given evidence file
+    proves once one *is* named.
+    """
+    try:
+        envelope = _read_envelope(file)
+    except SignoffError:
+        return "unmet", _REASON_UNREADABLE_EVIDENCE, None
+
+    if not isinstance(envelope, dict):
+        return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
+
+    try:
+        check_kind = _classify(envelope, file)
+    except SignoffError:
+        return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
+
+    if check_kind == "error":
+        return "unmet", _REASON_CHECK_ERRORED, None
+
+    if not _check_passed(check_kind, envelope):
+        return "unmet", _REASON_CHECK_FAILED, None
+
+    provenance = envelope.get("provenance") or {}
+    input_block = provenance.get("input") or {}
+    actual_hash = input_block.get("content_hash")
+    if expected_hash is not None and actual_hash != expected_hash:
+        return "unmet", _REASON_STALE_EVIDENCE, None
+
+    citation = {
+        "file": file,
+        "kind": check_kind,
+        "check_status": envelope.get("status"),
+        "content_hash": actual_hash,
+        "exit_status": 0,
+    }
+    return "met", None, citation
+
+
 def _build_tier_item(
     *,
     tier: str,
@@ -684,41 +793,19 @@ def _build_tier_item(
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
-    :func:`build_tier_report`'s docstring for the full met/unmet rule."""
+    :func:`build_tier_report`'s docstring for the full met/unmet rule and
+    the ``reason`` enum."""
     citation = None
     status = "unmet"
+    reason: str | None = _REASON_NO_EVIDENCE
 
     raw_entry = _lookup_evidence(evidence, item_id, partition)
     if raw_entry is not None:
         file, expected_hash = _normalize_evidence_entry(raw_entry)
-        if file is not None:
-            try:
-                envelope = _read_envelope(file)
-            except SignoffError:
-                envelope = None
-            if isinstance(envelope, dict):
-                try:
-                    check_kind = _classify(envelope, file)
-                except SignoffError:
-                    check_kind = None
-                if (
-                    check_kind is not None
-                    and check_kind != "error"
-                    and _check_passed(check_kind, envelope)
-                ):
-                    provenance = envelope.get("provenance") or {}
-                    input_block = provenance.get("input") or {}
-                    actual_hash = input_block.get("content_hash")
-                    stale = expected_hash is not None and actual_hash != expected_hash
-                    if not stale:
-                        citation = {
-                            "file": file,
-                            "kind": check_kind,
-                            "check_status": envelope.get("status"),
-                            "content_hash": actual_hash,
-                            "exit_status": 0,
-                        }
-                        status = "met"
+        if file is None:
+            reason = _REASON_INVALID_EVIDENCE
+        else:
+            status, reason, citation = _grade_evidence(file, expected_hash)
 
     return {
         "tier": tier,
@@ -728,5 +815,6 @@ def _build_tier_item(
         "text": text,
         "notes": notes,
         "status": status,
+        "reason": reason,
         "citation": citation,
     }
