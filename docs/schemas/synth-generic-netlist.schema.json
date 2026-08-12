@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/synth-generic-netlist.schema.json",
+  "title": "klayout-tools generic (technology-independent) gate netlist",
+  "description": "An engine-agnostic, technology-independent gate-level netlist -- the input Epic #704 Phase 2's technology-mapping stage maps onto a PDK's Liberty-described standard-cell library. Flat single-module scope: no sub-module instantiation. See docs/design/synth-techmap-stage-contract.md (issue #873) for the full contract, the ten-primitive cell vocabulary, and the interim Yosys-derived on-ramp before a native elaboration stage exists.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "top", "ports", "cells"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "klt.synth.generic-netlist/1",
+      "description": "Format identifier + major version. Bump the trailing integer only on a breaking (non-additive) change to this shape."
+    },
+    "top": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The design's (flat) top module name."
+    },
+    "ports": {
+      "type": "array",
+      "description": "The module's primary input/output/inout ports, in declaration order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "direction", "bits"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Port name as declared in the source RTL (e.g. \"a\" for a bus, \"clk\" for a scalar)."
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["input", "output", "inout"],
+            "description": "\"inout\" is accepted structurally (a tri-state I/O pad) but unmapped by the v1 technology-mapping stage -- see docs/design/synth-techmap-stage-contract.md section 8."
+          },
+          "bits": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Ordered list (MSB-first for a bus) of individual net names this port expands to -- \"a[3]\", \"a[2]\", ... for a 4-bit bus, \"[\\\"clk\\\"]\" for a scalar. Matches native/statime/src/netlist.rs's own bit-naming convention for the mapped-netlist dialect one stage downstream."
+          }
+        }
+      }
+    },
+    "cells": {
+      "type": "array",
+      "description": "Generic-cell instances forming the design's combinational/sequential logic.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "connections"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Instance name, unique within the module."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "$not",
+              "$buf",
+              "$and2",
+              "$nand2",
+              "$or2",
+              "$nor2",
+              "$xor2",
+              "$xnor2",
+              "$mux2",
+              "$dff"
+            ],
+            "description": "One of the ten v1 technology-independent primitives -- see docs/design/synth-techmap-stage-contract.md section 2.2 for each type's pin list and function."
+          },
+          "connections": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": { "type": "string", "minLength": 1 },
+            "description": "Maps each pin name the cell `type` declares (e.g. {\"A\", \"B\", \"Y\"} for $and2; {\"D\", \"CLK\", \"Q\"}, optionally plus \"RST\"/\"EN\", for $dff) to a connected net name -- either one of `ports[].bits` or an implicit internal net not declared elsewhere."
+          }
+        }
+      }
+    }
+  }
+}

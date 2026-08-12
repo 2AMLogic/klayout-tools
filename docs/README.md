@@ -76,6 +76,7 @@ docs/
     siliconcompiler-core-survey.md
     sim-evidence-discipline-spike.md
     spice-corner-runner-spike.md
+    synth-techmap-stage-contract.md
     synthesize-qor-improvements-survey.md
     wasm-spice-playground-spike.md
     yosys-synthesis-spike.md
@@ -83,6 +84,7 @@ docs/
     em-site-export.schema.json
     remote-sim-ami-manifest.schema.json
     socket.schema.json
+    synth-generic-netlist.schema.json
   guides/                # how-to guides
     building-klayout-macos.md
     github-action.md
