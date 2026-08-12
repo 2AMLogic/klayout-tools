@@ -1284,6 +1284,79 @@ def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     assert report["clock_skew_ns"] is None
 
 
+# --------------------------------------------------------------------------- #
+# Post-placement DEF export (issue #785). A debug artifact for the fleet
+# DSE congestion pre-check, deliberately kept out of the response contract.
+# --------------------------------------------------------------------------- #
+
+
+def test_place_stage_script_writes_a_placement_def(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    run_place_and_route(request_path)
+
+    output_dir = place_and_route.artifact_dir(request_path)
+    place_script = os.path.join(output_dir, "pnr_gcd_place.tcl")
+    written = _script_write_def_path(place_script)
+    assert written == place_and_route.placement_def_path(output_dir, "gcd")
+    assert written.endswith("gcd_place.def")
+    # Distinct from the routed DEF the `route` stage writes -- one must
+    # never overwrite the other.
+    assert written != os.path.join(output_dir, "gcd.def")
+
+
+def test_floorplan_and_cts_stage_scripts_write_no_def(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="cts")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place", "cts"))
+
+    run_place_and_route(request_path)
+
+    output_dir = place_and_route.artifact_dir(request_path)
+    assert (
+        _script_write_def_path(os.path.join(output_dir, "pnr_gcd_floorplan.tcl"))
+        is None
+    )
+    assert _script_write_def_path(os.path.join(output_dir, "pnr_gcd_cts.tcl")) is None
+
+
+def test_placement_def_is_not_reported_in_the_response(tmp_path, monkeypatch):
+    """AC4 of issue #785: the pre-check must not change this command's
+    request/response contract. The placement DEF is an on-disk artifact
+    only -- `def_path` still means "the routed DEF, or null"."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["def_path"] is None
+    placement_def = place_and_route.placement_def_path(
+        place_and_route.artifact_dir(request_path), "gcd"
+    )
+    assert placement_def not in json.dumps(report)
+
+
+def test_route_stage_still_reports_the_routed_def_not_the_placement_def(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    output_dir = place_and_route.artifact_dir(request_path)
+    assert report["def_path"] == os.path.join(output_dir, "gcd.def")
+    assert report["def_path"] != place_and_route.placement_def_path(output_dir, "gcd")
+
+
+def test_artifact_dir_is_dot_klt_place_and_route_next_to_the_request(tmp_path):
+    request_path = str(tmp_path / "nested" / "request.json")
+    assert place_and_route.artifact_dir(request_path) == os.path.join(
+        str(tmp_path / "nested"), ".klt", "place-and-route"
+    )
+
+
 def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None

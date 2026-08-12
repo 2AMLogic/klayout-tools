@@ -453,6 +453,33 @@ def load_request(request_path: str) -> dict[str, Any]:
     )
 
 
+def artifact_dir(request_path: str) -> str:
+    """Return the directory this command writes every debug artifact to for
+    the request at ``request_path`` -- ``.klt/place-and-route/`` next to the
+    request file, the "next to the input" convention every other verb uses.
+
+    Public so an out-of-band consumer (the fleet DSE congestion pre-check,
+    issue #785) can locate a run's artifacts without re-deriving the layout
+    convention or reading a response field that does not exist. Purely a
+    path computation: never creates the directory, never touches the disk.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.abspath(request_path)), ".klt", "place-and-route"
+    )
+
+
+def placement_def_path(output_dir: str, hdl_toplevel: str) -> str:
+    """Return the path of the post-``place``-stage DEF debug artifact.
+
+    Distinct from the routed DEF (``<hdl_toplevel>.def``, written by the
+    ``route`` stage and reported as the response's ``def_path``): this one
+    is ``<hdl_toplevel>_place.def`` and is **never** reported in the
+    response. See the ``write_def`` call in :func:`_stage_script_lines` for
+    why it exists and why it stays out of the contract.
+    """
+    return os.path.join(output_dir, f"{hdl_toplevel}_place.def")
+
+
 def run_place_and_route(
     request_path: str,
     *,
@@ -572,7 +599,7 @@ def run_place_and_route(
             f"-- cannot reach target_stage '{target_stage}'"
         )
 
-    output_dir = os.path.join(request_dir, ".klt", "place-and-route")
+    output_dir = artifact_dir(request_path)
     try:
         os.makedirs(output_dir, exist_ok=True)
     except OSError as exc:
@@ -1405,7 +1432,18 @@ def _stage_script_lines(
     )
     lines += _violation_count_lines()
 
-    if stage == "route":
+    if stage == "place":
+        # Post-placement DEF export (issue #785). Written as a *debug
+        # artifact only* -- deliberately NOT surfaced in the response's
+        # `def_path` field, which stays "the routed DEF, or null" exactly
+        # as before, so this command's request/response contract is
+        # byte-identical to before this export existed. Its purpose is to
+        # give a post-global-placement congestion pre-check (which runs
+        # outside this command, in a fleet DSE loop) real cell/pin geometry
+        # to work from without a second OpenROAD round trip; the path is
+        # derivable by any caller via `placement_def_path()` below.
+        lines += [f"write_def {placement_def_path(output_dir, hdl_toplevel)}"]
+    elif stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         lines += [f"write_def {def_path}"]
 
