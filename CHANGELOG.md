@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-12 — `klt mom`'s PEEC partial self-inductance
+  (`inductance_matrix_nh[j][j]`) no longer over-predicts by a systematic
+  ~0.3% (issue #836). Each filament's self term previously substituted an
+  equal-area circle's self geometric mean distance into the thin-wire mutual
+  -inductance formula; it is now computed exactly, via Hoer & Love's closed
+  form for the partial inductance of a rectangular bar against itself
+  (`native/mom/src/peec.rs`'s `self_partial_inductance_nh`). Measured against
+  the mean-distance asymptote for a square cross-section, the five bar
+  geometries this issue cited went from a +0.24–0.37% systematic
+  over-prediction to `< 0.05%` residual (dominated by the mutual-term
+  bundle-averaging approximation and the asymptote's own remainder, not the
+  self term). No response-shape change — `inductance_matrix_nh`'s field
+  shape and `schema_version` are unaffected, only the numeric values it
+  reports. See `docs/design/mom-validation.md`'s "Inductance/resistance"
+  section for the full measured validation.
 - 2026-08-12 — `klt synthesize` now reports `instance_count` /
   `instance_counts_by_type` as a **recursive rollup over the whole design
   hierarchy** (issue #821). Both fields were read straight out of

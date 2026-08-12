@@ -307,6 +307,14 @@ pub struct Filament {
     /// order (e.g. `axis == 1` (y) -> `[x, z]`).
     pub transverse_um: [f64; 2],
     pub area_um2: f64,
+    /// The filament's two transverse extents (um), in the same ascending
+    /// axis-index order as `transverse_um` -- i.e. the filament's true
+    /// rectangular cross-section width and height, not just their product
+    /// (`area_um2`). `peec::self_partial_inductance_nh` needs the actual
+    /// rectangle shape (not merely its area) for the exact Hoer & Love
+    /// closed-form self-inductance (issue #836) -- an equal-area substitute
+    /// shape is exactly the approximation that closed form replaces.
+    pub extent_um: [f64; 2],
 }
 
 /// The shared bar geometry PEEC discretises every conductor into: one
@@ -470,6 +478,7 @@ pub fn discretize_bars(
                     conductor_index,
                     transverse_um: [uc, vc],
                     area_um2: ulen * vlen,
+                    extent_um: [ulen, vlen],
                 });
             }
         }
