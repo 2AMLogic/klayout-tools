@@ -30,6 +30,11 @@ pub const DEFAULT_FILAMENT_SIZE_UM: f64 = 1.0;
 /// current-flow axis rather than a cross-section.
 pub const DEFAULT_SEGMENT_SIZE_UM: f64 = 5.0;
 
+/// Default port reference impedance (ohms) used when a `ports` entry omits
+/// `reference_impedance_ohm` -- 50 ohms, the standard RF/microwave
+/// convention (issue #894, Phase 2b of the MoM epic #701).
+pub const DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM: f64 = 50.0;
+
 #[derive(Debug, Deserialize)]
 pub struct MomRequest {
     /// Relative permittivity of the uniform background dielectric. The MVP
@@ -78,6 +83,37 @@ pub struct MomRequest {
     /// `frequencies_hz` is non-empty.
     #[serde(default)]
     pub segment_size_um: Option<f64>,
+    /// Opt into port definition + de-embedding (issue #894, Phase 2b of the
+    /// MoM epic #701): report S-parameters, referenced to each port's
+    /// reference plane and reference impedance, alongside the raw partial
+    /// impedance matrix `full_wave_sweep` already reports. Empty (the
+    /// default) preserves the original contract exactly. When non-empty,
+    /// must have **exactly two** entries (the MVP's canonical two-port
+    /// case), `frequencies_hz` must be non-empty, and the request must have
+    /// exactly two conductors satisfying the same bar-shaped-conductor
+    /// restriction the full-wave solve itself requires -- see
+    /// `fullwave.rs`'s "Ports and de-embedding" module docs.
+    #[serde(default)]
+    pub ports: Vec<PortRequest>,
+}
+
+/// One port definition for the full-wave solve's S-parameter extraction
+/// (issue #894): a reference plane location along the shared current-flow
+/// axis, plus a reference impedance. See `fullwave.rs`'s "Ports and
+/// de-embedding" module docs for how these are used.
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct PortRequest {
+    /// Axial position of this port's reference plane, in micrometers,
+    /// measured along the full-wave solve's shared current-flow axis (the
+    /// same axis `classify_full_wave_bars` resolves). Must lie within
+    /// `[axis_lo_um, axis_hi_um]` of the modeled bar span -- a port outside
+    /// the modeled geometry has nothing to de-embed against.
+    pub position_um: f64,
+    /// Port reference impedance, ohms (real, positive). Omit to use
+    /// `DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM` (50 ohms, the standard RF
+    /// convention).
+    #[serde(default)]
+    pub reference_impedance_ohm: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +247,32 @@ pub struct FullWavePoint {
     /// Phase constant (the imaginary part of gamma), radians per meter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_rad_per_m: Option<f64>,
+    /// De-embedded 2-port S-parameters at this frequency, referenced to each
+    /// port's `position_um`/`reference_impedance_ohm` (issue #894, Phase 2b
+    /// of the MoM epic #701). `Some` only when the request's `ports` had
+    /// exactly two entries; `None` (omitted from the JSON entirely)
+    /// otherwise -- purely additive, no `schema_version` bump, same
+    /// convention as this struct's own fields above. See `fullwave.rs`'s
+    /// "Ports and de-embedding" module docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_parameters: Option<SParameters>,
+}
+
+/// One frequency point's de-embedded 2-port S-parameters (issue #894). Each
+/// `sJK` is complex, split into real/imaginary parts for the JSON contract
+/// (matching `impedance_matrix_real_ohm`/`impedance_matrix_imag_ohm`'s own
+/// convention rather than a nested `{real, imag}` object) -- port 1 is
+/// `ports[0]`, port 2 is `ports[1]`, in the request's order.
+#[derive(Debug, Serialize)]
+pub struct SParameters {
+    pub s11_real: f64,
+    pub s11_imag: f64,
+    pub s12_real: f64,
+    pub s12_imag: f64,
+    pub s21_real: f64,
+    pub s21_imag: f64,
+    pub s22_real: f64,
+    pub s22_imag: f64,
 }
 
 /// `1` -- capacitance-only (issue #718/#719).
@@ -227,4 +289,8 @@ pub struct FullWavePoint {
 /// policy ("adding new fields does not require a bump"), which the `#2`
 /// bump above predates and did not strictly need either -- see this issue's
 /// acceptance criteria for the explicit "no schema_version bump" call.
+///
+/// Issue #894 adds `FullWavePoint::s_parameters` (`null`/omitted unless the
+/// request set exactly two `ports`) under the same "purely additive, no
+/// bump" convention #893 established.
 pub const RESPONSE_SCHEMA_VERSION: u32 = 2;

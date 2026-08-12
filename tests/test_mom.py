@@ -709,22 +709,23 @@ def _loop_fixture(
     layout.write(str(path))
 
 
-def _loop_spec(path, *, frequencies_hz: list[float]) -> None:
+def _loop_spec(
+    path, *, frequencies_hz: list[float], ports: list[dict] | None = None
+) -> None:
     entry = {"z0_um": 0.0, "z1_um": 2.0}
-    path.write_text(
-        json.dumps(
-            {
-                "background_permittivity": 1.0,
-                "panel_size_um": 2.0,
-                "frequencies_hz": frequencies_hz,
-                "segment_size_um": 5.0,
-                "stackup": [
-                    {"layer": "1/0", "conductor": "go", **entry},
-                    {"layer": "2/0", "conductor": "return", **entry},
-                ],
-            }
-        )
-    )
+    spec: dict = {
+        "background_permittivity": 1.0,
+        "panel_size_um": 2.0,
+        "frequencies_hz": frequencies_hz,
+        "segment_size_um": 5.0,
+        "stackup": [
+            {"layer": "1/0", "conductor": "go", **entry},
+            {"layer": "2/0", "conductor": "return", **entry},
+        ],
+    }
+    if ports is not None:
+        spec["ports"] = ports
+    path.write_text(json.dumps(spec))
 
 
 def test_run_mom_full_wave_sweep(tmp_path):
@@ -823,3 +824,117 @@ def test_cli_text_output_renders_full_wave_sweep(tmp_path, capsys):
     assert "full_wave_segment_count" in out
     assert "full-wave sweep:" in out
     assert "Z0=" in out
+
+
+# --- ports and de-embedding (issue #894, Phase 2b) --------------------------
+
+
+def test_run_mom_ports_adds_s_parameters(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    ports = [
+        {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+        {"position_um": 500.0, "reference_impedance_ohm": 50.0},
+    ]
+    _loop_spec(spec, frequencies_hz=[1.0e9], ports=ports)
+
+    report = run_mom(str(gds), str(spec))
+
+    assert report["ports"] == ports
+    point = report["full_wave_sweep"][0]
+    s = point["s_parameters"]
+    assert set(s) == {
+        "s11_real",
+        "s11_imag",
+        "s12_real",
+        "s12_imag",
+        "s21_real",
+        "s21_imag",
+        "s22_real",
+        "s22_imag",
+    }
+    # Reciprocal network: S12 == S21.
+    assert s["s12_real"] == pytest.approx(s["s21_real"], abs=1e-9)
+    assert s["s12_imag"] == pytest.approx(s["s21_imag"], abs=1e-9)
+
+
+def test_run_mom_ports_default_reference_impedance_is_50_ohm(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    # Omit reference_impedance_ohm entirely -- must default to 50 ohm.
+    ports = [{"position_um": 0.0}, {"position_um": 500.0}]
+    _loop_spec(spec, frequencies_hz=[1.0e9], ports=ports)
+
+    report = run_mom(str(gds), str(spec))
+    assert report["ports"] == [
+        {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+        {"position_um": 500.0, "reference_impedance_ohm": 50.0},
+    ]
+
+
+def test_run_mom_without_ports_omits_ports_and_s_parameters_fields(tmp_path):
+    """The default (ports unset) must keep the original response shape
+    exactly -- no new keys at all, matching
+    test_run_mom_without_frequencies_hz_omits_full_wave_fields's precedent."""
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[1.0e9])
+
+    report = run_mom(str(gds), str(spec))
+    assert "ports" not in report
+    assert "s_parameters" not in report["full_wave_sweep"][0]
+
+
+def test_run_mom_wrong_port_count_is_a_clear_error(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[1.0e9], ports=[{"position_um": 0.0}])
+
+    with pytest.raises(MomError, match="exactly two ports"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_port_position_outside_modeled_span_is_a_clear_error(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)  # 500um long
+    ports = [{"position_um": 0.0}, {"position_um": 600.0}]
+    _loop_spec(spec, frequencies_hz=[1.0e9], ports=ports)
+
+    with pytest.raises(MomError, match="outside the modeled bar span"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_ports_without_frequencies_hz_is_a_clear_error(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    ports = [{"position_um": 0.0}, {"position_um": 500.0}]
+    # frequencies_hz deliberately empty -- S-parameters are undefined
+    # without a swept frequency.
+    _loop_spec(spec, frequencies_hz=[], ports=ports)
+
+    with pytest.raises(MomError, match="frequencies_hz"):
+        run_mom(str(gds), str(spec))
+
+
+def test_cli_text_output_renders_ports_and_s_parameters(tmp_path, capsys):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    ports = [
+        {"position_um": 0.0, "reference_impedance_ohm": 50.0},
+        {"position_um": 500.0, "reference_impedance_ohm": 50.0},
+    ]
+    _loop_spec(spec, frequencies_hz=[1.0e9], ports=ports)
+
+    assert main(["mom", str(gds), str(spec)]) == 0
+    out = capsys.readouterr().out
+    assert "ports:" in out
+    assert "reference_impedance_ohm=50" in out
+    assert "S11=" in out
+    assert "S21=" in out

@@ -32,6 +32,15 @@ and propagation constant. This is Phase 2a of the same epic, delivered by
 [#893](https://github.com/2AMLogic/klayout-tools/issues/893) — see
 "Full-wave frequency sweep" below.
 
+`klt mom` can further, optionally (a two-entry `ports` array in the spec
+file, alongside `frequencies_hz`), report **de-embedded S-parameters** —
+turning the full-wave solve's raw partial-impedance/characteristic-impedance
+output into the standard RF two-port network representation, referenced to
+a chosen pair of reference planes and reference impedances. This is Phase 2b
+of the same epic, delivered by
+[#894](https://github.com/2AMLogic/klayout-tools/issues/894) — see "Port
+definition and de-embedding" below.
+
 ```
 klt mom <file> <spec> [--top <cell>] [--format text|json]
 ```
@@ -249,7 +258,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field                     | Type              | Description                                                                                     |
 | ------------------------- | ----------------- | ------------------------------------------------------------------------------------------------- |
-| `schema_version`          | integer           | Version of this command's JSON shape. `1` = capacitance-only (#718/#719); `2` = adds the PEEC fields below, each present only when `compute_inductance` was set (#797). The full-wave fields below (#893) are added **without** a further bump — purely additive, each present only when `frequencies_hz` was non-empty; see `docs/json-contract.md`'s envelope policy. |
+| `schema_version`          | integer           | Version of this command's JSON shape. `1` = capacitance-only (#718/#719); `2` = adds the PEEC fields below, each present only when `compute_inductance` was set (#797). The full-wave fields below (#893) and the ports/S-parameter fields (#894) are added **without** a further bump — purely additive, each present only when `frequencies_hz` was non-empty / `ports` was set, respectively; see `docs/json-contract.md`'s envelope policy. |
 | `file`                    | string            | The input layout path exactly as provided.                                                        |
 | `spec`                    | string            | The spec file path exactly as provided.                                                           |
 | `background_permittivity` | number            | Resolved from the spec (echoed for provenance).                                                   |
@@ -264,7 +273,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `filament_count`          | integer           | **Only present when `compute_inductance: true`.** Total PEEC filament count across every conductor (informational, mirrors `panel_count`). |
 | `segment_size_um`         | number            | **Only present when `frequencies_hz` is non-empty.** Resolved full-wave axial segment size — the spec's value, or the `5.0` default. |
 | `full_wave_segment_count` | integer           | **Only present when `frequencies_hz` is non-empty.** Total axial segment count across every conductor for the full-wave mesh (informational, mirrors `panel_count`/`filament_count`; identical at every swept frequency). |
-| `full_wave_sweep`         | array\<object\>   | **Only present when `frequencies_hz` is non-empty.** One entry per requested frequency, in the same order — see "Full-wave frequency sweep" below. |
+| `full_wave_sweep`         | array\<object\>   | **Only present when `frequencies_hz` is non-empty.** One entry per requested frequency, in the same order — see "Full-wave frequency sweep" below. Each entry additionally gains an `s_parameters` field when `ports` is set — see "Port definition and de-embedding" below. |
+| `ports`                   | array\<object\>   | **Only present when the spec sets a two-entry `ports` array.** Echoes the resolved port config (`position_um`/`reference_impedance_ohm`, defaults applied) — see "Port definition and de-embedding" below. |
 
 ### Reading the matrix
 
@@ -535,6 +545,144 @@ clear error before any work is attempted — the same role the panel-count
 and filament-count guards play above. Increase `segment_size_um` to work
 around it.
 
+## Port definition and de-embedding
+
+Set a two-entry `ports` array in the spec file to additionally report
+**S-parameters**, de-embedded to a chosen pair of reference planes and
+reference impedances — turning the raw partial-impedance/characteristic-
+impedance output above into the standard RF two-port network
+representation. This is Phase 2b of the Method-of-Moments epic
+([#894](https://github.com/2AMLogic/klayout-tools/issues/894)): it builds
+directly on the full-wave sweep above (`frequencies_hz` must be non-empty,
+and the same two-conductor bar-shaped restriction applies) and needs no new
+geometric scope of its own.
+
+```json
+{
+  "position_um": 0.0,
+  "reference_impedance_ohm": 50.0
+}
+```
+
+- `position_um` (required, number) — this port's reference-plane location,
+  in micrometers, along the full-wave solve's shared current-flow axis. Must
+  lie within `[axis_lo_um, axis_hi_um]` of the modeled bar span (the
+  conductors' shared axial extent) — a port outside the modeled geometry has
+  nothing to de-embed against.
+- `reference_impedance_ohm` (optional, number, default `50.0`) — this port's
+  reference impedance, ohms (real, positive). The standard RF convention
+  (50 ohm) if omitted.
+
+`ports` must have **exactly two entries** — the MVP's canonical two-port
+transmission-line case, matching the characteristic-impedance/propagation-
+constant derivation's own restriction to exactly two conductors above.
+`ports[0]`'s position must be strictly less than `ports[1]`'s (ports are
+always read "near" then "far" along the axis).
+
+### Method: ABCD cascade + de-embedding
+
+The full-wave solve already treats the whole modeled structure as one
+uniform transmission line (a single `Z0(omega)`/`gamma(omega)` pair, see
+"Full-wave frequency sweep" above). De-embedding uses the standard ABCD
+(chain-parameter) technique: model the total structure as three cascaded
+uniform-line segments — `feed1` (`axis_lo_um` to `ports[0].position_um`),
+the device-under-test ("DUT", `ports[0].position_um` to
+`ports[1].position_um`), and `feed2` (`ports[1].position_um` to
+`axis_hi_um`) — and recover the DUT's own ABCD matrix by cascading the
+*inverse* of each feed segment's ABCD matrix around the total:
+
+```text
+ABCD_total = ABCD_feed1 * ABCD_dut * ABCD_feed2
+ABCD_dut   = ABCD_feed1^-1 * ABCD_total * ABCD_feed2^-1
+```
+
+Each segment's ABCD matrix is the standard uniform-line chain matrix for
+length `l` at this line's own `Z0`/`gamma`: `A = D = cosh(gamma*l)`, `B =
+Z0*sinh(gamma*l)`, `C = sinh(gamma*l)/Z0`. `ABCD_dut` is then converted to
+2-port S-parameters at each port's own (possibly distinct) real reference
+impedance via the standard ABCD-to-S conversion (Pozar, *Microwave
+Engineering*, Table 4.2). A port placed exactly at its corresponding axial
+end has a zero-length (identity-matrix) feed segment, so de-embedding
+reduces to a no-op automatically in that case — there is no special-cased
+"no feed" branch. See `native/mom/src/fullwave.rs`'s "Ports and
+de-embedding" module docs for the full derivation.
+
+### Reading the S-parameters
+
+Each `full_wave_sweep` entry gains an `s_parameters` field (present only
+when the request set exactly two `ports`):
+
+```json
+{
+  "frequency_hz": 1000000000.0,
+  "s_parameters": {
+    "s11_real": 8.5e-13, "s11_imag": -9.6e-15,
+    "s12_real": 0.999936, "s12_imag": -0.011323,
+    "s21_real": 0.999936, "s21_imag": -0.011323,
+    "s22_real": 8.5e-13, "s22_imag": -9.6e-15
+  }
+}
+```
+
+`sJK_real`/`sJK_imag` is the complex S-parameter `S_JK` (port 1 = `ports[0]`,
+port 2 = `ports[1]`) at this frequency — split into real/imaginary parts,
+the same convention `impedance_matrix_real_ohm`/`impedance_matrix_imag_ohm`
+already use, rather than a nested `{real, imag}` object. For a reciprocal
+network (always true here, a passive linear structure) `S12 == S21`.
+
+### Worked example: matched two-wire transmission line
+
+The same two-wire loop as the full-wave sweep's own worked example, with
+ports placed at both physical ends and the reference impedance set near the
+line's own characteristic impedance — the classical **matched line** case,
+where `S11 == S22 == 0` (no reflection) and `S21 == S12 == exp(-gamma*L)`
+(pure propagation delay/attenuation):
+
+```json
+{
+  "background_permittivity": 1.0,
+  "panel_size_um": 2.0,
+  "frequencies_hz": [1.0e9],
+  "segment_size_um": 5.0,
+  "ports": [
+    { "position_um": 0.0,   "reference_impedance_ohm": 452.0 },
+    { "position_um": 500.0, "reference_impedance_ohm": 452.0 }
+  ],
+  "stackup": [
+    { "layer": "1/0", "conductor": "go",     "z0_um": 0.0, "z1_um": 2.0 },
+    { "layer": "2/0", "conductor": "return", "z0_um": 0.0, "z1_um": 2.0 }
+  ]
+}
+```
+
+Placing the ports **inward** from the physical ends (e.g.
+`position_um: 100.0` and `position_um: 400.0` on a 500 µm bar) instead
+exercises de-embedding: the reported S-parameters describe only the 300 µm
+segment between the ports, with the two 100 µm feed stubs' own contribution
+stripped out — see `tests/test_mom_ports_validation.py`'s
+`test_de_embedding_matches_the_dut_alone_closed_form` for the measured
+agreement (checked against the closed-form propagation phase over the DUT
+length alone, not the full modeled length) and
+`native/mom/src/fullwave.rs`'s own Rust-level unit tests
+(`de_embedding_recovers_the_dut_alone_s_parameters`) for the same check
+against the native solver directly.
+
+### Port-related error paths
+
+- **Wrong port count.** `ports` with anything other than exactly 0 or 2
+  entries is rejected with a clear "exactly two ports" error.
+- **Port outside the modeled span.** A `position_um` outside
+  `[axis_lo_um, axis_hi_um]` is rejected — there is nothing to de-embed
+  against beyond the modeled geometry.
+- **Non-ascending ports.** `ports[1].position_um` must be strictly greater
+  than `ports[0].position_um`.
+- **`ports` without `frequencies_hz`.** S-parameters are only defined at a
+  swept frequency; a spec setting `ports` but omitting (or emptying)
+  `frequencies_hz` is rejected with a clear error.
+- **More or fewer than two conductors.** Same restriction the
+  characteristic-impedance/propagation-constant derivation already has —
+  `ports` requires exactly two conductors.
+
 ## Worked example: parallel plate
 
 ```bash
@@ -661,13 +809,14 @@ oracles), for the exact geometry and measured accuracy.
   for the *shunt* capacitance (the standard "full-wave PEEC" approximation
   — see "Full-wave frequency sweep" above); a fully frequency-dependent
   (retarded) capacitance/potential-coefficient solve is a follow-up.
-- **No port definitions or de-embedding yet.** The full-wave solve reports
-  partial impedance and (for the two-conductor case) characteristic
-  impedance/propagation constant for the *modeled bar length as given* —
-  there is no port excitation, reference-impedance normalisation, or
-  de-embedding to turn this into a general S-parameter network for an
-  arbitrary N-port structure. That is Phase 2b of epic #701
-  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)).
+- **Ports/de-embedding are two-port-only (MVP).** Setting `ports` (see "Port
+  definition and de-embedding" above) reports S-parameters for exactly the
+  canonical two-port transmission-line case — the same two-conductor
+  restriction the characteristic-impedance/propagation-constant derivation
+  already has. A general N-port network (more than two conductors/ports) is
+  a follow-up beyond this MVP, delivered by
+  [#894](https://github.com/2AMLogic/klayout-tools/issues/894), Phase 2b of
+  epic #701.
 - **PEEC inductance/resistance and the full-wave solve are both
   bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
   above's "bar-shaped-conductor MVP restriction" — a materially narrower
@@ -726,8 +875,8 @@ analogous cap on the full-wave solve's axial mesh.
 
 | Exit code | Meaning                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
-| `0`       | Success — the capacitance matrix (and, if requested, the PEEC inductance/resistance and/or the full-wave sweep) was computed and returned. |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true`/full-wave conductor that does not satisfy the shared bar-shape scope, a missing `conductivity_S_per_m`, a non-positive `frequencies_hz` entry, or the filament-count/segment-count guards above). |
+| `0`       | Success — the capacitance matrix (and, if requested, the PEEC inductance/resistance, the full-wave sweep, and/or de-embedded S-parameters) was computed and returned. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true`/full-wave conductor that does not satisfy the shared bar-shape scope, a missing `conductivity_S_per_m`, a non-positive `frequencies_hz` entry, the filament-count/segment-count guards above, or (see "Port-related error paths" above) a `ports` array with other than exactly two entries, a port position outside the modeled bar span, non-ascending port positions, `ports` set without `frequencies_hz`, or `ports` set on other than exactly two conductors). |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                        |
 
 ## See also
@@ -744,11 +893,11 @@ analogous cap on the full-wave solve's axial mesh.
   PEEC inductance/resistance solve documented above.
 - [#893](https://github.com/2AMLogic/klayout-tools/issues/893) — delivered
   the full-wave frequency sweep documented above (Phase 2a).
-  [#894](https://github.com/2AMLogic/klayout-tools/issues/894) (Phase 2b,
-  port definition + de-embedding) and
+- [#894](https://github.com/2AMLogic/klayout-tools/issues/894) — delivered
+  the port definition + de-embedding documented above (Phase 2b).
   [#895](https://github.com/2AMLogic/klayout-tools/issues/895) (Phase 2c,
-  cross-validation against an external MoM/FEM solver) are its planned
-  follow-ons.
+  cross-validation against an external MoM/FEM solver) is the next planned
+  follow-on.
 - [`docs/design/mom-validation.md`](../design/mom-validation.md) — closed-form
   validation and convergence-under-refinement for both the capacitance solver
   ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)) and the PEEC
@@ -764,3 +913,7 @@ analogous cap on the full-wave solve's axial mesh.
   characteristic-impedance closed form and the TEM propagation-constant
   identity, the measured agreement, and the stated tolerances (mirroring
   `docs/design/mom-validation.md`'s role for the earlier solves).
+- `tests/test_mom_ports_validation.py` — closed-form validation for port
+  definition + de-embedding (#894): the matched-line S-parameter closed
+  form, and the de-embedding-recovers-the-DUT-alone check, with the same
+  measured-agreement/tolerance convention as its full-wave sibling above.
