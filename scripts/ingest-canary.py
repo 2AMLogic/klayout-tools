@@ -23,11 +23,7 @@ documented in `blocks/README.md`:
 
 When a canary's GDS lands (see "GDS detection" below), this script also
 attaches `renders: {"overview": "renders/overview.png"}` -- the gallery
-thumbnail (#651, Option A) -- via `klt render`'s library function. Neither
-current canary is past the pre-layout stage yet, so this path is
-forward-compat/not exercised against real data today; see
-`tests/test_ingest_canary.py::test_gds_found_upgrades_to_ok_status` for its
-coverage against a synthetic GDS.
+thumbnail (#651, Option A) -- via `klt render`'s library function.
 
 Public-repo gate (fail-closed)
 -------------------------------
@@ -38,21 +34,33 @@ installed/authenticated, no network -- raises `IngestError` and nothing is
 written. There is no allowlist to keep in sync: the API call is the source
 of truth at ingest time, every run.
 
-Pre-layout blocks ship "sim-evidence cards"
----------------------------------------------
-Both wave-1 canaries (`gf180-bandgap`, `sky130-bandgap`) are in
-schematic/sim stage -- no GDS exists yet. For a block with no layout file
-under `layout/` (or the repo root), this script emits `status: "in design —
+Pre-layout blocks ship "sim-evidence cards"; refreshing a canary's render
+--------------------------------------------------------------------------
+A block with no layout file findable under `layout/` (or `gds/`, or the
+repo root -- see "GDS detection" below) gets `status: "in design —
 simulation evidence"` (the honest status chip, mirroring issue #140's
 "never oversell an incomplete block" rule) instead of `"ok"`/`"partial"`/
-`"no_artifacts"`. When a block's layout eventually lands, re-running this
-script against the same `--repo` finds the GDS and upgrades the entry to a
-normal `"ok"`/`"partial"` metrics record (layer/cell counts via the same
-`klt layers`/`klt cells` library functions `klt layout-metrics` uses) --
-same slug, same card. This upgrade path is implemented but not exercised by
-either of the two current canaries (both pre-layout); see
-`tests/test_ingest_canary.py::test_gds_found_upgrades_to_ok_status` for its
-only coverage, against a synthetic corpus GDS rather than real canary data.
+`"no_artifacts"`. Both wave-1 canaries started here.
+
+**Refreshing a canary's render as its layout advances is just re-running
+this same command** -- no separate refresh mechanism exists or is needed:
+
+    python scripts/ingest-canary.py --repo 2AMLogic/sky130-bandgap
+    python scripts/ingest-canary.py --repo 2AMLogic/gf180-bandgap
+
+Once a block's layout lands, this upgrades the entry to a normal
+`"ok"`/`"partial"` metrics record (layer/cell counts via the same `klt
+layers`/`klt cells` library functions `klt layout-metrics` uses) plus a
+fresh `renders.overview` render and `downloadable: true` -- same slug, same
+card, no hand-editing of `layout.json`. Both `sky130-bandgap` and
+`gf180-bandgap` exercise this path against their real, committed routed GDS
+as of issue #896 (`bandgap_core_routed.gds` under sky130-bandgap's
+`reports/LATEST`-pointed run directory, and `bandgap_top.gds` under
+gf180-bandgap's flatter `layout/bandgap_top/`) -- see
+`tests/test_ingest_canary.py::test_gds_found_upgrades_to_ok_status` for the
+synthetic-fixture unit coverage and
+`test_full_ingest_real_public_canary_with_layout` for the real-network
+integration coverage of both shapes.
 
 `sim/` evidence is heterogeneous across repos (different harnesses, still
 evolving) -- see this module's docstrings on `_extract_bullet_nominal` /
@@ -78,7 +86,9 @@ Clones are cached (fetched, not re-cloned) under `.cache/canary-repos/`
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -115,6 +125,23 @@ IN_DESIGN_STATUS = "in design — simulation evidence"
 
 _GDS_GLOBS = ("*.gds", "*.gds.gz", "*.oas")
 _LAYOUT_SEARCH_DIRS = ("layout", "gds", ".")
+
+# Directory names never worth descending into while hunting for the block's
+# own layout GDS -- issue #896. `reports`/`fixed-offset-variants`/`mim-
+# overlay-feasibility` hold historical run archives or feasibility probes
+# (many GDS files, none of them the current block), `drc`/`lvs` hold DRC/LVS
+# *report* trees (which may themselves contain unrelated fixture GDS, e.g.
+# gf180-bandgap's `layout/drc/fixtures/trivial_poly_res.gds`), and
+# `renders` holds this same pipeline's own PNG output on a re-run.
+_EXCLUDED_SEARCH_DIR_NAMES = frozenset(
+    {"reports", "fixtures", "drc", "lvs", "renders", "output"}
+)
+# How many directory levels to descend below a `_LAYOUT_SEARCH_DIRS` entry
+# when no `reports/LATEST` pointer is found (gf180-bandgap's
+# `layout/bandgap_top/bandgap_top.gds` is one level deep).
+_MAX_SEARCH_DEPTH = 3
+_LATEST_POINTER_NAME = "LATEST"
+_ROUTED_GDS_RE = re.compile(r"_routed(?!.*_inner)", re.IGNORECASE)
 
 
 class IngestError(Exception):
@@ -640,25 +667,131 @@ def build_signals(sim_dir: Path) -> dict[str, Any] | None:
 
 
 # --------------------------------------------------------------------------- #
-# GDS detection (forward-compat: not exercised by the two pre-layout canaries)
+# GDS detection (issue #62 forward-compat path; fixed for real canary shapes
+# by issue #896 -- see that issue's Curator Enhancement for the two real
+# directory shapes this now handles)
 # --------------------------------------------------------------------------- #
+
+
+def _select_best_gds(candidates: list[Path], *, strict: bool = False) -> Path | None:
+    """Among multiple GDS candidates in one directory, prefer a
+    `*_routed*.gds` (excluding `*_inner*`) match -- the fully assembled,
+    pad-ring/guard-ring-closed block -- over sub-block exports like
+    `amp_input_pair.gds`/`pnp_ctat.gds` that a `compose`/`draw` step also
+    writes into the same report directory.
+
+    A single unambiguous candidate is used as-is, *unless* it is itself an
+    `_inner` variant under `strict` mode -- a lone `*_inner.gds` with no
+    sibling non-`_inner` file is a pre-pad-ring/guard-ring intermediate,
+    not something safe to stage as "the" block layout. With multiple
+    candidates and no `*_routed*` match: `strict=False` (the default, used
+    for a plain `layout/*.gds`-style directory) falls back to alphabetical
+    first, matching this function's original behavior. `strict=True` (used
+    for a `reports/<run>/` directory, which is known to routinely hold
+    heterogeneous sub-block exports alongside the assembled block) instead
+    returns `None` -- silently staging a sub-block export as "the layout"
+    would be worse than reporting `IN_DESIGN_STATUS` for that run and
+    trying the next search location.
+    """
+    if not candidates:
+        return None
+    routed = [p for p in candidates if _ROUTED_GDS_RE.search(p.stem)]
+    if routed:
+        return sorted(routed)[0]
+    if len(candidates) == 1:
+        sole = candidates[0]
+        if not (strict and "_inner" in sole.stem.lower()):
+            return sole
+    if strict:
+        return None
+    return sorted(candidates)[0]
+
+
+def _gds_candidates_in_dir(d: Path) -> list[Path]:
+    """Non-recursive GDS glob directly inside `d`."""
+    candidates: list[Path] = []
+    for pattern in _GDS_GLOBS:
+        candidates.extend(p for p in d.glob(pattern) if p.is_file())
+    return candidates
+
+
+def _find_via_latest_pointer(d: Path) -> Path | None:
+    """Follow a `<block>/reports/LATEST` pointer file when present (sky130-
+    bandgap's convention: `layout/bandgap-core/reports/LATEST` is a plain-
+    text file -- not a symlink -- naming the current timestamped run
+    directory, e.g. `20260811-221633-a0ee5e7`). Returns the best GDS found
+    directly inside that run directory, or `None` if no such pointer file
+    exists under `d` or it does not resolve to a real, non-empty directory.
+
+    Bounded to `reports/LATEST` two levels below `d` (`d/reports/LATEST` and
+    `d/<block>/reports/LATEST`) -- not an unbounded `**` glob -- so a large
+    canary repo's many other `reports/` trees (DRC/LVS report archives, not
+    layout run archives) can't slow this down or get matched by accident.
+    """
+    for pointer in sorted(d.glob("reports/" + _LATEST_POINTER_NAME)) + sorted(
+        d.glob("*/reports/" + _LATEST_POINTER_NAME)
+    ):
+        if not pointer.is_file():
+            continue
+        run_name = pointer.read_text().strip()
+        if not run_name:
+            continue
+        run_dir = pointer.parent / run_name
+        if not run_dir.is_dir():
+            continue
+        best = _select_best_gds(_gds_candidates_in_dir(run_dir), strict=True)
+        if best is not None:
+            return best
+    return None
+
+
+def _find_via_recursive_search(d: Path) -> Path | None:
+    """Bounded recursive fallback: walk up to `_MAX_SEARCH_DEPTH` directory
+    levels below `d`, skipping `_EXCLUDED_SEARCH_DIR_NAMES` subtrees (report
+    archives, DRC/LVS fixture/report trees, this pipeline's own render
+    output), and return the best GDS among every candidate found this way.
+    Covers gf180-bandgap's flatter `layout/bandgap_top/bandgap_top.gds`
+    shape (one level below `layout/`, no `reports/LATEST` pointer) while
+    still excluding `layout/drc/fixtures/trivial_poly_res/*.gds`."""
+    root_depth = len(d.parts)
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(d):
+        depth = len(Path(dirpath).parts) - root_depth
+        if depth >= _MAX_SEARCH_DEPTH:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [n for n in dirnames if n not in _EXCLUDED_SEARCH_DIR_NAMES]
+        for name in filenames:
+            if any(fnmatch.fnmatch(name, pat) for pat in _GDS_GLOBS):
+                candidates.append(Path(dirpath) / name)
+    return _select_best_gds(candidates)
 
 
 def find_layout_gds(repo_dir: Path) -> Path | None:
     """Locate a layout stream under a canary repo's conventional `layout/`
     directory (falling back to `gds/` then the repo root). `None` when
-    absent -- both current canaries are pre-layout, so this always returns
-    `None` for them today; it exists so a future re-ingest after layout
-    lands upgrades the block automatically (see module docstring)."""
+    absent (a genuinely pre-layout canary).
+
+    Two strategies, tried in order for each of `_LAYOUT_SEARCH_DIRS`:
+
+    1. Follow a `reports/LATEST` pointer file if present (sky130-bandgap's
+       convention -- see `_find_via_latest_pointer`).
+    2. A bounded recursive search excluding report/fixture/render subtrees
+       (covers gf180-bandgap's flatter shape, and the original flat
+       `layout/*.gds` case this function always supported).
+
+    Either way, when a directory holds multiple GDS candidates, a
+    `*_routed*.gds` (non-`_inner`) match is preferred over alphabetical
+    first (see `_select_best_gds`) -- otherwise a sub-block export like
+    `amp_input_pair.gds` could sort ahead of the fully assembled block.
+    """
     for sub in _LAYOUT_SEARCH_DIRS:
         d = repo_dir if sub == "." else repo_dir / sub
         if not d.is_dir():
             continue
-        candidates: list[Path] = []
-        for pattern in _GDS_GLOBS:
-            candidates.extend(p for p in d.glob(pattern) if p.is_file())
-        if candidates:
-            return sorted(candidates)[0]
+        found = _find_via_latest_pointer(d) or _find_via_recursive_search(d)
+        if found is not None:
+            return found
     return None
 
 
@@ -730,7 +863,15 @@ def build_layout_json(
         layout["description"] = description
 
     gds_path = find_layout_gds(repo_dir)
+    source_path = "."
     if gds_path is not None:
+        # Record exactly which file within the source repo this render/
+        # download came from (issue #896) -- e.g. a sky130-bandgap ingest
+        # resolves to `layout/bandgap-core/reports/<run>/bandgap_core_
+        # routed.gds`, not just "somewhere in the repo". Computed from the
+        # *original* clone-relative path, before staging copies it flat
+        # into `block_dir/output/`.
+        source_path = str(gds_path.relative_to(repo_dir))
         staged = gds_path if dry_run else _stage_gds(gds_path, block_dir)
         parsed_ok = True
         try:
@@ -761,7 +902,7 @@ def build_layout_json(
     if signals:
         layout["signals"] = signals
 
-    layout["source"] = {"repo": repo, "ref": ref, "path": "."}
+    layout["source"] = {"repo": repo, "ref": ref, "path": source_path}
     layout["downloadable"] = True
     layout["status"] = status
     return layout
