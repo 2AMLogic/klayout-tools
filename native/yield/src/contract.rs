@@ -65,6 +65,64 @@ pub struct MeasurementRequest {
     /// draw is visible in the output.
     #[serde(default)]
     pub source_corners: Vec<String>,
+    /// A seeded, known-bad variant of this measurement -- issue #817's
+    /// self-check discipline. When present, its own yield is estimated
+    /// against these same `limits` and checked for the degradation its
+    /// deliberate defect is supposed to produce.
+    #[serde(default)]
+    pub negative_control: Option<NegativeControlRequest>,
+    /// A closed-form distribution to check this measurement's empirical
+    /// mean/stddev against (issue #817's analytic cross-check).
+    #[serde(default)]
+    pub analytic_cross_check: Option<AnalyticCrossCheckRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NegativeControlRequest {
+    /// Samples drawn from the deliberately-degraded variant (e.g. a
+    /// mismatch/offset injected well past spec, a corner seeded to fail).
+    pub samples: Vec<f64>,
+    #[serde(default)]
+    pub errored: u64,
+    /// Human description of what was deliberately broken, echoed back so the
+    /// report is self-documenting (e.g. "vos forced to 3x spec via a fixed
+    /// device offset").
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One closed-form distribution `klt yield` can check a measurement's
+/// empirical mean/stddev against. Deliberately data-driven rather than a
+/// PDK-specific model lookup: the caller supplies the physical parameters (or
+/// the sigma itself), and this crate does the closed-form arithmetic and the
+/// statistical comparison.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnalyticCrossCheckRequest {
+    /// Thermal (`kT/C`) sampled-capacitor noise: `sigma = sqrt(kB * T / C)`,
+    /// zero-mean unless `analytic_mean` overrides it (e.g. a known offset
+    /// riding on top of the noise floor).
+    KtcNoise {
+        /// Sampling capacitance, in farads.
+        capacitance_f: f64,
+        /// Absolute temperature, in kelvin.
+        #[serde(default = "default_temperature_k")]
+        temperature_k: f64,
+        #[serde(default)]
+        analytic_mean: Option<f64>,
+    },
+    /// A mismatch-dominated offset/spread with a known sigma (e.g. a
+    /// Pelgrom-model prediction the caller has already evaluated), in the
+    /// measurement's own units.
+    MismatchOffset {
+        sigma: f64,
+        #[serde(default)]
+        mean: Option<f64>,
+    },
+}
+
+fn default_temperature_k() -> f64 {
+    300.0
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -115,8 +173,66 @@ pub struct MeasurementReport {
     pub yield_: YieldBlock,
     pub capability: Capability,
     pub sample_size: SampleSize,
+    /// `null` when this measurement declared no `negative_control` -- issue
+    /// #817's self-check requires a campaign to be flagged when it omits
+    /// one, which happens at the warning level (see `estimate::analyze`)
+    /// rather than here, so the absence itself is still visible in the
+    /// payload.
+    pub negative_control: Option<NegativeControlReport>,
+    /// `null` when this measurement declared no `analytic_cross_check`.
+    pub analytic_cross_check: Option<AnalyticCrossCheckReport>,
     pub status: String,
     pub warnings: Vec<String>,
+}
+
+/// The negative control's own yield estimate against the nominal
+/// measurement's limits, plus the self-check verdict: does the deliberately
+/// degraded variant actually show worse yield than the nominal draw, and is
+/// that difference more than sampling noise?
+#[derive(Debug, Serialize)]
+pub struct NegativeControlReport {
+    pub description: Option<String>,
+    pub n: u64,
+    pub errored: u64,
+    #[serde(rename = "yield")]
+    pub yield_: YieldBlock,
+    /// The nominal measurement's empirical yield estimate, echoed here so
+    /// the comparison this verdict rests on is checkable without
+    /// cross-referencing another part of the payload.
+    pub nominal_empirical_estimate: f64,
+    /// `true` only when the negative control's empirical yield is both lower
+    /// than the nominal's *and* the two exact (Clopper-Pearson) intervals do
+    /// not overlap -- a difference too large to be sampling noise, not just
+    /// a lower point estimate.
+    pub degradation_detected: bool,
+    /// `"detected"` / `"not_detected"`.
+    pub verdict: String,
+}
+
+/// The analytic model's prediction, the sample's own empirical mean/stddev,
+/// and the discrepancy between them.
+#[derive(Debug, Serialize)]
+pub struct AnalyticCrossCheckReport {
+    /// `"ktc_noise"` / `"mismatch_offset"`.
+    pub kind: String,
+    pub analytic_mean: f64,
+    pub analytic_stddev: f64,
+    pub empirical_mean: f64,
+    pub empirical_stddev: f64,
+    /// Confidence interval for the empirical stddev (same confidence level
+    /// as the rest of the report), via the same asymptotic
+    /// `Var(sigma_hat) = sigma^2/(2n)` approximation `yield.normal`'s
+    /// delta-method interval uses.
+    pub empirical_stddev_confidence_interval: Interval,
+    /// Confidence interval for the empirical mean (`Var(mu_hat) = sigma^2/n`).
+    pub empirical_mean_confidence_interval: Interval,
+    /// `(empirical_stddev - analytic_stddev) / analytic_stddev`.
+    pub stddev_relative_delta: f64,
+    /// `empirical_mean - analytic_mean`, in the measurement's own units.
+    pub mean_delta: f64,
+    /// `"consistent"` when both the analytic mean and stddev fall inside
+    /// their empirical confidence intervals; `"inconsistent"` otherwise.
+    pub verdict: String,
 }
 
 #[derive(Debug, Serialize)]

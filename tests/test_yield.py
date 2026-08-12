@@ -242,6 +242,114 @@ def test_sim_report_with_a_non_numeric_value_is_an_error(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# negative_control / analytic_cross_check parsing (issue #817, no native
+# extension needed -- these are input-reader-tier checks)
+# --------------------------------------------------------------------------- #
+
+
+def _sample_set_doc(tmp_path, entry):
+    path = tmp_path / "samples.json"
+    path.write_text(json.dumps({"measurements": [entry]}))
+    return str(path)
+
+
+def test_negative_control_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "negative_control": {
+            "samples": [9.0, None, 9.5],
+            "description": "vos forced to 10x spec",
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    nc = measurements[0]["negative_control"]
+    assert nc["samples"] == [9.0, 9.5]
+    assert nc["errored"] == 1
+    assert nc["description"] == "vos forced to 10x spec"
+
+
+def test_a_measurement_without_a_negative_control_reads_as_none(tmp_path):
+    path = _sample_set_doc(
+        tmp_path, {"name": "m", "samples": [1.0, 2.0], "limits": {"max": 5.0}}
+    )
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["negative_control"] is None
+    assert measurements[0]["analytic_cross_check"] is None
+
+
+def test_negative_control_must_be_an_object(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "negative_control": 9,
+        },
+    )
+    with pytest.raises(YieldError, match="non-object negative_control"):
+        _read_samples(path)
+
+
+def test_negative_control_without_samples_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "negative_control": {"description": "oops, forgot the samples"},
+        },
+    )
+    with pytest.raises(YieldError, match="negative_control has no 'samples'"):
+        _read_samples(path)
+
+
+def test_analytic_cross_check_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "analytic_cross_check": {"kind": "mismatch_offset", "sigma": 0.01, "mean": 0.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    check = measurements[0]["analytic_cross_check"]
+    assert check == {"kind": "mismatch_offset", "sigma": 0.01, "mean": 0.0}
+
+
+def test_analytic_cross_check_rejects_an_unknown_kind(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "analytic_cross_check": {"kind": "made_up"},
+        },
+    )
+    with pytest.raises(YieldError, match="kind must be one of"):
+        _read_samples(path)
+
+
+def test_analytic_cross_check_rejects_a_field_not_valid_for_its_kind(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "analytic_cross_check": {"kind": "mismatch_offset", "capacitance_f": 1e-12},
+        },
+    )
+    with pytest.raises(YieldError, match="is not valid for kind"):
+        _read_samples(path)
+
+
+# --------------------------------------------------------------------------- #
 # Statistics (native extension required)
 # --------------------------------------------------------------------------- #
 
@@ -380,6 +488,115 @@ def test_sim_report_and_sample_set_agree_on_the_same_draw():
 
 
 # --------------------------------------------------------------------------- #
+# negative_control / analytic_cross_check (issue #817)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_a_seeded_known_bad_negative_control_is_detected(tmp_path):
+    """The self-check issue #817 requires: a deliberately-degraded variant
+    must show up as a *statistically distinguishable* worse yield, not just
+    a lower point estimate."""
+    entry = {
+        "name": "vos",
+        "samples": _normal_grid(300, 0.0, 0.05),
+        "limits": {"min": -0.5, "max": 0.5},
+        "negative_control": {
+            "samples": _normal_grid(300, 0.6, 0.05),
+            "description": "vos forced to 0.6 (12x the 0.05 spec sigma)",
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+    nc = m["negative_control"]
+    assert nc["verdict"] == "detected"
+    assert nc["description"] == "vos forced to 0.6 (12x the 0.05 spec sigma)"
+    assert nc["yield"]["empirical"]["estimate"] < m["yield"]["empirical"]["estimate"]
+    assert not any("not statistically" in w for w in report["warnings"])
+    assert not any(
+        "no measurement declared a negative_control" in w for w in report["warnings"]
+    )
+
+
+@requires_native
+def test_a_negative_control_that_does_not_degrade_is_flagged(tmp_path):
+    """A "negative control" drawn from the same distribution as the nominal
+    measurement is a broken self-check (the defect was never injected) --
+    `klt yield` must flag this rather than accept it silently."""
+    samples = _normal_grid(300, 0.0, 0.05)
+    entry = {
+        "name": "vos",
+        "samples": samples,
+        "limits": {"min": -0.5, "max": 0.5},
+        "negative_control": {"samples": list(samples)},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["negative_control"]["verdict"] == "not_detected"
+    assert any("not statistically distinguishable" in w for w in m["warnings"])
+    assert any("did not show the expected degradation" in w for w in report["warnings"])
+
+
+@requires_native
+def test_a_campaign_without_any_negative_control_is_flagged(tmp_path):
+    path = _sample_set(
+        tmp_path, _normal_grid(200, 0.0, 1.0), limits={"min": -3.0, "max": 3.0}
+    )
+    report = run_yield(path)
+    assert report["measurements"][0]["negative_control"] is None
+    assert any(
+        "no measurement declared a negative_control" in w for w in report["warnings"]
+    )
+
+
+@requires_native
+def test_ktc_noise_analytic_cross_check_matches_a_synthetic_draw(tmp_path):
+    """`sigma = sqrt(kB * T / C)` for a 1 pF cap at 300 K -- the closed-form
+    case issue #817's second acceptance criterion asks for."""
+    boltzmann = 1.380_649e-23
+    capacitance_f = 1.0e-12
+    temperature_k = 300.0
+    sigma = math.sqrt(boltzmann * temperature_k / capacitance_f)
+    entry = {
+        "name": "vn",
+        "samples": _normal_grid(2000, 0.0, sigma),
+        "limits": {"min": -5 * sigma, "max": 5 * sigma},
+        "analytic_cross_check": {
+            "kind": "ktc_noise",
+            "capacitance_f": capacitance_f,
+            "temperature_k": temperature_k,
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    check = report["measurements"][0]["analytic_cross_check"]
+    assert check["kind"] == "ktc_noise"
+    assert check["verdict"] == "consistent"
+    assert check["analytic_stddev"] == pytest.approx(sigma, rel=1e-9)
+    assert abs(check["stddev_relative_delta"]) < 0.01
+
+
+@requires_native
+def test_mismatch_offset_analytic_cross_check_flags_a_disagreement(tmp_path):
+    """A draw whose actual spread is nowhere near the claimed sigma is the
+    discrepancy an analytic cross-check exists to catch."""
+    entry = {
+        "name": "vos",
+        "samples": _normal_grid(2000, 0.0, 0.001),
+        "limits": {"min": -0.05, "max": 0.05},
+        "analytic_cross_check": {"kind": "mismatch_offset", "sigma": 0.010},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+    check = m["analytic_cross_check"]
+    assert check["verdict"] == "inconsistent"
+    assert any("not consistent with the mismatch_offset" in w for w in m["warnings"])
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -419,6 +636,29 @@ def test_cli_text_output_always_shows_the_interval(tmp_path, capsys):
     assert "yield (empirical, clopper-pearson):" in out
     assert "at 95%, N=200" in out
     assert "sample size:" in out
+    assert "negative control: none declared" in out
+    assert "no measurement declared a negative_control" in out
+
+
+@requires_native
+def test_cli_text_output_shows_the_negative_control_and_analytic_cross_check(
+    tmp_path, capsys
+):
+    entry = {
+        "name": "vos",
+        "samples": _normal_grid(300, 0.0, 0.05),
+        "limits": {"min": -0.5, "max": 0.5},
+        "negative_control": {
+            "samples": _normal_grid(300, 0.6, 0.05),
+            "description": "forced offset",
+        },
+        "analytic_cross_check": {"kind": "mismatch_offset", "sigma": 0.05},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    assert main(["yield", path]) == 0
+    out = capsys.readouterr().out
+    assert "negative control (forced offset): detected" in out
+    assert "analytic cross-check (mismatch_offset): consistent" in out
 
 
 def test_cli_error_uses_the_json_error_envelope(tmp_path, capsys):

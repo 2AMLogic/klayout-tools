@@ -492,6 +492,31 @@ not `klt --version`, if you need to detect this kind of drift.
   antenna engine" section). Purely additive: `schema_version` stays `1`,
   and every field Phase 1a shipped is unchanged. See `docs/cli/erc.md`.
 
+- 2026-08-12 — `klt yield` now enforces the self-checking discipline issue
+  #817 requires (Phase 1b of the statistical/yield epic #710, building on
+  #816/#837): a per-measurement `negative_control` and `analytic_cross_check`
+  block, both reported alongside the yield estimate rather than as a
+  separate command. A **negative control** is a seeded, known-bad variant's
+  own samples, analysed against the same limits as the nominal draw; the
+  self-check verdict (`"detected"` / `"not_detected"`) requires not just a
+  lower point estimate but two **non-overlapping** exact (Clopper-Pearson)
+  confidence intervals — a difference too large to be sampling noise, mirroring
+  the never-a-bare-point-estimate discipline the rest of the command already
+  enforces. A campaign where no measurement declares a `negative_control` at
+  all, or whose negative control fails to show the expected degradation, is
+  flagged with a run-level warning rather than silently accepted. An
+  **analytic cross-check** compares a measurement's empirical mean/stddev
+  against a closed-form prediction: `kt_c_noise` (`sigma = sqrt(kB*T/C)` for
+  a given sampling capacitance and temperature) or `mismatch_offset` (a
+  caller-supplied sigma, e.g. from a Pelgrom-model prediction already
+  evaluated), each with its own confidence interval via the same asymptotic
+  approximation the `normal` yield estimator's delta method already uses;
+  `"consistent"` requires **both** the analytic mean and stddev to fall
+  inside their empirical intervals. Both blocks are optional per measurement
+  and additive to the JSON payload — `schema_version` is unaffected. See
+  `docs/cli/yield.md`'s "Negative control" and "Analytic cross-check"
+  sections.
+
 - 2026-08-12 — Every sky130 LVS device-extraction rule that carries a
   `RuleProvenance` citation (issue #868, Phase 2a) now also ships a golden
   layout→netlist pair validating it end-to-end — issue #867, Phase 2b of

@@ -108,6 +108,89 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
     return limits
 
 
+def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
+    """Normalise one measurement's ``negative_control`` object (issue #817's
+    seeded, known-bad-variant self-check), or ``None`` when absent.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise YieldError(
+            f"{where}: measurement '{name}' has a non-object negative_control"
+        )
+    raw_samples = raw.get("samples")
+    if not isinstance(raw_samples, list):
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control has no 'samples' array"
+        )
+    samples: list[float] = []
+    errored = int(raw.get("errored") or 0)
+    for value in raw_samples:
+        if value is None:
+            errored += 1
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise YieldError(
+                f"{where}: measurement '{name}' negative_control has a non-numeric "
+                "sample value"
+            )
+        samples.append(float(value))
+    description = raw.get("description")
+    if description is not None and not isinstance(description, str):
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control.description must be a "
+            "string"
+        )
+    return {"samples": samples, "errored": errored, "description": description}
+
+
+#: Which fields each `analytic_cross_check.kind` accepts, mirroring
+#: `native/yield/src/contract.rs`'s `AnalyticCrossCheckRequest` variants.
+_ANALYTIC_CROSS_CHECK_FIELDS = {
+    "ktc_noise": {"capacitance_f", "temperature_k", "analytic_mean"},
+    "mismatch_offset": {"sigma", "mean"},
+}
+
+
+def _analytic_cross_check_from(
+    raw: Any, name: str, where: str
+) -> dict[str, Any] | None:
+    """Normalise one measurement's ``analytic_cross_check`` object (issue
+    #817's closed-form cross-check), or ``None`` when absent.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise YieldError(
+            f"{where}: measurement '{name}' has a non-object analytic_cross_check"
+        )
+    kind = raw.get("kind")
+    if kind not in _ANALYTIC_CROSS_CHECK_FIELDS:
+        raise YieldError(
+            f"{where}: measurement '{name}' analytic_cross_check.kind must be one of "
+            f"{sorted(_ANALYTIC_CROSS_CHECK_FIELDS)} (got {kind!r})"
+        )
+    allowed = _ANALYTIC_CROSS_CHECK_FIELDS[kind]
+    out: dict[str, Any] = {"kind": kind}
+    for key, value in raw.items():
+        if key == "kind":
+            continue
+        if key not in allowed:
+            raise YieldError(
+                f"{where}: measurement '{name}' analytic_cross_check.{key} is not "
+                f"valid for kind '{kind}' (allowed: {sorted(allowed)})"
+            )
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise YieldError(
+                f"{where}: measurement '{name}' analytic_cross_check.{key} must be "
+                "a number"
+            )
+        out[key] = float(value)
+    return out
+
+
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a `klt sim` Monte Carlo report into this module's request shape.
 
@@ -173,6 +256,16 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 "errored": errored,
                 "limits": _limits_from(entry.get("limits"), name, "sim report"),
                 "source_corners": source_corners,
+                # A sim report's own corners are the nominal draw; a
+                # negative-control variant (issue #817) is supplied
+                # alongside it in the rollup entry, not derived from a
+                # corner -- there is no "known-bad corner" convention here.
+                "negative_control": _negative_control_from(
+                    entry.get("negative_control"), name, "sim report"
+                ),
+                "analytic_cross_check": _analytic_cross_check_from(
+                    entry.get("analytic_cross_check"), name, "sim report"
+                ),
             }
         )
     return out
@@ -218,6 +311,12 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "errored": errored,
                 "limits": _limits_from(entry.get("limits"), name, "sample set"),
                 "source_corners": [str(c) for c in source_corners],
+                "negative_control": _negative_control_from(
+                    entry.get("negative_control"), name, "sample set"
+                ),
+                "analytic_cross_check": _analytic_cross_check_from(
+                    entry.get("analytic_cross_check"), name, "sample set"
+                ),
             }
         )
     return out

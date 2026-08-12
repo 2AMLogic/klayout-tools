@@ -132,6 +132,28 @@ def _print_text(report: dict) -> None:
                     else "unreachable at the observed pass rate"
                 )
             )
+        nc = m.get("negative_control")
+        if nc is None:
+            print("  negative control: none declared")
+        else:
+            nc_emp = nc["yield"]["empirical"]
+            nc_ci = nc_emp["confidence_interval"]
+            desc = f" ({nc['description']})" if nc.get("description") else ""
+            print(
+                f"  negative control{desc}: {nc['verdict']} -- yield "
+                f"{nc_emp['estimate']:.6f} [{nc_ci['low']:.6f}, {nc_ci['high']:.6f}] "
+                f"vs nominal {nc['nominal_empirical_estimate']:.6f}, N={nc['n']}"
+            )
+        check = m.get("analytic_cross_check")
+        if check is not None:
+            print(
+                f"  analytic cross-check ({check['kind']}): {check['verdict']} -- "
+                f"analytic stddev={check['analytic_stddev']:.6g} "
+                f"empirical stddev={check['empirical_stddev']:.6g} "
+                f"[{check['empirical_stddev_confidence_interval']['low']:.6g}, "
+                f"{check['empirical_stddev_confidence_interval']['high']:.6g}] "
+                f"(delta {check['stddev_relative_delta']:+.2%})"
+            )
         for warning in m["warnings"]:
             print(f"  warning: {warning}")
 
