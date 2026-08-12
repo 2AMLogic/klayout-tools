@@ -284,7 +284,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--deck",
         default=None,
         help=(
-            "DRC deck to run (currently: sky130, gf180mcu). Required for "
+            "DRC deck to run (currently: sky130, gf180mcu, sg13g2). Required for "
             "--engine curated (the default); ignored for --engine klayout. "
             "Not validated by argparse -- an unknown deck name exits 1 with "
             "a clean error, per docs/cli/drc.md's exit-code contract, "
@@ -606,7 +606,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "DRC deck to run for the drc.violation_count field (currently: "
-            "sky130, gf180mcu). Omit to skip DRC entirely."
+            "sky130, gf180mcu, sg13g2). Omit to skip DRC entirely."
         ),
     )
     layout_metrics_parser.add_argument(
@@ -717,7 +717,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--deck",
         required=True,
         help=(
-            "extraction deck to run (currently: sky130, gf180mcu). Not "
+            "extraction deck to run (currently: sky130, gf180mcu, sg13g2). Not "
             "validated by argparse -- an unknown deck name exits 1 with a "
             "clean error, per docs/cli/extract.md's exit-code contract, "
             "rather than argparse's usage-error exit 2."
