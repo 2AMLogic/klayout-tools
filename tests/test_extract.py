@@ -8733,6 +8733,95 @@ def test_mom_net_omitted_is_byte_identical_to_before_feature(tmp_path):
     assert y_entry["capacitance_ff"] == pytest.approx(0.23966, abs=1e-5)
 
 
+def test_mom_net_duplicate_named_island_swaps_the_measured_island(
+    monkeypatch, tmp_path
+):
+    """Regression (issue #811): a `--mom-net` name shared by two distinct,
+    disconnected net islands (e.g. two un-strapped `VGND` shapes -- the
+    exact `gcd`-corpus pattern `_compute_parasitics`'s docstring documents,
+    reproduced synthetically via
+    `_make_two_disjoint_nmos_shared_label_layout`) must swap the capacitance
+    of the *same* island the MoM solve actually measured, not whichever
+    same-named `ground_nets` entry happens to sort first by `net_id`.
+
+    Before the fix, `_extract_netlist` resolved `matched_net` (the net the
+    MoM solver runs on) via the first match in `circuit.each_net()`'s own
+    unsorted iteration order, while `run_extract` independently resolved
+    `matched_entry` (the `ground_nets` entry whose `capacitance_ff` gets
+    overwritten) by a second, separate by-name lookup against `ground_nets`
+    -- a list sorted by `(net, net_id)`, i.e. the *smallest-net_id* entry
+    sharing that name. Nothing guaranteed those two picks agreed.
+
+    `_mom_ground_capacitance_for_net` is monkeypatched to a deterministic
+    stub that records which net object (`net.cluster_id`) it is actually
+    invoked on and returns a fixed, distinctive capacitance -- this
+    exercises the real `matched_net`/`matched_entry` resolution paths in
+    `_extract_netlist` and `run_extract` without requiring the
+    `klt_mom_native` extension, so this regression test runs in every
+    environment (unlike the `_SKIP_NO_KLT_MOM_NATIVE`-gated tests above)."""
+    import klayout_tools.extract as extract_module
+
+    captured_net_ids: list[int] = []
+    stub_capacitance_ff = 999.0
+
+    def fake_mom_ground_capacitance_for_net(
+        l2n, net, dbu, parasitics_deck, metal_index, background_permittivity
+    ):
+        captured_net_ids.append(net.cluster_id)
+        return {
+            "net": extract_module.spice_safe_net_name(net.expanded_name()),
+            "net_id": net.cluster_id,
+            "mom_capacitance_ff": stub_capacitance_ff,
+            "background_permittivity": background_permittivity,
+            "panel_size_um": 1.0,
+            "panel_count": 1,
+            "ground_pad_factor": 3.0,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        extract_module,
+        "_mom_ground_capacitance_for_net",
+        fake_mom_ground_capacitance_for_net,
+    )
+
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd_mom.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        parasitics=True,
+        mom_net="VGND",
+        output=str(tmp_path / "two_vgnd_mom.spice"),
+    )
+
+    # The stub ran exactly once, against exactly one of the two VGND islands
+    # -- capture which one so the assertion below is not tautological.
+    assert len(captured_net_ids) == 1
+    resolved_net_id = captured_net_ids[0]
+
+    vgnd_entries = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(vgnd_entries) == 2
+    swapped = [e for e in vgnd_entries if e["capacitance_ff"] == stub_capacitance_ff]
+    unswapped = [e for e in vgnd_entries if e["capacitance_ff"] != stub_capacitance_ff]
+    assert len(swapped) == 1
+    assert len(unswapped) == 1
+
+    # The swap lands on the *same* island `_mom_ground_capacitance_for_net`
+    # was actually invoked on, keyed by `net_id` -- not incidentally on
+    # whichever same-named entry sorts first.
+    assert swapped[0]["net_id"] == resolved_net_id
+    assert unswapped[0]["net_id"] != resolved_net_id
+
+    crosscheck = report["parasitics"]["mom_crosscheck"]
+    assert crosscheck["net"] == "VGND"
+    assert crosscheck["mom_capacitance_ff"] == stub_capacitance_ff
+    # The pre-swap lumped-RC value reported in the crosscheck must be the
+    # *swapped* island's own original value, not the stub, and not the
+    # untouched island's value.
+    assert crosscheck["lumped_rc_capacitance_ff"] != stub_capacitance_ff
+
+
 @_SKIP_NO_KLT_MOM_NATIVE
 def test_mom_net_poly_geometry_is_out_of_scope_and_warned(tmp_path):
     """A net whose lumped-RC ground capacitance is *not* entirely from a

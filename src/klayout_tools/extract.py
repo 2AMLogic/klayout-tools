@@ -393,16 +393,23 @@ def _mom_ground_capacitance_for_net(
     `docs/design/extract-fidelity-roadmap.md` section 2.2's description of
     how a PDK's own area/fringe coefficient table is derived).
 
-    Returns ``{"net", "mom_capacitance_ff", "background_permittivity",
-    "panel_size_um", "panel_count", "ground_pad_factor", "warnings"}``.
-    ``mom_capacitance_ff`` is ``None`` (with an explanatory ``warnings``
-    entry, never a silent zero) when ``net`` has no ground-eligible geometry
-    on any curated ``metals`` role. Raises :class:`~klayout_tools.mom.
-    MomError` (via ``solve_capacitance_matrix``) for a missing/unbuilt
-    ``klt_mom_native`` extension or a solver-level failure (a singular
-    matrix, or the panel-count guard) -- the caller (`run_extract`) turns
-    that into a clean :class:`ExtractError`, matching how every other
-    engine-dependency failure in this module is surfaced.
+    Returns ``{"net", "net_id", "mom_capacitance_ff",
+    "background_permittivity", "panel_size_um", "panel_count",
+    "ground_pad_factor", "warnings"}``. ``net_id`` is ``net.cluster_id`` --
+    the exact identifier this ``net`` object was resolved from -- so a
+    caller matching this result back to a :func:`_compute_parasitics`
+    ``ground_nets`` entry can key on ``net_id`` instead of the SPICE-safe
+    ``net`` *name*, which is not unique across distinct net objects that
+    happen to share one layout label (issue #811; see
+    :func:`_compute_parasitics`'s docstring for the same ``net_id`` vs.
+    ``net`` name distinction). ``mom_capacitance_ff`` is ``None`` (with an
+    explanatory ``warnings`` entry, never a silent zero) when ``net`` has no
+    ground-eligible geometry on any curated ``metals`` role. Raises
+    :class:`~klayout_tools.mom.MomError` (via ``solve_capacitance_matrix``)
+    for a missing/unbuilt ``klt_mom_native`` extension or a solver-level
+    failure (a singular matrix, or the panel-count guard) -- the caller
+    (`run_extract`) turns that into a clean :class:`ExtractError`, matching
+    how every other engine-dependency failure in this module is surfaced.
     """
     from . import mom as mom_module
 
@@ -460,6 +467,7 @@ def _mom_ground_capacitance_for_net(
     if not net_boxes or min_gap_um is None:
         return {
             "net": spice_safe_net_name(net.expanded_name()),
+            "net_id": net.cluster_id,
             "mom_capacitance_ff": None,
             "background_permittivity": background_permittivity,
             "panel_size_um": None,
@@ -495,6 +503,7 @@ def _mom_ground_capacitance_for_net(
 
     return {
         "net": spice_safe_net_name(net.expanded_name()),
+        "net_id": net.cluster_id,
         "mom_capacitance_ff": round(mom_capacitance_ff, 6),
         "background_permittivity": background_permittivity,
         "panel_size_um": round(panel_size_um, 6),
@@ -643,6 +652,19 @@ def run_extract(
     ``cap_area_ff_um2`` coefficient to a z-gap for the solve. ``mom_net``
     omitted (the default) skips this entirely -- byte-identical to before
     this feature existed.
+
+    A ``mom_net`` name is resolved to a net **object** exactly once, inside
+    :func:`_extract_netlist` (its ``matched_net`` loop), and both the MoM
+    solve and the ``ground_nets`` entry whose ``capacitance_ff`` gets
+    overwritten below key on that same object's ``net_id``
+    (``mom_crosscheck["net_id"]``) rather than on ``mom_net`` (the name)
+    separately in each place (issue #811). This matters when the name
+    resolves to more than one distinct, disconnected net island sharing one
+    layout label (e.g. two un-strapped ``VGND`` shapes, mirroring the
+    ``gcd`` corpus pattern :func:`_compute_parasitics`'s docstring
+    documents): a *second*, independent by-name lookup here could otherwise
+    silently swap the capacitance of a different island than the one the
+    solver actually measured.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
@@ -1381,10 +1403,32 @@ def run_extract(
         # already raised `ExtractError`), so `mom_crosscheck` here is always
         # a dict with a non-`None` `mom_capacitance_ff` when `mom_net` was
         # given.
+        #
+        # Matched by `net_id`, not by `mom_net` name (issue #811):
+        # `_extract_netlist` resolves `--mom-net` to a net *object* via the
+        # first match in `circuit.each_net()`'s own (unsorted) iteration
+        # order, while `ground_nets` is sorted by `(net, net_id)` -- so a
+        # name-keyed `next(...)` here picks the *smallest-net_id* entry
+        # sharing that name, which is not necessarily the same net object
+        # `mom_crosscheck` (and the MoM solve) resolved to. For a `--mom-net`
+        # name that resolves to more than one distinct net island (e.g. two
+        # un-strapped `VGND` shapes -- the `gcd` corpus pattern
+        # `_compute_parasitics`'s docstring documents), a by-name lookup
+        # here could silently overwrite a *different* island's
+        # `capacitance_ff` than the one the MoM solver actually measured.
+        # `mom_crosscheck["net_id"]` is the exact `net.cluster_id`
+        # `_extract_netlist`'s `matched_net` loop already resolved, so
+        # keying on it here makes both lookups agree by construction rather
+        # than by incidental iteration-order alignment.
         if mom_net is not None:
             assert mom_crosscheck is not None
             matched_entry = next(
-                (entry for entry in ground_nets if entry["net"] == mom_net), None
+                (
+                    entry
+                    for entry in ground_nets
+                    if entry["net_id"] == mom_crosscheck["net_id"]
+                ),
+                None,
             )
             if matched_entry is None:
                 raise ExtractError(
@@ -4250,6 +4294,16 @@ def _extract_netlist(
         # `run_extract`, for the same "`l2n` must still be alive" reason as
         # `parasitic_nets` immediately above -- `polygons_of_net` is a live
         # `LayoutToNetlist` API, unusable once this function returns.
+        #
+        # `matched_net` is resolved to a net *object* exactly once here, via
+        # the first match in `circuit.each_net()`'s own (unsorted) iteration
+        # order -- `run_extract` no longer re-resolves `mom_net` by name a
+        # second time against `ground_nets` (issue #811): it reads
+        # `mom_crosscheck["net_id"]` (this net's `cluster_id`, threaded
+        # through by `_mom_ground_capacitance_for_net`) instead, so both the
+        # MoM solve and the `ground_nets` entry it overwrites agree on
+        # exactly the same net object, even when `mom_net` names more than
+        # one distinct, disconnected net island.
         if mom_net is not None and circuit is not None:
             matched_net = None
             for candidate in circuit.each_net():
