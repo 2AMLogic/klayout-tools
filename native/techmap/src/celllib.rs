@@ -258,12 +258,19 @@ fn classify_sequential(cell: &Cell) -> Option<DffCandidate> {
     // to the clock -- the same structural heuristic
     // `native/statime/README.md` documents for this same library
     // ("Register data pins identified by the literal name... Correct for
-    // every sky130_fd_sc_hd sequential cell this corpus uses").
-    let q_pin = cell.pins.values().find(|p| {
-        p.direction == Direction::Output
+    // every sky130_fd_sc_hd sequential cell this corpus uses"). Walked in
+    // `pin_order` (declaration order from the `.lib` file), not
+    // `cell.pins.values()` -- a `HashMap` iterates in an unspecified,
+    // run-to-run-varying order, so a cell exposing both `Q` and `Q_N` with
+    // matching rising-edge arcs on each (a real liberty shape) could
+    // otherwise get wired to either pin nondeterministically between runs.
+    let q_pin = cell.pin_order.iter().find_map(|name| {
+        let p = cell.pins.get(name)?;
+        (p.direction == Direction::Output
             && p.arcs
                 .iter()
-                .any(|a| a.kind == ArcKind::RisingEdge && a.related_pin == clocked_on)
+                .any(|a| a.kind == ArcKind::RisingEdge && a.related_pin == clocked_on))
+        .then_some(p)
     })?;
 
     if ff.preset.is_some() {
@@ -527,6 +534,81 @@ library ("test_lib") {
 }
 "#;
 
+    /// A dff cell exposing both `Q` and `Q_N` with matching rising-edge
+    /// arcs on `CLK` -- built directly (not via `liberty::parse`) so its
+    /// `pin_order` is explicit and this test doesn't perturb the shared
+    /// `MINI_LIB` fixture (and its cardinality assertions) other tests
+    /// depend on.
+    fn dff_with_q_and_qn() -> Cell {
+        use crate::liberty::{ArcKind, Direction, FfInfo, TimingArcTables};
+
+        let rising_edge_arc = || TimingArcTables {
+            related_pin: "CLK".to_string(),
+            kind: ArcKind::RisingEdge,
+            cell_rise: None,
+            cell_fall: None,
+        };
+        let mut pins = HashMap::new();
+        pins.insert(
+            "CLK".to_string(),
+            crate::liberty::Pin {
+                name: "CLK".to_string(),
+                direction: Direction::Input,
+                capacitance_pf: 0.0,
+                function: None,
+                arcs: Vec::new(),
+            },
+        );
+        pins.insert(
+            "D".to_string(),
+            crate::liberty::Pin {
+                name: "D".to_string(),
+                direction: Direction::Input,
+                capacitance_pf: 0.0,
+                function: None,
+                arcs: Vec::new(),
+            },
+        );
+        pins.insert(
+            "Q".to_string(),
+            crate::liberty::Pin {
+                name: "Q".to_string(),
+                direction: Direction::Output,
+                capacitance_pf: 0.0,
+                function: None,
+                arcs: vec![rising_edge_arc()],
+            },
+        );
+        pins.insert(
+            "Q_N".to_string(),
+            crate::liberty::Pin {
+                name: "Q_N".to_string(),
+                direction: Direction::Output,
+                capacitance_pf: 0.0,
+                function: None,
+                arcs: vec![rising_edge_arc()],
+            },
+        );
+        Cell {
+            name: "DFXTP_QN".to_string(),
+            area_um2: 20.0,
+            pins,
+            pin_order: vec![
+                "CLK".to_string(),
+                "D".to_string(),
+                "Q".to_string(),
+                "Q_N".to_string(),
+            ],
+            ff: Some(FfInfo {
+                state_var: "IQ".to_string(),
+                clocked_on: "CLK".to_string(),
+                next_state: "D".to_string(),
+                clear: None,
+                preset: None,
+            }),
+        }
+    }
+
     fn build_lib() -> CellLibrary {
         let lib = liberty::parse(MINI_LIB).unwrap();
         build(&lib)
@@ -583,6 +665,41 @@ library ("test_lib") {
     }
 
     #[test]
+    fn single_output_constant_cell_is_not_misclassified_as_buf() {
+        // A PDK with separate single-output tie-hi/tie-lo cells (unlike
+        // sky130's own two-output `conb`) must not have its constant
+        // function `"1"`/`"0"` truth-table-match `$buf` -- see
+        // `boolfn::bare_constants_are_not_free_variables`.
+        const TIE_LIB: &str = r#"
+library ("tie_lib") {
+    time_unit : "1ns";
+    capacitive_load_unit(1.0, "pf");
+
+    cell ("TIEHI") {
+        area : 1.0;
+        pin ("HI") { direction : "output"; function : "1"; }
+    }
+
+    cell ("TIELO") {
+        area : 1.0;
+        pin ("LO") { direction : "output"; function : "0"; }
+    }
+}
+"#;
+        let lib = liberty::parse(TIE_LIB).unwrap();
+        let cl = build(&lib);
+        assert!(
+            cl.comb.get("$buf").map(|v| v.is_empty()).unwrap_or(true),
+            "constant tie cell must not appear as a $buf candidate: {:?}",
+            cl.comb.get("$buf")
+        );
+        assert_eq!(cl.tie_hi.len(), 1);
+        assert_eq!(cl.tie_hi[0].cell_name, "TIEHI");
+        assert_eq!(cl.tie_lo.len(), 1);
+        assert_eq!(cl.tie_lo[0].cell_name, "TIELO");
+    }
+
+    #[test]
     fn classifies_tie_cells() {
         let cl = build_lib();
         assert_eq!(cl.tie_hi.len(), 1);
@@ -598,6 +715,19 @@ library ("test_lib") {
         let cands = cl.comb.get("$and2").unwrap();
         let best = best_comb(cands, 0.0).unwrap();
         assert_eq!(best.cell_name, "AND2_0");
+    }
+
+    #[test]
+    fn q_pin_selection_is_deterministic_not_hashmap_order() {
+        // A dff exposing both Q and Q_N with matching rising-edge arcs on
+        // CLK -- classify_sequential must always pick the pin declared
+        // first in the liberty file (`pin_order`), not whichever pin a
+        // `HashMap` iterator happens to yield first.
+        let cell = dff_with_q_and_qn();
+        for _ in 0..20 {
+            let cand = classify_sequential(&cell).expect("should classify as a plain dff");
+            assert_eq!(cand.q_pin, "Q");
+        }
     }
 
     #[test]

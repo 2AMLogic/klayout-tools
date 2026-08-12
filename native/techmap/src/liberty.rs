@@ -182,10 +182,16 @@ impl Parser {
         t
     }
 
-    fn parse_group(&mut self) -> Option<Group> {
-        let name = match self.next()? {
-            Token::Ident(s) => s,
-            other => panic!("expected group/attr name, got {:?}", other),
+    fn parse_group(&mut self) -> Result<Option<Group>, LibertyError> {
+        let name = match self.next() {
+            None => return Ok(None),
+            Some(Token::Ident(s)) => s,
+            Some(other) => {
+                return Err(LibertyError(format!(
+                    "expected group/attr name, got {:?}",
+                    other
+                )))
+            }
         };
         let mut args = Vec::new();
         if self.peek() == Some(&Token::LParen) {
@@ -207,7 +213,12 @@ impl Parser {
                         };
                         args.push(v);
                     }
-                    other => panic!("unexpected token in arg list: {:?}", other),
+                    other => {
+                        return Err(LibertyError(format!(
+                            "unexpected token in arg list: {:?}",
+                            other
+                        )))
+                    }
                 }
             }
         }
@@ -225,46 +236,64 @@ impl Parser {
                             self.next();
                         }
                         Some(Token::Ident(_)) => {
-                            members.push(self.parse_member());
+                            members.push(self.parse_member()?);
                         }
-                        other => panic!("unexpected token in group body: {:?}", other),
+                        other => {
+                            return Err(LibertyError(format!(
+                                "unexpected token in group body: {:?}",
+                                other
+                            )))
+                        }
                     }
                 }
-                Some(Group {
+                Ok(Some(Group {
                     name,
                     args,
                     members,
-                })
+                }))
             }
             Some(Token::Semi) => {
                 self.next();
-                Some(Group {
+                Ok(Some(Group {
                     name,
                     args,
                     members: Vec::new(),
-                })
+                }))
             }
-            other => panic!("expected '{{' or ';' after group header, got {:?}", other),
+            other => Err(LibertyError(format!(
+                "expected '{{' or ';' after group header, got {:?}",
+                other
+            ))),
         }
     }
 
-    fn parse_member(&mut self) -> Member {
-        let name = match self.next().unwrap() {
-            Token::Ident(s) => s,
-            other => panic!("expected member name, got {:?}", other),
+    fn parse_member(&mut self) -> Result<Member, LibertyError> {
+        let name = match self.next() {
+            Some(Token::Ident(s)) => s,
+            other => {
+                return Err(LibertyError(format!(
+                    "expected member name, got {:?}",
+                    other
+                )))
+            }
         };
         match self.peek() {
             Some(Token::Colon) => {
                 self.next();
-                let v = match self.next().unwrap() {
-                    Token::Ident(s) => Value::Ident(s),
-                    Token::Str(s) => Value::Str(s),
-                    other => panic!("expected value after ':', got {:?}", other),
+                let v = match self.next() {
+                    Some(Token::Ident(s)) => Value::Ident(s),
+                    Some(Token::Str(s)) => Value::Str(s),
+                    other => {
+                        return Err(LibertyError(format!(
+                            "expected value after ':', got {:?}",
+                            other
+                        )))
+                    }
                 };
                 if self.peek() == Some(&Token::Semi) {
                     self.next();
                 }
-                Member::SimpleAttr(name, v)
+                Ok(Member::SimpleAttr(name, v))
             }
             Some(Token::LParen) => {
                 self.next();
@@ -286,7 +315,12 @@ impl Parser {
                             };
                             args.push(v);
                         }
-                        other => panic!("unexpected token in complex-attr args: {:?}", other),
+                        other => {
+                            return Err(LibertyError(format!(
+                                "unexpected token in complex-attr args: {:?}",
+                                other
+                            )))
+                        }
                     }
                 }
                 match self.peek() {
@@ -303,38 +337,45 @@ impl Parser {
                                     self.next();
                                 }
                                 Some(Token::Ident(_)) => {
-                                    members.push(self.parse_member());
+                                    members.push(self.parse_member()?);
                                 }
                                 other => {
-                                    panic!("unexpected token in group body: {:?}", other)
+                                    return Err(LibertyError(format!(
+                                        "unexpected token in group body: {:?}",
+                                        other
+                                    )))
                                 }
                             }
                         }
-                        Member::Group(Group {
+                        Ok(Member::Group(Group {
                             name,
                             args,
                             members,
-                        })
+                        }))
                     }
                     Some(Token::Semi) => {
                         self.next();
-                        Member::ComplexAttr(name, args)
+                        Ok(Member::ComplexAttr(name, args))
                     }
-                    other => panic!("expected '{{' or ';' after complex attr, got {:?}", other),
+                    other => Err(LibertyError(format!(
+                        "expected '{{' or ';' after complex attr, got {:?}",
+                        other
+                    ))),
                 }
             }
-            other => panic!(
+            other => Err(LibertyError(format!(
                 "expected ':' or '(' after member name '{}', got {:?}",
                 name, other
-            ),
+            ))),
         }
     }
 }
 
-fn parse_top(src: &str) -> Group {
+fn parse_top(src: &str) -> Result<Group, LibertyError> {
     let tokens = tokenize(src);
     let mut p = Parser { tokens, pos: 0 };
-    p.parse_group().expect("empty liberty file")
+    p.parse_group()?
+        .ok_or_else(|| LibertyError("empty liberty file".to_string()))
 }
 
 // ---------------------------------------------------------------------
@@ -652,7 +693,7 @@ fn parse_cell(group: &Group) -> Cell {
 /// "selective parsing is a future optimisation, not this parser's job"
 /// posture.
 pub fn parse(src: &str) -> Result<Library, LibertyError> {
-    let top = parse_top(src);
+    let top = parse_top(src)?;
     if top.name != "library" {
         return Err(LibertyError(format!(
             "expected top-level 'library' group, got '{}'",
@@ -786,5 +827,19 @@ library ("test_lib") {
         assert_eq!(ff.preset, None);
         let q = &dfrtp.pins["Q"];
         assert_eq!(q.arcs[0].kind, ArcKind::RisingEdge);
+    }
+
+    #[test]
+    fn malformed_syntax_returns_err_not_panic() {
+        // Missing '{' / ';' after the group header.
+        assert!(parse(r#"library ("test_lib") area : 6.256; }"#).is_err());
+        // Unclosed arg list — a '}' appears where ',' or ')' is expected.
+        assert!(parse(r#"library ("test_lib") { cell (1, 2, 3 }"#).is_err());
+        // Truncated complex-attr arg list, never closed.
+        assert!(parse(r#"library ("test_lib") { cell ("AND2") { pin ("A"#).is_err());
+        // Empty input entirely.
+        assert!(parse("").is_err());
+        // Member with neither ':' nor '(' after its name.
+        assert!(parse(r#"library ("test_lib") { cell ("AND2") { area } }"#).is_err());
     }
 }

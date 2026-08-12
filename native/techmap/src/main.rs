@@ -94,7 +94,8 @@ fn run() -> Result<request::Response, (u8, String)> {
 
     let out_dir = netlist_path.parent().unwrap_or_else(|| Path::new("."));
     let out_path = out_dir.join(format!("{}_mapped.v", netlist.top));
-    let verilog_text = verilog::write(&netlist, &mapped.instances);
+    let verilog_text =
+        verilog::write(&netlist, &mapped.instances).map_err(|e| (1, format!("{e}")))?;
     fs::write(&out_path, verilog_text).map_err(|e| {
         (
             1,

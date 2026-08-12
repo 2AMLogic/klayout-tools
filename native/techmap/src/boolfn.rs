@@ -18,6 +18,14 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Ident(String),
+    /// A bare `0`/`1` constant -- liberty's `function` grammar allows a
+    /// constant-output cell's function to be the literal digit `"0"` or
+    /// `"1"` rather than a Boolean expression over pin names (sky130's own
+    /// `conb` uses exactly this: `pin ("HI") { function : "1"; }`).
+    /// Tokenized distinctly from [`Tok::Ident`] so a lone `"1"`/`"0"`
+    /// never gets treated as a free variable named `"1"`/`"0"` -- see
+    /// [`Expr::Const`].
+    Const(bool),
     Not,
     And,
     Or,
@@ -76,7 +84,12 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, BoolFnError> {
                 while i < n && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
-                toks.push(Tok::Ident(chars[start..i].iter().collect()));
+                let text: String = chars[start..i].iter().collect();
+                match text.as_str() {
+                    "0" => toks.push(Tok::Const(false)),
+                    "1" => toks.push(Tok::Const(true)),
+                    _ => toks.push(Tok::Ident(text)),
+                }
             }
             other => {
                 return Err(BoolFnError(format!(
@@ -91,6 +104,8 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, BoolFnError> {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Var(String),
+    /// A bare `0`/`1` liberty constant -- see [`Tok::Const`].
+    Const(bool),
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -153,7 +168,7 @@ impl EParser {
                 // explicit), but liberty's grammar technically allows it,
                 // so a bare Ident/LParen/Not immediately following an
                 // and_expr's operand also continues the chain.
-                Some(Tok::Ident(_)) | Some(Tok::LParen) | Some(Tok::Not) => {
+                Some(Tok::Ident(_)) | Some(Tok::Const(_)) | Some(Tok::LParen) | Some(Tok::Not) => {
                     let rhs = self.parse_unary()?;
                     lhs = Expr::And(Box::new(lhs), Box::new(rhs));
                 }
@@ -175,6 +190,7 @@ impl EParser {
     fn parse_primary(&mut self) -> Result<Expr, BoolFnError> {
         match self.bump() {
             Some(Tok::Ident(name)) => Ok(Expr::Var(name)),
+            Some(Tok::Const(b)) => Ok(Expr::Const(b)),
             Some(Tok::LParen) => {
                 let e = self.parse_or()?;
                 match self.bump() {
@@ -217,6 +233,7 @@ pub fn free_vars(expr: &Expr) -> Vec<String> {
                     out.push(v.clone());
                 }
             }
+            Expr::Const(_) => {}
             Expr::Not(a) => walk(a, out),
             Expr::And(a, b) | Expr::Or(a, b) | Expr::Xor(a, b) => {
                 walk(a, out);
@@ -231,6 +248,7 @@ pub fn free_vars(expr: &Expr) -> Vec<String> {
 pub fn eval(expr: &Expr, env: &HashMap<String, bool>) -> bool {
     match expr {
         Expr::Var(v) => *env.get(v).unwrap_or(&false),
+        Expr::Const(b) => *b,
         Expr::Not(a) => !eval(a, env),
         Expr::And(a, b) => eval(a, env) && eval(b, env),
         Expr::Or(a, b) => eval(a, env) || eval(b, env),
@@ -298,5 +316,28 @@ mod tests {
         let e = parse("(!A)").unwrap();
         let tt = truth_table(&e, &["A".to_string()]);
         assert_eq!(tt, vec![true, false]);
+    }
+
+    #[test]
+    fn bare_constants_are_not_free_variables() {
+        // sky130's `conb`-style single-output tie cells use a bare "0"/"1"
+        // function -- these must be constants, not a free variable named
+        // "0"/"1" that would let classify_combinational's 1-var $buf check
+        // wrongly match a constant-output cell.
+        let one = parse("1").unwrap();
+        assert!(free_vars(&one).is_empty());
+        assert!(eval(&one, &HashMap::new()));
+
+        let zero = parse("0").unwrap();
+        assert!(free_vars(&zero).is_empty());
+        assert!(!eval(&zero, &HashMap::new()));
+    }
+
+    #[test]
+    fn constant_mixed_with_a_real_variable_still_evaluates_correctly() {
+        let e = parse("A & 1").unwrap();
+        assert_eq!(free_vars(&e), vec!["A".to_string()]);
+        let tt = truth_table(&e, &["A".to_string()]);
+        assert_eq!(tt, vec![false, true]); // A & 1 == A
     }
 }
