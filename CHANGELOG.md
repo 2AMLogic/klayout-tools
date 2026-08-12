@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-11 — `klt extract --mom-net <net>` now resolves the net whose
+  capacitance it overwrites by **net id**, not by name (issue #811). The
+  solver picked its net object by walking `Circuit.each_net()` and taking the
+  first name match, while the `parasitics.nets[]` entry to overwrite was
+  looked up by name a second time against a `(net, net_id)`-sorted list —
+  two independent lookups that are only guaranteed to select the same net
+  island as long as KLayout's (undocumented, and demonstrably non-monotone —
+  a net rescued by the purge pass is recreated at the end of the circuit's
+  net list) iteration order happens to agree with net-id order. For a
+  `--mom-net` label shared by several genuinely distinct, un-strapped islands
+  (the `gcd` corpus block has 105 same-labelled `VGND` islands, 88 `VPWR`)
+  that could have written one island's field-solved capacitance onto a
+  different island's SPICE `C` card, with `lumped_rc_capacitance_ff` /
+  `delta_ff` comparing two different pieces of geometry. The solve now
+  deterministically picks the **lowest-`net_id`** island among the matches
+  (the first entry carrying that name in `parasitics.nets[]`), reports which
+  one it solved in the new additive `parasitics.mom_crosscheck.net_id` field,
+  warns that the name matched several islands, and threads that id through to
+  the swap. A `--mom-net` name matching a single net island — including
+  #798's own `Y`/`sky130_fd_sc_hd__inv_1` acceptance case — reports exactly
+  the same numbers as before.
+
 - 2026-08-11 — `klt gen mos_array`'s `finger_topology="series"` (issue #777's
   deferred option 1, follow-up to #780's `"parallel"` default) now pads
   *every* gate finger and reports *every* terminal instead of only the two

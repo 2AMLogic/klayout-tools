@@ -1604,6 +1604,19 @@ klt extract cell.gds --deck sky130 --parasitics --mom-net Y --format json
   parasitics are completely unaffected.
 - **The comparison is also reported**, in a new `parasitics.mom_crosscheck`
   object — see "JSON `parasitics` block" below for the field list.
+- **A name shared by several net islands solves the lowest-`net_id` one**
+  (issue #811). A layout label is not a net identity: several genuinely
+  distinct, electrically unconnected nets can carry the same one (the `gcd`
+  corpus block has 105 separate un-strapped `VGND` islands, 88 `VPWR`).
+  `--mom-net` picks the island with the lowest `net_id` — i.e. the first
+  entry carrying that name in `parasitics.nets[]`, which is sorted by
+  `(net, net_id)`, so the choice is reproducible run to run — reports which
+  island it solved as `mom_crosscheck.net_id`, and emits a `warnings[]` entry
+  naming the number of matching islands. Every other same-named island keeps
+  its lumped-RC capacitance. The `parasitics.nets[]` entry that receives the
+  MoM value is resolved from that same `net_id`, never re-matched by name, so
+  the island measured and the island swapped are the same one by
+  construction.
 
 **Method.** The named net's geometry on each of the deck's `metals` roles
 (`PARASITICS.metals` — see "The coefficients are curated per-PDK-family"
@@ -1926,6 +1939,13 @@ pre-1.0-caveat precedent issue #547's R/C value change and issue #760's
 `model.coupling` value change already established. `--mom-net` omitted (the
 default) leaves every field byte-identical to before this feature existed.
 
+**Additive field, no `schema_version` bump (issue #811):**
+`mom_crosscheck.net_id` is new — it names the net *object* the solve
+measured, so a `--mom-net` label shared by several distinct islands is no
+longer ambiguous in the report. No documented field is renamed or retyped,
+and single-island nets (every `--mom-net` value with one match) report
+exactly the same numbers as before.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -1994,6 +2014,7 @@ default) leaves every field byte-identical to before this feature existed.
 | Field | Type | Description |
 |---|---|---|
 | `net` | string | The `--mom-net` value, echoed back. |
+| `net_id` | integer | Additive field (issue #811). Which net *object* was solved — the same `net_id` (KLayout's `Net.cluster_id`) the matching `nets[]` entry carries. `net` alone does not identify one: a label shared by several un-strapped islands resolves to the lowest-`net_id` island, and this field says which. |
 | `lumped_rc_capacitance_ff` | number | The net's ground capacitance **before** the swap — what `--parasitics` alone would have reported. |
 | `mom_capacitance_ff` | number | The `klt mom`-solved value — also what `nets[].capacitance_ff` for this net (and the written SPICE `C` card) now carry. |
 | `delta_ff` | number | `mom_capacitance_ff - lumped_rc_capacitance_ff`. |
