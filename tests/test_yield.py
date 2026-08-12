@@ -188,6 +188,7 @@ def test_malformed_json_is_a_clean_error(tmp_path):
         run_yield(str(path))
 
 
+@requires_native
 def test_a_measurement_without_limits_is_skipped_with_a_warning(tmp_path):
     """...but only when it was not asked for by name."""
     path = tmp_path / "samples.json"
