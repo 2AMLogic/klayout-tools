@@ -576,6 +576,30 @@ not `klt --version`, if you need to detect this kind of drift.
   that add response fields additively (no `schema_version` bump needed for
   either). See `docs/cli/erc.md`.
 
+- 2026-08-12 — `klt erc` additively reports `erc_findings`: the four core
+  ERC rules — floating gate, unconnected/multiply-driven net, missing
+  substrate/well tie, supply short — issue #861, Phase 1c of the antenna +
+  ERC signoff epic #713, building on #859's Phase 1a connectivity model.
+  `erc.floating_gate` needs no additional spec input — any gate net whose
+  accumulation stops immediately after the gate role (`step_area_um2 ==
+  0.0` at every level above it) is flagged directly from the existing
+  `gates[]` model. Two new optional spec sections drive the rest:
+  `nets` (named nets to check, mirroring `klt power`'s `power_nets` but
+  with an added `"kind": "signal" | "supply"`) and `ties` (substrate/well
+  tie declarations: a well/tub layer, a tap layer, the `stackup` role the
+  tap connects up to, and the net it must reach). A declared net matching
+  zero or more than one disconnected island is `erc.unconnected_net`; two
+  different declared names that resolve to the same electrical island are
+  `erc.multiply_driven_net`, or `erc.supply_short` when both are declared
+  `"kind": "supply"` — recovered from `klayout.db.Net.expanded_name()`'s
+  own comma-joined name for a shorted net (verified empirically for this
+  issue), not a second connectivity pass. Every well/tub shape without a
+  connected tap to its declared net is `erc.missing_tie`. Each finding
+  reports `rule`/`description` plus the specific `net`/`other_net`/
+  `gate_id`/`layer`/`bbox` implicated, mirroring `klt drc`'s
+  `violations[]` shape. No `schema_version` bump (purely additive fields).
+  See `docs/cli/erc.md`.
+
 - 2026-08-12 — `klt signoff --fleet <file>` adds a third mode to `klt
   signoff`: a fleet-wide tier roll-up (issue #827, Phase 1c of epic #706).
   Given a **fleet manifest** naming several blocks (each a per-block

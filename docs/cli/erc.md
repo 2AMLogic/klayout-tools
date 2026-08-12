@@ -1,9 +1,11 @@
 # `klt erc`
 
 Build the layer-by-layer connectivity model (issue
-[#859](https://github.com/2AMLogic/klayout-tools/issues/859), Phase 1a) and
-the per-gate antenna-ratio verdict (issue
-[#860](https://github.com/2AMLogic/klayout-tools/issues/860), Phase 1b) of
+[#859](https://github.com/2AMLogic/klayout-tools/issues/859), Phase 1a), the
+per-gate antenna-ratio verdict (issue
+[#860](https://github.com/2AMLogic/klayout-tools/issues/860), Phase 1b), and
+report the core ERC finding checks (issue
+[#861](https://github.com/2AMLogic/klayout-tools/issues/861), Phase 1c) of
 the antenna + ERC signoff epic
 [#713](https://github.com/2AMLogic/klayout-tools/issues/713).
 
@@ -14,7 +16,8 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
   a `klt place-and-route` output.
 - `<spec>` — path to a JSON **spec file** (see "Spec file" below): the
-  gate/conductor stackup, in fabrication order, and the vias bridging it.
+  gate/conductor stackup and the vias bridging it, plus (issue #861,
+  optional) named nets and substrate/well ties to check.
 - `--top` — top cell to analyse when the stream has more than one
   (**required** in that case — like `klt mom`/`klt power`, `klt erc` needs
   exactly one root to analyse, unlike `klt layers`, which defaults to
@@ -29,7 +32,7 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
 
-## Phase scope: what `klt erc` is, and what has shipped
+## Phase scope: what `klt erc` is, and what has shipped so far
 
 `klt erc`'s full, intended interface (per epic #713) is:
 
@@ -40,27 +43,27 @@ run in CI.
   unconnected/multiply-driven nets, missing substrate/well ties, supply
   shorts).
 
-**Phase 1a (#859) delivered the interface and the layer-by-layer
-connectivity model.** The spec file's `stackup`/`vias` *are* the
 connectivity declaration; `gates[].levels[]` (`step_area_um2`/
 `cumulative_area_um2` below) is the per-gate, per-fabrication-step
 connected conductor area.
 
-**Phase 1b (#860, this document's current state) adds the antenna-ratio
-verdict** on top of that connectivity model: `--pdk` selects a real,
-source-cited PDK antenna-ratio limit table (see "Antenna-ratio verdict"
-below), and every `levels[]` entry gains `antenna_ratio`/
-`antenna_ratio_max`/`antenna_ratio_source`/`verdict`; every `gates[]` entry
-gains an aggregate `antenna_verdict`. Per
-[`docs/json-contract.md`](../json-contract.md)'s additive-envelope design,
-this needed **no `schema_version` bump**: every field 1a's own version of
-this document promised is still exactly as documented, unchanged.
+**Phase 1b (#860) adds the antenna-ratio verdict** on top of that
+connectivity model: `--pdk` selects a real, source-cited PDK antenna-ratio
+limit table (see "Antenna-ratio verdict" below), and every `levels[]` entry
+gains `antenna_ratio`/`antenna_ratio_max`/`antenna_ratio_source`/`verdict`;
+every `gates[]` entry gains an aggregate `antenna_verdict`.
 
-**`erc_findings` (Phase 1c, [#861](https://github.com/2AMLogic/klayout-tools/issues/861))
-is still not part of this phase's response.** It is expected to follow the
-same shape as `klt drc`'s `violations[]` (a rule id, a description, and the
-specific net/gate/layer implicated) — see #861 for the shipped shape once
-it lands, again added additively with no `schema_version` bump.
+**Phase 1c (#861, this document's current state) additively delivers
+`erc_findings`**: the four core electrical-correctness rules — floating
+gate, unconnected/multiply-driven net, missing substrate/well tie, supply
+short — computed from the same connectivity model, plus two new optional
+spec sections (`nets`, `ties`). See "ERC finding checks" and "Spec file"
+below.
+
+Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
+design, neither 1b's nor 1c's fields needed a **`schema_version` bump**:
+every field 1a's own version of this document promised is still exactly as
+documented, unchanged.
 
 ## "Per gate" means "per gate net", not "per drawn poly finger"
 
@@ -130,16 +133,44 @@ A `stackup`/`vias` entry naming a layer absent from the given layout is not
 itself an error (a shared spec can list layers a particular fixture doesn't
 use) — matching `klt power`'s own convention.
 
+- `nets` (optional array, default `[]`, issue #861) — named nets to check
+  for connectivity findings, mirroring `klt power`'s `power_nets` but with
+  an added `kind`:
+  - `name` (string, required) — the net name, matched against `stackup`
+    label text the same way `klt power`'s `power_nets` are matched.
+  - `kind` (`"signal"` | `"supply"`, optional, default `"signal"`) —
+    classifies a two-net short (see "ERC finding checks" below):
+    two shorted `"supply"` nets are `erc.supply_short`; any other
+    combination is the more general `erc.multiply_driven_net`.
+  - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
+    `erc.supply_short` are never computed.
+- `ties` (optional array, default `[]`, issue #861) — substrate/well tie
+  declarations for the `erc.missing_tie` check:
+  - `name` (string, optional, defaults to `"tie<index>"`) — echoed in each
+    finding's `layer` field.
+  - `well_layer` (string, `"<layer>/<datatype>"`, required) — the
+    well/tub diffusion layer; each of its physically distinct (merged)
+    shapes is checked independently.
+  - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
+    (substrate/well contact) layer expected inside each well shape.
+  - `connect_to` (string, required) — the `stackup` role name the tap is
+    wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
+  - `net` (string, required) — the net name (matched the same way as
+    `nets[].name` above) the tap must ultimately reach.
+  - Omitted entirely -> `erc.missing_tie` is never computed.
+
 ## Connectivity model
 
 Connectivity is traced with `klayout.db.LayoutToNetlist`, used purely for
 wire/via connectivity — no device recognition is registered, unlike `klt
 extract`'s deck-based extraction. This is the same API `extract.py`'s own
 metal/via connectivity graph and `klt power`'s resistive-network extraction
-already use, scoped down to only the layers this spec declares — and the
-"LVS's shared net extraction" [#861](https://github.com/2AMLogic/klayout-tools/issues/861)
-(Phase 1c) names as the connectivity model this phase builds and that phase
-reuses.
+already use, scoped down to only the layers this spec declares (`stackup`,
+`vias`, and — issue #861 — each `ties[]` entry's `well_layer`/`tap_layer`).
+This is the "LVS's shared net extraction" issue #861's own description
+names as the connectivity model Phase 1a builds and Phase 1c reuses: the
+`erc_findings` checks below run against this exact same unified graph, not
+a second extraction pass.
 
 For every net the extraction discovers whose geometry includes the declared
 gate-role layer (`stackup[0]`):
@@ -160,8 +191,43 @@ A gate net with no geometry above the gate layer (an "unstrapped" gate —
 common for an isolated poly shape with no contact at all) still reports one
 `levels[]` entry per `stackup` role, each with `step_area_um2: 0.0` and
 `cumulative_area_um2` unchanged from the previous level — the accumulation
-simply does not grow past the gate level. This is not an error: it is the
-electrically correct answer for that net.
+simply does not grow past the gate level. This is not an error in the
+connectivity model itself: see "ERC finding checks" below for when it
+*is* reported as a finding.
+
+## ERC finding checks (issue #861)
+
+Four core electrical-correctness rules, each purely geometric/connectivity
+-- no device recognition, matching this command's Phase 1a posture. Each
+finding's shape is documented in "JSON schema" below; every rule ships
+with a golden violate/pass layout pair in `tests/test_erc.py`.
+
+- **`erc.floating_gate`** — a gate net (from `gates[]` above) whose
+  accumulation stops immediately after the gate role: `step_area_um2 ==
+  0.0` on every `stackup` level above `stackup[0]`. This is the electrical
+  signature of an uncontacted/floating gate. Computed directly from
+  `gates[]`; needs no `nets`/`ties` spec section.
+- **`erc.unconnected_net`** — a declared `nets[]` entry that matches zero,
+  or more than one, disconnected electrical island. Zero matches means
+  nothing in the layout carries that net's label at all; more than one
+  means the intended net is split into pieces that never actually touch.
+- **`erc.multiply_driven_net`** / **`erc.supply_short`** — two *different*
+  declared `nets[]` names whose matched geometry resolves to the very same
+  electrical island (a short), reported per unordered pair. When both
+  names are declared `"kind": "supply"`, this is the more severe
+  `erc.supply_short`; any other combination (signal-signal or
+  signal-supply) is `erc.multiply_driven_net`. KLayout's own
+  `Net.expanded_name()` already joins every label attached to one shorted
+  island into a single comma-separated name (e.g.
+  `"SHORTED_VDD,VSS"`) — this check splits that string to recover which
+  declared names collided.
+- **`erc.missing_tie`** — for every physically distinct well/tub shape
+  (one per merged polygon of a `ties[]` entry's `well_layer`), a tap must
+  be drawn inside it (`tap_layer`) *and* that tap must be electrically
+  connected — via this same connectivity graph, since the tap is wired to
+  `connect_to`'s `stackup` region during registration — to the declared
+  `net`. Both failure modes (no tap drawn at all, or a tap present but
+  wired to the wrong net) are reported under this one rule id.
 
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
@@ -286,13 +352,25 @@ the shared envelope (`schema_version`, error shape, exit codes).
         }
       ]
     }
-  ]
+  ],
+  "erc_findings": [
+    {
+      "rule": "erc.floating_gate",
+      "description": "gate net has no connected geometry above the gate layer (floating/uncontacted gate)",
+      "net": null,
+      "other_net": null,
+      "gate_id": "gate1",
+      "layer": "poly",
+      "bbox": { "left": 10000, "bottom": 0, "right": 10500, "top": 1000 }
+    }
+  ],
+  "erc_finding_count": 1
 }
 ```
 
 | Field            | Type            | Description                                                                                    |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------ |
-| `schema_version` | integer         | `1` (unchanged since Phase 1a — Phase 1b's fields were added additively; see "Phase scope" above). |
+| `schema_version` | integer         | `1`, unchanged since Phase 1a — Phase 1b's and Phase 1c's fields were both added additively (see "Phase scope" above). |
 | `file`           | string          | The input layout path exactly as provided.                                                       |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
@@ -311,13 +389,22 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
 | `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
+| `erc_findings`   | array\<object\> | One entry per ERC violation found by the four checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
+| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short` — matching `klt drc`'s `violations[].rule` convention. |
+| `erc_findings[].description` | string | Human-readable explanation of this specific finding.                                       |
+| `erc_findings[].net` | string \| null | The primary net name implicated (a `nets[].name`/`ties[].net` value, or a gate's own `gates[].net`). |
+| `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short` only; `null` otherwise. |
+| `erc_findings[].gate_id` | string \| null | The `gates[].gate_id` implicated, for `erc.floating_gate` only; `null` otherwise.           |
+| `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
+| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
+| `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
-| `0`       | Success — at least one gate net was found and reported.                                              |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
+| `0`       | Success — at least one gate net was found and reported. This is unaffected by `erc_findings`: a `0` exit with a non-empty `erc_findings` array means the run *completed* successfully, not that the layout is ERC-clean — check `erc_finding_count` (matching `klt drc`'s own "clean run" vs. "found violations" distinction). |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
 
 ## Cross-checked against klayout's own built-in antenna engine
@@ -343,13 +430,16 @@ ingestion harness exists is a natural follow-on.
 ## See also
 
 - [#713](https://github.com/2AMLogic/klayout-tools/issues/713) — the parent
-  antenna + ERC signoff epic (later phases: the core ERC finding list).
+  antenna + ERC signoff epic.
 - [#859](https://github.com/2AMLogic/klayout-tools/issues/859) — Phase 1a,
-  the layer-by-layer connectivity model this module's antenna-ratio verdict
-  is built on.
+  the `klt erc` interface and layer-by-layer connectivity model this
+  document's "Connectivity model" section describes.
+- [#860](https://github.com/2AMLogic/klayout-tools/issues/860) — Phase 1b,
+  the per-gate antenna-ratio check ("Antenna-ratio verdict" above) this
+  module's connectivity model feeds.
 - [#861](https://github.com/2AMLogic/klayout-tools/issues/861) — Phase 1c,
-  the core ERC finding list (floating gate, missing tie, supply short) that
-  reuses this model and `klt lvs`'s net extraction.
+  the core ERC finding list ("ERC finding checks" above), shipped in this
+  document's current form.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna
