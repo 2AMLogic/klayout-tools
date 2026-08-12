@@ -14,6 +14,31 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-12 — `klt synthesize` now maps constant drivers onto real
+  tie-high/tie-low standard cells, unblocking `klt place-and-route` for
+  designs that need constant ties (issue #854). Yosys's `synth`/`abc` passes
+  leave `1'b0`/`1'b1` constants as bare Verilog literals (`assign q[5] =
+  1'h0;`, `.D(1'h1)`); OpenSTA's Verilog reader materialises one net per
+  constant value when OpenROAD reads such a netlist (conventionally `zero_`
+  and `one_`), OpenROAD types those nets `GROUND`/`POWER`, and TritonRoute
+  then aborts the whole `route` stage with `[ERROR DRT-0305] Net zero_ of
+  signal type GROUND is not routable by TritonRoute.` The generated `.ys`
+  script now runs Yosys's `hilomap` pass — between `clean` and `stat`, so
+  the inserted tie cells are counted in `instance_count`/`area_um2` — using
+  the resolved `pdk.cell_library`'s own verified tie cells
+  (`sky130_fd_sc_hd__conb_1` HI/LO; `gf180mcu_fd_sc_mcu9t5v0__tieh` Z /
+  `__tiel` ZN — ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT` for
+  each platform, cross-checked against the installed liberty). A
+  `cell_library` with no tie-cell table entry emits no `hilomap` line at
+  all, keeping its script unchanged, and a design that needs no constant
+  tie (the repo's own `gcd.v`) synthesizes to a byte-identical netlist. No
+  response-shape change; `schema_version` is unaffected. Additionally, `klt
+  place-and-route` now *diagnoses* `DRT-0305` instead of passing it through:
+  the error message names the offending net and explains the tie-cell fix,
+  rather than surfacing only OpenROAD's own Tcl line-number summary
+  (`Error: pnr_<top>_route.tcl, 6 DRT-0305`) — which is what a caller saw,
+  because the informative line goes to stdout while the useless one goes to
+  stderr.
 - 2026-08-12 — `klt mom`'s PEEC partial self-inductance
   (`inductance_matrix_nh[j][j]`) no longer over-predicts by a systematic
   ~0.3% (issue #836). Each filament's self term previously substituted an
