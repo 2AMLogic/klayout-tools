@@ -239,7 +239,18 @@ def gate_savings(
     the gate, plus how many genuinely-bad (nonzero-DRC) candidates it
     caught and how many DRC-clean candidates it wrongly rejected -- the
     false-reject count issue #785's AC3 turns on.
+
+    Only candidates whose route actually completed are modelled: a
+    place-only or interrupted run has no baseline route cost to save and no
+    DRC oracle to be right or wrong about, so including it would silently
+    inflate the saved fraction.
     """
+    records = [
+        record
+        for record in records
+        if isinstance(record.get("route_seconds"), (int, float))
+        and record.get("route_returncode") == 0
+    ]
     baseline = 0.0
     gated = 0.0
     rejected: list[str] = []

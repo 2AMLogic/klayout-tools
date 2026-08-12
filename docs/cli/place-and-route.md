@@ -85,6 +85,16 @@ changes that net's own routing, so this mirrors ORFS's own
 then reports the post-repair violation count (`antenna_violation_count`)
 before `write_def`.
 
+The `"place"` stage also ends with a `write_def` of its own, to
+`.klt/place-and-route/<hdl_toplevel>_place.def` (issue #785). This is a
+**debug artifact only** — it is deliberately *not* reported anywhere in the
+response, and `def_path` still means "the routed DEF, or `null`" exactly as
+before. It exists so a post-global-placement congestion pre-check (see
+"Congestion pre-check" below) can read real cell/pin geometry without a
+second OpenROAD round trip; the path is derivable by any consumer via
+`place_and_route.placement_def_path(place_and_route.artifact_dir(request_path),
+hdl_toplevel)`.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -468,3 +478,44 @@ scheduler, not a new `--backend remote`/`--hosts` flag on `klt synthesize`/
 `klt place-and-route` (neither accepts one today) — an orchestrator (a
 design-space-exploration loop, or a future CLI verb) drives `digital_fleet`
 directly, the way the snippet above does.
+
+## Congestion pre-check (research spike, not wired in)
+
+`klayout_tools.congestion` estimates post-placement routing congestion from
+the `place` stage's `<hdl_toplevel>_place.def` debug artifact: per-net
+rectilinear Steiner trees (Prim RMST + Kahng & Robins Iterated 1-Steiner),
+RUDY bounding-box demand spreading onto a GCell-sized bin grid, and per-bin
+demand-vs-track-supply utilisation statistics. It exists to answer P&R
+survey §3.6's question — can a cheap estimator reject an obviously-bad DSE
+candidate before paying for `global_route`/`detailed_route`?
+
+**It is deliberately not wired into anything.** No `klt` verb calls it, and
+`digital_fleet`'s candidate loop does not gate on it. Issue #785's own
+go/no-go criterion was "correlate against OpenROAD's post-route
+DRC-violation count, and ship only if that correlation rejects genuinely-bad
+candidates without false-rejecting good ones". On the corpus slice that
+criterion is measurable over, **every** candidate OpenROAD's placer accepts
+routes DRC-clean (placement itself fails with `DPL-0038` above ~70%
+utilisation), so the DRC oracle is constant and the correlation is
+undefined. What the estimator does track well is routing *cost*, not routing
+*failure* — see the PR for issue #785 for the full measurement table.
+
+Use it directly if you want that signal:
+
+```python
+from klayout_tools import congestion, place_and_route
+
+artifacts = place_and_route.artifact_dir("request.json")
+estimate = congestion.estimate_congestion_from_def(
+    place_and_route.placement_def_path(artifacts, "gcd"),
+    tech_lef=".../sky130_fd_sc_hd__nom.tlef",
+    cell_lefs=[".../sky130_fd_sc_hd.lef"],
+    routing_layers=["met1", "met2", "met3", "met4", "met5"],
+)
+estimate["congestion_score"]  # p95 bin utilisation
+```
+
+`scripts/congestion-precheck-study.sh` (real OpenROAD, via
+`openroad/orfs:latest`) plus `scripts/congestion_precheck_study.py`
+(correlation + gate-savings model) re-run the whole study on any candidate
+set, so the go/no-go verdict above is re-derivable rather than asserted.
