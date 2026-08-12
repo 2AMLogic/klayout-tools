@@ -51,6 +51,36 @@ dev = [
 functional-verification = [
     "cocotb>=2.0.1,<2.1; python_version < \"3.14\"",
 ]
+# Backs `tests/test_mom_cross_validation.py` (issue #895, Phase 2c of the
+# Method-of-Moments epic #701): the external MoM oracle used to cross-check
+# `klt mom`'s full-wave S-parameters ("Cross-check against an external
+# MoM/FEM ... on a shared benchmark", the epic's own Phase 0
+# reality-grounding requirement). `PyNEC` wraps nec2++/NEC2 -- a mature,
+# independently-developed thin-wire Method-of-Moments antenna/transmission-
+# line solver (Lawrence Livermore's original NEC2, ported to C++), a
+# genuinely different codebase/discretisation from `klt_mom_native`'s Rust
+# implementation. It is its own extra, never pulled in by `dev`, for two
+# reasons:
+#   1. License: `PyNEC`'s own PyPI metadata declares `GPL-3.0-only` -- the
+#      same category `docs/design/em-field-sim-spike.md` already flags for
+#      openEMS ("fine to invoke as a subprocess, forecloses in-process/
+#      library embedding inside this repo's MIT surface"). `klt mom` itself
+#      never imports it; only `scripts/mom_nec_reference.py` does, and that
+#      script is always invoked as its own subprocess by the cross-
+#      validation test -- see that script's module docs for the full
+#      rationale. Kept as an installable extra (not a `[tool.uv.sources]`
+#      path dependency like the `mom`/`congestion`/`yield` groups above)
+#      because -- unlike those in-repo Rust crates -- `PyNEC` is a real
+#      published PyPI package with no in-repo source of its own.
+#   2. `python_version >= "3.11"` mirrors `PyNEC`'s own declared
+#      `Requires-Python` floor (verified against its PyPI metadata) --
+#      without the marker, `uv sync --extra mom-cross-validation` on this
+#      repo's own 3.10 floor (`requires-python` above) would fail to
+#      resolve; the cross-validation test instead skips cleanly on 3.10 with
+#      a clear reason (see that test module's own skip logic).
+mom-cross-validation = [
+    "PyNEC>=2.3,<3; python_version >= \"3.11\"",
+]
 
 # Backs `klt mom` (issue #718, Phase 0/1 of the Method-of-Moments epic #701):
 # the `klt_mom_native` pyo3 extension whose crate lives in `native/mom/`, this
