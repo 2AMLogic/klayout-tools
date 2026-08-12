@@ -1,14 +1,14 @@
 # `klt erc`
 
-Define the `klt erc` interface and build the layer-by-layer connectivity
-model that both the per-gate antenna-ratio check and the core electrical
-rule checks (ERC) depend on — issue
-[#859](https://github.com/2AMLogic/klayout-tools/issues/859), Phase 1a of
+Build the layer-by-layer connectivity model (issue
+[#859](https://github.com/2AMLogic/klayout-tools/issues/859), Phase 1a) and
+the per-gate antenna-ratio verdict (issue
+[#860](https://github.com/2AMLogic/klayout-tools/issues/860), Phase 1b) of
 the antenna + ERC signoff epic
 [#713](https://github.com/2AMLogic/klayout-tools/issues/713).
 
 ```
-klt erc <file> <spec> [--top <cell>] [--format text|json]
+klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -19,12 +19,17 @@ klt erc <file> <spec> [--top <cell>] [--format text|json]
   (**required** in that case — like `klt mom`/`klt power`, `klt erc` needs
   exactly one root to analyse, unlike `klt layers`, which defaults to
   summing across every top cell).
+- `--pdk` — PDK antenna-ratio limit table each non-gate `stackup` level's
+  `antenna_ratio` is compared against (currently: `sky130`). Optional — see
+  "Antenna-ratio verdict" below for what happens when it's omitted. Not
+  validated by argparse: an unrecognised name is a clean exit-1 error, like
+  `klt drc`'s own `--deck`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
 
-## Phase scope: what `klt erc` is, and what this issue delivers
+## Phase scope: what `klt erc` is, and what has shipped
 
 `klt erc`'s full, intended interface (per epic #713) is:
 
@@ -35,33 +40,27 @@ run in CI.
   unconnected/multiply-driven nets, missing substrate/well ties, supply
   shorts).
 
-**This issue (#859, Phase 1a) delivers only the interface and the
-layer-by-layer connectivity model.** The spec file's `stackup`/`vias` *are*
-the connectivity declaration; this command's own JSON response
-(`gates[].levels[]` below) is the per-gate, per-fabrication-step connected
-conductor area that a later phase turns into a verdict. Two things from the
-full interface above are **deliberately not part of this phase**:
+**Phase 1a (#859) delivered the interface and the layer-by-layer
+connectivity model.** The spec file's `stackup`/`vias` *are* the
+connectivity declaration; `gates[].levels[]` (`step_area_um2`/
+`cumulative_area_um2` below) is the per-gate, per-fabrication-step
+connected conductor area.
 
-- An explicit `netlist`/PDK antenna/ERC rule-set spec input — not read in
-  this phase. `klt erc` traces connectivity itself via
-  `klayout.db.LayoutToNetlist` (no device recognition), the same way `klt
-  power` traces power-net connectivity without reading an external netlist
-  — see "Connectivity model" below. A PDK rule set (per-layer antenna-ratio
-  limits, the core ERC rule definitions) is consumed starting in 1b/1c.
-- `antenna_ratio`/`verdict` (per-level, Phase 1b,
-  [#860](https://github.com/2AMLogic/klayout-tools/issues/860)) and
-  `erc_findings` (Phase 1c,
-  [#861](https://github.com/2AMLogic/klayout-tools/issues/861)) — these
-  fields do not exist in this phase's response at all. Per
-  [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-  design, adding them in a later phase needs **no `schema_version`
-  bump**: every field this document currently promises stays exactly as
-  documented. 1b's `antenna_ratio` is expected to be a simple derived value
-  (`cumulative_area_um2 / gate_area_um2` at a given level) compared against
-  a PDK-specific limit; 1c's `erc_findings` is expected to follow the same
-  shape as `klt drc`'s `violations[]` (a rule id, a description, and the
-  specific net/gate/layer implicated) — see #860/#861 for the shipped
-  shape once each lands.
+**Phase 1b (#860, this document's current state) adds the antenna-ratio
+verdict** on top of that connectivity model: `--pdk` selects a real,
+source-cited PDK antenna-ratio limit table (see "Antenna-ratio verdict"
+below), and every `levels[]` entry gains `antenna_ratio`/
+`antenna_ratio_max`/`antenna_ratio_source`/`verdict`; every `gates[]` entry
+gains an aggregate `antenna_verdict`. Per
+[`docs/json-contract.md`](../json-contract.md)'s additive-envelope design,
+this needed **no `schema_version` bump**: every field 1a's own version of
+this document promised is still exactly as documented, unchanged.
+
+**`erc_findings` (Phase 1c, [#861](https://github.com/2AMLogic/klayout-tools/issues/861))
+is still not part of this phase's response.** It is expected to follow the
+same shape as `klt drc`'s `violations[]` (a rule id, a description, and the
+specific net/gate/layer implicated) — see #861 for the shipped shape once
+it lands, again added additively with no `schema_version` bump.
 
 ## "Per gate" means "per gate net", not "per drawn poly finger"
 
@@ -164,6 +163,71 @@ common for an isolated poly shape with no contact at all) still reports one
 simply does not grow past the gate level. This is not an error: it is the
 electrically correct answer for that net.
 
+## Antenna-ratio verdict (Phase 1b, issue #860)
+
+For every non-gate `stackup` level (`stackup[1:]` — the gate role itself,
+`stackup[0]`, is never PDK-checked; see below), `klt erc` derives
+`antenna_ratio = cumulative_area_um2 / gate_area_um2` and, when `--pdk` is
+given, compares it against that PDK's real antenna-ratio limit for the
+level's own role `name`:
+
+- **`verdict: "pass"`** — `antenna_ratio <= antenna_ratio_max`.
+- **`verdict: "violate"`** — `antenna_ratio > antenna_ratio_max`.
+- **`verdict: "unchecked"`** — no PDK limit was available for this level,
+  either because `--pdk` was omitted (every level comes back `"unchecked"`
+  in that case — `antenna_ratio` is still reported, just with nothing to
+  compare it against) or because this role's `name` does not match any
+  role the selected PDK's table defines (see "Sky130 antenna-ratio
+  limits" below for the exact names it recognises).
+
+**The gate role itself (`stackup[0]`) is always `"unchecked"`.** Its
+`antenna_ratio` is trivially `1.0` (`cumulative_area_um2 == gate_area_um2`
+at that level by construction), and the source PDK table's own gate-layer
+rule measures a different quantity (poly *perimeter*, not cumulative
+connected *area*) that this area-only connectivity model does not compute
+— comparing a always-`1.0` ratio against that table's numeric limit would
+be meaningless, so it is left uncompared rather than reported as a
+misleading trivial pass.
+
+Each `gates[]` entry also reports an aggregate `antenna_verdict`: `
+"violate"` if any of its `levels[]` violate, else `"pass"` if any level
+passed, else `"unchecked"`.
+
+### Sky130 antenna-ratio limits
+
+`--pdk sky130` uses the real SkyWater sky130 antenna-rule table, "MAX_EGAR"
+(maximum effective-area/gate-area ratio *without* an antenna diode),
+transcribed from the official PDK repository's own published rule tables:
+[`google/skywater-pdk`, `docs/rules/antenna/table-Ia-antenna-rules-s8d.csv`](https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv)
+(the "Max EA/A w/o diode" column, fetched 2026-08-12).
+
+| `stackup` role name | Limit | Source rule id |
+| -------------------- | ----: | --------------- |
+| `poly`                | *(never checked — see above)* | `.poly.1` |
+| `li1`                  | 75    | `.li.1`   |
+| `met1`                 | 400   | `.met1.1` |
+| `met2`                 | 400   | `.met2.1` |
+
+These limits are **verified stack-invariant**: identical across every
+sky130 metal-stack option table checked (S8D, S8P/SP8P/S8P-10R,
+S8TM/S8TMC/S8TMA-5R, S8P12/S8PIR/S8PF-10R, S8TNV-5R —
+`docs/rules/antenna/table-I{a,e,c,g,b}-antenna-rules-*.csv` in the same
+repository), so this one table applies to every sky130 stack variant, not
+just S8D specifically. **met3-and-above limits vary by stack option**
+(0.8–2.0× in the checked tables) and are **intentionally not
+transcribed** — a candidate follow-on, not a silent omission, matching
+[`decks/sky130.py`](../../src/klayout_tools/decks/sky130.py)'s own
+convention of calling out every deliberately-uncovered rule.
+
+`licon1`/`mcon`/`via1` also appear in the source table (`.licon.1`/
+`.mcon.1`/`.via.1`) but can never produce a `levels[]` verdict here: those
+are `klt erc` *via* roles (the spec's `vias[]` array), not `stackup`
+roles, so they have no `levels[]` entry to attach one to.
+
+An unrecognised `--pdk` name (anything other than `sky130`) is a clean
+exit-1 error, checked eagerly before the layout is even loaded — see "Exit
+codes" below.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
@@ -174,6 +238,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
   "schema_version": 1,
   "file": "routed.gds",
   "spec": "erc.json",
+  "pdk": "sky130",
   "gate_role": "poly",
   "gate_count": 1,
   "gates": [
@@ -181,11 +246,44 @@ the shared envelope (`schema_version`, error shape, exit codes).
       "gate_id": "gate0",
       "net": "GATE_A",
       "gate_area_um2": 2.0,
+      "antenna_verdict": "pass",
       "levels": [
-        { "layer": "poly", "step_area_um2": 2.0, "cumulative_area_um2": 2.0 },
-        { "layer": "li1", "step_area_um2": 2.0, "cumulative_area_um2": 4.0 },
-        { "layer": "met1", "step_area_um2": 1.5, "cumulative_area_um2": 5.5 },
-        { "layer": "met2", "step_area_um2": 1.6, "cumulative_area_um2": 7.1 }
+        {
+          "layer": "poly",
+          "step_area_um2": 2.0,
+          "cumulative_area_um2": 2.0,
+          "antenna_ratio": 1.0,
+          "antenna_ratio_max": null,
+          "antenna_ratio_source": null,
+          "verdict": "unchecked"
+        },
+        {
+          "layer": "li1",
+          "step_area_um2": 2.0,
+          "cumulative_area_um2": 4.0,
+          "antenna_ratio": 2.0,
+          "antenna_ratio_max": 75.0,
+          "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.li.1', 'Max EA/A w/o diode' column",
+          "verdict": "pass"
+        },
+        {
+          "layer": "met1",
+          "step_area_um2": 1.5,
+          "cumulative_area_um2": 5.5,
+          "antenna_ratio": 2.75,
+          "antenna_ratio_max": 400.0,
+          "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.met1.1', 'Max EA/A w/o diode' column",
+          "verdict": "pass"
+        },
+        {
+          "layer": "met2",
+          "step_area_um2": 1.6,
+          "cumulative_area_um2": 7.1,
+          "antenna_ratio": 3.55,
+          "antenna_ratio_max": 400.0,
+          "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.met2.1', 'Max EA/A w/o diode' column",
+          "verdict": "pass"
+        }
       ]
     }
   ]
@@ -194,38 +292,68 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field            | Type            | Description                                                                                    |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------ |
-| `schema_version` | integer         | `1` (this phase's connectivity-model-only shape; see "Phase scope" above for the additive fields to come). |
+| `schema_version` | integer         | `1` (unchanged since Phase 1a — Phase 1b's fields were added additively; see "Phase scope" above). |
 | `file`           | string          | The input layout path exactly as provided.                                                       |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
+| `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
 | `gate_role`      | string          | The `stackup[0].name` value — the gate-role layer's own name.                                    |
 | `gate_count`     | integer         | `len(gates)`.                                                                                     |
 | `gates`          | array\<object\> | One entry per net with nonzero area on the gate-role layer — see below.                          |
 | `gates[].gate_id`| string          | `"gate<index>"`, ascending in internal net-id order (stable within one run, not guaranteed stable across `klt`/KLayout versions). |
 | `gates[].net`    | string \| null  | The net's own label text, if any `stackup` role's `label_layer` carries one; `null` if unlabelled. |
 | `gates[].gate_area_um2` | number   | This net's own merged area on the gate-role layer, in µm². Identical to `levels[0].cumulative_area_um2`. |
+| `gates[].antenna_verdict` | string | `"violate"` if any `levels[]` entry violates, else `"pass"` if any level passed, else `"unchecked"`. |
 | `gates[].levels` | array\<object\> | One entry per `stackup` role, in fabrication order — see below.                                  |
 | `levels[].layer` | string          | The contributing `stackup` role's own `name`.                                                     |
 | `levels[].step_area_um2` | number   | This net's own merged area on this role's layer, in µm².                                         |
 | `levels[].cumulative_area_um2` | number | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm².     |
+| `levels[].antenna_ratio` | number   | `cumulative_area_um2 / gate_area_um2` for this level. `1.0` at `stackup[0]` (the gate level) by construction. |
+| `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
+| `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
+| `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
 | `0`       | Success — at least one gate net was found and reported.                                              |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias` declaration, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
+
+## Cross-checked against klayout's own built-in antenna engine
+
+`klayout.db.LayoutToNetlist.antenna_check` is klayout's own, independently
+implemented (C++ core) per-net antenna check — a genuinely separate
+engine from this module's own manual `polygons_of_net`/area-accumulation
+arithmetic. `tests/test_erc.py`'s
+`test_antenna_verdict_agrees_with_klayout_builtin_antenna_check` runs it
+directly against every golden violate/pass fixture (li1/met1/met2, both
+outcomes) alongside `klt erc`'s own verdict and asserts agreement.
+
+The epic's named corpus for this cross-check, the Tiny Tapeout corpus
+([#520](https://github.com/2AMLogic/klayout-tools/issues/520)), is **not
+usable yet**: #520 is itself an unimplemented, `loom:operator-only` epic —
+no ingestion harness exists, and no Tiny Tapeout GDS is cached anywhere in
+this repo (verified 2026-08-12). This is a documented discrepancy, not a
+silently-skipped acceptance criterion: the golden-fixture cross-check
+above against klayout's own antenna engine is what this repo can do
+headlessly today; re-running it against the real #520 corpus once its
+ingestion harness exists is a natural follow-on.
 
 ## See also
 
 - [#713](https://github.com/2AMLogic/klayout-tools/issues/713) — the parent
-  antenna + ERC signoff epic (later phases: the per-gate antenna-ratio
-  verdict, the core ERC finding list).
-- [#860](https://github.com/2AMLogic/klayout-tools/issues/860) — Phase 1b,
-  the per-gate antenna-ratio check this module's connectivity model feeds.
+  antenna + ERC signoff epic (later phases: the core ERC finding list).
+- [#859](https://github.com/2AMLogic/klayout-tools/issues/859) — Phase 1a,
+  the layer-by-layer connectivity model this module's antenna-ratio verdict
+  is built on.
 - [#861](https://github.com/2AMLogic/klayout-tools/issues/861) — Phase 1c,
   the core ERC finding list (floating gate, missing tie, supply short) that
   reuses this model and `klt lvs`'s net extraction.
+- [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
+  Tapeout corpus epic named as this feature's cross-check corpus; not yet
+  implemented (see "Cross-checked against klayout's own built-in antenna
+  engine" above).
 - [`docs/cli/power.md`](power.md) — `klt power`, the sibling Phase 1a
   connectivity-only verb this command's spec-file/phase-scope conventions
   deliberately mirror.
