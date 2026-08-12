@@ -440,6 +440,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt signoff --fleet <file>` adds a third mode to `klt
+  signoff`: a fleet-wide tier roll-up (issue #827, Phase 1c of epic #706).
+  Given a **fleet manifest** naming several blocks (each a per-block
+  manifest, inline or by path), it calls the existing tier-verdict machinery
+  (`klt signoff --manifest`, #722/#825/#826) once per block and reports
+  each block's current tier plus, for any block not yet at T1, the single
+  T1 item still blocking it — turning "which canaries are at which tier,
+  and what's blocking each not-yet-T1 block" into one query instead of a
+  per-block survey. No evidence is read or graded independently: a block's
+  roll-up row is a pure reduction of its own tier report, so the two can
+  never disagree about *why* it isn't T1. New top-level JSON shape
+  (`schema_version: 1`, independent of the other two modes'
+  `schema_version`s) — `block_count`/`t1_count`/`not_t1_count` plus one
+  `blocks[]` entry per fleet member (`block`, `source`, `kind`, `tier`,
+  `t1_item_count`, `t1_met_count`, `blocking_item`). Exits `0` only when
+  every block in the fleet is `tier: "T1"`, `3` otherwise, `1` on a
+  malformed fleet/block manifest. See `docs/cli/signoff.md`'s "Fleet
+  roll-up" section.
+
 - 2026-08-12 — New verb `klt power` extracts a routed layout's named
   power/ground nets into a resistive network (nodes + segment resistances) —
   issue #844, Phase 1a of the power/IR-drop + EM signoff epic #712. A JSON

@@ -53,6 +53,13 @@ grades them by hand -- see `docs/cli/signoff.md`'s "Tier-verdict report"
 section for the manifest shape and JSON schema, including the
 command-backed evidence entry's shape.
 
+When qualifying more than one block at once, `klt signoff --fleet <file>`
+(#827, Phase 1c of epic #706) grades every block named in a **fleet
+manifest** (a list of block manifests, inline or by path) and reports each
+one's current tier plus, for any block not yet T1, the single item still
+blocking it -- one query across a fleet of canaries instead of re-running
+this skill per block. See `docs/cli/signoff.md`'s "Fleet roll-up" section.
+
 ## Producing a qualification report
 
 Target: one markdown report grading a block repo against the **T1

@@ -1,6 +1,6 @@
 # `klt signoff`
 
-Two modes, one verb:
+Three modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
    more `klt drc`/`klt lvs`/`klt extract`/`klt sim` JSON envelopes into a
@@ -15,20 +15,31 @@ Two modes, one verb:
    (issue #825, Phase 1 of epic #706) a `klt drc`/`klt lvs`/`klt
    extract`/`klt sim` command to actually run and grade against its own
    exit status and stdout. See "Tier-verdict report" below.
+3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
+   every block named in a **fleet manifest** (one tier-verdict report per
+   block) and reduce each block's result down to its current tier and, for
+   any block not yet at T1, the single item still blocking it — one query
+   across a whole fleet of canaries instead of opening each block's own
+   report. See "Fleet roll-up" below.
 
 ```
 klt signoff <file>... [--format text|json]
 klt signoff --manifest <manifest-file> [--format text|json]
+klt signoff --fleet <fleet-manifest-file> [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
   sim` JSON envelope files (`--format json` output from any of those four
   verbs), in the order they should appear in `checks[]`. Any entry may be
   `-`, which reads one envelope from stdin (same convention as `klt
-  report`/`klt lvs`). Mutually exclusive with `--manifest`.
+  report`/`klt lvs`). Mutually exclusive with `--manifest`/`--fleet`.
 - `--manifest` — path to a block manifest JSON file (or `-` for stdin);
   switches to the tier-verdict report mode instead of aggregating `<file>...`
-  arguments. Mutually exclusive with `<file>...`.
+  arguments. Mutually exclusive with `<file>...`/`--fleet`.
+- `--fleet` — path to a fleet manifest JSON file (or `-` for stdin);
+  switches to the fleet roll-up mode instead of aggregating `<file>...`
+  arguments or rendering one block's tier report. Mutually exclusive with
+  `<file>...`/`--manifest`.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -297,6 +308,115 @@ actually ran and failed):
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
 
+## Fleet roll-up (`--fleet`)
+
+`klt signoff --fleet <file>` grades every block named in a **fleet
+manifest** — one tier-verdict report per block, computed by calling the
+tier-verdict machinery above once per block — and reduces each block's
+result down to two facts: its current tier, and, for any block not yet at
+T1, the single T1 item still blocking it. No evidence is read or graded
+independently here; a block's roll-up row is a pure reduction of its own
+`build_tier_report` result, so the roll-up and that block's full report can
+never disagree about *why* it isn't T1 yet.
+
+```json
+{
+  "blocks": [
+    "manifests/sky130-bandgap.json",
+    {"block": "gf180-bandgap", "kind": "analog", "evidence": {"3": "drc.json"}}
+  ]
+}
+```
+
+- `blocks` — required, a non-empty array. Each entry is either a **path** to
+  a block manifest JSON file (or `"-"` for stdin — read exactly like
+  `--manifest`'s own input), or an **inline** block manifest object (the
+  same `block`/`kind`/`evidence` shape `--manifest` accepts, described
+  above). Every resolved manifest's `block` field is **required** here
+  (unlike single-block tier-report mode, where it is optional) — it is how
+  a roll-up row is identified.
+
+A block whose manifest is structurally invalid (missing/invalid `kind`, a
+malformed `evidence` map, or no `block` name) aborts the whole roll-up with
+an error — a fleet-manifest authoring mistake, not a "no evidence yet"
+grading outcome. A block whose evidence is simply incomplete (a missing
+DRC report, a check that failed) never aborts anything: it renders with
+`tier: null` and a `blocking_item` naming exactly what's missing, same as
+single-block tier-report mode.
+
+### Fleet-report JSON schema
+
+```json
+{
+  "schema_version": 1,
+  "block_count": 3,
+  "t1_count": 1,
+  "not_t1_count": 2,
+  "source_doc": "docs/design-evidence-tiers.md",
+  "blocks": [
+    {
+      "block": "sky130-bandgap",
+      "source": "manifests/sky130-bandgap.json",
+      "kind": "analog",
+      "tier": "T1",
+      "t1_item_count": 10,
+      "t1_met_count": 10,
+      "blocking_item": null
+    },
+    {
+      "block": "gf180-bandgap",
+      "source": null,
+      "kind": "analog",
+      "tier": null,
+      "t1_item_count": 10,
+      "t1_met_count": 3,
+      "blocking_item": {
+        "id": 4,
+        "title": "LVS clean",
+        "partition": null,
+        "reason": "no_evidence"
+      }
+    }
+  ]
+}
+```
+
+| Field           | Type              | Description                                                                          |
+| --------------- | ------------------ | ---------------------------------------------------------------------------------------- |
+| `schema_version`| integer             | Version of this report's own JSON shape (starts at `1`, independent of the other two modes' `schema_version`s). |
+| `block_count`   | integer             | Number of `blocks[]` entries graded.                                                     |
+| `t1_count`      | integer             | Number of those blocks with `tier: "T1"`.                                                |
+| `not_t1_count`  | integer             | `block_count - t1_count`.                                                                 |
+| `source_doc`    | string               | Always `"docs/design-evidence-tiers.md"`.                                                |
+| `blocks`        | array\<object\>      | One entry per fleet manifest `blocks[]` entry, in order.                                 |
+
+#### `blocks[]` entries
+
+| Field           | Type              | Description                                                                          |
+| --------------- | ------------------ | ---------------------------------------------------------------------------------------- |
+| `block`         | string               | The block's name, from its manifest's `block` field.                                     |
+| `source`        | string \| null       | The fleet manifest entry's file path, or `null` for an inline block manifest.             |
+| `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the block's manifest.           |
+| `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
+| `t1_item_count` | integer              | This block's rendered T1 item count (10, or 20 for `mixed-signal`).                      |
+| `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
+| `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the first unmet T1 item — see below.                 |
+
+#### `blocking_item` fields
+
+| Field       | Type              | Description                                                                          |
+| ----------- | ------------------ | ---------------------------------------------------------------------------------------- |
+| `id`        | integer              | The blocking T1 checklist item's number (1-10).                                          |
+| `title`     | string               | The item's title.                                                                        |
+| `partition` | string \| null       | `"analog"`/`"digital"` for a `mixed-signal` block's per-partition item, else `null`.      |
+| `reason`    | string               | Why this item is unmet — one of the `reason` values documented under "Tier-verdict report" above. |
+
+`blocking_item` names the *first* rendered T1 item (in the same order the
+tier-verdict report renders items — item id, then partition for a
+mixed-signal block) that is not `"met"` — the single next thing to fix, not
+a re-rendering of the whole item list. Open that block's own `--manifest`
+report for the full item-by-item detail.
+
 ## Envelope-aggregation JSON schema (the contract)
 
 **JSON is the API.** Per the project's rules, **breaking (renaming,
@@ -391,9 +511,18 @@ Tier-verdict report mode (`--manifest`):
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | `tier: "T1"` — every rendered T1 item is `"met"`.                        |
-| `1`       | The manifest file was missing/unreadable/not valid JSON/not a JSON object, its `kind` was missing or invalid, its `evidence` field was not a JSON object, `docs/design-evidence-tiers.md` could not be parsed, or `--manifest` was combined with `<file>...`. |
+| `1`       | The manifest file was missing/unreadable/not valid JSON/not a JSON object, its `kind` was missing or invalid, its `evidence` field was not a JSON object, `docs/design-evidence-tiers.md` could not be parsed, or `--manifest` was combined with `<file>...`/`--fleet`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `tier: null` — ran successfully, but at least one T1 item is `"unmet"`.  |
+
+Fleet roll-up mode (`--fleet`):
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | `not_t1_count: 0` — every block in the fleet is `tier: "T1"`.             |
+| `1`       | The fleet manifest file was missing/unreadable/not valid JSON/not a JSON object, its `blocks` field was missing/not a non-empty JSON array, a `blocks[]` entry was neither a string nor a JSON object (or a string entry couldn't be read/parsed), a resolved block manifest had no non-empty `block` name, a block manifest was structurally invalid (see "Tier-verdict report mode" above), or `--fleet` was combined with `<file>...`/`--manifest`. |
+| `2`       | Usage error (bad `--format` value) — from argparse.                      |
+| `3`       | `not_t1_count > 0` — ran successfully, but at least one block's tier is not `"T1"`. |
 
 On error, a concise message is written to **stderr** and nothing is written
 to stdout. No Python traceback is printed.
@@ -535,3 +664,35 @@ readable file the way a file-backed citation's `exit_status: 0` is. A
 broken or hanging gate command renders `"unmet"` with `reason:
 "command_failed"` (a launch failure, a timeout, or a nonzero exit) instead
 of silently reading like a skipped check or a fabricated pass.
+
+## Worked example: fleet roll-up across three canaries
+
+Issue #827 (Phase 1c of epic #706): grade `sky130-bandgap`'s and
+`gf180-bandgap`'s own block manifests (each on disk), plus a third canary
+given inline, in one call:
+
+```
+$ cat fleet.json
+{
+  "blocks": [
+    "manifests/sky130-bandgap.json",
+    "manifests/gf180-bandgap.json",
+    {"block": "sky130-ota-5t", "kind": "analog", "evidence": {}}
+  ]
+}
+$ klt signoff --fleet fleet.json
+fleet: 1/3 blocks at T1 (2 not yet)
+
+[T1   ] sky130-bandgap (analog)  T1: 10/10 items met
+[not-T1] gf180-bandgap (analog)  T1: 3/10 items met
+        blocking: #4 LVS clean (reason: no_evidence)
+[not-T1] sky130-ota-5t (analog)  T1: 0/10 items met
+        blocking: #1 Design sources (reason: no_evidence)
+
+source: docs/design-evidence-tiers.md
+```
+
+One query names every canary's tier and, for the two not yet at T1, exactly
+which item to fix next — instead of opening each block's own `--manifest`
+report to find out. `klt signoff` exits `3` here (`not_t1_count: 2`); it
+would exit `0` only once every block in the fleet reaches `tier: "T1"`.

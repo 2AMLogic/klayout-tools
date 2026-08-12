@@ -26,7 +26,12 @@ import pytest
 from klayout_tools import signoff as signoff_module
 from klayout_tools.cli import main
 from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
-from klayout_tools.signoff import SignoffError, build_signoff, build_tier_report
+from klayout_tools.signoff import (
+    SignoffError,
+    build_fleet_report,
+    build_signoff,
+    build_tier_report,
+)
 
 #: Repo root, resolved once -- used by the real-subprocess gate-binding
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
@@ -1463,3 +1468,251 @@ def test_cli_manifest_missing_file_exits_one(tmp_path, capsys):
     )
 
     assert exit_code == 1
+
+
+# --------------------------------------------------------------------------- #
+# build_fleet_report(): fleet-wide tier roll-up (issue #827, Phase 1c of
+# epic #706)
+# --------------------------------------------------------------------------- #
+
+
+def _fleet_block_manifest(block: str, kind: str = "analog", evidence=None) -> dict:
+    return {"block": block, "kind": kind, "evidence": evidence or {}}
+
+
+def _fleet_write(tmp_path, blocks: list) -> str:
+    return _write(tmp_path, "fleet.json", {"blocks": blocks})
+
+
+def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    # canary-a: every T1 item met -> T1, no blocking item.
+    full_evidence = {str(i): drc_path for i in range(1, 11)}
+    full_evidence["4"] = lvs_path
+    block_a = _fleet_block_manifest("canary-a", evidence=full_evidence)
+
+    # canary-b: everything but item 4 (LVS clean) met -> blocked on #4.
+    partial_evidence = {str(i): drc_path for i in range(1, 11) if i != 4}
+    block_b = _fleet_block_manifest("canary-b", evidence=partial_evidence)
+
+    # canary-c: nothing met -> blocked on item 1 (the first T1 item).
+    block_c = _fleet_block_manifest("canary-c", evidence={})
+
+    result = build_fleet_report({"blocks": [block_a, block_b, block_c]})
+
+    assert result["schema_version"] == 1
+    assert result["block_count"] == 3
+    assert result["t1_count"] == 1
+    assert result["not_t1_count"] == 2
+    assert result["source_doc"] == "docs/design-evidence-tiers.md"
+
+    by_name = {block["block"]: block for block in result["blocks"]}
+
+    assert by_name["canary-a"]["tier"] == "T1"
+    assert by_name["canary-a"]["t1_met_count"] == 10
+    assert by_name["canary-a"]["blocking_item"] is None
+
+    assert by_name["canary-b"]["tier"] is None
+    assert by_name["canary-b"]["blocking_item"] == {
+        "id": 4,
+        "title": "LVS clean",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+
+    assert by_name["canary-c"]["tier"] is None
+    assert by_name["canary-c"]["blocking_item"]["id"] == 1
+    assert by_name["canary-c"]["blocking_item"]["title"] == "Design sources"
+    assert by_name["canary-c"]["blocking_item"]["reason"] == "no_evidence"
+
+
+def test_fleet_report_never_reparses_evidence_itself(tmp_path):
+    # The roll-up's blocking_item must be exactly the first unmet T1 item
+    # build_tier_report() already computed -- no independent re-grading.
+    drc_path = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+    manifest = _fleet_block_manifest("canary-a", evidence={"3": drc_path})
+
+    tier_result = build_tier_report(manifest)
+    fleet_result = build_fleet_report({"blocks": [manifest]})
+
+    first_unmet = next(
+        item
+        for item in tier_result["items"]
+        if item["tier"] == "T1" and item["status"] != "met"
+    )
+    blocking_item = fleet_result["blocks"][0]["blocking_item"]
+    assert blocking_item["id"] == first_unmet["id"]
+    assert blocking_item["reason"] == first_unmet["reason"]
+
+
+def test_fleet_manifest_blocks_accept_inline_or_file_path(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    inline_block = _fleet_block_manifest("inline-block", evidence={"3": drc_path})
+    file_block_path = _write(
+        tmp_path, "block-manifest.json", _fleet_block_manifest("file-block")
+    )
+
+    result = build_fleet_report({"blocks": [inline_block, file_block_path]})
+
+    by_name = {block["block"]: block for block in result["blocks"]}
+    assert by_name["inline-block"]["source"] is None
+    assert by_name["file-block"]["source"] == file_block_path
+
+
+def test_fleet_manifest_not_object_raises():
+    with pytest.raises(SignoffError, match="must be a JSON object"):
+        build_fleet_report(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+def test_fleet_manifest_missing_blocks_raises():
+    with pytest.raises(SignoffError, match="non-empty JSON array"):
+        build_fleet_report({})
+
+
+def test_fleet_manifest_empty_blocks_raises():
+    with pytest.raises(SignoffError, match="non-empty JSON array"):
+        build_fleet_report({"blocks": []})
+
+
+def test_fleet_manifest_non_list_blocks_raises():
+    with pytest.raises(SignoffError, match="non-empty JSON array"):
+        build_fleet_report({"blocks": "nope"})
+
+
+def test_fleet_block_entry_wrong_type_raises():
+    with pytest.raises(SignoffError, match=r"blocks\[0\]"):
+        build_fleet_report({"blocks": [123]})
+
+
+def test_fleet_block_manifest_missing_block_name_raises():
+    with pytest.raises(SignoffError, match="no non-empty 'block' name"):
+        build_fleet_report({"blocks": [{"kind": "analog", "evidence": {}}]})
+
+
+def test_fleet_block_manifest_empty_block_name_raises():
+    with pytest.raises(SignoffError, match="no non-empty 'block' name"):
+        build_fleet_report({"blocks": [{"block": "", "kind": "analog"}]})
+
+
+def test_fleet_block_manifest_invalid_kind_propagates():
+    with pytest.raises(SignoffError, match="kind"):
+        build_fleet_report({"blocks": [{"block": "bad", "kind": "bogus"}]})
+
+
+def test_fleet_block_manifest_missing_file_raises(tmp_path):
+    with pytest.raises(SignoffError, match="file not found"):
+        build_fleet_report({"blocks": [str(tmp_path / "nope.json")]})
+
+
+def test_fleet_block_manifest_non_object_raises(tmp_path):
+    path = _write(tmp_path, "list.json", ["not", "a", "dict"])
+    with pytest.raises(
+        SignoffError, match=r"blocks\[0\] must resolve to a JSON object"
+    ):
+        build_fleet_report({"blocks": [path]})
+
+
+# --------------------------------------------------------------------------- #
+# CLI (`klt signoff --fleet`)
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_fleet_json_output(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    full_evidence = {str(i): drc_path for i in range(1, 11)}
+    full_evidence["4"] = lvs_path
+    fleet_path = _fleet_write(
+        tmp_path,
+        [
+            _fleet_block_manifest("canary-a", evidence=full_evidence),
+            _fleet_block_manifest("canary-b", evidence={}),
+        ],
+    )
+
+    exit_code = main(["signoff", "--fleet", fleet_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["block_count"] == 2
+    assert out["t1_count"] == 1
+    assert exit_code == 3  # not every block is T1 yet
+
+
+def test_cli_fleet_all_t1_exits_zero(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    full_evidence = {str(i): drc_path for i in range(1, 11)}
+    full_evidence["4"] = lvs_path
+    fleet_path = _fleet_write(
+        tmp_path, [_fleet_block_manifest("canary-a", evidence=full_evidence)]
+    )
+
+    exit_code = main(["signoff", "--fleet", fleet_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["not_t1_count"] == 0
+    assert exit_code == 0
+
+
+def test_cli_fleet_text_format_names_blocking_item(tmp_path, capsys):
+    fleet_path = _fleet_write(tmp_path, [_fleet_block_manifest("canary-a")])
+
+    exit_code = main(["signoff", "--fleet", fleet_path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "canary-a" in out
+    assert "blocking:" in out
+    assert "no_evidence" in out
+
+
+def test_cli_fleet_and_manifest_together_is_an_error(tmp_path, capsys):
+    fleet_path = _fleet_write(tmp_path, [_fleet_block_manifest("canary-a")])
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(
+        [
+            "signoff",
+            "--fleet",
+            fleet_path,
+            "--manifest",
+            manifest_path,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "mutually exclusive" in err["error"]["message"]
+
+
+def test_cli_fleet_and_files_together_is_an_error(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    fleet_path = _fleet_write(tmp_path, [_fleet_block_manifest("canary-a")])
+
+    exit_code = main(["signoff", "--fleet", fleet_path, drc_path, "--format", "json"])
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "fleet" in err["error"]["message"]
+
+
+def test_cli_fleet_missing_file_exits_one(tmp_path, capsys):
+    exit_code = main(
+        ["signoff", "--fleet", str(tmp_path / "nope.json"), "--format", "json"]
+    )
+
+    assert exit_code == 1
+
+
+def test_cli_fleet_invalid_block_entry_exits_one(tmp_path, capsys):
+    fleet_path = _fleet_write(tmp_path, [{"kind": "analog"}])  # no 'block' name
+
+    exit_code = main(["signoff", "--fleet", fleet_path, "--format", "json"])
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "block" in err["error"]["message"]
