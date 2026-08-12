@@ -44,6 +44,7 @@ def _make_cell_library(
     with_spice=True,
     with_lib=True,
     bare_device_names=False,
+    prefixed_operating_conditions=False,
 ):
     """Fabricate a `libs.ref/<name>` entry with `spice/`/`lib/` views.
 
@@ -56,6 +57,13 @@ def _make_cell_library(
     ``(corner_name, nom_process, nom_temperature, nom_voltage)`` tuples, one
     `.lib` file per entry. ``with_spice``/``with_lib`` let a test omit either
     view to exercise the missing-view fallback.
+
+    ``prefixed_operating_conditions=True`` writes the `.lib` file's
+    `default_operating_conditions` attribute as `f"{name}__{corner_name}"`
+    instead of the bare ``corner_name`` -- gf180mcu_fd_sc_mcu9t5v0's real
+    shape (issue #820), where the vendor's own Liberty attribute already
+    carries the `<cell_library>__` prefix that sky130's files omit. The
+    on-disk filename is unaffected (still `<name>__<corner_name>.lib`).
     """
     lib_dir = variant_dir / "libs.ref" / name
     if with_spice:
@@ -77,8 +85,13 @@ def _make_cell_library(
         lib_views_dir = lib_dir / "lib"
         lib_views_dir.mkdir(parents=True)
         for corner_name, process, temperature, voltage in corners:
+            operating_conditions = (
+                f"{name}__{corner_name}"
+                if prefixed_operating_conditions
+                else corner_name
+            )
             content = (
-                f'    default_operating_conditions : "{corner_name}";\n'
+                f'    default_operating_conditions : "{operating_conditions}";\n'
                 f"    nom_process : {process};\n"
                 f"    nom_temperature : {temperature};\n"
                 f"    nom_voltage : {voltage};\n"
@@ -957,6 +970,34 @@ def test_cells_reports_every_characterised_supply_gf180mcu_shape(tmp_path):
     # Backward-compatible single-value field still reports the lowest.
     assert library["nominal_supply_v"] == 1.8
     assert library["nominal_corner"] == "tt_025C_1v80"
+
+
+def test_cells_nominal_corner_strips_doubled_library_prefix_gf180mcu_shape(tmp_path):
+    """gf180mcu_fd_sc_mcu9t5v0's `.lib` files write their own
+    `<cell_library>__` prefix into `default_operating_conditions` (e.g.
+    `gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80`), unlike sky130's files, where
+    the same attribute (or the filename-stem fallback) is already bare.
+    `nominal_corner` must always report the bare corner regardless -- a
+    naive pass-through doubles the prefix when a consumer (`synthesize`,
+    `place_and_route`) later builds `<cell_library>__<corner>.lib` (issue
+    #820).
+    """
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        devices=("nfet_06v0", "pfet_06v0"),
+        bare_device_names=True,
+        prefixed_operating_conditions=True,
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+
+    report = pdk.list_cell_libraries(root=str(root))
+
+    library = report["libraries"][0]
+    assert library["nominal_corner"] == "tt_025C_1v80"
+    assert not library["nominal_corner"].startswith("gf180mcu_fd_sc_mcu9t5v0__")
 
 
 def test_cells_supply_matches_against_full_supply_set_not_just_nominal(tmp_path):

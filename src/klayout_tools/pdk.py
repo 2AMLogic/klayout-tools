@@ -761,8 +761,9 @@ def _nominal_supply(lib_dir: str) -> dict[str, Any]:
     if not os.path.isdir(lib_views_dir):
         return {"voltage": None, "corner": None, "supplies_v": []}
 
+    library_name = os.path.basename(os.path.normpath(lib_dir))
     parsed = [
-        _parse_lib_corner(os.path.join(lib_views_dir, filename))
+        _parse_lib_corner(os.path.join(lib_views_dir, filename), library_name)
         for filename in sorted(os.listdir(lib_views_dir))
         if filename.endswith(".lib")
     ]
@@ -794,7 +795,7 @@ def _nominal_supply(lib_dir: str) -> dict[str, Any]:
     }
 
 
-def _parse_lib_corner(path: str) -> dict[str, Any]:
+def _parse_lib_corner(path: str, library_name: str | None = None) -> dict[str, Any]:
     """Extract the nominal-condition fields from one `.lib` timing view.
 
     Returns ``voltage``/``process``/``temperature`` (``float | None``, from
@@ -802,6 +803,14 @@ def _parse_lib_corner(path: str) -> dict[str, Any]:
     `default_operating_conditions` name, or the filename stem when that
     attribute is absent), and ``filename`` (for deterministic tie-breaking).
     This is a targeted attribute scrape, not a Liberty parser.
+
+    ``corner`` is always returned bare (never `<library_name>__<corner>`):
+    some vendors' `.lib` files (e.g. gf180mcu_fd_sc_mcu9t5v0) write their own
+    `<library_name>__` prefix into `default_operating_conditions`, unlike
+    sky130's files, which are already bare. When ``library_name`` is given, a
+    leading `f"{library_name}__"` is stripped from the parsed corner so
+    callers (``_nominal_supply``/``list_cell_libraries``) always see the bare
+    form documented for `nominal_corner` (`docs/cli/pdk.md`).
     """
     filename = os.path.basename(path)
     text = _read_text(path)
@@ -820,6 +829,10 @@ def _parse_lib_corner(path: str) -> dict[str, Any]:
 
     corner_match = _OPERATING_CONDITIONS_RE.search(text)
     corner = corner_match.group(1) if corner_match else os.path.splitext(filename)[0]
+    if library_name is not None:
+        prefix = f"{library_name}__"
+        if corner.startswith(prefix):
+            corner = corner[len(prefix) :]
 
     return {
         "voltage": _first_float(_NOM_VOLTAGE_RE),

@@ -143,12 +143,18 @@ def _make_pdk_install(
         ("tt_025C_1v80", 1.0, 25.0, 1.8),
     ),
     with_cell_library: bool = True,
+    prefixed_operating_conditions: bool = False,
 ) -> Path:
     """Fabricate a minimal open_pdks-layout variant under ``root`` with a
     standard-cell library's `lib/` view(s) -- enough for `find_pdk()`/
     `list_cell_libraries()`/`run_synthesize`'s own liberty resolution, not a
     real, Yosys-parseable liberty file (the stubbed-Yosys tests never invoke
-    a real Yosys against it)."""
+    a real Yosys against it).
+
+    ``prefixed_operating_conditions=True`` writes the `.lib` file's
+    `default_operating_conditions` attribute as `f"{cell_library}__{corner_name}"`
+    instead of the bare ``corner_name`` -- gf180mcu_fd_sc_mcu9t5v0's real
+    shape (issue #820); the on-disk filename is unaffected."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     libs_ref = variant_dir / "libs.ref"
@@ -157,8 +163,13 @@ def _make_pdk_install(
         lib_views_dir = libs_ref / cell_library / "lib"
         lib_views_dir.mkdir(parents=True, exist_ok=True)
         for corner_name, process, temperature, voltage in corners:
+            operating_conditions = (
+                f"{cell_library}__{corner_name}"
+                if prefixed_operating_conditions
+                else corner_name
+            )
             content = (
-                f'    default_operating_conditions : "{corner_name}";\n'
+                f'    default_operating_conditions : "{operating_conditions}";\n'
                 f"    nom_process : {process};\n"
                 f"    nom_temperature : {temperature};\n"
                 f"    nom_voltage : {voltage};\n"
@@ -363,6 +374,31 @@ def test_run_synthesize_nominal_corner_default(tmp_path, monkeypatch):
     assert corner == "tt_025C_1v80"
     assert liberty_path.endswith("sky130_fd_sc_hd__tt_025C_1v80.lib")
     assert info["variant"] == "sky130A"
+
+
+def test_run_synthesize_nominal_corner_default_gf180mcu_shape(tmp_path, monkeypatch):
+    """gf180mcu_fd_sc_mcu9t5v0's `.lib` files write their own
+    `<cell_library>__` prefix into `default_operating_conditions`, unlike
+    sky130's bare attribute. Omitting `pdk.corner` must still resolve to the
+    correctly-named on-disk liberty file -- not a doubled-prefix path that
+    does not exist (issue #820)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuD",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+        prefixed_operating_conditions=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = synthesize._resolve_liberty(
+        "gf180mcu_fd_sc_mcu9t5v0", None
+    )
+    assert corner == "tt_025C_1v80"
+    assert liberty_path.endswith("gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80.lib")
+    assert info["variant"] == "gf180mcuD"
 
 
 # --------------------------------------------------------------------------- #
