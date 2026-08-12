@@ -63,7 +63,11 @@ both explicit ``report_*_metric`` proc calls (``report_worst_slack_metric``
 -> ``timing__setup__ws``, ``report_tns_metric`` -> ``timing__setup__tns``,
 ``report_fmax_metric`` -> ``timing__fmax``, ``report_power_metric`` ->
 ``power__total``, ``report_design_area_metrics`` -> ``design__die__area``/
-``design__core__area``/``design__instance__utilization``) *and* metrics
+``design__core__area``/``design__instance__utilization``, and (``"cts"``/
+``"route"`` stages only, issue #783) ``report_clock_skew_metric`` ->
+``clock__skew__setup`` -- verified live via ``openroad -no_init -exit``'s
+own ``info body report_clock_skew_metric`` against a real
+``openroad/orfs:latest`` container, ``26Q3-1080-gab6fd26351``) *and* metrics
 several stage commands populate automatically as a side effect
 (``global_route``/``detailed_route`` -> ``route__wirelength``,
 ``detailed_placement`` -> ``route__wirelength__estimated``). No fallback to
@@ -406,6 +410,9 @@ _TOP_LEVEL_METRIC_KEYS = (
     "hold_violation_count",
     "antenna_violation_count",
     "estimated_power_mw",
+    # Additive (issue #783, P&R survey #735 section 3.4) -- never replaces an
+    # existing field; `null` on any stage that hasn't run CTS yet.
+    "clock_skew_ns",
 )
 
 
@@ -1199,7 +1206,9 @@ def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     ]
 
 
-def _metrics_report_lines(*, include_fmax: bool, include_power: bool) -> list[str]:
+def _metrics_report_lines(
+    *, include_fmax: bool, include_power: bool, include_clock_skew: bool = False
+) -> list[str]:
     lines = [
         "report_worst_slack_metric -setup",
         "report_tns_metric -setup",
@@ -1209,6 +1218,14 @@ def _metrics_report_lines(*, include_fmax: bool, include_power: bool) -> list[st
         lines.append("report_fmax_metric")
     if include_power:
         lines.append("report_power_metric")
+    if include_clock_skew:
+        # `-setup` matches this module's existing convention of reporting
+        # only the setup-side variant of a metric that also has a `-hold`
+        # form (`report_worst_slack_metric -setup`/`report_tns_metric
+        # -setup` above) -- `-hold` skew is a possible additive follow-on,
+        # not this issue's scope (#783). Only meaningful once a clock tree
+        # exists, so callers gate this to the `"cts"`/`"route"` stages.
+        lines.append("report_clock_skew_metric -setup")
     return lines
 
 
@@ -1319,7 +1336,21 @@ def _stage_script_lines(
         lines += [
             f"set_wire_rc -layer {io_spec['layer_v']}",
             "estimate_parasitics -placement",
-            f"clock_tree_synthesis -root_buf {buf_cell} -buf_list {buf_cell}",
+            # `-sink_clustering_enable -obstruction_aware` (P&R survey
+            # section 3.4, issue #783): TritonCTS clusters nearby sinks
+            # under a shared buffer instead of one buffer per sink, and
+            # routes the clock tree around placed macro/blockage
+            # obstructions instead of ignoring them -- both are real
+            # TritonCTS flags on this OpenROAD version, confirmed live via
+            # `info body clock_tree_synthesis` against a real
+            # `openroad/orfs:latest` container (`26Q3-1080-gab6fd26351`).
+            # `-balance_levels` was evaluated and deliberately **not**
+            # added: the same introspection shows OpenROAD now treats it as
+            # obsolete (`utl::warn CTS 132 "-balance_levels is obsolete."`)
+            # -- passing it would only emit a warning, a no-op flag this
+            # command's Tcl generator has no reason to carry.
+            f"clock_tree_synthesis -root_buf {buf_cell} -buf_list {buf_cell} "
+            "-sink_clustering_enable -obstruction_aware",
             # Post-CTS parasitics must be re-estimated (the clock tree just
             # added real buffers/wire) *before* hold repair runs -- hold
             # slack is only meaningful once a real clock tree (with real
@@ -1363,7 +1394,15 @@ def _stage_script_lines(
         lines += _antenna_check_lines()
         lines += ["estimate_parasitics -global_routing"]
 
-    lines += _metrics_report_lines(include_fmax=True, include_power=True)
+    lines += _metrics_report_lines(
+        include_fmax=True,
+        include_power=True,
+        # A clock tree only exists from `"cts"` onward -- `"place"` runs
+        # before `clock_tree_synthesis`, so `report_clock_skew_metric`
+        # there would report on an ideal (zero-latency) clock, not a real
+        # tree (#783).
+        include_clock_skew=stage in ("cts", "route"),
+    )
     lines += _violation_count_lines()
 
     if stage == "route":
@@ -1545,6 +1584,14 @@ def _extract_stage_metrics(
         power_w = metrics.get("power__total")
         if power_w is not None:
             entry["estimated_power_mw"] = round(power_w * 1000, 4)
+        # Only the `"cts"`/`"route"` stages' own generated Tcl runs
+        # `report_clock_skew_metric` (see `_stage_script_lines`), so this
+        # key is simply absent -- never present-but-zero -- on the other
+        # stages; `.get` degrades that to `None` the same way every other
+        # field above does (#783).
+        clock_skew = metrics.get("clock__skew__setup")
+        if clock_skew is not None:
+            entry["clock_skew_ns"] = round(clock_skew, 5)
         if setup_violation_count is not None:
             entry["setup_violation_count"] = setup_violation_count
         if hold_violation_count is not None:
