@@ -382,6 +382,31 @@ not `klt --version`, if you need to detect this kind of drift.
   compared apples-to-oranges. See docs/cli/extract.md's "`klt mom` cross-check
   for one net" section.
 
+- 2026-08-12 — `klt mom`'s matrix solve step is now **preconditioned
+  Conjugate Gradient** (Jacobi/diagonal preconditioner) instead of a direct
+  LU factorisation (#799, Phase 1c of the Method-of-Moments epic #701). The
+  potential-coefficient matrix is symmetric positive definite by
+  construction (`q^T P q` is twice the charge distribution's electrostatic
+  energy), which is exactly the case CG — not the more general GMRES the
+  epic also named — is the standard, provably-optimal Krylov method for. On
+  an 8-conductor/1-shared-ground "finger" geometry discretised to 6 912
+  panels (well past the MVP's 1-2 conductor fixtures), CG converges in a
+  mean of 68.8 iterations (~1% of `n`) per right-hand side and the solve is
+  **3.83x faster** than the direct factorisation it replaces (112.9 s vs.
+  29.5 s), with the solved capacitance matrix agreeing with the direct
+  solve to 1e-7 relative. Wiring this in also surfaced (and fixed) a latent
+  fill bug: a multi-box conductor whose boxes abut at a right-angle corner
+  (e.g. the coax fixtures' four-wall shield) could discretise two panels at
+  the exact same location, giving the potential-coefficient matrix a
+  literal `Inf` entry that the old direct solve happened not to trip over —
+  `geometry::discretize` now deduplicates exact-coincident panels within a
+  conductor. **No `schema_version` bump and no behavior change to `klt
+  mom`'s JSON contract or reported numbers** — every existing closed-form
+  and convergence-under-refinement check (`tests/test_mom_validation.py`,
+  #757) passes unchanged against the new solve path. Full rationale, the
+  preconditioner choice, and the measured convergence/scaling numbers:
+  `docs/design/mom-iterative-solver.md`.
+
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on

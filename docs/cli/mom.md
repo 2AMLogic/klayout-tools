@@ -338,12 +338,25 @@ See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
 
 ### Panel-count guard
 
-The dense potential-coefficient matrix is `O(n^2)` in memory and `O(n^3)` in
-solve time. A request whose discretisation would exceed an internal 8000-panel
-cap is rejected with a clear error before any allocation is attempted —
-most commonly triggered by a `panel_size_um` sized for a small conductor
-being reused against a much larger one in the same request (a scale
-mismatch). Increase `panel_size_um`, or split the request, to work around it.
+The dense potential-coefficient matrix is `O(n^2)` in memory. A request whose
+discretisation would exceed an internal 8000-panel cap is rejected with a
+clear error before any allocation is attempted — most commonly triggered by a
+`panel_size_um` sized for a small conductor being reused against a much
+larger one in the same request (a scale mismatch). Increase `panel_size_um`,
+or split the request, to work around it.
+
+### The matrix solve
+
+The solve step is preconditioned Conjugate Gradient (Jacobi/diagonal
+preconditioner), not a direct (LU) factorisation — the potential-coefficient
+matrix is symmetric positive definite by construction, and CG converges in
+well under `n` iterations on the geometries this command targets, which is
+materially cheaper at scale than the `O(n^3)` direct solve it replaced. See
+[`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md)
+([#799](https://github.com/2AMLogic/klayout-tools/issues/799)) for why CG
+(not GMRES) is the solver appropriate to this system, the measured
+convergence rate, and the solve-time comparison against the direct solve at a
+larger-than-MVP conductor count.
 
 ## Exit codes
 
@@ -366,3 +379,8 @@ mismatch). Increase `panel_size_um`, or split the request, to work around it.
   validation and convergence-under-refinement for this solver
   ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)): the analytic
   oracles, the measured agreement, and the stated tolerances.
+- [`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md) —
+  the iterative (preconditioned Conjugate Gradient) solve step
+  ([#799](https://github.com/2AMLogic/klayout-tools/issues/799)): why CG over
+  GMRES, the preconditioner, and the measured convergence rate and solve-time
+  comparison against the direct solve it replaced.
