@@ -1433,8 +1433,8 @@ def create_parser() -> argparse.ArgumentParser:
         "signoff",
         help=(
             "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
-            "pass/fail verdict, or render a T1-T4 tier-verdict report "
-            "with --manifest"
+            "pass/fail verdict, render a T1-T4 tier-verdict report with "
+            "--manifest, or a fleet-wide tier roll-up with --fleet"
         ),
         description=(
             "Read one or more `klt` JSON envelope files (or '-' for stdin) "
@@ -1449,7 +1449,11 @@ def create_parser() -> argparse.ArgumentParser:
             "graded against a block manifest's declared kind and per-item "
             "evidence locations -- an item is 'met' only when it cites a "
             "passing klt JSON envelope with fresh provenance; a missing or "
-            "stale check renders 'unmet', never assumed met. "
+            "stale check renders 'unmet', never assumed met. With --fleet "
+            "instead, grades every block named in a fleet manifest and "
+            "reports each block's current tier and, for any block not yet "
+            "T1, the single item still blocking it -- one query across the "
+            "whole fleet instead of opening each block's own report. "
             "See docs/cli/signoff.md."
         ),
     )
@@ -1459,7 +1463,8 @@ def create_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
-            "'-' to read one from stdin (mutually exclusive with --manifest)"
+            "'-' to read one from stdin (mutually exclusive with "
+            "--manifest/--fleet)"
         ),
     )
     signoff_parser.add_argument(
@@ -1468,8 +1473,21 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "path to a block manifest JSON file (or '-' for stdin) -- "
             "renders the T1-T4 tier-verdict report instead of aggregating "
-            "envelope <file> arguments (mutually exclusive with them). See "
-            "docs/cli/signoff.md's 'Tier-verdict report' section for the "
+            "envelope <file> arguments (mutually exclusive with them and "
+            "with --fleet). See docs/cli/signoff.md's 'Tier-verdict report' "
+            "section for the manifest shape."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--fleet",
+        metavar="FILE",
+        help=(
+            "path to a fleet manifest JSON file (or '-' for stdin) -- "
+            "grades every block it names (each a block manifest, inline or "
+            "by path) and renders a fleet-wide tier roll-up instead of a "
+            "single block's report (mutually exclusive with the envelope "
+            "<file> arguments and with --manifest). See "
+            "docs/cli/signoff.md's 'Fleet roll-up' section for the fleet "
             "manifest shape."
         ),
     )

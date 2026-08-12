@@ -56,10 +56,26 @@ returned -- Phase 0's ``exit_status: 0`` for a file-backed entry remains
 must have exited zero); a command-backed entry's ``exit_status`` is
 *observed*.
 
-Pure library: both :func:`build_signoff` and :func:`build_tier_report`
-return plain Python data (a ``dict`` of JSON-serialisable primitives) and
-never print, mirroring ``report.py``. Serialisation and console printing
-live in the CLI command module (``cli/signoff_cmd.py``).
+## Fleet roll-up (issue #827, Phase 1c of epic #706)
+
+:func:`build_fleet_report` is a third, additive entry point: instead of
+grading one block manifest, it grades a **fleet manifest** -- a list of
+per-block manifests (inline, or file paths to them) -- by calling
+:func:`build_tier_report` once per block and reducing each block's full
+item list down to two facts: its current tier, and, for any block not yet
+at T1, the single T1 item still blocking it (the first unmet T1 item, in
+the same doc order :func:`build_tier_report` renders). It never re-parses
+or re-grades evidence itself -- every citation/reason a block's row reflects
+was computed by :func:`build_tier_report`, so the two can never disagree
+about *why* a block is or isn't T1. This turns "which canaries are at which
+tier, and what's blocking each not-yet-T1 block" from a survey (open N
+tier reports) into one query.
+
+Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
+:func:`build_fleet_report` all return plain Python data (a ``dict`` of
+JSON-serialisable primitives) and never print, mirroring ``report.py``.
+Serialisation and console printing live in the CLI command module
+(``cli/signoff_cmd.py``).
 
 This module is a **consumer** of the shared JSON envelope
 (``docs/json-contract.md``), like ``report.py`` -- it never changes any
@@ -86,6 +102,7 @@ __all__ = [
     "DesignEvidenceTiersError",
     "build_signoff",
     "build_tier_report",
+    "build_fleet_report",
 ]
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -99,6 +116,12 @@ SCHEMA_VERSION = 1
 #: because the two modes' top-level fields are unrelated; bumping one must
 #: never imply the other changed.
 TIER_REPORT_SCHEMA_VERSION = 1
+
+#: Schema version for :func:`build_fleet_report`'s own JSON shape -- distinct
+#: from both :data:`SCHEMA_VERSION` and :data:`TIER_REPORT_SCHEMA_VERSION`
+#: for the same reason: the three modes' top-level fields are unrelated, so
+#: bumping one must never imply either of the others changed.
+FLEET_REPORT_SCHEMA_VERSION = 1
 
 #: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
@@ -256,23 +279,27 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _read_envelope(source: str) -> Any:
-    """Read and JSON-decode one envelope: ``source == "-"`` reads stdin,
+def _read_json_source(source: str, description: str) -> Any:
+    """Read and JSON-decode one JSON source: ``source == "-"`` reads stdin,
     otherwise ``source`` is a file path. Raises :class:`SignoffError` on any
     read/parse failure -- never lets a malformed input silently become an
-    incomplete verdict.
+    incomplete verdict. ``description`` (e.g. ``"envelope"``, ``"manifest"``)
+    only affects error-message wording, so each caller's failures still read
+    naturally.
 
     Deliberately mirrors ``report.py``'s ``_read_envelope`` (same
     read/parse/error-message contract) rather than importing it: the two
     commands' input-reading needs are identical but incidental, not a
     shared abstraction worth coupling two independently-versioned CLI
-    verbs over.
+    verbs over. Shared *within* this module by :func:`_read_envelope` and
+    :func:`_read_fleet_block_manifest` (issue #827), which do belong to the
+    same command and would otherwise triplicate this same read/parse logic.
     """
     if source == "-":
         try:
             return json.load(sys.stdin)
         except json.JSONDecodeError as exc:
-            raise SignoffError(f"stdin envelope is not valid JSON: {exc}") from exc
+            raise SignoffError(f"stdin {description} is not valid JSON: {exc}") from exc
 
     if not os.path.exists(source):
         raise SignoffError(f"file not found: {source}")
@@ -283,11 +310,19 @@ def _read_envelope(source: str) -> Any:
         with open(source, encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, UnicodeDecodeError) as exc:
-        raise SignoffError(f"could not read envelope file '{source}': {exc}") from exc
+        raise SignoffError(
+            f"could not read {description} file '{source}': {exc}"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise SignoffError(
-            f"envelope file '{source}' is not valid JSON: {exc}"
+            f"{description} file '{source}' is not valid JSON: {exc}"
         ) from exc
+
+
+def _read_envelope(source: str) -> Any:
+    """Read and JSON-decode one ``klt`` envelope -- see
+    :func:`_read_json_source`."""
+    return _read_json_source(source, "envelope")
 
 
 def _classify(envelope: dict[str, Any], source: str) -> str:
@@ -980,3 +1015,185 @@ def _build_tier_item(
         "reason": reason,
         "citation": citation,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Fleet roll-up (issue #827, Phase 1c of epic #706)
+# --------------------------------------------------------------------------- #
+
+
+def build_fleet_report(fleet: dict[str, Any]) -> dict[str, Any]:
+    """Grade every block in a **fleet manifest** against the T1-T4 item
+    skeleton (:func:`build_tier_report`, called once per block) and reduce
+    each block's result down to its current tier and, for any block not yet
+    at T1, the single T1 item still blocking it -- turning "which canaries
+    are at which tier, and what's blocking each not-yet-T1 block" into one
+    query instead of a survey (Epic #706, Phase 1c).
+
+    ``fleet`` (JSON in)::
+
+        {
+            "blocks": [
+                "manifests/sky130-bandgap.json",
+                {"block": "gf180-bandgap", "kind": "analog", "evidence": {...}}
+            ]
+        }
+
+    Each ``blocks[]`` entry is either a **path** to a block manifest JSON
+    file (or ``"-"`` for stdin -- read exactly like ``--manifest``'s own
+    input), or an **inline** block manifest object -- the same shape
+    :func:`build_tier_report` accepts (``block``/``kind``/``evidence``).
+    Every resolved manifest's ``block`` field is required here (unlike
+    single-block tier-report mode, where it is optional and merely echoed)
+    since it is how a roll-up row is identified.
+
+    Returns (JSON out)::
+
+        {
+            "schema_version": 1,
+            "block_count": 3,
+            "t1_count": 1,
+            "not_t1_count": 2,
+            "source_doc": "docs/design-evidence-tiers.md",
+            "blocks": [
+                {
+                    "block": "sky130-bandgap",
+                    "source": "manifests/sky130-bandgap.json",
+                    "kind": "analog",
+                    "tier": "T1",
+                    "t1_item_count": 10,
+                    "t1_met_count": 10,
+                    "blocking_item": None,
+                },
+                {
+                    "block": "gf180-bandgap",
+                    "source": None,
+                    "kind": "analog",
+                    "tier": None,
+                    "t1_item_count": 10,
+                    "t1_met_count": 3,
+                    "blocking_item": {
+                        "id": 4,
+                        "title": "LVS clean",
+                        "partition": None,
+                        "reason": "no_evidence",
+                    },
+                },
+                ...
+            ],
+        }
+
+    ``blocking_item`` is the *first* rendered T1 item (in the same order
+    :func:`build_tier_report` renders items -- item id, then partition for a
+    mixed-signal block) whose ``status`` is not ``"met"``, or ``None`` when
+    ``tier == "T1"``. It is deliberately a single item, not the full unmet
+    list: the roll-up's job is "what is the next thing to fix", not a
+    re-rendering of the per-block report (open that block's own
+    ``--manifest`` report for the full item-by-item detail). No evidence is
+    read or graded here beyond what :func:`build_tier_report` already did --
+    this function only reduces its output, so a block's roll-up row and its
+    full tier report can never disagree about *why* it isn't T1 yet.
+
+    Raises :class:`SignoffError` if ``fleet`` is not a JSON object, its
+    ``blocks`` field is missing, not a JSON array, or empty; if any
+    ``blocks[]`` entry is neither a string nor a JSON object, or a
+    string entry cannot be read/parsed as JSON; or if any resolved block
+    manifest is not a JSON object or has no non-empty string ``block``
+    field. Also propagates :class:`SignoffError` /
+    :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
+    from :func:`build_tier_report` for a structurally invalid per-block
+    manifest (e.g. a missing/invalid ``kind``) -- a malformed block is a
+    fleet-manifest authoring error, not a "no evidence yet" grading outcome,
+    so it aborts the whole roll-up rather than rendering that one block as
+    silently unmet.
+    """
+    if not isinstance(fleet, dict):
+        raise SignoffError(
+            f"fleet manifest must be a JSON object, got {type(fleet).__name__}"
+        )
+
+    raw_blocks = fleet.get("blocks")
+    if not isinstance(raw_blocks, list) or not raw_blocks:
+        raise SignoffError(
+            "fleet manifest 'blocks' must be a non-empty JSON array of "
+            "block manifests (or paths/'-' to them)"
+        )
+
+    blocks: list[dict[str, Any]] = []
+    t1_count = 0
+    for index, raw_entry in enumerate(raw_blocks):
+        source, manifest = _read_fleet_block_manifest(raw_entry, index)
+
+        if not isinstance(manifest, dict):
+            raise SignoffError(
+                f"fleet manifest blocks[{index}] must resolve to a JSON "
+                f"object, got {type(manifest).__name__}"
+            )
+
+        block_name = manifest.get("block")
+        if not isinstance(block_name, str) or not block_name:
+            raise SignoffError(
+                f"fleet manifest blocks[{index}] resolves to a manifest with "
+                "no non-empty 'block' name -- required to identify the "
+                "canary in the roll-up"
+            )
+
+        tier_report = build_tier_report(manifest)
+        blocking_item = _first_unmet_t1_item(tier_report["items"])
+        if tier_report["tier"] == "T1":
+            t1_count += 1
+
+        blocks.append(
+            {
+                "block": block_name,
+                "source": source,
+                "kind": tier_report["kind"],
+                "tier": tier_report["tier"],
+                "t1_item_count": tier_report["t1_item_count"],
+                "t1_met_count": tier_report["t1_met_count"],
+                "blocking_item": blocking_item,
+            }
+        )
+
+    return {
+        "schema_version": FLEET_REPORT_SCHEMA_VERSION,
+        "block_count": len(blocks),
+        "t1_count": t1_count,
+        "not_t1_count": len(blocks) - t1_count,
+        "source_doc": "docs/design-evidence-tiers.md",
+        "blocks": blocks,
+    }
+
+
+def _read_fleet_block_manifest(raw_entry: Any, index: int) -> tuple[str | None, Any]:
+    """Resolve one ``fleet["blocks"][index]`` entry into ``(source,
+    manifest)``: ``source`` is the file path/``"-"`` the manifest was read
+    from, or ``None`` for an inline manifest object. Raises
+    :class:`SignoffError` if ``raw_entry`` is neither a string nor a JSON
+    object, or a string entry cannot be read/parsed as JSON."""
+    if isinstance(raw_entry, dict):
+        return None, raw_entry
+    if isinstance(raw_entry, str):
+        return raw_entry, _read_json_source(raw_entry, "fleet block manifest")
+    raise SignoffError(
+        f"fleet manifest blocks[{index}] must be a JSON object or a file "
+        f"path string, got {type(raw_entry).__name__}"
+    )
+
+
+def _first_unmet_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return a trimmed view of the first rendered T1 item in ``items``
+    (:func:`build_tier_report`'s own item order) whose ``status`` is not
+    ``"met"``, or ``None`` if every T1 item is met. T2-T4 ladder rows are
+    never candidates -- they are always ``"unmet"`` by design (this
+    toolkit's closed loop targets T1) and are not what gates the ``tier ==
+    "T1"`` verdict this roll-up reports against."""
+    for item in items:
+        if item["tier"] == "T1" and item["status"] != "met":
+            return {
+                "id": item["id"],
+                "title": item["title"],
+                "partition": item["partition"],
+                "reason": item["reason"],
+            }
+    return None
