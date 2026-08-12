@@ -68,13 +68,25 @@ functional-verification = [
 #      would then fail with "no matching distribution" -- there is no such
 #      package on PyPI. Dependency groups are checkout-local by design and
 #      never land in published metadata.
+#
+# `native/congestion/` (issue #785, Epic #700 Phase 1 §3.6 of
+# `docs/design/place-and-route-improvements-survey.md`): the
+# `klt_congestion_native` pyo3 extension backing the FLUTE/RUDY-family
+# post-placement congestion pre-check research spike. Same two reasons as
+# `mom` above (optional Rust toolchain, in-repo-only path source) -- this is
+# a research/library component, not a shipped `klt` CLI verb, so it is
+# likewise a dependency group rather than an installable extra.
 [dependency-groups]
 mom = [
     "klt-mom-native",
 ]
+congestion = [
+    "klt-congestion-native",
+]
 
 [tool.uv.sources]
 klt-mom-native = { path = "native/mom" }
+klt-congestion-native = { path = "native/congestion" }
 
 [build-system]
 requires = ["hatchling"]
