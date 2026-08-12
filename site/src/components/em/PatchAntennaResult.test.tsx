@@ -36,6 +36,23 @@ const fixture: EmSiteExport = {
       { frequency_hz: 2_400_000_000, s11_db: -3.2 },
     ],
   },
+  provenance: {
+    generator: {
+      repo: "https://github.com/rjwalters/geode-fem",
+      license: "MIT",
+      commit: "90759f103fdbdc42e47b1941ccd8d0e0b031c4e6",
+      version: "0.3.0",
+      backend: "burn::backend::NdArray<f64, i32> (CPU)",
+      build_profile: "release",
+    },
+    geometry: {
+      fixture: "tests/fixtures/patch_2g4.msh",
+      fixture_sha256: "01c55cbd359b97d2fdceae9630a86d6fa2342f9a18317c01d61ad41a1df05f8",
+      description: "Probe-fed FR-4 rectangular microstrip patch.",
+    },
+    solve_parameters: { port_resistance_ohm: 50, substrate: "fr4", eps_r: 4.4 },
+    generated_at: "2026-08-12T04:15:40Z",
+  },
 };
 
 function mockFetchOk(payload: EmSiteExport) {
@@ -163,5 +180,25 @@ describe("PatchAntennaResult", () => {
     );
     render(<PatchAntennaResult />);
     await waitFor(() => expect(screen.getByTestId("patch-antenna-error")).toBeInTheDocument());
+  });
+
+  it("calls onLoad with the full parsed export once the fetch resolves", async () => {
+    vi.stubGlobal("fetch", mockFetchOk(fixture));
+    const onLoad = vi.fn();
+    render(<PatchAntennaResult onLoad={onLoad} />);
+    await waitFor(() => expect(screen.getByTestId("patch-antenna-result")).toBeInTheDocument());
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    expect(onLoad).toHaveBeenCalledWith(fixture);
+  });
+
+  it("does not call onLoad when the export fetch fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve({ ok: false, status: 404 } as Response)),
+    );
+    const onLoad = vi.fn();
+    render(<PatchAntennaResult onLoad={onLoad} />);
+    await waitFor(() => expect(screen.getByTestId("patch-antenna-error")).toBeInTheDocument());
+    expect(onLoad).not.toHaveBeenCalled();
   });
 });

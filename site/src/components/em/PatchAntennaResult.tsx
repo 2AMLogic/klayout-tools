@@ -47,12 +47,21 @@ export interface PatchAntennaResultProps {
    * build time). Overridable for tests.
    */
   dataUrl?: string;
+  /**
+   * Fired once the export fetch resolves successfully, with the full parsed
+   * document (issue #851: lets a gallery-entry wrapper render a
+   * `ProvenancePanel` alongside this component from the *same* fetched
+   * document, rather than re-fetching `dataUrl` a second time just to reach
+   * `data.provenance`). Never called on a failed/loading fetch.
+   */
+  onLoad?: (data: EmSiteExport) => void;
 }
 
 type LoadState = "loading" | "error" | EmSiteExport;
 
 export function PatchAntennaResult({
   dataUrl = "/em/patch_antenna/patch_antenna.em-export.json",
+  onLoad,
 }: PatchAntennaResultProps) {
   const [state, setState] = useState<LoadState>("loading");
   const [pointIndex, setPointIndex] = useState(0);
@@ -68,7 +77,9 @@ export function PatchAntennaResult({
         return res.json() as Promise<EmSiteExport>;
       })
       .then((data) => {
-        if (!cancelled) setState(data);
+        if (cancelled) return;
+        setState(data);
+        onLoad?.(data);
       })
       .catch(() => {
         if (!cancelled) setState("error");
@@ -76,6 +87,10 @@ export function PatchAntennaResult({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onLoad is a
+    // caller-supplied callback, not a re-fetch trigger; re-running the
+    // effect whenever the caller passes a fresh closure would refetch and
+    // re-invoke onLoad on every render, which is not the intended contract.
   }, [dataUrl]);
 
   const data = typeof state === "object" ? state : null;

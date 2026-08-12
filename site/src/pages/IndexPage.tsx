@@ -1,5 +1,6 @@
 import type { Layout } from "@/data/types";
 import { LayoutCard } from "@/components/LayoutCard";
+import { EmGallerySection } from "@/components/em";
 
 /**
  * klayout-tools.org landing page (ported from `index.astro` in issue #92's
@@ -9,6 +10,12 @@ import { LayoutCard } from "@/components/LayoutCard";
  * (issue #11, mirroring `site/index.html`) and renders the gallery index —
  * one card per block discovered at build time by `loadLayouts()` (issue
  * #63). Each card links to its `/<slug>/` detail page (issue #64).
+ *
+ * Below the layout gallery, `EmGallerySection` (Epic #840 Phase 1c, issue
+ * #851) renders the "Electromagnetics" section: real geode-fem solver
+ * results (mesh/field overlay + S-parameter sweep, each with a provenance
+ * panel), independent of `layouts` — its data comes from the staged
+ * `examples/em/*.em-export.json` exports, not the block-metrics pipeline.
  */
 export interface IndexPageProps {
   layouts: Layout[];
@@ -98,6 +105,8 @@ export function IndexPage({ layouts }: IndexPageProps) {
           </li>
         ))}
       </ul>
+
+      <EmGallerySection />
     </main>
   );
 }
