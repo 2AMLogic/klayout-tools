@@ -2,16 +2,21 @@
 
 Phase 1 of the Method-of-Moments epic
 ([#701](https://github.com/2AMLogic/klayout-tools/issues/701)), delivered by
-[#719](https://github.com/2AMLogic/klayout-tools/issues/719). Where
+[#719](https://github.com/2AMLogic/klayout-tools/issues/719) (capacitance)
+and [#797](https://github.com/2AMLogic/klayout-tools/issues/797) (PEEC
+inductance/resistance, Phase 1a). Where
 [#718](https://github.com/2AMLogic/klayout-tools/issues/718) set `klt mom`'s
 bar at "produces a numeric capacitance-matrix result", this document records
 what that result is actually *worth*: the analytic oracles it is checked
 against, the tolerances chosen, and the measured numbers behind them.
 
-The executable form of everything here is `tests/test_mom_validation.py` —
-this file is the rationale, that file is the gate. Values below were measured
-on `native/mom` at the commit that introduced the harness; re-run
-`pytest tests/test_mom_validation.py -v --capture=tee-sys` to reprint them.
+The executable form of the capacitance sections below is
+`tests/test_mom_validation.py`; the inductance/resistance section ("§
+Inductance/resistance") is `tests/test_mom_peec_validation.py`. This file is
+the rationale, those files are the gate. Values below were measured on
+`native/mom` at the commit that introduced each harness; re-run
+`pytest tests/test_mom_validation.py tests/test_mom_peec_validation.py -v
+--capture=tee-sys` to reprint them.
 
 ## Why analytic oracles at all
 
@@ -206,6 +211,115 @@ first order; the tests assert it. The gate is shown to fire three ways:
    successive differences do not shrink, so there is no path by which a
    non-converging sequence reports "converged".
 
+## Inductance/resistance
+
+Phase 1a of the Method-of-Moments epic, delivered by
+[#797](https://github.com/2AMLogic/klayout-tools/issues/797), which extends
+`klt mom` to PEEC (Partial Element Equivalent Circuit) partial-inductance and
+DC-resistance extraction alongside the capacitance solve above (see
+[`docs/cli/mom.md`](../cli/mom.md#peec-inductanceresistance) for the method
+and the bar-shaped-conductor MVP scope). The executable form of this section
+is `tests/test_mom_peec_validation.py`; re-run
+`pytest tests/test_mom_peec_validation.py -v --capture=tee-sys` to reprint
+the numbers below.
+
+### Why re-derived, not cited
+
+Unlike the capacitance solver's oracles above (each a well-known closed
+form, safely recalled and cross-checked against a second source), the
+standard PEEC partial-inductance literature (Ruehli 1972; Hoer & Love 1965's
+exact rectangular-bar formulas) has multi-term closed forms whose exact
+coefficients this issue's Curator review flagged as unsafe to transcribe from
+memory. Live web search was not usable from the build environment either
+(queries came back with unrelated decoy results rather than a clean
+failure). Rather than risk a subtly wrong transcribed formula, the whole
+method — the Neumann mutual-inductance double integral, and the self
+geometric mean distance (self-GMD) of a circular cross-section — was
+**independently re-derived from first principles and numerically verified**
+(symbolic integration via `sympy` for the Neumann formula; Monte Carlo double
+integration for the self-GMD constant), then cross-checked end to end against
+two classical closed forms it should reproduce in the thin-wire limit (Rosa's
+straight-wire self-inductance, and the two-wire transmission-line loop
+inductance) — both by hand and by a brute-force filament-bundle simulation of
+a round wire. See `native/mom/src/peec.rs`'s module docs for the full
+derivation.
+
+### 1. Straight-wire self-inductance — Rosa's formula
+
+Rosa's classical DC (uniform current density) partial self-inductance of an
+isolated straight round wire:
+
+```
+L = (mu0 * l / 2*pi) * (ln(2*l / a) - 3/4)
+```
+
+`klt mom`'s bar is rectangular, not round; the oracle's radius `a` is taken
+as the equal-area circle's, `a = sqrt(width * height / pi)` — a
+**shape-substituted oracle**, the same role the Kirchhoff-disk oracle plays
+for the capacitance solver's square plates (§2 above). A square
+cross-section's *true* self-GMD was independently measured (Monte Carlo) to
+be ~1.7% larger than the equal-area circle's, so the converged PEEC answer is
+expected to sit slightly *below* this oracle, not to converge exactly onto
+it.
+
+Fixture: 2000 µm long, 4×4 µm square cross section (aspect ratio 500:1),
+copper conductivity, `filament_size_um = 0.5`.
+
+| measured `L₀₀` | Rosa oracle | rel. error | filaments |
+| -------------- | ----------- | ---------- | --------- |
+| 2.685764 nH    | 2.692048 nH | 0.2334%    | 64 (8×8)  |
+
+**Stated tolerance**: 2% (measured: 0.23%, well inside — and in the expected
+direction, slightly below the oracle).
+
+### 2. Loop inductance — the two-wire transmission-line formula
+
+For two identical parallel round wires of separation `D` (`a << D << l`):
+
+```
+L' = (mu0 / pi) * (ln(D/a) + 1/4)      [per unit length]
+L_loop = 2 * (L_self - M(l, D))         [in the same asymptotic limit]
+```
+
+Fixture: 5000 µm long, 4×4 µm bars ("go"/"return"), 60 µm separation
+(`l ≫ D ≫ a` throughout), `filament_size_um = 0.5`.
+
+| measured `L_loop` | two-wire-line oracle | rel. error |
+| ------------------ | --------------------- | ---------- |
+| 7.004233 nH         | 7.060830 nH            | 0.8016%    |
+
+**Stated tolerance**: 5% (measured: 0.80%) — looser than the straight-wire
+check because the loop oracle compounds two asymptotic approximations
+(`l ≫ a` *and* `l ≫ D`), each contributing its own residual.
+
+### 3. DC resistance — exact
+
+`R = length / (conductivity * cross_sectional_area)` is Ohm's law for a
+uniform bar — no approximation. Checked at `rel=1e-9` (round-off, not
+tolerance), on a 200 µm × 2×2 µm copper bar.
+
+### Convergence under filament refinement
+
+Same fixture as §1 above (2000 µm, 4×4 µm bar), four filament-grid
+refinement levels (1×1 → 2×2 → 4×4 → 8×8 filaments):
+
+| `filament_size_um` | filaments | `L₀₀`         |
+| ------------------- | --------- | ------------- |
+| 4.00 (1×1)           | 1         | 2.69239952 nH |
+| 2.00 (2×2)           | 4         | 2.68832537 nH |
+| 1.00 (4×4)           | 16        | 2.68635383 nH |
+| 0.50 (8×8)           | 64        | 2.68576441 nH |
+
+Successive `|differences|`: `0.004074 → 0.001972 → 0.000589` nH — each step
+strictly smaller than the last (the gate this test asserts, mirroring §"A
+non-converging solver is not accepted" above). Observed order between the
+first pair of steps: **p ≈ 1.05**; between the second pair: **p ≈ 1.74**
+(accelerating, consistent with the self-GMD approximation resolving better as
+filaments shrink). Richardson-extrapolating from the last three levels gives
+a limit of **2.685513 nH**, 0.24% below the Rosa oracle — matching §1's
+observation that the converged answer sits slightly, and consistently, below
+the shape-substituted oracle rather than drifting further from it.
+
 ## What is *not* validated here
 
 - **Absolute accuracy of a general layout.** These are canonical fixtures
@@ -222,7 +336,12 @@ first order; the tests assert it. The gate is shown to fire three ways:
   mode as the cheaper in-house cross-check for exactly this regime; either
   would be a natural follow-up, and would test something these analytic
   oracles cannot (general geometry).
-- **Inductance, resistance, ports, S-parameters.** Later phases of #701.
+- **Non-bar-shaped PEEC geometry, ports, S-parameters.** The PEEC solve's
+  own MVP scope (a single, elongated, axis-aligned bar per conductor — see
+  `docs/cli/mom.md`'s "PEEC inductance/resistance") is a separate,
+  documented restriction, not something this section's oracles exercise;
+  general-mesh PEEC, ports, and frequency-dependent (AC/skin-effect) behavior
+  remain later phases of #701.
 
 ## See also
 

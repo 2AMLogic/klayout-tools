@@ -129,7 +129,7 @@ def test_run_mom_parallel_plate(tmp_path):
 
     report = run_mom(str(gds), str(spec))
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(gds)
     assert report["spec"] == str(spec)
     assert report["background_permittivity"] == 3.9
@@ -438,7 +438,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "panel_count",
         "warnings",
     }
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
 
 
 def test_cli_text_output(tmp_path, capsys):
@@ -502,3 +502,187 @@ def test_cli_json_error_shape(tmp_path, capsys):
     assert err["schema_version"] == 1
     assert err["error"]["command"] == "mom"
     assert "spec file not found" in err["error"]["message"]
+
+
+# --- PEEC inductance/resistance (issue #797) --------------------------------
+
+
+def _wire_fixture(path) -> None:
+    """A single 100x2 um bar on layer 1/0 -- becomes a 100x2x2 um bar once
+    the spec's z0_um/z1_um give it thickness."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(2)))
+    layout.write(str(path))
+
+
+def _wire_spec(path, *, conductivity: float | None = 5.96e7) -> None:
+    entry = {"layer": "1/0", "conductor": "wire", "z0_um": 0.0, "z1_um": 2.0}
+    if conductivity is not None:
+        entry["conductivity_S_per_m"] = conductivity
+    path.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                # Coarse on purpose -- these tests are about the PEEC
+                # inductance/resistance path, not capacitance accuracy; a
+                # long, thick (real 3-D, non-flat) bar at the default
+                # panel_size_um would trip the capacitance solver's own
+                # panel-count guard (docs/cli/mom.md's "Panel-count guard").
+                "panel_size_um": 5.0,
+                "compute_inductance": True,
+                "filament_size_um": 0.5,
+                "stackup": [entry],
+            }
+        )
+    )
+
+
+def test_run_mom_peec_straight_wire(tmp_path):
+    gds = tmp_path / "wire.gds"
+    spec = tmp_path / "wire.mom.json"
+    _wire_fixture(gds)
+    _wire_spec(spec)
+
+    report = run_mom(str(gds), str(spec))
+
+    assert report["schema_version"] == 2
+    assert report["conductors"] == ["wire"]
+    assert report["filament_size_um"] == 0.5
+    assert report["filament_count"] > 0
+    l_nh = report["inductance_matrix_nh"]
+    assert len(l_nh) == 1 and len(l_nh[0]) == 1
+    assert l_nh[0][0] > 0
+    r = report["resistance_ohm"]
+    assert len(r) == 1
+    length_m = 100e-6
+    area_m2 = 2e-6 * 2e-6
+    expected_r = length_m / (5.96e7 * area_m2)
+    assert r[0] == pytest.approx(expected_r, rel=1e-9)
+
+
+def test_run_mom_without_compute_inductance_omits_peec_fields(tmp_path):
+    """The default (compute_inductance unset) must keep the original
+    capacitance-only response shape exactly -- no new keys at all."""
+    gds = tmp_path / "wire.gds"
+    spec = tmp_path / "wire-cap-only.mom.json"
+    _wire_fixture(gds)
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "stackup": [
+                    {"layer": "1/0", "conductor": "wire", "z0_um": 0.0, "z1_um": 2.0}
+                ],
+            }
+        )
+    )
+
+    report = run_mom(str(gds), str(spec))
+    assert "inductance_matrix_nh" not in report
+    assert "resistance_ohm" not in report
+    assert "filament_count" not in report
+    assert "filament_size_um" not in report
+
+
+def test_run_mom_peec_missing_conductivity_is_a_clear_error(tmp_path):
+    gds = tmp_path / "wire.gds"
+    spec = tmp_path / "wire.mom.json"
+    _wire_fixture(gds)
+    _wire_spec(spec, conductivity=None)
+
+    with pytest.raises(MomError, match="conductivity_S_per_m|conductivity_s_per_m"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_peec_rejects_non_bar_shaped_conductor(tmp_path):
+    """A square pad (aspect ratio ~1:1) has no well-defined current-flow
+    direction under this MVP's model."""
+    gds = tmp_path / "pad.gds"
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(5), _um(5)))
+    layout.write(str(gds))
+
+    spec = tmp_path / "pad.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "compute_inductance": True,
+                "stackup": [
+                    {
+                        "layer": "1/0",
+                        "conductor": "pad",
+                        "z0_um": 0.0,
+                        "z1_um": 5.0,
+                        "conductivity_S_per_m": 5.96e7,
+                    }
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(MomError, match="bar-shaped"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_peec_loop(tmp_path):
+    """Two long parallel bars (a 'loop' -- out on one, back on the other)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(500), _um(2)))
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(0), _um(20), _um(500), _um(22))
+    )
+    gds = tmp_path / "loop.gds"
+    layout.write(str(gds))
+
+    spec = tmp_path / "loop.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                # Coarse on purpose -- see _wire_spec's comment.
+                "panel_size_um": 5.0,
+                "compute_inductance": True,
+                "filament_size_um": 0.5,
+                "stackup": [
+                    {
+                        "layer": "1/0",
+                        "conductor": "go",
+                        "z0_um": 0.0,
+                        "z1_um": 2.0,
+                        "conductivity_S_per_m": 5.96e7,
+                    },
+                    {
+                        "layer": "2/0",
+                        "conductor": "return",
+                        "z0_um": 0.0,
+                        "z1_um": 2.0,
+                        "conductivity_S_per_m": 5.96e7,
+                    },
+                ],
+            }
+        )
+    )
+
+    report = run_mom(str(gds), str(spec))
+    l_nh = report["inductance_matrix_nh"]
+    assert l_nh[0][1] == pytest.approx(l_nh[1][0], rel=1e-9)
+    assert l_nh[0][0] > l_nh[0][1] > 0
+
+
+def test_cli_text_output_renders_peec_fields(tmp_path, capsys):
+    gds = tmp_path / "wire.gds"
+    spec = tmp_path / "wire.mom.json"
+    _wire_fixture(gds)
+    _wire_spec(spec)
+
+    assert main(["mom", str(gds), str(spec)]) == 0
+    out = capsys.readouterr().out
+    assert "nanohenries" in out
+    assert "resistance (ohms):" in out
