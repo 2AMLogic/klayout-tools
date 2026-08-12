@@ -54,6 +54,12 @@ binding for Yosys the way `klayout.db` already is for `klt lvs`/`klt
 extract`. Requires a `yosys` binary on `$PATH`; a missing binary is a clear,
 actionable error (exit 1), never a traceback.
 
+One post-processing stage is **not** Yosys: after `write_verilog` produces
+the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
+in process — see "`sta`" below) analyzes that netlist's timing graph. It is
+optional and additive: a missing extension reports `"sta": null` and changes
+nothing else about the run.
+
 ## Generated `.ys` script
 
 Per the Yosys survey's own recommendation, `klt synthesize` generates a
@@ -264,6 +270,126 @@ Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
 therefore `stime -p`, never ran), or when the resolved ABC printed no
 recognisable summary line.
 
+## `sta`: the native gate-level critical-path report
+
+[Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 3
+(issue #925) wires
+[`klt-statime-native`](../../native/statime/README.md) — the native-Rust
+NLDM/static-timing engine issue #809 shipped as a spike — into this command
+as an **additive** stage. After `write_verilog -noattr` produces
+`netlist_path`, that same file is handed to the engine along with the same
+resolved liberty, and the result lands in the response's `sta` field:
+
+```json
+"sta": {
+  "source": "klt_statime_native",
+  "input_transition_ns": 0.05,
+  "output_load_pf": 0.03,
+  "top": "gcd",
+  "num_cells": 353,
+  "num_nets": 388,
+  "worst_path": {
+    "startpoint": "_640_/Q",
+    "startpoint_kind": "flip-flop (rising edge)",
+    "endpoint": "_035_",
+    "endpoint_kind": "internal net",
+    "delay_ns": 4.4642972825718,
+    "hops": [
+      {
+        "point": "_640_/Q",
+        "cell": "sky130_fd_sc_hd__dfrtp_1",
+        "edge": "fall",
+        "arrival_ns": 0.41273907228437867,
+        "slew_ns": 0.0925558496296774
+      },
+      {
+        "point": "_377_/Y",
+        "cell": "sky130_fd_sc_hd__xnor2_1",
+        "edge": "fall",
+        "arrival_ns": 0.6083993722243425,
+        "slew_ns": 0.11961144661859305
+      }
+    ]
+  },
+  "worst_reg_to_reg_path": {
+    "startpoint": "_640_/Q",
+    "startpoint_kind": "flip-flop (rising edge)",
+    "endpoint": "_035_",
+    "endpoint_kind": "flip-flop (D, setup)",
+    "delay_ns": 4.4642972825718,
+    "hops": ["...same shape, 12 hops..."]
+  }
+}
+```
+
+(Real output, elided only in `hops` — measured against
+`tests/corpus/statime/gcd_netlist.v` + `sky130_fd_sc_hd__tt_025C_1v80`; the
+full `worst_path.hops` array is 12 entries, one per cell on the path.)
+
+**`sta` and `timing` are different numbers, and neither replaces the
+other.** `timing` is ABC's own `stime -p` line (see above): pre-layout,
+wire-free, and confined to the largest *combinational* cone ABC mapped, with
+no path or cell breakdown available at all. `sta` is a real timing-graph
+walk over the **whole** mapped netlist, rise/fall-aware, with a full per-hop
+cell breakdown — `worst_path` is the globally worst path whatever its
+endpoints (register-to-register, register-to-port, or port-to-port), and
+`worst_reg_to_reg_path` reports the worst *pure* register-to-register path
+separately (`null` for a purely combinational design). Every pre-#925
+consumer of `timing` is unaffected; `sta` is a new sibling field, which
+`docs/json-contract.md` treats as additive (no `schema_version` bump).
+
+**Accuracy.** On the 3-design corpus slice
+(`tests/corpus/statime/`) the engine lands within **1.34%** of an OpenSTA
+oracle (`gcd` 1.34%, `mult8` 0.36%, `modexp` 0.45%), always an
+*under*-estimate — verified through this integrated path, not just the
+standalone binary, by `tests/test_sta_corpus.py`. See
+[`native/statime/README.md`](../../native/statime/README.md) "Results —
+accuracy" for how the oracle was captured.
+
+**Read the caveats — `sta` is still not signoff STA either:**
+
+- **No SDC, no `create_clock`.** The engine models no clock at all. Every
+  primary input — *including the clock net* — gets the same uniform input
+  transition, and every primary output the same uniform extra load:
+  `input_transition_ns: 0.05` and `output_load_pf: 0.03`, echoed in the
+  response so the boundary condition is never implicit. These are the exact
+  values the accuracy comparison above ran with, matching OpenSTA's own
+  `-unconstrained` report mode. They are **not** derived from the request's
+  `constraints.clock_period_ns`, and **not** from the ABC `-constr` table
+  that feeds `set_driving_cell`/`set_load` (a driving-*cell name* plus a
+  load in femtofarads — a different knob in different units, not
+  interchangeable with these two).
+- **`delay_ns` is a path delay, never slack.** With no clock modeled there
+  is no required time to subtract, so nothing here can tell you whether a
+  design meets timing — only how long its longest path is.
+- **Still wire-free.** A net's arrival equals its driver pin's arrival
+  exactly; there is no placement, so no parasitics. Same estimate class as
+  `timing` in this respect — a real post-layout path will be longer.
+- **Register data pins are identified by the literal pin name `D`**, and
+  async set/reset (`recovery`/`removal`/setup/hold) arcs are parsed but
+  excluded from propagation.
+- **3 corpus designs is the whole verified sample.** A design shape not yet
+  seen could show a larger gap than 1.34%.
+
+These are issue #809's own "Known simplifications" 1–5, inherited
+**unresolved** — issue #925 wired the engine in unchanged rather than
+hardening its numerics. Signoff timing is still Phase 4's OpenROAD/OpenSTA
+step.
+
+**`sta` is `null` — never a fabricated number — when:**
+
+- the optional `klt_statime_native` extension is not installed (it needs a
+  Rust toolchain, like every other native `klt` engine; from a checkout,
+  `uv sync --group statime`, or `maturin develop --release` inside
+  `native/statime/`), or
+- the engine could not analyze this particular netlist/liberty pair — e.g. a
+  mapped cell type with no liberty entry.
+
+A missing extension never fails the run: synthesis itself does not depend on
+this stage, so `klt synthesize` behaves exactly as it did before #925 and
+simply reports `"sta": null`. This mirrors `timing`'s own "no number to
+report" discipline.
+
 ## Equivalence gate
 
 [Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 1:
@@ -361,6 +487,16 @@ caller decision rather than something this command should pick.
     "critical_path_ps": 2485.93,
     "delay_target_ps": null
   },
+  "sta": {
+    "source": "klt_statime_native",
+    "input_transition_ns": 0.05,
+    "output_load_pf": 0.03,
+    "top": "gcd",
+    "num_cells": 353,
+    "num_nets": 388,
+    "worst_path": { "startpoint": "_640_/Q", "endpoint": "_035_", "delay_ns": 4.4642972825718, "hops": ["..."] },
+    "worst_reg_to_reg_path": { "...": "same shape" }
+  },
   "netlist_path": "/abs/path/.klt/synthesize/gcd_synth.v",
   "script_path": "/abs/path/.klt/synthesize/synth_gcd.ys",
   "provenance": {
@@ -385,6 +521,7 @@ caller decision rather than something this command should pick.
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
+| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
 | `netlist_path` | string | The mapped gate-level netlist (`write_verilog -noattr`'s output), an absolute path. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | string | The generated `.ys` script, an absolute path — kept as a debuggable artifact. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
@@ -449,6 +586,26 @@ releases — the same pre-#807 flow maps this design to 326 instances on
 Ubuntu 24.04's Yosys 0.33 — so treat these figures as anchored to the build
 named here, not as invariants.
 
+With the optional `klt_statime_native` extension built (`uv sync --group
+statime`), the same run additionally reports the native critical path.
+Measured live on Yosys 0.68+post against a volare `sky130A` install
+(`examples/functional-verification/gcd.v`, 402 instances / 3244.3616 µm²
+on that build):
+
+```console
+$ klt synthesize request.json
+...
+critical_path_ps: 2584.58 (source: abc_stime, target: none, wire_load: none -- pre-layout estimate)
+sta.worst_path: 2.8642 ns (_721_/Q -> _019_, source: klt_statime_native)
+sta.worst_reg_to_reg_path: 2.8642 ns (_721_/Q -> _019_)
+```
+
+The two numbers **do not agree, and are not supposed to** — 2584.58 ps is
+ABC's own estimate over the largest combinational cone it mapped, while
+2.8642 ns is a whole-netlist register-to-register walk (13 hops, each cell
+listed under `sta.worst_path.hops` in the JSON output). See "`timing`" and
+"`sta`" above for what each one is and is not.
+
 A 4-bit ripple-carry adder (`adder4.v`, combinational — no clock, so it is
 in-scope for the gate — the same design [`docs/cli/equiv.md`](equiv.md)'s
 own worked example uses), synthesized with the gate enabled:
@@ -491,9 +648,15 @@ for the full seeded-mismatch demonstration.
   `--verify-equivalence` against a design with flip-flops, latches, or
   memories fails the gate with a clear scope error, not a misleadingly
   confident verdict.
-- **Signoff timing.** `timing` is ABC's pre-layout, wire-free estimate —
-  see "`timing`" above. Real STA (wire RCs, register-to-register paths,
-  slack against an SDC) is Phase 4's OpenROAD/OpenSTA step.
+- **Signoff timing.** Neither delay this command reports is signoff STA.
+  `timing` is ABC's pre-layout, wire-free, combinational-cone-only estimate
+  (see "`timing`" above); `sta` walks the whole netlist and does report
+  register-to-register paths, but is still wire-free and still models no
+  clock at all — a path delay, never slack (see "`sta`" above). Real STA
+  (wire RCs, slack against an SDC) is Phase 4's OpenROAD/OpenSTA step.
+- **Timing-*driven* synthesis.** `sta` is reported, not optimized against:
+  nothing in this command feeds the critical path back into the mapper.
+  That restructuring loop is issue #926's scope (Epic #704 Phase 3).
 - **Place-and-route.** `netlist_path` is this command's own deliverable and
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
   contract's `netlist` request field) — this command does not floorplan,

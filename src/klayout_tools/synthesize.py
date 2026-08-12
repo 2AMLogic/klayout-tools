@@ -65,6 +65,29 @@ never signoff STA -- hence the self-labelling ``timing`` object shape
 documented in ``docs/cli/synthesize.md``, never a bare ``delay_ps`` float.
 Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
 
+``sta`` carries a real, whole-netlist critical-path report from
+``klt_statime_native`` (``native/statime/``, issue #809, wired in by issue
+#925 -- Epic #704 Phase 3), computed via :func:`klayout_tools.sta.
+compute_critical_path` against the exact ``write_verilog -noattr`` netlist
+this module already produces. Unlike ``timing`` (ABC's combinational-cone-
+only estimate above, unaffected by this addition -- a purely additive
+sibling field, never a replacement), ``sta`` walks the *whole* mapped
+netlist's rise/fall-aware timing graph and reports the worst path (register-
+to-register, register-to-port, or port-to-port, whichever is globally
+worst) with its full per-hop cell breakdown, plus the worst pure
+register-to-register path separately when the design has registers. It uses
+the same uniform, SDC-free boundary condition (``0.05`` ns input transition,
+``0.03`` pF output load on every primary input/output) the spike's own
+``native/statime/README.md`` accuracy comparison used -- **not**
+``synthesize.py``'s own :data:`_ABC_CONSTR_INPUTS` table, a different knob
+in different units (see ``klayout_tools/sta.py``'s module docstring).
+``sta`` is ``None`` -- never a fabricated number -- when the
+``klt_statime_native`` extension is not installed (an optional Rust
+toolchain, like every other native ``klt`` engine) or when the engine could
+not analyze this particular netlist/liberty pair; see ``docs/cli/
+synthesize.md``'s ``sta`` section for the full caveat this inherits from the
+spike unresolved (no wire delay/parasitics, no SDC).
+
 Constant drivers are mapped to real tie cells (issue #854). Yosys leaves
 ``1'b0``/``1'b1`` constants as bare Verilog literals, which OpenSTA's
 Verilog reader turns into ``zero_``/``one_`` nets that OpenROAD types
@@ -100,6 +123,7 @@ from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from .equiv import EquivError, run_equiv
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
+from .sta import StaError, compute_critical_path
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -505,6 +529,7 @@ def run_synthesize(
             sorted((module_stats.get("num_cells_by_type") or {}).items())
         ),
         "timing": _read_abc_timing(abc_log_path, delay_target_ps),
+        "sta": _read_sta_timing(netlist_path, liberty_path, hdl_toplevel),
         "netlist_path": netlist_path,
         "script_path": script_path,
         "provenance": provenance,
@@ -1181,6 +1206,33 @@ def _read_abc_timing(
         "critical_path_ps": critical_path_ps,
         "delay_target_ps": delay_target_ps,
     }
+
+
+def _read_sta_timing(
+    netlist_path: str, liberty_path: str, hdl_toplevel: str
+) -> dict[str, Any] | None:
+    """Run :func:`klayout_tools.sta.compute_critical_path` over the
+    just-produced ``netlist_path`` and shape its result into the response's
+    ``sta`` field (issue #925, Epic #704 Phase 3) -- a real timing-graph
+    walk over the whole mapped netlist (register-to-register,
+    register-to-port, or port-to-port, whichever is globally worst),
+    computed by ``klt_statime_native`` (``native/statime/``).
+
+    Additive and best-effort, mirroring :func:`_read_abc_timing`'s own
+    "no number to report" honesty discipline: returns ``None`` -- never a
+    fabricated result -- when the ``klt_statime_native`` extension is not
+    installed (a Rust toolchain is optional for every other ``klt synthesize``
+    caller, so a missing extension must not turn every synthesis run into a
+    hard failure) or when the native engine itself could not analyze this
+    particular netlist/liberty pair (:class:`~klayout_tools.sta.StaError`).
+    A genuine analysis result is never partial -- either the full
+    ``worst_path``/``worst_reg_to_reg_path`` shape comes back, or this
+    returns ``None``.
+    """
+    try:
+        return compute_critical_path(netlist_path, liberty_path, hdl_toplevel)
+    except StaError:
+        return None
 
 
 def _combined_content_hash(paths: list[str]) -> str | None:

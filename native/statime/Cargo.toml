@@ -6,26 +6,41 @@ description = "Native-Rust gate-level static timing (NLDM) spike for `klt` (2AML
 license = "MIT"
 publish = false
 
-# Deliberately a plain `cargo test`/`cargo run` binary crate for this spike --
-# no `pyo3`/`maturin` wiring, following `native/legalize/`'s precedent
-# (issue #784) rather than `native/mom/`'s production shape. Issue #809 is
-# explicitly go/no-go: adding the `pyo3`/`maturin`/CI-wiring surface before a
-# verdict would spend real maintenance cost on a result that might be
-# "No-go". If this spike reports "Go", a follow-on issue adds the `pyo3`
-# extension-module shape `native/mom/Cargo.toml`'s own comments document,
-# without relocating this crate (already at the `native/<engine>/` path the
-# eventual shape needs). See README.md "Python<->Rust boundary" for the
-# full deferred-integration story this issue asks to document explicitly.
+# Issue #809 shipped this crate as a plain `cargo test`/`cargo run` binary --
+# no `pyo3`/`maturin` wiring -- following `native/legalize/`'s precedent
+# (issue #784) rather than `native/mom/`'s production shape, since #809 was
+# explicitly go/no-go and adding the production-integration surface before
+# the verdict was known would have spent real maintenance cost on a result
+# that might have been "No-go". The verdict was "Go" (see README.md), and
+# issue #925 (the follow-on integration issue README.md's own "Not in
+# scope" section named) is what adds the `pyo3` extension-module shape
+# below, matching `native/mom/Cargo.toml`'s own shape exactly. The
+# `[[bin]]` target (the standalone `klt-statime` CLI `tests/corpus/statime/
+# compare.py` still exercises) is unaffected -- both targets build from the
+# same crate.
 
 [[bin]]
 name = "klt-statime"
 path = "src/main.rs"
 
 [lib]
+# `cdylib` is required for pyo3's `extension-module`; `rlib` keeps the crate
+# usable from `cargo test` and from the `klt-statime` binary above (a
+# `cdylib`-only crate can't be linked as a normal Rust test/bin target) --
+# mirrors `native/mom/Cargo.toml`'s own rationale exactly.
 name = "klt_statime_native"
+crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
+# pyo3 0.29 is the first line supporting Python 3.14 (see
+# `native/mom/Cargo.toml` for the verified 0.22/0.23 rejection behavior this
+# floor avoids). `extension-module` is deliberately NOT enabled here -- see
+# `native/mom/Cargo.toml`'s own comment: it would make a plain `cargo test`/
+# `cargo build --bin klt-statime` unlinkable. `pyproject.toml`'s
+# `[tool.maturin] features` turns it on only for the `maturin build`/
+# `develop` path.
+pyo3 = { version = "0.29" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

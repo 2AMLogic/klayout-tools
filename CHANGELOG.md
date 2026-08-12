@@ -440,6 +440,46 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt synthesize` now reports a real gate-level critical path
+  in a new, additive `sta` response field, computed by
+  `klt-statime-native` (`native/statime/`) over the mapped netlist the run
+  just produced — issue #925, Epic #704 Phase 3. The engine issue #809
+  shipped as a go/no-go spike (native-Rust NLDM liberty parsing +
+  rise/fall-aware timing graph, verified within 1.34% of an OpenSTA oracle
+  on a 3-design corpus) is promoted here to a `pyo3`/`maturin` extension
+  module (`klt_statime_native`, via a single `critical_path_json`
+  `#[pyfunction]`) and called in process by `klayout_tools/sta.py`; the
+  standalone `klt-statime` CLI binary still builds from the same crate, and
+  the crate's numerics are unchanged. `sta` carries `worst_path` — the
+  globally worst path, whatever its endpoints, with a full per-hop cell
+  breakdown (`point`/`cell`/`edge`/`arrival_ns`/`slew_ns`) — plus
+  `worst_reg_to_reg_path` (`null` for a purely combinational design), and
+  echoes the uniform boundary condition it ran with. **Additive, not a
+  replacement**: the existing `timing` field (ABC's `stime -p` pre-layout,
+  wire-free, combinational-cone-only estimate, `source: "abc_stime"`,
+  issue #807) is untouched, as is `--verify-equivalence`'s `klt equiv`
+  acceptance gate (#808), so no `schema_version` bump is needed per
+  `docs/json-contract.md`. **Still not signoff STA**, and issue #925
+  resolved none of the spike's documented simplifications: no SDC and no
+  `create_clock` (every primary input, *including the clock net*, gets a
+  uniform 0.05 ns transition; every primary output a uniform 0.03 pF load —
+  the same values the accuracy comparison ran with, and deliberately **not**
+  derived from `constraints.clock_period_ns` or from ABC's own
+  `-constr` driving-cell/load table, a different knob in different units),
+  still wire-free/parasitic-free, register data pins identified by the
+  literal pin name `D`, and 3 corpus designs is the whole verified sample.
+  `delay_ns` is therefore a path delay, never slack. `sta` is `null` — never
+  a fabricated number — when the optional `klt_statime_native` extension is
+  not installed (it needs a Rust toolchain; `uv sync --group statime` from a
+  checkout) or when the engine cannot analyze the netlist/liberty pair, and
+  a missing extension never fails the run. Accuracy is re-verified through
+  the *integrated* path, not just the standalone binary
+  (`tests/test_sta_corpus.py`: `gcd` 1.34%, `mult8` 0.36%, `modexp` 0.45%
+  vs. the checked-in OpenSTA oracle). See `docs/cli/synthesize.md`'s `sta`
+  section and `native/statime/README.md`. Timing-*driven* restructuring —
+  optimizing against this number rather than only reporting it — is #926's
+  scope, not this change's.
+
 - 2026-08-12 — New verb `klt yield-sensitivity` ranks a completed Monte
   Carlo campaign's device/process parameters by their contribution to an
   output metric's variance — issue #923, Phase 3 of the statistical/yield

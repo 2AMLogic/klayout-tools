@@ -37,6 +37,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -572,6 +573,16 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
         "critical_path_ps": 2485.93,
         "delay_target_ps": None,
     }
+
+    # The `sta` field (issue #925) always exists in the response shape, but
+    # is `None` here: this tier's "netlist" is a fabricated stub, so the
+    # native engine has nothing analyzable even when the optional
+    # `klt_statime_native` extension happens to be built on this machine.
+    # `_read_sta_timing`'s "degrade to None, never fabricate" contract is
+    # what keeps a missing/failing engine from breaking synthesis at all --
+    # exercised directly in `tests/test_sta.py`.
+    assert "sta" in report
+    assert report["sta"] is None
 
     assert os.path.isabs(report["netlist_path"])
     assert os.path.isfile(report["netlist_path"])
@@ -1998,6 +2009,72 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
 def _setup_success_env_real(tmp_path: Path) -> str:
     _write(tmp_path / "gcd.v", _GCD_RTL)
     return _write_request(tmp_path / "request.json", _base_request())
+
+
+#: `klt_statime_native` (issue #925, Epic #704 Phase 3) is an optional Rust
+#: extension -- same posture as `klt_mom_native`/`klt_congestion_native`/
+#: `klt_yield_native` (see `tests/test_mom.py`'s identical `importorskip`).
+#: Its absence must never fail this integration test; it means `sta` is
+#: `None` (asserted in the always-run tier above) and the extra checks below
+#: are skipped with a clear reason.
+_HAVE_STATIME_NATIVE = importlib.util.find_spec("klt_statime_native") is not None
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+@pytest.mark.skipif(
+    not _HAVE_STATIME_NATIVE,
+    reason=(
+        "klt_statime_native is not built -- run `maturin develop --release` "
+        "in native/statime/ (see docs/cli/synthesize.md's 'sta' section)"
+    ),
+)
+def test_integration_real_yosys_gcd_sta_field(tmp_path, monkeypatch):
+    """Issue #925 (Epic #704 Phase 3), end to end against a real Yosys, a
+    real sky130 PDK install, and the built `klt_statime_native` extension:
+    `klt synthesize`'s response carries a populated `sta` critical-path
+    report -- the same worst register-to-register/port-to-port delay this
+    engine's own spike (`native/statime/README.md`) reported for the
+    identical `gcd` corpus design, now reached through the integrated
+    `run_synthesize` path rather than the standalone `klt-statime
+    critical-path` binary."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    request_path = _setup_success_env_real(tmp_path)
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+
+    sta = report["sta"]
+    assert sta is not None, "sta must be populated when klt_statime_native is built"
+    assert sta["source"] == "klt_statime_native"
+    assert sta["input_transition_ns"] == pytest.approx(0.05)
+    assert sta["output_load_pf"] == pytest.approx(0.03)
+    assert sta["top"] == "gcd"
+    assert sta["num_cells"] > 0
+
+    worst = sta["worst_path"]
+    assert worst["delay_ns"] > 0
+    assert worst["startpoint"]
+    assert worst["endpoint"]
+    assert worst["hops"], "the limiting path's cells must be reported"
+
+    # `gcd` is a sequential design (issue #809's own corpus) -- a
+    # register-to-register path must exist.
+    r2r = sta["worst_reg_to_reg_path"]
+    assert r2r is not None
+    assert r2r["delay_ns"] > 0
+    assert r2r["hops"]
+
+    # `timing` (ABC's pre-layout, combinational-cone-only estimate) is
+    # unaffected by this addition -- both fields coexist, neither replaces
+    # the other (issue #925 AC: additive, not a replacement).
+    assert report["timing"] is not None
 
 
 #: RTL whose synthesized netlist provably needs constant ties: `q[5]` is a
