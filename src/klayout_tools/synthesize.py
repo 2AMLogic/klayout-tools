@@ -839,9 +839,122 @@ def _yosys_version() -> str | None:
     return match.group(1) if match else None
 
 
+def _submodule_key(
+    modules: dict[str, Any], cell_type: str, seen: frozenset[str]
+) -> str | None:
+    """The ``modules`` key a ``num_cells_by_type`` entry names, or ``None``
+    when the entry is a real leaf standard cell.
+
+    ``stat -json`` keys the ``modules`` dict by escaped identifier
+    (``"\\adder16"``) but names submodule instances *unescaped* inside
+    ``num_cells_by_type`` (``{"adder16": 2}``) -- verified live against real
+    Yosys output (0.33 locally, 0.68 in #821's curation pass). The unescaped
+    key is also probed, so a stats file that does not escape module names is
+    still resolved. Modules already on the current recursion path resolve to
+    ``None`` (treated as leaves), which is what keeps a pathological cyclic
+    ``modules`` graph from recursing forever.
+    """
+    for candidate in (f"\\{cell_type}", cell_type):
+        if candidate in modules and candidate not in seen:
+            return candidate
+    return None
+
+
+def _aggregate_cell_counts(
+    modules: dict[str, Any],
+    module_key: str,
+    _seen: frozenset[str] = frozenset(),
+) -> tuple[int, dict[str, int]]:
+    """Recursively total the *leaf* standard-cell counts reachable from
+    ``modules[module_key]``, scaled through every level of hierarchy.
+
+    ``stat -liberty ... -json``'s ``modules`` dict is keyed per module
+    *definition* (escaped, e.g. ``"\\adder16"``), not per instance path, and
+    each block's own ``num_cells_by_type`` mixes two different kinds of
+    entries: real leaf standard-cell types (e.g.
+    ``"sky130_fd_sc_hd__xnor2_1"``) and, for any sub-module Yosys's default
+    ``synth`` left hierarchical (never flattened into the top module), a
+    pseudo "cell type" entry named after the sub-module itself (e.g.
+    ``"adder16": 2`` for two ``adder16`` instances) -- confirmed live against
+    real Yosys output, issue #821. A submodule entry's *count* already
+    reflects how many times that submodule is instantiated under this one
+    parent (verified live: ``modules["\\<top>"].num_cells_by_type`` shows
+    ``{"adder16": 2}`` when the parent instantiates ``adder16`` twice) -- so
+    each submodule's own per-instance totals need only be multiplied by that
+    count, not by some separately-tracked instance path.
+
+    Returns ``(total_leaf_cells, leaf_cells_by_type)`` for **one instance**
+    of ``modules[module_key]`` -- real standard-cell types only; submodule
+    names never appear as keys in the returned dict, at any depth.
+
+    **A hierarchical block's own ``num_cells`` is deliberately not used as
+    the starting total.** Whether it counts submodule instances is
+    Yosys-version-dependent, and getting that wrong silently double-counts
+    every nested cell:
+
+    - Yosys 0.68 (#821's live capture): ``mac8`` reports ``num_cells: 0``
+      alongside ``num_submodules: 2`` -- submodule instances are *excluded*
+      from ``num_cells``.
+    - Yosys 0.33 (verified live while implementing #821, no
+      ``num_submodules`` field at all): a top with one direct ``$_NOT_`` and
+      one submodule instance reports ``num_cells: 2`` -- submodule instances
+      are *included* in ``num_cells``.
+
+    ``num_cells_by_type`` is the version-stable source: in both shapes it
+    breaks the block down entry by entry, so the count of *direct real
+    cells* is exactly the sum of the entries that do not name another
+    module. Each entry that *does* name another module contributes that
+    submodule's own recursive total instead, scaled by the entry's count,
+    and never appears as a key in the result.
+
+    A single-module design -- no ``num_cells_by_type`` entry matches another
+    key in ``modules`` -- recurses zero levels and short-circuits to the
+    block's verbatim ``num_cells``/``num_cells_by_type``, an exact match for
+    the direct pass-through this replaced (#821), byte for byte, even when
+    (as in a trimmed test fixture) the by-type dict does not itself sum to
+    ``num_cells``.
+    """
+    stats = modules.get(module_key)
+    if not isinstance(stats, dict):
+        return 0, {}
+    own_num_cells = stats.get("num_cells")
+    own_total = own_num_cells if isinstance(own_num_cells, int) else 0
+    counts_by_type = stats.get("num_cells_by_type")
+    if not isinstance(counts_by_type, dict):
+        return own_total, {}
+
+    seen = _seen | {module_key}
+    resolved = {
+        cell_type: _submodule_key(modules, cell_type, seen)
+        for cell_type in counts_by_type
+    }
+    if not any(resolved.values()):
+        # Flat block (the common single-module case): nothing to recurse
+        # into, so report exactly what Yosys reported.
+        return own_total, dict(counts_by_type)
+
+    total = 0
+    aggregated: dict[str, int] = {}
+    for cell_type, count in counts_by_type.items():
+        if not isinstance(count, int):
+            continue
+        submodule_key = resolved[cell_type]
+        if submodule_key is None:
+            total += count
+            aggregated[cell_type] = aggregated.get(cell_type, 0) + count
+            continue
+        sub_total, sub_by_type = _aggregate_cell_counts(modules, submodule_key, seen)
+        total += sub_total * count
+        for sub_type, sub_count in sub_by_type.items():
+            aggregated[sub_type] = aggregated.get(sub_type, 0) + sub_count * count
+    return total, aggregated
+
+
 def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
     """Parse ``stat -liberty ... -json``'s captured output (Yosys survey
-    section 2) and return the top module's own stats block.
+    section 2) and return the top module's stats block, with ``num_cells``/
+    ``num_cells_by_type`` replaced by a recursive rollup over the design's
+    full hierarchy (#821).
 
     Prefers ``modules["\\<hdl_toplevel>"]`` (Yosys's own escaped-identifier
     naming for a public module name); falls back to the ``design`` rollup
@@ -849,6 +962,25 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
     path -- for a single top-level design the two are identical, per the
     Yosys survey's own worked example). Raises :class:`SynthesizeError` if
     the file is missing, unparseable, or names no recognisable module.
+
+    ``area``/``sequential_area`` are passed through unchanged from the
+    resolved block -- ``stat``'s own ``area`` is already a recursive rollup
+    at every level of hierarchy (verified live, #821), so only the cell-
+    count fields need correcting. For a design where the top module
+    instantiates sub-modules Yosys's default ``synth`` leaves hierarchical
+    (never flattened away), ``modules["\\<hdl_toplevel>"]``'s own
+    ``num_cells``/``num_cells_by_type`` describe only that one module --
+    ``num_cells`` is zero (Yosys 0.68) or counts each sub-module instance as
+    a single "cell" (Yosys 0.33) when the top is a pure wrapper, and
+    ``num_cells_by_type`` reports sub-module *names* as pseudo cell types
+    rather than the real leaf standard cells they instantiate.
+    :func:`_aggregate_cell_counts` walks the full ``modules`` dict to total
+    real leaf standard-cell counts recursively, scaled by each level's own
+    instance count, so a multiply-instantiated or deeply-nested sub-module
+    is counted correctly rather than once or not at all. A single-module
+    design is unaffected: with no submodule entries to recurse into, the
+    rollup is identical to the direct pass-through this function used
+    before #821.
     """
     if not os.path.isfile(stats_path):
         raise SynthesizeError(
@@ -867,7 +999,9 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
         ) from exc
 
     modules = data.get("modules") if isinstance(data, dict) else None
-    module_stats = (modules or {}).get(f"\\{hdl_toplevel}")
+    module_key = f"\\{hdl_toplevel}"
+    module_stats = (modules or {}).get(module_key)
+    used_module_lookup = module_stats is not None
     if module_stats is None:
         module_stats = data.get("design") if isinstance(data, dict) else None
     if not isinstance(module_stats, dict) or "num_cells" not in module_stats:
@@ -875,7 +1009,26 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
             f"could not find synthesis statistics for top module "
             f"'{hdl_toplevel}' in '{stats_path}'"
         )
-    return module_stats
+
+    result = dict(module_stats)
+    if used_module_lookup and isinstance(modules, dict):
+        total_cells, cells_by_type = _aggregate_cell_counts(modules, module_key)
+        result["num_cells"] = total_cells
+        result["num_cells_by_type"] = cells_by_type
+    elif isinstance(modules, dict):
+        # Defensive fallback path (`data["design"]` used because the top
+        # module's own key was missing from `modules` -- should not happen
+        # for a real Yosys run): `design.num_cells` is already the recursive
+        # total, but `design.num_cells_by_type` can still mix submodule-name
+        # pseudo entries in among real cell types (#821), so drop those.
+        raw_by_type = module_stats.get("num_cells_by_type")
+        if isinstance(raw_by_type, dict):
+            result["num_cells_by_type"] = {
+                cell_type: count
+                for cell_type, count in raw_by_type.items()
+                if _submodule_key(modules, cell_type, frozenset()) is None
+            }
+    return result
 
 
 def _read_abc_timing(

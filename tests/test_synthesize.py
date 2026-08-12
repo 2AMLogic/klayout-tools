@@ -783,6 +783,390 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
+# Hierarchical `instance_count`/`instance_counts_by_type` rollup (issue #821)
+#
+# Every fixture above (`_GCD_MODULE_STATS` included) is single-module: the
+# top's own `modules["\\<top>"]` block already *is* the whole design, so the
+# pre-#821 direct pass-through happened to be correct for all of them. These
+# fixtures instead give the top module a real sub-hierarchy -- shaped like
+# the `mac8` (`mult8` + `adder16`, sky130_fd_sc_hd) example captured live
+# against real Yosys 0.68+post in issue #821's curation pass -- so a
+# regression in the recursive aggregation (right for one level/one instance,
+# wrong for 2+ levels or a multiply-instantiated submodule) has something to
+# actually be wrong against.
+# --------------------------------------------------------------------------- #
+
+#: `adder16`-shaped submodule: 54 leaf standard cells, fully accounted for in
+#: its own `num_cells_by_type` (unlike the trimmed `_GCD_MODULE_STATS`) so a
+#: test can assert the aggregated by-type dict sums to the aggregated total.
+_ADDER16_MODULE_STATS = {
+    "num_cells": 54,
+    "area": 425.408,
+    "num_cells_by_type": {
+        "sky130_fd_sc_hd__xor2_1": 32,
+        "sky130_fd_sc_hd__a211o_1": 22,
+    },
+}
+
+#: `mult8`-shaped submodule: 248 leaf standard cells.
+_MULT8_MODULE_STATS = {
+    "num_cells": 248,
+    "area": 1939.36,
+    "num_cells_by_type": {
+        "sky130_fd_sc_hd__and2_1": 200,
+        "sky130_fd_sc_hd__nand2_1": 48,
+    },
+}
+
+#: `mac8`-shaped 2-level hierarchy: top instantiates both submodules exactly
+#: once each and has no cells of its own -- `num_cells: 0` with
+#: `num_cells_by_type` naming the two submodules as pseudo cell types,
+#: exactly as captured live in issue #821's curation pass. `area` (2364.768)
+#: is already `adder16`'s 425.408 + `mult8`'s 1939.36, matching the "area is
+#: already a recursive rollup" finding this fix must leave unchanged.
+_MAC8_MODULES = {
+    "\\mac8": {
+        "num_cells": 0,
+        "num_submodules": 2,
+        "area": 2364.768,
+        "num_cells_by_type": {"adder16": 1, "mult8": 1},
+    },
+    "\\adder16": _ADDER16_MODULE_STATS,
+    "\\mult8": _MULT8_MODULE_STATS,
+}
+
+
+def _stub_hierarchical_yosys(
+    monkeypatch,
+    *,
+    modules: dict,
+    version: str = "0.68+post",
+) -> None:
+    """Like `_stub_yosys_success`, but writes a full multi-module `modules`
+    dict (already escaped/backslash-keyed) rather than a single top-level
+    stats block -- the shape a real hierarchical design's
+    `stat -liberty ... -json -top <top>` output actually has."""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-V"]:
+            return _FakeCompleted(
+                stdout=f"Yosys {version} (git sha1 deadbeef, Release)\n"
+            )
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
+        assert cmd[:2] == ["yosys", "-s"]
+        script_path = cmd[2]
+        stats_path, netlist_path = _script_output_paths(script_path)
+        with open(stats_path, "w", encoding="utf-8") as handle:
+            json.dump({"modules": modules}, handle)
+        with open(netlist_path, "w", encoding="utf-8") as handle:
+            handle.write("// fake mapped netlist\n")
+        abc_log_path = _script_abc_log_path(script_path)
+        if abc_log_path is not None:
+            with open(abc_log_path, "w", encoding="utf-8") as handle:
+                handle.write(_ABC_STIME_LINE + "\n")
+        return _FakeCompleted(returncode=0)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+
+def _setup_hierarchical_env(tmp_path, monkeypatch, hdl_toplevel: str) -> str:
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.v", f"module {hdl_toplevel}(); endmodule\n")
+    return _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=["top.v"], hdl_toplevel=hdl_toplevel),
+    )
+
+
+def test_run_synthesize_hierarchical_top_reports_recursive_instance_count(
+    tmp_path, monkeypatch
+):
+    """The `mac8` fixture (top wraps `mult8` + `adder16`, neither flattened
+    by Yosys's default `synth`): `instance_count` must be the true recursive
+    total (302, per issue #821's live repro), never the top module's own
+    (zero) direct-cell count, and `instance_counts_by_type` must contain only
+    real leaf standard-cell types -- never `adder16`/`mult8` as a pseudo cell
+    type."""
+    request_path = _setup_hierarchical_env(tmp_path, monkeypatch, "mac8")
+    _stub_hierarchical_yosys(monkeypatch, modules=_MAC8_MODULES)
+
+    report = run_synthesize(request_path)
+
+    assert report["instance_count"] == 302
+    assert report["area_um2"] == 2364.768
+    by_type = report["instance_counts_by_type"]
+    assert "adder16" not in by_type
+    assert "mult8" not in by_type
+    assert by_type == {
+        "sky130_fd_sc_hd__a211o_1": 22,
+        "sky130_fd_sc_hd__and2_1": 200,
+        "sky130_fd_sc_hd__nand2_1": 48,
+        "sky130_fd_sc_hd__xor2_1": 32,
+    }
+    assert sum(by_type.values()) == 302
+
+
+def test_read_stats_multiply_instantiated_submodule_scales_counts(tmp_path):
+    """A submodule instantiated twice under the same parent must contribute
+    its counts *twice*, not once -- the parent block's own
+    `num_cells_by_type` count for that entry (2) is the instance
+    multiplicity, verified live against real Yosys output in issue #821."""
+    modules = {
+        "\\dual_adder": {
+            "num_cells": 0,
+            "area": 850.816,
+            "num_cells_by_type": {"adder16": 2},
+        },
+        "\\adder16": _ADDER16_MODULE_STATS,
+    }
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(json.dumps({"modules": modules}), encoding="utf-8")
+
+    result = synthesize._read_stats(str(stats_path), "dual_adder")
+
+    assert result["num_cells"] == 108
+    assert result["num_cells_by_type"] == {
+        "sky130_fd_sc_hd__xor2_1": 64,
+        "sky130_fd_sc_hd__a211o_1": 44,
+    }
+    assert result["area"] == 850.816
+
+
+def test_read_stats_three_level_hierarchy_recurses_past_one_level(tmp_path):
+    """A submodule that itself instantiates a sub-submodule: the recursion
+    must not assume exactly one level. `grand` wraps one `mid`, `mid` wraps
+    two `leaf` plus 5 direct cells of its own."""
+    modules = {
+        "\\grand": {
+            "num_cells": 0,
+            "area": 999.0,
+            "num_cells_by_type": {"mid": 1},
+        },
+        "\\mid": {
+            "num_cells": 5,
+            "area": 999.0,
+            "num_cells_by_type": {
+                "sky130_fd_sc_hd__buf_1": 5,
+                "leaf": 2,
+            },
+        },
+        "\\leaf": {
+            "num_cells": 10,
+            "area": 999.0,
+            "num_cells_by_type": {"sky130_fd_sc_hd__inv_1": 10},
+        },
+    }
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(json.dumps({"modules": modules}), encoding="utf-8")
+
+    result = synthesize._read_stats(str(stats_path), "grand")
+
+    # mid's own 5 direct cells + 2 * leaf's 10 cells = 25.
+    assert result["num_cells"] == 25
+    assert result["num_cells_by_type"] == {
+        "sky130_fd_sc_hd__buf_1": 5,
+        "sky130_fd_sc_hd__inv_1": 20,
+    }
+    assert "mid" not in result["num_cells_by_type"]
+    assert "leaf" not in result["num_cells_by_type"]
+
+
+def test_read_stats_mixed_direct_cells_and_submodule_instances(tmp_path):
+    """A top module that is not a pure wrapper -- it has both direct cells of
+    its own *and* a submodule instance -- must sum both contributions."""
+    modules = {
+        "\\mixed_top": {
+            "num_cells": 3,
+            "area": 999.0,
+            "num_cells_by_type": {
+                "sky130_fd_sc_hd__inv_1": 3,
+                "adder16": 1,
+            },
+        },
+        "\\adder16": _ADDER16_MODULE_STATS,
+    }
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(json.dumps({"modules": modules}), encoding="utf-8")
+
+    result = synthesize._read_stats(str(stats_path), "mixed_top")
+
+    assert result["num_cells"] == 57
+    assert result["num_cells_by_type"] == {
+        "sky130_fd_sc_hd__inv_1": 3,
+        "sky130_fd_sc_hd__xor2_1": 32,
+        "sky130_fd_sc_hd__a211o_1": 22,
+    }
+
+
+def test_read_stats_single_module_design_unaffected(tmp_path):
+    """A single-module design (no other key in `modules` matches any of its
+    own `num_cells_by_type` entries) is unaffected by the #821 fix -- same
+    `num_cells`/`num_cells_by_type` values as the pre-#821 direct
+    pass-through, even when (as in this trimmed real fixture) the by-type
+    dict does not itself sum to `num_cells`."""
+    modules = {"\\gcd": _GCD_MODULE_STATS}
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(json.dumps({"modules": modules}), encoding="utf-8")
+
+    result = synthesize._read_stats(str(stats_path), "gcd")
+
+    assert result["num_cells"] == 335
+    assert result["num_cells_by_type"] == _GCD_MODULE_STATS["num_cells_by_type"]
+    assert result["area"] == 2951.5808
+    assert result["sequential_area"] == 1251.2
+
+
+#: Byte-real `stat -json` output captured live from Yosys 0.33 (Ubuntu's
+#: distro build, `git sha1 2584903a060`) while implementing #821, running the
+#: exact pass sequence `_write_script` emits over a 3-level design (`top`
+#: instantiates one `mid` plus one direct `$_NOT_`; `mid` instantiates two
+#: `leaf`; `leaf` holds one `$_NAND_`).
+#:
+#: Its `num_cells` accounting differs from the Yosys 0.68 capture in #821's
+#: curation pass: 0.33 has no `num_submodules` field and *counts each
+#: submodule instance in the parent's own `num_cells`* (`top` reports 2 = one
+#: `$_NOT_` + one `mid`), whereas 0.68 excludes them (`mac8` reports 0). Any
+#: rollup that seeds its total from the parent's own `num_cells` therefore
+#: double-counts on 0.33 -- this fixture pins the version-independent
+#: behaviour, and the expected values below are Yosys's own `design` rollup
+#: from the same capture.
+_YOSYS_033_HIER_MODULES = {
+    "\\leaf": {
+        "num_wires": 3,
+        "num_cells": 1,
+        "num_cells_by_type": {"$_NAND_": 1},
+    },
+    "\\mid": {
+        "num_wires": 3,
+        "num_cells": 2,
+        "num_cells_by_type": {"leaf": 2},
+    },
+    "\\top": {
+        "num_wires": 5,
+        "num_cells": 2,
+        "num_cells_by_type": {"$_NOT_": 1, "mid": 1},
+    },
+}
+
+
+def test_read_stats_matches_yosys_own_design_rollup_on_0_33_shape(tmp_path):
+    """Against real Yosys 0.33 output -- where a parent's own `num_cells`
+    *includes* its submodule instances -- the rollup must reproduce Yosys's
+    own `design` block exactly (`num_cells: 3`, `{"$_NAND_": 2, "$_NOT_": 1}`),
+    not 6 (the double-count a `num_cells`-seeded total would produce)."""
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(
+        json.dumps({"modules": _YOSYS_033_HIER_MODULES}), encoding="utf-8"
+    )
+
+    result = synthesize._read_stats(str(stats_path), "top")
+
+    assert result["num_cells"] == 3
+    assert result["num_cells_by_type"] == {"$_NAND_": 2, "$_NOT_": 1}
+
+
+#: A second live Yosys 0.33 capture from the same session: a 4-level design
+#: (`top2` -> {`upper`, `mid`, `leaf`}, `upper` -> two `mid`, `mid` -> three
+#: `leaf` + one direct `$_XOR_`) that exercises every hard case at once --
+#: depth past two levels, a multiply-instantiated submodule, the same
+#: submodule reachable by two different paths, and a parent holding both
+#: direct cells and submodule instances. The pre-#821 pass-through reported
+#: `num_cells: 3` with `{"leaf": 1, "mid": 1, "upper": 1}`.
+_YOSYS_033_DEEP_MODULES = {
+    "\\leaf": {"num_cells": 1, "num_cells_by_type": {"$_NAND_": 1}},
+    "\\mid": {"num_cells": 4, "num_cells_by_type": {"$_XOR_": 1, "leaf": 3}},
+    "\\upper": {"num_cells": 2, "num_cells_by_type": {"mid": 2}},
+    "\\top2": {
+        "num_cells": 3,
+        "num_cells_by_type": {"leaf": 1, "mid": 1, "upper": 1},
+    },
+}
+
+
+def test_read_stats_deep_multiply_instantiated_hierarchy(tmp_path):
+    """Live 4-level capture: 3 `mid` instances x (1 `$_XOR_` + 3 `$_NAND_`)
+    plus one directly-instantiated `leaf` = 10 `$_NAND_` + 3 `$_XOR_`, which
+    is exactly what the same capture's own `design` block reports."""
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(
+        json.dumps({"modules": _YOSYS_033_DEEP_MODULES}), encoding="utf-8"
+    )
+
+    result = synthesize._read_stats(str(stats_path), "top2")
+
+    assert result["num_cells"] == 13
+    assert result["num_cells_by_type"] == {"$_NAND_": 10, "$_XOR_": 3}
+
+
+def test_read_stats_design_fallback_drops_submodule_pseudo_entries(tmp_path):
+    """Defensive `data["design"]` fallback (top module absent from
+    `modules`): `design.num_cells` is already the recursive total and is kept
+    as-is, but the submodule-name pseudo entries Yosys mixes into
+    `design.num_cells_by_type` must not be reported as cell types."""
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "modules": {"\\adder16": _ADDER16_MODULE_STATS},
+                "design": {
+                    "num_cells": 57,
+                    "area": 999.0,
+                    "num_cells_by_type": {
+                        "sky130_fd_sc_hd__inv_1": 3,
+                        "sky130_fd_sc_hd__xor2_1": 32,
+                        "sky130_fd_sc_hd__a211o_1": 22,
+                        "adder16": 1,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = synthesize._read_stats(str(stats_path), "renamed_top")
+
+    assert result["num_cells"] == 57
+    assert result["num_cells_by_type"] == {
+        "sky130_fd_sc_hd__inv_1": 3,
+        "sky130_fd_sc_hd__xor2_1": 32,
+        "sky130_fd_sc_hd__a211o_1": 22,
+    }
+
+
+def test_read_stats_cyclic_modules_graph_terminates(tmp_path):
+    """A malformed/adversarial `modules` graph where two modules instantiate
+    each other must not recurse forever -- a module already on the recursion
+    path is treated as a leaf."""
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "modules": {
+                    "\\a": {
+                        "num_cells": 1,
+                        "num_cells_by_type": {"sky130_fd_sc_hd__inv_1": 1, "b": 1},
+                    },
+                    "\\b": {
+                        "num_cells": 1,
+                        "num_cells_by_type": {"sky130_fd_sc_hd__buf_1": 1, "a": 1},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = synthesize._read_stats(str(stats_path), "a")
+
+    assert result["num_cells_by_type"]["sky130_fd_sc_hd__inv_1"] == 1
+    assert result["num_cells_by_type"]["sky130_fd_sc_hd__buf_1"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # ABC delay target / cell exclusion / `stime -p` timing (issue #807)
 # --------------------------------------------------------------------------- #
 

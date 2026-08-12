@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Fixed since release
 
+- 2026-08-12 — `klt synthesize` now reports `instance_count` /
+  `instance_counts_by_type` as a **recursive rollup over the whole design
+  hierarchy** (issue #821). Both fields were read straight out of
+  `stat -liberty … -json`'s `modules["\<top>"]` block, which describes only
+  the top module itself: for any design whose top instantiates sub-modules
+  Yosys's default `synth` leaves un-flattened, `instance_count` was the top
+  module's own direct-cell count (`0` for a pure wrapper — the reported
+  `mac8` case, whose true total is 302) while `area_um2` in the same block
+  was already the correct hierarchical rollup, so the two silently disagreed
+  about what "the design" meant. `instance_counts_by_type` was worse than
+  empty: `stat` lists each un-flattened sub-module *instance* as a pseudo
+  cell type in its parent's block, so the map reported sub-module names
+  (`adder16`, `mult8`) as if they were standard cells. The counts are now
+  aggregated by walking the full `modules` dict, expanding every sub-module
+  entry into the real leaf standard cells it instantiates and scaling each
+  level by that level's own instance count — correct for 3+ levels of
+  hierarchy and for a sub-module instantiated more than once under one
+  parent, and verified to reproduce `stat`'s own `design` rollup exactly on
+  live Yosys output. The aggregation reads instance multiplicity from
+  `num_cells_by_type` rather than a parent's own `num_cells`, because
+  whether `num_cells` counts sub-module instances is Yosys-version-dependent
+  (0.33 counts them, 0.68 reports them separately as `num_submodules`).
+  `area_um2` / `sequential_area_um2` are unchanged (already recursive), and a
+  single-module design — every existing fixture, `gcd` included — reports
+  exactly the same numbers as before. Consumers that treated
+  `instance_count` as a design-size proxy (`klt eval`'s `synthesize`
+  threshold gate, which a wrong `0` trivially satisfied; `digital_fleet`'s
+  instance-sizing ladder) now see the true gate count.
+
 - 2026-08-11 — `klt extract --mom-net <net>` now resolves the net whose
   capacitance it overwrites by **net id**, not by name (issue #811). The
   solver picked its net object by walking `Circuit.each_net()` and taking the
