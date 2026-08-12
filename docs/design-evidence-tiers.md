@@ -120,7 +120,15 @@ every block.
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Until parasitic
      extraction lands (#217), state what the extracted netlist does and
-     does not model.
+     does not model. A `klt pex` JSON report — the per-corner,
+     per-spec-row schematic-vs-extracted delta — is the machine-checkable
+     evidence for this item, and the *only* evidence `klt signoff`'s
+     tier-verdict mode accepts for it: unlike every other item, item 7
+     rejects a passing citation of any other kind, since a clean DRC or a
+     pre-layout schematic sim proves nothing about post-layout behaviour
+     (#871). `klt pex` itself is not implemented yet (Epic #709, shape
+     pending #801) — see `docs/cli/signoff.md`'s "Item 7 is
+     kind-restricted" section for the provisional envelope shape.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
      pre-layout RTL/gate simulation.
