@@ -3705,3 +3705,401 @@ def test_sky130_capm_capm2_have_at_least_one_drc_rule():
     }
     for layer in capacitor_top_plates:
         assert layer in rule_layers, f"{layer} has no rule of any kind in DECK"
+
+
+# --------------------------------------------------------------------------- #
+# "area" / "density" / "antenna" check kinds (issue #812)
+#
+# Neither shipped deck (`sky130`/`gf180mcu`) authors a rule of any of these
+# three kinds yet -- that's explicitly out of scope for this issue (a
+# separate follow-on). Each is exercised here against a minimal synthetic
+# one-rule deck via monkeypatch, mirroring
+# `test_run_drc_synthetic_enclosed_check_flags_zero_overlap` above.
+# --------------------------------------------------------------------------- #
+
+
+def _patch_synthetic_deck(monkeypatch, rules):
+    """Wire `run_drc("synthetic", ...)` to a synthetic one-off `rules` list,
+    the same monkeypatch triple `test_run_drc_synthetic_enclosed_check_
+    flags_zero_overlap` above uses -- `get_deck`/`get_nominal_dbu`/
+    `get_layer_names`, all keyed off the arbitrary deck name `"synthetic"`."""
+    monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: rules)
+    monkeypatch.setattr("klayout_tools.drc.get_nominal_dbu", lambda name: 0.001)
+    monkeypatch.setattr("klayout_tools.drc.get_layer_names", lambda name: {})
+
+
+def test_run_drc_synthetic_area_check_violation(tmp_path, monkeypatch):
+    """`check="area"`: a polygon smaller than `area_min_dbu2` is reported --
+    driven by `Region.with_area(..., inverse=True)`, which returns the
+    violating polygon directly (a `Region`, not `EdgePairs`)."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.area.1",
+                description="synthetic: minimum metal polygon area",
+                layer=(30, 0),
+                check="area",
+                threshold_dbu=0,  # unused by "area"
+                area_min_dbu2=10_000,  # (100 dbu)^2
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(30, 0)
+    # 50 x 50 dbu = 2500 dbu^2 < 10_000 dbu^2 threshold.
+    top.shapes(metal).insert(kdb.Box(0, 0, 50, 50))
+    path = tmp_path / "area_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["metal.area.1"] == 1
+    (violation,) = report["violations"]
+    assert violation["check"] == "area"
+    assert violation["bbox"] == {"left": 0, "bottom": 0, "right": 50, "top": 50}
+    assert violation["polygon"] is not None
+
+
+def test_run_drc_synthetic_area_check_clean(tmp_path, monkeypatch):
+    """`check="area"`: a polygon at/above `area_min_dbu2` is not reported."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.area.1",
+                description="synthetic: minimum metal polygon area",
+                layer=(30, 0),
+                check="area",
+                threshold_dbu=0,
+                area_min_dbu2=10_000,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(30, 0)
+    # 200 x 200 dbu = 40_000 dbu^2 >= 10_000 dbu^2 threshold.
+    top.shapes(metal).insert(kdb.Box(0, 0, 200, 200))
+    path = tmp_path / "area_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_area_check_requires_min_or_max(tmp_path, monkeypatch):
+    """A `check="area"` rule with neither `area_min_dbu2` nor
+    `area_max_dbu2` set can never detect anything -- `run_drc` raises
+    `DrcError` rather than silently reporting `status: "clean"`."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.area.1",
+                description="synthetic: misconfigured area rule",
+                layer=(30, 0),
+                check="area",
+                threshold_dbu=0,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(30, 0)
+    top.shapes(metal).insert(kdb.Box(0, 0, 50, 50))
+    path = tmp_path / "area_misconfigured.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="area_min_dbu2"):
+        run_drc(str(path), "synthetic")
+
+
+def test_run_drc_synthetic_density_check_violation(tmp_path, monkeypatch):
+    """`check="density"`: two adjacent 1 um x 1 um windows, each covered
+    only 30% (below `density_min=0.5`), are both reported -- one violation
+    per under-dense window, tiled from the checked layer's own drawn extent
+    (`region.bbox()`)."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.density.1",
+                description="synthetic: minimum metal fill density",
+                layer=(30, 0),
+                check="density",
+                threshold_dbu=0,
+                density_window_um=1.0,
+                density_min=0.5,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(30, 0)
+    # Window 1 is [0, 1000) x [0, 1000); window 2 is [1000, 2000) x [0, 1000)
+    # (1 um = 1000 dbu at this layout's dbu). Each shape covers exactly
+    # 300 x 1000 = 300_000 dbu^2 of its own window's 1_000_000 dbu^2 -- 30%,
+    # below the 50% floor -- while together their union bbox spans exactly
+    # the two windows (0..2000 x 0..1000), so both windows get tiled.
+    top.shapes(metal).insert(kdb.Box(0, 0, 300, 1000))
+    top.shapes(metal).insert(kdb.Box(1700, 0, 2000, 1000))
+    path = tmp_path / "density_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["metal.density.1"] == 2
+    bboxes = {
+        (v["bbox"]["left"], v["bbox"]["bottom"], v["bbox"]["right"], v["bbox"]["top"])
+        for v in report["violations"]
+    }
+    assert bboxes == {(0, 0, 1000, 1000), (1000, 0, 2000, 1000)}
+    for v in report["violations"]:
+        assert v["check"] == "density"
+        assert v["polygon"] == [
+            [v["bbox"]["left"], v["bbox"]["bottom"]],
+            [v["bbox"]["right"], v["bbox"]["bottom"]],
+            [v["bbox"]["right"], v["bbox"]["top"]],
+            [v["bbox"]["left"], v["bbox"]["top"]],
+        ]
+
+
+def test_run_drc_synthetic_density_check_clean(tmp_path, monkeypatch):
+    """`check="density"`: the same two-window layout, each now covered 60%
+    (at/above `density_min=0.5`), reports no violations."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.density.1",
+                description="synthetic: minimum metal fill density",
+                layer=(30, 0),
+                check="density",
+                threshold_dbu=0,
+                density_window_um=1.0,
+                density_min=0.5,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(30, 0)
+    # 600 x 1000 = 600_000 dbu^2 in each window's 1_000_000 dbu^2 -- 60%.
+    top.shapes(metal).insert(kdb.Box(0, 0, 600, 1000))
+    top.shapes(metal).insert(kdb.Box(1400, 0, 2000, 1000))
+    path = tmp_path / "density_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_density_check_requires_window_size(tmp_path, monkeypatch):
+    """A `check="density"` rule missing `density_window_um` raises
+    `DrcError` rather than silently checking nothing."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.density.1",
+                description="synthetic: misconfigured density rule",
+                layer=(30, 0),
+                check="density",
+                threshold_dbu=0,
+                density_min=0.5,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(30, 0)
+    top.shapes(metal).insert(kdb.Box(0, 0, 600, 1000))
+    path = tmp_path / "density_misconfigured.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="density_window_um"):
+        run_drc(str(path), "synthetic")
+
+
+def test_run_drc_synthetic_antenna_check_violation(tmp_path, monkeypatch):
+    """`check="antenna"`: a flat, connectivity-free area-ratio approximation
+    -- `layer`'s total merged area over `other_layer`'s exceeds
+    `antenna_ratio_max` -- reports one violation for the whole cell."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="poly.antenna.1",
+                description="synthetic: gate-to-metal antenna ratio",
+                layer=(50, 0),  # the accumulating "antenna" layer
+                other_layer=(60, 0),  # the protecting/reference layer
+                check="antenna",
+                threshold_dbu=0,
+                antenna_ratio_max=2.0,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    antenna = layout.layer(50, 0)
+    reference = layout.layer(60, 0)
+    # 100 x 100 = 10_000 dbu^2 antenna area vs. 10 x 100 = 1_000 dbu^2
+    # reference area -- ratio 10.0 > 2.0.
+    top.shapes(antenna).insert(kdb.Box(0, 0, 100, 100))
+    top.shapes(reference).insert(kdb.Box(200, 0, 210, 100))
+    path = tmp_path / "antenna_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["poly.antenna.1"] == 1
+    (violation,) = report["violations"]
+    assert violation["check"] == "antenna"
+    assert violation["bbox"] == {"left": 0, "bottom": 0, "right": 100, "top": 100}
+    assert violation["polygon"] is None
+
+
+def test_run_drc_synthetic_antenna_check_clean(tmp_path, monkeypatch):
+    """`check="antenna"`: an area ratio at/below `antenna_ratio_max`
+    reports no violation."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="poly.antenna.1",
+                description="synthetic: gate-to-metal antenna ratio",
+                layer=(50, 0),
+                other_layer=(60, 0),
+                check="antenna",
+                threshold_dbu=0,
+                antenna_ratio_max=2.0,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    antenna = layout.layer(50, 0)
+    reference = layout.layer(60, 0)
+    # 100 x 100 = 10_000 dbu^2 antenna area vs. 100 x 100 = 10_000 dbu^2
+    # reference area -- ratio 1.0 <= 2.0.
+    top.shapes(antenna).insert(kdb.Box(0, 0, 100, 100))
+    top.shapes(reference).insert(kdb.Box(200, 0, 300, 100))
+    path = tmp_path / "antenna_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_synthetic_antenna_check_zero_reference_area_is_violation(
+    tmp_path, monkeypatch
+):
+    """`check="antenna"`: antenna-layer area with *zero* reference-layer
+    area anywhere in the cell is an undefined/infinite ratio, always worse
+    than any finite `antenna_ratio_max` -- reported as a violation rather
+    than skipped or silently treated as a clean run."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="poly.antenna.1",
+                description="synthetic: gate-to-metal antenna ratio",
+                layer=(50, 0),
+                other_layer=(60, 0),
+                check="antenna",
+                threshold_dbu=0,
+                antenna_ratio_max=2.0,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    antenna = layout.layer(50, 0)
+    reference = layout.layer(60, 0)
+    top.shapes(antenna).insert(kdb.Box(0, 0, 100, 100))
+    # A second, unrelated top cell carries the only reference-layer shape in
+    # the stream -- keeps layer 60/0 registered in the written GDS (an empty
+    # layer with zero shapes anywhere is dropped on write/read, verified
+    # empirically), while `TOP`'s own `other_region` (scoped to `TOP`'s own
+    # hierarchy) is still genuinely empty.
+    other_top = layout.create_cell("OTHER")
+    other_top.shapes(reference).insert(kdb.Box(0, 0, 100, 100))
+    path = tmp_path / "antenna_zero_reference.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["poly.antenna.1"] == 1
+    (violation,) = report["violations"]
+    assert violation["cell"] == "TOP"
+
+
+def test_run_drc_antenna_check_requires_other_layer(tmp_path, monkeypatch):
+    """A `check="antenna"` rule with no `other_layer` raises `DrcError`
+    rather than crashing or silently reporting `status: "clean"` -- the
+    same requirement `_run_check` enforces for every other two-layer check
+    kind."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="poly.antenna.1",
+                description="synthetic: misconfigured antenna rule",
+                layer=(50, 0),
+                check="antenna",
+                threshold_dbu=0,
+                antenna_ratio_max=2.0,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    antenna = layout.layer(50, 0)
+    top.shapes(antenna).insert(kdb.Box(0, 0, 100, 100))
+    path = tmp_path / "antenna_misconfigured.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="other_layer"):
+        run_drc(str(path), "synthetic")

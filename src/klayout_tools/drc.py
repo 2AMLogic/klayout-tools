@@ -67,6 +67,22 @@ _TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
 # an enclosure rule exists to catch, so it must not read as `status: clean`.
 _OUTSIDE_CHECKS = {"enclosing", "enclosed"}
 
+# Single-layer check kind (issue #812) whose native primitive
+# (`Region.with_area`) returns violating *polygons* directly (a `Region`),
+# not an `EdgePairs` collection like every check kind above -- dispatched via
+# `_run_area_check` rather than `_run_check`. See `DrcRule.area_min_dbu2`/
+# `area_max_dbu2`.
+_AREA_CHECKS = {"area"}
+# Single-layer check kind (issue #812) with no native `Region` primitive at
+# all -- computed via windowed area accounting, `_run_density_check`. See
+# `DrcRule.density_window_um`/`density_min`/`density_max`.
+_DENSITY_CHECKS = {"density"}
+# Two-layer check kind (issue #812) approximating an antenna/PAAR check as a
+# flat, connectivity-free area-ratio comparison -- `_run_antenna_check`. See
+# `DrcRule.antenna_ratio_max`'s docstring for why this is *not* a net-aware
+# antenna check.
+_ANTENNA_CHECKS = {"antenna"}
+
 
 class DrcError(Exception):
     """Raised when a layout cannot be checked: bad file, unknown deck, or a
@@ -342,6 +358,93 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
                 if other_index is not None
                 else None
             )
+
+            if rule.check in _AREA_CHECKS:
+                for polygon in _run_area_check(region, rule, dbu_scale).each_merged():
+                    bbox = polygon.bbox()
+                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
+                    source_cell, source_path = _attribute_to_instance(cell, bbox)
+                    violations.append(
+                        {
+                            "rule": rule.id,
+                            "description": rule.description,
+                            "check": rule.check,
+                            "layer": layer_label,
+                            "cell": cell.name,
+                            "source_cell": source_cell,
+                            "source_path": source_path,
+                            "bbox": {
+                                "left": bbox.left,
+                                "bottom": bbox.bottom,
+                                "right": bbox.right,
+                                "top": bbox.top,
+                            },
+                            "polygon": points,
+                        }
+                    )
+                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
+                continue
+
+            if rule.check in _DENSITY_CHECKS:
+                for window_box in _run_density_check(region, rule, layout.dbu):
+                    points = [
+                        [window_box.left, window_box.bottom],
+                        [window_box.right, window_box.bottom],
+                        [window_box.right, window_box.top],
+                        [window_box.left, window_box.top],
+                    ]
+                    source_cell, source_path = _attribute_to_instance(cell, window_box)
+                    violations.append(
+                        {
+                            "rule": rule.id,
+                            "description": rule.description,
+                            "check": rule.check,
+                            "layer": layer_label,
+                            "cell": cell.name,
+                            "source_cell": source_cell,
+                            "source_path": source_path,
+                            "bbox": {
+                                "left": window_box.left,
+                                "bottom": window_box.bottom,
+                                "right": window_box.right,
+                                "top": window_box.top,
+                            },
+                            "polygon": points,
+                        }
+                    )
+                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
+                continue
+
+            if rule.check in _ANTENNA_CHECKS:
+                antenna_bbox = _run_antenna_check(region, other_region, rule)
+                if antenna_bbox is not None:
+                    source_cell, source_path = _attribute_to_instance(
+                        cell, antenna_bbox
+                    )
+                    violations.append(
+                        {
+                            "rule": rule.id,
+                            "description": rule.description,
+                            "check": rule.check,
+                            "layer": layer_label,
+                            "cell": cell.name,
+                            "source_cell": source_cell,
+                            "source_path": source_path,
+                            "bbox": {
+                                "left": antenna_bbox.left,
+                                "bottom": antenna_bbox.bottom,
+                                "right": antenna_bbox.right,
+                                "top": antenna_bbox.top,
+                            },
+                            # Flat, whole-cell aggregate -- no single real
+                            # polygon corresponds to "the violation" the way
+                            # an "area" or edge-pair check's does, see
+                            # `_run_antenna_check`'s docstring.
+                            "polygon": None,
+                        }
+                    )
+                    rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
+                continue
 
             edge_pairs, outside_region = _run_check(
                 region, other_region, rule, dbu_scale
@@ -640,6 +743,171 @@ def _run_check(
         return edge_pairs, outside_region
 
     raise DrcError(f"rule '{rule.id}': unsupported check kind '{check}'")
+
+
+def _run_area_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any:
+    """``check="area"`` (issue #812): the violating polygons of ``region``
+    (a ``Region``), driven by ``klayout.db.Region.with_area(min_area,
+    max_area, inverse=True)``.
+
+    Unlike every check in ``_SINGLE_LAYER_CHECKS``/``_TWO_LAYER_CHECKS``,
+    ``with_area`` already returns exactly the shapes that *violate* the
+    bound (area below ``min_area``, or at/above ``max_area``) when
+    ``inverse=True`` -- there is no separate edge-pair-shaped "violation"
+    concept for an area check, so callers iterate the returned ``Region``'s
+    polygons directly (see ``run_drc``'s ``_AREA_CHECKS`` branch), the same
+    way ``_run_check``'s ``outside_region`` escape term is already reported.
+
+    ``rule.area_min_dbu2``/``area_max_dbu2`` are expressed in **square**
+    database units of the deck's own nominal dbu -- rescaled here by
+    ``dbu_scale ** 2`` (not the plain ``dbu_scale`` a linear-distance
+    threshold uses), since an area scales with the square of a linear
+    rescaling; reusing ``dbu_scale`` unscaled would silently miscompute the
+    threshold by orders of magnitude for any layout whose dbu differs from
+    the deck's nominal one. At least one of ``area_min_dbu2``/
+    ``area_max_dbu2`` must be set -- both absent means this rule can never
+    detect anything, almost certainly a deck-authoring mistake, so this
+    raises :class:`DrcError` rather than silently returning an empty
+    result.
+    """
+    if rule.area_min_dbu2 is None and rule.area_max_dbu2 is None:
+        raise DrcError(
+            f"rule '{rule.id}': check 'area' requires area_min_dbu2 and/or "
+            "area_max_dbu2"
+        )
+    min_area = (
+        None
+        if rule.area_min_dbu2 is None
+        else round(rule.area_min_dbu2 * dbu_scale * dbu_scale)
+    )
+    max_area = (
+        None
+        if rule.area_max_dbu2 is None
+        else round(rule.area_max_dbu2 * dbu_scale * dbu_scale)
+    )
+    return region.with_area(min_area, max_area, True)
+
+
+def _run_density_check(region: Any, rule: DrcRule, dbu: float) -> list[Any]:
+    """``check="density"`` (issue #812): windowed area-density accounting,
+    since no native ``klayout.db.Region`` primitive computes this.
+
+    Tiles ``region.bbox()`` -- the checked layer's own drawn extent in
+    *this* cell, not a chip-boundary layer this engine has no concept of --
+    into non-overlapping ``rule.density_window_um`` squares (rescaled
+    against the layout's own ``dbu`` directly, like
+    ``DerivedLayer.sized_by_um``, since a window size has no natural
+    "nominal dbu" the way a rule threshold does). For each window, the
+    covered-area fraction is ``(region & window).area() / window.area()``;
+    a window outside ``[rule.density_min, rule.density_max]`` (either bound
+    may be ``None`` for "no floor"/"no ceiling") is returned as one
+    violation, reported by the caller as a single rectangular polygon
+    matching the window itself.
+
+    Only whole windows entirely inside ``region.bbox()`` are tiled -- a
+    remainder narrower than one window at the right/top edge is left
+    unchecked, a documented approximation of this first cut (see
+    ``docs/cli/drc.md``), not a defect. An empty ``region`` (nothing drawn
+    on this layer in this cell) tiles no windows and so reports no
+    violations, the same "nothing to check" behaviour every other check
+    kind has for an empty input region.
+
+    Raises :class:`DrcError` if neither ``density_min`` nor ``density_max``
+    is set (an unbounded rule can never detect anything, almost certainly a
+    deck-authoring mistake), or if ``density_window_um`` is missing or does
+    not round to at least one whole database unit at this layout's ``dbu``.
+    """
+    if rule.density_min is None and rule.density_max is None:
+        raise DrcError(
+            f"rule '{rule.id}': check 'density' requires density_min and/or density_max"
+        )
+    if rule.density_window_um is None:
+        raise DrcError(f"rule '{rule.id}': check 'density' requires density_window_um")
+
+    import klayout.db as kdb
+
+    window_dbu = round(rule.density_window_um / dbu)
+    if window_dbu <= 0:
+        raise DrcError(
+            f"rule '{rule.id}': density_window_um={rule.density_window_um} is "
+            f"too small to represent at dbu={dbu}"
+        )
+
+    bbox = region.bbox()
+    violations: list[Any] = []
+    if bbox.empty():
+        return violations
+
+    window_area = window_dbu * window_dbu
+    y = bbox.bottom
+    while y + window_dbu <= bbox.top:
+        x = bbox.left
+        while x + window_dbu <= bbox.right:
+            window_box = kdb.Box(x, y, x + window_dbu, y + window_dbu)
+            covered = region & kdb.Region(window_box)
+            covered_area = sum(p.area() for p in covered.each_merged())
+            density = covered_area / window_area
+            below_min = rule.density_min is not None and density < rule.density_min
+            above_max = rule.density_max is not None and density > rule.density_max
+            if below_min or above_max:
+                violations.append(window_box)
+            x += window_dbu
+        y += window_dbu
+
+    return violations
+
+
+def _run_antenna_check(region: Any, other_region: Any | None, rule: DrcRule) -> Any:
+    """``check="antenna"`` (issue #812): a flat, connectivity-free
+    approximation of an antenna/process-antenna-area-ratio (PAAR) check.
+
+    **This is not a net-aware antenna check.** A real antenna/PAAR rule
+    accumulates conductor area *per net*, reset at each via level -- a
+    question this purely-geometric engine cannot answer without net
+    extraction (``extract.py``'s ``LayoutToNetlist`` machinery, a different
+    code path entirely, not wired into this module). Instead, this sums
+    ``region``'s and ``other_region``'s total merged area across the whole
+    checked cell (no per-net split) and reports at most one flat violation
+    per ``(rule, cell)`` when ``area(region) / area(other_region)`` exceeds
+    ``rule.antenna_ratio_max`` -- or when ``region`` has nonzero area but
+    ``other_region`` has none at all (an undefined/infinite ratio, treated
+    as a violation whenever ``region`` is present). Mirrors how
+    ``"enclosing"``/``"enclosed"`` already document their own approximation
+    of the official rule they check (see ``DrcRule``'s docstring); a future
+    golden-pair author must not assume more precision than this primitive
+    actually has.
+
+    Returns ``region``'s own bounding box (``kdb.Box``) as the violation's
+    reported location when the ratio is exceeded, or ``None`` when it is
+    not -- there is no single real polygon that "is" this flat, whole-cell
+    violation the way there is for ``"area"``, so the caller reports
+    ``polygon: null`` for it (see ``run_drc``'s ``_ANTENNA_CHECKS`` branch).
+
+    Raises :class:`DrcError` if ``rule.antenna_ratio_max`` is unset or
+    ``other_region`` is ``None`` (a two-layer check kind missing its second
+    layer, the same requirement ``_run_check`` enforces for
+    ``_TWO_LAYER_CHECKS``).
+    """
+    if other_region is None:
+        raise DrcError(f"rule '{rule.id}': check 'antenna' requires other_layer")
+    if rule.antenna_ratio_max is None:
+        raise DrcError(f"rule '{rule.id}': check 'antenna' requires antenna_ratio_max")
+
+    layer_area = sum(p.area() for p in region.each_merged())
+    if layer_area == 0:
+        return None
+
+    other_area = sum(p.area() for p in other_region.each_merged())
+    if other_area == 0:
+        # Nonzero antenna-layer area with zero protection-layer area
+        # anywhere in this cell -- an undefined ratio, always worse than any
+        # finite `antenna_ratio_max`.
+        return region.bbox()
+
+    ratio = layer_area / other_area
+    if ratio > rule.antenna_ratio_max:
+        return region.bbox()
+    return None
 
 
 # --------------------------------------------------------------------------- #
