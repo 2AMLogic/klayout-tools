@@ -111,7 +111,11 @@ every block.
    block whose spec has no statistical row must say so explicitly rather
    than omit the item. Where it does apply, MC runs need a recorded seed,
    sample count, a deterministic negative control, and results combined
-   with (not instead of) process corners (#344).
+   with (not instead of) process corners (#344). A `klt yield` JSON report
+   — a yield estimate with its confidence interval, sample-size verdict, and
+   Cpk/sigma-to-spec against the row's own limits — is the machine-checkable
+   evidence for this item (`klt signoff`'s tier-verdict mode grades it the
+   same way it grades the deterministic items above).
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Until parasitic

@@ -460,6 +460,30 @@ not `klt --version`, if you need to detect this kind of drift.
   `docs/cli/extract.md`'s "Device rule provenance" section. Like
   `DrcRule.provenance`, not yet surfaced in `klt extract`'s JSON output.
 
+- 2026-08-12 — `klt signoff`'s tier-verdict mode now grades the T1
+  checklist's statistical-evidence item (item 6, "Statistical claims carry
+  Monte Carlo evidence") against a `klt yield` report — issue #870, Phase 2a
+  of epic #706, extending the gate binding Phase 1 (#825) shipped for the
+  four deterministic gates (DRC/LVS/netlist regeneration/corner sim) to the
+  statistical item. `_classify`/`_check_passed`/`_detail` now also recognise
+  a `klt yield` (issue #816, Phase 1a of epic #710) JSON envelope, reachable
+  via item 6's `evidence` entry exactly like every other kind — file-backed
+  or command-backed, no new evidence shape. A `"met"` verdict passes on
+  `status: "pass"` or `status: "reported"` (no measurement declared a
+  `target_yield`, so nothing could fail); `status: "fail"` renders
+  `"unmet"` with `reason: "check_failed"`, same as every other kind. `klt
+  yield`'s current JSON shape carries no `provenance` block of its own —
+  unlike drc/lvs/extract/sim, its envelope names no content hash for the
+  Monte Carlo sample document it analysed — so the citation's `content_hash`
+  is instead computed by hashing the referenced samples document directly
+  (`_yield_samples_content_hash`), preserving the same input-hash staleness
+  discipline Phase 1 established rather than leaving a `"met"` yield
+  citation with no input hash at all. An item with no backing Monte Carlo
+  campaign evidence renders `"unmet"` via the same `no_evidence` reason
+  every other item uses — there is no separate code path that could
+  fabricate a `"met"` for it. See `docs/cli/signoff.md`'s "`klt yield`
+  evidence and content hashing" section.
+
 - 2026-08-12 — New verb `klt erc` builds a per-gate, layer-by-layer
   connectivity model — issue #859, Phase 1a of the antenna + ERC signoff
   epic #713. A JSON spec declares a `stackup` (fabrication order from the
