@@ -105,10 +105,14 @@ jobs:
         # gracefully) -- this job is what makes sure the skip is never the only
         # thing CI ever sees.
         #
-        # tests/test_mom_ports_validation.py (issue #894, Phase 2b) is
-        # listed explicitly for the same reason: it is what actually
-        # exercises the "S-parameters match the closed-form reference"
-        # acceptance criterion in CI rather than only locally.
+        # tests/test_mom_ports_validation.py (issue #894, Phase 2b),
+        # tests/test_mom_peec_validation.py (issue #797), and
+        # tests/test_mom_fullwave_validation.py (issue #893) are listed
+        # explicitly for the same reason: they are what actually exercise
+        # the PEEC inductance/resistance and full-wave characteristic-
+        # impedance/propagation-constant closed-form validation, and the
+        # "S-parameters match the closed-form reference" acceptance
+        # criterion, in CI rather than only locally.
         #
         # --capture=tee-sys so the closed-form comparison and
         # convergence-rate tables tests/test_mom_validation.py prints (issue
@@ -121,7 +125,9 @@ jobs:
           uv sync --locked --extra dev --group mom
           uv run --frozen --extra dev --group mom pytest \
             tests/test_mom.py tests/test_mom_validation.py \
-            tests/test_mom_ports_validation.py -v --capture=tee-sys
+            tests/test_mom_ports_validation.py \
+            tests/test_mom_peec_validation.py \
+            tests/test_mom_fullwave_validation.py -v --capture=tee-sys
 
       - name: Assert the klt mom tests actually ran (no silent skip)
         working-directory: .
