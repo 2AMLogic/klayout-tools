@@ -1,0 +1,30 @@
+[package]
+name = "klt-yield-native"
+version = "0.1.0"
+edition = "2021"
+description = "Statistical yield-analysis core for `klt yield` -- distribution fit, yield estimate + confidence intervals, Cpk/sigma-to-spec, sample-size verdict (2AMLogic/klayout-tools, issue #816)"
+license = "MIT"
+publish = false
+
+[lib]
+# `cdylib` is required for pyo3's `extension-module`; `rlib` keeps the crate
+# usable from `cargo test` (a `cdylib`-only crate can't be linked as a normal
+# Rust test binary). Mirrors native/mom/Cargo.toml's own rationale.
+name = "klt_yield_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned to the same floor as native/mom and native/congestion (0.29 is the
+# first line supporting Python 3.14 -- see native/mom/Cargo.toml for the
+# verified rejection behavior of 0.22/0.23 against a 3.14 interpreter).
+#
+# `extension-module` is deliberately NOT enabled here; `pyproject.toml`'s
+# `[tool.maturin] features` turns it on for the maturin build only, so
+# `cargo test` (which links libpython normally) still works from the same
+# manifest. Same rationale as native/mom/Cargo.toml.
+pyo3 = { version = "0.29" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true

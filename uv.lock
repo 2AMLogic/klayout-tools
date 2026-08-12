@@ -190,6 +190,9 @@ congestion = [
 mom = [
     { name = "klt-mom-native" },
 ]
+yield = [
+    { name = "klt-yield-native" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -204,6 +207,7 @@ provides-extras = ["dev", "functional-verification"]
 [package.metadata.requires-dev]
 congestion = [{ name = "klt-congestion-native", directory = "native/congestion" }]
 mom = [{ name = "klt-mom-native", directory = "native/mom" }]
+yield = [{ name = "klt-yield-native", directory = "native/yield" }]
 
 [[package]]
 name = "klt-congestion-native"
@@ -214,6 +218,11 @@ source = { directory = "native/congestion" }
 name = "klt-mom-native"
 version = "0.1.0"
 source = { directory = "native/mom" }
+
+[[package]]
+name = "klt-yield-native"
+version = "0.1.0"
+source = { directory = "native/yield" }
 
 [[package]]
 name = "packaging"

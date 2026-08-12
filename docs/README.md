@@ -47,6 +47,7 @@ docs/
     stats.md
     synthesize.md
     trajectory.md
+    yield.md
   design/                # design notes, spikes, and upstream surveys
     co-simulation-approach-survey.md
     cocotb-verification-spike.md

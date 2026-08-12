@@ -462,6 +462,53 @@ not `klt --version`, if you need to detect this kind of drift.
   fields additively (no `schema_version` bump needed for either). See
   `docs/cli/power.md`.
 
+- 2026-08-12 — **new verb `klt yield`** (#816, Phase 1a of the
+  statistical/yield epic #710): a Monte Carlo sample set plus spec limits in,
+  a yield estimate with confidence intervals, a distribution fit,
+  Cpk/sigma-to-spec, and a sample-size verdict out. Both input shapes are
+  accepted and auto-detected — a `klt sim --format json` Monte Carlo report
+  is consumed **directly** (samples from `corners[]` entries carrying a
+  `monte_carlo` block, limits from the report's own
+  `measurements[].limits`), so the record format the canary MC harnesses
+  already produce needs no intermediate format; a plain sample-set document
+  (`{"measurements": [{"name", "samples", "limits"}]}`) covers a draw that
+  came from somewhere else. A `--limits` spec file supplies or overrides the
+  limits and can carry run-level `confidence`/`target_ci_halfwidth`/
+  `min_samples`/`target_yield` defaults.
+
+  **The tool never emits a bare point estimate, and enforces that rather
+  than advising it.** Every yield number is an object carrying `estimate`,
+  `confidence`, `confidence_interval`, and `n` — a shape the Rust response
+  types make impossible to bypass, with a final guard rejecting a
+  non-finite or inverted interval before serialisation. A request that could
+  only produce a bare number is an **error** (exit `1`), not a warning:
+  fewer than 2 usable samples, `--min-samples` below the hard floor of 2,
+  `--confidence 0` or `1`, or a measurement with neither `min` nor `max`. A
+  zero-failure run is reported as `[low, 1]` with a warning spelling out the
+  honest statement ("at least 98.78% at 95% confidence, N = 300", not "100%
+  yield"). A declared `target_yield` passes only if the **lower** confidence
+  bound reaches it, and the sample-size block answers two separate questions
+  — `required_n` (samples for the requested interval half-width) and
+  `required_n_for_target` (samples for the *claim*, searched against the
+  same exact interval the report publishes, `null` when the observed pass
+  rate makes the target unreachable at any N).
+
+  Two estimators ship side by side: `empirical` (exact Clopper-Pearson,
+  assumption-free) and `normal` (delta-method interval over the fitted
+  normal), with an Anderson-Darling normality verdict and a warning when the
+  normal fit is rejected. Statistics run in the new `klt_yield_native` Rust
+  extension (`native/yield/`, this repo's third Rust component after
+  `native/mom/` and `native/congestion/`) — dependency-free numerics
+  (Cody `erfc`, Acklam inverse normal CDF, Lanczos log-gamma, modified-Lentz
+  incomplete beta) each with its own closed-form unit test. Like `klt mom`,
+  it is an **optional** PEP 735 dependency group (`uv sync --group yield`):
+  every other `klt` verb still installs with no Rust toolchain in sight, and
+  an unbuilt extension is a clean error pointing at the build instructions.
+  Exit codes: `0` pass, `1` failed to run, `3` a yield claim was not
+  supported at the stated confidence. Worked example in `examples/yield/`
+  (both input shapes over one seeded 300-sample draw); see
+  `docs/cli/yield.md`.
+
 - 2026-08-12 — `klt extract --parasitics --mom-net <net>` cross-checks (and
   replaces) one net's lumped-RC ground capacitance with `klt mom`'s
   Method-of-Moments field solver (#798, Phase 1b of the MoM epic #701 —

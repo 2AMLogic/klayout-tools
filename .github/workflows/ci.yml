@@ -189,6 +189,74 @@ jobs:
             exit 1
           }
 
+  native-yield:
+    name: Native engines (Rust) — yield statistics
+    # `native/yield/` (issue #816, Phase 1a of the statistical/yield epic
+    # #710) is this repo's third Rust component -- the `klt_yield_native`
+    # pyo3 extension behind `klt yield`. Its own job, not folded into
+    # `native` above, so a failure here is attributable to this crate
+    # specifically -- the one-job-per-native-engine precedent that job's
+    # comment sets.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/yield
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo --version
+        run: cargo --version && rustc --version
+
+      - name: Cache cargo registry + build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/yield/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/yield/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        # GATES, like the ruff steps above -- do not add continue-on-error.
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        # The statistics core's closed-form oracles (erfc against DLMF
+        # values, Clopper-Pearson against directly-solved binomial tails, the
+        # +/-2 sigma yield against erf(sqrt(2))) live here -- this step is
+        # what keeps them honest.
+        run: cargo test
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build + install the extension, then run the klt yield tests
+        # `--group yield` resolves klt-yield-native from native/yield/ via
+        # pyproject.toml's [tool.uv.sources] and drives maturin to compile
+        # it. Without it, tests/test_yield.py's statistics tier skips itself
+        # (by design, so a Rust-less environment degrades gracefully) --
+        # this job is what makes sure the skip is never the only thing CI
+        # ever sees.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group yield
+          uv run --frozen --extra dev --group yield pytest \
+            tests/test_yield.py -v --capture=tee-sys
+
+      - name: Assert the klt yield tests actually ran (no silent skip)
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group yield python -c "import klt_yield_native" || {
+            echo "::error::klt_yield_native did not install -- tests/test_yield.py's statistics tier would have skipped"
+            exit 1
+          }
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

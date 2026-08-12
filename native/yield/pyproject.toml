@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "klt-yield-native"
+version = "0.1.0"
+description = "Compiled pyo3 extension backing `klt yield` (2AMLogic/klayout-tools, issue #816) -- not published standalone"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+# The extension module Python imports as `klt_yield_native` (matches the
+# crate's `[lib] name` in Cargo.toml).
+module-name = "klt_yield_native"
+features = ["pyo3/extension-module"]
