@@ -51,6 +51,40 @@ export interface EmSParameters {
 }
 
 /**
+ * Reproducibility record (`docs/schemas/em-site-export.schema.json`'s
+ * `provenance` object) — the exact solver build, geometry, and solve
+ * parameters a given export traces back to. Rendered by `ProvenancePanel`
+ * (issue #851) alongside each gallery entry's field/S-parameter result, so
+ * every visual is auditable rather than a bare "trust me". Only the fields
+ * `ProvenancePanel` actually reads are typed here; the schema marks
+ * `provenance`/`generator`/`geometry` as `additionalProperties: true`, so a
+ * real export may carry more fields than declared below.
+ */
+export interface EmProvenance {
+  generator: {
+    repo: string;
+    license?: string;
+    /** Full git commit hash of the geode-fem checkout the solve ran against. */
+    commit: string;
+    version?: string | null;
+    backend?: string;
+    build_profile?: string;
+  };
+  geometry: {
+    fixture: string;
+    fixture_sha256?: string | null;
+    description?: string;
+  };
+  /** Solver boundary-condition / material parameters — shape varies by
+   *  benchmark family, so this is a read-only string-keyed bag rendered
+   *  generically (key/value rows) rather than typed field-by-field. */
+  solve_parameters?: Record<string, string | number | boolean | null>;
+  /** UTC timestamp this export file was generated (not necessarily when the
+   *  solve itself ran — see the schema's own field description). */
+  generated_at: string;
+}
+
+/**
  * The full geode-fem site export document. NOTE: `frames.length` and
  * `s_parameters.points.length` are **not** index-aligned in general — the
  * committed patch-antenna export has exactly 1 frame (the FEM resonant
@@ -63,4 +97,5 @@ export interface EmSiteExport {
   mesh: FieldMesh;
   frames: EmFrame[];
   s_parameters: EmSParameters;
+  provenance: EmProvenance;
 }
