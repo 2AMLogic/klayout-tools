@@ -87,6 +87,7 @@ klt size request.json                    # gm/Id sizing (single device or couple
 klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield estimate with CIs, Cpk, sample-size verdict (Rust core)
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
+klt design-centering request.json        # yield-sensitivity ranking + sized device -> re-centering candidates
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
 klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)

@@ -440,6 +440,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — New verb `klt design-centering` closes the loop between the
+  statistical/yield epic #710 and the analog-sizing epic #705: it turns a
+  `klt yield-sensitivity` parameter ranking (issue #923) into re-centering
+  candidates against a `klt size` sized device's own geometry — issue #924,
+  Phase 3 of epic #710. Reads a request document naming a `sensitivity`
+  report, a `sized_device` (single-device or coupled topology mode), and a
+  caller-supplied `parameter_map` bridging the two commands' different
+  naming conventions (`klt yield-sensitivity` ranks mismatch/process
+  parameters like `vth_mismatch_m1`; `klt size` reports geometry keyed by
+  device instance, e.g. `input_a`) — this command does not guess that
+  mapping. Each mapped, ranked parameter gets a suggested area-growth
+  multiplier via the standard Pelgrom mismatch-scaling law (`sigma ~ 1 /
+  sqrt(area)`), a stated first-pass heuristic rather than a rigorous
+  re-optimization. #705's own analog-sizing engine is still Phase 1 with no
+  design-centering stage of its own, so this ships as the reference consumer
+  the `klt yield-sensitivity` contract already reserved for it (no new field
+  was added to that contract); if #705 grows a real design-centering stage
+  later, it should wire into `ranking[].parameter`/`ranking[].contribution`
+  directly. Validated end-to-end against #923's own known-dominant-parameter
+  fixture (`examples/design-centering/`): the injected 10x-dominant mismatch
+  term correctly surfaces as re-centering candidate #1, mapped to its sized
+  device instance. See `docs/cli/design-centering.md`.
+
 - 2026-08-12 — `klt synthesize` now reports a real gate-level critical path
   in a new, additive `sta` response field, computed by
   `klt-statime-native` (`native/statime/`) over the mapped netlist the run

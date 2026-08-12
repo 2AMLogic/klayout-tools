@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "topology": "diff_pair_mirror_tail",
+  "corner": { "corner_id": "tt/27C", "process": "tt", "vdd_v": 1.8, "temperature_c": 27.0 },
+  "budget": {
+    "tail_current_a": 2e-05,
+    "tail_mirror_ratio": 1.0,
+    "reference_current_a": 2e-05,
+    "branch_current_a": 1e-05,
+    "measured": {
+      "tail_current_a": 1.9812e-05,
+      "reference_current_a": 2e-05,
+      "branch_current_a": { "input_a": 9.9134e-06, "input_b": 9.9013e-06 },
+      "tail_split": [0.5006, 0.4994],
+      "tail_mirror_ratio": 0.9906,
+      "mirror_ratio": 0.9984,
+      "tail_current_rel_error": -0.0094
+    }
+  },
+  "bias": { "vcm_v": 0.9, "vout_v": 0.8991, "vtail_v": 0.2103 },
+  "roles": {
+    "tail": { "w_um": 9.832, "l_um": 1.0, "target_gm_id": 14.23, "control_instance": "tail", "feasible": true },
+    "input_pair": { "w_um": 8.739, "l_um": 0.5, "target_gm_id": 19.1, "control_instance": "input_a", "feasible": true },
+    "mirror": { "w_um": 6.409, "l_um": 1.0, "target_gm_id": 8.9, "control_instance": "mirror_a", "feasible": true }
+  },
+  "devices": {
+    "tail_ref": {
+      "role": "tail", "instance": "xtailref", "is_control": false,
+      "placement": "diode-connected tail-bias replica (Vds=Vgs), fed by the reference current",
+      "device": { "kind": "nmos", "model": "sky130_fd_pr__nfet_01v8", "l_um": 1.0, "w_min_um": 1.0, "w_max_um": 40.0, "nf": 1, "mult": 1 },
+      "status": "pass",
+      "target": { "gm_id": 14.23, "id_a": 2e-05 },
+      "operating_point": {
+        "w_um": 9.832, "l_um": 1.0, "nf": 1, "mult": 1,
+        "id_a": 2e-05, "gm_s": 0.0002846, "gm_id": 14.23,
+        "vgs_v": 0.7248, "vth_v": 0.6112, "vov_v": 0.1136,
+        "vdsat_v": 0.1149, "inversion_level": "strong"
+      },
+      "margins": { "gm_id_rel_error": 0.0, "id_rel_error": 0.0 },
+      "rationale": "[tail_ref] tail role, diode-connected bias replica. Measured in-circuit gm/Id=14.23 S/A against target 14.23 (0.0% error)."
+    },
+    "tail": {
+      "role": "tail", "instance": "xtail", "is_control": true,
+      "placement": "tail current source; gate driven by the replica, drain at the pair's common source",
+      "device": { "kind": "nmos", "model": "sky130_fd_pr__nfet_01v8", "l_um": 1.0, "w_min_um": 1.0, "w_max_um": 40.0, "nf": 1, "mult": 1 },
+      "status": "pass",
+      "target": { "gm_id": 14.23, "id_a": 2e-05 },
+      "operating_point": {
+        "w_um": 9.832, "l_um": 1.0, "nf": 1, "mult": 1,
+        "id_a": 1.9812e-05, "gm_s": 0.0002819, "gm_id": 14.23,
+        "vgs_v": 0.7215, "vth_v": 0.6109, "vov_v": 0.1106,
+        "vdsat_v": 0.1121, "inversion_level": "strong"
+      },
+      "margins": { "gm_id_rel_error": -0.0054, "id_rel_error": -0.0094 },
+      "rationale": "[tail] tail role, current source. Measured in-circuit gm/Id=14.15 S/A against target 14.23 (-0.5% error)."
+    },
+    "input_a": {
+      "role": "input_pair", "instance": "xinputa", "is_control": true,
+      "placement": "pair leg driving the mirror's diode leg -- this module's own diff-pair \"m1\" stand-in, matching examples/yield-sensitivity/'s vth_mismatch_m1/beta_mismatch_m1 naming",
+      "device": { "kind": "nmos", "model": "sky130_fd_pr__nfet_01v8", "l_um": 0.5, "w_min_um": 1.0, "w_max_um": 40.0, "nf": 1, "mult": 1 },
+      "status": "pass",
+      "target": { "gm_id": 19.1, "id_a": 1e-05 },
+      "operating_point": {
+        "w_um": 8.739, "l_um": 0.5, "nf": 1, "mult": 1,
+        "id_a": 9.9134e-06, "gm_s": 0.0001895, "gm_id": 19.12,
+        "vgs_v": 0.6841, "vth_v": 0.5977, "vov_v": 0.0864,
+        "vdsat_v": 0.0871, "inversion_level": "moderate"
+      },
+      "margins": { "gm_id_rel_error": 0.0219, "id_rel_error": -0.0087 },
+      "rationale": "[input_a] input_pair role, pair leg driving the mirror's diode leg. Measured in-circuit gm/Id=19.55 S/A against target 19.1 (2.2% error)."
+    },
+    "input_b": {
+      "role": "input_pair", "instance": "xinputb", "is_control": false,
+      "placement": "pair leg driving the output node -- this module's own diff-pair \"m2\" stand-in, matching examples/yield-sensitivity/'s vth_mismatch_m2/beta_mismatch_m2 naming",
+      "device": { "kind": "nmos", "model": "sky130_fd_pr__nfet_01v8", "l_um": 0.5, "w_min_um": 1.0, "w_max_um": 40.0, "nf": 1, "mult": 1 },
+      "status": "pass",
+      "target": { "gm_id": 19.1, "id_a": 1e-05 },
+      "operating_point": {
+        "w_um": 8.739, "l_um": 0.5, "nf": 1, "mult": 1,
+        "id_a": 9.9013e-06, "gm_s": 0.0001891, "gm_id": 19.10,
+        "vgs_v": 0.6839, "vth_v": 0.5977, "vov_v": 0.0862,
+        "vdsat_v": 0.0869, "inversion_level": "moderate"
+      },
+      "margins": { "gm_id_rel_error": 0.0, "id_rel_error": -0.0099 },
+      "rationale": "[input_b] input_pair role, pair leg driving the output node. Measured in-circuit gm/Id=19.10 S/A against target 19.1 (0.0% error)."
+    },
+    "mirror_a": {
+      "role": "mirror", "instance": "xmirrora", "is_control": true,
+      "placement": "diode-connected leg of the PMOS mirror load (Vds=Vgs)",
+      "device": { "kind": "pmos", "model": "sky130_fd_pr__pfet_01v8", "l_um": 1.0, "w_min_um": 1.0, "w_max_um": 40.0, "nf": 1, "mult": 1 },
+      "status": "pass",
+      "target": { "gm_id": 8.9, "id_a": 1e-05 },
+      "operating_point": {
+        "w_um": 6.409, "l_um": 1.0, "nf": 1, "mult": 1,
+        "id_a": 9.9134e-06, "gm_s": 0.0000915, "gm_id": 9.156,
+        "vgs_v": 0.9241, "vth_v": 0.7712, "vov_v": 0.1529,
+        "vdsat_v": 0.1541, "inversion_level": "strong"
+      },
+      "margins": { "gm_id_rel_error": 0.0288, "id_rel_error": -0.0087 },
+      "rationale": "[mirror_a] mirror role, diode-connected leg. Measured in-circuit gm/Id=9.156 S/A against target 8.9 (2.9% error)."
+    },
+    "mirror_b": {
+      "role": "mirror", "instance": "xmirrorb", "is_control": false,
+      "placement": "output leg of the PMOS mirror load",
+      "device": { "kind": "pmos", "model": "sky130_fd_pr__pfet_01v8", "l_um": 1.0, "w_min_um": 1.0, "w_max_um": 40.0, "nf": 1, "mult": 1 },
+      "status": "pass",
+      "target": { "gm_id": 8.9, "id_a": 1e-05 },
+      "operating_point": {
+        "w_um": 6.409, "l_um": 1.0, "nf": 1, "mult": 1,
+        "id_a": 9.9013e-06, "gm_s": 0.0000913, "gm_id": 9.121,
+        "vgs_v": 0.9238, "vth_v": 0.7712, "vov_v": 0.1526,
+        "vdsat_v": 0.1538, "inversion_level": "strong"
+      },
+      "margins": { "gm_id_rel_error": 0.0248, "id_rel_error": -0.0099 },
+      "rationale": "[mirror_b] mirror role, output leg. Measured in-circuit gm/Id=9.121 S/A against target 8.9 (2.5% error)."
+    }
+  },
+  "tolerance": { "gm_id_rel": 0.05 },
+  "joint_solve": {
+    "method": "coupled fixed-point on the assembled topology: characterize each role's diode-connected gm/Id(W) curve, then correct all three widths at once from a single coupled ngspice operating-point measurement.",
+    "max_iterations": 6, "iterations_run": 1, "converged": true, "gm_id_rel_tol": 0.05,
+    "iterations": [
+      {
+        "index": 0,
+        "widths_um": { "tail": 9.832, "input_pair": 8.739, "mirror": 6.409 },
+        "gm_id": { "tail": 14.15, "input_pair": 19.55, "mirror": 9.156 },
+        "gm_id_rel_error": { "tail": -0.0054, "input_pair": 0.0219, "mirror": 0.0253 },
+        "worst_abs_rel_error": 0.0253,
+        "status": "ok"
+      }
+    ]
+  },
+  "method": {
+    "name": "coupled multi-device joint solve (diff-pair + mirror + tail)",
+    "rationale": "Seeded from each role's own diode-connected gm/Id(W) curve, then corrected jointly against a single coupled ngspice operating-point measurement of the assembled circuit -- see docs/cli/size.md's 'Coupled multi-device topology sizing' section."
+  },
+  "environment": { "engine": "ngspice", "engine_version": "46", "models_lib": "/abs/path/sky130.lib.spice" },
+  "provenance": {
+    "klt_version": "0.2.0",
+    "klayout_version": "0.30.10",
+    "pdk": { "variant": "sky130A", "root": "/abs/path/sky130A" },
+    "deck": { "name": "sky130.lib.spice", "path": "/abs/path/sky130.lib.spice" },
+    "input": null
+  },
+  "_note": "Hand-built, synthetic 'klt size' topology-mode response for this worked example -- representative of the documented schema (docs/cli/size.md's 'Response' section under 'Coupled multi-device topology sizing'), not an actual ngspice run. See this directory's README.md for why."
+}

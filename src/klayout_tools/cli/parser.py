@@ -14,6 +14,7 @@ from . import (
     cells_cmd,
     components_cmd,
     deck_cmd,
+    design_centering_cmd,
     draw_cmd,
     drc_cmd,
     equiv_cmd,
@@ -1954,6 +1955,46 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(yield_sensitivity_parser)
     yield_sensitivity_parser.set_defaults(func=yield_sensitivity_cmd.run)
+
+    design_centering_parser = subparsers.add_parser(
+        "design-centering",
+        help=("yield-sensitivity ranking + sized device -> re-centering candidates"),
+        description=(
+            "Turn a `klt yield-sensitivity` parameter ranking into "
+            "re-centering candidates against a `klt size` sized device's "
+            "own geometry -- issue #924, Phase 3 of the statistical/yield "
+            "epic #710, closing the loop with the analog-sizing engine "
+            "(#705). Reads a request JSON file declaring 'sensitivity' (a "
+            "klt yield-sensitivity JSON payload, or one of its "
+            "'measurements' entries), 'sized_device' (a klt size JSON "
+            "payload), and 'parameter_map' ({mismatch_parameter: "
+            "instance_name}) bridging the two commands' different naming "
+            "conventions. Each mapped, ranked parameter gets a suggested "
+            "area-growth multiplier via Pelgrom's mismatch-scaling law -- "
+            "a first-pass heuristic, not a rigorous re-optimization. "
+            "Producer-side reference consumer: #705 has no design-"
+            "centering stage of its own yet, so this exercises the "
+            "contract `klt yield-sensitivity` already reserves for it "
+            "(docs/cli/yield-sensitivity.md's 'Downstream consumers' "
+            "section) rather than requiring #705 to exist first -- see "
+            "docs/cli/design-centering.md."
+        ),
+    )
+    design_centering_parser.add_argument(
+        "request",
+        help="path to a klt design-centering request JSON file",
+    )
+    design_centering_parser.add_argument(
+        "--measurement",
+        default=None,
+        help=(
+            "select which measurement's ranking to use when "
+            "request.sensitivity has more than one; overrides "
+            "request.measurement when given"
+        ),
+    )
+    _add_format_arg(design_centering_parser)
+    design_centering_parser.set_defaults(func=design_centering_cmd.run)
 
     return parser
 

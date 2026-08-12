@@ -254,11 +254,15 @@ for how the fixture is built.
 `ranking[]`'s shape — a flat, name-keyed, numerically-sorted list with a
 consistently-present `contribution` field — is designed to be consumed
 without change by a design-centering loop that adjusts sizing based on which
-parameters dominate the spread (issue
-[#924](https://github.com/2AMLogic/klayout-tools/issues/924)), which does
-not exist yet as of this command shipping. No `#924`-specific field lives in
-this contract; `#924` is expected to read `ranking[].parameter` and
-`ranking[].contribution` directly.
+parameters dominate the spread. [`klt design-centering`](design-centering.md)
+(issue [#924](https://github.com/2AMLogic/klayout-tools/issues/924)) is that
+consumer: it reads `ranking[].parameter` and `ranking[].contribution`
+directly, exactly as this section originally reserved, and bridges them onto
+a sized device's own geometry via a caller-supplied `parameter_map`. No
+`#924`-specific field was added to this contract — see
+[`docs/cli/design-centering.md`](design-centering.md)'s "The
+mismatch-parameter vs. sizing-geometry key mismatch" section for how the two
+commands' different naming conventions are reconciled outside this contract.
 
 ## Errors
 
@@ -294,15 +298,19 @@ pass/fail claim to miss.
 - **No `klt sim` integration yet.** See "Why not a `klt sim` report" above.
 - **No confidence interval on the ranking itself.** Every number in the
   response is a point estimate; see "Method limitations" above.
-- **Independent of #924.** This command ships the *producer* side of the
-  ranking (issue #923); wiring it into an analog-sizing/design-centering
-  loop is #924's job, tracked separately.
+- **Independent of #924 — now consumed by it.** This command ships the
+  *producer* side of the ranking (issue #923); wiring it into a
+  design-centering proposal is [`klt design-centering`](design-centering.md)'s
+  job (issue #924, shipped as a reference consumer since #705's own
+  analog-sizing engine has no design-centering stage of its own yet — see
+  that command's docs for the current state of that hand-off).
 
 ## See also
 
 - [`docs/cli/yield.md`](yield.md) — the sibling command this one's crate,
   extension-loading, and JSON-envelope conventions mirror.
+- [`docs/cli/design-centering.md`](design-centering.md) — `klt
+  design-centering` (issue #924), the reference consumer that wires this
+  ranking into a re-centering proposal against a sized device's geometry.
 - [#710](https://github.com/2AMLogic/klayout-tools/issues/710) — the parent
   statistical/yield epic.
-- [#924](https://github.com/2AMLogic/klayout-tools/issues/924) — wiring this
-  ranking into the analog-sizing engine for design centering.

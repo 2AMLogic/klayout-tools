@@ -1,0 +1,6 @@
+{
+  "vth_mismatch_m1": "input_a",
+  "vth_mismatch_m2": "input_b",
+  "beta_mismatch_m1": "input_a",
+  "beta_mismatch_m2": "input_b"
+}
