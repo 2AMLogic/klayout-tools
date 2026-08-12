@@ -952,9 +952,12 @@ was missed" precedent rather than inventing a new number.
   campaign orchestration, "Campaign orchestration" above;
   [#923](https://github.com/2AMLogic/klayout-tools/issues/923) delivered
   sensitivity ranking, [`klt yield-sensitivity`](yield-sensitivity.md);
-  remaining phase: design centering, #924).
+  [#924](https://github.com/2AMLogic/klayout-tools/issues/924) delivered
+  design centering, [`klt design-centering`](design-centering.md)).
 - [`docs/cli/yield-sensitivity.md`](yield-sensitivity.md) — Phase 3: which
   device/process parameters drive the spread.
+- [`docs/cli/design-centering.md`](design-centering.md) — Phase 3: turning
+  that ranking into re-centering candidates against a sized device.
 - [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) — the T1
   statistical-row bar this command produces evidence for.
 - [`docs/json-contract.md`](../json-contract.md) — the shared envelope,
