@@ -54,6 +54,7 @@ docs/
     digital-flow-contracts-spike.md
     digital-fleet-unit-abstraction-decision.md
     em-field-sim-spike.md
+    em-site-export-format.md
     extract-fidelity-roadmap.md
     gen-bjt-array-spike.md
     gen-canary-bringup-phase3.md
@@ -78,6 +79,7 @@ docs/
     wasm-spice-playground-spike.md
     yosys-synthesis-spike.md
   schemas/               # published JSON Schemas
+    em-site-export.schema.json
     remote-sim-ami-manifest.schema.json
     socket.schema.json
   guides/                # how-to guides
