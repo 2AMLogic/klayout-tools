@@ -9,6 +9,12 @@ node_modules/
 # generated artifacts).
 public/blocks/
 
+# geode-fem site exports staged into public/ by the stage-em-data prebuild
+# step (site/scripts/stage-em-data.mjs). Copied from examples/em/<benchmark>/
+# at build time and must never be committed (the source file is itself the
+# generated artifact).
+public/em/
+
 # Vite build cache (tsc's incremental build info lives under node_modules/,
 # already covered above)
 .vite/

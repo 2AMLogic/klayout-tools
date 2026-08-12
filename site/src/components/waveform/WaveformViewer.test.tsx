@@ -235,6 +235,147 @@ describe("WaveformViewer", () => {
     expect(screen.getByText("No signals data.")).toBeInTheDocument();
   });
 
+  describe("zero real corners + liveWaveform only (issue #850's S-parameter plot)", () => {
+    // Shaped like the EM gallery's S11 plot: no real PVT corners at all, only
+    // a synthesized liveWaveform overlay.
+    const emptySignals: LayoutSignals = {
+      schema_version: 1,
+      engine: "geode-fem",
+      engine_version: null,
+      status: "pass",
+      corner_count: 0,
+      passed: 0,
+      failed: 0,
+      errored: 0,
+      measurements: [],
+      corners: [],
+    };
+    const s11Data: WaveformData = {
+      plotname: "S11 (patch_antenna)",
+      variables: [
+        { index: 0, name: "frequency_hz", type: "frequency" },
+        { index: 1, name: "s11_db", type: "gain" },
+      ],
+      points: [
+        [2e9, -0.39],
+        [2.1e9, -0.7],
+        [2.2e9, -2.71],
+      ],
+    };
+
+    it("renders the plot instead of 'No signals data' when corners is empty but liveWaveform is supplied", async () => {
+      render(
+        <WaveformViewer
+          slug="patch_antenna"
+          signals={emptySignals}
+          liveWaveform={{ id: "s11", label: "S11 (patch_antenna)", data: s11Data }}
+        />,
+      );
+      expect(screen.queryByText("No signals data.")).not.toBeInTheDocument();
+      await waitFor(() => expect(screen.getByTestId("waveform-plot")).toBeInTheDocument());
+      expect(screen.getByTestId("waveform-plot").querySelectorAll("path").length).toBeGreaterThan(0);
+    });
+
+    it("still renders 'No signals data' when corners is empty and there is no liveWaveform", () => {
+      render(<WaveformViewer slug="patch_antenna" signals={emptySignals} />);
+      expect(screen.getByText("No signals data.")).toBeInTheDocument();
+    });
+  });
+
+  describe("controlled cursorX (issue #850's frequency slider)", () => {
+    const s11Data: WaveformData = {
+      plotname: "S11 (patch_antenna)",
+      variables: [
+        { index: 0, name: "frequency_hz", type: "frequency" },
+        { index: 1, name: "s11_db", type: "gain" },
+      ],
+      points: [
+        [2e9, -0.39],
+        [2.1e9, -0.7],
+        [2.2e9, -2.71],
+      ],
+    };
+    const emptySignals: LayoutSignals = {
+      schema_version: 1,
+      engine: "geode-fem",
+      engine_version: null,
+      status: "pass",
+      corner_count: 0,
+      passed: 0,
+      failed: 0,
+      errored: 0,
+      measurements: [],
+      corners: [],
+    };
+
+    it("places the cursor at an externally-supplied cursorX without a click", async () => {
+      render(
+        <WaveformViewer
+          slug="patch_antenna"
+          signals={emptySignals}
+          liveWaveform={{ id: "s11", label: "S11", data: s11Data }}
+          cursorX={2.1e9}
+        />,
+      );
+      await waitFor(() => expect(screen.getByTestId("cursor-readout")).toBeInTheDocument());
+    });
+
+    it("moves the cursor when the controlled cursorX prop changes, via rerender", async () => {
+      const { rerender } = render(
+        <WaveformViewer
+          slug="patch_antenna"
+          signals={emptySignals}
+          liveWaveform={{ id: "s11", label: "S11", data: s11Data }}
+          cursorX={2e9}
+        />,
+      );
+      await waitFor(() => expect(screen.getByTestId("cursor-readout")).toBeInTheDocument());
+      const before = screen.getByTestId("cursor-readout").textContent;
+
+      rerender(
+        <WaveformViewer
+          slug="patch_antenna"
+          signals={emptySignals}
+          liveWaveform={{ id: "s11", label: "S11", data: s11Data }}
+          cursorX={2.2e9}
+        />,
+      );
+      await waitFor(() => expect(screen.getByTestId("cursor-readout").textContent).not.toBe(before));
+    });
+
+    it("fires onCursorXChange on a plot click without moving the externally-controlled cursor", async () => {
+      const onCursorXChange = vi.fn();
+      render(
+        <WaveformViewer
+          slug="patch_antenna"
+          signals={emptySignals}
+          liveWaveform={{ id: "s11", label: "S11", data: s11Data }}
+          cursorX={2e9}
+          onCursorXChange={onCursorXChange}
+        />,
+      );
+      await waitFor(() => expect(screen.getByTestId("waveform-plot")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId("waveform-plot"), { clientX: 320, clientY: 100 });
+
+      await waitFor(() => expect(onCursorXChange).toHaveBeenCalled());
+      // Controlled: the readout still reflects the `cursorX` prop (2e9 ->
+      // "2.00 G", per `formatEngineering`), not the click, until the parent
+      // re-renders with a new `cursorX`.
+      expect(screen.getByTestId("cursor-readout")).toHaveTextContent("2.00 G");
+    });
+
+    it("uncontrolled cursor (cursorX omitted) still places via click, unchanged pre-#850 behavior", async () => {
+      render(<WaveformViewer slug="sky130_fd_sc_hd__inv_1" signals={signals} />);
+      await waitFor(() => expect(screen.getByTestId("waveform-plot")).toBeInTheDocument());
+      expect(screen.queryByTestId("cursor-readout")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId("waveform-plot"), { clientX: 320, clientY: 100 });
+
+      await waitFor(() => expect(screen.getByTestId("cursor-readout")).toBeInTheDocument());
+    });
+  });
+
   describe("no-traces (measurements-only) shape (issue #653)", () => {
     // Shaped like the canary blocks' `signals`: real per-corner measurement
     // data, but no corner carries a `waveform` artifact (no `signals/`

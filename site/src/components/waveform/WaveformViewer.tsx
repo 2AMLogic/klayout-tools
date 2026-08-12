@@ -37,7 +37,11 @@ import {
  * pre-selected "corner" entry, so the stimulus-editing playground can feed
  * a re-run's result into the exact same plot the static `signals` data
  * populates. Omitted/`null` preserves this component's pre-#151 behavior
- * exactly (every existing prop shape still renders identically).
+ * exactly (every existing prop shape still renders identically). A caller
+ * with zero real PVT corners (e.g. the EM gallery's S-parameter plot,
+ * issue #850) can supply a `liveWaveform` alongside an empty-`corners`
+ * `signals` stub — see `cursorX` below and the "no corners" branch further
+ * down for how that all-`liveWaveform` case is handled.
  *
  * When no corner in `signals.corners` carries a `waveform` artifact (and no
  * `liveWaveform` is supplied) there is nothing for the plot to ever draw —
@@ -51,6 +55,21 @@ export interface WaveformViewerProps {
   slug: string;
   signals: LayoutSignals;
   liveWaveform?: LiveWaveform | null;
+  /**
+   * Externally-controlled plot cursor position (in the sweep variable's
+   * units, e.g. seconds for a transient waveform or Hz for an S-parameter
+   * sweep) — issue #850's frequency slider drives this so scrubbing
+   * frequency moves the S11 plot's cursor without requiring a click.
+   * Mirrors `FieldViewer`'s `parameterIndex` controlled-prop pattern: omit
+   * to let the component manage its own cursor via plot clicks (unchanged
+   * pre-#850 behavior); pass it to drive the cursor from outside.
+   */
+  cursorX?: number | null;
+  /** Fired whenever the cursor changes — from a plot click, or simply to
+   *  notify a controlling parent of that click when `cursorX` is also
+   *  controlled (so an external frequency slider can stay in sync with a
+   *  direct click on the plot). */
+  onCursorXChange?: (x: number) => void;
 }
 
 const CORNER_COLORS = ["#3ee0e8", "#ffa028", "#ff6a5c", "#9d7cf2", "#6adf7f", "#f2c94c"];
@@ -136,7 +155,7 @@ function SignalsMeasurementsTable({ corners }: { corners: SignalsCorner[] }) {
   );
 }
 
-export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerProps) {
+export function WaveformViewer({ slug, signals, liveWaveform, cursorX, onCursorXChange }: WaveformViewerProps) {
   const corners = signals.corners;
 
   // The live overlay entry (if any) rendered as one more "corner" everywhere
@@ -178,8 +197,15 @@ export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerPr
   // freshly-loaded waveform's domain never has to wait on an extra effect
   // round-trip; `resetZoom` restores this state too.
   const [zoomOverride, setZoomOverride] = useState<Domain | null>(null);
-  const [cursorX, setCursorX] = useState<number | null>(null);
+  const [internalCursorX, setInternalCursorX] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+
+  // Controlled/uncontrolled split mirrors `FieldViewer`'s `parameterIndex`:
+  // `cursorX === undefined` means "manage the cursor internally" (unchanged
+  // pre-#850 click-to-place behavior); any other value (including `null`,
+  // "no cursor yet") means an external caller owns it.
+  const isCursorControlled = cursorX !== undefined;
+  const effectiveCursorX = isCursorControlled ? cursorX : internalCursorX;
 
   // Seed the live overlay entry directly (no fetch — its data is already
   // resolved) and auto-select it, so a re-run's result shows up in the plot
@@ -362,10 +388,15 @@ export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerPr
     if (rect.width <= 0) return;
     const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
     const [lo, hi] = effectiveDomain;
-    setCursorX(lo + fraction * (hi - lo));
+    const next = lo + fraction * (hi - lo);
+    if (!isCursorControlled) setInternalCursorX(next);
+    onCursorXChange?.(next);
   }
 
-  if (corners.length === 0) {
+  // `displayCorners`, not `corners` — a caller with zero real PVT corners
+  // but a `liveWaveform` (issue #850's S-parameter plot) still has one
+  // (synthetic) displayable corner and must not hit this early return.
+  if (displayCorners.length === 0) {
     return <p className="text-fog-dim">No signals data.</p>;
   }
 
@@ -517,10 +548,10 @@ export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerPr
               );
             });
           })}
-          {cursorX !== null && (
+          {effectiveCursorX !== null && (
             <line
-              x1={xScale(cursorX)}
-              x2={xScale(cursorX)}
+              x1={xScale(effectiveCursorX)}
+              x2={xScale(effectiveCursorX)}
               y1={padding.top}
               y2={padding.top + plotH}
               stroke="var(--color-fog-dim)"
@@ -531,7 +562,7 @@ export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerPr
         </svg>
       )}
 
-      {cursorX !== null && (
+      {effectiveCursorX !== null && (
         <div className="overflow-x-auto rounded-lg border border-border" data-testid="cursor-readout">
           <table className="w-full border-collapse text-sm">
             <tbody>
@@ -540,13 +571,13 @@ export function WaveformViewer({ slug, signals, liveWaveform }: WaveformViewerPr
                   Cursor {cursorSweepUnit}
                 </th>
                 <td className="px-3.5 py-2 text-left font-mono text-fog">
-                  {formatEngineering(cursorX, cursorSweepUnit === "time" ? "s" : "")}
+                  {formatEngineering(effectiveCursorX, cursorSweepUnit === "time" ? "s" : "")}
                 </td>
               </tr>
               {Array.from(selectedCorners).flatMap((cornerId) => {
                 const wf = waveforms[cornerId];
                 if (typeof wf !== "object" || wf === null) return [];
-                const sample = nearestSample(wf, cursorX);
+                const sample = nearestSample(wf, effectiveCursorX);
                 if (!sample) return [];
                 return wf.variables.slice(1).map((variable, i) => {
                   if (!nodesToShow.has(variable.name)) return null;
