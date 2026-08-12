@@ -90,6 +90,33 @@ the same `_REASON_NO_EVIDENCE`/`_REASON_UNREADABLE_EVIDENCE`/etc. machinery
 every other item already uses -- there is no separate "statistical" code
 path to fabricate a `"met"` for, by construction.
 
+## Post-layout binding: item 7 <- `klt pex` (issue #871, Phase 2b of epic #706)
+
+Item 7 ("Post-layout verification") is the T1 checklist's schematic-vs-
+extracted-netlist re-simulation delta. Before this phase, `_build_tier_item`
+was kind-agnostic per item -- any recognised envelope (even a bare `klt drc`
+report) could satisfy *any* item, including item 7, which let a manifest
+render item 7 `"met"` on evidence that never actually re-simulated an
+extracted netlist. This phase adds a per-item ``allowed_kinds`` restriction
+(:func:`_build_tier_item`'s new parameter, wired only at item 7's call site
+in :func:`build_tier_report`) so item 7 only accepts evidence that classifies
+as kind ``"pex"`` -- a citation of any other recognised kind now renders
+``"unmet"`` (:data:`_REASON_WRONG_KIND`), never a fallback pass. Items 1-6
+and 8-10 are unaffected (``allowed_kinds=None`` there, preserving the
+original unrestricted behaviour).
+
+**Provisional envelope shape.** `klt pex` (Epic #709) does not exist in this
+codebase as of this writing, and its defining issue, **#801** ("Define `klt
+pex`"), is stalled with an empty body pending an operator decision -- there
+is no ratified JSON shape to build against yet. :func:`_classify` recognises
+a **Curator-proposed, provisional** `pex` shape instead (a top-level
+``delta`` list plus a ``reference_netlist`` field, mirroring how `klt sim`'s
+shape is detected by ``measurements``/``corner_count`` and `klt extract`'s by
+``device_count``/``nets``), scoped narrowly enough that #801 landing later is
+very likely additive to it, not a rewrite. **This is not #801's ratified
+shape** -- reconcile against #801's real report shape once it lands (re-check
+#801's state before relying on this note).
+
 ## Fleet roll-up (issue #827, Phase 1c of epic #706)
 
 :func:`build_fleet_report` is a third, additive entry point: instead of
@@ -162,6 +189,21 @@ FLEET_REPORT_SCHEMA_VERSION = 1
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
 _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 
+#: Per-T1-item-id restriction on which :func:`_classify` kinds may satisfy
+#: that item (issue #871, Phase 2b of epic #706) -- passed as
+#: :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An item id absent
+#: from this map (every id but 7, today) is unrestricted (``None``),
+#: preserving the original Phase 0/1 behaviour where any recognised, passing
+#: envelope kind satisfies any item. Item 7 ("Post-layout verification")
+#: is the only item this phase restricts: it requires a ``"pex"``-kind
+#: citation (a `klt pex` schematic-vs-extracted-netlist delta report -- see
+#: this module's "Post-layout binding" docstring section) -- a `klt
+#: drc`/`klt lvs`/generic `klt sim`/`klt extract`/`klt yield` citation no
+#: longer satisfies it, even if that check itself passed.
+_ITEM_ALLOWED_KINDS: dict[int, set[str]] = {
+    7: {"pex"},
+}
+
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
 #: for what each check means and why a mismatch is refused rather than
@@ -203,6 +245,18 @@ _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
 #: stdout wasn't valid JSON) -- different ways "no runnable check proves this
 #: item" can happen, kept distinguishable per issue #826's invariant.
 _REASON_COMMAND_FAILED = "command_failed"
+
+#: Issue #871 (Phase 2b of epic #706): the evidence resolved to a readable,
+#: recognised, *passing* envelope -- but its classified kind is not one this
+#: item accepts (see :func:`_build_tier_item`'s ``allowed_kinds`` parameter).
+#: Grouped with the other "no runnable check exists for this item" reasons
+#: (:data:`_REASON_NO_EVIDENCE` et al.) rather than with
+#: :data:`_REASON_CHECK_FAILED`: the cited check did not fail on its own
+#: terms, it simply does not prove what *this* item requires (e.g. a clean
+#: DRC report cited for item 7, "post-layout verification", proves nothing
+#: about a schematic-vs-extracted-netlist delta) -- so it must never render
+#: `"met"` by borrowing an unrelated check's pass.
+_REASON_WRONG_KIND = "wrong_kind"
 
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
 #: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
@@ -249,7 +303,8 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
             "checks": [
                 {
                     "source": <str, the entry from `sources`>,
-                    "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "error",
+                    "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
+                            | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -401,11 +456,24 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if "device_count" in envelope and isinstance(envelope.get("nets"), list):
         return "extract"
 
+    # `klt pex` (issue #871, Phase 2b of epic #706): does not exist in this
+    # codebase yet -- this recognition rule matches a Curator-proposed,
+    # *provisional* envelope shape (issue #871's own proposal), not a shape
+    # ratified by #801 ("Define `klt pex`", still stalled with an empty body
+    # as of this writing). A top-level `delta` list (per-corner/per-spec-row
+    # schematic-vs-extracted comparisons) plus `reference_netlist` (the
+    # schematic netlist compared against) is unique to this shape -- it
+    # cannot collide with `sim` (detected by `measurements`+`corner_count`
+    # above, checked first) or `extract` (`device_count`+`nets`, checked
+    # just above). Reconcile with #801's real shape once it lands.
+    if isinstance(envelope.get("delta"), list) and "reference_netlist" in envelope:
+        return "pex"
+
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield success or error envelope -- klt signoff aggregates only "
-        "those five verbs today (see docs/cli/signoff.md)"
+        "yield/pex success or error envelope -- klt signoff aggregates only "
+        "those six verbs today (see docs/cli/signoff.md)"
     )
 
 
@@ -445,6 +513,9 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       always ``True``. It is still listed in ``checks[]`` (not dropped) so
       its ``provenance`` block participates in the consistency check below
       and its device/net counts are visible in the aggregated verdict.
+    - ``pex`` (issue #871, provisional shape pending #801) passes on
+      ``status == "pass"`` -- mirrors ``sim``: every graded delta row met
+      its tolerance.
     - ``error`` never passes.
     """
     if kind == "drc":
@@ -457,6 +528,8 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
         return envelope.get("status") in ("pass", "reported")
     if kind == "extract":
         return True
+    if kind == "pex":
+        return envelope.get("status") == "pass"
     return False  # kind == "error"
 
 
@@ -502,6 +575,15 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "deck": envelope.get("deck"),
             "device_count": envelope.get("device_count"),
             "net_count": envelope.get("net_count"),
+        }
+    if kind == "pex":
+        return {
+            "netlist": envelope.get("netlist"),
+            "reference_netlist": envelope.get("reference_netlist"),
+            "corner_count": envelope.get("corner_count"),
+            "passed": envelope.get("passed"),
+            "failed": envelope.get("failed"),
+            "errored": envelope.get("errored"),
         }
     # kind == "error"
     error = envelope.get("error") or {}
@@ -692,19 +774,30 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
 
     An item's ``status`` is ``"met"`` only when its ``evidence`` entry
     resolves to a *readable* ``klt`` JSON envelope, classifiable as one of
-    ``drc``/``lvs``/``extract``/``sim``/``yield`` (:func:`_classify`), whose
-    own check passed (:func:`_check_passed`) -- and, if the evidence entry
-    pinned an expected ``content_hash``, whose input content hash matches it
-    (``provenance.input.content_hash`` for drc/lvs/extract/sim; the hashed
-    ``samples`` document for yield, per :func:`_yield_samples_content_hash`
-    -- a mismatch means the check ran against a *different* layout/sample
-    revision than the one being claimed -- stale, so it renders ``"unmet"``,
-    never a false pass). Every other case (no evidence entry, a malformed
-    entry, an unreadable/unparsable evidence file, a command that could not
-    be run to completion or whose stdout didn't parse, an unrecognised
-    envelope shape, or a failing check) also renders ``"unmet"``: this phase
-    never infers a ``"met"`` verdict for an item with no runnable check
-    behind it.
+    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex`` (:func:`_classify`),
+    whose own check passed (:func:`_check_passed`) -- and, if the evidence
+    entry pinned an expected ``content_hash``, whose input content hash
+    matches it (``provenance.input.content_hash`` for drc/lvs/extract/sim;
+    the hashed ``samples`` document for yield, per
+    :func:`_yield_samples_content_hash` -- a mismatch means the check ran
+    against a *different* layout/sample revision than the one being claimed
+    -- stale, so it renders ``"unmet"``, never a false pass). Every other
+    case (no evidence entry, a malformed entry, an unreadable/unparsable
+    evidence file, a command that could not be run to completion or whose
+    stdout didn't parse, an unrecognised envelope shape, a failing check, or
+    (issue #871) a passing check of a kind this item does not accept) also
+    renders ``"unmet"``: this phase never infers a ``"met"`` verdict for an
+    item with no runnable check behind it.
+
+    **Item 7 is kind-restricted** (issue #871, Phase 2b of epic #706): every
+    other T1 item accepts any recognised, passing envelope kind, but item 7
+    ("Post-layout verification") only accepts a ``"pex"``-kind citation --
+    the schematic-vs-extracted-netlist re-simulation delta a `klt pex`
+    (Epic #709) run would produce (see this module's "Post-layout binding"
+    docstring section for the provisional envelope shape and its
+    reconciliation status against #801). A ``drc``/``lvs``/``sim``/``extract``/
+    ``yield`` citation for item 7 -- even a genuinely passing one -- renders
+    ``"unmet"`` with ``reason: "wrong_kind"``, never a borrowed pass.
 
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
@@ -738,6 +831,11 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
       ``provenance.input.content_hash`` does not match the manifest's
       pinned ``content_hash`` -- the check ran against a different layout
       revision than the one being claimed.
+    - ``"wrong_kind"`` (issue #871) -- the evidence resolved to a recognised,
+      *passing* envelope, but its classified kind is not one this item
+      accepts (today, only item 7 restricts kinds -- see "Item 7 is
+      kind-restricted" above). The cited check did not fail on its own
+      terms; it simply does not prove what this item requires.
     - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
       repository has no mechanism to run a T2+ check at all.
 
@@ -820,6 +918,7 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
                 notes=list(t1_item["notes"]),
                 partition=partition if kind == "mixed-signal" else None,
                 evidence=evidence,
+                allowed_kinds=_ITEM_ALLOWED_KINDS.get(t1_item["id"]),
             )
             total += 1
             if entry["status"] == "met":
@@ -1113,10 +1212,21 @@ def _build_tier_item(
     notes: list[str],
     partition: str | None,
     evidence: dict[str, Any],
+    allowed_kinds: set[str] | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
-    the ``reason`` enum."""
+    the ``reason`` enum.
+
+    ``allowed_kinds`` (issue #871, Phase 2b of epic #706): when given, a
+    ``"met"`` grading is only accepted if the resolved evidence's classified
+    kind (:func:`_classify`, via the citation's ``"kind"``) is a member of
+    this set -- otherwise the item is downgraded to ``"unmet"`` with
+    ``reason: "wrong_kind"`` and no citation. ``None`` (the default) means no
+    restriction, preserving Phase 0/1's original behaviour where any
+    recognised, passing envelope kind satisfies any item -- every T1 item
+    except item 7 still passes ``None`` (see :data:`_ITEM_ALLOWED_KINDS`).
+    """
     citation = None
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
@@ -1128,6 +1238,14 @@ def _build_tier_item(
             reason = _REASON_INVALID_EVIDENCE
         else:
             status, reason, citation = _grade_evidence(spec)
+            if (
+                status == "met"
+                and allowed_kinds is not None
+                and citation["kind"] not in allowed_kinds
+            ):
+                status = "unmet"
+                reason = _REASON_WRONG_KIND
+                citation = None
 
     return {
         "tier": tier,
