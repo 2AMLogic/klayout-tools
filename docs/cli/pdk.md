@@ -129,29 +129,43 @@ rediscover a gap by failure.
 | PDK / tree | Layout | `klt pdk find`/`list`/`env` | `klt drc` | `klt lvs` |
 | ---------- | ------ | ---------------------------- | --------- | --------- |
 | sky130, gf180mcu (open_pdks / volare / ciel) | open_pdks-layout (nested) | ✅ | ✅ curated deck (`sky130`, `gf180mcu`) | ✅ `"klayout"` engine (curated deck) or `"netgen"` engine |
-| IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ❌ no curated deck yet — see below | ⚠️ `"netgen"` engine only, with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary; `"klayout"` engine needs a curated extraction deck that does not exist yet |
+| IHP-Open-PDK SG13G2 | open_pdks-layout (nested, `PDK_ROOT` at the clone root) or flat (`PDK_ROOT` at `ihp-sg13g2/` itself) | ✅ (issue #522) | ⚠️ curated starter deck (`sg13g2`, issue #905 — 8 width/space DRC rules across 4 layers, one MOSFET LVS device class; see below) | ⚠️ `"klayout"` engine now works against the same starter `sg13g2` extraction deck (MOSFET-only, issue #905), or `"netgen"` engine with a resolved `netgen_setup_file` (issue #522) and a `netgen` binary |
 | lambdapdk (`scripts/fetch-pdks.sh`, any process incl. its own `ihp130`) | `lambdapdk/<process>/{libs,base}` — no `libs.tech`/`libs.ref` marker at all | ❌ never resolved by this module — point tools at `pdks/lambdapdk/...` paths directly | ❌ | ❌ |
 
-**Why `klt drc`/`klt lvs` don't fully run against SG13G2 yet.** `klt drc`
-only runs *this repo's own* curated Python rule decks
-(`klayout_tools.decks.sky130`/`.gf180mcu`) via KLayout's native `Region`
-check primitives — a deliberate engine choice (see `docs/cli/drc.md`) that
-never shells out to the standalone `klayout` DRC-DSL script runner, so it
-has no mechanism to execute a foreign PDK's own `.drc` ruleset (SG13G2 ships
-`ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, a KLayout DRC-DSL
-script, not this repo's curated deck format). Porting SG13G2's rule deck
-into a curated `klayout_tools.decks` module is real, standalone follow-up
-work — a from-scratch deck port comparable in size to the existing
-sky130/gf180mcu decks, not a resolver change — tracked separately from this
-issue as #524. The same gap blocks `klt lvs`'s default `"klayout"` engine,
-whose layout-side netlist extraction needs the same kind of curated device
-deck.
-`klt lvs`'s `"netgen"` engine is the one path that does *not* need a curated
-deck (it compares two already-built SPICE netlists, layout-side extraction
-supplied separately) — it resolves and can run against a real SG13G2
-install's own `libs.tech/netgen/ihp-sg13g2_setup.tcl` via
-`netgen_setup_file()` today, gated only by a local `netgen` binary (see
-`docs/cli/lvs.md`'s `"netgen"` engine section and
+**What `klt drc`/`klt lvs` run against SG13G2 today, and what's still
+missing.** `klt drc`/`klt lvs`'s default (`"curated"`/`"klayout"`) engines
+only run *this repo's own* curated Python rule decks
+(`klayout_tools.decks.sky130`/`.gf180mcu`/`.sg13g2`) via KLayout's native
+`Region`/`LayoutToNetlist` primitives — a deliberate engine choice (see
+`docs/cli/drc.md`) that never shells out to the standalone `klayout`
+DRC-DSL script runner, so it has no mechanism to execute a foreign PDK's own
+`.drc`/`.lvs` ruleset directly. Issue #905 (Epic #711 Phase 3b) added a
+**curated starter subset** — `sg13g2.py`'s 8 `width`/`space` DRC rules
+across `Activ`/`GatPoly`/`Metal1`/`Metal2`, and one MOSFET LVS device class
+— not a full port: SG13G2's official design rule manual, like
+sky130's/gf180mcu's, spans hundreds of rules this starter deck does not
+attempt (see `docs/cli/drc.md`'s "Coverage" → `sg13g2` section and
+`src/klayout_tools/decks/sg13g2.py`'s own module docstring for exactly what
+was and wasn't transcribed and why). `--engine klayout` cross-checking this
+curated deck against SG13G2's *real* native `.drc`/`.lvs` deck is still
+**not** available — SG13G2 ships
+`ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, but every one of its
+`%include` lines is commented out in the shipped release; its real rule
+content lives in per-topic fragment files assembled at run time by a
+separate Python wrapper (`run_drc.py`), the same "no single ready-to-run
+file" shape gf180mcu's native deck already has (see `docs/cli/drc.md`'s
+"Engine" → "klayout" limitation) — resolving that assembly gap for either
+PDK is separately-scoped follow-up work, not a resolver change.
+No hand-written SG13G2 deck exists elsewhere in this repo to cross-check the
+new curated deck against either — issue #524 (a hand-transcribed SG13G2
+deck) is still open, unmerged, `loom:operator-only`, as of issue #905.
+`klt lvs`'s `"netgen"` engine remains the one path that does *not* need a
+curated deck at all (it compares two already-built SPICE netlists,
+layout-side extraction supplied separately) — it resolves and can run
+against a real SG13G2 install's own
+`libs.tech/netgen/ihp-sg13g2_setup.tcl` via `netgen_setup_file()`, gated
+only by a local `netgen` binary (see `docs/cli/lvs.md`'s `"netgen"` engine
+section and
 `tests/test_lvs.py::test_netgen_engine_real_binary_against_sg13g2_shaped_install`).
 
 **`klt pdk cells` is also not yet SG13G2-aware**, for a narrower reason: it

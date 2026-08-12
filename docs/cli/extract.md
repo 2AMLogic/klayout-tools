@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -21,7 +21,8 @@ two disagree, this document (and the code) win.
   auto-detects the stream format on read (same as `klt drc`); the extension
   is not authoritative.
 - `--deck` — required. The connectivity + device-extraction deck to run.
-  Currently: `sky130`, `gf180mcu`.
+  Currently: `sky130`, `gf180mcu`, `sg13g2` (issue #905 — a much smaller
+  MOSFET-only starter deck; see "Curated starter subsets" below).
 - `--output` / `-o` — path to write the extracted SPICE netlist. Defaults to
   `<file>` with its extension replaced by `.spice`, next to the input (the
   "next to the input" convention `klt render`/`klt sim` already use). The
@@ -172,8 +173,21 @@ each field's exact layer numbers and provenance are documented in the deck
 module's own docstring, verified against this repo's real corpus fixtures
 (`tests/corpus/sky130/`, `tests/corpus/gf180mcu/`).
 
-Two known connectivity-fidelity limitations, both documented in the deck
-modules and deliberate (not oversights):
+The `sg13g2` deck (issue #905, Epic #711 Phase 3b) is a much smaller,
+MOSFET-only starter: `active`/`poly`/`nwell` device recognition (NMOS/PMOS,
+citing IHP-Open-PDK's real `mos_extraction.lvs` `sg13_lv_nmos`/`sg13_lv_pmos`
+device-class names via `nfet_provenance`/`pfet_provenance`) plus a
+single-level `metals=((8, 0),)` (`Metal1` only) connectivity stack — SG13G2's
+`Cont` layer lands contacts directly on `Metal1`, with no `li1`-like
+local-interconnect level. No `tap`/`well_label`-distinct substrate-tie
+coverage beyond the plain global-net fallback (mirrors gf180mcu's shared-
+`Comp`-layer "NMOS body" limitation below), and no bipolar/capacitor/
+resistor/diode device recognition yet. See
+`src/klayout_tools/decks/sg13g2.py`'s module docstring for the full
+provenance notes.
+
+Two known connectivity-fidelity limitations in the `sky130`/`gf180mcu`
+decks, both documented in the deck modules and deliberate (not oversights):
 
 - **NMOS body.** Neither curated deck draws a separate substrate/pwell
   layer. On **sky130**, `tap.drawing` is reused for both purposes: a shape
@@ -2504,7 +2518,7 @@ written to stdout. No Python traceback is printed.
   [`docs/json-contract.md`](../json-contract.md)):
 
   ```json
-  { "schema_version": 1, "error": { "command": "extract", "message": "unknown deck 'nope' (available: gf180mcu, sky130)" } }
+  { "schema_version": 1, "error": { "command": "extract", "message": "unknown deck 'nope' (available: gf180mcu, sg13g2, sky130)" } }
   ```
 
 ## Out of scope

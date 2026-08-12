@@ -151,7 +151,7 @@ def test_build_provenance_input_hash_null_for_unresolvable_path(tmp_path):
 
 
 def test_deck_source_path_resolves_known_decks():
-    for name in ("sky130", "gf180mcu"):
+    for name in ("sky130", "gf180mcu", "sg13g2"):
         source = deck_source_path(name)
         assert source is not None
         assert source.endswith(f"{name}.py")

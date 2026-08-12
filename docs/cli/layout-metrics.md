@@ -7,15 +7,16 @@ metrics ad hoc: it calls the exact same library functions that back `klt
 layers`, `klt cells`, and `klt drc`.
 
 ```
-klt layout-metrics <block> [--deck sky130|gf180mcu] [--output PATH]
+klt layout-metrics <block> [--deck sky130|gf180mcu|sg13g2] [--output PATH]
                     [--dry-run] [--format text|json]
 ```
 
 - `<block>` — path to a block directory (e.g. `blocks/example-block`). See
   "Block directory layout" below.
 - `--deck` — optional DRC deck to run for the `drc.violation_count` field
-  (currently: `sky130`, `gf180mcu`). Omitted by default — DRC is opt-in per
-  invocation since the deck cannot be inferred from the block directory.
+  (currently: `sky130`, `gf180mcu`, `sg13g2`). Omitted by default — DRC is
+  opt-in per invocation since the deck cannot be inferred from the block
+  directory.
 - `--output` / `-o` — override the output path. Defaults to
   `<block>/output/layout.json`.
 - `--dry-run` — print the computed `layout.json` without writing any file.

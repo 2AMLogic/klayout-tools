@@ -6,7 +6,7 @@ structured data.
 
 ```
 klt precheck <file> [--grid-um <float>] [--allowed-layers <json-or-path>]
-             [--deck sky130|gf180mcu] [--top <cell>] [--format text|json]
+             [--deck sky130|gf180mcu|sg13g2] [--top <cell>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -17,10 +17,10 @@ klt precheck <file> [--grid-um <float>] [--allowed-layers <json-or-path>]
 - `--allowed-layers` — a path to a JSON file, or an inline JSON string, of
   `[layer, datatype]` pairs (e.g. `'[[65, 20], [66, 20]]'`) for the
   `layer_whitelist` check. Omitted by default, which **skips** that check.
-- `--deck` — extraction deck (`sky130` or `gf180mcu`) to source label/drawing
-  layer pairs from for the `pin_labels_over_drawing` check. Not validated by
-  argparse — an unknown deck name exits `1` with a clean error. Omitted by
-  default, which **skips** that check.
+- `--deck` — extraction deck (`sky130`, `gf180mcu`, or `sg13g2`) to source
+  label/drawing layer pairs from for the `pin_labels_over_drawing` check. Not
+  validated by argparse — an unknown deck name exits `1` with a clean error.
+  Omitted by default, which **skips** that check.
 - `--top` — top cell to check when the stream has more than one; omit to
   check every top cell (today's default, unchanged). Every check is scoped
   to that cell's own hierarchy — itself plus every cell it calls, directly
@@ -254,5 +254,5 @@ is written to stdout. No Python traceback is printed.
   [`docs/json-contract.md`](../json-contract.md)):
 
   ```json
-  { "schema_version": 1, "error": { "command": "precheck", "message": "unknown deck 'nope' (available: gf180mcu, sky130)" } }
+  { "schema_version": 1, "error": { "command": "precheck", "message": "unknown deck 'nope' (available: gf180mcu, sg13g2, sky130)" } }
   ```

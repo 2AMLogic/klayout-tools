@@ -1322,15 +1322,19 @@ def deck_source_path(name: str) -> str | None:
 
 
 def _registry() -> dict[str, list[DrcRule]]:
-    from . import gf180mcu, sky130
+    from . import gf180mcu, sg13g2, sky130
 
-    return {"sky130": sky130.DECK, "gf180mcu": gf180mcu.DECK}
+    return {"sky130": sky130.DECK, "gf180mcu": gf180mcu.DECK, "sg13g2": sg13g2.DECK}
 
 
 def _layer_name_registry() -> dict[str, dict[tuple[int, int], str]]:
-    from . import gf180mcu, sky130
+    from . import gf180mcu, sg13g2, sky130
 
-    return {"sky130": sky130.LAYER_NAMES, "gf180mcu": gf180mcu.LAYER_NAMES}
+    return {
+        "sky130": sky130.LAYER_NAMES,
+        "gf180mcu": gf180mcu.LAYER_NAMES,
+        "sg13g2": sg13g2.LAYER_NAMES,
+    }
 
 
 def get_deck(name: str) -> list[DrcRule]:
@@ -1361,11 +1365,12 @@ def get_layer_names(name: str) -> dict[tuple[int, int], str]:
 
 
 def _unmodeled_voltage_marker_registry() -> dict[str, dict[tuple[int, int], str]]:
-    from . import gf180mcu, sky130
+    from . import gf180mcu, sg13g2, sky130
 
     return {
         "sky130": sky130.UNMODELED_VOLTAGE_MARKERS,
         "gf180mcu": gf180mcu.UNMODELED_VOLTAGE_MARKERS,
+        "sg13g2": sg13g2.UNMODELED_VOLTAGE_MARKERS,
     }
 
 
@@ -1403,9 +1408,13 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
 
 
 def _nominal_dbu_registry() -> dict[str, float]:
-    from . import gf180mcu, sky130
+    from . import gf180mcu, sg13g2, sky130
 
-    return {"sky130": sky130.NOMINAL_DBU_UM, "gf180mcu": gf180mcu.NOMINAL_DBU_UM}
+    return {
+        "sky130": sky130.NOMINAL_DBU_UM,
+        "gf180mcu": gf180mcu.NOMINAL_DBU_UM,
+        "sg13g2": sg13g2.NOMINAL_DBU_UM,
+    }
 
 
 def get_nominal_dbu(name: str) -> float:
@@ -1429,11 +1438,12 @@ def get_nominal_dbu(name: str) -> float:
 
 
 def _extraction_registry() -> dict[str, ExtractionDeck]:
-    from . import gf180mcu, sky130
+    from . import gf180mcu, sg13g2, sky130
 
     return {
         "sky130": sky130.EXTRACTION_DECK,
         "gf180mcu": gf180mcu.EXTRACTION_DECK,
+        "sg13g2": sg13g2.EXTRACTION_DECK,
     }
 
 
@@ -1521,11 +1531,12 @@ def _resolve_resistor_flavours(
 
 
 def _parasitics_registry() -> dict[str, ParasiticsDeck]:
-    from . import gf180mcu, sky130
+    from . import gf180mcu, sg13g2, sky130
 
     return {
         "sky130": sky130.PARASITICS,
         "gf180mcu": gf180mcu.PARASITICS,
+        "sg13g2": sg13g2.PARASITICS,
     }
 
 

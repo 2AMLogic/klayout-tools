@@ -4,7 +4,7 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu [--top <cell>] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2 [--top <cell>] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
 ```
 
@@ -12,7 +12,7 @@ klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-roo
   auto-detects the stream format on read; the extension is not authoritative.
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
-  `gf180mcu`.
+  `gf180mcu`, `sg13g2`.
 - `--top` — top cell to check when the stream has more than one; omit to
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
@@ -435,6 +435,35 @@ process variant this deck doesn't model — see `gf180mcu.py`'s docstring), or
 
 Coverage is expected to grow incrementally in follow-on issues, for both
 decks.
+
+The `sg13g2` deck (issue #905, Epic #711 Phase 3b) is a much smaller
+**curated starter subset**: 8 rules — `width`/`space` checks only, across
+four layers (`Activ`, `GatPoly`, `Metal1`, `Metal2`) — transcribed from a
+real IHP-Open-PDK v0.3.0 install fetched via `scripts/fetch-ihp-sg13g2.sh`
+(Apache License 2.0), specifically the "5.5 Activ" (`Act.*`), "5.8 GatPoly"
+(`Gat.*`), "5.16 Metal1" (`M1.*`), and "5.17 Metaln" (`Mn.*`, `n = 2`
+transcribed only) rule fragments under
+`ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/{feol,beol}/*.drc`.
+Deliberately scoped to `width`/`space` only — the two check kinds requiring
+no new check primitives — per
+[`docs/design/deck-compiler-proposal.md`](../design/deck-compiler-proposal.md)
+§6's own sequencing recommendation, the same pilot shape issue #747 used for
+sky130/gf180mcu's own first `width`/`space` slice. See `sg13g2.py`'s module
+docstring for the full provenance notes and what was deliberately left
+un-transcribed (`Gat.d`'s Activ-to-GatPoly separation, `V1.a`'s min-and-max
+via-width bound, and every conditional wide-line/45-degree-bend spacing
+variant).
+
+Unlike sky130's single self-contained `sky130A.lydrc`, SG13G2's top-level
+`ihp-sg13g2.drc` ships with every `%include` line commented out — its real
+rule content lives in per-topic fragment files assembled at run time by a
+separate Python wrapper (`run_drc.py`), the same "fragmented deck, no single
+ready-to-run file" shape gf180mcu's native deck has (see "Engine" →
+"klayout" above). `--engine klayout` cross-checking this curated deck
+against SG13G2's real native deck is deferred for that same reason, not
+attempted in this pass. No hand-written SG13G2 deck exists elsewhere in this
+repo to cross-check against either — issue #524 (a hand-transcribed SG13G2
+deck) is still open, unmerged, at the time this deck shipped.
 
 ## Macro-scale, machine-generated (standard-cell) layout
 
@@ -939,7 +968,7 @@ written to stdout. No Python traceback is printed — including for an unknown
   [`docs/json-contract.md`](../json-contract.md)):
 
   ```json
-  { "schema_version": 1, "error": { "command": "drc", "message": "unknown deck 'nope' (available: gf180mcu, sky130)" } }
+  { "schema_version": 1, "error": { "command": "drc", "message": "unknown deck 'nope' (available: gf180mcu, sg13g2, sky130)" } }
   ```
 
 Note that exit code `3` is a per-command extension of the shared exit-code

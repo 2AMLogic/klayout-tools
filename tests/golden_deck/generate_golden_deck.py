@@ -1,4 +1,5 @@
-"""Regenerate the golden width/space manifest for both decks (issue #747).
+"""Regenerate the golden width/space manifest for every registered deck
+(issue #747; sg13g2 added by issue #905).
 
 Run this whenever a piloted `DrcRule`'s `layer`/`threshold_dbu` changes, or a
 width/space rule is added to/removed from `sky130.py`/`gf180mcu.py`:
@@ -36,12 +37,14 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from klayout_tools.decks import (  # noqa: E402
     DrcRule,  # noqa: E402
     gf180mcu,
+    sg13g2,
     sky130,
 )
 
 DECKS: dict[str, list[DrcRule]] = {
     "sky130": sky130.DECK,
     "gf180mcu": gf180mcu.DECK,
+    "sg13g2": sg13g2.DECK,
 }
 
 #: Fixed bar dimensions (database units), independent of any individual

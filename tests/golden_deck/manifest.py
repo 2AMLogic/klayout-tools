@@ -23,8 +23,10 @@ import klayout.db as kdb
 GOLDEN_DECK_DIR = Path(__file__).resolve().parent
 
 #: Every deck this manifest covers (issue #747 pilot scope: sky130 + gf180mcu
-#: width/space rules only -- see the module docstring).
-DECK_NAMES: tuple[str, ...] = ("sky130", "gf180mcu")
+#: width/space rules only -- see the module docstring; sg13g2 added by issue
+#: #905, Epic #711 Phase 3b, reusing the same width/space-only manifest
+#: infra for its own 8-rule starter subset).
+DECK_NAMES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2")
 
 
 def manifest_path(deck: str) -> Path:
