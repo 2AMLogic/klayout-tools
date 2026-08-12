@@ -145,6 +145,14 @@ see [`legalize/README.md`](legalize/README.md) for what they are and
 issue #784 / `native/legalize/README.md` for the native-Rust legalizer
 spike they back (go/no-go result: **No-go**, documented there).
 
+## STA-spike fixtures — `tests/corpus/statime/`
+
+Mapped structural netlists (`gcd`, `mult8`, `modexp`) and an OpenSTA oracle
+snapshot backing issue #809's native-Rust gate-level static-timing spike —
+see [`statime/README.md`](statime/README.md) for what they are and
+`native/statime/README.md` for the go/no-go result they back (**Go**,
+documented there).
+
 ## Adding a new corpus file
 
 1. Download the file into `tests/corpus/<pdk>/`, verifying the upstream
