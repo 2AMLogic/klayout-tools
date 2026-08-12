@@ -350,6 +350,127 @@ def test_analytic_cross_check_rejects_a_field_not_valid_for_its_kind(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# sampling parsing (issue #907, Phase 2b of epic #710 -- no native extension
+# needed, these are input-reader-tier checks)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_measurement_without_sampling_reads_as_none(tmp_path):
+    path = _sample_set_doc(
+        tmp_path, {"name": "m", "samples": [1.0, 2.0], "limits": {"max": 5.0}}
+    )
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["sampling"] is None
+
+
+def test_plain_random_sampling_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "sampling": {"strategy": "plain_random"},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["sampling"] == {"strategy": "plain_random"}
+
+
+def test_latin_hypercube_sampling_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0, 4.0],
+        "limits": {"max": 5.0},
+        "sampling": {"strategy": "latin_hypercube", "replicates": 2},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["sampling"] == {
+        "strategy": "latin_hypercube",
+        "replicates": 2,
+    }
+
+
+def test_importance_sampling_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0],
+        "limits": {"max": 5.0},
+        "sampling": {"strategy": "importance", "weights": [1.5, 2.5]},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["sampling"] == {
+        "strategy": "importance",
+        "weights": [1.5, 2.5],
+    }
+
+
+def test_sampling_must_be_an_object(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {"name": "m", "samples": [1.0, 2.0], "limits": {"max": 5.0}, "sampling": 9},
+    )
+    with pytest.raises(YieldError, match="non-object sampling"):
+        _read_samples(path)
+
+
+def test_sampling_rejects_an_unknown_strategy(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "sampling": {"strategy": "made_up"},
+        },
+    )
+    with pytest.raises(YieldError, match="strategy must be one of"):
+        _read_samples(path)
+
+
+def test_sampling_rejects_a_field_not_valid_for_its_strategy(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "sampling": {"strategy": "plain_random", "replicates": 2},
+        },
+    )
+    with pytest.raises(YieldError, match="is not valid for strategy"):
+        _read_samples(path)
+
+
+def test_latin_hypercube_sampling_requires_replicates_at_least_two(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "sampling": {"strategy": "latin_hypercube", "replicates": 1},
+        },
+    )
+    with pytest.raises(YieldError, match="replicates must be an integer >= 2"):
+        _read_samples(path)
+
+
+def test_importance_sampling_requires_a_non_empty_weights_array(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "sampling": {"strategy": "importance", "weights": []},
+        },
+    )
+    with pytest.raises(YieldError, match="weights must be a non-empty array"):
+        _read_samples(path)
+
+
+# --------------------------------------------------------------------------- #
 # Statistics (native extension required)
 # --------------------------------------------------------------------------- #
 
@@ -594,6 +715,111 @@ def test_mismatch_offset_analytic_cross_check_flags_a_disagreement(tmp_path):
     check = m["analytic_cross_check"]
     assert check["verdict"] == "inconsistent"
     assert any("not consistent with the mismatch_offset" in w for w in m["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Variance-reduction sampling strategies (issue #907, Phase 2b of epic #710)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_omitting_sampling_reports_plain_random_with_no_variance_reduced_estimate(
+    tmp_path,
+):
+    path = _sample_set(
+        tmp_path, _normal_grid(300, 0.0, 1.0), limits={"min": -3.0, "max": 3.0}
+    )
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["sampling"] == {
+        "strategy": "plain_random",
+        "replicates": None,
+        "effective_sample_size": None,
+    }
+    assert m["yield"]["variance_reduced"] is None
+    assert m["sample_size"]["variance_reduced"] is None
+
+
+@requires_native
+def test_latin_hypercube_sampling_strategy_and_verdict_are_surfaced_in_the_report(
+    tmp_path,
+):
+    """Issue #907's JSON-contract requirement: the sampling strategy and its
+    effect on the CI/sample-size verdict must be visible in the payload, not
+    just the point estimate."""
+    entry = {
+        "name": "vref",
+        # 4 replicates of an exact quantile grid -- deterministic, so this
+        # test only checks the JSON shape end to end; the Rust crate's own
+        # tests (native/yield/src/estimate.rs) carry the statistical
+        # variance-reduction proof against a genuinely random draw.
+        "samples": _normal_grid(400, 0.0, 1.0),
+        "limits": {"min": -2.0, "max": 2.0},
+        "sampling": {"strategy": "latin_hypercube", "replicates": 4},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["sampling"]["strategy"] == "latin_hypercube"
+    assert m["sampling"]["replicates"] == 4
+    assert m["yield"]["variance_reduced"]["method"] == "lhs-replicated"
+    assert m["yield"]["variance_reduced"]["n"] == 400
+    assert m["sample_size"]["variance_reduced"] is not None
+    assert m["sample_size"]["variance_reduced"]["verdict"] in (
+        "sufficient",
+        "insufficient",
+    )
+
+
+@requires_native
+def test_importance_sampling_with_equal_weights_matches_the_plain_empirical_estimate(
+    tmp_path,
+):
+    samples = _normal_grid(300, 0.0, 1.0)
+    entry = {
+        "name": "vref",
+        "samples": samples,
+        "limits": {"min": -2.0, "max": 2.0},
+        "sampling": {"strategy": "importance", "weights": [2.0] * len(samples)},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+    assert m["sampling"]["strategy"] == "importance"
+    assert m["sampling"]["effective_sample_size"] == pytest.approx(300.0, rel=1e-6)
+    assert m["yield"]["variance_reduced"]["method"] == "importance-weighted"
+    assert m["yield"]["variance_reduced"]["estimate"] == pytest.approx(
+        m["yield"]["empirical"]["estimate"], rel=1e-9
+    )
+
+
+@requires_native
+def test_latin_hypercube_replicates_below_two_is_an_error(tmp_path):
+    # Python's own input-reader rejects this before it ever reaches the
+    # native core (see test_latin_hypercube_sampling_requires_replicates_at_least_two
+    # above); this test is the end-to-end confirmation via `run_yield`.
+    entry = {
+        "name": "vref",
+        "samples": [1.0, 2.0],
+        "limits": {"max": 5.0},
+        "sampling": {"strategy": "latin_hypercube", "replicates": 1},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    with pytest.raises(YieldError, match="replicates must be an integer >= 2"):
+        run_yield(path)
+
+
+@requires_native
+def test_importance_weights_length_mismatch_is_an_error(tmp_path):
+    entry = {
+        "name": "vref",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "sampling": {"strategy": "importance", "weights": [1.0, 1.0]},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    with pytest.raises(YieldError, match="sampling.weights has 2 entries"):
+        run_yield(path)
 
 
 # --------------------------------------------------------------------------- #

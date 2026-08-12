@@ -475,6 +475,27 @@ not `klt --version`, if you need to detect this kind of drift.
   deck" error) — a follow-on scope, the same incremental-growth pattern
   sky130/gf180mcu's own coverage already followed.
 
+- 2026-08-12 — `klt yield` gains variance-reduction sampling strategies —
+  issue #907, Phase 2b of the statistical/yield epic #710. A measurement's
+  input can now declare `sampling: {"strategy": "latin_hypercube",
+  "replicates": N}` (a replicated Latin-hypercube design — McKay, Conover &
+  Beckman 1979) or `sampling: {"strategy": "importance", "weights": [...]}`
+  (a Horvitz-Thompson importance-weighted estimate with a delta-method
+  interval — Hesterberg 1995) as alternatives to Phase 1's plain random
+  Monte Carlo, plus Kish's effective sample size for importance sampling.
+  Both add a strategy-aware `yield.variance_reduced` estimate and a
+  `sample_size.variance_reduced` precision verdict alongside the existing
+  `yield.empirical`/`yield.normal` fields, and every measurement now always
+  carries a `sampling` report (`"plain_random"` by default) naming which
+  strategy produced its estimate. Validated against known analytic
+  distributions, not just run: replicated LHS reaches the analytic yield
+  with a measurably tighter confidence interval than plain MC at a matched
+  total sample count, and importance sampling resolves a one-sided
+  4-sigma tail (`Phi(4) = 0.99996833...`) that plain MC cannot at a
+  smaller sample budget (`native/yield/src/estimate.rs`'s own tests).
+  Purely additive — `schema_version` stays at `1`. See
+  `docs/cli/yield.md`'s "Sampling strategies (variance reduction)" section.
+
 - 2026-08-12 — `klt mom` gains port definition + de-embedding, reporting
   **de-embedded S-parameters** for the full-wave sweep's canonical two-port
   transmission-line case — issue #894, Phase 2b of the Method-of-Moments
