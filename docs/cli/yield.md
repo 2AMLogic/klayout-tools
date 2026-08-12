@@ -362,6 +362,117 @@ and the report says exactly that. Running `sim-report.json` instead produces
 the identical statistics — the point of consuming the MC record format
 directly.
 
+## Real canary evidence
+
+Phase 1c of epic #710
+([#818](https://github.com/2AMLogic/klayout-tools/issues/818)) ran `klt
+yield` end to end against a real canary's existing Monte Carlo campaign,
+rather than the synthetic data above, to prove the statistical T1-row
+evidence this command produces is actually consumable by a signoff
+aggregator — not just by its own worked example.
+
+**Canary and campaign chosen**: `2AMLogic/gf180-sar-adc`'s
+`sim/mc-cdac-mismatch/` — CDAC unit-capacitor mismatch → INL/DNL, against
+the block's **ratified** spec row ("INL / DNL, < 1 LSB baseline / < 0.5 LSB
+stretch, untrimmed, 3σ Monte Carlo mismatch"). This was the more complete of
+the two candidate canaries' existing MC records at the time: `N = 20000` raw
+per-trial samples (vs. the bandgap canaries' `N = 300`), a ratified spec
+window to grade against (vs. `sky130-bandgap`'s still-DRAFT spec), and the
+source experiment's own closed-form Pelgrom-law sigma prediction already on
+record — a ready-made analytic cross-check input, not one this exercise had
+to invent.
+
+**What was real, what was new**: the `N = 20000` DNL/INL draw
+(`sim/mc-cdac-mismatch/runs/20260801-093800-c033611/trials_n20000.csv`) is
+the canary's own pre-existing, committed simulation output — reused as-is,
+reformatted (not re-simulated) into `klt yield`'s sample-set shape. The one
+genuinely new simulation is the negative control: the same experiment's own
+`mc_cdac_mismatch.py` tool, re-run with the unit-cap mismatch sigma forced
+to 3x the calibrated design value (`sigma_u = 2.211629342323457 %`,
+`N = 2000`, seeded) — a real, re-runnable defect injection, not a synthetic
+offset.
+
+**Result** (`klt yield mc-samples.json --limits spec-limits.json --format
+json`, run from the evidence bundle below):
+
+| Measurement | Limits | Status | `sigma_to_spec` | Negative control | Analytic cross-check |
+| --- | --- | --- | --- | --- | --- |
+| `dnl_at_256_lsb_baseline` | ±1.0 LSB | pass | 5.975 | detected | consistent (Δ +0.37%) |
+| `dnl_at_256_lsb_stretch` | ±0.5 LSB | **fail** | 2.986 | detected | consistent |
+| `inl_at_256_lsb_baseline` | ±1.0 LSB | pass | 11.954 | **not_detected** | consistent (Δ +0.27%) |
+| `inl_at_256_lsb_stretch` | ±0.5 LSB | pass | 5.975 | detected | consistent |
+
+Two findings are worth calling out because they are exactly what "read the
+verdict, not the point estimate" (above) means in practice on a real
+campaign, not a synthetic one:
+
+- `klt yield`'s independently-computed `sigma_to_spec` (5.975 DNL / 11.954
+  INL, ±1 LSB baseline) agrees with the source experiment's own
+  bespoke-script `sigma_at_spec` (5.978 / 11.957,
+  `summary_n20000.json`) to 3 significant figures — an independent
+  cross-check that neither tool's arithmetic is wrong, computed two
+  different ways from the same raw draw.
+- The negative control is `not_detected` on `inl_at_256_lsb_baseline`: a 3x
+  sigma-scale defect is not big enough to push INL's yield measurably below
+  1.0 against the *loose* ±1 LSB limit (it does show up against the tighter
+  ±0.5 LSB stretch limit, on the same samples). This is the honest, expected
+  behavior the negative-control mechanism is supposed to surface — a defect
+  detector's power depends on the limit it is checked against, and a single
+  campaign-wide "detected/not detected" summary would have hidden exactly
+  this.
+
+**Evidence bundle**
+([2AMLogic/gf180-sar-adc#149](https://github.com/2AMLogic/gf180-sar-adc/pull/149),
+record
+[`20260812-132011-f613571.md`](https://github.com/2AMLogic/gf180-sar-adc/blob/main/sim/mc-cdac-mismatch/records/20260812-132011-f613571.md)):
+`sim/mc-cdac-mismatch/yield-evidence/` carries `build_yield_evidence.py`
+(the deterministic, re-runnable script that reformats the real CSVs into
+`klt yield`'s input shape — it invents no numbers), `mc-samples.json`,
+`spec-limits.json`, and the committed `klt-yield-report.json`/`.txt`
+outputs, recorded in the canary's `sim/` directory per its own append-only
+evidence convention (new record, nothing edited or superseded).
+
+### Consumable by a signoff aggregator without bespoke parsing
+
+`klt-yield-report.json` is a stock `klt yield --format json` envelope —
+`klt signoff --manifest`'s Phase 2a binding
+([`signoff.md`](signoff.md#tier-verdict-report---manifest), issue #870)
+already classifies this exact shape by content (`measurement_count` + a
+`source` object), so a block manifest can cite it with **zero
+canary-specific parsing**, either command-backed:
+
+```json
+"6": {
+  "command": ["klt", "yield", "mc-samples.json", "--limits", "spec-limits.json", "--format", "json"],
+  "cwd": "sim/mc-cdac-mismatch/yield-evidence/"
+}
+```
+
+or file-backed, to grade against the exact committed report without
+re-running anything:
+
+```json
+"6": {"file": "sim/mc-cdac-mismatch/yield-evidence/klt-yield-report.json"}
+```
+
+### Checked against the T1 statistical-row bar
+
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 6
+("Statistical claims carry Monte Carlo evidence") requires a recorded seed,
+sample count, a deterministic negative control, and results **combined
+with (not instead of) process corners**. This evidence bundle satisfies the
+first three plainly (seeds `20260801` nominal / `99109901` negative
+control; `N = 20000` nominal / `N = 2000` negative control; a real, seeded,
+detected-on-3-of-4-rows negative control) but is honest about the fourth:
+it is the **mismatch leg only** — `sim/mc-cdac-mismatch/`'s own scope
+statement excludes the PVT-corner axis by design (mismatch is not a
+supply/temperature-corner phenomenon), and combining it with
+`sim/adc-inl-dnl/`'s separate process-corner leg into one verdict is not
+done here. Per the doc's own "Coverage honesty" rule, that gap is part of
+the claim, not hidden by it: this bundle is complete, real, T1-row
+statistical evidence for the mismatch leg of item 6, not yet a closed
+item-6 claim for the full ratified spec row.
+
 ## JSON schema (the contract)
 
 ```json

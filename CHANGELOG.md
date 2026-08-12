@@ -460,6 +460,28 @@ not `klt --version`, if you need to detect this kind of drift.
   `segment_size_um`) present only when requested; `schema_version` stays at
   `2`. See `docs/cli/mom.md`'s "Full-wave frequency sweep" section.
 
+- 2026-08-12 — Ran `klt yield` end to end against a real canary's existing
+  Monte Carlo campaign — issue #818, Phase 1c of the statistical/yield epic
+  #710. `2AMLogic/gf180-sar-adc`'s `sim/mc-cdac-mismatch/` (CDAC unit-cap
+  mismatch → INL/DNL, N=20000, ratified spec row) was chosen over the two
+  bandgap canaries as the more complete existing MC record. Produced a
+  complete T1-row statistical record — yield estimate, CI, Cpk/sigma-to-spec,
+  sample-size verdict, a real seeded negative control (mismatch sigma forced
+  to 3x nominal, N=2000), and an analytic cross-check against the
+  experiment's own closed-form Pelgrom-law prediction — recorded in the
+  canary's `sim/` directory per its append-only evidence convention
+  ([2AMLogic/gf180-sar-adc#149](https://github.com/2AMLogic/gf180-sar-adc/pull/149)).
+  `klt yield`'s independently-computed `sigma_to_spec` agreed with the
+  canary's own bespoke-script `sigma_at_spec` to 3 significant figures. No
+  code change to `klt yield` itself (already complete as of #816/#837 and
+  #817/#902) — `docs/cli/yield.md`'s new "Real canary evidence" section has
+  the full result table, the negative-control's honest
+  detected-on-3-of-4-rows finding, the manifest snippet showing zero-bespoke
+  -parsing consumption by `klt signoff`'s Phase 2a binding (#870/#880), and
+  an explicit check against `docs/design-evidence-tiers.md` item 6's bar
+  (satisfied except the process-corner-combination leg, stated as a known
+  gap, not hidden).
+
 - 2026-08-12 — Cross-checked the compiled sky130 LVS device-extraction rules
   (`EXTRACTION_DECK`, issues #868/#867) against the real, hand-written
   upstream `sky130.lvs` deck they were transcribed from — issue #869, Phase
