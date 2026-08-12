@@ -722,7 +722,9 @@ test suite ships a small seeded PRNG, test-only, to validate them against
 sampling noise rather than a noise-free quantile grid). Campaign
 *orchestration* (Phase 2a, see "Campaign orchestration" below) is pure Python
 glue over `klt sim`/`remote_fleet` and needs none of it. Sensitivity ranking
-(Phase 3) is the remaining compute-bound work this core is positioned for.
+(Phase 3, [#923](https://github.com/2AMLogic/klayout-tools/issues/923)) has
+shipped as [`klt yield-sensitivity`](yield-sensitivity.md), reusing this same
+crate (standardized-regression/correlation numerics, still dependency-free).
 
 ## Building the native extension
 
@@ -919,8 +921,9 @@ whole epic:
   discrepancy when a cross-check is supplied — but there is no flag or exit
   code that turns either into a hard failure. Neither block is required for
   a measurement to `pass`/`fail` its own `target_yield`.
-- **No sensitivity ranking.** Which device mismatches drive the spread is
-  Phase 3.
+- **No sensitivity ranking here.** Which device mismatches drive the spread
+  is a separate command, [`klt yield-sensitivity`](yield-sensitivity.md)
+  (Phase 3, issue [#923](https://github.com/2AMLogic/klayout-tools/issues/923)).
 
 ## Exit codes
 
@@ -946,8 +949,12 @@ was missed" precedent rather than inventing a new number.
   [#907](https://github.com/2AMLogic/klayout-tools/issues/907) delivered the
   Latin-hypercube/importance sampling strategies above;
   [#906](https://github.com/2AMLogic/klayout-tools/issues/906) delivered
-  campaign orchestration, "Campaign orchestration" above; remaining phases:
-  sensitivity and design centering).
+  campaign orchestration, "Campaign orchestration" above;
+  [#923](https://github.com/2AMLogic/klayout-tools/issues/923) delivered
+  sensitivity ranking, [`klt yield-sensitivity`](yield-sensitivity.md);
+  remaining phase: design centering, #924).
+- [`docs/cli/yield-sensitivity.md`](yield-sensitivity.md) — Phase 3: which
+  device/process parameters drive the spread.
 - [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) — the T1
   statistical-row bar this command produces evidence for.
 - [`docs/json-contract.md`](../json-contract.md) — the shared envelope,

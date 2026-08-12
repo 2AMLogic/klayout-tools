@@ -46,6 +46,7 @@ from . import (
     trajectory_cmd,
     yield_campaign_cmd,
     yield_cmd,
+    yield_sensitivity_cmd,
 )
 
 
@@ -1905,6 +1906,54 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(yield_campaign_parser)
     yield_campaign_parser.set_defaults(func=yield_campaign_cmd.run)
+
+    yield_sensitivity_parser = subparsers.add_parser(
+        "yield-sensitivity",
+        help=(
+            "campaign parameter draws + output values -> ranked "
+            "contribution to the spread"
+        ),
+        description=(
+            "Rank a completed Monte Carlo campaign's device/process "
+            "parameters by their contribution to an output metric's "
+            "variance -- issue #923, Phase 3 of the statistical/yield epic "
+            "#710. Reads a sensitivity sample document (per-sample "
+            "parameter draws paired with the resulting output value; see "
+            "docs/cli/yield-sensitivity.md's 'Input' section), and emits a "
+            "ranked list of parameters with a stated contribution metric "
+            "(a standardized regression coefficient when the sample count "
+            "supports it, else a Pearson-correlation fallback -- never a "
+            "full Sobol/variance-based decomposition, a deliberate "
+            "simplification the report itself states). A distinct "
+            "top-level verb from `klt yield`, mirroring `klt "
+            "yield-campaign`/`klt gen-compose`'s own precedent for a "
+            "second analysis mode of existing data. Statistics run in the "
+            "klt_yield_native Rust extension (native/yield/, the same "
+            "crate `klt yield` uses)."
+        ),
+    )
+    yield_sensitivity_parser.add_argument(
+        "samples",
+        help=(
+            "path to a sensitivity sample document ({'measurements': "
+            "[{'name', 'samples': [{'parameters': {name: value, ...}, "
+            "'output': value}, ...]}, ...]}) -- see "
+            "docs/cli/yield-sensitivity.md"
+        ),
+    )
+    yield_sensitivity_parser.add_argument(
+        "--measurement",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "restrict the analysis to this measurement; repeatable, and "
+            "comma-separated names are accepted. A named measurement "
+            "absent from the document is an error rather than a silent skip"
+        ),
+    )
+    _add_format_arg(yield_sensitivity_parser)
+    yield_sensitivity_parser.set_defaults(func=yield_sensitivity_cmd.run)
 
     return parser
 

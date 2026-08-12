@@ -27,12 +27,13 @@
 
 mod contract;
 mod estimate;
+mod sensitivity;
 mod stats;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use contract::YieldRequest;
+use contract::{SensitivityRequest, YieldRequest};
 
 /// The whole analysis as plain Rust: JSON string in, JSON string out, with
 /// a plain `String` error.
@@ -63,10 +64,39 @@ fn analyze_yield_json(request_json: &str) -> PyResult<String> {
     run_json(request_json).map_err(PyValueError::new_err)
 }
 
+/// The whole sensitivity ranking as plain Rust: JSON string in, JSON string
+/// out. Kept separate from the `#[pyfunction]` wrapper for the same reason
+/// as [`run_json`] -- `cargo test` exercises it with no CPython interpreter
+/// involved.
+pub fn run_sensitivity_json(request_json: &str) -> Result<String, String> {
+    let request: SensitivityRequest = serde_json::from_str(request_json)
+        .map_err(|e| format!("invalid sensitivity request JSON: {e}"))?;
+
+    let response = sensitivity::analyze(&request)?;
+
+    serde_json::to_string(&response)
+        .map_err(|e| format!("failed to serialise sensitivity response: {e}"))
+}
+
+/// Rank a completed campaign's device/process parameters by their
+/// contribution to an output metric's variance: parse `request_json`, rank,
+/// and return the response as a JSON string (see
+/// `contract::SensitivityResponse`).
+///
+/// Raises `ValueError` (surfaced to Python as
+/// `klayout_tools.yield_sensitivity.SensitivityError`) for malformed input
+/// JSON, too few usable samples, a constant output, or every declared
+/// parameter being constant.
+#[pyfunction]
+fn analyze_sensitivity_json(request_json: &str) -> PyResult<String> {
+    run_sensitivity_json(request_json).map_err(PyValueError::new_err)
+}
+
 /// The `klt_yield_native` Python extension module.
 #[pymodule]
 fn klt_yield_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(analyze_yield_json, m)?)?;
+    m.add_function(wrap_pyfunction!(analyze_sensitivity_json, m)?)?;
     Ok(())
 }
 
@@ -112,5 +142,47 @@ mod tests {
         }"#;
         let err = run_json(request).unwrap_err();
         assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    #[test]
+    fn run_sensitivity_json_round_trips_a_minimal_request() {
+        let request = r#"{
+            "measurements": [
+                {
+                    "name": "gain_db",
+                    "unit": "dB",
+                    "parameters": [
+                        {"x1": 0.1, "x2": 0.9},
+                        {"x1": 0.4, "x2": 0.2},
+                        {"x1": 0.9, "x2": 0.5},
+                        {"x1": 0.2, "x2": 0.7},
+                        {"x1": 0.6, "x2": 0.1},
+                        {"x1": 0.8, "x2": 0.4}
+                    ],
+                    "output": [1.1, 4.3, 9.2, 2.3, 6.2, 8.1]
+                }
+            ]
+        }"#;
+        let response = run_sensitivity_json(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["measurements"][0]["n"], 6);
+        assert_eq!(parsed["measurements"][0]["ranking"][0]["parameter"], "x1");
+        assert_eq!(parsed["measurements"][0]["ranking"][0]["rank"], 1);
+    }
+
+    #[test]
+    fn run_sensitivity_json_rejects_a_request_below_the_sample_floor() {
+        let request = r#"{
+            "measurements": [
+                {
+                    "name": "gain_db",
+                    "parameters": [{"x1": 0.1}, {"x1": 0.4}],
+                    "output": [1.1, 4.3]
+                }
+            ]
+        }"#;
+        let err = run_sensitivity_json(request).unwrap_err();
+        assert!(err.contains("at least"), "{err}");
     }
 }

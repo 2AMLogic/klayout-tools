@@ -274,21 +274,25 @@ jobs:
       - name: Build + install the extension, then run the klt yield tests
         # `--group yield` resolves klt-yield-native from native/yield/ via
         # pyproject.toml's [tool.uv.sources] and drives maturin to compile
-        # it. Without it, tests/test_yield.py's statistics tier skips itself
+        # it. Without it, tests/test_yield.py's and
+        # tests/test_yield_sensitivity.py's statistics tiers skip themselves
         # (by design, so a Rust-less environment degrades gracefully) --
         # this job is what makes sure the skip is never the only thing CI
-        # ever sees.
+        # ever sees. Both files share this one crate (issue #923, Phase 3 of
+        # the statistical/yield epic #710, added `klt yield-sensitivity` to
+        # the same `klt_yield_native` extension `klt yield` uses).
         working-directory: .
         run: |
           uv sync --locked --extra dev --group yield
           uv run --frozen --extra dev --group yield pytest \
-            tests/test_yield.py -v --capture=tee-sys
+            tests/test_yield.py tests/test_yield_sensitivity.py \
+            -v --capture=tee-sys
 
       - name: Assert the klt yield tests actually ran (no silent skip)
         working-directory: .
         run: |
           uv run --frozen --extra dev --group yield python -c "import klt_yield_native" || {
-            echo "::error::klt_yield_native did not install -- tests/test_yield.py's statistics tier would have skipped"
+            echo "::error::klt_yield_native did not install -- tests/test_yield.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
             exit 1
           }
 
