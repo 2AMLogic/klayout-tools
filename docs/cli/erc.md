@@ -53,17 +53,22 @@ limit table (see "Antenna-ratio verdict" below), and every `levels[]` entry
 gains `antenna_ratio`/`antenna_ratio_max`/`antenna_ratio_source`/`verdict`;
 every `gates[]` entry gains an aggregate `antenna_verdict`.
 
-**Phase 1c (#861, this document's current state) additively delivers
-`erc_findings`**: the four core electrical-correctness rules — floating
-gate, unconnected/multiply-driven net, missing substrate/well tie, supply
-short — computed from the same connectivity model, plus two new optional
-spec sections (`nets`, `ties`). See "ERC finding checks" and "Spec file"
-below.
+**Phase 1c (#861) additively delivers `erc_findings`**: the four core
+electrical-correctness rules — floating gate, unconnected/multiply-driven
+net, missing substrate/well tie, supply short — computed from the same
+connectivity model, plus two new optional spec sections (`nets`, `ties`).
+See "ERC finding checks" and "Spec file" below.
+
+**Phase 3 (#908, this document's current state) additively delivers
+`levels[].remedy`**: for every `verdict: "violate"` level, a standard-fix
+recommendation — diode insertion or layer jumping — naming the specific net
+and layer, so the violation is directly actionable rather than just
+flagged. See "Antenna-violation fix guidance" below.
 
 Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-design, neither 1b's nor 1c's fields needed a **`schema_version` bump**:
-every field 1a's own version of this document promised is still exactly as
-documented, unchanged.
+design, none of 1b's, 1c's, or Phase 3's fields needed a **`schema_version`
+bump**: every field 1a's own version of this document promised is still
+exactly as documented, unchanged.
 
 ## "Per gate" means "per gate net", not "per drawn poly finger"
 
@@ -294,6 +299,47 @@ An unrecognised `--pdk` name (anything other than `sky130`) is a clean
 exit-1 error, checked eagerly before the layout is even loaded — see "Exit
 codes" below.
 
+## Antenna-violation fix guidance (Phase 3, issue #908)
+
+Every `levels[]` entry with `verdict: "violate"` gains a `remedy` object
+naming one of the two standard antenna fixes — **diode insertion** or
+**layer jumping** — for the specific net and layer that violated, so the
+finding is directly actionable rather than just flagged. A non-violating
+level's `remedy` is always `null` (including every level when `--pdk` was
+omitted, since no level can be `"violate"` there).
+
+The remedy choice is not a fixed default — it depends on whether an
+adjacent `stackup` level actually has headroom to absorb more of this
+net's routing:
+
+- **`"layer_jumping"`** — recommended when both hold:
+  - **the violation is layer-local**: the immediately preceding `stackup`
+    level does not itself violate (`cumulative_area_um2` only ever grows
+    going up the stack, so a violation already present one level down is
+    already baked into every level above it — jumping cannot undo that).
+  - **an adjacent level has margin**: the level immediately below or above
+    reports `verdict: "pass"`, i.e. it has real headroom under its own
+    limit. The higher neighbour is preferred when both qualify (continuing
+    the route forward onto the next fabrication step is the more common
+    real remedy); the lower neighbour is used when only it qualifies (e.g.
+    the violating level is the last one in the stack, with nothing above
+    it to jump to).
+  - `target_layer` names which neighbour to route through instead.
+- **`"diode_insertion"`** — the fallback for every other case: either the
+  violation cascades from a lower level that already violates (jumping to
+  a neighbour would not resolve the underlying excess), or no adjacent
+  level has margin to redistribute onto. Diode insertion is the
+  general-purpose fix — it bleeds off accumulated charge electrically
+  regardless of which layer is at fault — so it is always a valid
+  fallback. `target_layer` is `null` in this case.
+
+See `klayout_tools.erc._antenna_remedy`'s own docstring for the exact
+per-level logic, and `tests/test_erc.py`'s `# --- run_erc: antenna-
+violation fix guidance` section for a golden case of each remedy type
+(including the "last-level, lower-margin-only" `layer_jumping` case and a
+cascading-violation `diode_insertion` case where no neighbour has margin
+anywhere in the stack).
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
@@ -321,7 +367,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
           "antenna_ratio": 1.0,
           "antenna_ratio_max": null,
           "antenna_ratio_source": null,
-          "verdict": "unchecked"
+          "verdict": "unchecked",
+          "remedy": null
         },
         {
           "layer": "li1",
@@ -330,7 +377,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
           "antenna_ratio": 2.0,
           "antenna_ratio_max": 75.0,
           "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.li.1', 'Max EA/A w/o diode' column",
-          "verdict": "pass"
+          "verdict": "pass",
+          "remedy": null
         },
         {
           "layer": "met1",
@@ -339,7 +387,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
           "antenna_ratio": 2.75,
           "antenna_ratio_max": 400.0,
           "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.met1.1', 'Max EA/A w/o diode' column",
-          "verdict": "pass"
+          "verdict": "pass",
+          "remedy": null
         },
         {
           "layer": "met2",
@@ -348,7 +397,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
           "antenna_ratio": 3.55,
           "antenna_ratio_max": 400.0,
           "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.met2.1', 'Max EA/A w/o diode' column",
-          "verdict": "pass"
+          "verdict": "pass",
+          "remedy": null
         }
       ]
     }
@@ -365,6 +415,52 @@ the shared envelope (`schema_version`, error shape, exit codes).
     }
   ],
   "erc_finding_count": 1
+}
+```
+
+A violating `levels[]` entry's `remedy` is populated instead of `null` —
+e.g. a `layer_jumping` remedy (`li1` violates its own 75 limit, but the
+carried-over cumulative area still clears `met1`'s much looser 400 limit,
+so `met1` has margin):
+
+```json
+{
+  "layer": "li1",
+  "step_area_um2": 80.0,
+  "cumulative_area_um2": 81.0,
+  "antenna_ratio": 81.0,
+  "antenna_ratio_max": 75.0,
+  "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.li.1', 'Max EA/A w/o diode' column",
+  "verdict": "violate",
+  "remedy": {
+    "type": "layer_jumping",
+    "net": "GATE_A",
+    "layer": "li1",
+    "target_layer": "met1",
+    "justification": "net 'GATE_A' exceeds the antenna-ratio limit at 'li1' (ratio 81 > 75); 'met1' has margin (ratio 82 <= 400) -- route more of this net's connection through 'met1' instead of continuing to accumulate area on 'li1'"
+  }
+}
+```
+
+or, when the violation already originated at a lower level and so carries
+forward regardless (a `diode_insertion` remedy):
+
+```json
+{
+  "layer": "met1",
+  "step_area_um2": 350.0,
+  "cumulative_area_um2": 431.0,
+  "antenna_ratio": 431.0,
+  "antenna_ratio_max": 400.0,
+  "antenna_ratio_source": "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv rule '.met1.1', 'Max EA/A w/o diode' column",
+  "verdict": "violate",
+  "remedy": {
+    "type": "diode_insertion",
+    "net": "GATE_A",
+    "layer": "met1",
+    "target_layer": null,
+    "justification": "net 'GATE_A' exceeds the antenna-ratio limit at 'met1' (ratio 431 > 400); the violation is already present at the preceding stackup level ('li1'), so it carries forward regardless of how routing on 'met1' is redistributed -- insert an antenna diode on this net at 'met1' to bleed off accumulated charge"
+  }
 }
 ```
 
@@ -389,6 +485,12 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
 | `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
+| `levels[].remedy` | object \| null | Fix guidance (issue #908, Phase 3) — `null` unless `verdict == "violate"`. See "Antenna-violation fix guidance" above and below. |
+| `remedy.type`    | string          | `"layer_jumping"` or `"diode_insertion"` — see "Antenna-violation fix guidance" above for the selection rule. |
+| `remedy.net`     | string \| null  | The violating gate's own net name — identical to `gates[].net`.                                  |
+| `remedy.layer`   | string          | The violating `levels[].layer` value — identical to the entry this remedy is attached to.        |
+| `remedy.target_layer` | string \| null | For `"layer_jumping"`, the adjacent `stackup` role name to route through instead; `null` for `"diode_insertion"`. |
+| `remedy.justification` | string    | Human-readable explanation citing the specific ratio/limit values and (for `"layer_jumping"`) the target layer's own margin.     |
 | `erc_findings`   | array\<object\> | One entry per ERC violation found by the four checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
 | `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short` — matching `klt drc`'s `violations[].rule` convention. |
 | `erc_findings[].description` | string | Human-readable explanation of this specific finding.                                       |
@@ -438,8 +540,10 @@ ingestion harness exists is a natural follow-on.
   the per-gate antenna-ratio check ("Antenna-ratio verdict" above) this
   module's connectivity model feeds.
 - [#861](https://github.com/2AMLogic/klayout-tools/issues/861) — Phase 1c,
-  the core ERC finding list ("ERC finding checks" above), shipped in this
-  document's current form.
+  the core ERC finding list ("ERC finding checks" above).
+- [#908](https://github.com/2AMLogic/klayout-tools/issues/908) — Phase 3,
+  antenna-violation fix guidance ("Antenna-violation fix guidance" above),
+  shipped in this document's current form.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna

@@ -52,6 +52,11 @@ def _print_text(report: dict) -> None:
                 f"(max={level['antenna_ratio_max']}) "
                 f"verdict={level['verdict']}"
             )
+            remedy = level["remedy"]
+            if remedy is not None:
+                target = remedy["target_layer"]
+                suffix = f" -> {target}" if target else ""
+                print(f"    remedy: {remedy['type']}{suffix}")
 
     print()
     print(f"erc_findings: {report['erc_finding_count']}")
