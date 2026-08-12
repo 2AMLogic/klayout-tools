@@ -139,12 +139,43 @@ in sync with the still-private canaries (`gf180-trng`, `gf180-sar-adc`,
 truth at ingest time, every run, so a repo that flips to public later just
 starts working the next time this script runs against it.
 
-**Sim-evidence cards for pre-layout blocks.** Both current canaries are at
-schematic/sim stage — no GDS exists yet, so there is nothing for `klt
-layers`/`klt cells` to derive `layer_count`/`cell_count`/`renders` from.
-Rather than a `no_artifacts` stub, their `layout.json` carries `status: "in
-design — simulation evidence"` (the honest status chip — see issue #140)
-plus two fields not part of `klt layout-metrics`'s own contract:
+**Both wave-1 canaries now have a real, committed layout** (issue #896):
+`sky130-bandgap`'s routed core (`layout/bandgap-core/reports/LATEST` →
+`bandgap_core_routed.gds`, LVS-clean as of DR-007) and `gf180-bandgap`'s
+DRC-clean/LVS-matching top block (`layout/bandgap_top/bandgap_top.gds`).
+`ingest-canary.py` finds each repo's own layout GDS (see "GDS detection"
+below), stages it into `blocks/<slug>/output/`, and derives
+`layer_count`/`cell_count`/`instance_count` via the same `klt
+layers`/`klt cells` library calls `klt layout-metrics` uses — `status`
+becomes `"ok"` (or `"partial"` if either extractor call fails) instead of
+the pre-layout status below, and a `renders.overview` thumbnail is attached
+the same way the #4 corpus blocks get theirs (issue #651). Both blocks are
+`downloadable: true`.
+
+**GDS detection.** Canary repos don't share one fixed layout-output
+convention, so `find_layout_gds()` tries, under each of `layout/`, `gds/`,
+and the repo root: (1) a `reports/LATEST` pointer file naming the current
+timestamped run directory (`sky130-bandgap`'s convention — the run
+directory often holds several sub-block GDS exports alongside the
+assembled block, e.g. `amp_input_pair.gds`, so a `*_routed*.gds` match,
+excluding `*_inner*`, is preferred when present); (2) failing that, a
+bounded recursive search (3 levels deep, skipping `reports/`, `fixtures/`,
+`drc/`, `lvs/`, `renders/`, `output/` subtrees) for the flatter
+`layout/<block>/<block>.gds` shape `gf180-bandgap` uses. **Refreshing a
+canary's render as its layout advances is just re-running the same
+command** — no separate refresh mechanism exists or is needed; see
+`scripts/ingest-canary.py`'s module docstring for the full detection logic
+and `tests/test_ingest_canary.py::test_full_ingest_real_public_canary_with_layout`
+for the real-network regression coverage of both repos' current shapes.
+
+**Sim-evidence cards for pre-layout blocks.** A canary with no GDS
+findable this way (or a future wave-1+ canary that hasn't reached layout
+yet) gets `layout.json` with `status: "in design — simulation evidence"`
+(the honest status chip — see issue #140) instead of `"ok"`/`"partial"`/
+`"no_artifacts"`. Two extra fields, not part of `klt layout-metrics`'s own
+contract, are populated either way (pre- or post-layout — both current
+canaries' `layout.json` still carries both alongside their real
+`layer_count`/`renders`):
 
 - `spec_summary` — the source repo's `README.md` "Target specification"
   table, parsed verbatim (`{status_note, rows: [{parameter, target,
@@ -169,11 +200,11 @@ is public) — see `site/src/data/types.ts`'s `LayoutSource`/
 (including the markdown-parsing helpers for the two different `sim/`
 evidence record shapes the two current canaries happen to use).
 
-When a canary's layout eventually lands, re-running the same command finds
-the GDS (under `layout/`, `gds/`, or the repo root) and upgrades the block
-to a normal `"ok"`/`"partial"` metrics record — same slug, same card. This
-upgrade path exists in the script today but is not exercised by either
-current canary (both pre-layout); see `tests/test_ingest_canary.py`.
+When a canary's layout advances further (a new routed run, a design
+change), re-running the same command re-resolves `find_layout_gds()`
+against the repo's current `HEAD`, restages the GDS, re-renders the
+overview thumbnail, and rewrites `layout.json` in place — same slug, same
+card, no hand-editing required.
 
 ## License note
 

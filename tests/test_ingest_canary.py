@@ -14,9 +14,12 @@ Two tiers:
   list (falling back to a `pytest.skip` -- not a false pass or a failure --
   if every candidate has since gone public), and a full end-to-end ingest
   of both real public canaries (`2AMLogic/gf180-bandgap`,
-  `2AMLogic/sky130-bandgap`). Skipped (with a clear reason, never silently
-  passing) when `gh`/network access isn't available -- mirrors
-  `tests/test_gallery_signals.py`'s `HAVE_NGSPICE` skip convention.
+  `2AMLogic/sky130-bandgap`) -- as of issue #896 both have a real, committed
+  layout GDS, so this exercises the `find_layout_gds` -> stage -> render ->
+  `"ok"` status path against real data, not just the synthetic fixture in
+  `test_gds_found_upgrades_to_ok_status`. Skipped (with a clear reason,
+  never silently passing) when `gh`/network access isn't available --
+  mirrors `tests/test_gallery_signals.py`'s `HAVE_NGSPICE` skip convention.
 """
 
 from __future__ import annotations
@@ -477,7 +480,13 @@ def test_gate_refuses_real_private_canary(tmp_path):
 
 @_SKIP_NO_NETWORK
 @pytest.mark.parametrize("repo", ["2AMLogic/gf180-bandgap", "2AMLogic/sky130-bandgap"])
-def test_full_ingest_real_public_canary(tmp_path, repo):
+def test_full_ingest_real_public_canary_with_layout(tmp_path, repo):
+    """Both wave-1 canaries have a real, committed layout GDS as of issue
+    #896 -- this exercises `find_layout_gds` -> stage -> render against
+    each repo's actual current directory shape (sky130-bandgap's
+    `reports/LATEST` pointer, gf180-bandgap's flatter `layout/<block>/`),
+    not just the synthetic fixture in `test_gds_found_upgrades_to_ok_status`.
+    """
     blocks_dir = tmp_path / "blocks"
     layout = ic.ingest(repo, blocks_dir=blocks_dir, cache_dir=tmp_path / "cache")
 
@@ -489,10 +498,23 @@ def test_full_ingest_real_public_canary(tmp_path, repo):
 
     assert layout["schema_version"] == 1
     assert layout["slug"] == slug
-    assert layout["status"] == ic.IN_DESIGN_STATUS
     assert layout["source"]["repo"] == repo
     assert len(layout["source"]["ref"]) == 40  # a full git sha
     assert layout["downloadable"] is True
     # Both wave-1 canaries ship a Target specification table.
     assert "spec_summary" in layout
     assert layout["spec_summary"]["rows"]
+
+    # Both wave-1 canaries have a real routed/composed layout committed as
+    # of issue #896 -- this is the "ok"/"partial" metrics path, not the
+    # pre-layout sim-evidence-card path.
+    assert layout["status"] in ("ok", "partial")
+    assert layout["layer_count"] > 0
+    assert layout["layout_file"]
+    staged_gds = blocks_dir / slug / "output" / layout["layout_file"]
+    assert staged_gds.is_file()
+    assert layout["renders"] == {"overview": "renders/overview.png"}
+    assert (blocks_dir / slug / "output" / "renders" / "overview.png").is_file()
+    # source.path records exactly which file within the source repo this
+    # came from, not just "somewhere in the repo".
+    assert layout["source"]["path"].endswith(layout["layout_file"])

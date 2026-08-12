@@ -25,10 +25,9 @@
  *     (the content-pipeline / public-repo gate, `scripts/ingest-canary.py`,
  *     #62) AND `layout_file` is present, `layout_file` is staged the same
  *     way so the detail page's download link resolves. Both current canary
- *     blocks set `downloadable: true` but have no `layout_file` yet (they
- *     are pre-layout sim-evidence cards — see `blocks/README.md`), so this
- *     still never fires against real data today; it is exercised once a
- *     canary's layout lands.
+ *     blocks (`sky130-bandgap`, `gf180-bandgap`) have a real, committed
+ *     routed/composed GDS as of issue #896, so this path is exercised
+ *     against real data — see `blocks/README.md`'s "Canary blocks" section.
  *   - Signals waveform artifacts (issue #100, Epic #90 Phase 2): every
  *     `signals.corners[].waveform` path (relative to `output/`, same
  *     convention as `renders`) is staged the same way, so the block detail
