@@ -1,7 +1,8 @@
 /**
  * Types for the geode-fem site export (`docs/schemas/em-site-export.schema.json`,
  * issue #849, Phase 1a of Epic #840) — the shape `PatchAntennaResult.tsx`
- * (issue #850) fetches and wires into `FieldViewer` / `WaveformViewer`.
+ * (issue #850) and `SpiralInductorResult.tsx` (issue #877) fetch and wire
+ * into `FieldViewer` / `WaveformViewer`.
  *
  * `mesh`/`frames` reuse `FieldMesh`/`FieldFrame` from
  * `@/components/field/types` directly (the schema deliberately shapes them
@@ -38,6 +39,13 @@ export interface EmSParameterPoint {
   p_rad?: number;
   efficiency?: number;
   solve_residual_rel?: number;
+  /** Spiral-inductor-family extras (issue #877) — inductance/resistance/
+   *  quality factor at this sweep point, carried through verbatim from
+   *  geode-fem's `results.toml`. Absent on benchmarks that don't extract a
+   *  lumped L/R/Q (e.g. the patch antenna). */
+  l_nh?: number;
+  r_ohm?: number;
+  q?: number;
 }
 
 /** The `s_parameters` sub-object — the frequency-swept port response a
