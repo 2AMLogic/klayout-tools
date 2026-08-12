@@ -1,0 +1,20 @@
+[package]
+name = "interconnect_coupling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "klayout-tools reproducibility-seam driver (not part of geode-fem upstream -- see examples/em/interconnect_coupling/generate.py in the klayout-tools repo): electrostatic coupling-capacitance extraction on a hand-authored two-rail mesh sized to a real klayout-tools canary's GDS geometry (klayout-tools issue #842)."
+
+[[bin]]
+name = "interconnect_coupling"
+path = "src/main.rs"
+
+[dependencies]
+geode-core = { path = "../../crates/geode-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

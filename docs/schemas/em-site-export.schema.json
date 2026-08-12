@@ -2,10 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://klayout-tools.org/docs/schemas/em-site-export.schema.json",
   "title": "geode-fem site export (Epic #840 Phase 1a)",
-  "description": "The mesh + swept-field + S-parameter + provenance record a geode-fem solver run is converted into for browser display on klayout-tools.org (issue #849, Phase 1a of Epic #840). `mesh`/`frames` are deliberately shaped to be a strict superset of `site/src/components/field/types.ts`'s `FieldMesh`/`FieldFrame` (an `{mesh, frames}` slice of this document validates directly as that component's `FieldViewerData` prop) so a future consumer (issue #850, not yet built) can feed this file to `FieldViewer` without a translation layer, while `s_parameters`/`radiation_pattern`/`provenance` carry the rest of a solver run's record that a generic mesh+field viewer has no concept of. Produced by `examples/em/patch_antenna/generate.py`; see `docs/design/em-site-export-format.md` for the full design rationale.",
+  "description": "The mesh + swept-field + S-parameter/capacitance + provenance record a geode-fem solver run is converted into for browser display on klayout-tools.org (issue #849, Phase 1a of Epic #840). `mesh`/`frames` are deliberately shaped to be a strict superset of `site/src/components/field/types.ts`'s `FieldMesh`/`FieldFrame` (an `{mesh, frames}` slice of this document validates directly as that component's `FieldViewerData` prop) so a future consumer (issue #850, not yet built) can feed this file to `FieldViewer` without a translation layer, while `s_parameters`/`radiation_pattern`/`capacitance`/`provenance` carry the rest of a solver run's record that a generic mesh+field viewer has no concept of. Produced by `examples/em/patch_antenna/generate.py` (the driven-port/S-parameter shape) and `examples/em/interconnect_coupling/generate.py` (the `capacitance` shape, issue #842); see `docs/design/em-site-export-format.md` for the full design rationale, including the `capacitance` addendum.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "benchmark", "mesh", "frames", "s_parameters", "provenance"],
+  "required": ["schema_version", "benchmark", "mesh", "frames", "provenance"],
+  "anyOf": [
+    { "required": ["s_parameters"] },
+    { "required": ["capacitance"] }
+  ],
   "properties": {
     "schema_version": {
       "type": "integer",
@@ -129,6 +133,42 @@
             },
             "bandwidth_10db_note": { "type": ["string", "null"] }
           }
+        }
+      }
+    },
+    "capacitance": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["conductors", "matrix_farad"],
+      "description": "The N x N Maxwell capacitance-matrix result of a multi-conductor electrostatic (DC) extraction -- the piece a driven-port/S-parameter sweep has no concept of, and the sibling of `s_parameters` for a benchmark with no frequency sweep at all (issue #842's on-chip interconnect-coupling case: two real GDS-derived conductors' self- and mutual capacitance). A document MUST carry `s_parameters`, `capacitance`, or both (see this schema's top-level `anyOf`).",
+      "properties": {
+        "conductors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Conductor/electrode names in `matrix_farad` row/column order, e.g. `[\"vgnd\", \"vpwr\"]`."
+        },
+        "matrix_farad": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" }
+          },
+          "description": "The N x N Maxwell capacitance matrix (farads), `matrix_farad[i][j]` from the energy method `C_ij = phi(i)^T K phi(j)` (conductor i at 1V, all others + ground at 0V). Diagonal entries are each conductor's self-capacitance to the solve's ground boundary; off-diagonal entries are the mutual/coupling capacitance between two conductors."
+        },
+        "matrix_flux_diag_farad": {
+          "type": "array",
+          "items": { "type": ["number", "null"] },
+          "description": "Independent surface-flux cross-check of the diagonal (one entry per conductor, `null` when no surface set was supplied for that conductor) -- a genuinely different discrete quantity than the energy method, the same cross-check `benchmarks/electrostatic/results.toml` records for its own oracles."
+        },
+        "max_rel_asymmetry": {
+          "type": "number",
+          "description": "Max relative asymmetry of the off-diagonal terms, `|C_ij - C_ji| / max(|C_ij|, |C_ji|)` -- Maxwell reciprocity is an exact discrete identity of the energy method regardless of mesh quality, so this is a hard correctness check (near-zero), not an accuracy oracle -- the same convention `benchmarks/electrostatic/results.toml`'s own `two_sphere_box` oracle uses (`max_rel_asymmetry`, documented there as a \"hard check\")."
+        },
+        "oracle": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "description": "An independent analytic/published sanity cross-check for the extracted capacitance, honestly banded per this repo's own benchmark convention (e.g. `two_sphere_box`'s box-truncation-dominated band) rather than a tight pass/fail bar -- `null`/omitted when no independent cross-check applies."
         }
       }
     },
