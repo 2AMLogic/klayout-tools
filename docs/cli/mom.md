@@ -22,6 +22,16 @@ separate, opt-in solve path with its own (narrower) geometric scope — see
 closed-form straight-wire and two-wire-loop inductance oracles (see
 `docs/design/mom-validation.md`'s "Inductance/resistance" section).
 
+`klt mom` can additionally, optionally (a non-empty `frequencies_hz` in the
+spec file), sweep a **frequency-domain, full-wave** solve — with a retarded
+Green's function, rather than the quasi-static kernel the capacitance and
+PEEC solves above use — reporting each conductor pair's complex partial
+impedance at every requested frequency, plus (for the canonical
+two-conductor case) the transmission-line segment's characteristic impedance
+and propagation constant. This is Phase 2a of the same epic, delivered by
+[#893](https://github.com/2AMLogic/klayout-tools/issues/893) — see
+"Full-wave frequency sweep" below.
+
 ```
 klt mom <file> <spec> [--top <cell>] [--format text|json]
 ```
@@ -168,6 +178,16 @@ The spec file is a JSON object:
   cross-section filament edge length in micrometers. Only consulted when
   `compute_inductance` is set; same "smaller is more accurate, more
   expensive" tradeoff as `panel_size_um`.
+- `frequencies_hz` (optional, array of numbers, default empty) — opt into
+  the frequency-domain full-wave partial-impedance sweep alongside
+  capacitance. Each entry is a frequency in Hz (must be positive and
+  finite). See "Full-wave frequency sweep" below for the (narrower)
+  geometric scope this requires — the same bar-shaped-conductor restriction
+  `compute_inductance` uses, independent of whether that is also set.
+- `segment_size_um` (optional, number, default `5.0`) — target axial mesh
+  segment edge length in micrometers for the full-wave solve. Only
+  consulted when `frequencies_hz` is non-empty; same "smaller is more
+  accurate, more expensive" tradeoff as `panel_size_um`/`filament_size_um`.
 - `stackup` (required, non-empty array) — each entry maps one GDS
   `(layer, datatype)` pair's shapes to an electrical conductor's z-extent:
   - `layer` (string, `"<layer>/<datatype>"`) — the GDS layer/datatype to
@@ -229,12 +249,12 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field                     | Type              | Description                                                                                     |
 | ------------------------- | ----------------- | ------------------------------------------------------------------------------------------------- |
-| `schema_version`          | integer           | Version of this command's JSON shape. `1` = capacitance-only (#718/#719); `2` = adds the PEEC fields below, each present only when `compute_inductance` was set (#797). |
+| `schema_version`          | integer           | Version of this command's JSON shape. `1` = capacitance-only (#718/#719); `2` = adds the PEEC fields below, each present only when `compute_inductance` was set (#797). The full-wave fields below (#893) are added **without** a further bump — purely additive, each present only when `frequencies_hz` was non-empty; see `docs/json-contract.md`'s envelope policy. |
 | `file`                    | string            | The input layout path exactly as provided.                                                        |
 | `spec`                    | string            | The spec file path exactly as provided.                                                           |
 | `background_permittivity` | number            | Resolved from the spec (echoed for provenance).                                                   |
 | `panel_size_um`           | number            | Resolved panel size — the spec's value, or the `0.5` default when omitted.                        |
-| `conductors`              | array\<string\>   | Conductor names, in the same order as `capacitance_matrix_ff`'s (and, when present, `inductance_matrix_nh`'s) rows/columns (first-seen order in `stackup`). |
+| `conductors`              | array\<string\>   | Conductor names, in the same order as `capacitance_matrix_ff`'s (and, when present, `inductance_matrix_nh`'s / each `full_wave_sweep` entry's `impedance_matrix_*_ohm`'s) rows/columns (first-seen order in `stackup`). |
 | `capacitance_matrix_ff`   | array\<array\<number\>\> | The Maxwell (short-circuit) capacitance matrix, in femtofarads — see "Reading the matrix" below. |
 | `panel_count`             | integer           | Total discretisation panel count across every conductor (informational).                          |
 | `warnings`                | array\<string\>   | Non-fatal physicality diagnostics — empty on a well-resolved solve. See "Warnings" below.          |
@@ -242,6 +262,9 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `inductance_matrix_nh`    | array\<array\<number\>\> | **Only present when `compute_inductance: true`.** The PEEC partial-inductance matrix, in nanohenries — see "PEEC inductance/resistance" below. |
 | `resistance_ohm`          | array\<number\>   | **Only present when `compute_inductance: true`.** Per-conductor DC resistance, in ohms, same order as `conductors`. |
 | `filament_count`          | integer           | **Only present when `compute_inductance: true`.** Total PEEC filament count across every conductor (informational, mirrors `panel_count`). |
+| `segment_size_um`         | number            | **Only present when `frequencies_hz` is non-empty.** Resolved full-wave axial segment size — the spec's value, or the `5.0` default. |
+| `full_wave_segment_count` | integer           | **Only present when `frequencies_hz` is non-empty.** Total axial segment count across every conductor for the full-wave mesh (informational, mirrors `panel_count`/`filament_count`; identical at every swept frequency). |
+| `full_wave_sweep`         | array\<object\>   | **Only present when `frequencies_hz` is non-empty.** One entry per requested frequency, in the same order — see "Full-wave frequency sweep" below. |
 
 ### Reading the matrix
 
@@ -382,6 +405,136 @@ meaningful once combined into a loop (e.g. `L_loop = L[0][0] + L[1][1] -
 2*L[0][1]` for a two-conductor "go/return" loop). The matrix is symmetric.
 `resistance_ohm[j]` is conductor `j`'s DC resistance in ohms.
 
+## Full-wave frequency sweep
+
+Set a non-empty `frequencies_hz` in the spec file to additionally sweep a
+**frequency-domain, full-wave** solve — with a retarded (frequency-dependent)
+free-space Green's function, `exp(-jkR)/(4*pi*R)`, rather than the
+quasi-static `1/(4*pi*R)` kernel the capacitance and PEEC solves above use.
+This is Phase 2a of the Method-of-Moments epic
+([#893](https://github.com/2AMLogic/klayout-tools/issues/893)): the entry
+point for RF/EM blocks and S-parameter extraction, moving `klt mom` from a
+single static R/L/C matrix to genuine frequency-swept network parameters.
+
+### The bar-shaped-conductor MVP restriction (shared with PEEC)
+
+The full-wave solve requires the **exact same** bar-shaped-conductor
+restriction as `compute_inductance` above — every conductor reduces to a
+single well-defined bar (one box, a true 3-D elongated shape, sharing a
+common current-flow axis and axial extent with every other conductor in the
+request) — see "The bar-shaped-conductor MVP restriction" above for the
+full detail and why. This applies independent of whether
+`compute_inductance` is also set in the same request.
+
+### Method: retarded thin-wire partial impedance
+
+Where PEEC's static solve discretises each conductor's *cross-section* into
+a filament bundle, the full-wave solve keeps each conductor as a single
+**equivalent thin wire** (radius `a_eff = sqrt(area / pi)`, the same
+"equal-area circle" convention the PEEC oracles above use) and instead
+refines the wire **axially**: its shared axial extent is subdivided into
+segments (target length `segment_size_um`), and each conductor pair's
+partial impedance is the point-collocation (Riemann-sum) approximation of
+the classical partial mutual/self impedance double integral, generalised
+from PEEC's static Neumann-formula kernel to the retarded kernel:
+
+```text
+Z_pq(omega) = j*omega*mu0/(4*pi) * integral_0^l integral_0^l
+              exp(-j*k*R(z,z')) / R(z,z') dz dz'
+```
+
+for conductors `p`/`q` sharing axial length `l`, wavenumber
+`k = omega * sqrt(background_permittivity) / c0`. As `omega -> 0`, this
+reduces to exactly the same geometric double integral PEEC's static partial
+inductance uses — see `native/mom/src/fullwave.rs`'s module docs for the
+full derivation, the self-term "reduced kernel" thin-wire regularisation,
+and the point-collocation approximation's own precedent
+(`solver.rs`'s capacitance fill uses the identical technique for its
+off-diagonal terms).
+
+### Reading the impedance matrix and the derived line quantities
+
+Each `full_wave_sweep` entry is:
+
+```json
+{
+  "frequency_hz": 1000000000.0,
+  "impedance_matrix_real_ohm": [[0.0033, 0.0033], [0.0033, 0.0033]],
+  "impedance_matrix_imag_ohm": [[8.507, 3.064], [3.064, 8.507]],
+  "characteristic_impedance_real_ohm": 452.37,
+  "characteristic_impedance_imag_ohm": -3.4e-8,
+  "attenuation_np_per_m": 1.7e-9,
+  "phase_rad_per_m": 22.65
+}
+```
+
+`impedance_matrix_real_ohm[j][k]`/`impedance_matrix_imag_ohm[j][k]` is
+conductor `j`'s partial self impedance (`j == k`) or the partial mutual
+impedance between conductors `j` and `k` (`j != k`) at this frequency, in
+the same Ruehli-PEEC sense as `inductance_matrix_nh` (no implied current
+return path) — generalised to nonzero frequency. The matrix is symmetric.
+
+`characteristic_impedance_real_ohm`/`_imag_ohm`
+(`Z0 = sqrt(Z' / Y')`) and `attenuation_np_per_m`/`phase_rad_per_m`
+(the real/imaginary parts of the propagation constant
+`gamma = sqrt(Z' * Y') = alpha + j*beta`) are present **only when the
+request has exactly two conductors** — the canonical transmission-line
+case. They are derived from the per-unit-length series impedance
+`Z' = (Z[0][0] + Z[1][1] - 2*Z[0][1]) / length` (the same "loop" combination
+the PEEC worked example above uses for inductance) and the per-unit-length
+**differential-mode line capacitance**
+`C' = (capacitance_matrix_ff[0][0] - capacitance_matrix_ff[0][1]) / 2 / length`
+— **not** simply `capacitance_matrix_ff[0][0]`: for an isolated
+two-conductor system (no third, enclosing reference node), a meaningful
+fraction of that self-capacitance's field lines terminate "at infinity"
+rather than on the other conductor, so it alone over-counts the capacitance
+the telegrapher-equation model needs. See
+`native/mom/src/fullwave.rs`'s module docs for the full derivation.
+
+### Worked example: two-wire transmission line
+
+A rectangular loop — the same 4x4 µm, 60 µm-apart two-wire geometry as the
+PEEC loop example above — additionally swept at 1 MHz and 1 GHz:
+
+```json
+{
+  "background_permittivity": 1.0,
+  "panel_size_um": 10.0,
+  "frequencies_hz": [1.0e6, 1.0e9],
+  "segment_size_um": 5.0,
+  "stackup": [
+    {
+      "layer": "1/0", "conductor": "go",
+      "z0_um": 0.0, "z1_um": 4.0
+    },
+    {
+      "layer": "2/0", "conductor": "return",
+      "z0_um": 0.0, "z1_um": 4.0
+    }
+  ]
+}
+```
+
+The reported characteristic impedance should sit near the classical
+two-wire-line closed form `Z0 = (eta0 / pi) * acosh(D / (2*a))` (`eta0` the
+free-space wave impedance, `a` the equal-area-circle bar radius), and the
+propagation constant near the lossless TEM identity `beta = omega *
+sqrt(background_permittivity) / c0`, `alpha ~= 0` — see
+`tests/test_mom_fullwave_validation.py` for the measured agreement and
+tolerance, and `native/mom/src/fullwave.rs`'s own Rust-level unit tests for
+the same checks against the native solver directly.
+
+### Segment-count guard
+
+The retarded-kernel fill is `O(n^2)` per swept frequency (a dense sum over
+every axial segment pair, mirroring `solver.rs`'s dense potential-
+coefficient fill), recomputed independently for every entry in
+`frequencies_hz`. A request whose total axial segment count (across every
+conductor) would exceed an internal 4000-segment cap is rejected with a
+clear error before any work is attempted — the same role the panel-count
+and filament-count guards play above. Increase `segment_size_um` to work
+around it.
+
 ## Worked example: parallel plate
 
 ```bash
@@ -501,16 +654,38 @@ oracles), for the exact geometry and measured accuracy.
   [`docs/design/mom-validation.md`](../design/mom-validation.md). The kernel's
   known failure mode — panels wider than the gap they face — is detected and
   surfaced in `warnings` rather than returned silently (see "Warnings").
-- **No ports/S-parameters, no frequency dependence.** Both the capacitance
-  and the PEEC inductance/resistance solve are quasi-static (DC/low-frequency)
-  — no ports, no skin effect, no S-parameters. Those are separate, later
-  phases of epic #701.
-- **PEEC inductance/resistance is bar-shaped-conductors-only (MVP).** See
-  "PEEC inductance/resistance" above's "bar-shaped-conductor MVP restriction"
-  — a materially narrower scope than the capacitance solve's (single box,
-  true 3-D, elongated, shared axis/extent across every conductor in the
-  request). A request that does not fit is rejected with a clear error
-  naming which restriction it violates, not silently approximated.
+- **The capacitance and PEEC inductance/resistance solves are quasi-static**
+  (DC/low-frequency) — no frequency dependence, no skin effect. The
+  full-wave solve above adds a genuine frequency sweep for the *series*
+  impedance, but still reuses the quasi-static capacitance matrix unchanged
+  for the *shunt* capacitance (the standard "full-wave PEEC" approximation
+  — see "Full-wave frequency sweep" above); a fully frequency-dependent
+  (retarded) capacitance/potential-coefficient solve is a follow-up.
+- **No port definitions or de-embedding yet.** The full-wave solve reports
+  partial impedance and (for the two-conductor case) characteristic
+  impedance/propagation constant for the *modeled bar length as given* —
+  there is no port excitation, reference-impedance normalisation, or
+  de-embedding to turn this into a general S-parameter network for an
+  arbitrary N-port structure. That is Phase 2b of epic #701
+  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)).
+- **PEEC inductance/resistance and the full-wave solve are both
+  bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
+  above's "bar-shaped-conductor MVP restriction" — a materially narrower
+  scope than the capacitance solve's (single box, true 3-D, elongated,
+  shared axis/extent across every conductor in the request). A request that
+  does not fit is rejected with a clear error naming which restriction it
+  violates, not silently approximated. The full-wave solve's derived
+  characteristic-impedance/propagation-constant fields are further
+  restricted to exactly two conductors (the canonical transmission-line
+  case); larger conductor counts still get the raw partial-impedance
+  matrix, just not those derived fields.
+- **Full-wave solve keeps each conductor as a single equivalent thin wire.**
+  Unlike PEEC's cross-section filament bundle, the full-wave solve does not
+  discretise a conductor's cross-section — it uses one equal-area-circle
+  effective radius per conductor (see "Method: retarded thin-wire partial
+  impedance" above) and refines only along the axial direction. A general
+  cross-section-resolved full-wave (true "full-wave PEEC" filament bundle,
+  or a proper surface EFIE) is a follow-up once a use case needs it.
 
 ### Panel-count guard
 
@@ -544,12 +719,15 @@ cap is rejected with a clear error before any allocation is attempted, the
 same role the panel-count guard plays for capacitance. Increase
 `filament_size_um` to work around it.
 
+See "Segment-count guard" (above, in "Full-wave frequency sweep") for the
+analogous cap on the full-wave solve's axial mesh.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
-| `0`       | Success — the capacitance matrix (and, if requested, the PEEC inductance/resistance) was computed and returned. |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true` conductor that does not satisfy the PEEC bar-shape scope, a missing `conductivity_S_per_m`, or the filament-count guard above). |
+| `0`       | Success — the capacitance matrix (and, if requested, the PEEC inductance/resistance and/or the full-wave sweep) was computed and returned. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true`/full-wave conductor that does not satisfy the shared bar-shape scope, a missing `conductivity_S_per_m`, a non-positive `frequencies_hz` entry, or the filament-count/segment-count guards above). |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                        |
 
 ## See also
@@ -560,9 +738,17 @@ same role the panel-count guard plays for capacitance. Increase
   lighter-weight alternative (reusing geode-fem's quasi-static solver mode)
   worth revisiting if the cost/accuracy tradeoff argues for it.
 - [#701](https://github.com/2AMLogic/klayout-tools/issues/701) — the parent
-  Method-of-Moments epic (later phases: ports, coupling, general PEEC mesh).
+  Method-of-Moments epic (later phases: ports/de-embedding, coupling,
+  general PEEC mesh).
 - [#797](https://github.com/2AMLogic/klayout-tools/issues/797) — delivered the
   PEEC inductance/resistance solve documented above.
+- [#893](https://github.com/2AMLogic/klayout-tools/issues/893) — delivered
+  the full-wave frequency sweep documented above (Phase 2a).
+  [#894](https://github.com/2AMLogic/klayout-tools/issues/894) (Phase 2b,
+  port definition + de-embedding) and
+  [#895](https://github.com/2AMLogic/klayout-tools/issues/895) (Phase 2c,
+  cross-validation against an external MoM/FEM solver) are its planned
+  follow-ons.
 - [`docs/design/mom-validation.md`](../design/mom-validation.md) — closed-form
   validation and convergence-under-refinement for both the capacitance solver
   ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)) and the PEEC
@@ -573,3 +759,8 @@ same role the panel-count guard plays for capacitance. Increase
   ([#799](https://github.com/2AMLogic/klayout-tools/issues/799)): why CG over
   GMRES, the preconditioner, and the measured convergence rate and solve-time
   comparison against the direct solve it replaced.
+- `tests/test_mom_fullwave_validation.py` — closed-form validation and
+  convergence-under-refinement for the full-wave sweep (#893): the two-wire
+  characteristic-impedance closed form and the TEM propagation-constant
+  identity, the measured agreement, and the stated tolerances (mirroring
+  `docs/design/mom-validation.md`'s role for the earlier solves).

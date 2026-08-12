@@ -686,3 +686,140 @@ def test_cli_text_output_renders_peec_fields(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "nanohenries" in out
     assert "resistance (ohms):" in out
+
+
+# --- full-wave frequency sweep (issue #893) ---------------------------------
+
+
+def _loop_fixture(
+    path, *, length_um: float = 500.0, separation_um: float = 40.0
+) -> None:
+    """Two long, parallel bars -- the same "loop" shape as `_wire_spec`'s
+    inductance sibling, reused as the full-wave solve's canonical
+    two-conductor transmission-line structure."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(
+        kdb.Box.new(_um(0), _um(0), _um(length_um), _um(2))
+    )
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(0), _um(separation_um), _um(length_um), _um(separation_um + 2))
+    )
+    layout.write(str(path))
+
+
+def _loop_spec(path, *, frequencies_hz: list[float]) -> None:
+    entry = {"z0_um": 0.0, "z1_um": 2.0}
+    path.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 2.0,
+                "frequencies_hz": frequencies_hz,
+                "segment_size_um": 5.0,
+                "stackup": [
+                    {"layer": "1/0", "conductor": "go", **entry},
+                    {"layer": "2/0", "conductor": "return", **entry},
+                ],
+            }
+        )
+    )
+
+
+def test_run_mom_full_wave_sweep(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[1.0e6, 1.0e9])
+
+    report = run_mom(str(gds), str(spec))
+
+    assert report["schema_version"] == 2
+    assert report["segment_size_um"] == 5.0
+    assert report["full_wave_segment_count"] > 0
+    sweep = report["full_wave_sweep"]
+    assert len(sweep) == 2
+    assert [p["frequency_hz"] for p in sweep] == [1.0e6, 1.0e9]
+
+    for point in sweep:
+        z = point["impedance_matrix_real_ohm"]
+        assert len(z) == 2 and len(z[0]) == 2
+        # Symmetric partial-impedance matrix (same reciprocity argument as
+        # the static inductance/capacitance matrices).
+        assert point["impedance_matrix_real_ohm"][0][1] == pytest.approx(
+            point["impedance_matrix_real_ohm"][1][0], rel=1e-9
+        )
+        assert point["impedance_matrix_imag_ohm"][0][1] == pytest.approx(
+            point["impedance_matrix_imag_ohm"][1][0], rel=1e-9
+        )
+        # Two conductors -> the derived characteristic impedance/propagation
+        # constant fields must be present.
+        assert point["characteristic_impedance_real_ohm"] is not None
+        assert point["characteristic_impedance_real_ohm"] > 0
+        assert point["phase_rad_per_m"] > 0
+
+
+def test_run_mom_without_frequencies_hz_omits_full_wave_fields(tmp_path):
+    """The default (frequencies_hz unset) must keep the original response
+    shape exactly -- no new keys at all, matching
+    test_run_mom_without_compute_inductance_omits_peec_fields's precedent."""
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[])
+
+    report = run_mom(str(gds), str(spec))
+    assert "full_wave_sweep" not in report
+    assert "full_wave_segment_count" not in report
+    assert "segment_size_um" not in report
+
+
+def test_run_mom_full_wave_rejects_non_bar_shaped_conductor(tmp_path):
+    """Same bar-shape restriction as PEEC's compute_inductance (#797),
+    reused here -- a square pad has no well-defined current-flow axis."""
+    gds = tmp_path / "pad.gds"
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(5), _um(5)))
+    layout.write(str(gds))
+
+    spec = tmp_path / "pad.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "frequencies_hz": [1.0e9],
+                "stackup": [
+                    {"layer": "1/0", "conductor": "pad", "z0_um": 0.0, "z1_um": 5.0}
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(MomError, match="bar-shaped"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_full_wave_rejects_non_positive_frequency(tmp_path):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[0.0])
+
+    with pytest.raises(MomError, match="positive"):
+        run_mom(str(gds), str(spec))
+
+
+def test_cli_text_output_renders_full_wave_sweep(tmp_path, capsys):
+    gds = tmp_path / "loop.gds"
+    spec = tmp_path / "loop.mom.json"
+    _loop_fixture(gds)
+    _loop_spec(spec, frequencies_hz=[1.0e6])
+
+    assert main(["mom", str(gds), str(spec)]) == 0
+    out = capsys.readouterr().out
+    assert "full_wave_segment_count" in out
+    assert "full-wave sweep:" in out
+    assert "Z0=" in out

@@ -68,6 +68,29 @@ def _print_text(report: dict) -> None:
         for name, r in zip(conductors, report["resistance_ohm"], strict=True):
             print(f"  {name.ljust(name_width)}  {r:.6g}")
 
+    if "full_wave_sweep" in report:
+        print()
+        print(f"segment_size_um: {report['segment_size_um']}")
+        print(f"full_wave_segment_count: {report['full_wave_segment_count']}")
+        print("full-wave sweep:")
+        has_line = bool(report["full_wave_sweep"]) and (
+            report["full_wave_sweep"][0].get("characteristic_impedance_real_ohm")
+            is not None
+        )
+        for point in report["full_wave_sweep"]:
+            line = f"  {point['frequency_hz']:.6g} Hz"
+            if has_line:
+                z0 = complex(
+                    point["characteristic_impedance_real_ohm"],
+                    point["characteristic_impedance_imag_ohm"],
+                )
+                line += (
+                    f"  Z0={z0.real:.6g}{z0.imag:+.6g}j ohm"
+                    f"  alpha={point['attenuation_np_per_m']:.6g} Np/m"
+                    f"  beta={point['phase_rad_per_m']:.6g} rad/m"
+                )
+            print(line)
+
     warnings = report["warnings"]
     if warnings:
         print()
