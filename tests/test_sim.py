@@ -3069,9 +3069,14 @@ def test_run_sim_invalid_hosts_raises(tmp_path, bad_value):
         sim.run_sim(str(request))
 
 
-def test_run_sim_hosts_greater_than_one_with_remote_backend_raises_before_any_aws_call(
+def test_run_sim_hosts_over_units_remote_backend_raises_before_aws_call(
     tmp_path, monkeypatch
 ):
+    """``hosts`` may not exceed the number of units to dispatch for backend
+    ``remote`` -- issue #906's fleet dispatch (:func:`sim._run_remote_fleet`)
+    rejects this before ever touching ``remote_fleet.run_fleet`` (an idle
+    fleet member would still be billed). This single-default-corner request
+    has exactly one unit, so ``hosts=2`` is always over the line."""
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -3090,12 +3095,13 @@ def test_run_sim_hosts_greater_than_one_with_remote_backend_raises_before_any_aw
 
     def _unexpected(*args, **kwargs):
         raise AssertionError(
-            "hosts>1 + backend='remote' must not touch AWS in this issue"
+            "hosts (2) exceeding the unit count (1) must not touch AWS"
         )
 
     monkeypatch.setattr(sim, "RemoteLauncher", _unexpected)
+    monkeypatch.setattr(sim.remote_fleet, "run_fleet", _unexpected)
 
-    with pytest.raises(sim.SimError, match="not yet supported"):
+    with pytest.raises(sim.SimError, match="exceeds the number of units"):
         sim.run_sim(str(request))
 
 
@@ -3425,6 +3431,7 @@ class _FakeRemoteLauncher:
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.job_id = kwargs.get("job_id", "fake-job-id")
         self.terminated = False
         self.provision_error: Exception | None = None
         type(self).last_instance = self
@@ -3786,6 +3793,318 @@ def test_run_sim_remote_backend_measurements_are_value_identical_to_local(
         local_report["environment"]["engine_version"]
         == remote_report["environment"]["engine_version"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# remote fleet dispatch (`hosts > 1` + backend `remote`, Epic #375 Phase 1B
+# wiring, issue #906). `remote_fleet.run_fleet`'s own K-instance launch,
+# fleet-level cost gate, vCPU quota pre-check, one-shard retry, and
+# teardown-all are `remote_fleet`'s own test suite's job
+# (tests/test_remote_fleet.py) -- these tests fake `run_fleet` itself and
+# check only `_run_remote_fleet`'s own integration seam: shard slicing,
+# `explicit_points` wiring (so a shard's pushed request runs exactly its own
+# slice, never re-deriving/re-seeding), and per-shard result merging.
+# --------------------------------------------------------------------------- #
+
+
+def _fake_run_fleet_success(monkeypatch):
+    """Fake `sim.remote_fleet.run_fleet`: actually calls the given
+    `shard_runner` once per shard (sequentially, each against its own
+    `_FakeRemoteLauncher`), so `_run_remote_dispatch`'s push/run/pull
+    sequence runs for real per shard through the same faked
+    `remote_transport.*` calls `_install_fake_remote_transport` installs.
+    Every shard succeeds -- see `_fake_run_fleet_with_shard_statuses` for a
+    lost-shard variant. Returns the captured `run_fleet(...)` call kwargs."""
+    calls: dict = {}
+
+    def fake_run_fleet(*, region, pdk, shard_unit_counts, shard_runner, **kwargs):
+        calls["region"] = region
+        calls["pdk"] = pdk
+        calls["shard_unit_counts"] = list(shard_unit_counts)
+        calls["kwargs"] = kwargs
+        outcomes = []
+        for shard_index, _count in enumerate(shard_unit_counts):
+            launcher = _FakeRemoteLauncher(
+                job_id=f"fleet-shard{shard_index}", region=region
+            )
+            info = launcher.provision()
+            result = shard_runner(shard_index, launcher, launcher.get_public_ip())
+            outcomes.append(
+                sim.remote_fleet.ShardOutcome(
+                    shard_index=shard_index,
+                    status="ok",
+                    result=result,
+                    attempts=1,
+                    environment=info,
+                )
+            )
+        return sim.remote_fleet.FleetLaunchResult(
+            shards=outcomes, hosts_launched=len(shard_unit_counts)
+        )
+
+    monkeypatch.setattr(sim.remote_fleet, "run_fleet", fake_run_fleet)
+    return calls
+
+
+def _fake_run_fleet_with_lost_shard(monkeypatch, *, lost_shard_index: int):
+    """Fake `sim.remote_fleet.run_fleet` where ``lost_shard_index`` reports
+    `status="error"` (both attempts exhausted) without calling
+    ``shard_runner`` at all -- mirrors what a real fleet member whose retry
+    also failed hands back to `remote_fleet.FleetLauncher.run_shards`."""
+
+    def fake_run_fleet(*, region, shard_unit_counts, shard_runner, **kwargs):
+        del kwargs
+        outcomes = []
+        for shard_index, _count in enumerate(shard_unit_counts):
+            if shard_index == lost_shard_index:
+                outcomes.append(
+                    sim.remote_fleet.ShardOutcome(
+                        shard_index=shard_index,
+                        status="error",
+                        error="ssh timeout (both attempts)",
+                        attempts=2,
+                        environment=None,
+                    )
+                )
+                continue
+            launcher = _FakeRemoteLauncher(
+                job_id=f"fleet-shard{shard_index}", region=region
+            )
+            info = launcher.provision()
+            result = shard_runner(shard_index, launcher, launcher.get_public_ip())
+            outcomes.append(
+                sim.remote_fleet.ShardOutcome(
+                    shard_index=shard_index,
+                    status="ok",
+                    result=result,
+                    attempts=1,
+                    environment=info,
+                )
+            )
+        return sim.remote_fleet.FleetLaunchResult(
+            shards=outcomes, hosts_launched=len(shard_unit_counts) - 1
+        )
+
+    monkeypatch.setattr(sim.remote_fleet, "run_fleet", fake_run_fleet)
+
+
+def _remote_fleet_base_request(**overrides) -> dict:
+    request = _base_remote_request(
+        corners={"temperature_c": [10, 20, 30, 40]},
+        measurements=[
+            {
+                "name": "vout",
+                "spice": ".meas tran vout FIND v(out) AT=1u",
+                "limits": {"min": 0.5},
+            }
+        ],
+    )
+    request.update(overrides)
+    return request
+
+
+def _make_shard_remote_report_factory(remote_side_dir: Path):
+    """Build a `remote_report_factory` (for `_install_fake_remote_transport`)
+    that actually runs `sim.run_sim` against each shard's own pushed netlist
+    + request -- exactly like a real fleet member running `klt sim ...
+    --backend local-parallel`. Each call gets its own subdirectory so
+    concurrent/sequential shard dispatches never collide on disk."""
+    counter = {"n": 0}
+
+    def factory(state):
+        counter["n"] += 1
+        shard_dir = remote_side_dir / f"shard{counter['n']}"
+        shard_dir.mkdir()
+        netlist_dst = shard_dir / remote_transport.REMOTE_NETLIST_FILENAME
+        netlist_dst.write_text(Path(state["local_netlist_path"]).read_text())
+        request_dst = shard_dir / remote_transport.REMOTE_REQUEST_FILENAME
+        request_dst.write_text(json.dumps(state["remote_request"]))
+        return sim.run_sim(str(request_dst))
+
+    return factory
+
+
+def test_run_sim_remote_fleet_requires_region(tmp_path):
+    _write_body(tmp_path)
+    bad = _remote_fleet_base_request()
+    bad["remote"] = {**bad["remote"], "hosts": 2}
+    del bad["remote"]["region"]
+    request = _write_request(tmp_path, bad)
+    with pytest.raises(sim.SimError, match="requires request.remote.region"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_remote_fleet_requires_ssh_key_path(tmp_path):
+    _write_body(tmp_path)
+    bad = _remote_fleet_base_request()
+    bad["remote"] = {**bad["remote"], "hosts": 2}
+    del bad["remote"]["ssh_key_path"]
+    request = _write_request(tmp_path, bad)
+    with pytest.raises(sim.SimError, match="requires request.remote.ssh_key_path"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_remote_fleet_shards_dispatch_and_merge_in_unit_order(
+    tmp_path, monkeypatch
+):
+    """`hosts > 1` + backend `remote` (issue #906) shards the corner list,
+    dispatches each shard to its own (faked) EC2 instance via
+    `remote_fleet.run_fleet`, and merges the results back in global unit
+    order -- value-identical to the same request run unsharded, since each
+    shard's pushed request carries its own already-expanded `_explicit_points`
+    slice (never re-derived on the remote box from `corners` ranges)."""
+    _write_body(tmp_path)
+    base = _remote_fleet_base_request()
+
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    local_request = _write_request(
+        tmp_path,
+        {k: v for k, v in base.items() if k not in ("backend", "remote")},
+        name="local.json",
+    )
+    local_report = sim.run_sim(str(local_request), backend="local")
+
+    remote_request = _write_request(tmp_path, base, name="remote.json")
+
+    remote_side_dir = tmp_path / "remote_side"
+    remote_side_dir.mkdir()
+    _install_fake_remote_transport(
+        monkeypatch,
+        remote_report_factory=_make_shard_remote_report_factory(remote_side_dir),
+    )
+    fleet_calls = _fake_run_fleet_success(monkeypatch)
+
+    remote_report = sim.run_sim(str(remote_request), hosts=2)
+
+    assert fleet_calls["shard_unit_counts"] == [2, 2]
+    assert fleet_calls["pdk"] == "sky130A"
+    assert fleet_calls["region"] == "us-east-1"
+    assert [c["corner_id"] for c in remote_report["corners"]] == [
+        c["corner_id"] for c in local_report["corners"]
+    ]
+    assert _corner_measurement_summary(local_report) == _corner_measurement_summary(
+        remote_report
+    )
+    assert len(remote_report["environment"]["remote"]["fleet"]) == 2
+    for member in remote_report["environment"]["remote"]["fleet"]:
+        assert member["instance_id"] == "i-fake123"
+        assert member["attempts"] == 1
+
+
+def test_run_sim_remote_fleet_preserves_mc_seeds_vs_unsharded_local_run(
+    tmp_path, monkeypatch
+):
+    """Sharding across a fleet must never change a single unit's derived
+    Monte Carlo seed -- `_explicit_points` transmits each point's own
+    already-derived seed verbatim rather than letting a shard's own remote
+    box re-run `_expand_monte_carlo` (which would index samples/corners
+    relative to that shard alone, not the unsharded request -- issue #906's
+    whole reason for `_explicit_points` instead of forwarding `corners`/
+    `monte_carlo` verbatim)."""
+    _write_body(tmp_path)
+    base = _remote_fleet_base_request(
+        corners={"temperature_c": [10, 20]},
+        monte_carlo={"n": 2, "seed": 20260812, "vary": "mismatch"},
+    )
+
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    local_request = _write_request(
+        tmp_path,
+        {k: v for k, v in base.items() if k not in ("backend", "remote")},
+        name="local.json",
+    )
+    local_report = sim.run_sim(str(local_request), backend="local")
+
+    remote_request = _write_request(tmp_path, base, name="remote.json")
+
+    remote_side_dir = tmp_path / "remote_side"
+    remote_side_dir.mkdir()
+    _install_fake_remote_transport(
+        monkeypatch,
+        remote_report_factory=_make_shard_remote_report_factory(remote_side_dir),
+    )
+    _fake_run_fleet_success(monkeypatch)
+
+    # 4 units (2 corners x 2 MC samples), 2 hosts -> 2 units/shard.
+    remote_report = sim.run_sim(str(remote_request), hosts=2)
+
+    local_seeds = [(c["corner_id"], c["monte_carlo"]) for c in local_report["corners"]]
+    remote_seeds = [
+        (c["corner_id"], c["monte_carlo"]) for c in remote_report["corners"]
+    ]
+    assert local_seeds == remote_seeds
+
+
+def test_run_sim_remote_fleet_lost_shard_reports_error_without_raising(
+    tmp_path, monkeypatch
+):
+    """A shard whose fleet dispatch never succeeds (both the initial attempt
+    and its one automatic retry failed) is reported as `lost_shard`
+    `status: "error"` corners for that shard's own units -- mirroring
+    `_run_sharded`'s local-backend lost-shard handling -- never raised, and
+    never prevents the other shard's units from being reported."""
+    _write_body(tmp_path)
+    base = _remote_fleet_base_request()
+
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    remote_request = _write_request(tmp_path, base, name="remote.json")
+
+    remote_side_dir = tmp_path / "remote_side"
+    remote_side_dir.mkdir()
+    _install_fake_remote_transport(
+        monkeypatch,
+        remote_report_factory=_make_shard_remote_report_factory(remote_side_dir),
+    )
+    _fake_run_fleet_with_lost_shard(monkeypatch, lost_shard_index=1)
+
+    remote_report = sim.run_sim(str(remote_request), hosts=2)
+
+    assert remote_report["corner_count"] == 4
+    lost = [
+        c
+        for c in remote_report["corners"]
+        if any(d["code"] == "lost_shard" for d in c["diagnostics"])
+    ]
+    assert len(lost) == 2
+    assert all(c["status"] == "error" for c in lost)
+    fleet = remote_report["environment"]["remote"]["fleet"]
+    assert fleet[0] is not None  # shard 0 dispatched fine
+    assert fleet[1] is None  # shard 1 is the lost one
+
+
+def test_run_sim_remote_fleet_over_units_raises_before_run_fleet(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    base = _remote_fleet_base_request(corners={"temperature_c": [10, 20]})
+    request = _write_request(tmp_path, base)
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("run_fleet must not be called when hosts > units")
+
+    monkeypatch.setattr(sim.remote_fleet, "run_fleet", _unexpected)
+
+    with pytest.raises(sim.SimError, match="exceeds the number of units"):
+        sim.run_sim(str(request), hosts=3)
 
 
 # --------------------------------------------------------------------------- #

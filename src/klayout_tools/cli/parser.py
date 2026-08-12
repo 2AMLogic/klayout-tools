@@ -43,6 +43,7 @@ from . import (
     stats_cmd,
     synthesize_cmd,
     trajectory_cmd,
+    yield_campaign_cmd,
     yield_cmd,
 )
 
@@ -1748,6 +1749,111 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(yield_parser)
     yield_parser.set_defaults(func=yield_cmd.run)
+
+    yield_campaign_parser = subparsers.add_parser(
+        "yield-campaign",
+        help="launch + analyse a Monte Carlo yield campaign from a spec",
+        description=(
+            "Launch and manage a Monte Carlo yield campaign directly, "
+            "rather than requiring a pre-run `klt sim` report -- issue #906, "
+            "Phase 2a of the statistical/yield epic #710. A campaign spec is "
+            "a `klt sim` request document with a mandatory `monte_carlo` "
+            "block; seeds are derived deterministically when omitted so the "
+            "same spec re-run reproduces the same sample set, dispatch "
+            "reuses `klt sim`'s own `--backend`/`--hosts` (Epic #375's "
+            "shard/merge engine, including a real EC2 fleet for `backend: "
+            '"remote"` + `hosts > 1`), and the resulting `klt sim` report '
+            "is analysed by `klt yield`'s own unmodified Phase 1 pipeline -- "
+            "see docs/cli/yield.md's 'Campaign orchestration' section."
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "spec", help="path to a campaign spec JSON file; see docs/cli/yield.md"
+    )
+    yield_campaign_parser.add_argument(
+        "-o",
+        "--out-dir",
+        dest="out_dir",
+        default=None,
+        help=(
+            "directory to write the dispatched `klt sim` request, its "
+            "report, and artifacts into (default: a `.klt/yield-campaign/` "
+            "directory next to the spec file)"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--backend",
+        default=None,
+        help=(
+            "execution backend for the campaign's `klt sim` dispatch "
+            "(default: local, or the spec's own `backend` field); see "
+            "docs/cli/sim.md"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--hosts",
+        dest="hosts",
+        type=int,
+        default=None,
+        help=(
+            "shard the campaign's corner/Monte-Carlo-sample grid across "
+            "this many hosts (default: 1, or the spec's own `remote.hosts` "
+            "field); see docs/cli/sim.md's 'Fleet sharding' section"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "override the campaign's Monte Carlo seed (default: the spec's "
+            "own `monte_carlo.seed`, or one derived deterministically from "
+            "the spec's own content)"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--confidence",
+        type=float,
+        default=None,
+        help=(
+            "two-sided confidence level for every reported interval, "
+            "strictly between 0 and 1 (default: 0.95, or the spec's own "
+            "'confidence' field)"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--target-ci-halfwidth",
+        dest="target_ci_halfwidth",
+        type=float,
+        default=None,
+        help=(
+            "half-width, in absolute yield, the sample-size verdict is "
+            "measured against (default: 0.01, or the spec's own "
+            "'target_ci_halfwidth' field)"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--min-samples",
+        dest="min_samples",
+        type=int,
+        default=None,
+        help=(
+            "minimum usable samples per measurement (default: 2, or the "
+            "spec's own 'min_samples' field)"
+        ),
+    )
+    yield_campaign_parser.add_argument(
+        "--measurement",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "restrict the analysis to this measurement; repeatable, and "
+            "comma-separated names are accepted"
+        ),
+    )
+    _add_format_arg(yield_campaign_parser)
+    yield_campaign_parser.set_defaults(func=yield_campaign_cmd.run)
 
     return parser
 

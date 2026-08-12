@@ -63,7 +63,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any
 
-from . import remote_transport
+from . import remote_fleet, remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from .pdk import PdkNotFoundError, find_pdk
@@ -499,13 +499,26 @@ def run_sim(
     decision 4). Defaults to ``1`` when both are omitted, which is exactly
     today's single-host behaviour -- byte-identical, not just
     "equivalent" -- so every existing request/response is unaffected. Must
-    be a positive integer when given explicitly. ``hosts > 1`` is currently
-    only implemented for the ``local``/``local-parallel`` backends (see
-    :func:`_run_sharded`); pairing it with backend ``remote`` raises
-    :class:`SimError` today -- the fleet launch lifecycle that shards a
-    *remote* run across real hosts is Epic #375 Phase 1B (#377), which
-    plugs its own per-shard runner into the same merge engine this
-    implements.
+    be a positive integer when given explicitly, and (for backend
+    ``remote`` only) no greater than the number of units to dispatch --
+    an idle fleet member would still be billed.
+
+    For ``local``/``local-parallel``, ``hosts > 1`` fans the already-expanded,
+    already-seeded ``CornerPoint`` list across a thread pool in this same
+    process (:func:`_run_sharded`, Epic #375 Phase 1A/#376) -- no new
+    execution path, just a concurrency seam one level above the worker pool
+    itself. For backend ``remote``, ``hosts > 1`` instead provisions ``hosts``
+    real EC2 instances through :func:`_run_remote_fleet`, reusing Epic #375
+    Phase 1B's fleet launch lifecycle (:mod:`klayout_tools.remote_fleet`,
+    #377) unmodified for the K-instance launch, fleet-level cost gate, vCPU
+    quota pre-check, one-shard retry, and guaranteed teardown-all -- this is
+    that lifecycle's first real caller (issue #906). Each shard is pushed its
+    own already-expanded, already-seeded slice of the corner/Monte-Carlo unit
+    list (never re-derived on the remote box from ``corners``/``monte_carlo``
+    ranges, which would risk two shards disagreeing about which points are
+    whose, or reseeding a point differently than an unsharded run would have)
+    -- see :func:`_corner_points_to_wire` and ``_build_remote_request``'s
+    ``explicit_points`` parameter.
 
     ``budget_s`` bounds the **whole sweep's** wall-clock time, overriding the
     request's own ``options.wall_clock_budget_s`` when given (the
@@ -566,13 +579,6 @@ def run_sim(
     )
     if not isinstance(hosts, int) or isinstance(hosts, bool) or hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
-    if hosts > 1 and backend == "remote":
-        raise SimError(
-            "remote.hosts > 1 is not yet supported for backend 'remote' -- "
-            "sharding a live remote fleet is Epic #375 Phase 1B (#377); "
-            "use hosts=1 (the default) with backend 'remote', or hosts>1 "
-            "with 'local'/'local-parallel'"
-        )
 
     netlist_ref = request["netlist"]
     netlist_path = _resolve_relative(netlist_ref, request_dir)
@@ -672,7 +678,20 @@ def run_sim(
     monte_carlo_spec = request.get("monte_carlo")
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
-    if monte_carlo_spec is not None:
+    explicit_points_wire = request.get("_explicit_points")
+    if explicit_points_wire is not None:
+        # Internal-only escape hatch: never set by an external caller or the
+        # CLI, only by this same module's own `_run_remote_fleet` when it
+        # builds one fleet shard's pushed request (issue #906). The
+        # orchestrating process has already expanded `corners`/`monte_carlo`
+        # and sliced out exactly this shard's points (with their seeds
+        # already derived); re-deriving from `corners_spec`/`monte_carlo_spec`
+        # on the remote box here would risk this shard disagreeing with a
+        # sibling shard about which points are whose, or deriving different
+        # seeds than an unsharded run of the same request would have. See
+        # `_corner_points_to_wire`/`_corner_points_from_wire`.
+        corner_points = _corner_points_from_wire(explicit_points_wire)
+    elif monte_carlo_spec is not None:
         corner_points, monte_carlo_info = _expand_monte_carlo(
             corner_points, monte_carlo_spec
         )
@@ -770,6 +789,25 @@ def run_sim(
             deadline=deadline,
             initial_ppid=initial_ppid,
             checkpoint=checkpoint,
+        )
+    elif backend == "remote":
+        # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
+        # issue #906) -- distinct from the generic `_run_sharded` seam below,
+        # which just re-invokes the already-selected backend per shard
+        # in-process. A `remote` shard instead needs its own provisioned
+        # instance, guardrails, and teardown, which `_run_remote_fleet`
+        # gets from `remote_fleet.run_fleet` unmodified -- see this
+        # function's docstring on `hosts`.
+        corners_new, backend_engine_version, remote_environment = _run_remote_fleet(
+            corner_points=dispatch_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=artifacts_dir,
+            request=request,
+            hosts=hosts,
+            measurements_spec=measurements_spec,
         )
     else:
 
@@ -1132,6 +1170,56 @@ def _parse_process_entry(entry: Any) -> tuple[str | None, list[str] | None]:
         "corners.process entries must be a string or an object "
         '{"name": str, "sections": list[str]}'
     )
+
+
+# --------------------------------------------------------------------------- #
+# CornerPoint <-> JSON wire format (issue #906's remote-fleet shard dispatch)
+# --------------------------------------------------------------------------- #
+
+
+def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
+    """Serialise a ``list[CornerPoint]`` verbatim, including any already-
+    derived Monte Carlo seed, to the internal ``request["_explicit_points"]``
+    wire shape a remote fleet shard's pushed request carries -- see
+    ``_build_remote_request``'s ``explicit_points`` parameter and this
+    module's ``_corner_points_from_wire`` counterpart.
+    """
+    return [
+        {
+            "process": point.process,
+            "process_sections": point.process_sections,
+            "supply_v": point.supply_v,
+            "temperature_c": point.temperature_c,
+            "sample_index": point.sample_index,
+            "mc_seed": point.mc_seed,
+        }
+        for point in points
+    ]
+
+
+def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
+    """Inverse of :func:`_corner_points_to_wire` -- reconstructs the exact
+    ``CornerPoint`` list a fleet shard was handed, seeds included, so a
+    remote box's own ``run_sim`` never re-derives (and could never
+    disagree about) which points are its own.
+    """
+    if not isinstance(data, list):
+        raise SimError("request._explicit_points must be an array")
+    points = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            raise SimError("request._explicit_points entries must be objects")
+        points.append(
+            CornerPoint(
+                entry.get("process"),
+                entry.get("supply_v") or {},
+                entry.get("temperature_c"),
+                process_sections=entry.get("process_sections"),
+                sample_index=entry.get("sample_index"),
+                mc_seed=entry.get("mc_seed"),
+            )
+        )
+    return points
 
 
 def _expand_corners(
@@ -2155,7 +2243,8 @@ def _run_remote(
 
     started = time.monotonic()
     info: dict[str, Any] | None = None
-    remote_report: dict[str, Any] | None = None
+    corners: list[dict[str, Any]] | None = None
+    engine_version: str | None = None
     try:
         with launcher:
             info = launcher.provision()
@@ -2171,62 +2260,27 @@ def _run_remote(
             )
             spin_up_s = round(time.monotonic() - started, 3)
 
-            remote_job_dir = remote_transport.job_dir(ssh_user, job_id)
-            remote_request = _build_remote_request(
-                request,
+            corners, engine_version = _run_remote_dispatch(
+                launcher=launcher,
+                public_ip=public_ip,
+                corner_points=corner_points,
+                netlist_path=netlist_path,
                 timeout_s=timeout_s,
                 keep_artifacts=keep_artifacts,
                 want_waveforms=want_waveforms,
-            )
-            job = _build_remote_job_description(remote_request, netlist_path)
-            remote_transport.push_job(
-                host=public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                remote_job_dir=remote_job_dir,
-                job=job,
-            )
-            remote_report = remote_transport.run_remote_job(
-                host=public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                remote_job_dir=remote_job_dir,
-                job=job,
-                timeout_s=remote_spec.get(
+                artifacts_dir=artifacts_dir,
+                request=request,
+                ssh_user=ssh_user,
+                ssh_key_path=ssh_key_path,
+                ssh_run_timeout_s=remote_spec.get(
                     "ssh_timeout_s",
                     _default_remote_run_timeout_s(len(corner_points), timeout_s),
                 ),
             )
-            if keep_artifacts:
-                remote_transport.pull_artifacts(
-                    host=public_ip,
-                    user=ssh_user,
-                    identity_file=ssh_key_path,
-                    remote_job_dir=remote_job_dir,
-                    local_artifacts_dir=artifacts_dir,
-                    job=job,
-                )
-            remote_transport.cleanup_job(
-                host=public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                remote_job_dir=remote_job_dir,
-            )
     except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
         raise SimError(f"remote backend failed: {exc}") from exc
 
-    assert info is not None and remote_report is not None  # provision()/run succeeded
-
-    corners = remote_report.get("corners", [])
-    if keep_artifacts:
-        _rewrite_remote_artifact_paths(
-            corners,
-            remote_root=remote_transport.artifacts_root(
-                remote_job_dir, job.artifacts_relative_dir
-            ),
-            local_root=artifacts_dir,
-        )
-    engine_version = (remote_report.get("environment") or {}).get("engine_version")
+    assert info is not None and corners is not None  # provision()/run succeeded
 
     remote_environment = {
         "provider": info["provider"],
@@ -2242,12 +2296,98 @@ def _run_remote(
     return corners, engine_version, remote_environment
 
 
+def _run_remote_dispatch(
+    *,
+    launcher: RemoteLauncher,
+    public_ip: str,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    artifacts_dir: str,
+    request: dict[str, Any],
+    ssh_user: str,
+    ssh_key_path: str,
+    ssh_run_timeout_s: float,
+    explicit_points: list[CornerPoint] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Push, run, and (when ``keep_artifacts``) pull one job's worth of
+    corners against an already-provisioned, SSH-reachable remote host --
+    the shared body of the single-host ``remote`` backend
+    (:func:`_run_remote`, which provisions its own ``launcher`` first) and
+    a real fleet's per-shard dispatch (:func:`_run_remote_fleet`, whose
+    ``launcher``/``public_ip`` come from :func:`remote_fleet.run_fleet`'s
+    already-provisioned fleet member).
+
+    ``explicit_points`` -- when given -- is threaded through to
+    :func:`_build_remote_request` so the pushed request carries exactly
+    this call's own ``corner_points`` (with their already-derived Monte
+    Carlo seeds) rather than re-expanding from the caller's ``corners``/
+    ``monte_carlo`` request fields; see that parameter's own docstring.
+    ``_run_remote`` never passes it (a single host always runs the whole
+    matrix); ``_run_remote_fleet`` always does (one shard's own slice).
+    """
+    remote_job_dir = remote_transport.job_dir(ssh_user, launcher.job_id)
+    remote_request = _build_remote_request(
+        request,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        explicit_points=explicit_points,
+    )
+    job = _build_remote_job_description(remote_request, netlist_path)
+    remote_transport.push_job(
+        host=public_ip,
+        user=ssh_user,
+        identity_file=ssh_key_path,
+        remote_job_dir=remote_job_dir,
+        job=job,
+    )
+    remote_report = remote_transport.run_remote_job(
+        host=public_ip,
+        user=ssh_user,
+        identity_file=ssh_key_path,
+        remote_job_dir=remote_job_dir,
+        job=job,
+        timeout_s=ssh_run_timeout_s,
+    )
+    if keep_artifacts:
+        remote_transport.pull_artifacts(
+            host=public_ip,
+            user=ssh_user,
+            identity_file=ssh_key_path,
+            remote_job_dir=remote_job_dir,
+            local_artifacts_dir=artifacts_dir,
+            job=job,
+        )
+    remote_transport.cleanup_job(
+        host=public_ip,
+        user=ssh_user,
+        identity_file=ssh_key_path,
+        remote_job_dir=remote_job_dir,
+    )
+
+    corners = remote_report.get("corners", [])
+    if keep_artifacts:
+        _rewrite_remote_artifact_paths(
+            corners,
+            remote_root=remote_transport.artifacts_root(
+                remote_job_dir, job.artifacts_relative_dir
+            ),
+            local_root=artifacts_dir,
+        )
+    engine_version = (remote_report.get("environment") or {}).get("engine_version")
+    return corners, engine_version
+
+
 def _build_remote_request(
     request: dict[str, Any],
     *,
     timeout_s: float,
     keep_artifacts: bool,
     want_waveforms: bool,
+    explicit_points: list[CornerPoint] | None = None,
 ) -> dict[str, Any]:
     """Build the request document pushed to the remote host: a copy of the
     caller's own request with ``backend`` forced to ``local-parallel`` (per
@@ -2263,11 +2403,28 @@ def _build_remote_request(
     "Remote backend" section for this constraint). ``options.max_workers`` is
     dropped so the remote run resolves its own default from that box's own
     CPU count (see ``_run_remote``'s docstring).
+
+    ``explicit_points`` (issue #906's fleet-shard wiring) -- when given --
+    replaces ``corners``/``monte_carlo``/``exclude`` with the internal
+    ``_explicit_points`` wire field (:func:`_corner_points_to_wire`) instead
+    of forwarding them verbatim, so the remote box's own ``run_sim`` runs
+    *exactly* this caller's ``corner_points`` (see ``run_sim``'s handling of
+    ``request["_explicit_points"]``) rather than re-expanding the whole
+    matrix from ranges -- correct only when the whole matrix is meant to run
+    on one host, which a fleet shard is not. ``None`` (the default,
+    ``_run_remote``'s own case) forwards ``corners``/``monte_carlo``
+    unchanged, exactly as before this parameter existed.
     """
     remote_request = dict(request)
     remote_request.pop("remote", None)
     remote_request["backend"] = "local-parallel"
     remote_request["netlist"] = remote_transport.REMOTE_NETLIST_FILENAME
+
+    if explicit_points is not None:
+        remote_request.pop("corners", None)
+        remote_request.pop("monte_carlo", None)
+        remote_request.pop("exclude", None)
+        remote_request["_explicit_points"] = _corner_points_to_wire(explicit_points)
 
     options = dict(request.get("options") or {})
     options["timeout_s"] = timeout_s
@@ -2276,6 +2433,172 @@ def _build_remote_request(
     options.pop("max_workers", None)
     remote_request["options"] = options
     return remote_request
+
+
+# --------------------------------------------------------------------------- #
+# Remote fleet dispatch (Epic #375 Phase 1B, #377; wired into `klt sim` by
+# issue #906, Phase 2 of the statistical/yield epic #710)
+# --------------------------------------------------------------------------- #
+
+
+def _run_remote_fleet(
+    *,
+    corner_points: list[CornerPoint],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    artifacts_dir: str,
+    request: dict[str, Any],
+    hosts: int,
+    measurements_spec: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The ``remote`` backend's ``hosts > 1`` dispatch: provision ``hosts``
+    real EC2 instances through :func:`remote_fleet.run_fleet` -- the K-host
+    launch, fleet-level cost gate, vCPU quota pre-check, one-shard retry, and
+    guaranteed teardown-all Epic #375 Phase 1B (#377) already ships and
+    already tests, reused here unmodified rather than reimplemented. This is
+    that lifecycle's first real caller (issue #906, Phase 2 of the
+    statistical/yield epic #710 -- driving an MC campaign's corner x
+    Monte-Carlo-sample grid across the fleet).
+
+    Slices ``corner_points`` into ``hosts`` contiguous shards
+    (:func:`_shard_corner_points`, #376) and gives each shard its own
+    ``ShardRunner`` closure that -- once :class:`remote_fleet.FleetLauncher`
+    hands it an already-provisioned, SSH-reachable instance -- pushes,
+    runs, and (when ``keep_artifacts``) pulls exactly that shard's slice
+    via :func:`_run_remote_dispatch`'s ``explicit_points`` path (never the
+    whole matrix -- see that function's docstring on why a fleet shard
+    cannot reuse the single-host ``remote`` backend's own re-expand-on-the-
+    box behavior). A lost shard (both the initial attempt and its one
+    automatic retry failed) is reported the same way :func:`_run_sharded`
+    reports one for a local backend: every one of its units gets a
+    ``status: "error"``/``lost_shard`` corner report
+    (:func:`_lost_shard_corner`) rather than aborting the fleet.
+
+    ``hosts`` exceeding ``len(corner_points)`` is rejected up front (unlike
+    the local shard/merge engine, which just runs an empty shard's worth of
+    nothing) -- an idle fleet member is still billed, so there is no benign
+    reading of "more hosts than units" here.
+    """
+    if hosts > len(corner_points):
+        raise SimError(
+            f"remote.hosts ({hosts}) exceeds the number of units to "
+            f"dispatch ({len(corner_points)}) -- an idle fleet member would "
+            "still be billed; use hosts <= corner/sample count"
+        )
+
+    remote_spec = request.get("remote") or {}
+    region = remote_spec.get("region")
+    pdk = (request.get("models") or {}).get("pdk")
+    if not pdk:
+        raise SimError(
+            "backend 'remote' requires request.models.pdk (selects which "
+            "baked-AMI PDK to provision -- see "
+            "remote_launcher.SUPPORTED_PDKS and docs/cli/sim.md)"
+        )
+    if not region:
+        raise SimError("backend 'remote' requires request.remote.region")
+    ssh_key_path = remote_spec.get("ssh_key_path")
+    if not ssh_key_path:
+        raise SimError(
+            "backend 'remote' requires request.remote.ssh_key_path (local "
+            "private key matching request.remote.key_name, used to SSH/SCP "
+            "into every provisioned instance)"
+        )
+    ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+
+    shards = _shard_corner_points(corner_points, hosts)
+    job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
+
+    def _shard_runner(
+        shard_index: int, launcher: RemoteLauncher, public_ip: str
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        shard_points = shards[shard_index]
+        remote_transport.wait_for_ssh(
+            public_ip,
+            user=ssh_user,
+            identity_file=ssh_key_path,
+            timeout_s=remote_spec.get(
+                "ssh_ready_timeout_s", _REMOTE_SSH_READY_TIMEOUT_S
+            ),
+            poll_interval_s=_REMOTE_SSH_POLL_INTERVAL_S,
+        )
+        shard_artifacts_dir = (
+            os.path.join(artifacts_dir, f"shard{shard_index}")
+            if keep_artifacts
+            else artifacts_dir
+        )
+        return _run_remote_dispatch(
+            launcher=launcher,
+            public_ip=public_ip,
+            corner_points=shard_points,
+            netlist_path=netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=shard_artifacts_dir,
+            request=request,
+            ssh_user=ssh_user,
+            ssh_key_path=ssh_key_path,
+            ssh_run_timeout_s=remote_spec.get(
+                "ssh_timeout_s",
+                _default_remote_run_timeout_s(len(shard_points), timeout_s),
+            ),
+            explicit_points=shard_points,
+        )
+
+    try:
+        fleet_result = remote_fleet.run_fleet(
+            region=region,
+            pdk=pdk,
+            shard_unit_counts=[len(shard) for shard in shards],
+            shard_runner=_shard_runner,
+            job_id_prefix=job_id_prefix,
+            spot=remote_spec.get("spot", True),
+            max_hourly_cost_usd=remote_spec.get("max_hourly_cost_usd"),
+            launcher_cidr=remote_spec.get("launcher_cidr"),
+            security_group_id=remote_spec.get("security_group_id"),
+            key_name=remote_spec.get("key_name"),
+            subnet_id=remote_spec.get("subnet_id"),
+            manifest_path=remote_spec.get("ami_manifest"),
+        )
+    except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
+        raise SimError(f"remote fleet backend failed: {exc}") from exc
+
+    corners: list[dict[str, Any]] = []
+    engine_version: str | None = None
+    fleet: list[dict[str, Any] | None] = []
+    for shard_points, outcome in zip(shards, fleet_result.shards, strict=True):
+        if outcome.status != "ok":
+            corners.extend(
+                _lost_shard_corner(
+                    point, measurements_spec, f"shard lost: {outcome.error}"
+                )
+                for point in shard_points
+            )
+            fleet.append(None)
+            continue
+        shard_corners, shard_engine_version = outcome.result
+        corners.extend(shard_corners)
+        if shard_engine_version is not None:
+            engine_version = shard_engine_version
+        info = outcome.environment or {}
+        fleet.append(
+            {
+                "provider": info.get("provider"),
+                "region": info.get("region"),
+                "instance_type": info.get("instance_type"),
+                "instance_id": info.get("instance_id"),
+                "spot": info.get("spot"),
+                "estimated_hourly_cost_usd": info.get("estimated_hourly_cost_usd"),
+                "ami_id": info.get("ami_id"),
+                "pdk_snapshot": info.get("pdk_snapshot"),
+                "attempts": outcome.attempts,
+            }
+        )
+
+    return corners, engine_version, {"fleet": fleet}
 
 
 #: `klt sim`'s own remote-command exit codes that still mean "the sweep ran
