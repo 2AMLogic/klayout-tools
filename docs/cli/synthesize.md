@@ -8,7 +8,9 @@ flow").
 
 ```
 klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
-    [--verify-equivalence] [--equiv-timeout-s SECONDS] [--format text|json]
+    [--verify-equivalence] [--equiv-timeout-s SECONDS] \
+    [--restructure-timing] [--restructure-max-iterations N] \
+    [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -41,7 +43,18 @@ flag line carries cleanly — not positional RTL file args.
   "Equivalence gate" below.
 - `--equiv-timeout-s` — overall wall-clock timeout in seconds for the
   `--verify-equivalence` proof (default: `klt equiv`'s own `60`); no effect
-  unless `--verify-equivalence` is given.
+  unless `--verify-equivalence` is given. Also bounds the `klt equiv` check
+  `--restructure-timing` runs on any netlist it actually resizes.
+- `--restructure-timing` — close (or reduce) a setup violation on the
+  native `sta` critical path via a bounded cell-resizing loop, when it
+  exceeds `constraints.clock_period_ns`. Requires
+  `constraints.clock_period_ns` and a working `sta` stage; either missing
+  is a hard failure (exit 1). Off by default. See "Timing-driven
+  restructuring" below.
+- `--restructure-max-iterations` — cap on the number of resize attempts
+  `--restructure-timing` makes (default:
+  `klayout_tools.restructure.DEFAULT_MAX_ITERATIONS`, `8`); no effect
+  unless `--restructure-timing` is given.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -390,6 +403,103 @@ this stage, so `klt synthesize` behaves exactly as it did before #925 and
 simply reports `"sta": null`. This mirrors `timing`'s own "no number to
 report" discipline.
 
+## Timing-driven restructuring
+
+[Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 3
+(issue #926): `--restructure-timing` closes — or reduces — a setup
+violation on the `sta` stage's `worst_path`, using a **bounded cell-resizing
+loop** (`klayout_tools.restructure.restructure_for_timing`). Off by default,
+additive/opt-in like `--verify-equivalence`.
+
+**Technique.** Each iteration finds the highest-contribution cell on the
+current worst path (the hop whose `arrival_ns` jumped the most relative to
+the previous hop), looks up same-family, higher-drive-strength variants in
+the resolved liberty (the `<family>_<drive-strength-integer>` naming
+convention `synthesize.py`'s own `_ABC_CONSTR_INPUTS`/`_TIE_CELLS` tables
+already document — e.g. `sky130_fd_sc_hd__buf_1` → `__buf_2`), verifies the
+candidate is genuinely **pin-compatible** (same pin names/directions,
+checked against the liberty — never assumed from the naming convention
+alone), swaps the *one* matching instantiation line in a copy of the
+netlist, and re-measures the whole-netlist critical path via the same
+`compute_critical_path` call the `sta` stage itself uses. A candidate is
+kept only if it strictly reduces the worst-path delay. Buffer insertion and
+re-mapping (the acceptance criteria's two named extensions) are **not**
+implemented in this increment — cell resizing is the minimum-bar technique
+this issue requires.
+
+**Bounded, never unbounded.** The loop stops — reporting `converged` plus a
+`gave_up_reason` — the moment it meets the target, runs out of resizable
+candidates, produces a non-improving candidate, or reaches
+`--restructure-max-iterations` (default `8`). It never loops indefinitely.
+
+**Requires an explicit target and a working `sta` stage.** Unlike `sta`
+itself (which degrades to `null` on a missing extension so an *optional*
+stage never breaks a run), `--restructure-timing` was explicitly requested,
+so either of these missing is a **hard failure** (exit 1), never a silent
+no-op:
+
+- `constraints.clock_period_ns` must be set — this is the target period the
+  loop restructures against (converted from the same value that already
+  feeds ABC's own `-D` delay target, in nanoseconds here rather than
+  picoseconds).
+- The `sta` stage must have produced a result (the optional
+  `klt_statime_native` extension must be installed and able to analyze the
+  mapped netlist).
+
+**Validated by `klt equiv` before it is ever handed back** (acceptance
+criterion 3): whenever the loop actually applies at least one resize, the
+resulting netlist is checked against the same source RTL via `klt equiv`
+— reusing the same combinational-only scope, request contract, and hard
+"non-equivalent verdict fails the run" discipline `--verify-equivalence`
+already has (see "Equivalence gate" below), written to a **separate**
+`equiv_request_<top>_restructured.json` request file so both gates can be
+requested in the same run without clobbering each other's artifact. A
+resize this gate cannot prove equivalent is never returned — cell resizing
+changes only electrical properties (drive strength), never logic, but this
+gate is what makes that guarantee load-bearing rather than assumed. When the
+loop applies no resize at all (already meets the target, or gives up before
+ever writing a candidate), no `klt equiv` check runs — there is nothing new
+to verify.
+
+**Response shape** — the `restructuring` field, `null` unless
+`--restructure-timing` was given:
+
+```json
+"restructuring": {
+  "target_period_ns": 3.0,
+  "max_iterations": 8,
+  "initial_worst_path_delay_ns": 4.4642972825718,
+  "final_worst_path_delay_ns": 2.9,
+  "converged": true,
+  "iterations_used": 1,
+  "gave_up_reason": null,
+  "resizes_applied": [
+    {"instance": "_377_", "from_cell": "sky130_fd_sc_hd__xnor2_1", "to_cell": "sky130_fd_sc_hd__xnor2_2"}
+  ],
+  "restructured_netlist_path": "/abs/path/.klt/synthesize/gcd_synth_restructured.v",
+  "equivalence": {"status": "equivalent", "engine": "yosys", "engine_version": "0.67+post", "timeout_s": 60.0, "elapsed_s": 0.05, "artifacts": {"...": "..."}}
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `target_period_ns` | number | The target period restructured against — `constraints.clock_period_ns`, echoed in nanoseconds. |
+| `max_iterations` | integer | The resize-attempt cap this run used. |
+| `initial_worst_path_delay_ns` / `final_worst_path_delay_ns` | number | The `sta` stage's `worst_path.delay_ns` before and after restructuring — equal when no resize was ever kept. |
+| `converged` | boolean | `true` iff `final_worst_path_delay_ns <= target_period_ns`. |
+| `iterations_used` | integer | Resize attempts actually made (including a final non-improving one that ended the loop), never more than `max_iterations`. |
+| `gave_up_reason` | string \| null | `null` when `converged` is `true`; otherwise why the loop stopped short — no candidate available, a non-improving candidate, an unanalyzable candidate, or the iteration cap. |
+| `resizes_applied` | array | `{instance, from_cell, to_cell}` per resize actually kept, in order; empty if none. |
+| `restructured_netlist_path` | string \| null | The resized netlist's path when `resizes_applied` is non-empty, else `null`. **This is the netlist-handoff contract for #700 (`klt par`)**: once that epic reaches its own timing phase, it should prefer this path over the plain `netlist_path` whenever it is non-`null`, falling back to `netlist_path` otherwise — the same additive-sibling posture `sta` already has relative to `timing`. |
+| `equivalence` | object \| null | Same shape as the top-level `equivalence` field (see "Equivalence gate" below), `null` unless a resize was actually applied. A non-`"equivalent"` verdict never reaches this field — it is a `SynthesizeError` instead. |
+
+**Known limitations**, inherited from the `sta` stage this loop measures
+against: no wire delay/parasitics, no SDC/`create_clock` (the "target" is a
+plain period, not a real clock constraint), and **hold-time closure is not
+modeled at all** — the engine reports only the worst (longest) path, never
+a minimum-delay check, so despite this issue's "setup/hold" framing, this
+increment addresses setup only.
+
 ## Equivalence gate
 
 [Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 1:
@@ -451,7 +561,7 @@ section and Out of scope below.
 | `hdl_toplevel` | string | The design's top module name. Required. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
-| `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. |
+| `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
 
 **`clock_period_ns: null` (or omitted) is a defined state, not a fallback.**
 The run still passes `-constr`, so ABC's `buffer`/`upsize`/`dnsize` sizing
@@ -506,7 +616,8 @@ caller decision rather than something this command should pick.
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
     "input": { "content_hash": "sha256:<hex>" }
   },
-  "equivalence": null
+  "equivalence": null,
+  "restructuring": null
 }
 ```
 
@@ -526,13 +637,14 @@ caller decision rather than something this command should pick.
 | `script_path` | string | The generated `.ys` script, an absolute path — kept as a debuggable artifact. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
+| `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Synthesis succeeded, netlist written (and, with `--verify-equivalence`, proven equivalent to its source RTL). |
-| `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), a Yosys/ABC engine error — or, with `--verify-equivalence`, a non-equivalent (`"counterexample"`) or inconclusive (timeout) `klt equiv` verdict against the produced netlist. |
+| `0` | Synthesis succeeded, netlist written (and, with `--verify-equivalence` and/or `--restructure-timing`, proven equivalent to its source RTL). |
+| `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), a Yosys/ABC engine error — or, with `--verify-equivalence`, a non-equivalent (`"counterexample"`) or inconclusive (timeout) `klt equiv` verdict against the produced netlist — or, with `--restructure-timing`, a missing `constraints.clock_period_ns`/`sta` stage, or a non-equivalent verdict against a netlist it actually resized. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 **No exit code `3`.** Matching `klt extract`'s reasoning exactly — there is
@@ -654,9 +766,20 @@ for the full seeded-mismatch demonstration.
   register-to-register paths, but is still wire-free and still models no
   clock at all — a path delay, never slack (see "`sta`" above). Real STA
   (wire RCs, slack against an SDC) is Phase 4's OpenROAD/OpenSTA step.
-- **Timing-*driven* synthesis.** `sta` is reported, not optimized against:
-  nothing in this command feeds the critical path back into the mapper.
-  That restructuring loop is issue #926's scope (Epic #704 Phase 3).
+- **Buffer insertion and re-mapping.** `--restructure-timing` (issue #926,
+  Epic #704 Phase 3) implements exactly one restructuring technique — cell
+  resizing to a faster same-family liberty variant. Buffer insertion and
+  re-mapping the violating path's cells (the acceptance criteria's two
+  named extensions) are not implemented in this increment.
+- **Hold-time closure.** The `sta` stage reports only the worst (longest)
+  path; there is no minimum-delay/short-path check, so
+  `--restructure-timing` addresses setup violations only, despite issue
+  #926's "setup/hold" framing.
+- **Direct #700 (`klt place-and-route`) integration.**
+  `--restructure-timing`'s `restructured_netlist_path` is a documented
+  handoff contract for a future timing phase of #700 to consume (see
+  "Timing-driven restructuring" above), not a live integration — #700 does
+  not read this field today.
 - **Place-and-route.** `netlist_path` is this command's own deliverable and
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
   contract's `netlist` request field) — this command does not floorplan,

@@ -480,6 +480,42 @@ not `klt --version`, if you need to detect this kind of drift.
   optimizing against this number rather than only reporting it — is #926's
   scope, not this change's.
 
+- 2026-08-12 — `klt synthesize` gains an opt-in `--restructure-timing` flag
+  (new `restructuring` response field, `null` unless given) that closes or
+  reduces a setup violation on the `sta` stage's `worst_path`, via a bounded
+  cell-resizing loop — issue #926, Epic #704 Phase 3, the last open phase of
+  that epic. Each iteration finds the highest-contribution cell on the
+  current worst path, looks up a same-family, higher-drive-strength,
+  pin-compatible variant in the resolved liberty (the
+  `<family>_<drive-strength-integer>` naming convention
+  `_ABC_CONSTR_INPUTS`/`_TIE_CELLS` already document), swaps the one
+  matching instantiation line, and re-measures via the same
+  `compute_critical_path` call `sta` itself uses -- keeping the resize only
+  if it strictly reduces the delay. Bounded: the loop stops -- reporting
+  `converged` plus a `gave_up_reason` -- once it meets
+  `constraints.clock_period_ns` (now required, along with a working `sta`
+  stage, whenever this flag is given -- either missing is a hard failure,
+  since the flag was explicitly requested), exhausts resizable candidates,
+  produces a non-improving candidate, or reaches
+  `--restructure-max-iterations` (default `8`); it never loops unboundedly.
+  Any resize actually applied is validated by `klt equiv` against the
+  source RTL before the run returns -- reusing `--verify-equivalence`'s own
+  combinational-only scope and hard "non-equivalent verdict fails the run"
+  discipline, via a separate `equiv_request_<top>_restructured.json` request
+  file so both gates can be requested together without clobbering each
+  other's artifact. The restructured netlist's path
+  (`restructuring.restructured_netlist_path`, `null` when no resize was
+  applied) is the documented netlist-handoff contract for #700
+  (`klt place-and-route`) to prefer once that epic reaches its own timing
+  phase -- #700 does not consume it yet, and this change does not require
+  #700 to be unblocked. Only cell resizing is implemented in this
+  increment; buffer insertion and re-mapping (the acceptance criteria's two
+  named extensions) are not, and hold-time closure is not modeled at all
+  (the `sta` stage reports only the worst/longest path, never a
+  minimum-delay check) -- see `docs/cli/synthesize.md`'s "Timing-driven
+  restructuring" section for the full scope and known limitations. Additive:
+  `sta`/`timing`/`equivalence` are unaffected, no `schema_version` bump.
+
 - 2026-08-12 — New verb `klt yield-sensitivity` ranks a completed Monte
   Carlo campaign's device/process parameters by their contribution to an
   output metric's variance — issue #923, Phase 3 of the statistical/yield

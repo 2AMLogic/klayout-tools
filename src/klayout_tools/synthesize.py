@@ -108,6 +108,20 @@ equivalent or inconclusive verdict is a hard :class:`SynthesizeError`, never
 a silent warning. Combinational designs only, matching ``klt equiv``'s own
 Phase 0 scope (#707) -- see ``docs/cli/synthesize.md``'s "Equivalence gate"
 section. This is Phase 1 of Epic #704.
+
+``restructure_timing`` (the CLI's ``--restructure-timing`` flag; issue #926,
+Epic #704 Phase 3) runs :func:`klayout_tools.restructure.restructure_for_timing`
+-- a bounded cell-resizing loop -- against the just-produced ``sta`` critical
+path whenever it exceeds ``constraints.clock_period_ns``, and reports the
+outcome in the response's ``restructuring`` field. Off by default
+(additive/opt-in, same posture as ``verify_equivalence``); requires both
+``constraints.clock_period_ns`` (the target to restructure against) and a
+working ``sta`` stage (the optional ``klt_statime_native`` extension) -- see
+:func:`_run_timing_restructuring` and ``docs/cli/synthesize.md``'s
+"Timing-driven restructuring" section. Any resize actually applied is
+validated by ``klt equiv`` against the same source RTL before it is ever
+handed back -- a restructured netlist that cannot be proven equivalent is a
+hard failure, never a silent "trust me" (acceptance criterion 3).
 """
 
 from __future__ import annotations
@@ -123,6 +137,7 @@ from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from .equiv import EquivError, run_equiv
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
+from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -357,6 +372,8 @@ def run_synthesize(
     pdk_root: str | None = None,
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
+    restructure_timing: bool = False,
+    restructure_max_iterations: int | None = None,
 ) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
 
@@ -387,7 +404,27 @@ def run_synthesize(
     this gate cannot prove faithful to its own source RTL is not "done".
     ``equiv_timeout_s`` (the CLI's ``--equiv-timeout-s``) overrides ``klt
     equiv``'s own default proof timeout; ``None`` leaves
-    :data:`klayout_tools.equiv.DEFAULT_TIMEOUT_S` in effect.
+    :data:`klayout_tools.equiv.DEFAULT_TIMEOUT_S` in effect. It also bounds
+    the ``klt equiv`` check ``restructure_timing`` runs, below.
+
+    ``restructure_timing`` (the CLI's ``--restructure-timing`` flag; issue
+    #926, Epic #704 Phase 3) runs a bounded cell-resizing loop
+    (:func:`klayout_tools.restructure.restructure_for_timing`) against the
+    ``sta`` stage's ``worst_path`` whenever it exceeds
+    ``constraints.clock_period_ns``. Requires ``constraints.clock_period_ns``
+    to be set and the ``sta`` stage to have produced a result (the optional
+    ``klt_statime_native`` extension must be installed) -- either being
+    missing is a hard :class:`SynthesizeError`, since the flag was
+    explicitly requested and there would be nothing to restructure against.
+    Any resize the loop actually applies is validated by ``klt equiv``
+    against the source RTL before the run returns (reusing the same
+    combinational-only scope ``verify_equivalence`` has); a non-equivalent
+    verdict is a hard failure, mirroring ``verify_equivalence``'s own "never
+    a silent warning" discipline. See the response's ``restructuring`` field
+    and ``docs/cli/synthesize.md``'s "Timing-driven restructuring" section.
+    ``restructure_max_iterations`` overrides
+    :data:`klayout_tools.restructure.DEFAULT_MAX_ITERATIONS`; ``None``
+    (default) leaves that default in effect.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
@@ -512,6 +549,22 @@ def run_synthesize(
             timeout_s=equiv_timeout_s,
         )
 
+    sta = _read_sta_timing(netlist_path, liberty_path, hdl_toplevel)
+
+    restructuring = None
+    if restructure_timing:
+        restructuring = _run_timing_restructuring(
+            netlist_path=netlist_path,
+            liberty_path=liberty_path,
+            hdl_toplevel=hdl_toplevel,
+            delay_target_ps=delay_target_ps,
+            sta=sta,
+            output_dir=output_dir,
+            resolved_sources=resolved_sources,
+            max_iterations=restructure_max_iterations,
+            equiv_timeout_s=equiv_timeout_s,
+        )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
@@ -529,11 +582,12 @@ def run_synthesize(
             sorted((module_stats.get("num_cells_by_type") or {}).items())
         ),
         "timing": _read_abc_timing(abc_log_path, delay_target_ps),
-        "sta": _read_sta_timing(netlist_path, liberty_path, hdl_toplevel),
+        "sta": sta,
         "netlist_path": netlist_path,
         "script_path": script_path,
         "provenance": provenance,
         "equivalence": equivalence,
+        "restructuring": restructuring,
     }
 
 
@@ -545,6 +599,7 @@ def _verify_synthesis_equivalence(
     netlist_path: str,
     liberty_path: str,
     timeout_s: float | None,
+    request_filename: str | None = None,
 ) -> dict[str, Any]:
     """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
     successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
@@ -563,7 +618,10 @@ def _verify_synthesis_equivalence(
     directory (the inline-JSON form's own relative-path anchor, per
     :func:`klayout_tools.equiv.load_request_arg`'s docs), which would
     silently scatter equivalence-check artifacts somewhere unrelated to the
-    request being synthesized.
+    request being synthesized. ``request_filename`` (default
+    ``equiv_request_<hdl_toplevel>.json``) lets a second caller in the same
+    run (:func:`_run_timing_restructuring`, checking a *different* netlist)
+    use a distinct file rather than overwriting ``verify_equivalence``'s own.
 
     Returns a small summary dict (attached to the response's
     ``equivalence`` field) on an ``"equivalent"`` verdict. Raises
@@ -575,7 +633,8 @@ def _verify_synthesis_equivalence(
     outside this MVP's combinational-only ``klt equiv`` scope).
     """
     equiv_request_path = os.path.join(
-        synthesize_output_dir, f"equiv_request_{hdl_toplevel}.json"
+        synthesize_output_dir,
+        request_filename or f"equiv_request_{hdl_toplevel}.json",
     )
     equiv_request = {
         "gold": {"sources": resolved_sources, "top": hdl_toplevel},
@@ -644,6 +703,96 @@ def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> s
     if log_path:
         message += f" -- see {log_path} for the full proof"
     return message
+
+
+def _run_timing_restructuring(
+    *,
+    netlist_path: str,
+    liberty_path: str,
+    hdl_toplevel: str,
+    delay_target_ps: int | None,
+    sta: dict[str, Any] | None,
+    output_dir: str,
+    resolved_sources: list[str],
+    max_iterations: int | None,
+    equiv_timeout_s: float | None,
+) -> dict[str, Any]:
+    """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
+    ``sta`` stage: runs
+    :func:`klayout_tools.restructure.restructure_for_timing`'s bounded
+    cell-resizing loop against ``constraints.clock_period_ns``
+    (``delay_target_ps``, converted back to nanoseconds -- the same unit
+    :func:`_resolve_delay_target_ps` converted *from*), and, if it actually
+    applied any resize, validates the result with ``klt equiv`` before
+    returning (issue #926 acceptance criterion 3).
+
+    Requires both ``delay_target_ps`` and ``sta`` to be present -- unlike
+    ``sta`` itself (which degrades to ``None`` on a missing extension so a
+    synthesis run is never broken by an *optional* stage), this flag was
+    *explicitly requested*, so a missing target or a missing/failed ``sta``
+    stage is a hard :class:`SynthesizeError` naming exactly what is missing,
+    never a silent no-op.
+
+    The restructured netlist (when any resize was applied) is written to
+    ``<hdl_toplevel>_synth_restructured.v`` alongside this run's other
+    ``.klt/synthesize/`` artifacts -- kept, like every other artifact this
+    command writes, as a debuggable file, never deleted -- and echoed back
+    as the report's own ``restructured_netlist_path``. This is the
+    netlist-handoff contract acceptance criterion 5 asks this issue to
+    document (see ``docs/cli/synthesize.md``'s "Timing-driven restructuring"
+    section): a future ``klt par`` (#700, once it reaches its own timing
+    phase) should prefer this path over the plain ``netlist_path`` whenever
+    it is non-``null``, and fall back to ``netlist_path`` otherwise --
+    exactly the same "additive sibling, never required" posture ``sta``
+    already has relative to ``timing``.
+    """
+    if delay_target_ps is None:
+        raise SynthesizeError(
+            "restructure_timing requires request.constraints.clock_period_ns "
+            "-- there is no target period to restructure against"
+        )
+    if sta is None:
+        raise SynthesizeError(
+            "restructure_timing requires a working sta stage, but it "
+            "produced no result -- install the klt_statime_native "
+            "extension (`uv sync --group statime`, or `maturin develop "
+            "--release` inside native/statime/) or check that the mapped "
+            "netlist/liberty pair can be analyzed"
+        )
+
+    target_period_ns = delay_target_ps / 1000.0
+    output_netlist_path = os.path.join(
+        output_dir, f"{hdl_toplevel}_synth_restructured.v"
+    )
+    kwargs: dict[str, Any] = {}
+    if max_iterations is not None:
+        kwargs["max_iterations"] = max_iterations
+
+    try:
+        report = restructure_for_timing(
+            netlist_path,
+            liberty_path,
+            hdl_toplevel,
+            target_period_ns,
+            output_netlist_path=output_netlist_path,
+            **kwargs,
+        )
+    except RestructureError as exc:
+        raise SynthesizeError(f"timing restructuring failed: {exc}") from exc
+
+    report["equivalence"] = None
+    if report["resizes_applied"]:
+        report["equivalence"] = _verify_synthesis_equivalence(
+            synthesize_output_dir=output_dir,
+            resolved_sources=resolved_sources,
+            hdl_toplevel=hdl_toplevel,
+            netlist_path=output_netlist_path,
+            liberty_path=liberty_path,
+            timeout_s=equiv_timeout_s,
+            request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
+        )
+
+    return report
 
 
 def _resolve_sources(sources: Any, request_dir: str) -> list[str]:

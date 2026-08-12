@@ -977,7 +977,37 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "overall wall-clock timeout in seconds for the `--verify-"
             "equivalence` proof (default: klt equiv's own 60s default); "
-            "has no effect unless `--verify-equivalence` is given."
+            "has no effect unless `--verify-equivalence` is given. Also "
+            "bounds the `klt equiv` check `--restructure-timing` runs."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--restructure-timing",
+        dest="restructure_timing",
+        action="store_true",
+        help=(
+            "close (or reduce) a setup violation on the native `sta` "
+            "critical path via a bounded cell-resizing loop, when it "
+            "exceeds `constraints.clock_period_ns`. Requires "
+            "`constraints.clock_period_ns` and a working `sta` stage (the "
+            "optional `klt_statime_native` extension) -- either missing is "
+            "a hard failure. Any applied resize is validated by `klt "
+            "equiv` before returning (combinational designs only, same "
+            "scope as `--verify-equivalence`); off by default (#926, Epic "
+            "#704 Phase 3). See docs/cli/synthesize.md's 'Timing-driven "
+            "restructuring' section."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--restructure-max-iterations",
+        dest="restructure_max_iterations",
+        type=int,
+        default=None,
+        help=(
+            "cap on the number of resize attempts `--restructure-timing` "
+            "makes (default: klayout_tools.restructure's own "
+            "DEFAULT_MAX_ITERATIONS); has no effect unless "
+            "`--restructure-timing` is given."
         ),
     )
     _add_format_arg(synthesize_parser)
