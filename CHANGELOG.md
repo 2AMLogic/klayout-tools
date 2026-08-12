@@ -519,6 +519,30 @@ not `klt --version`, if you need to detect this kind of drift.
   smaller sample budget (`native/yield/src/estimate.rs`'s own tests).
   Purely additive — `schema_version` stays at `1`. See
   `docs/cli/yield.md`'s "Sampling strategies (variance reduction)" section.
+- 2026-08-12 — New command `klt yield-campaign` launches and manages a
+  Monte Carlo yield campaign directly, rather than requiring a pre-run `klt
+  sim` report — issue #906, Phase 2a of the statistical/yield epic #710.
+  A campaign spec is a `klt sim` request document with a mandatory
+  `monte_carlo` block; a `monte_carlo.seed` omitted from the spec is
+  derived deterministically from the spec's own sampling-relevant content
+  (netlist/analysis/measurements/corners/`monte_carlo.n`/`vary`), so the
+  same spec re-run — on one host or sharded across a fleet — always
+  reproduces the same sample set. Dispatch is handed straight to `klt
+  sim`'s own `--backend`/`--hosts`, reusing Epic #375's shard/merge engine
+  for the corner x Monte-Carlo-sample grid unchanged, which this issue also
+  finishes wiring into `klt sim` itself: `backend: "remote"` with `hosts >
+  1` now provisions a real, guarded K-instance EC2 fleet
+  (`remote_fleet.run_fleet`, Epic #375 Phase 1B/#377) instead of raising
+  "not yet supported" — each shard is pushed its own already-expanded,
+  already-seeded slice of the unit list (`request._explicit_points`, an
+  internal wire field) rather than re-deriving from `corners`/`monte_carlo`
+  ranges on the remote box, so sharding never changes a unit's own value or
+  its derived seed. `klt yield-campaign`'s response is `klt yield`'s own
+  Phase 1 yield-report JSON, produced by that exact pipeline unmodified
+  against the resulting sample set, plus one added `campaign` provenance
+  block (resolved seed/source, requested samples, backend/hosts, sim
+  status). See `docs/cli/yield.md`'s "Campaign orchestration" section and
+  `docs/cli/sim.md`'s "Fleet sharding" section.
 
 - 2026-08-12 — `klt mom` gains port definition + de-embedding, reporting
   **de-embedded S-parameters** for the full-wave sweep's canonical two-port

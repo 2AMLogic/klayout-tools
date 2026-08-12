@@ -7,7 +7,10 @@ and a sample-size verdict. Phase 1a of the statistical/yield epic
 [#816](https://github.com/2AMLogic/klayout-tools/issues/816). Phase 1b
 ([#817](https://github.com/2AMLogic/klayout-tools/issues/817)) adds the two
 self-checks described below: a **negative control** and an **analytic
-cross-check**.
+cross-check**. Phase 2a ([#906](https://github.com/2AMLogic/klayout-tools/issues/906))
+adds `klt yield-campaign`, a sibling command that **launches and manages the
+MC campaign itself** — see "Campaign orchestration" below — rather than
+requiring a pre-run sample set.
 
 ```
 klt yield <samples> [--limits <file>] [--confidence <c>]
@@ -717,8 +720,9 @@ the variance-reduction estimators described in "Sampling strategies (variance
 reduction)" above — still dependency-free (no `rand` crate; the crate's own
 test suite ships a small seeded PRNG, test-only, to validate them against
 sampling noise rather than a noise-free quantile grid). Campaign
-orchestration (Phase 2a) and sensitivity ranking (Phase 3) are the remaining
-compute-bound work this core is positioned for.
+*orchestration* (Phase 2a, see "Campaign orchestration" below) is pure Python
+glue over `klt sim`/`remote_fleet` and needs none of it. Sensitivity ranking
+(Phase 3) is the remaining compute-bound work this core is positioned for.
 
 ## Building the native extension
 
@@ -768,6 +772,122 @@ cargo test
 feature; `native/yield/pyproject.toml`'s `[tool.maturin] features` turns it on
 for the wheel build only.
 
+## Campaign orchestration
+
+Phase 1 above consumes an **already-run** MC sample set. `klt yield-campaign`
+([#906](https://github.com/2AMLogic/klayout-tools/issues/906), Phase 2a of
+epic #710) closes the loop on the input side: it launches the campaign
+itself, then runs the exact Phase 1 pipeline above against the result --
+unmodified.
+
+```
+klt yield-campaign <spec.json> [-o|--out-dir <dir>] [--backend <name>]
+                   [--hosts <n>] [--seed <n>] [--confidence <c>]
+                   [--target-ci-halfwidth <h>] [--min-samples <n>]
+                   [--measurement <name>]... [--format text|json]
+```
+
+A distinct top-level verb, not a `klt yield` sub-subcommand -- mirrors `klt
+gen`/`klt gen-compose`'s split. `klt yield`'s own single-positional-argument
+shape (a sample-set/report path) is unchanged.
+
+### Campaign spec
+
+`<spec.json>` is a [`klt sim` request document](sim.md) with a **mandatory**
+`monte_carlo` block -- a spec without one is just a `klt sim` request; run
+`klt sim` directly instead. Every other field is exactly `klt sim`'s own
+schema: `netlist`, `analysis`, `measurements[]` (with each measurement's
+`limits.min`/`max`/`target_yield`, already a `klt sim` field -- yield's own
+pass/fail vocabulary needs no new one here), `corners` (device/PVT ranges;
+optional, defaults to a single nominal corner), `monte_carlo.vary`
+(`"process"`/`"mismatch"`/`"both"` -- the device-mismatch axis), `backend`,
+and `remote`. Three additional top-level fields are `klt yield`'s own
+run-level defaults, mirroring a `klt yield --limits` spec file's
+`confidence`/`target_ci_halfwidth`/`min_samples` (there is no separate
+limits file in this flow, so they live on the campaign spec's own top
+level):
+
+```json
+{
+  "netlist": "amp.sp",
+  "models": {"pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice"},
+  "analysis": {"kind": "tran", "args": "1n 1u"},
+  "measurements": [
+    {
+      "name": "vref",
+      "spice": ".meas tran vref FIND v(out) AT=1u",
+      "limits": {"min": 1.15, "max": 1.25, "target_yield": 0.99}
+    }
+  ],
+  "monte_carlo": {"n": 300, "vary": "mismatch"},
+  "confidence": 0.95,
+  "backend": "local-parallel"
+}
+```
+
+### Seed management
+
+If `monte_carlo.seed` is omitted, one is derived deterministically from the
+spec's own sampling-relevant content (netlist, analysis, measurements,
+corners, `monte_carlo.n`/`vary` -- never `backend`/`remote`/`options`, which
+affect *how* the campaign runs but never *what* is sampled). The exact same
+spec file, re-run any number of times -- on one host or sharded across a
+fleet -- reproduces the exact same sample set: this reuses `klt sim`'s own
+Monte Carlo seed contract (`docs/cli/sim.md`'s "Monte Carlo sampling")
+unchanged, deriving every per-sample seed from one base value. The resolved
+seed and its source (`"cli"`/`"spec"`/`"derived"`) are always echoed in the
+response's `campaign` block, so a derived seed is exactly as auditable as an
+explicit one. `--seed` overrides the spec's own `monte_carlo.seed` (or its
+derived default) for a caller that wants a specific value.
+
+### Dispatch
+
+`--backend`/`--hosts` override the spec's own `backend`/`remote.hosts`
+fields, the same precedence rule `klt sim --backend`/`--hosts` use, and are
+handed straight to `klt sim` -- this command adds no scheduling logic of its
+own. That means the campaign's corner x Monte-Carlo-sample grid is sharded
+exactly as any other `klt sim` sweep is (`docs/cli/sim.md`'s "Fleet
+sharding"): `local`/`local-parallel` shard in-process across a worker pool,
+and `backend: "remote"` with `hosts > 1` shards across a real, guarded
+EC2 fleet (Epic #375's K-instance launch, fleet-level cost gate, vCPU quota
+pre-check, and one-shard retry).
+
+### Collection
+
+The dispatched `klt sim` report -- already shaped exactly like any other
+`klt sim` Monte Carlo report -- is written to `<out-dir>/sample-set.json`
+and handed to the exact `klt yield` reader/pipeline described earlier in
+this document, unmodified: the same `klt sim` report auto-detection, the
+same distribution fit/CI/Cpk/negative-control/analytic-cross-check pipeline.
+The response is Phase 1's own yield-report JSON (see "JSON schema" above)
+with one added `campaign` block:
+
+```json
+{
+  "campaign": {
+    "spec": "spec.json",
+    "seed": 2122464451,
+    "seed_source": "derived",
+    "requested_samples": 300,
+    "vary": "mismatch",
+    "backend": "local-parallel",
+    "hosts": 4,
+    "sim_status": "pass",
+    "corner_count": 300,
+    "sim_report_path": ".klt/yield-campaign/sample-set.json",
+    "request_path": ".klt/yield-campaign/sim-request.json"
+  }
+}
+```
+
+`--out-dir` overrides where the dispatched `klt sim` request, its report,
+and its artifacts are written (default: a `.klt/yield-campaign/` directory
+next to the spec file). Exit codes match `klt yield`'s own (see "Exit
+codes" below): `1` if the campaign never runs (a bad spec, a `klt sim`
+dispatch failure -- bad netlist, a refused fleet cost/quota gate, ...), `3`
+if it runs but a measurement's `target_yield` claim is not supported at the
+stated confidence.
+
 ## Scope and limitations
 
 Phase 1a's bar is "a defensible yield statement from a sample set", not the
@@ -780,15 +900,18 @@ whole epic:
   pooled into one population, with a warning that this is an envelope rather
   than a sampled distribution. A per-corner breakdown (`klt sim`'s
   `by_corner`) is not yet reproduced here.
-- **No campaign orchestration, and `klt yield` never draws a sample itself.**
-  It consumes a campaign; it does not drive one. `sampling` (Phase 2b,
-  [#907](https://github.com/2AMLogic/klayout-tools/issues/907)) is metadata
-  about how the caller already drew `samples` — the caller (or a future
-  campaign-orchestration layer, epic #710 Phase 2a) is responsible for
-  actually running a Latin-hypercube design or an importance-sampling
-  proposal and handing the resulting draw (plus, for `importance`, its
-  weights) to `klt yield`. Seed management and adaptive sampling remain
-  Phase 2a's scope.
+- **No adaptive sampling.** `klt yield-campaign`
+  ([#906](https://github.com/2AMLogic/klayout-tools/issues/906), Phase 2a, see
+  "Campaign orchestration" below) launches and manages a fixed-`n` Monte Carlo
+  campaign directly from a spec, with deterministic seed derivation and
+  dispatch across `klt sim`'s local/fleet backends; `sampling`
+  ([#907](https://github.com/2AMLogic/klayout-tools/issues/907), Phase 2b) lets
+  that same campaign draw its samples via a Latin-hypercube design or an
+  importance-sampling proposal instead of plain random Monte Carlo, for a
+  tighter interval or better rare-event-tail coverage at a matched sample
+  count. Neither phase adjusts the sample count *during* a run based on
+  interim results — a campaign's `n`/`replicates` are fixed for its whole
+  duration.
 - **The negative-control and analytic cross-check are opt-in, not
   mandatory.** Phase 1b ([#817](https://github.com/2AMLogic/klayout-tools/issues/817))
   makes `klt yield` *flag* a campaign that omits a negative control or whose
@@ -814,13 +937,17 @@ was missed" precedent rather than inventing a new number.
 ## See also
 
 - [`docs/cli/sim.md`](sim.md#monte-carlo-sampling) — the Monte Carlo request
-  and the report shape this command consumes directly.
+  and the report shape this command consumes directly, and
+  [sim.md#fleet-sharding-remotehosts](sim.md#fleet-sharding-remotehosts) —
+  the shard/merge engine `klt yield-campaign`'s dispatch reuses unchanged.
 - [#710](https://github.com/2AMLogic/klayout-tools/issues/710) — the parent
   statistical/yield epic ([#817](https://github.com/2AMLogic/klayout-tools/issues/817)
   delivered the negative control and analytic cross-check above;
   [#907](https://github.com/2AMLogic/klayout-tools/issues/907) delivered the
-  Latin-hypercube/importance sampling strategies above; remaining phases:
-  campaign orchestration, sensitivity and design centering).
+  Latin-hypercube/importance sampling strategies above;
+  [#906](https://github.com/2AMLogic/klayout-tools/issues/906) delivered
+  campaign orchestration, "Campaign orchestration" above; remaining phases:
+  sensitivity and design centering).
 - [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) — the T1
   statistical-row bar this command produces evidence for.
 - [`docs/json-contract.md`](../json-contract.md) — the shared envelope,
