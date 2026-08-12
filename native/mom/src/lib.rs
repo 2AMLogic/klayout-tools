@@ -18,12 +18,16 @@
 
 mod contract;
 mod geometry;
+mod peec;
 mod solver;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use contract::{MomRequest, MomResponse, DEFAULT_PANEL_SIZE_UM, RESPONSE_SCHEMA_VERSION};
+use contract::{
+    MomRequest, MomResponse, DEFAULT_FILAMENT_SIZE_UM, DEFAULT_PANEL_SIZE_UM,
+    RESPONSE_SCHEMA_VERSION,
+};
 
 /// Run the quasi-static capacitance solve end to end: parse `request_json`,
 /// discretise every conductor's boxes into panels, fill the
@@ -50,6 +54,24 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
     )
     .map_err(PyValueError::new_err)?;
 
+    let (inductance_matrix_nh, resistance_ohm, filament_count) = if request.compute_inductance {
+        let filament_size_um = request.filament_size_um.unwrap_or(DEFAULT_FILAMENT_SIZE_UM);
+        let bar_layout = geometry::discretize_bars(&request.conductors, filament_size_um)
+            .map_err(PyValueError::new_err)?;
+        let inductance_matrix_nh = peec::solve_inductance_matrix_nh(&bar_layout, conductor_count)
+            .map_err(PyValueError::new_err)?;
+        let resistance_ohm =
+            peec::resistance_ohm(&bar_layout, &request.conductors, conductor_count)
+                .map_err(PyValueError::new_err)?;
+        (
+            Some(inductance_matrix_nh),
+            Some(resistance_ohm),
+            Some(bar_layout.filaments.len()),
+        )
+    } else {
+        (None, None, None)
+    };
+
     let conductors: Vec<String> = request.conductors.into_iter().map(|c| c.name).collect();
     let warnings = solver::physicality_warnings(&capacitance_matrix_ff, &conductors);
 
@@ -59,6 +81,9 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
         capacitance_matrix_ff,
         panel_count: panels.len(),
         warnings,
+        inductance_matrix_nh,
+        resistance_ohm,
+        filament_count,
     };
 
     serde_json::to_string(&response)

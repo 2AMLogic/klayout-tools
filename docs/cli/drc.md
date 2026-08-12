@@ -232,6 +232,63 @@ MIM capacitors or gf180mcu — any future deck (this one or sky130) can use it
 for another rule whose official scope needs a sized/boolean layer
 expression.
 
+### `"area"` / `"density"` / `"antenna"` check kinds (issue #812)
+
+Three more check kinds exist alongside `"width"`/`"space"`/`"notch"`
+(single-layer) and `"separation"`/`"enclosing"`/`"enclosed"`/`"overlap"`
+(two-layer) above. None of the shipped `sky130`/`gf180mcu` decks author a
+rule of any of these three kinds yet — that's a separate follow-on issue;
+this section documents the primitives themselves.
+
+**`"area"`** — single-layer, minimum and/or maximum polygon area. Driven by
+`klayout.db.Region.with_area(min_area, max_area, inverse=True)`, which
+returns the *violating* polygons directly (a `Region`, not the `EdgePairs`
+collection every check above returns) — each is reported as its own
+`violations[]` entry, the same way an `"enclosing"`/`"enclosed"` rule's
+zero-overlap-escape term already is. Uses two new `DrcRule` fields instead
+of `threshold_dbu`: `area_min_dbu2`/`area_max_dbu2`, in **square** database
+units of the deck's own nominal dbu — rescaled by `dbu_scale ** 2` (the
+*squared* nominal-to-actual dbu ratio), not the plain `dbu_scale` a linear
+distance threshold uses, since an area scales with the square of a linear
+rescaling. At least one of the two must be set. `other_layer`/
+`derived_layer` are unused.
+
+**`"density"`** — single-layer, windowed area-fill fraction. No native
+`Region` primitive computes this, so `run_drc` tiles the checked layer's own
+drawn extent (`region.bbox()` — there is no chip-boundary layer concept in
+this engine, unlike a real density-check flow that scopes to a floorplan
+boundary) into non-overlapping `density_window_um` x `density_window_um`
+squares and flags any window whose covered-area fraction falls outside
+`[density_min, density_max]` (either bound may be omitted for "no
+floor"/"no ceiling"; at least one must be set). Each violating window is
+reported as one `violations[]` entry, `bbox`/`polygon` set to the window's
+own rectangle. `density_window_um` is a real physical size in micrometres,
+rescaled against the *input layout's own* `dbu` directly — like
+`DerivedLayer.sized_by_um`, not like `threshold_dbu`/the area fields above,
+since a window size has no natural "nominal dbu" the way a distance or area
+threshold does. Only whole windows entirely inside the checked extent are
+tiled; a remainder narrower than one window at the right/top edge is left
+unchecked — a documented approximation of this first cut, not a defect.
+
+**`"antenna"`** — two-layer, and the one deliberate approximation of the
+three. **This is not a net-aware antenna/process-antenna-area-ratio (PAAR)
+check.** A real antenna rule accumulates conductor area *per net*, reset at
+each via level — this purely-geometric engine has no connectivity/net
+information available to `drc.py` (net extraction is a separate code path,
+`extract.py`, not wired in here), so it cannot compute that. Instead,
+`run_drc` sums `layer`'s and `other_layer`'s total merged area across the
+*whole checked cell* (no per-net split) and reports a single flat violation
+when their ratio exceeds the new `antenna_ratio_max` field — or when `layer`
+has nonzero area but `other_layer` has none at all anywhere in the cell (an
+undefined/infinite ratio, always worse than any finite maximum). The
+reported `bbox` is `layer`'s own merged bounding box and `polygon` is always
+`null`, since no single real polygon "is" this flat, whole-cell violation
+the way there is for an `"area"` check. This mirrors how `"enclosing"`/
+`"enclosed"` above already document their own approximation of the official
+rule they check — a future golden-pair author authoring a real `"antenna"`
+rule against this primitive must not assume more precision (in particular,
+no per-net isolation) than it actually has.
+
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
@@ -264,10 +321,11 @@ gf180mcu's `contact.width.1` already make. Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
 always the real, unmodified source values, with exactly one documented
 exception described next. The official deck's `m2.6`
-(minimum met2 area, 0.0676 um²) is **not** transcribed: no `"area"` check
-primitive exists in `DrcRule`'s vocabulary today (only
-`width`/`space`/`notch`/`separation`/`enclosing`/`enclosed`/`overlap`) —
-tracked as a candidate follow-on rather than silently dropped.
+(minimum met2 area, 0.0676 um²) is **not** transcribed: authoring it (and
+any other `"area"`/`"density"`/`"antenna"` rule) is out of scope for the
+check-primitive work that added those three kinds (issue #812, see
+"`"area"`/`"density"`/`"antenna"` check kinds" above) — tracked as a
+candidate follow-on rather than silently dropped.
 
 `li1.enclosing.licon1.1` (issue #551) is that one exception, and the only
 rule in either deck whose threshold is deliberately *not* its source value.

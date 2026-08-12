@@ -1,5 +1,6 @@
-"""Quasi-static capacitance extraction via a Method-of-Moments solver
-(``klt mom``, issue #718, Phase 0/1 of the MoM epic #701).
+"""Quasi-static capacitance/inductance/resistance extraction via a
+Method-of-Moments solver (``klt mom``, issue #718, Phase 0/1 of the MoM epic
+#701; PEEC inductance/resistance added by issue #797, Phase 1a).
 
 Pure library: :func:`run_mom` returns plain Python data (a JSON-serialisable
 ``dict``) and never prints -- serialisation and human-readable formatting
@@ -7,14 +8,15 @@ live in ``cli/mom_cmd.py``, matching every other ``klt`` verb (see
 ``layers.py``'s docstring on the same convention).
 
 Geometry extraction from the GDSII/OASIS layout uses ``klayout.db`` in batch
-mode only (headless, CI-safe). The numerically hot part -- surface
-discretisation, potential-coefficient matrix fill, and the linear solve for
-the capacitance matrix -- runs in the ``klt_mom_native`` Rust extension
-(``native/mom/``, this repo's first Rust component); this module's job is
-only to turn a GDS layer + stackup spec into the JSON request that extension
-expects, and to turn its JSON response into this command's documented
-payload. See ``docs/cli/mom.md`` for the full spec-file schema, the native
-extension's JSON contract, and build instructions.
+mode only (headless, CI-safe). The numerically hot parts -- surface
+discretisation + potential-coefficient matrix fill for capacitance, and
+bar/filament discretisation + PEEC partial-inductance/resistance fill for
+inductance -- run in the ``klt_mom_native`` Rust extension (``native/mom/``,
+this repo's first Rust component); this module's job is only to turn a GDS
+layer + stackup spec into the JSON request that extension expects, and to
+turn its JSON response into this command's documented payload. See
+``docs/cli/mom.md`` for the full spec-file schema, the native extension's
+JSON contract, and build instructions.
 """
 
 from __future__ import annotations
@@ -32,7 +34,16 @@ from ._layout import load_layout, select_top_cells
 #: solver (which defaults the same way if the request omits the field).
 DEFAULT_PANEL_SIZE_UM = 0.5
 
-SCHEMA_VERSION = 1
+#: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_FILAMENT_SIZE_UM`` --
+#: same manual-sync convention as ``DEFAULT_PANEL_SIZE_UM`` above. Only
+#: consulted when the spec sets ``compute_inductance: true``.
+DEFAULT_FILAMENT_SIZE_UM = 1.0
+
+#: `1` -- capacitance-only (issue #718/#719).
+#: `2` -- adds the PEEC inductance/resistance fields (issue #797), each
+#:        present only when the spec sets ``compute_inductance: true`` --
+#:        see ``native/mom/src/contract.rs``'s own schema-version note.
+SCHEMA_VERSION = 2
 
 
 class MomError(Exception):
@@ -90,7 +101,7 @@ def _parse_layer_datatype(raw: str, spec_path: str) -> tuple[int, int]:
 
 def _stackup_boxes(
     layout: Any, top_cell: Any, spec: dict[str, Any], spec_path: str
-) -> tuple[list[str], dict[str, list[dict[str, float]]]]:
+) -> tuple[list[str], dict[str, list[dict[str, float]]], dict[str, float | None]]:
     """Read every stackup entry's GDS shapes into per-conductor boxes (um).
 
     Multiple stackup entries may name the same ``conductor`` -- their boxes
@@ -98,11 +109,15 @@ def _stackup_boxes(
     conductor, e.g. a coax outer shield's four wall segments, is expressed;
     see ``docs/cli/mom.md``'s "Spec file" section). Returns conductor names
     in first-seen order (stable, so the response's row/column order is
-    deterministic) plus the box lists keyed by name.
+    deterministic), the box lists keyed by name, and each conductor's
+    ``conductivity_S_per_m`` (``None`` if no stackup entry set it -- only
+    required when the spec's ``compute_inductance`` is set, checked by the
+    native solver).
     """
     dbu = layout.dbu
     order: list[str] = []
     boxes: dict[str, list[dict[str, float]]] = {}
+    conductivity: dict[str, float | None] = {}
 
     for entry in spec["stackup"]:
         for key in ("layer", "conductor", "z0_um", "z1_um"):
@@ -115,6 +130,19 @@ def _stackup_boxes(
         if name not in boxes:
             boxes[name] = []
             order.append(name)
+            conductivity[name] = None
+
+        if "conductivity_S_per_m" in entry:
+            value = float(entry["conductivity_S_per_m"])
+            existing = conductivity[name]
+            if existing is not None and existing != value:
+                raise MomError(
+                    f"spec '{spec_path}': conductor {name!r} has conflicting "
+                    f"conductivity_S_per_m values ({existing!r} vs {value!r}) across "
+                    "its stackup entries -- a conductor's conductivity must agree "
+                    "everywhere it is named"
+                )
+            conductivity[name] = value
 
         layer_index = layout.find_layer(*layer_datatype)
         if layer_index is None:
@@ -146,7 +174,56 @@ def _stackup_boxes(
             f"spec '{spec_path}': conductor(s) {empty!r} matched no shapes -- "
             "check the stackup's layer/datatype numbers against the layout"
         )
-    return order, boxes
+    return order, boxes, conductivity
+
+
+def solve_capacitance_matrix(
+    conductors: list[dict[str, Any]],
+    background_permittivity: float,
+    *,
+    panel_size_um: float = DEFAULT_PANEL_SIZE_UM,
+) -> dict[str, Any]:
+    """Solve the Maxwell capacitance matrix for box geometry already in
+    memory -- the programmatic sibling of :func:`run_mom` (issue #798).
+
+    ``run_mom`` is file-oriented: it reads a GDS layout plus a stackup spec
+    from disk and returns this command's own documented envelope
+    (``schema_version``/``file``/``spec``/...). A caller that already has
+    conductor geometry as plain Python data (e.g. `klt extract`'s
+    ``--mom-net`` cross-check, which derives idealised box geometry from an
+    extracted net's own per-layer regions rather than re-reading a GDS file)
+    does not want that round trip -- it wants the native solver's answer
+    directly.
+
+    ``conductors`` -- ``[{"name": str, "boxes": [{"x0_um", "y0_um",
+    "x1_um", "y1_um", "z0_um", "z1_um"}, ...]}, ...]``, exactly
+    ``solve_mom_json``'s own ``conductors`` request field (see
+    ``native/mom/src/contract.rs``'s ``MomRequest``) -- the same shape
+    :func:`run_mom` builds internally from a stackup spec's matched GDS
+    shapes.
+
+    Returns the native solver's response dict verbatim: ``{"conductors",
+    "capacitance_matrix_ff", "panel_count", "warnings"}`` -- deliberately
+    *not* wrapped in :func:`run_mom`'s ``schema_version``/``file``/``spec``
+    envelope, since those fields describe a file-based invocation this
+    function never makes; a programmatic caller builds its own envelope
+    around this result.
+
+    Raises :class:`MomError` for a missing/unbuilt extension or a
+    solver-level failure (a singular potential-coefficient matrix, or the
+    panel-count guard), matching :func:`run_mom`.
+    """
+    native = _load_native()
+    request = {
+        "background_permittivity": float(background_permittivity),
+        "panel_size_um": float(panel_size_um),
+        "conductors": conductors,
+    }
+    try:
+        response_json = native.solve_mom_json(json.dumps(request))
+    except ValueError as exc:
+        raise MomError(str(exc)) from exc
+    return json.loads(response_json)
 
 
 def run_mom(
@@ -155,22 +232,32 @@ def run_mom(
     *,
     top: str | None = None,
 ) -> dict[str, Any]:
-    """Run ``klt mom``'s quasi-static capacitance extraction end to end.
+    """Run ``klt mom``'s quasi-static capacitance (and, optionally, PEEC
+    inductance/resistance) extraction end to end.
 
     ``file`` is a GDSII/OASIS layout; ``spec_path`` is a JSON file with:
 
     - ``stackup`` (required, non-empty array): entries of
       ``{"layer": "<layer>/<datatype>", "conductor": "<name>",
-      "z0_um": <float>, "z1_um": <float>}``, mapping each GDS layer's shapes
-      to an electrical conductor's z-extent. Several entries may share a
-      ``conductor`` name to merge shapes on different GDS layers into one
-      electrical node.
+      "z0_um": <float>, "z1_um": <float>, "conductivity_S_per_m": <float>}``
+      (the last is optional -- required only when ``compute_inductance`` is
+      set), mapping each GDS layer's shapes to an electrical conductor's
+      z-extent. Several entries may share a ``conductor`` name to merge
+      shapes on different GDS layers into one electrical node.
     - ``background_permittivity`` (required, float): relative permittivity
       of the uniform dielectric surrounding every conductor -- the MVP
       solves a single homogeneous medium (see docs/cli/mom.md's "Scope and
       limitations").
     - ``panel_size_um`` (optional, float): target discretisation panel edge
       length in micrometers; defaults to :data:`DEFAULT_PANEL_SIZE_UM`.
+    - ``compute_inductance`` (optional, bool, default ``false``): opt into
+      the PEEC partial-inductance/DC-resistance solve alongside capacitance.
+      See docs/cli/mom.md's "PEEC inductance/resistance" section for the
+      MVP's bar-shaped-conductor restrictions.
+    - ``filament_size_um`` (optional, float): target PEEC cross-section
+      filament edge length in micrometers; defaults to
+      :data:`DEFAULT_FILAMENT_SIZE_UM`. Only consulted when
+      ``compute_inductance`` is set.
 
     ``top`` selects the top cell to discretise when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -199,14 +286,25 @@ def run_mom(
             f"found in '{file}'); pass --top to select one"
         )
 
-    conductor_order, boxes = _stackup_boxes(layout, top_cells[0], spec, spec_path)
+    conductor_order, boxes, conductivity = _stackup_boxes(
+        layout, top_cells[0], spec, spec_path
+    )
 
     panel_size_um = float(spec.get("panel_size_um", DEFAULT_PANEL_SIZE_UM))
+    compute_inductance = bool(spec.get("compute_inductance", False))
+    filament_size_um = float(spec.get("filament_size_um", DEFAULT_FILAMENT_SIZE_UM))
     request = {
         "background_permittivity": float(spec["background_permittivity"]),
         "panel_size_um": panel_size_um,
+        "compute_inductance": compute_inductance,
+        "filament_size_um": filament_size_um,
         "conductors": [
-            {"name": name, "boxes": boxes[name]} for name in conductor_order
+            {
+                "name": name,
+                "boxes": boxes[name],
+                "conductivity_s_per_m": conductivity[name],
+            }
+            for name in conductor_order
         ],
     }
 
@@ -216,7 +314,7 @@ def run_mom(
         raise MomError(str(exc)) from exc
     response = json.loads(response_json)
 
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "file": file,
         "spec": spec_path,
@@ -229,3 +327,13 @@ def run_mom(
         # well-resolved solve) -- see docs/cli/mom.md's "Warnings".
         "warnings": response["warnings"],
     }
+    if compute_inductance:
+        # Only present when requested -- mirrors the native contract's
+        # Option<...>/None-omitted convention (see contract.rs's
+        # MomResponse doc), so a capacitance-only spec's output shape is
+        # completely unchanged from before this feature existed.
+        result["filament_size_um"] = filament_size_um
+        result["inductance_matrix_nh"] = response["inductance_matrix_nh"]
+        result["resistance_ohm"] = response["resistance_ohm"]
+        result["filament_count"] = response["filament_count"]
+    return result

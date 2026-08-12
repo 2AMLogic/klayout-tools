@@ -184,6 +184,9 @@ functional-verification = [
 ]
 
 [package.dev-dependencies]
+congestion = [
+    { name = "klt-congestion-native" },
+]
 mom = [
     { name = "klt-mom-native" },
 ]
@@ -199,7 +202,13 @@ requires-dist = [
 provides-extras = ["dev", "functional-verification"]
 
 [package.metadata.requires-dev]
+congestion = [{ name = "klt-congestion-native", directory = "native/congestion" }]
 mom = [{ name = "klt-mom-native", directory = "native/mom" }]
+
+[[package]]
+name = "klt-congestion-native"
+version = "0.1.0"
+source = { directory = "native/congestion" }
 
 [[package]]
 name = "klt-mom-native"

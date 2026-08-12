@@ -136,7 +136,12 @@ class DrcRule:
     selects which ``klayout.db.Region`` check primitive to run:
     ``"width"`` / ``"space"`` / ``"notch"`` are single-layer checks;
     ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"`` are
-    two-layer checks and require ``other_layer``. ``threshold_dbu`` is the
+    two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
+    and ``"antenna"`` (issue #812) are a third shape entirely -- see their own
+    fields below and ``drc.py``'s ``_run_area_check``/``_run_density_check``/
+    ``_run_antenna_check`` for why they cannot reuse ``threshold_dbu`` or the
+    ``EdgePairs``-shaped result the checks above return.
+    ``threshold_dbu`` is the
     rule's distance threshold expressed in database units of the deck's own
     *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM`` constant — e.g.
     sky130 and gf180mcu are both authored against ``dbu_um = 0.001``, i.e.
@@ -206,6 +211,68 @@ class DrcRule:
     backfilled for this rule yet -- the prose citation in its own inline
     comment remains the only record, exactly as for every rule before this
     field existed.
+
+    ``area_min_dbu2`` / ``area_max_dbu2`` (issue #812) are the fields
+    ``check="area"`` uses instead of ``threshold_dbu``: a minimum and/or
+    maximum polygon area, in **square** database units of the deck's own
+    nominal dbu -- ``run_drc()`` rescales each by ``dbu_scale ** 2`` (the
+    *squared* ratio of the deck's nominal dbu to the layout's actual one),
+    not the plain ``dbu_scale`` every linear-distance check above uses,
+    since an area scales with the square of a linear rescaling. Both
+    default to ``None``; at least one must be set for an ``"area"`` rule
+    (``run_drc()`` raises :class:`~klayout_tools.drc.DrcError` for an
+    ``"area"`` rule with neither set) -- a rule needs only a floor (a
+    minimum-area rule, e.g. sky130's un-transcribed ``m2.6``), only a
+    ceiling, or both. Driven by ``klayout.db.Region.with_area(min_area,
+    max_area, inverse=True)``, which returns exactly the *violating*
+    polygons (area below the minimum or at/above the maximum) directly --
+    unlike every check above, this returns a ``Region`` (polygons), not an
+    ``EdgePairs`` collection, so ``run_drc()`` reports each returned polygon
+    as its own violation the same way it already does for the
+    ``"enclosing"``/``"enclosed"`` zero-overlap-escape term (see
+    ``_run_area_check`` in ``drc.py``). ``other_layer``/``derived_layer`` are
+    unused for this check kind.
+
+    ``density_window_um`` / ``density_min`` / ``density_max`` (issue #812)
+    are the fields ``check="density"`` uses: no native ``Region`` primitive
+    computes windowed area density, so ``run_drc()`` tiles the checked
+    layer's own drawn extent (``region.bbox()``, *not* a chip-boundary
+    layer this engine has no concept of) into non-overlapping
+    ``density_window_um`` x ``density_window_um`` squares and flags any
+    window whose covered-area fraction falls outside ``[density_min,
+    density_max]`` (either bound may be ``None`` for "no floor"/"no
+    ceiling", but at least one must be set). ``density_window_um`` is a real
+    physical window size in micrometres, rescaled against the *layout's
+    own* ``dbu`` directly at run time -- like ``DerivedLayer.sized_by_um``,
+    **not** like ``threshold_dbu``, which is expressed in the deck's
+    nominal dbu and rescaled by ``dbu_scale`` instead (there is no natural
+    "nominal window size" the way there is a nominal distance threshold).
+    A remainder narrower than one whole window at the checked extent's
+    right/top edge is not tiled and so not checked -- a documented
+    approximation of this first cut, not a defect (see ``docs/cli/drc.md``).
+    All three default to ``None``; ``other_layer``/``derived_layer`` are
+    unused for this check kind.
+
+    ``antenna_ratio_max`` (issue #812) is the field ``check="antenna"``
+    uses: the maximum allowed ratio of ``layer``'s total merged area to
+    ``other_layer``'s (required, like every other two-layer check kind).
+    **This is a flat, connectivity-free geometric approximation of a real
+    antenna/process-antenna-area-ratio (PAAR) check, not a net-aware one** --
+    a true antenna check accumulates conductor area *per net*, reset at
+    each via level, which this purely-geometric engine cannot compute
+    without net extraction (a different code path, ``extract.py``, not
+    wired into ``drc.py``). Instead, ``run_drc()`` sums ``layer``'s and
+    ``other_layer``'s merged area across the *whole checked cell* (no
+    per-net split) and reports a single flat violation when their ratio
+    exceeds ``antenna_ratio_max`` -- or when ``layer`` has nonzero area but
+    ``other_layer`` has none at all (an undefined/infinite ratio, always a
+    violation when ``layer`` is present). Mirrors how ``"enclosing"``/
+    ``"enclosed"`` already document their own approximation of the official
+    rule they check (see this class's docstring above and
+    ``docs/cli/drc.md``); a future golden-pair author must not assume more
+    precision than this primitive actually has. Defaults to ``None``, and
+    ``run_drc()`` raises :class:`~klayout_tools.drc.DrcError` for an
+    ``"antenna"`` rule that leaves it unset or omits ``other_layer``.
     """
 
     id: str
@@ -217,6 +284,12 @@ class DrcRule:
     derived_layer: DerivedLayer | None = None
     scope: str = ""
     provenance: RuleProvenance | None = None
+    area_min_dbu2: int | None = None
+    area_max_dbu2: int | None = None
+    density_window_um: float | None = None
+    density_min: float | None = None
+    density_max: float | None = None
+    antenna_ratio_max: float | None = None
 
 
 class UnknownDeckError(Exception):

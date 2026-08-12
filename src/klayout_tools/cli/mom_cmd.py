@@ -30,6 +30,16 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_matrix(conductors: list, matrix: list, name_width: int, unit: str) -> None:
+    header = " " * name_width + "  " + "  ".join(name.rjust(12) for name in conductors)
+    print()
+    print(header)
+    for name, row in zip(conductors, matrix, strict=True):
+        cells = "  ".join(f"{value:12.6g}" for value in row)
+        print(f"{name.ljust(name_width)}  {cells}")
+    print(f"({unit})")
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
@@ -44,13 +54,19 @@ def _print_text(report: dict) -> None:
         return
 
     name_width = max(len("conductor"), max(len(name) for name in conductors))
-    header = " " * name_width + "  " + "  ".join(name.rjust(12) for name in conductors)
-    print()
-    print(header)
-    for name, row in zip(conductors, matrix, strict=True):
-        cells = "  ".join(f"{value:12.6g}" for value in row)
-        print(f"{name.ljust(name_width)}  {cells}")
-    print("(femtofarads)")
+    _print_matrix(conductors, matrix, name_width, "femtofarads")
+
+    if "inductance_matrix_nh" in report:
+        print()
+        print(f"filament_size_um: {report['filament_size_um']}")
+        print(f"filament_count: {report['filament_count']}")
+        _print_matrix(
+            conductors, report["inductance_matrix_nh"], name_width, "nanohenries"
+        )
+        print()
+        print("resistance (ohms):")
+        for name, r in zip(conductors, report["resistance_ohm"], strict=True):
+            print(f"  {name.ljust(name_width)}  {r:.6g}")
 
     warnings = report["warnings"]
     if warnings:

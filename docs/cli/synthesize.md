@@ -7,7 +7,8 @@ digital engine class — Yosys + OpenROAD — RTL→GDS as a first-class `klt`
 flow").
 
 ```
-klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] [--format text|json]
+klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
+    [--verify-equivalence] [--equiv-timeout-s SECONDS] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -34,6 +35,13 @@ flag line carries cleanly — not positional RTL file args.
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
   search order.
+- `--verify-equivalence` — gate the produced netlist through `klt equiv`
+  against its own source RTL before returning; a non-equivalent or
+  inconclusive verdict is a hard failure (exit 1). Off by default. See
+  "Equivalence gate" below.
+- `--equiv-timeout-s` — overall wall-clock timeout in seconds for the
+  `--verify-equivalence` proof (default: `klt equiv`'s own `60`); no effect
+  unless `--verify-equivalence` is given.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -57,8 +65,8 @@ debuggable, saveable artifact (`script_path` in the response), never
 deleted — the same discipline `klt sim`'s generated corner decks already
 follow.
 
-The generated script is exactly the Yosys survey's own verified pass
-sequence:
+The generated script is the Yosys survey's own verified pass sequence, with
+the `abc` line carrying the constraint/exclusion flags described below:
 
 ```
 read_verilog <source-1>
@@ -67,7 +75,7 @@ read_verilog <source-2>
 hierarchy -check -top <hdl_toplevel>
 synth -top <hdl_toplevel>
 dfflibmap -liberty <resolved liberty path>
-abc -liberty <resolved liberty path>
+tee -q -o <abc log path> abc -liberty <resolved liberty path> -constr <constr path> [-D <picoseconds>] [-dont_use <glob> ...]
 clean
 tee -q -o <stats path> stat -liberty <resolved liberty path> -json -top <hdl_toplevel>
 write_verilog -noattr <netlist path>
@@ -75,6 +83,57 @@ write_verilog -noattr <netlist path>
 
 Every path embedded in the script is absolute, so the script runs correctly
 regardless of the invoking process's own working directory.
+
+### Artifacts written to `.klt/synthesize/`
+
+| File | Contents |
+| --- | --- |
+| `synth_<top>.ys` | The generated Yosys script (`script_path` in the response). |
+| `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
+| `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
+| `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
+| `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
+
+### ABC constraints, delay target, and cell exclusions
+
+`abc -liberty <lib>` **without** `-constr` skips ABC's own
+`buffer; upsize; dnsize; stime -p` tail entirely (`yosys -p 'help abc'` —
+those four steps are `-constr`-gated). That is the whole reason this command
+emits a constraint file: one flag turns on load-driven buffering and
+drive-strength sizing *and* produces the only delay number available
+anywhere in this flow.
+
+- **`-constr <top>_abc.constr`** is passed whenever the resolved
+  `pdk.cell_library` has an entry in `synthesize.py`'s own
+  `_ABC_CONSTR_INPUTS` table (`sky130_fd_sc_hd`,
+  `gf180mcu_fd_sc_mcu9t5v0` today). Its `set_driving_cell`/`set_load`
+  values are ORFS's own `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` for that
+  platform, cross-checked against the installed liberty — the same
+  "verified, never guessed" per-library reference-data posture
+  `place_and_route.py`'s `_CTS_BUFFER_CELLS`/`_ROUTING_LAYER_RANGE` tables
+  already use. Each entry cites its source in that table's own docstring.
+- **`-D <picoseconds>`** is passed **only** when the request supplies
+  `constraints.clock_period_ns` (see the request table below for the
+  `null` behaviour).
+- **`-dont_use <glob>`**, once per entry, when the library has an entry in
+  the `_ABC_DONT_USE_GLOBS` table. For `sky130_fd_sc_hd` that is
+  `sky130_fd_sc_hd__lpflow_*` and `sky130_fd_sc_hd__probe*` — the
+  power-domain isolation and test-probe cells ORFS's own sky130hd
+  `DONT_USE_CELLS` excludes (the two globs match that 36-cell list exactly
+  against the installed liberty). Without them, a plain `gcd` synthesis maps
+  19 `lpflow_*` isolation cells into a design with no power domains.
+
+A `cell_library` in **neither** table is never given a guessed driving cell
+or exclusion list: its generated script keeps exactly the pre-#807 shape
+(`abc -liberty <lib>`, no `tee`), and `timing` stays `null`.
+
+**Yosys version note.** `abc -dont_use` does not exist in older Yosys
+builds (verified: present in 0.68, absent in Ubuntu 24.04's 0.33, where
+passing it is a hard error). This command probes `yosys -p 'help abc'` once
+per run and omits the exclusion list on builds that do not support it,
+rather than failing — the same graceful degradation `sequential_area_um2`
+already applies to those builds. `-constr`/`-D`/`stime -p` are supported on
+both.
 
 ## PDK / liberty resolution
 
@@ -108,15 +167,86 @@ matching `.lib` file — this is a clear **"liberty not found for deck"**
 application error (exit 1), matching `klt drc`'s existing "deck requires an
 asset the resolved install doesn't ship" posture.
 
-## `timing` is always `null`
+## `timing`: ABC's own pre-layout estimate, **not** signoff STA
 
-Per the Yosys survey section 3.5/3.6: Yosys's own `sta`/`ltp` passes could
-not produce a usable timing report against a liberty-mapped netlist (every
-mapped standard-cell type is reported "not recognised! Ignoring." by
-`sta`). Rather than commit to a Yosys-native timing field this repo cannot
-back with a working recipe, `timing` is reserved (present, typed, always
-`null` today) and deferred to Phase 4's OpenROAD/OpenSTA step, which already
-must run STA for place-and-route signoff.
+`timing` carries ABC's `stime -p` critical-path number — the one delay
+figure this flow produces — shaped so it can never be mistaken for the
+OpenSTA-backed number Phase 4's P&R step will eventually report:
+
+```json
+"timing": {
+  "source": "abc_stime",
+  "wire_load": null,
+  "critical_path_ps": 2485.93,
+  "delay_target_ps": null
+}
+```
+
+**Read the caveats before using this number:**
+
+- **It is wire-free.** ABC reports `WireLoad = "none"` on every run of this
+  flow, echoed here as `"wire_load": null`. There is no placement, so there
+  are no wire RCs in it at all — a real post-layout critical path will be
+  longer, often substantially.
+- **It is combinational, over the cone ABC itself mapped.** `dfflibmap`
+  maps every flip-flop to a liberty cell *before* `abc` runs, so registers
+  are outside the reported path; this is not a register-to-register signoff
+  path. When Yosys invokes ABC once per combinational region, the largest
+  region's reported delay is the one published here.
+- **`source` names its provenance.** A later OpenSTA-backed number will
+  carry a different `source`, so a caller can tell them apart without
+  guessing. Never treat `critical_path_ps` as slack.
+
+The Yosys survey section 3.5/3.6 finding it supersedes is narrower than it
+looked, and still stands as written: *Yosys's own* `sta`/`ltp` passes still
+cannot produce a usable report against a liberty-mapped netlist (every
+mapped standard-cell type is "not recognised! Ignoring."). What changed is
+that ABC prints its own number inside the subprocess this command already
+runs — it was simply discarded, because `-constr` was never passed
+(`docs/design/synthesize-qor-improvements-survey.md` sections 1.2/1.4).
+Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
+
+`timing` is `null` — never a fabricated number — when the resolved
+`cell_library` has no ABC constraint-table entry (so `-constr`, and
+therefore `stime -p`, never ran), or when the resolved ABC printed no
+recognisable summary line.
+
+## Equivalence gate
+
+[Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 1:
+`--verify-equivalence` wires [`klt equiv`](equiv.md) (#726) in as this
+command's own **acceptance gate** — a synthesized netlist is not considered
+done until `klt equiv` reports it `"equivalent"` to the source RTL that was
+fed into Yosys. Off by default (additive/opt-in; every pre-`--verify-
+equivalence` invocation is unaffected).
+
+When given, after `synth`/`abc`/`write_verilog` produce `netlist_path`, this
+command builds a `klt equiv` request reusing that command's own contract
+(see [`docs/cli/equiv.md`](equiv.md)) — `gold` is the same `sources`/
+`hdl_toplevel` this run just synthesized; `gate` is the just-produced
+`netlist_path`, with `gate.liberty` set to the same resolved liberty this
+synthesis run used (so the netlist's standard-cell instances resolve as
+real combinational logic, not an undefined blackbox — see `klt equiv`'s
+"Request" section) — and runs it. The generated equiv request and its own
+artifacts (the `.ys` script, the flattened combined netlist, the raw Yosys
+log) land under `.klt/synthesize/.klt/equiv/`, alongside this run's own
+`script_path`/`netlist_path` — never deleted, kept as debuggable artifacts
+like every other file this command writes. The outcome:
+
+- **`"equivalent"`** — attached to the response's `equivalence` field (see
+  "Response" below); `klt synthesize` itself still exits `0`.
+- **`"counterexample"` or `"inconclusive"`** (a proven divergence or a
+  solver/process timeout) — a **hard failure**: `SynthesizeError`, exit `1`,
+  never a silent warning folded into a `status: "ok"` response. An
+  `"inconclusive"` verdict (timeout) is never treated as a pass, mirroring
+  `klt equiv`'s own "timeout is never equivalent" discipline one level up.
+
+**Combinational designs only** — `klt equiv`'s Phase 0 MVP scope (#707) is
+combinational-only; a design containing flip-flops, latches, or memories
+(e.g. the GCD worked example below) makes the gate itself fail with a clear
+scope error, even though synthesis succeeded. `--verify-equivalence` is not
+yet usable on sequential designs — see `docs/cli/equiv.md`'s "Scope"
+section and Out of scope below.
 
 ## Request
 
@@ -142,7 +272,19 @@ must run STA for place-and-route signoff.
 | `hdl_toplevel` | string | The design's top module name. Required. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
-| `constraints.clock_period_ns` | number \| null | Accepted but **not consumed** by this invocation surface — per the Yosys survey's finding that Yosys's synthesis passes have no SDC-reading step. Carried for forward compatibility with Phase 4's P&R/STA step; has no effect on this command's output today. |
+| `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. |
+
+**`clock_period_ns: null` (or omitted) is a defined state, not a fallback.**
+The run still passes `-constr`, so ABC's `buffer`/`upsize`/`dnsize` sizing
+steps and its `stime -p` report both run and `timing` is still populated;
+only `-D` is omitted, leaving ABC's mapper and sizers to optimize
+untargeted exactly as they did before this field was consumed.
+`timing.delay_target_ps` is `null` in that case, so a caller can always tell
+a targeted run from an untargeted one. Measured effect of the target on
+`gcd` (Yosys 0.68+48, sky130, issue #807): untargeted maps to 3238.11 µm² at
+2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
+relaxed target buys area back at the cost of delay, so the value is a real
+caller decision rather than something this command should pick.
 
 ## Response
 
@@ -150,17 +292,22 @@ must run STA for place-and-route signoff.
 {
   "schema_version": 1,
   "engine": "yosys",
-  "engine_version": "0.67+post",
+  "engine_version": "0.68+48",
   "hdl_toplevel": "gcd",
   "status": "ok",
-  "instance_count": 335,
-  "area_um2": 2951.5808,
+  "instance_count": 347,
+  "area_um2": 3238.1056,
   "sequential_area_um2": 1251.2,
   "instance_counts_by_type": {
     "sky130_fd_sc_hd__a211o_1": 1,
     "sky130_fd_sc_hd__dfrtp_1": 50
   },
-  "timing": null,
+  "timing": {
+    "source": "abc_stime",
+    "wire_load": null,
+    "critical_path_ps": 2485.93,
+    "delay_target_ps": null
+  },
   "netlist_path": "/abs/path/.klt/synthesize/gcd_synth.v",
   "script_path": "/abs/path/.klt/synthesize/synth_gcd.ys",
   "provenance": {
@@ -169,7 +316,8 @@ must run STA for place-and-route signoff.
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
     "input": { "content_hash": "sha256:<hex>" }
-  }
+  },
+  "equivalence": null
 }
 ```
 
@@ -183,17 +331,18 @@ must run STA for place-and-route signoff.
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). |
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. |
-| `timing` | null | Always `null` in this contract — see "`timing` is always `null`" above. |
+| `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
 | `netlist_path` | string | The mapped gate-level netlist (`write_verilog -noattr`'s output), an absolute path. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | string | The generated `.ys` script, an absolute path — kept as a debuggable artifact. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
+| `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Synthesis succeeded, netlist written. |
-| `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), or a Yosys/ABC engine error. |
+| `0` | Synthesis succeeded, netlist written (and, with `--verify-equivalence`, proven equivalent to its source RTL). |
+| `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), a Yosys/ABC engine error — or, with `--verify-equivalence`, a non-equivalent (`"counterexample"`) or inconclusive (timeout) `klt equiv` verdict against the produced netlist. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 **No exit code `3`.** Matching `klt extract`'s reasoning exactly — there is
@@ -213,22 +362,85 @@ $ klt synthesize request.json --format json
 {
   "schema_version": 1,
   "engine": "yosys",
-  "engine_version": "0.67+post",
+  "engine_version": "0.68+48",
   "hdl_toplevel": "gcd",
   "status": "ok",
-  "instance_count": 335,
-  "area_um2": 2951.5808,
+  "instance_count": 347,
+  "area_um2": 3238.1056,
   "sequential_area_um2": 1251.2,
+  "timing": {
+    "source": "abc_stime",
+    "wire_load": null,
+    "critical_path_ps": 2485.93,
+    "delay_target_ps": null
+  },
   ...
 }
 ```
 
-335 standard-cell instances, 2951.5808 µm² total (1251.2 µm² sequential),
-matching the Yosys survey's own live-verified numbers exactly.
+347 standard-cell instances, 3238.1056 µm² total (1251.2 µm² sequential),
+2485.93 ps ABC-estimated critical path, and **zero** `lpflow_*`/`probe*`
+cells — measured live on Yosys 0.68+48 against a volare `sky130A` install.
+Note this particular design is **sequential** (it has a clocked `always`
+block) — see "Equivalence gate" above, `--verify-equivalence` is not usable
+on it.
+
+Before the ABC constraint/exclusion flags landed (issue #807), the same
+request on the same toolchain mapped to **335 instances / 2951.5808 µm²**
+with no delay number at all and 19 `lpflow_*` power-isolation instances in
+the netlist. The ~10% area difference is the cost of ABC's
+`buffer`/`upsize`/`dnsize` sizing plus the exclusion list; supplying
+`constraints.clock_period_ns` gives the caller the knob to trade it back
+(see the request table above). Yosys's own mapping result also moves between
+releases — the same pre-#807 flow maps this design to 326 instances on
+Ubuntu 24.04's Yosys 0.33 — so treat these figures as anchored to the build
+named here, not as invariants.
+
+A 4-bit ripple-carry adder (`adder4.v`, combinational — no clock, so it is
+in-scope for the gate — the same design [`docs/cli/equiv.md`](equiv.md)'s
+own worked example uses), synthesized with the gate enabled:
+
+```console
+$ klt synthesize adder4_request.json --verify-equivalence --format json
+{
+  "schema_version": 1,
+  "engine": "yosys",
+  "hdl_toplevel": "adder4",
+  "status": "ok",
+  ...
+  "equivalence": {
+    "status": "equivalent",
+    "engine": "yosys",
+    "engine_version": "0.67+post",
+    "timeout_s": 60.0,
+    "elapsed_s": 0.08,
+    "artifacts": {
+      "script_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.ys",
+      "netlist_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv_netlist.v",
+      "log_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.log"
+    }
+  }
+}
+```
+
+A synthesized netlist that diverges from its own source RTL (e.g. a
+corrupted/mis-synthesized output) makes the gate fail hard instead —
+`klt synthesize` exits `1` with a message naming the diverging outputs,
+never a `status: "ok"` response — see `tests/test_synthesize_equiv_gate.py`
+for the full seeded-mismatch demonstration.
 
 ## Out of scope
 
-- **Timing.** See "`timing` is always `null`" above — deferred to Phase 4.
+- **Sequential-design equivalence checking.** `--verify-equivalence` only
+  works on combinational designs today — `klt equiv`'s Phase 0 MVP scope
+  (#707). A future phase of #707 (temporal induction / BMC via SymbiYosys)
+  extends the gate to sequential designs; until then, running
+  `--verify-equivalence` against a design with flip-flops, latches, or
+  memories fails the gate with a clear scope error, not a misleadingly
+  confident verdict.
+- **Signoff timing.** `timing` is ABC's pre-layout, wire-free estimate —
+  see "`timing`" above. Real STA (wire RCs, register-to-register paths,
+  slack against an SDC) is Phase 4's OpenROAD/OpenSTA step.
 - **Place-and-route.** `netlist_path` is this command's own deliverable and
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
   contract's `netlist` request field) — this command does not floorplan,

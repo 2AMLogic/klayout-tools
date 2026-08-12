@@ -1408,6 +1408,24 @@ def _stage_script_lines(
     if stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         lines += [f"write_def {def_path}"]
+    elif stage == "place":
+        # A placement-only DEF, written as a side artifact (never referenced
+        # by `run_place_and_route`'s own return value) alongside the
+        # `write_db` checkpoint below. This exists purely so an out-of-band
+        # caller -- the FLUTE/RUDY-family congestion pre-check
+        # (`klayout_tools.congestion`, issue #785, Epic #700 Phase 1 §3.6)
+        # -- can read real post-placement cell/pin geometry via
+        # `klayout.db`'s DEF parser (mirroring `_merge_def_to_gds`'s own use
+        # of it) without needing the far more expensive `route` stage to
+        # have run first. Deliberately **not** added to
+        # `run_place_and_route`'s response dict or `PlaceAndRouteResult`:
+        # this is an internal artifact, not part of the public
+        # request/response contract (issue #785's own explicit acceptance
+        # criterion) -- callers that need it locate it at this same
+        # deterministic path (`<output_dir>/<hdl_toplevel>.place.def`), the
+        # same way the DSE-loop pre-check itself would.
+        place_def_path = os.path.join(output_dir, f"{hdl_toplevel}.place.def")
+        lines += [f"write_def {place_def_path}"]
 
     lines += [f"write_db {checkpoint_out}"]
     return lines

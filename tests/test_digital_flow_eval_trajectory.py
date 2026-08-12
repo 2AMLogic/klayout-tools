@@ -233,8 +233,24 @@ def _make_pdk_install(
 # Stubbed Yosys (tests/test_synthesize.py's own pattern)
 # --------------------------------------------------------------------------- #
 
-_TEE_RE = re.compile(r"^tee -q -o (\S+) ")
+_TEE_RE = re.compile(r"^tee -q -o (\S+) stat ")
+_ABC_TEE_RE = re.compile(r"^tee -q -o (\S+) abc ")
 _WRITE_VERILOG_RE = re.compile(r"^write_verilog -noattr (\S+)$")
+
+#: A real `abc -constr` run's own `stime -p` summary line (issue #807) --
+#: the same fixture `tests/test_synthesize.py` uses, kept here so this
+#: file's stub produces the ABC log `run_synthesize` now parses.
+_ABC_STIME_LINE = (
+    'ABC: WireLoad = "none"  Gates =    297 (  5.7 %)   Cap =  6.2 ff ( 12.4 %)'
+    "   Area =     1986.91 ( 66.3 %)   Delay =  2485.93 ps  ( 32.3 %)"
+)
+
+#: Yosys 0.68's own `help abc` wording for the option the capability probe
+#: (issue #807) looks for.
+_ABC_HELP_WITH_DONT_USE = """
+    -dont_use <cell_name>
+        avoid usage of the technology cell <cell_name> when mapping the design.
+"""
 
 
 class _FakeCompleted:
@@ -263,12 +279,19 @@ def _script_output_paths(script_path: str) -> tuple[str, str]:
 def _fake_yosys_run(cmd, **kwargs) -> _FakeCompleted:
     if cmd[:2] == ["yosys", "-V"]:
         return _FakeCompleted(stdout="Yosys 0.67+post (git sha1 deadbeef)\n")
+    if cmd[:3] == ["yosys", "-p", "help abc"]:
+        return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
     assert cmd[:2] == ["yosys", "-s"]
     stats_path, netlist_path = _script_output_paths(cmd[2])
     with open(stats_path, "w", encoding="utf-8") as handle:
         json.dump({"modules": {"\\gcd": _GCD_MODULE_STATS}}, handle)
     with open(netlist_path, "w", encoding="utf-8") as handle:
         handle.write("// fake mapped netlist\n")
+    for line in open(cmd[2], encoding="utf-8"):
+        match = _ABC_TEE_RE.match(line.rstrip("\n"))
+        if match:
+            with open(match.group(1), "w", encoding="utf-8") as handle:
+                handle.write(_ABC_STIME_LINE + "\n")
     return _FakeCompleted(returncode=0)
 
 

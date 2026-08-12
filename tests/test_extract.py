@@ -40,6 +40,7 @@ from klayout_tools.extract import (
     _detect_single_terminal_nets,
     _exclude_capacitor_top_via_overlap,
     _extract_netlist,
+    _mom_crosscheck_gap_um,
     _n_squares,
     _promote_orphan_named_nets,
     _purge_preserving_named_nets,
@@ -60,6 +61,20 @@ GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
 HAVE_NGSPICE = shutil.which("ngspice") is not None
 _SKIP_NO_NGSPICE = pytest.mark.skipif(
     not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
+)
+
+try:
+    import klt_mom_native  # noqa: F401
+
+    HAVE_KLT_MOM_NATIVE = True
+except ImportError:
+    HAVE_KLT_MOM_NATIVE = False
+_SKIP_NO_KLT_MOM_NATIVE = pytest.mark.skipif(
+    not HAVE_KLT_MOM_NATIVE,
+    reason=(
+        "klt_mom_native is not built -- run `maturin develop --release` in "
+        "native/mom/ (see docs/cli/mom.md#building-the-native-extension)"
+    ),
 )
 
 
@@ -2133,6 +2148,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _unmodelled_poly,
         _abstracted_cells,
         _dead_metal,
+        _mom_crosscheck,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -3292,6 +3308,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _unmodelled_poly,
         _abstracted_cells,
         _dead_metal,
+        _mom_crosscheck,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -6038,7 +6055,11 @@ def test_parasitics_summary_block_shape(tmp_path):
         "metals_without_coefficient",
         "overlap_pairs_without_coefficient",
         "model",
+        "mom_crosscheck",
     }
+    # `mom_crosscheck` (issue #798) is `None` unless `--mom-net` was given --
+    # additive, present but empty here (this test does not pass `mom_net`).
+    assert para["mom_crosscheck"] is None
     # `model` (issue #728) declares the parasitic model's own scope --
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
@@ -8550,3 +8571,334 @@ def test_dead_metal_empty_on_gf180mcu_corpus(gds, tmp_path):
         str(gds), "gf180mcu", output=str(tmp_path / f"{gds.stem}.spice")
     )
     assert report["dead_metal"] == [], gds.name
+
+
+# --------------------------------------------------------------------------- #
+# `klt extract --mom-net` (issue #798, Epic #701 Phase 1b): cross-check one
+# net's --parasitics ground capacitance against `klt mom`'s Method-of-Moments
+# field solver instead of the deck's lumped-RC coefficient table.
+# --------------------------------------------------------------------------- #
+
+
+def test_mom_crosscheck_gap_um_is_the_parallel_plate_formula_inverse():
+    """`_mom_crosscheck_gap_um` inverts `C/A = eps0 * eps_r / d` for `d` --
+    round-tripping through the closed form recovers the same coefficient
+    `tests/test_mom_validation.py`'s own `parallel_plate_ff` would compute
+    from the returned gap, at 1 um^2 so `C/A` and `C` are numerically
+    identical."""
+    eps0_f_per_m = 8.854_187_812_8e-12
+    eps_r = 3.9
+    cap_area_ff_um2 = 0.037  # sky130 li1's real `cap_area_ff_um2`.
+
+    gap_um = _mom_crosscheck_gap_um(cap_area_ff_um2, eps_r)
+    assert gap_um > 0.0
+
+    # Round trip: `C/A` computed from `gap_um` via the same closed form
+    # `parallel_plate_ff` uses (area/gap, not area*gap) must recover the
+    # coefficient the gap was derived from.
+    recovered_cap_area_ff_um2 = eps0_f_per_m * eps_r * (1.0 / gap_um) * 1e9
+    assert recovered_cap_area_ff_um2 == pytest.approx(cap_area_ff_um2, rel=1e-9)
+
+
+def test_mom_net_requires_parasitics(tmp_path):
+    """`--mom-net` without `--parasitics` is a clean, immediate error -- it
+    has nothing to cross-check against without the lumped-RC pass it
+    piggybacks on. Needs no `klt_mom_native` at all: this is rejected before
+    any MoM code runs."""
+    gds = SKY130_CORPUS_FILES[0]
+    with pytest.raises(ExtractError, match="--mom-net requires --parasitics"):
+        run_extract(
+            str(gds),
+            "sky130",
+            mom_net="Y",
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_net_unknown_net_raises_clean_error(tmp_path):
+    """A `--mom-net` name matching no net in the layout is a clean error, not
+    a silent no-op or a `KeyError`. Needs no `klt_mom_native`: the net lookup
+    (and its failure) happens before any MoM geometry is built."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    with pytest.raises(ExtractError, match="matches no net"):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            mom_net="DOES_NOT_EXIST",
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+@_SKIP_NO_KLT_MOM_NATIVE
+def test_mom_net_swaps_capacitance_and_reports_crosscheck(tmp_path):
+    """The acceptance-criteria case (issue #798): `sky130_fd_sc_hd__inv_1`'s
+    output net `Y` -- the exact canary net `docs/design/extract-fidelity-
+    roadmap.md` section 4 already cites as this repo's committed
+    schematic-vs-extracted sensitivity-floor example -- is a clean,
+    single-role (li1-only) net, so its MoM cross-check is not confounded by
+    the documented poly/diffusion scope limitation.
+
+    Asserts all three of issue #798's acceptance criteria at once: (1) `Y`'s
+    capacitance is genuinely swapped to the MoM value (both in the written
+    SPICE `C` card and in `parasitics.nets[]`), (2) the fidelity delta
+    between the two models is measured and reported, not asserted, and (3)
+    the comparison is reproducible -- pinned to a fixed, documented method
+    (`background_permittivity`/`panel_size_um`/`ground_pad_factor`) so a
+    second run against the same input reproduces the identical numbers."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        mom_net="Y",
+        output=str(tmp_path / "inv1.spice"),
+    )
+
+    y_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y")
+    crosscheck = report["parasitics"]["mom_crosscheck"]
+    assert crosscheck is not None
+    assert crosscheck["net"] == "Y"
+
+    # (1) genuinely extracted via `klt mom`, not merely reported alongside
+    # the lumped-RC value.
+    assert y_entry["capacitance_ff"] == crosscheck["mom_capacitance_ff"]
+    assert crosscheck["mom_capacitance_ff"] != crosscheck["lumped_rc_capacitance_ff"]
+    # The roadmap's own committed number for this exact net/layout/deck
+    # (section 4: "extracted output net Y carries 0.2397 fF").
+    assert crosscheck["lumped_rc_capacitance_ff"] == pytest.approx(0.23966, abs=1e-5)
+    spice_text = (tmp_path / "inv1.spice").read_text()
+    c_line = next(line for line in spice_text.splitlines() if line.startswith("CY "))
+    written_farads = float(c_line.split()[-1])
+    assert written_farads == pytest.approx(
+        crosscheck["mom_capacitance_ff"] * 1e-15, rel=1e-9
+    )
+
+    # (2) fidelity delta measured and reported, not asserted -- both
+    # directions of the arithmetic must agree with each other.
+    assert crosscheck["delta_ff"] == pytest.approx(
+        crosscheck["mom_capacitance_ff"] - crosscheck["lumped_rc_capacitance_ff"],
+        abs=1e-9,
+    )
+    assert crosscheck["delta_pct"] == pytest.approx(
+        100.0 * crosscheck["delta_ff"] / crosscheck["lumped_rc_capacitance_ff"],
+        abs=0.01,
+    )
+
+    # (3) reproducible: fixed, documented method fields, and every other
+    # net's parasitics are completely unaffected by the swap.
+    assert crosscheck["background_permittivity"] == 3.9
+    assert crosscheck["panel_size_um"] > 0.0
+    assert crosscheck["panel_count"] > 0
+    assert crosscheck["ground_pad_factor"] == 3.0
+    assert "klt mom" in crosscheck["method"]
+    other_nets = {n["net"]: n for n in report["parasitics"]["nets"] if n["net"] != "Y"}
+    baseline = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1_baseline.spice"),
+    )
+    baseline_others = {
+        n["net"]: n for n in baseline["parasitics"]["nets"] if n["net"] != "Y"
+    }
+    assert other_nets == baseline_others
+    # Reproducible: re-running against the identical input yields the
+    # identical cross-check numbers.
+    report2 = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        mom_net="Y",
+        output=str(tmp_path / "inv1_again.spice"),
+    )
+    assert report2["parasitics"]["mom_crosscheck"] == crosscheck
+
+
+def test_mom_net_omitted_is_byte_identical_to_before_feature(tmp_path):
+    """`--mom-net` omitted (the default) is unaffected by this feature's
+    existence: `parasitics.mom_crosscheck` is present (additive) but `None`,
+    and every net's capacitance is the pre-existing lumped-RC value. Needs no
+    `klt_mom_native`: the cross-check code path never runs when `mom_net` is
+    `None`."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+    )
+    assert report["parasitics"]["mom_crosscheck"] is None
+    y_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y")
+    assert y_entry["capacitance_ff"] == pytest.approx(0.23966, abs=1e-5)
+
+
+@_SKIP_NO_KLT_MOM_NATIVE
+def test_mom_net_poly_geometry_is_out_of_scope_and_warned(tmp_path):
+    """A net whose lumped-RC ground capacitance is *not* entirely from a
+    `metals` role (`sky130_fd_sc_hd__inv_1`'s gate net `A` also draws poly)
+    still solves -- the cross-check is metals-only by documented scope, not a
+    correctness bug -- and says so explicitly in `warnings`, rather than
+    silently comparing an apples-to-oranges pair with no explanation."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        mom_net="A",
+        output=str(tmp_path / "inv1.spice"),
+    )
+    crosscheck = report["parasitics"]["mom_crosscheck"]
+    assert crosscheck["mom_capacitance_ff"] is not None
+    assert any("metals" in w and "poly" in w for w in crosscheck["warnings"])
+    assert any("metals" in w and "poly" in w for w in report["warnings"])
+
+
+@_SKIP_NO_KLT_MOM_NATIVE
+def test_mom_net_cli_json_and_text(tmp_path, capsys):
+    """`--mom-net` is wired all the way through the CLI, both `--format
+    json` (the `mom_crosscheck` block) and the default text formatter (a
+    `mom_crosscheck:` summary line)."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+
+    exit_code = main(
+        [
+            "extract",
+            str(gds),
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--mom-net",
+            "Y",
+            "--format",
+            "json",
+            "-o",
+            str(tmp_path / "cli.spice"),
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["mom_crosscheck"]["net"] == "Y"
+
+    exit_code = main(
+        [
+            "extract",
+            str(gds),
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--mom-net",
+            "Y",
+            "-o",
+            str(tmp_path / "cli2.spice"),
+        ]
+    )
+    assert exit_code == 0
+    text_out = capsys.readouterr().out
+    assert "mom_crosscheck: net=Y" in text_out
+
+
+def test_mom_net_swap_targets_the_actually_measured_island_not_a_same_named_one(
+    tmp_path, monkeypatch
+):
+    """Regression/investigation for issue #811: does `--mom-net`'s
+    net-object lookup (`_extract_netlist`'s unsorted `circuit.each_net()`
+    first-match loop, which decides which island's geometry `klt mom`
+    actually measures) ever disagree with `run_extract`'s independent
+    by-*name* `ground_nets` lookup (which decides which `parasitics.nets[]`
+    entry's `capacitance_ff` gets overwritten with that measurement) when
+    the `--mom-net` name is shared by two distinct, disconnected net
+    islands -- e.g. two un-strapped `VGND` rail islands, the exact
+    duplicate-label shape issue #765 hardened elsewhere in this module (see
+    `_make_two_disjoint_nmos_shared_label_layout`, reused here) and
+    `_compute_parasitics`'s own docstring documents (105 such islands on the
+    `gcd` corpus).
+
+    **Finding: they do not disagree.** `_mom_ground_capacitance_for_net` is
+    monkeypatched here (no `klt_mom_native` build required -- this test
+    asserts *which island gets selected*, not the field-solve numerics
+    `test_mom_net_swaps_capacitance_and_reports_crosscheck` already covers)
+    to record the `net.cluster_id` of the net object `_extract_netlist`'s
+    loop actually resolved and hands to the MoM cross-check, and returns a
+    sentinel capacitance recognizable in the swapped `ground_nets` entry.
+    The entry that is overwritten always carries that same `net_id` --
+    i.e. `run_extract`'s name-keyed `ground_nets` lookup always resolves to
+    the identical net object `_extract_netlist` measured, never a different
+    same-named island.
+
+    This holds because `kdb.Circuit.each_net()` iterates in strictly
+    ascending `cluster_id` order on the pinned `klayout` version this repo
+    tests against (verified directly, both on this two-island synthetic
+    fixture and across the full 2133-net/105-VGND-island `gcd` corpus
+    fixture used by `test_parasitics_...gcd...` above) -- so
+    `_extract_netlist`'s first-match-wins loop and `ground_nets`'s
+    `(net, net_id)`-ascending sort's first-match-wins lookup both always
+    select the same-named entry with the *smallest* `net_id`, by
+    construction of that shared ordering, not by accident of this
+    particular fixture's geometry. `pyproject.toml` pins only
+    ``klayout>=0.30`` (no upper bound) -- if a future `klayout` release
+    changes `each_net()`'s iteration order, this test (and
+    ``test_parasitics_disjoint_same_label_nets_get_distinct_instance_names``
+    a few hundred lines above, which depends on the same ordering
+    assumption for its own `_dup1` suffix check) would be the first to
+    catch the regression.
+    """
+    import klayout_tools.extract as extract_mod
+
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd_mom.gds")
+
+    captured: dict[str, int] = {}
+    _SENTINEL_MOM_CAPACITANCE_FF = 123456.0
+
+    def _spy_mom_ground_capacitance(
+        l2n, net, dbu, parasitics_deck, metal_index, background_permittivity=3.9
+    ):
+        # This is exactly the net object `_extract_netlist`'s
+        # `circuit.each_net()` first-match loop resolved for `--mom-net`.
+        captured["matched_net_cluster_id"] = net.cluster_id
+        return {
+            "net": extract_mod.spice_safe_net_name(net.expanded_name()),
+            "mom_capacitance_ff": _SENTINEL_MOM_CAPACITANCE_FF,
+            "background_permittivity": background_permittivity,
+            "panel_size_um": 1.0,
+            "panel_count": 1,
+            "ground_pad_factor": extract_mod._MOM_CROSSCHECK_GROUND_PAD_FACTOR,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        extract_mod, "_mom_ground_capacitance_for_net", _spy_mom_ground_capacitance
+    )
+
+    report = extract_mod.run_extract(
+        path,
+        "sky130",
+        parasitics=True,
+        mom_net="VGND",
+        output=str(tmp_path / "two_vgnd_mom.spice"),
+    )
+
+    vgnd_entries = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(vgnd_entries) == 2
+    assert vgnd_entries[0]["net_id"] != vgnd_entries[1]["net_id"]
+
+    swapped = [
+        e for e in vgnd_entries if e["capacitance_ff"] == _SENTINEL_MOM_CAPACITANCE_FF
+    ]
+    assert len(swapped) == 1, (
+        "exactly one of the two same-named VGND entries must carry the "
+        "MoM-derived capacitance"
+    )
+
+    # The core property under investigation: the entry that got overwritten
+    # (found by `run_extract`'s independent by-name `ground_nets` lookup)
+    # is the *same* net object `_extract_netlist` actually measured (found
+    # by the unsorted `circuit.each_net()` first-match loop) -- not a
+    # different same-named island.
+    assert swapped[0]["net_id"] == captured["matched_net_cluster_id"]
+
+    # And it is always the smallest `net_id` among the same-named entries --
+    # confirming the mechanism (both first-match lookups agreeing via
+    # `each_net()`'s ascending-`cluster_id` order), not just the outcome.
+    assert swapped[0]["net_id"] == min(e["net_id"] for e in vgnd_entries)

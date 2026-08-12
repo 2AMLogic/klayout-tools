@@ -85,7 +85,12 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test
+        # `--nocapture` so `solver::tests::iterative_solve_matches_direct_lu_solve`'s
+        # printed convergence-rate report (issue #799's acceptance criterion
+        # that the rate be *reported*, not only asserted) lands in this job's
+        # log on a green run too, matching how the Python job already does
+        # this for tests/test_mom_validation.py's convergence tables.
+        run: cargo test -- --nocapture
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v9.0.0
@@ -117,6 +122,70 @@ jobs:
         run: |
           uv run --frozen --extra dev --group mom python -c "import klt_mom_native" || {
             echo "::error::klt_mom_native did not install -- tests/test_mom.py would have skipped"
+            exit 1
+          }
+
+  native-congestion:
+    name: Native engines (Rust) — congestion pre-check
+    # `native/congestion/` (issue #785, Epic #700 Phase 1 §3.6) is this
+    # repo's second Rust component -- the `klt_congestion_native` pyo3
+    # extension behind the FLUTE/RUDY-family congestion pre-check research
+    # spike. A separate job from `native` above (not folded into it) so a
+    # failure here is attributable to this crate specifically, matching the
+    # one-job-per-native-engine precedent that job's own comment sets.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/congestion
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo --version
+        run: cargo --version && rustc --version
+
+      - name: Cache cargo registry + build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/congestion/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/congestion/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        # GATES, like the ruff steps above -- do not add continue-on-error.
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build + install the extension, then run the congestion tests
+        # `--group congestion` resolves klt-congestion-native from
+        # native/congestion/ via pyproject.toml's [tool.uv.sources] and
+        # drives maturin to compile it. Without it, tests/test_congestion.py's
+        # native-extension-dependent tests skip themselves (by design) --
+        # this job is what makes sure the skip is never the only thing CI
+        # ever sees.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group congestion
+          uv run --frozen --extra dev --group congestion pytest \
+            tests/test_congestion.py -v --capture=tee-sys
+
+      - name: Assert the congestion tests actually ran (no silent skip)
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group congestion python -c "import klt_congestion_native" || {
+            echo "::error::klt_congestion_native did not install -- tests/test_congestion.py would have skipped"
             exit 1
           }
 

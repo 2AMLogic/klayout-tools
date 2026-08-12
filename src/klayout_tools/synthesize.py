@@ -52,11 +52,29 @@ When ``request.pdk.corner`` is omitted, the nominal (typical-process,
 room-temperature) corner ``klt pdk cells``' own ``nominal_corner`` selection
 already picks is used, via :func:`klayout_tools.pdk.list_cell_libraries`.
 
-``timing`` is always ``null`` in this contract, deliberately -- the Yosys
-survey section 3.5/3.6 found no working recipe for a Yosys-native timing
-report against a liberty-mapped netlist (every mapped standard-cell type is
-reported "not recognised" by ``sta``); deferred to Phase 4's OpenROAD/OpenSTA
-step, which already must run STA for place-and-route signoff.
+``timing`` carries ABC's own ``stime -p`` critical-path estimate (issue
+#807, Epic #704 Phase 1a). The Yosys survey section 3.5/3.6 finding stands
+unchanged -- *Yosys*'s own ``sta``/``ltp`` passes still produce nothing
+usable against a liberty-mapped netlist -- but the conclusion drawn from it
+("no delay number is available from this flow at all") was too strong: ABC
+prints one itself, inside the subprocess this module already runs, as long
+as it is invoked with ``-constr`` (see
+``docs/design/synthesize-qor-improvements-survey.md`` section 1.2/1.4). It
+is a **pre-layout, wire-free** estimate (ABC reports ``WireLoad = "none"``),
+never signoff STA -- hence the self-labelling ``timing`` object shape
+documented in ``docs/cli/synthesize.md``, never a bare ``delay_ps`` float.
+Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
+
+**Acceptance gate**: :func:`run_synthesize`'s ``verify_equivalence`` flag
+(the CLI's ``--verify-equivalence``, default off/additive) wires the just-
+produced netlist through ``klt equiv``
+(:func:`klayout_tools.equiv.run_equiv`, #726) against the same source RTL
+this run just synthesized -- a synthesized netlist is not considered done
+until ``klt equiv`` reports it ``"equivalent"`` to its own RTL. A non-
+equivalent or inconclusive verdict is a hard :class:`SynthesizeError`, never
+a silent warning. Combinational designs only, matching ``klt equiv``'s own
+Phase 0 scope (#707) -- see ``docs/cli/synthesize.md``'s "Equivalence gate"
+section. This is Phase 1 of Epic #704.
 """
 
 from __future__ import annotations
@@ -70,6 +88,7 @@ from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance, sha256_file
+from .equiv import EquivError, run_equiv
 from .pdk import PdkNotFoundError, find_pdk, list_cell_libraries
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -82,6 +101,120 @@ SCHEMA_VERSION = 1
 SUPPORTED_ENGINES = ("yosys",)
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
+
+#: ABC's own ``stime -p`` summary line, as it reaches the Yosys log (and,
+#: via ``tee -q -o``, the captured ABC log this module parses):
+#: ``ABC: WireLoad = "none"  Gates = 297 ( 5.7 %)   Cap = 6.2 ff ( 12.4 %)
+#: Area = 1986.91 ( 66.3 %)   Delay = 2485.93 ps  ( 32.3 %)``. Verified live
+#: (Yosys 0.68+48, sky130_fd_sc_hd, issue #807).
+_ABC_STIME_RE = re.compile(
+    r'WireLoad\s*=\s*"(?P<wire_load>[^"]*)".*?Delay\s*=\s*(?P<delay_ps>[\d.]+)\s*ps'
+)
+
+#: Per-cell-library ABC constraint inputs -- ``(set_driving_cell cell,
+#: set_load femtofarads)`` -- written to the ``<top>_abc.constr`` file this
+#: module passes as ``abc -constr``. Same not-derivable-from-the-install,
+#: verified-not-guessed posture as ``place_and_route.py``'s
+#: :data:`~klayout_tools.place_and_route._CTS_BUFFER_CELLS` /
+#: :data:`~klayout_tools.place_and_route._ROUTING_LAYER_RANGE` tables
+#: (issues #629/#637): a driving cell for the primary inputs and an output
+#: load are properties of how a platform is *used*, not of the liberty file
+#: itself. ORFS pins both per platform, as ``ABC_DRIVER_CELL`` /
+#: ``ABC_LOAD_IN_FF`` (read 2026-08-12 from
+#: ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``), and builds
+#: exactly this two-line file from them
+#: (``flow/scripts/synth_preamble.tcl``: ``puts $constr "set_driving_cell
+#: $::env(ABC_DRIVER_CELL)"`` / ``puts $constr "set_load
+#: $::env(ABC_LOAD_IN_FF)"``). Sourced, per library:
+#:
+#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__buf_1`` / ``5.0`` fF, both
+#:   verbatim from ``platforms/sky130hd/config.mk`` (``ABC_DRIVER_CELL =
+#:   sky130_fd_sc_hd__buf_1``, ``ABC_LOAD_IN_FF = 5``). Liberty cross-check
+#:   against the installed ``sky130_fd_sc_hd__tt_025C_1v80.lib``:
+#:   ``sky130_fd_sc_hd__buf_1`` is present, and its own input pin
+#:   ``A`` has ``capacitance : 0.0021030000`` in that liberty's
+#:   ``capacitive_load_unit(1.0, "pf")`` -- i.e. 2.1 fF, so ORFS's ``5``
+#:   is ~2.4 single-input loads and is unambiguously already the
+#:   femtofarad figure Yosys's ``help abc`` documents ``set_load`` to take
+#:   ("sets the load in femtofarads for each primary output").
+#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> ``gf180mcu_fd_sc_mcu9t5v0__buf_4`` /
+#:   ``13.43`` fF. The cell is ``platforms/gf180/config.mk``'s own
+#:   ``ABC_DRIVER_CELL = gf180mcu_fd_sc_mcu$(TRACK_OPTION)$(POWER_OPTION)__
+#:   buf_4`` under that platform's defaults (``TRACK_OPTION ?= 9t``,
+#:   ``POWER_OPTION ?= 5v0``) -- the same resolution
+#:   ``_CTS_BUFFER_CELLS``'s gf180 entry already documents. The load is the
+#:   one value in either table **not** copied verbatim, and the liberty
+#:   cross-check is why: that `config.mk` sets ``ABC_LOAD_IN_FF = 0.01343``,
+#:   which is the *picofarad* figure (the installed
+#:   ``gf180mcu_fd_sc_mcu9t5v0__tt_025C_5v00.lib`` declares
+#:   ``capacitive_load_unit(1, pf)`` and gives ``buf_4``'s own input pin
+#:   ``I`` ``capacitance : 0.0137`` -- 13.7 fF, matching 0.01343 pF to
+#:   within 2%). Taken literally as femtofarads it would be 13.43 *atto*
+#:   farads, three orders of magnitude below any real pin in that library,
+#:   so the unit-consistent value for Yosys's femtofarad-denominated
+#:   ``set_load`` is 13.43 fF -- ORFS's own number, converted, not a guess.
+#:
+#: ORFS is **reference data only**, never a runtime dependency -- nothing
+#: here shells out to, reads, or requires an ORFS checkout, and no ORFS file
+#: is vendored. A ``cell_library`` with no entry keeps this command's
+#: pre-#807 behaviour exactly (no ``-constr``, no sizing/buffering, no
+#: ``timing``), rather than guessing a driving cell for it.
+_ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
+    "sky130_fd_sc_hd": ("sky130_fd_sc_hd__buf_1", 5.0),
+    "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__buf_4", 13.43),
+}
+
+#: Per-cell-library ``abc -dont_use`` glob list: the non-logic cell classes
+#: a real flow keeps out of a mapped netlist. Same sourcing discipline as
+#: :data:`_ABC_CONSTR_INPUTS` above -- each entry is ORFS's own
+#: ``DONT_USE_CELLS`` for that platform, cross-checked against the installed
+#: liberty's actual cell list (read 2026-08-12 from
+#: ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``):
+#:
+#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__lpflow_*`` (multi-power-domain
+#:   isolation/level-shifter/decap cells) and ``sky130_fd_sc_hd__probe*``
+#:   (test-probe cells with metal shapes on every layer).
+#:   ``platforms/sky130hd/config.mk`` spells its ``DONT_USE_CELLS`` out as
+#:   36 explicit cell names with exactly that intent (its own comment: "The
+#:   *probe* are for inserting probe points and have metal shapes on all
+#:   layers. *lpflow* cells are for multi-power domains"). Verified against
+#:   the installed ``sky130_fd_sc_hd__tt_025C_1v80.lib``: the two globs
+#:   above match **exactly** those 36 cells -- no cell ORFS excludes is
+#:   missed, and no additional cell is caught (set difference empty in both
+#:   directions). Globs are used rather than the 36 names because
+#:   ``abc -dont_use`` supports them ("supports simple glob patterns in the
+#:   cell name", ``help abc``) and because they stay correct if a future
+#:   open_pdks release adds another ``lpflow_``/``probe`` cell.
+#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> **deliberately absent**, and this is the
+#:   one place this table does not simply mirror ORFS. That platform's
+#:   ``DONT_USE_CELLS = *_1`` (``platforms/gf180/config.mk``) excludes every
+#:   *minimum-drive* cell in the library -- 62 of the installed
+#:   ``gf180mcu_fd_sc_mcu9t5v0__tt_025C_5v00.lib``'s 229 cells -- which is a
+#:   drive-strength policy for P&R congestion ("Dont use cells to ease
+#:   congestion", that `config.mk`'s own comment), not the "keep non-logic
+#:   cells out of the netlist" exclusion this table exists for. The QoR
+#:   survey section 3.2 flags exactly this asymmetry and warns that the two
+#:   libraries must not be given the same treatment by analogy; measured
+#:   live here rather than assumed (issue #807, 8x8 multiplier, Yosys
+#:   0.68+48): applying it costs **+31% area** (9217.96 -> 12119.39 um^2)
+#:   and **+12% delay** (6150.64 -> 6887.58 ps) against the same run with
+#:   ``-constr`` and no exclusions. Every logic function does keep a
+#:   higher-drive variant (zero functions lost entirely, checked live), so
+#:   the exclusion is *safe* -- it is simply not a QoR win at this stage of
+#:   the flow, and a synthesis-time default that costs a third of the area
+#:   for a congestion benefit no step of this command can observe would be a
+#:   guess dressed as sourcing. gf180 still gets its ``-constr`` entry
+#:   above; a caller wanting ORFS's P&R-oriented exclusion can be served
+#:   later by an explicit request field, measured on its own terms.
+#:
+#: A ``cell_library`` with no entry gets no ``-dont_use`` flags at all --
+#: this command's pre-#807 behaviour -- rather than a guessed exclusion.
+_ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
+    "sky130_fd_sc_hd": (
+        "sky130_fd_sc_hd__lpflow_*",
+        "sky130_fd_sc_hd__probe*",
+    ),
+}
 
 
 class SynthesizeError(Exception):
@@ -121,6 +254,8 @@ def run_synthesize(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    verify_equivalence: bool = False,
+    equiv_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
 
@@ -133,17 +268,41 @@ def run_synthesize(
     conventional prefixes) in effect, unchanged from before this parameter
     existed.
 
+    ``verify_equivalence`` (the CLI's ``--verify-equivalence`` flag; default
+    ``False``, additive/opt-in -- unchanged behaviour for every existing
+    caller) gates the produced netlist through ``klt equiv`` (:func:`
+    klayout_tools.equiv.run_equiv`) against the same ``sources``/
+    ``hdl_toplevel`` this request just synthesized, before returning: the
+    just-produced ``netlist_path`` (with ``liberty`` set to the same
+    resolved liberty this synthesis run used, so standard-cell instances
+    resolve as real logic rather than an undefined blackbox) is proven
+    equivalent to the RTL that was fed into Yosys. A non-``"equivalent"``
+    verdict (``"counterexample"`` or ``"inconclusive"``) -- or an
+    :class:`~klayout_tools.equiv.EquivError`, e.g. a **sequential** design
+    (this MVP's ``klt equiv`` is combinational-only -- see
+    ``docs/cli/equiv.md``'s "Scope" section; a design containing flip-flops/
+    latches/memories cannot use this flag today) -- is a hard
+    :class:`SynthesizeError`, never a silent warning: a synthesized netlist
+    this gate cannot prove faithful to its own source RTL is not "done".
+    ``equiv_timeout_s`` (the CLI's ``--equiv-timeout-s``) overrides ``klt
+    equiv``'s own default proof timeout; ``None`` leaves
+    :data:`klayout_tools.equiv.DEFAULT_TIMEOUT_S` in effect.
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
     section 4). Raises :class:`SynthesizeError` for anything that prevents a
     netlist from being produced at all -- bad request, unreadable RTL
     source, elaboration/hierarchy error, unresolvable ``pdk.cell_library``/
-    ``corner``, or a Yosys/ABC engine error.
+    ``corner``, a Yosys/ABC engine error, or (when ``verify_equivalence`` is
+    set) a failed/inconclusive equivalence check.
 
-    The generated ``.ys`` script and mapped netlist are written to
-    ``.klt/synthesize/`` next to the request file (the same "next to the
-    input" default ``klt sim``'s ``.klt/sim/`` artifacts directory already
-    uses) and kept as debuggable artifacts, never deleted.
+    The generated ``.ys`` script, the mapped netlist, the captured stats
+    JSON, and -- when the resolved ``cell_library`` has an
+    :data:`_ABC_CONSTR_INPUTS` entry -- the generated ``<top>_abc.constr``
+    file and captured ``<top>_abc.log`` are written to ``.klt/synthesize/``
+    next to the request file (the same "next to the input" default ``klt
+    sim``'s ``.klt/sim/`` artifacts directory already uses) and kept as
+    debuggable artifacts, never deleted.
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -177,6 +336,7 @@ def run_synthesize(
     constraints = request.get("constraints")
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
+    delay_target_ps = _resolve_delay_target_ps(constraints)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -194,6 +354,18 @@ def run_synthesize(
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
     stats_path = os.path.join(output_dir, f"{hdl_toplevel}_stats.json")
 
+    constr_inputs = _ABC_CONSTR_INPUTS.get(cell_library)
+    constr_path: str | None = None
+    abc_log_path: str | None = None
+    if constr_inputs is not None:
+        constr_path = os.path.join(output_dir, f"{hdl_toplevel}_abc.constr")
+        abc_log_path = os.path.join(output_dir, f"{hdl_toplevel}_abc.log")
+        _write_constr(constr_path, *constr_inputs)
+
+    dont_use_globs: tuple[str, ...] = ()
+    if _ABC_DONT_USE_GLOBS.get(cell_library) and _abc_supports_dont_use():
+        dont_use_globs = _ABC_DONT_USE_GLOBS[cell_library]
+
     _write_script(
         script_path=script_path,
         sources=resolved_sources,
@@ -201,6 +373,10 @@ def run_synthesize(
         liberty_path=liberty_path,
         stats_path=stats_path,
         netlist_path=netlist_path,
+        constr_path=constr_path,
+        abc_log_path=abc_log_path,
+        delay_target_ps=delay_target_ps,
+        dont_use_globs=dont_use_globs,
     )
 
     _run_yosys(script_path)
@@ -223,6 +399,17 @@ def run_synthesize(
     if len(resolved_sources) > 1:
         provenance["input"] = {"content_hash": _combined_content_hash(resolved_sources)}
 
+    equivalence = None
+    if verify_equivalence:
+        equivalence = _verify_synthesis_equivalence(
+            synthesize_output_dir=output_dir,
+            resolved_sources=resolved_sources,
+            hdl_toplevel=hdl_toplevel,
+            netlist_path=netlist_path,
+            liberty_path=liberty_path,
+            timeout_s=equiv_timeout_s,
+        )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
@@ -239,11 +426,121 @@ def run_synthesize(
         "instance_counts_by_type": dict(
             sorted((module_stats.get("num_cells_by_type") or {}).items())
         ),
-        "timing": None,
+        "timing": _read_abc_timing(abc_log_path, delay_target_ps),
         "netlist_path": netlist_path,
         "script_path": script_path,
         "provenance": provenance,
+        "equivalence": equivalence,
     }
+
+
+def _verify_synthesis_equivalence(
+    *,
+    synthesize_output_dir: str,
+    resolved_sources: list[str],
+    hdl_toplevel: str,
+    netlist_path: str,
+    liberty_path: str,
+    timeout_s: float | None,
+) -> dict[str, Any]:
+    """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
+    successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
+    existing request contract, with ``gold`` set to the same RTL ``sources``
+    this synthesis run just read and ``gate`` set to the netlist it just
+    produced (``liberty`` attached so the standard-cell instances resolve as
+    real logic, not an undefined blackbox -- see
+    :func:`klayout_tools.equiv._resolve_side`'s own docs).
+
+    The equiv request is written to a real file under
+    ``synthesize_output_dir`` (this run's own ``.klt/synthesize/`` -- never
+    passed as an inline JSON string) so
+    :func:`klayout_tools.equiv.run_equiv` resolves its own artifacts
+    directory as ``.klt/synthesize/.klt/equiv/``, right alongside this run's
+    own script/netlist -- rather than the process's current working
+    directory (the inline-JSON form's own relative-path anchor, per
+    :func:`klayout_tools.equiv.load_request_arg`'s docs), which would
+    silently scatter equivalence-check artifacts somewhere unrelated to the
+    request being synthesized.
+
+    Returns a small summary dict (attached to the response's
+    ``equivalence`` field) on an ``"equivalent"`` verdict. Raises
+    :class:`SynthesizeError` -- a hard failure, never a silent warning --
+    for every other outcome: a proven ``"counterexample"`` (the synthesized
+    netlist diverges from its own source RTL), an ``"inconclusive"`` verdict
+    (a solver/process timeout -- never treated as a pass), or an
+    :class:`~klayout_tools.equiv.EquivError` (e.g. a sequential design,
+    outside this MVP's combinational-only ``klt equiv`` scope).
+    """
+    equiv_request_path = os.path.join(
+        synthesize_output_dir, f"equiv_request_{hdl_toplevel}.json"
+    )
+    equiv_request = {
+        "gold": {"sources": resolved_sources, "top": hdl_toplevel},
+        "gate": {
+            "sources": [netlist_path],
+            "top": hdl_toplevel,
+            "liberty": liberty_path,
+        },
+    }
+    try:
+        with open(equiv_request_path, "w", encoding="utf-8") as handle:
+            json.dump(equiv_request, handle, indent=2)
+    except OSError as exc:
+        raise SynthesizeError(
+            f"could not write equivalence-check request '{equiv_request_path}': {exc}"
+        ) from exc
+
+    try:
+        equiv_report = run_equiv(equiv_request_path, timeout_s=timeout_s)
+    except EquivError as exc:
+        raise SynthesizeError(
+            f"equivalence check against source RTL could not be completed: {exc}"
+        ) from exc
+
+    status = equiv_report["status"]
+    if status != "equivalent":
+        raise SynthesizeError(_equivalence_failure_message(status, equiv_report))
+
+    return {
+        "status": status,
+        "engine": equiv_report["engine"],
+        "engine_version": equiv_report["engine_version"],
+        "timeout_s": equiv_report["timeout_s"],
+        "elapsed_s": equiv_report["elapsed_s"],
+        "artifacts": equiv_report["artifacts"],
+    }
+
+
+def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
+    """An actionable :class:`SynthesizeError` message for a non-
+    ``"equivalent"`` ``klt equiv`` verdict against a just-produced netlist
+    -- names the diverging outputs for a proven ``"counterexample"``, or the
+    first diagnostic for an ``"inconclusive"`` (timeout) verdict."""
+    log_path = equiv_report.get("artifacts", {}).get("log_path")
+    if status == "counterexample":
+        counterexample = equiv_report.get("counterexample") or {}
+        diverging = counterexample.get("diverging_outputs") or []
+        confirmed = counterexample.get("confirmed_by_simulation")
+        detail = (
+            f"diverging outputs: {', '.join(diverging)}"
+            if diverging
+            else "no diverging outputs reported"
+        )
+        message = (
+            "synthesized netlist is NOT equivalent to its source RTL "
+            f"(klt equiv reported 'counterexample'; {detail}; "
+            f"confirmed_by_simulation={confirmed})"
+        )
+    else:
+        diagnostics = equiv_report.get("diagnostics") or []
+        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
+        message = (
+            "equivalence check against source RTL did not reach a verdict "
+            f"(klt equiv reported '{status}'): {detail}"
+        )
+    if log_path:
+        message += f" -- see {log_path} for the full proof"
+    return message
 
 
 def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
@@ -344,6 +641,81 @@ def _resolve_liberty(
     return liberty_path, corner, info
 
 
+def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
+    """``constraints.clock_period_ns`` as an integer picosecond ABC delay
+    target (``abc -D``), or ``None`` when the request does not supply one.
+
+    ``None``/omitted is a deliberate, documented state, not an oversight
+    (``docs/cli/synthesize.md``): the run still gets ``-constr`` -- so ABC's
+    ``buffer``/``upsize``/``dnsize`` sizing steps and its ``stime -p`` report
+    still run -- but ``&nf``/``upsize``/``dnsize`` optimize untargeted,
+    exactly as they did before issue #807. Only the *target* is caller-
+    supplied.
+
+    Raises :class:`SynthesizeError` for a non-numeric or non-positive value
+    -- a request that means to constrain the run but expresses it wrongly
+    must not be silently downgraded to "unconstrained".
+    """
+    if not constraints:
+        return None
+    clock_period_ns = constraints.get("clock_period_ns")
+    if clock_period_ns is None:
+        return None
+    if isinstance(clock_period_ns, bool) or not isinstance(
+        clock_period_ns, (int, float)
+    ):
+        raise SynthesizeError(
+            "request.constraints.clock_period_ns must be a positive number "
+            "(nanoseconds) or null"
+        )
+    if clock_period_ns <= 0:
+        raise SynthesizeError(
+            "request.constraints.clock_period_ns must be greater than zero"
+        )
+    return int(round(clock_period_ns * 1000))
+
+
+def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
+    """Write the two-line ABC constraint file ``abc -constr`` consumes --
+    ``set_driving_cell <cell>`` / ``set_load <femtofarads>``, the exact
+    shape ``help abc`` documents and ORFS's own
+    ``flow/scripts/synth_preamble.tcl`` generates.
+
+    Kept in ``.klt/synthesize/`` alongside the ``.ys`` script and the mapped
+    netlist, as a debuggable artifact, never deleted.
+    """
+    try:
+        with open(constr_path, "w", encoding="utf-8") as handle:
+            handle.write(f"set_driving_cell {driving_cell}\nset_load {load_ff:g}\n")
+    except OSError as exc:
+        raise SynthesizeError(
+            f"could not write ABC constraint file '{constr_path}': {exc}"
+        ) from exc
+
+
+def _abc_supports_dont_use() -> bool:
+    """Whether the resolved Yosys build's ``abc`` pass accepts ``-dont_use``.
+
+    Probed against ``yosys -p 'help abc'`` rather than inferred from a
+    version number: measured live (issue #807), Yosys 0.68 documents
+    ``-dont_use`` and Ubuntu 24.04's distro-packaged 0.33 does not mention
+    it at all -- and passing an unknown option to ``abc`` is a hard Yosys
+    error. Older builds therefore degrade to a run with no exclusion list
+    (mapped exactly as before issue #807) rather than failing outright --
+    the same graceful-degradation posture ``sequential_area_um2`` already
+    takes toward those builds (#560). Never raises.
+    """
+    try:
+        completed = subprocess.run(
+            ["yosys", "-p", "help abc"], capture_output=True, text=True
+        )
+    except OSError:
+        return False
+    if completed.returncode != 0:
+        return False
+    return "-dont_use" in (completed.stdout or "")
+
+
 def _write_script(
     *,
     script_path: str,
@@ -352,22 +724,56 @@ def _write_script(
     liberty_path: str,
     stats_path: str,
     netlist_path: str,
+    constr_path: str | None = None,
+    abc_log_path: str | None = None,
+    delay_target_ps: int | None = None,
+    dont_use_globs: tuple[str, ...] = (),
 ) -> None:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
     ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``stat``/
     ``write_verilog``) into ``script_path``.
 
+    The ``abc`` line carries the issue #807 additions when the resolved
+    ``cell_library`` has table entries for them:
+
+    - ``-constr <file>`` whenever ``constr_path`` is given. This is what
+      unlocks ABC's ``buffer``/``upsize``/``dnsize`` sizing-and-buffering
+      steps *and* its ``stime -p`` timing report -- all four are
+      ``-constr``-gated in Yosys's own default ABC script (``help abc``),
+      which is why one flag delivers both halves of this change.
+    - ``-D <picoseconds>`` only when the request supplied
+      ``constraints.clock_period_ns``.
+    - one ``-dont_use <glob>`` per exclusion-table entry.
+
+    When ``constr_path`` is given the whole ``abc`` invocation is wrapped in
+    ``tee -q -o <abc_log_path>`` so ``stime -p``'s output is captured to a
+    file, per the #396 spike's explicit warning against regexing the
+    interleaved Yosys log.
+
+    With none of those (a ``cell_library`` in neither table), the emitted
+    script is byte-identical to the pre-#807 one.
+
     Every path embedded in the script is absolute, so the script runs
     correctly regardless of the invoking process's own working directory --
     :func:`_run_yosys` never sets ``cwd=``.
     """
+    abc_command = f"abc -liberty {liberty_path}"
+    if constr_path is not None:
+        abc_command += f" -constr {constr_path}"
+    if delay_target_ps is not None:
+        abc_command += f" -D {delay_target_ps}"
+    for glob in dont_use_globs:
+        abc_command += f" -dont_use {glob}"
+    if constr_path is not None and abc_log_path is not None:
+        abc_command = f"tee -q -o {abc_log_path} {abc_command}"
+
     lines = [f"read_verilog {path}" for path in sources]
     lines += [
         f"hierarchy -check -top {hdl_toplevel}",
         f"synth -top {hdl_toplevel}",
         f"dfflibmap -liberty {liberty_path}",
-        f"abc -liberty {liberty_path}",
+        abc_command,
         "clean",
         f"tee -q -o {stats_path} "
         f"stat -liberty {liberty_path} -json -top {hdl_toplevel}",
@@ -470,6 +876,66 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
             f"'{hdl_toplevel}' in '{stats_path}'"
         )
     return module_stats
+
+
+def _read_abc_timing(
+    abc_log_path: str | None, delay_target_ps: int | None
+) -> dict[str, Any] | None:
+    """Parse ABC's own ``stime -p`` line out of the captured ABC log and
+    shape it into the response's ``timing`` object, or return ``None`` when
+    no such line is available.
+
+    ``None`` covers every "no number to report" case honestly rather than
+    inventing one: no ``-constr`` was passed (the resolved ``cell_library``
+    has no :data:`_ABC_CONSTR_INPUTS` entry, so ``stime -p`` never ran), the
+    captured log is missing/unreadable, or the resolved ABC printed no
+    recognisable summary line.
+
+    The shape names its own provenance and limits -- never a bare
+    ``delay_ps`` float a caller could mistake for signoff timing (QoR survey
+    section 3.3):
+
+    ``{"source": "abc_stime", "wire_load": null, "critical_path_ps": 2485.93,
+    "delay_target_ps": 5000}``
+
+    ``wire_load`` is ABC's own ``WireLoad = "..."`` echo, normalised to
+    ``None`` for its ``"none"`` -- the load-modelling caveat made
+    machine-readable: this is a **pre-layout, wire-free** combinational
+    estimate over the cone ABC itself mapped (flip-flops are already
+    liberty-mapped by ``dfflibmap`` before ``abc`` runs, so they are outside
+    the reported path), not a register-to-register signoff number.
+
+    When a run produces several ``stime`` reports (Yosys invokes ABC once
+    per combinational region), the **maximum** reported delay is used --
+    the critical path across the whole design, not whichever region
+    happened to be mapped last.
+    """
+    if abc_log_path is None or not os.path.isfile(abc_log_path):
+        return None
+    try:
+        with open(abc_log_path, encoding="utf-8", errors="replace") as handle:
+            log_text = handle.read()
+    except OSError:
+        return None
+
+    best: tuple[float, str] | None = None
+    for match in _ABC_STIME_RE.finditer(log_text):
+        try:
+            delay_ps = float(match.group("delay_ps"))
+        except ValueError:  # pragma: no cover - regex only matches numbers
+            continue
+        if best is None or delay_ps > best[0]:
+            best = (delay_ps, match.group("wire_load"))
+    if best is None:
+        return None
+
+    critical_path_ps, wire_load = best
+    return {
+        "source": "abc_stime",
+        "wire_load": None if wire_load.lower() == "none" else wire_load,
+        "critical_path_ps": critical_path_ps,
+        "delay_target_ps": delay_target_ps,
+    }
 
 
 def _combined_content_hash(paths: list[str]) -> str | None:

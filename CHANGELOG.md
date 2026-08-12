@@ -349,6 +349,111 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt extract --parasitics --mom-net <net>` cross-checks (and
+  replaces) one net's lumped-RC ground capacitance with `klt mom`'s
+  Method-of-Moments field solver (#798, Phase 1b of the MoM epic #701 —
+  "prove the shipped MoM solver improves real extraction fidelity, not just
+  canonical benchmarks"). The named net's geometry on each of the deck's
+  `metals` roles is read via the same `LayoutToNetlist.polygons_of_net` call
+  `--parasitics` itself uses; each shape's bbox becomes a `klt mom` conductor
+  panel, paired with a synthesized ground plate directly beneath it (z-gap
+  inverted from the deck's own `cap_area_ff_um2` coefficient at a fixed 3.9
+  relative permittivity, padded 3× that gap in every direction — a factor
+  chosen from a convergence sweep during implementation, not tuned to any one
+  net; see docs/cli/extract.md's "`klt mom` cross-check for one net" for the
+  full derivation). Both the written SPICE `C` card and the
+  `parasitics.nets[]` entry for that one net now carry the MoM value; every
+  other net is untouched. On `tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds`
+  net `Y` — the exact canary net `docs/design/extract-fidelity-roadmap.md`
+  section 4 already cites as this repo's committed schematic-vs-extracted
+  sensitivity-floor example, and a clean single-role (li1-only) case —
+  the measured delta is **-27.66%** (lumped RC 0.23966 fF vs. MoM 0.17338 fF):
+  MoM's ab-initio solve reports meaningfully less capacitance than the
+  lumped model's area+fringe sum for this net's actual isolated geometry.
+  **No `schema_version` bump** — the new `parasitics.mom_crosscheck` field is
+  additive (`null` unless `--mom-net` was given), and every other documented
+  field keeps its meaning; `--mom-net` omitted (the default) is
+  byte-identical to before this feature existed. Requires the
+  `klt_mom_native` extension to be built (docs/cli/mom.md); an unbuilt
+  extension, an unresolvable net name, or a solver-level failure is a clean
+  `ExtractError`. Only the deck's `metals` roles are modelled — a net whose
+  ground capacitance also draws on a `poly`/`diffusion` role is honestly
+  flagged as out of scope in `mom_crosscheck.warnings` rather than silently
+  compared apples-to-oranges. See docs/cli/extract.md's "`klt mom` cross-check
+  for one net" section.
+
+- 2026-08-12 — `klt mom`'s matrix solve step is now **preconditioned
+  Conjugate Gradient** (Jacobi/diagonal preconditioner) instead of a direct
+  LU factorisation (#799, Phase 1c of the Method-of-Moments epic #701). The
+  potential-coefficient matrix is symmetric positive definite by
+  construction (`q^T P q` is twice the charge distribution's electrostatic
+  energy), which is exactly the case CG — not the more general GMRES the
+  epic also named — is the standard, provably-optimal Krylov method for. On
+  an 8-conductor/1-shared-ground "finger" geometry discretised to 6 912
+  panels (well past the MVP's 1-2 conductor fixtures), CG converges in a
+  mean of 68.8 iterations (~1% of `n`) per right-hand side and the solve is
+  **3.83x faster** than the direct factorisation it replaces (112.9 s vs.
+  29.5 s), with the solved capacitance matrix agreeing with the direct
+  solve to 1e-7 relative. Wiring this in also surfaced (and fixed) a latent
+  fill bug: a multi-box conductor whose boxes abut at a right-angle corner
+  (e.g. the coax fixtures' four-wall shield) could discretise two panels at
+  the exact same location, giving the potential-coefficient matrix a
+  literal `Inf` entry that the old direct solve happened not to trip over —
+  `geometry::discretize` now deduplicates exact-coincident panels within a
+  conductor. **No `schema_version` bump and no behavior change to `klt
+  mom`'s JSON contract or reported numbers** — every existing closed-form
+  and convergence-under-refinement check (`tests/test_mom_validation.py`,
+  #757) passes unchanged against the new solve path. Full rationale, the
+  preconditioner choice, and the measured convergence/scaling numbers:
+  `docs/design/mom-iterative-solver.md`.
+
+- 2026-08-12 — `klt synthesize --verify-equivalence` (#808, Phase 1 of the
+  RTL-synthesis epic #704) wires the already-shipped `klt equiv` (#726) in
+  as `klt synthesize`'s own **acceptance gate**: a synthesized netlist is
+  not considered done until `klt equiv` reports it `"equivalent"` to the
+  source RTL that was fed into Yosys. Off by default (additive/opt-in —
+  every pre-existing invocation is unaffected). When given, the just-
+  produced netlist is proven against the same `sources`/`hdl_toplevel` this
+  run synthesized (reusing `klt equiv`'s own request contract — `gate`'s
+  `liberty` is set to the same resolved liberty synthesis used); a
+  `"counterexample"` or `"inconclusive"` (timeout) verdict is a hard
+  `SynthesizeError`/exit `1`, never a silent warning folded into a
+  `status: "ok"` response. Combinational designs only, matching `klt
+  equiv`'s own Phase 0 MVP scope (#707) — a sequential design (e.g. the GCD
+  worked example) makes the gate itself fail with a clear scope error. New
+  response field `equivalence` (`null` unless the flag is given;
+  `{status, engine, engine_version, timeout_s, elapsed_s, artifacts}` on a
+  pass) — **no `schema_version` bump**, purely additive. New
+  `--equiv-timeout-s` flag overrides `klt equiv`'s own default proof
+  timeout. See `docs/cli/synthesize.md`'s "Equivalence gate" section.
+
+- 2026-08-12 — `klt synthesize` now drives ABC's constraint-gated half of
+  the mapping flow (#807, Epic #704 Phase 1a). Three additive changes, all
+  unlocked by one flag: (1) `constraints.clock_period_ns` is **consumed**
+  rather than carried — it becomes `abc -D <picoseconds>`, and the command
+  always writes a `<top>_abc.constr` file (`set_driving_cell`/`set_load`,
+  per-`cell_library` values sourced from ORFS's own
+  `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` and cross-checked against the installed
+  liberty) passed as `abc -constr`, which is what turns on ABC's
+  `buffer`/`upsize`/`dnsize` sizing and buffering steps at all; (2) non-logic
+  cells are excluded via `abc -dont_use` — for `sky130_fd_sc_hd` the
+  `lpflow_*` power-isolation and `probe*` test-probe classes ORFS's own
+  `DONT_USE_CELLS` names, so a plain `gcd` netlist no longer contains 19
+  power-domain isolation cells it has no use for; (3) the reserved `timing`
+  field is now populated with ABC's own `stime -p` critical path, as a
+  self-labelling object (`{"source": "abc_stime", "wire_load": null,
+  "critical_path_ps": …, "delay_target_ps": …}`) — **a pre-layout,
+  wire-free estimate, never signoff STA**, which remains Phase 4's
+  OpenROAD/OpenSTA step. Measured on Yosys 0.68+48 against a volare
+  `sky130A` install: `gcd` goes from 335 cells / 2951.5808 µm² / no delay
+  number to 347 cells / 3238.1056 µm² / 2485.93 ps with zero excluded cells,
+  and supplying `clock_period_ns: 10` maps it to 3001.6288 µm² at 3072.40 ps
+  — the area/delay trade-off is now caller-controlled instead of pinned to
+  one unlabelled point. `klt equiv` reports `"equivalent"` before and after
+  on every combinational design measured. `cell_library` values in neither
+  new table (and Yosys builds whose `abc` predates `-dont_use`, e.g. Ubuntu
+  24.04's 0.33) keep the previous behaviour exactly rather than failing.
+
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on

@@ -61,6 +61,7 @@ docs/
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
+    mom-iterative-solver.md
     mom-validation.md
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md

@@ -13,6 +13,15 @@ checked against the parallel-plate and coaxial closed forms and shown to
 converge under mesh refinement. Read it before trusting a number from here —
 in particular for what `panel_size_um` you need for a given accuracy.
 
+`klt mom` can also, optionally (`compute_inductance: true` in the spec file),
+extract **partial inductance and DC resistance** via PEEC (Partial Element
+Equivalent Circuit) filaments — Phase 1a of the same epic, delivered by
+[#797](https://github.com/2AMLogic/klayout-tools/issues/797). This is a
+separate, opt-in solve path with its own (narrower) geometric scope — see
+"PEEC inductance/resistance" below — validated the same way, against
+closed-form straight-wire and two-wire-loop inductance oracles (see
+`docs/design/mom-validation.md`'s "Inductance/resistance" section).
+
 ```
 klt mom <file> <spec> [--top <cell>] [--format text|json]
 ```
@@ -127,7 +136,7 @@ interpreter to resolve Python's symbols against and fails to link.)
 
 ## Spec file
 
-The spec file is a JSON object with three keys:
+The spec file is a JSON object:
 
 ```json
 {
@@ -151,6 +160,14 @@ The spec file is a JSON object with three keys:
   conductor-to-conductor separation in the geometry** — a coarser value
   breaks the point-collocation fill down and is reported in `warnings` (see
   "Warnings" below).
+- `compute_inductance` (optional, bool, default `false`) — opt into the PEEC
+  partial-inductance/DC-resistance solve alongside capacitance. See "PEEC
+  inductance/resistance" below for the (narrower) geometric scope this
+  requires.
+- `filament_size_um` (optional, number, default `1.0`) — target PEEC
+  cross-section filament edge length in micrometers. Only consulted when
+  `compute_inductance` is set; same "smaller is more accurate, more
+  expensive" tradeoff as `panel_size_um`.
 - `stackup` (required, non-empty array) — each entry maps one GDS
   `(layer, datatype)` pair's shapes to an electrical conductor's z-extent:
   - `layer` (string, `"<layer>/<datatype>"`) — the GDS layer/datatype to
@@ -160,11 +177,20 @@ The spec file is a JSON object with three keys:
     electrical conductor. This is how a conductor spread across several GDS
     layers (e.g. a coax-style shield's four wall segments, each its own
     layer) is expressed as a single node; see "Worked example: coax" below.
+    (PEEC's bar-shaped-conductor restriction below means a
+    `compute_inductance: true` request cannot use this to merge several
+    boxes into one conductor — see "PEEC inductance/resistance".)
   - `z0_um`/`z1_um` (numbers) — the conductor's z-extent at this layer.
     `z0_um == z1_um` models an idealised zero-thickness flat plate (the
     common case for a simple parallel-plate test); `z1_um > z0_um` models a
     conductor with real thickness (all six faces of the resulting
     rectangular prism are discretised).
+  - `conductivity_S_per_m` (optional, number) — the conductor's bulk
+    conductivity, siemens per meter. **Required** (and used only) when
+    `compute_inductance` is set, to compute this conductor's DC resistance.
+    If several `stackup` entries share a `conductor` name, they must agree
+    on this value everywhere it is set (a `conductor`'s conductivity cannot
+    differ by layer).
 
 Every shape on a `stackup` entry's GDS layer, within the selected top cell,
 is read via its **axis-aligned bounding box** — not its exact outline. This
@@ -186,7 +212,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "coupled_lines.gds",
   "spec": "coupled_lines.mom.json",
   "background_permittivity": 3.9,
@@ -203,15 +229,19 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field                     | Type              | Description                                                                                     |
 | ------------------------- | ----------------- | ------------------------------------------------------------------------------------------------- |
-| `schema_version`          | integer           | Version of this command's JSON shape (starts at `1`).                                             |
+| `schema_version`          | integer           | Version of this command's JSON shape. `1` = capacitance-only (#718/#719); `2` = adds the PEEC fields below, each present only when `compute_inductance` was set (#797). |
 | `file`                    | string            | The input layout path exactly as provided.                                                        |
 | `spec`                    | string            | The spec file path exactly as provided.                                                           |
 | `background_permittivity` | number            | Resolved from the spec (echoed for provenance).                                                   |
 | `panel_size_um`           | number            | Resolved panel size — the spec's value, or the `0.5` default when omitted.                        |
-| `conductors`              | array\<string\>   | Conductor names, in the same order as `capacitance_matrix_ff`'s rows/columns (first-seen order in `stackup`). |
+| `conductors`              | array\<string\>   | Conductor names, in the same order as `capacitance_matrix_ff`'s (and, when present, `inductance_matrix_nh`'s) rows/columns (first-seen order in `stackup`). |
 | `capacitance_matrix_ff`   | array\<array\<number\>\> | The Maxwell (short-circuit) capacitance matrix, in femtofarads — see "Reading the matrix" below. |
 | `panel_count`             | integer           | Total discretisation panel count across every conductor (informational).                          |
 | `warnings`                | array\<string\>   | Non-fatal physicality diagnostics — empty on a well-resolved solve. See "Warnings" below.          |
+| `filament_size_um`        | number            | **Only present when `compute_inductance: true`.** Resolved PEEC filament size — the spec's value, or the `1.0` default. |
+| `inductance_matrix_nh`    | array\<array\<number\>\> | **Only present when `compute_inductance: true`.** The PEEC partial-inductance matrix, in nanohenries — see "PEEC inductance/resistance" below. |
+| `resistance_ohm`          | array\<number\>   | **Only present when `compute_inductance: true`.** Per-conductor DC resistance, in ohms, same order as `conductors`. |
+| `filament_count`          | integer           | **Only present when `compute_inductance: true`.** Total PEEC filament count across every conductor (informational, mirrors `panel_count`). |
 
 ### Reading the matrix
 
@@ -263,6 +293,93 @@ warnings:
   and re-run
 ```
 
+## PEEC inductance/resistance
+
+Set `compute_inductance: true` in the spec file to also extract
+**partial self/mutual inductance** and **DC resistance**, via PEEC (Partial
+Element Equivalent Circuit) filaments — Ruehli's classical formulation
+("Inductance Calculations in a Complex Integrated Circuit Environment", IBM
+J. Res. Dev. 16(5), 1972). Unlike the capacitance solve (which discretises
+each conductor's outer *surface* into panels), PEEC needs *volumetric*
+current-carrying filaments, spanning each conductor's full length along its
+current-flow axis. That requires a materially narrower geometric scope than
+the capacitance solve's — read this section before turning it on.
+
+### The bar-shaped-conductor MVP restriction
+
+`compute_inductance: true` requires every conductor in the request to reduce
+to a single well-defined current-flow "bar":
+
+- **Exactly one box per conductor.** A conductor merged from several
+  `stackup` entries (e.g. the coax shield's four wall segments in "Worked
+  example: coax" below) has no single well-defined bar cross-section under
+  this MVP's model, and is rejected with a clear error. Multi-box PEEC
+  (Ruehli's general mesh) is a follow-up.
+- **A true 3-D bar.** All three of a box's extents (x, y, z) must be
+  non-zero — a flat, zero-thickness plate (fine for capacitance) has no
+  cross-sectional area to carry current.
+- **Bar-shaped, not cubic.** The box's longest extent (the current-flow
+  axis — the MVP's simplest defensible choice: **current flows along the
+  box's longest axis**, matching how bar/wire conductors are treated in
+  introductory PEEC codes) must be at least 3x each of the other two
+  extents. A conductor closer to square/cubic than that (e.g. a pad or a
+  via) has no well-defined single current-flow direction under this MVP's
+  model and is rejected — this mirrors how the capacitance solver's own
+  "Scope and limitations" documents *its* MVP simplifications rather than
+  silently returning a number that doesn't mean what it looks like it means.
+- **Every conductor must share the same current-flow axis and the same
+  axial extent** (start/end coordinate along that axis). This is what lets
+  the mutual-inductance formula below (parallel, equal-length, aligned
+  filaments) apply directly; a request mixing axes, or with offset/unequal
+  bar lengths (e.g. an L-shaped loop, or two loop sides that don't line up
+  end-to-end), is rejected. The general unequal-length/off-axis Neumann
+  formula is a follow-up.
+- Every conductor must set `conductivity_S_per_m` (used for DC resistance;
+  see "Spec file" above).
+
+A rectangular loop (two long, parallel, aligned bars — "Worked example:
+straight wire and loop" below) and a single straight bar both satisfy this
+scope; a coax shield, a pad, or an L-shaped trace do not (yet).
+
+### Method: filament bundle + Neumann's formula
+
+Each PEEC-eligible conductor's cross-section is discretised into a grid of
+filaments (target edge length `filament_size_um`), each spanning the full
+bar length. The partial mutual inductance between two parallel, equal-length,
+axially-aligned filaments separated by perpendicular distance `d` is the
+closed-form Neumann double integral:
+
+```
+M(l, d) = (mu0 / 2*pi) * l * [ asinh(l/d) - sqrt(1 + (d/l)^2) + d/l ]
+```
+
+A filament's own self term reuses this formula with `d` set to its self
+geometric mean distance (self-GMD) — `a * exp(-1/4)` for a filament of
+equivalent circular radius `a = sqrt(area / pi)`. A conductor's partial self
+inductance, and the partial mutual inductance between two conductors, are
+each the plain average of every pairwise filament term within (or between)
+their filament bundles — the standard PEEC bundle-of-filaments technique.
+This combination reproduces two independent textbook closed forms in the
+thin-wire limit (Rosa's straight-wire self-inductance, and the classical
+two-wire transmission-line loop inductance) — see
+`native/mom/src/peec.rs`'s module docs for the full derivation and
+`docs/design/mom-validation.md`'s "Inductance/resistance" section for the
+measured validation against both.
+
+DC resistance needs no approximation: `R = length / (conductivity *
+cross_sectional_area)` (Ohm's law), computed directly from the same bar
+geometry.
+
+### Reading the inductance matrix
+
+`inductance_matrix_nh[j][k]` is conductor `j`'s partial self inductance
+(`j == k`) or the partial mutual inductance between conductors `j` and `k`
+(`j != k`), in nanohenries, in the Ruehli PEEC sense — a **partial**
+inductance has no implied current-return path; it becomes physically
+meaningful once combined into a loop (e.g. `L_loop = L[0][0] + L[1][1] -
+2*L[0][1]` for a two-conductor "go/return" loop). The matrix is symmetric.
+`resistance_ohm[j]` is conductor `j`'s DC resistance in ohms.
+
 ## Worked example: parallel plate
 
 ```bash
@@ -312,6 +429,56 @@ shield:
 
 See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
 
+## Worked example: straight wire and loop
+
+`compute_inductance: true` on a single 100x2x2 µm bar (self-inductance and
+resistance only):
+
+```json
+{
+  "background_permittivity": 1.0,
+  "panel_size_um": 5.0,
+  "compute_inductance": true,
+  "filament_size_um": 0.5,
+  "stackup": [
+    {
+      "layer": "1/0", "conductor": "wire",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    }
+  ]
+}
+```
+
+A rectangular loop — two long, parallel, aligned 4x4 µm bars 60 µm apart,
+`"go"` and `"return"` — additionally exercises the mutual term (the loop's
+own inductance is `L[0][0] + L[1][1] - 2*L[0][1]`):
+
+```json
+{
+  "background_permittivity": 1.0,
+  "panel_size_um": 10.0,
+  "compute_inductance": true,
+  "filament_size_um": 0.5,
+  "stackup": [
+    {
+      "layer": "1/0", "conductor": "go",
+      "z0_um": 0.0, "z1_um": 4.0,
+      "conductivity_S_per_m": 5.96e7
+    },
+    {
+      "layer": "2/0", "conductor": "return",
+      "z0_um": 0.0, "z1_um": 4.0,
+      "conductivity_S_per_m": 5.96e7
+    }
+  ]
+}
+```
+
+See `tests/test_mom.py`'s `_wire_fixture`/`test_run_mom_peec_loop`, and
+`tests/test_mom_peec_validation.py` (which runs both against their closed-form
+oracles), for the exact geometry and measured accuracy.
+
 ## Scope and limitations
 
 - **Rectangular geometry only (MVP).** Every conductor is discretised from
@@ -332,25 +499,55 @@ See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
   [`docs/design/mom-validation.md`](../design/mom-validation.md). The kernel's
   known failure mode — panels wider than the gap they face — is detected and
   surfaced in `warnings` rather than returned silently (see "Warnings").
-- **No ports/S-parameters.** This is a pure electrostatic (capacitance-only)
-  solve — no ports, no frequency dependence, no inductance/resistance. Those
-  are separate, later phases of epic #701.
+- **No ports/S-parameters, no frequency dependence.** Both the capacitance
+  and the PEEC inductance/resistance solve are quasi-static (DC/low-frequency)
+  — no ports, no skin effect, no S-parameters. Those are separate, later
+  phases of epic #701.
+- **PEEC inductance/resistance is bar-shaped-conductors-only (MVP).** See
+  "PEEC inductance/resistance" above's "bar-shaped-conductor MVP restriction"
+  — a materially narrower scope than the capacitance solve's (single box,
+  true 3-D, elongated, shared axis/extent across every conductor in the
+  request). A request that does not fit is rejected with a clear error
+  naming which restriction it violates, not silently approximated.
 
 ### Panel-count guard
 
-The dense potential-coefficient matrix is `O(n^2)` in memory and `O(n^3)` in
-solve time. A request whose discretisation would exceed an internal 8000-panel
-cap is rejected with a clear error before any allocation is attempted —
-most commonly triggered by a `panel_size_um` sized for a small conductor
-being reused against a much larger one in the same request (a scale
-mismatch). Increase `panel_size_um`, or split the request, to work around it.
+The dense potential-coefficient matrix is `O(n^2)` in memory. A request whose
+discretisation would exceed an internal 8000-panel cap is rejected with a
+clear error before any allocation is attempted — most commonly triggered by a
+`panel_size_um` sized for a small conductor being reused against a much
+larger one in the same request (a scale mismatch). Increase `panel_size_um`,
+or split the request, to work around it.
+
+### The matrix solve
+
+The solve step is preconditioned Conjugate Gradient (Jacobi/diagonal
+preconditioner), not a direct (LU) factorisation — the potential-coefficient
+matrix is symmetric positive definite by construction, and CG converges in
+well under `n` iterations on the geometries this command targets, which is
+materially cheaper at scale than the `O(n^3)` direct solve it replaced. See
+[`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md)
+([#799](https://github.com/2AMLogic/klayout-tools/issues/799)) for why CG
+(not GMRES) is the solver appropriate to this system, the measured
+convergence rate, and the solve-time comparison against the direct solve at a
+larger-than-MVP conductor count.
+
+### Filament-count guard
+
+The PEEC mutual-inductance fill is `O(f^2)` in the total filament count `f`
+across every conductor (cheaper than the capacitance solve's dense `O(n^3)`
+solve, but still unbounded without a guard). A `compute_inductance: true`
+request whose filament discretisation would exceed an internal 6000-filament
+cap is rejected with a clear error before any allocation is attempted, the
+same role the panel-count guard plays for capacitance. Increase
+`filament_size_um` to work around it.
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
-| `0`       | Success — the capacitance matrix was computed and returned.                                |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, or the panel-count guard above). |
+| `0`       | Success — the capacitance matrix (and, if requested, the PEEC inductance/resistance) was computed and returned. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true` conductor that does not satisfy the PEEC bar-shape scope, a missing `conductivity_S_per_m`, or the filament-count guard above). |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                        |
 
 ## See also
@@ -361,8 +558,16 @@ mismatch). Increase `panel_size_um`, or split the request, to work around it.
   lighter-weight alternative (reusing geode-fem's quasi-static solver mode)
   worth revisiting if the cost/accuracy tradeoff argues for it.
 - [#701](https://github.com/2AMLogic/klayout-tools/issues/701) — the parent
-  Method-of-Moments epic (later phases: ports, coupling, resistance/inductance).
+  Method-of-Moments epic (later phases: ports, coupling, general PEEC mesh).
+- [#797](https://github.com/2AMLogic/klayout-tools/issues/797) — delivered the
+  PEEC inductance/resistance solve documented above.
 - [`docs/design/mom-validation.md`](../design/mom-validation.md) — closed-form
-  validation and convergence-under-refinement for this solver
-  ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)): the analytic
-  oracles, the measured agreement, and the stated tolerances.
+  validation and convergence-under-refinement for both the capacitance solver
+  ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)) and the PEEC
+  inductance/resistance solve (#797): the analytic oracles, the measured
+  agreement, and the stated tolerances.
+- [`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md) —
+  the iterative (preconditioned Conjugate Gradient) solve step
+  ([#799](https://github.com/2AMLogic/klayout-tools/issues/799)): why CG over
+  GMRES, the preconditioner, and the measured convergence rate and solve-time
+  comparison against the direct solve it replaced.
