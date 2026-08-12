@@ -1052,7 +1052,10 @@ def _resolve_layout(
             # flag, so it is always an empty list here. The 11th return
             # (dead_metal, #676) is likewise a report-only structured view of
             # `klt extract`'s own warnings -- routing geometry on no net
-            # cannot change which devices/nets the compare below sees.
+            # cannot change which devices/nets the compare below sees. The
+            # 12th return (mom_crosscheck, #798) is `klt extract
+            # --mom-net`'s own report; `klt lvs` never passes that flag (LVS
+            # is topological, parasitics-free), so it is always `None` here.
             (
                 netlist,
                 top_cell_name,
@@ -1065,6 +1068,7 @@ def _resolve_layout(
                 _voltage_domain_warnings,
                 _abstracted_cells,
                 _dead_metal,
+                _mom_crosscheck,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

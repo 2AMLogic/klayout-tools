@@ -758,6 +758,28 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--mom-net",
+        dest="mom_net",
+        default=None,
+        metavar="NET",
+        help=(
+            "cross-check (and replace) this one net's --parasitics ground "
+            "capacitance against the `klt mom` Method-of-Moments field "
+            "solver instead of the deck's lumped-RC coefficient table "
+            "(issue #798, Epic #701 Phase 1b); requires --parasitics. Both "
+            "the written SPICE `C` card and the `parasitics.nets[]` entry "
+            "for this net carry the MoM value; the pre-swap lumped-RC value "
+            "and the measured delta between the two are reported in the "
+            "new `parasitics.mom_crosscheck` block. Requires the "
+            "klt_mom_native extension to be built (see "
+            "docs/cli/mom.md#building-the-native-extension); an unbuilt "
+            "extension, a name matching no net with ground-eligible "
+            "parasitics geometry, or a solver-level failure is an error. "
+            "Off by default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--mom-net' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--top-cell-pins",
         dest="top_cell_pins",
         action="store_true",
