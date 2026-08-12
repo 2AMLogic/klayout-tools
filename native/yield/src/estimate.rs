@@ -19,11 +19,16 @@
 //! Issue #816 (Phase 1a of the statistical/yield epic #710).
 
 use crate::contract::{
-    Capability, Distribution, Estimate, Interval, Limits, MeasurementReport, MeasurementRequest,
-    Normality, SampleSize, YieldBlock, YieldRequest, YieldResponse, ABSOLUTE_MIN_SAMPLES,
-    SCHEMA_VERSION,
+    AnalyticCrossCheckReport, AnalyticCrossCheckRequest, Capability, Distribution, Estimate,
+    Interval, Limits, MeasurementReport, MeasurementRequest, NegativeControlReport,
+    NegativeControlRequest, Normality, SampleSize, YieldBlock, YieldRequest, YieldResponse,
+    ABSOLUTE_MIN_SAMPLES, SCHEMA_VERSION,
 };
 use crate::stats;
+
+/// Boltzmann constant, J/K (SI 2019 exact definition) -- the `kT/C` analytic
+/// cross-check's only physical constant.
+const BOLTZMANN_J_PER_K: f64 = 1.380_649e-23;
 
 /// Run the full analysis for a request, or return a human-readable error.
 pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
@@ -76,6 +81,25 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
                 .to_string(),
         );
     }
+    // Issue #817: a campaign with no negative control at all is flagged --
+    // "reported" would let a self-check-free campaign pass silently.
+    if reports.iter().all(|r| r.negative_control.is_none()) {
+        warnings.push(
+            "no measurement declared a negative_control -- this campaign has no seeded, \
+             known-bad variant demonstrating that the statistics above can actually detect a \
+             degraded design; see docs/cli/yield.md#negative-control"
+                .to_string(),
+        );
+    } else if reports
+        .iter()
+        .any(|r| matches!(&r.negative_control, Some(nc) if nc.verdict == "not_detected"))
+    {
+        warnings.push(
+            "at least one measurement's negative_control did not show the expected \
+             degradation -- see that measurement's own warnings"
+                .to_string(),
+        );
+    }
 
     Ok(YieldResponse {
         schema_version: SCHEMA_VERSION,
@@ -120,6 +144,9 @@ fn analyze_measurement(
         return Err(format!(
             "measurement '{name}' has a non-finite sample value (NaN or infinity)"
         ));
+    }
+    if let Some(check) = &m.analytic_cross_check {
+        validate_analytic_cross_check(check, name)?;
     }
 
     let n = m.samples.len();
@@ -251,6 +278,39 @@ fn analyze_measurement(
         ));
     }
 
+    // ---- negative control (issue #817) ------------------------------------ //
+    let negative_control = match &m.negative_control {
+        Some(nc) => {
+            let (report, warning) =
+                negative_control_report(name, nc, &m.limits, confidence, min_samples, &empirical)?;
+            if let Some(w) = warning {
+                warnings.push(w);
+            }
+            Some(report)
+        }
+        None => None,
+    };
+
+    // ---- analytic cross-check (issue #817) --------------------------------- //
+    let analytic_cross_check = m.analytic_cross_check.as_ref().map(|check| {
+        let report = analytic_cross_check_report(check, mean, stddev, n, confidence);
+        if report.verdict == "inconsistent" {
+            warnings.push(format!(
+                "measurement '{name}': the empirical distribution (mean={:.6}, stddev={:.6}) is \
+                 not consistent with the {} analytic model's prediction (mean={:.6}, \
+                 stddev={:.6}) at {:.0}% confidence -- relative stddev delta {:+.2}%",
+                mean,
+                stddev,
+                report.kind,
+                report.analytic_mean,
+                report.analytic_stddev,
+                confidence * 100.0,
+                report.stddev_relative_delta * 100.0
+            ));
+        }
+        report
+    });
+
     // ---- verdict --------------------------------------------------------- //
     let status = match m.limits.target_yield {
         None => "reported",
@@ -273,6 +333,8 @@ fn analyze_measurement(
         distribution,
         yield_: YieldBlock { empirical, normal },
         capability,
+        negative_control,
+        analytic_cross_check,
         sample_size,
         status: status.to_string(),
         warnings,
@@ -546,6 +608,215 @@ fn required_n_for_target(p_hat: f64, confidence: f64, target_yield: f64) -> Opti
     Some(lo)
 }
 
+/// Validate an [`AnalyticCrossCheckRequest`]'s physical parameters before any
+/// arithmetic runs on them -- a non-positive capacitance, temperature, or
+/// sigma would otherwise surface as a silent `NaN` deep in the report.
+fn validate_analytic_cross_check(
+    check: &AnalyticCrossCheckRequest,
+    name: &str,
+) -> Result<(), String> {
+    match check {
+        AnalyticCrossCheckRequest::KtcNoise {
+            capacitance_f,
+            temperature_k,
+            ..
+        } => {
+            if *capacitance_f <= 0.0 {
+                return Err(format!(
+                    "measurement '{name}' analytic_cross_check.capacitance_f must be positive \
+                     (got {capacitance_f})"
+                ));
+            }
+            if *temperature_k <= 0.0 {
+                return Err(format!(
+                    "measurement '{name}' analytic_cross_check.temperature_k must be positive \
+                     (got {temperature_k})"
+                ));
+            }
+        }
+        AnalyticCrossCheckRequest::MismatchOffset { sigma, .. } => {
+            if *sigma <= 0.0 {
+                return Err(format!(
+                    "measurement '{name}' analytic_cross_check.sigma must be positive (got \
+                     {sigma})"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The analytic model's prediction against this measurement's own empirical
+/// mean/stddev, with confidence intervals for both (the same asymptotic
+/// approximations `normal_estimate`'s delta method already relies on:
+/// `Var(mu_hat) = sigma^2/n`, `Var(sigma_hat) = sigma^2/(2n)`).
+///
+/// `"consistent"` requires **both** the analytic mean and the analytic
+/// stddev to fall inside their respective empirical confidence intervals --
+/// either one alone would let a noise-floor-only or offset-only model pass
+/// a check it should fail.
+fn analytic_cross_check_report(
+    check: &AnalyticCrossCheckRequest,
+    mean: f64,
+    stddev: f64,
+    n: usize,
+    confidence: f64,
+) -> AnalyticCrossCheckReport {
+    let (kind, analytic_mean, analytic_stddev) = match check {
+        AnalyticCrossCheckRequest::KtcNoise {
+            capacitance_f,
+            temperature_k,
+            analytic_mean,
+        } => {
+            let sigma = (BOLTZMANN_J_PER_K * temperature_k / capacitance_f).sqrt();
+            ("ktc_noise".to_string(), analytic_mean.unwrap_or(0.0), sigma)
+        }
+        AnalyticCrossCheckRequest::MismatchOffset { sigma, mean } => {
+            ("mismatch_offset".to_string(), mean.unwrap_or(0.0), *sigma)
+        }
+    };
+
+    let n_f = n as f64;
+    let z = stats::norm_ppf(0.5 + confidence / 2.0);
+    let se_mean = stddev / n_f.sqrt();
+    let se_stddev = stddev / (2.0 * n_f).sqrt();
+    let mean_ci = Interval {
+        low: mean - z * se_mean,
+        high: mean + z * se_mean,
+    };
+    let stddev_ci = Interval {
+        low: (stddev - z * se_stddev).max(0.0),
+        high: stddev + z * se_stddev,
+    };
+
+    let mean_ok = analytic_mean >= mean_ci.low && analytic_mean <= mean_ci.high;
+    let stddev_ok = analytic_stddev >= stddev_ci.low && analytic_stddev <= stddev_ci.high;
+
+    AnalyticCrossCheckReport {
+        kind,
+        analytic_mean,
+        analytic_stddev,
+        empirical_mean: mean,
+        empirical_stddev: stddev,
+        empirical_stddev_confidence_interval: stddev_ci,
+        empirical_mean_confidence_interval: mean_ci,
+        stddev_relative_delta: if analytic_stddev != 0.0 {
+            (stddev - analytic_stddev) / analytic_stddev
+        } else {
+            f64::NAN
+        },
+        mean_delta: mean - analytic_mean,
+        verdict: if mean_ok && stddev_ok {
+            "consistent"
+        } else {
+            "inconsistent"
+        }
+        .to_string(),
+    }
+}
+
+/// Analyze the negative control's own samples against the nominal
+/// measurement's limits, and decide whether the deliberate defect actually
+/// shows up as a **statistically distinguishable** degradation -- not merely
+/// a lower point estimate, which sampling noise alone could produce.
+///
+/// Returns the report plus an optional warning (when the degradation was not
+/// detected). Errors exactly like the nominal measurement does: a
+/// non-finite sample, or fewer than `min_samples` usable draws (issue #816's
+/// "never a bare point estimate" rule applies here too -- a negative control
+/// with no interval of its own could not support this comparison).
+#[allow(clippy::too_many_arguments)]
+fn negative_control_report(
+    name: &str,
+    nc: &NegativeControlRequest,
+    limits: &Limits,
+    confidence: f64,
+    min_samples: usize,
+    nominal_empirical: &Estimate,
+) -> Result<(NegativeControlReport, Option<String>), String> {
+    if nc.samples.iter().any(|s| !s.is_finite()) {
+        return Err(format!(
+            "measurement '{name}' negative_control has a non-finite sample value (NaN or \
+             infinity)"
+        ));
+    }
+    let n = nc.samples.len();
+    if n < min_samples {
+        return Err(format!(
+            "measurement '{name}' negative_control has {n} usable sample(s), below the minimum \
+             of {min_samples}: it needs its own confidence interval to be checkable, exactly \
+             like the nominal measurement (see docs/cli/yield.md, 'Never a bare point estimate')"
+        ));
+    }
+    let n_u = n as u64;
+    let mut sorted = nc.samples.clone();
+    sorted.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("non-finite sample already rejected")
+    });
+    let mean = stats::mean(&sorted);
+    let stddev = stats::sample_stddev(&sorted).expect("n >= 2 checked above");
+
+    let passing = sorted.iter().filter(|x| within(**x, limits)).count() as u64;
+    let (cp_low, cp_high) = stats::clopper_pearson(passing, n_u, confidence);
+    let empirical = Estimate {
+        method: "clopper-pearson".to_string(),
+        estimate: passing as f64 / n as f64,
+        confidence,
+        confidence_interval: Interval {
+            low: cp_low,
+            high: cp_high,
+        },
+        n: n_u,
+    };
+    let normal = if stddev > 0.0 {
+        Some(normal_estimate(mean, stddev, n, limits, confidence))
+    } else {
+        None
+    };
+
+    // Non-overlapping exact intervals, in the degraded direction: sampling
+    // noise alone cannot produce this, so it is the signal the self-check
+    // exists to require.
+    let degradation_detected = empirical.estimate < nominal_empirical.estimate
+        && empirical.confidence_interval.high < nominal_empirical.confidence_interval.low;
+    let verdict = if degradation_detected {
+        "detected"
+    } else {
+        "not_detected"
+    };
+
+    let warning = if degradation_detected {
+        None
+    } else {
+        Some(format!(
+            "measurement '{name}': the negative_control's empirical yield ({:.6}, CI [{:.6}, \
+             {:.6}]) is not statistically distinguishable from the nominal draw's ({:.6}, CI \
+             [{:.6}, {:.6}]) -- the deliberate defect did not show up as the degradation the \
+             statistics claim to detect",
+            empirical.estimate,
+            empirical.confidence_interval.low,
+            empirical.confidence_interval.high,
+            nominal_empirical.estimate,
+            nominal_empirical.confidence_interval.low,
+            nominal_empirical.confidence_interval.high
+        ))
+    };
+
+    Ok((
+        NegativeControlReport {
+            description: nc.description.clone(),
+            n: n_u,
+            errored: nc.errored,
+            yield_: YieldBlock { empirical, normal },
+            nominal_empirical_estimate: nominal_empirical.estimate,
+            degradation_detected,
+            verdict: verdict.to_string(),
+        },
+        warning,
+    ))
+}
+
 /// The runtime half of issue #816's "never a bare point estimate" rule.
 ///
 /// The response *types* already make an interval-less estimate
@@ -579,6 +850,12 @@ pub fn guard_no_bare_point_estimate(report: &MeasurementReport) -> Result<(), St
     check(&report.yield_.empirical, "empirical")?;
     if let Some(normal) = &report.yield_.normal {
         check(normal, "normal")?;
+    }
+    if let Some(nc) = &report.negative_control {
+        check(&nc.yield_.empirical, "negative-control empirical")?;
+        if let Some(normal) = &nc.yield_.normal {
+            check(normal, "negative-control normal")?;
+        }
     }
     Ok(())
 }
@@ -616,6 +893,8 @@ mod tests {
                 errored: 0,
                 limits,
                 source_corners: vec![],
+                negative_control: None,
+                analytic_cross_check: None,
             }],
         }
     }
@@ -906,5 +1185,241 @@ mod tests {
         let m = &resp.measurements[0];
         assert_eq!(m.distribution.normality.verdict, "rejected");
         assert!(m.warnings.iter().any(|w| w.contains("not consistent")));
+    }
+
+    // ----------------------------------------------------------------- //
+    // Negative control (issue #817)
+    // ----------------------------------------------------------------- //
+
+    /// A request whose one measurement optionally carries a negative
+    /// control and/or an analytic cross-check -- the `request()` helper
+    /// above deliberately leaves both `None` so every pre-#817 test stays
+    /// unaffected.
+    fn request_with_self_checks(
+        samples: Vec<f64>,
+        limits: Limits,
+        negative_control: Option<NegativeControlRequest>,
+        analytic_cross_check: Option<AnalyticCrossCheckRequest>,
+    ) -> YieldRequest {
+        YieldRequest {
+            confidence: 0.95,
+            target_ci_halfwidth: DEFAULT_TARGET_CI_HALFWIDTH,
+            min_samples: None,
+            measurements: vec![MeasurementRequest {
+                name: "m".to_string(),
+                unit: None,
+                samples,
+                errored: 0,
+                limits,
+                source_corners: vec![],
+                negative_control,
+                analytic_cross_check,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_seeded_known_bad_negative_control_is_detected() {
+        // Nominal: tightly centered, comfortably inside +/-0.5 -- a clean
+        // campaign. Negative control: deliberately shifted to straddle the
+        // upper limit, mirroring a seeded known-bad variant (e.g. a forced
+        // offset injection) that should show up as materially worse yield.
+        let nominal = normal_grid(300, 0.0, 0.05);
+        let bad = normal_grid(300, 0.6, 0.05);
+        let req = request_with_self_checks(
+            nominal,
+            Limits {
+                min: Some(-0.5),
+                max: Some(0.5),
+                target_yield: None,
+            },
+            Some(NegativeControlRequest {
+                samples: bad,
+                errored: 0,
+                description: Some("vos forced to 0.6 (12x the 0.05 spec sigma)".to_string()),
+            }),
+            None,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let nc = m.negative_control.as_ref().unwrap();
+        assert_eq!(nc.verdict, "detected");
+        assert!(nc.degradation_detected);
+        assert!(nc.yield_.empirical.estimate < m.yield_.empirical.estimate);
+        assert_eq!(
+            nc.description.as_deref(),
+            Some("vos forced to 0.6 (12x the 0.05 spec sigma)")
+        );
+        // A detected negative control raises no "not distinguishable" or
+        // "no measurement declared" warning anywhere in the payload.
+        assert!(!m.warnings.iter().any(|w| w.contains("not statistically")));
+        assert!(!resp
+            .warnings
+            .iter()
+            .any(|w| w.contains("no measurement declared a negative_control")));
+    }
+
+    #[test]
+    fn a_negative_control_that_does_not_degrade_is_flagged_not_detected() {
+        // The "negative control" here is drawn from the *same* distribution
+        // as the nominal measurement -- a broken/no-op self-check (e.g. the
+        // deliberate defect was never actually injected). The tool must
+        // flag this rather than silently accept it.
+        let nominal = normal_grid(300, 0.0, 0.05);
+        let not_actually_bad = normal_grid(300, 0.0, 0.05);
+        let req = request_with_self_checks(
+            nominal,
+            Limits {
+                min: Some(-0.5),
+                max: Some(0.5),
+                target_yield: None,
+            },
+            Some(NegativeControlRequest {
+                samples: not_actually_bad,
+                errored: 0,
+                description: None,
+            }),
+            None,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let nc = m.negative_control.as_ref().unwrap();
+        assert_eq!(nc.verdict, "not_detected");
+        assert!(!nc.degradation_detected);
+        assert!(m
+            .warnings
+            .iter()
+            .any(|w| w.contains("not statistically distinguishable")));
+        assert!(resp
+            .warnings
+            .iter()
+            .any(|w| w.contains("did not show the expected degradation")));
+    }
+
+    #[test]
+    fn a_campaign_with_no_negative_control_at_all_is_flagged() {
+        let req = request(
+            normal_grid(200, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: Some(3.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        assert!(resp.measurements[0].negative_control.is_none());
+        assert!(resp
+            .warnings
+            .iter()
+            .any(|w| w.contains("no measurement declared a negative_control")));
+    }
+
+    #[test]
+    fn a_negative_control_below_the_sample_floor_is_an_error() {
+        let req = request_with_self_checks(
+            normal_grid(50, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: Some(3.0),
+                target_yield: None,
+            },
+            Some(NegativeControlRequest {
+                samples: vec![9.0],
+                errored: 0,
+                description: None,
+            }),
+            None,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("negative_control"), "{err}");
+        assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    // ----------------------------------------------------------------- //
+    // Analytic cross-check (issue #817)
+    // ----------------------------------------------------------------- //
+
+    #[test]
+    fn ktc_noise_cross_check_matches_a_synthetic_thermal_noise_draw() {
+        // sigma = sqrt(kT/C) for a 1 pF sampling cap at 300 K.
+        let capacitance_f = 1.0e-12_f64;
+        let temperature_k = 300.0_f64;
+        let sigma = (1.380_649e-23 * temperature_k / capacitance_f).sqrt();
+        let samples = normal_grid(2000, 0.0, sigma);
+        let req = request_with_self_checks(
+            samples,
+            Limits {
+                min: Some(-5.0 * sigma),
+                max: Some(5.0 * sigma),
+                target_yield: None,
+            },
+            None,
+            Some(AnalyticCrossCheckRequest::KtcNoise {
+                capacitance_f,
+                temperature_k,
+                analytic_mean: Some(0.0),
+            }),
+        );
+        let resp = analyze(&req).unwrap();
+        let check = resp.measurements[0].analytic_cross_check.as_ref().unwrap();
+        assert_eq!(check.kind, "ktc_noise");
+        close(check.analytic_stddev, sigma, 1e-15 * sigma);
+        assert_eq!(check.verdict, "consistent");
+        close(check.stddev_relative_delta, 0.0, 5e-3);
+        assert!(!resp.measurements[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("not consistent with the ktc_noise")));
+    }
+
+    #[test]
+    fn mismatch_offset_cross_check_flags_a_draw_that_disagrees_with_the_claimed_sigma() {
+        // The draw's actual spread (1 mV) is nowhere near the claimed
+        // Pelgrom-model sigma (10 mV) -- the discrepancy an analytic
+        // cross-check exists to catch.
+        let samples = normal_grid(2000, 0.0, 0.001);
+        let req = request_with_self_checks(
+            samples,
+            Limits {
+                min: Some(-0.05),
+                max: Some(0.05),
+                target_yield: None,
+            },
+            None,
+            Some(AnalyticCrossCheckRequest::MismatchOffset {
+                sigma: 0.010,
+                mean: Some(0.0),
+            }),
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let check = m.analytic_cross_check.as_ref().unwrap();
+        assert_eq!(check.kind, "mismatch_offset");
+        assert_eq!(check.verdict, "inconsistent");
+        close(check.mean_delta, 0.0, 1e-3);
+        assert!(check.stddev_relative_delta < -0.5);
+        assert!(m
+            .warnings
+            .iter()
+            .any(|w| w.contains("not consistent with the mismatch_offset")));
+    }
+
+    #[test]
+    fn a_non_positive_analytic_parameter_is_an_error() {
+        let req = request_with_self_checks(
+            normal_grid(50, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: Some(3.0),
+                target_yield: None,
+            },
+            None,
+            Some(AnalyticCrossCheckRequest::MismatchOffset {
+                sigma: -1.0,
+                mean: None,
+            }),
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("sigma must be positive"), "{err}");
     }
 }
