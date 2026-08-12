@@ -164,12 +164,18 @@ def _make_pdk_install(
     with_lib: bool = True,
     with_lef: bool = True,
     with_gds: bool = True,
+    prefixed_operating_conditions: bool = False,
 ) -> Path:
     """Fabricate a minimal open_pdks-layout variant with a standard-cell
     library's `lib/`/`techlef/`/`lef/`/`gds/` views -- enough for
     `run_place_and_route`'s own resolution, never real, engine-parseable
     file contents (the stubbed-OpenROAD tests never invoke a real
-    `openroad`; the GDS merge is separately stubbed in those tests)."""
+    `openroad`; the GDS merge is separately stubbed in those tests).
+
+    ``prefixed_operating_conditions=True`` writes the `.lib` file's
+    `default_operating_conditions` attribute as `f"{cell_library}__{corner}"`
+    instead of the bare ``corner`` -- gf180mcu_fd_sc_mcu9t5v0's real shape
+    (issue #820); the on-disk filename is unaffected."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     lib_dir = variant_dir / "libs.ref" / cell_library
@@ -177,8 +183,11 @@ def _make_pdk_install(
     if with_lib:
         lib_views_dir = lib_dir / "lib"
         lib_views_dir.mkdir(parents=True, exist_ok=True)
+        operating_conditions = (
+            f"{cell_library}__{corner}" if prefixed_operating_conditions else corner
+        )
         content = (
-            f'    default_operating_conditions : "{corner}";\n'
+            f'    default_operating_conditions : "{operating_conditions}";\n'
             "    nom_process : 1.0;\n"
             "    nom_temperature : 25.0;\n"
             "    nom_voltage : 1.8;\n"
@@ -476,6 +485,31 @@ def test_run_liberty_not_found(tmp_path, monkeypatch):
     request_path = _write_request(tmp_path / "request.json", _base_request())
     with pytest.raises(PlaceAndRouteError, match="liberty not found for deck"):
         run_place_and_route(request_path)
+
+
+def test_resolve_liberty_nominal_corner_default_gf180mcu_shape(tmp_path, monkeypatch):
+    """gf180mcu_fd_sc_mcu9t5v0's `.lib` files write their own
+    `<cell_library>__` prefix into `default_operating_conditions`, unlike
+    sky130's bare attribute. Omitting `pdk.corner` (``requested_corner=None``)
+    must still resolve to the correctly-named on-disk liberty file -- not a
+    doubled-prefix path that does not exist (issue #820)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuD",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        corner="tt_025C_1v80",
+        prefixed_operating_conditions=True,
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = place_and_route._resolve_liberty(
+        "gf180mcu_fd_sc_mcu9t5v0", None
+    )
+    assert corner == "tt_025C_1v80"
+    assert liberty_path.endswith("gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80.lib")
+    assert info["variant"] == "gf180mcuD"
 
 
 def test_run_lef_not_found(tmp_path, monkeypatch):

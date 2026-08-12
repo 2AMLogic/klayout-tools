@@ -627,15 +627,10 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     whatever family is actually installed on the machine running the tests
     -- this sandbox and CI may each resolve a different one).
 
-    ``corner`` is the bare corner suffix (e.g. ``"tt_025C_1v80"`, never
-    ``"<cell_library>__tt_025C_1v80"``) -- `list_cell_libraries()`'s own
-    `nominal_corner` field already carries the full
-    `"<cell_library>__<corner>"` form, matching a `.lib` file's own name;
-    `run_synthesize`/`_resolve_liberty`'s *default*-corner path re-prepends
-    `cell_library` on top of that (unrelated pre-existing behaviour, not
-    exercised by `test_synthesize.py`'s own real-PDK integration test
-    either -- it always passes `pdk.corner` explicitly, as this test does
-    too via the stripped suffix computed here)."""
+    ``corner`` is `list_cell_libraries()`'s own `nominal_corner` field,
+    which is always the bare corner suffix (e.g. ``"tt_025C_1v80"``, never
+    ``"<cell_library>__tt_025C_1v80"``) regardless of what a library's `.lib`
+    file's `default_operating_conditions` attribute reports (issue #820)."""
     try:
         result = pdk_module.list_pdks()
     except Exception:
@@ -649,15 +644,12 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
             except Exception:
                 continue
             for library in libraries["libraries"]:
-                name = library["name"]
-                nominal_corner = library["nominal_corner"]
-                prefix = f"{name}__"
-                corner = (
-                    nominal_corner[len(prefix) :]
-                    if nominal_corner.startswith(prefix)
-                    else nominal_corner
+                return (
+                    install["root"],
+                    variant["name"],
+                    library["name"],
+                    library["nominal_corner"],
                 )
-                return install["root"], variant["name"], name, corner
     return None
 
 
