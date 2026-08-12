@@ -440,6 +440,33 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — Cross-checked the compiled sky130 LVS device-extraction rules
+  (`EXTRACTION_DECK`, issues #868/#867) against the real, hand-written
+  upstream `sky130.lvs` deck they were transcribed from — issue #869, Phase
+  2c of the DRC/LVS deck compiler epic #711. A new
+  `klayout_tools.extract.run_extract_klayout_engine` helper drives sky130's
+  native LVS/device-extraction deck (resolved via the new
+  `klayout_tools.pdk.lvs_deck_file`) through the standalone `klayout`
+  binary and reads back an extracted device netlist comparable to
+  `run_extract`'s own — the LVS-device-extraction counterpart of
+  `run_drc_klayout_engine`/`--engine klayout` (issue #565), the same
+  native-deck cross-check mechanism Phase 1 (#747) used for the DRC side.
+  Issue #520's Tiny Tapeout corpus is still an open, unbuilt epic with no
+  vendored layouts in this repo, so — mirroring Phase 1's own and issue
+  #860's own precedent — `tests/test_lvs_native_extraction_cross_check.py`
+  reuses the golden-layout-per-rule convention as the corpus stand-in.
+  Verified against a real `volare`-fetched sky130A install and a real
+  KLayout 0.28.16 binary: 7 of 8 provenance-cited device rules were run (the
+  `pnp` bipolar is investigated and explicitly deferred, not silently
+  dropped); 4 agree with the native deck exactly, and 3 disagree for a
+  documented, already-known reason (`res_high_po`'s issue #518 refinement,
+  `cap_mim`/`cap_mim_m4`'s issue #512 perimeter term) — no undocumented
+  disagreement was found. No response-shape change (`run_extract`/`klt
+  extract`'s own output is untouched; the new engine is a Python helper, not
+  yet a CLI flag — see `docs/cli/extract.md`'s new "sky130 native-deck
+  (`sky130.lvs`) LVS device-extraction cross-check" section for the full
+  writeup and scope note).
+
 - 2026-08-12 — `klt erc` gains a per-gate antenna-ratio verdict — issue
   #860, Phase 1b of the antenna + ERC signoff epic #713, built on Phase
   1a's (#859) layer-by-layer connectivity model. Every non-gate `stackup`

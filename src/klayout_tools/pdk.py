@@ -442,6 +442,84 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     return None
 
 
+def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | None:
+    """Resolve the **filename** of the PDK's native, directly-runnable
+    KLayout LVS-DSL rule-deck script inside the already-discovered
+    ``assets["klayout"]`` directory's ``lvs/`` subdirectory (issue #869),
+    mirroring :func:`drc_deck_file`'s shape one asset area over (that
+    function's own docstring documents the ``drc/`` sibling's naming
+    convention and gf180mcu-shaped-fragments caveat; the same reasoning
+    applies here).
+
+    Naming convention (verified against a real ``volare``-fetched sky130A
+    install for this issue): open_pdks stages sky130's complete,
+    ready-to-run LVS/device-extraction deck as a single file named after
+    the variant, ``libs.tech/klayout/lvs/<variant>.lvs`` (e.g.
+    ``sky130.lvs`` -- unlike :func:`drc_deck_file`'s own
+    ``<variant>.lydrc``, the LVS deck's filename is *not* itself
+    variant-suffixed on a real sky130A/sky130B install, both of which ship
+    the identical ``sky130.lvs``). This function prefers a variant-named
+    file (``<variant>.lvs``) if one exists (the same "prefer the specific
+    name" precedence :func:`drc_deck_file`/:func:`netgen_setup_file` use)
+    and falls back to the bare family name derived by stripping any
+    trailing PDK-suite letter from ``variant`` (``sky130A``/``sky130B`` ->
+    ``sky130.lvs``; a variant with no such letter, e.g. an already-bare
+    ``sky130``, is tried as-is).
+
+    A real gf180mcu install also ships a single ``libs.tech/klayout/lvs/
+    gf180mcu.lvs`` (verified for this issue) -- unlike ``drc_deck_file``'s
+    gf180mcu fragments-only case, so this resolver does not need a
+    "fragments, return None" branch the way that one does. Whether that
+    file's own internal device-recognition contract is drivable the same
+    way this issue's sky130 cross-check drives ``sky130.lvs`` is untested
+    here (issue #869 is a sky130-only cross-check, matching this repo's
+    "sky130 first" open-PDK policy and gf180mcu's device-extraction deck
+    carrying no ``RuleProvenance`` citations yet to cross-check against --
+    see ``docs/cli/extract.md``'s "sky130 native-deck (sky130.lvs) LVS
+    device-extraction cross-check" section) -- this function still resolves
+    it structurally (same "single file present" check as sky130), a future
+    caller is free to attempt it.
+
+    Returns the absolute path to the resolved script, or ``None`` when the
+    variant ships no ``klayout`` asset directory at all, no ``lvs/``
+    subdirectory, or that directory contains neither expected filename --
+    never guessed or fabricated, matching this module's existing
+    ``None``-means-absent convention (see :func:`_asset_dirs`/
+    :func:`drc_deck_file`).
+
+    Raises :class:`PdkNotFoundError` when no PDK install resolves at all
+    (the same condition :func:`find_pdk` raises for).
+    """
+    info = find_pdk(variant=variant, root=root)
+    klayout_dir = info["assets"]["klayout"]
+    if klayout_dir is None:
+        return None
+
+    lvs_dir = os.path.join(klayout_dir, "lvs")
+    if not os.path.isdir(lvs_dir):
+        return None
+
+    resolved_variant = info["variant"]
+    # Strip a trailing single uppercase PDK-suite designator (sky130A ->
+    # sky130, gf180mcuC -> gf180mcu -- both known families end in a digit
+    # or lowercase letter, never uppercase, so this is unambiguous) --
+    # open_pdks names the LVS deck after the bare family, not the lettered
+    # variant. Mirrors `pdk_models._pdk_variant_family`'s own family/variant
+    # split, restated locally rather than imported to avoid a dependency
+    # from this lower-level asset-discovery module onto that higher-level
+    # device-model-resolution one.
+    family = resolved_variant
+    if len(family) > 1 and family[-1].isupper():
+        family = family[:-1]
+
+    for name in (f"{resolved_variant}.lvs", f"{family}.lvs"):
+        candidate = os.path.join(lvs_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    return None
+
+
 #: Tech-LEF corner suffixes open_pdks ships alongside a standard-cell
 #: library's merged macro LEF (issue #397 / #425 -- the OpenROAD survey's own
 #: finding that ``_ASSET_LAYOUT`` has no ``lef`` key at all). Unlike

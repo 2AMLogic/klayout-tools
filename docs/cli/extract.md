@@ -1220,7 +1220,83 @@ resolution). See `tests/test_lvs_device_provenance.py`, whose own
 without a matching golden pair, mirroring `tests/golden_deck/`'s own
 coverage test for `klt drc`'s width/space rules. Epic #711's Phase 2c
 (cross-checking the compiled sky130 LVS device rules against the
-hand-written deck on the #520 corpus) remains a separate, later phase.
+hand-written deck on the #520 corpus) is the next section.
+
+## sky130 native-deck (`sky130.lvs`) LVS device-extraction cross-check (issue #869)
+
+Phase 1 (issue #747) resolved `klt drc`'s "cross-check against the
+hand-written deck" not by hand-authoring a second Python DRC deck, but by
+running KLayout's own native rule-deck runner (`run_drc_klayout_engine`,
+`--engine klayout`, issue #565) against the real upstream `sky130A.lydrc`
+script and diffing its violations against the compiled `DrcRule` deck's own
+results on the same golden layouts — see [`docs/cli/drc.md`](drc.md) →
+"Engine" → `"klayout"`. This section is the LVS-device-extraction
+counterpart: `klayout_tools.extract.run_extract_klayout_engine` (a Python
+helper, not yet a `klt extract --engine` CLI flag — see "Scope" below) drives
+`sky130.lvs` — sky130's single, directly-runnable native LVS/device-
+extraction deck, resolved via `klayout_tools.pdk.lvs_deck_file` from the
+same `libs.tech/klayout/lvs/` directory `klt pdk find` already discovers —
+through the standalone `klayout` application binary and reads back the
+device netlist it extracts, in a shape close enough to `run_extract`'s own
+`devices[]`/`device_counts` to compare value-for-value.
+
+**A native `.lvs` script is written for a complete LVS flow** (extract, then
+`compare` against a reference schematic) and hard-requires a schematic to
+exist at all — `run_extract_klayout_engine` always supplies a trivial
+synthesized empty-`.SUBCKT` stub purely to satisfy that requirement; the
+compare verdict itself is discarded (it is expected to report a mismatch
+against the empty stub on every real fixture — that is not a failure, since
+there is no trustworthy independent reference schematic to compare against
+here; only the extracted netlist is used). Two `-rd` globals
+(`net_only=true`, `top_lvl_pins=true`) disable the script's own default
+`netlist.simplify` pass, which otherwise silently drops every extracted
+device before the netlist is even written. Extracted parameter values are
+corrected for a verified, fixed unit round-trip `kdb.NetlistSpiceReader()`
+applies when re-reading `sky130.lvs`'s own SPICE writer output (length-typed
+params `L`/`W`/`P`/`PS`/`PD` come back scaled ×1e6, area-typed `A`/`AS`/`AD`
+×1e12) — see `run_extract_klayout_engine`'s own docstring for the full
+mechanism.
+
+**The "#520 corpus."** Issue #520 (Tiny Tapeout) is an open, unbuilt epic
+with no vendored corpus anywhere in this repo (no `tt_corpus`-shaped fixture
+directory, no vendored GDS). Following the same convention Phase 1's own
+golden-pair manifest (`tests/golden_deck/`) and Phase 2a/2b's own golden
+layout→netlist pairs (`tests/test_lvs_device_provenance.py`) already
+established for this class of cross-check, `tests/test_lvs_native_extraction_
+cross_check.py` reuses that synthesized-golden-layout convention as the
+corpus stand-in — one minimal layout per device rule `EXTRACTION_DECK`
+declares a `RuleProvenance` citation for (the same 8-rule set
+`tests/test_lvs_device_provenance.py` already validates against the compiled
+deck in isolation), extended where the native deck's own recognition
+contract needed geometry (an implant layer, an exact SKU width) the existing
+golden pairs did not draw.
+
+**Results** (verified against a real, `volare`-fetched sky130A install,
+`open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b` — the same commit
+`sky130.py`'s own provenance notes cite — and a real KLayout 0.28.16
+binary): **7 of the 8 provenanced device rules were run; 4 agree exactly, 3
+disagree for a documented, already-known reason, 1 is deferred** (`pnp` —
+the native deck's exact-area/exact-edge-length three-terminal device
+selection needs bespoke geometry construction not completed within this
+issue's scope; investigated and documented, not silently dropped). Every
+non-exact disagreement is a *deliberate, previously documented* refinement
+this deck already carries a code-comment citation for — `res_high_po`'s
+two-term fit (issue #518) and `cap_mim`/`cap_mim_m4`'s perimeter term (issue
+#512) — discovered independently by this cross-check, not introduced by it.
+No *undocumented* disagreement was found on the 7 rules actually run. See
+`tests/test_lvs_native_extraction_cross_check.py`'s own module docstring for
+the full per-rule table and each test's docstring for the underlying
+geometry/coefficient detail.
+
+**Scope.** `run_extract_klayout_engine` is a Python helper used by this
+cross-check's own test module, not (yet) wired up as a `klt extract
+--engine klayout` CLI flag the way `run_drc_klayout_engine` is for `klt
+drc` — this issue's acceptance criteria ask for the cross-check to be run
+and reported, not for a new user-facing engine flag; promoting it to a CLI
+surface (JSON contract, docs, exit codes) is a separate, explicitly-scoped
+follow-on if a caller ever needs to run this oracle outside of tests.
+gf180mcu is out of scope here (its device entries carry no `RuleProvenance`
+citations yet to cross-check against — see "Device rule provenance" above).
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 

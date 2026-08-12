@@ -603,6 +603,104 @@ def test_drc_deck_file_no_install_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# lvs_deck_file (issue #869)
+#
+# Naming convention verified against a real, volare-fetched sky130A/sky130B
+# install: open_pdks stages the LVS/device-extraction deck as a single
+# bare-family-named file, `libs.tech/klayout/lvs/sky130.lvs` -- unlike
+# `drc_deck_file`'s own `<variant>.lydrc`, this file is *not* itself
+# lettered-variant-suffixed (both sky130A and sky130B ship the identical
+# `sky130.lvs`). A real gf180mcuB install ships the analogous
+# `gf180mcu.lvs`.
+# --------------------------------------------------------------------------- #
+
+
+def test_lvs_deck_file_prefers_variant_named_lvs(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "sky130A.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "sky130A.lvs")
+
+
+def test_lvs_deck_file_falls_back_to_bare_family_name(tmp_path):
+    """The real-world shape: open_pdks names the LVS deck after the bare
+    PDK family, not the lettered variant (`sky130A` resolves `sky130.lvs`,
+    not `sky130A.lvs`)."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "sky130.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "sky130.lvs")
+
+
+def test_lvs_deck_file_falls_back_to_bare_family_name_gf180mcu(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuB", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "gf180mcu.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "gf180mcu.lvs")
+
+
+def test_lvs_deck_file_none_when_directory_has_neither_file(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("klayout",))
+    (variant_dir / "libs.tech" / "klayout" / "lvs").mkdir(parents=True)
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_lvs_deck_file_none_when_no_lvs_subdirectory(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("klayout",))  # no lvs/ subdir yet
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_lvs_deck_file_none_when_pdk_ships_no_klayout_asset(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))  # no "klayout"
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result is None
+
+
+def test_lvs_deck_file_resolves_variant_and_root_like_find_pdk(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130B", assets=("klayout",))
+    _make_install(root, "sky130A", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "sky130.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(variant="sky130B", root=str(root))
+
+    assert result == str(lvs_dir / "sky130.lvs")
+
+
+def test_lvs_deck_file_no_install_raises(tmp_path):
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.lvs_deck_file(root=str(tmp_path / "does-not-exist"))
+
+
+# --------------------------------------------------------------------------- #
 # lef_files (issue #397 / #425 -- the OpenROAD survey's own finding that
 # `_ASSET_LAYOUT` never carried a `lef` key; naming convention verified
 # against a real, volare-fetched `sky130A` install for issue #425's own
