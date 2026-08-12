@@ -882,11 +882,11 @@ not `"pex"`, so it is not accepted as proof of post-layout re-simulation —
 `klt signoff` refuses the borrowed pass rather than fabricate a `"met"` for
 an item nothing actually checked.
 
-## Worked example: fleet roll-up across three canaries
+## Worked example: fleet roll-up across four canaries
 
-Issue #827 (Phase 1c of epic #706): grade `sky130-bandgap`'s and
-`gf180-bandgap`'s own block manifests (each on disk), plus a third canary
-given inline, in one call:
+Issue #827 (Phase 1c of epic #706): grade `sky130-bandgap`'s,
+`gf180-bandgap`'s and `gf180-sar-adc`'s own block manifests (each on disk),
+plus a fourth canary given inline, in one call:
 
 ```
 $ cat fleet.json
@@ -894,22 +894,76 @@ $ cat fleet.json
   "blocks": [
     "manifests/sky130-bandgap.json",
     "manifests/gf180-bandgap.json",
+    "manifests/gf180-sar-adc.json",
     {"block": "sky130-ota-5t", "kind": "analog", "evidence": {}}
   ]
 }
 $ klt signoff --fleet fleet.json
-fleet: 1/3 blocks at T1 (2 not yet)
+fleet: 1/4 blocks at T1 (3 not yet)
 
 [T1   ] sky130-bandgap (analog)  T1: 10/10 items met
 [not-T1] gf180-bandgap (analog)  T1: 3/10 items met
         blocking: #4 LVS clean (reason: no_evidence)
+[not-T1] gf180-sar-adc (analog)  T1: 9/10 items met
+        blocking: #6 Statistical claims carry Monte Carlo evidence (reason: no_evidence)
 [not-T1] sky130-ota-5t (analog)  T1: 0/10 items met
         blocking: #1 Design sources (reason: no_evidence)
 
 source: docs/design-evidence-tiers.md
 ```
 
-One query names every canary's tier and, for the two not yet at T1, exactly
-which item to fix next — instead of opening each block's own `--manifest`
-report to find out. `klt signoff` exits `3` here (`not_t1_count: 2`); it
-would exit `0` only once every block in the fleet reaches `tier: "T1"`.
+One query names every canary's tier and, for the three not yet at T1,
+exactly which item to fix next — instead of opening each block's own
+`--manifest` report to find out. `klt signoff` exits `3` here
+(`not_t1_count: 3`); it would exit `0` only once every block in the fleet
+reaches `tier: "T1"`.
+
+`gf180-sar-adc` is the case Phase 2c (#872) makes visible: its manifest
+already cites everything else — including a `klt pex` envelope for item 7 —
+so the only thing between it and T1 is item 6's Monte Carlo evidence. The
+roll-up names that item exactly like any other unmet one, with no item-id
+special-casing; its row in `--format json` is:
+
+```json
+{
+  "block": "gf180-sar-adc",
+  "source": "manifests/gf180-sar-adc.json",
+  "kind": "analog",
+  "tier": null,
+  "t1_item_count": 10,
+  "t1_met_count": 9,
+  "blocking_item": {
+    "id": 6,
+    "title": "Statistical claims carry Monte Carlo evidence",
+    "partition": null,
+    "reason": "no_evidence"
+  }
+}
+```
+
+Bind item 6 to a real `klt yield` run — a file-backed envelope, or the
+command-backed entry from "Worked example: binding the statistical-evidence
+item to `klt yield`" above
+(`{"command": ["klt", "yield", "mc-samples.json", "--limits", "spec-limits.json", "--format", "json"]}`)
+— and re-run the same fleet manifest. The block's verdict moves on its own;
+nothing else changed:
+
+```
+$ klt signoff --fleet fleet.json
+fleet: 2/4 blocks at T1 (2 not yet)
+
+[T1   ] sky130-bandgap (analog)  T1: 10/10 items met
+[not-T1] gf180-bandgap (analog)  T1: 3/10 items met
+        blocking: #4 LVS clean (reason: no_evidence)
+[T1   ] gf180-sar-adc (analog)  T1: 10/10 items met
+[not-T1] sky130-ota-5t (analog)  T1: 0/10 items met
+        blocking: #1 Design sources (reason: no_evidence)
+
+source: docs/design-evidence-tiers.md
+```
+
+Had item 7 been the gap instead, the roll-up would name it the same way —
+and, because item 7 is kind-restricted (see "Item 7 is kind-restricted:
+`klt pex`" above), citing a passing-but-wrong-kind envelope there renders
+`blocking: #7 Post-layout verification (reason: wrong_kind)` rather than
+borrowing that pass.

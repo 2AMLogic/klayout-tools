@@ -459,7 +459,10 @@ not `klt --version`, if you need to detect this kind of drift.
   campaign and confirms the block's `tier` changes from `null` to `"T1"`
   once that evidence is bound. No response-shape change; both
   `TIER_REPORT_SCHEMA_VERSION` and `FLEET_REPORT_SCHEMA_VERSION` are
-  unaffected. See `docs/cli/signoff.md`'s "Fleet roll-up" section.
+  unaffected. See `docs/cli/signoff.md`'s "Fleet roll-up" section and its
+  "Worked example: fleet roll-up across four canaries", which now carries a
+  canary blocked on item 6 and shows that block reaching T1 once real
+  `klt yield` evidence is bound.
 
 - 2026-08-12 — `klt drc`/`klt extract`/`klt lvs` gain a third built-in deck,
   `sg13g2` (IHP-Open-PDK's SG13G2) — issue #905, Phase 3b of the DRC/LVS deck
