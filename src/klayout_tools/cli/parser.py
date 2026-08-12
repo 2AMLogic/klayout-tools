@@ -939,13 +939,41 @@ def create_parser() -> argparse.ArgumentParser:
             "always `null` in this contract, deferred to a future "
             "OpenROAD/OpenSTA step. Runs Yosys as a subprocess -- requires "
             "a `yosys` binary on `$PATH`. Takes a request-document path "
-            "(like `klt lvs`/`klt sim`), not positional RTL file args."
+            "(like `klt lvs`/`klt sim`), not positional RTL file args. "
+            "`--verify-equivalence` optionally gates the produced netlist "
+            "through `klt equiv` against its own source RTL before "
+            "returning -- a hard failure on a non-equivalent verdict, "
+            "never a silent warning (#704 Phase 1)."
         ),
     )
     synthesize_parser.add_argument(
         "request", help="path to a klt synthesize request JSON file"
     )
     _add_pdk_args(synthesize_parser)
+    synthesize_parser.add_argument(
+        "--verify-equivalence",
+        dest="verify_equivalence",
+        action="store_true",
+        help=(
+            "gate the produced netlist through `klt equiv` against its own "
+            "source RTL before returning -- a non-equivalent or "
+            "inconclusive verdict is a hard failure (exit 1), never a "
+            "silent warning. Combinational designs only (klt equiv's own "
+            "Phase 0 scope, #707); off by default. See docs/cli/"
+            "synthesize.md's 'Equivalence gate' section."
+        ),
+    )
+    synthesize_parser.add_argument(
+        "--equiv-timeout-s",
+        dest="equiv_timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds for the `--verify-"
+            "equivalence` proof (default: klt equiv's own 60s default); "
+            "has no effect unless `--verify-equivalence` is given."
+        ),
+    )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 

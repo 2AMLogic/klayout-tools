@@ -407,6 +407,26 @@ not `klt --version`, if you need to detect this kind of drift.
   preconditioner choice, and the measured convergence/scaling numbers:
   `docs/design/mom-iterative-solver.md`.
 
+- 2026-08-12 — `klt synthesize --verify-equivalence` (#808, Phase 1 of the
+  RTL-synthesis epic #704) wires the already-shipped `klt equiv` (#726) in
+  as `klt synthesize`'s own **acceptance gate**: a synthesized netlist is
+  not considered done until `klt equiv` reports it `"equivalent"` to the
+  source RTL that was fed into Yosys. Off by default (additive/opt-in —
+  every pre-existing invocation is unaffected). When given, the just-
+  produced netlist is proven against the same `sources`/`hdl_toplevel` this
+  run synthesized (reusing `klt equiv`'s own request contract — `gate`'s
+  `liberty` is set to the same resolved liberty synthesis used); a
+  `"counterexample"` or `"inconclusive"` (timeout) verdict is a hard
+  `SynthesizeError`/exit `1`, never a silent warning folded into a
+  `status: "ok"` response. Combinational designs only, matching `klt
+  equiv`'s own Phase 0 MVP scope (#707) — a sequential design (e.g. the GCD
+  worked example) makes the gate itself fail with a clear scope error. New
+  response field `equivalence` (`null` unless the flag is given;
+  `{status, engine, engine_version, timeout_s, elapsed_s, artifacts}` on a
+  pass) — **no `schema_version` bump**, purely additive. New
+  `--equiv-timeout-s` flag overrides `klt equiv`'s own default proof
+  timeout. See `docs/cli/synthesize.md`'s "Equivalence gate" section.
+
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on

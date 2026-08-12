@@ -7,7 +7,8 @@ digital engine class — Yosys + OpenROAD — RTL→GDS as a first-class `klt`
 flow").
 
 ```
-klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] [--format text|json]
+klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
+    [--verify-equivalence] [--equiv-timeout-s SECONDS] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -34,6 +35,13 @@ flag line carries cleanly — not positional RTL file args.
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
   search order.
+- `--verify-equivalence` — gate the produced netlist through `klt equiv`
+  against its own source RTL before returning; a non-equivalent or
+  inconclusive verdict is a hard failure (exit 1). Off by default. See
+  "Equivalence gate" below.
+- `--equiv-timeout-s` — overall wall-clock timeout in seconds for the
+  `--verify-equivalence` proof (default: `klt equiv`'s own `60`); no effect
+  unless `--verify-equivalence` is given.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -118,6 +126,43 @@ back with a working recipe, `timing` is reserved (present, typed, always
 `null` today) and deferred to Phase 4's OpenROAD/OpenSTA step, which already
 must run STA for place-and-route signoff.
 
+## Equivalence gate
+
+[Epic #704](https://github.com/2AMLogic/klayout-tools/issues/704) Phase 1:
+`--verify-equivalence` wires [`klt equiv`](equiv.md) (#726) in as this
+command's own **acceptance gate** — a synthesized netlist is not considered
+done until `klt equiv` reports it `"equivalent"` to the source RTL that was
+fed into Yosys. Off by default (additive/opt-in; every pre-`--verify-
+equivalence` invocation is unaffected).
+
+When given, after `synth`/`abc`/`write_verilog` produce `netlist_path`, this
+command builds a `klt equiv` request reusing that command's own contract
+(see [`docs/cli/equiv.md`](equiv.md)) — `gold` is the same `sources`/
+`hdl_toplevel` this run just synthesized; `gate` is the just-produced
+`netlist_path`, with `gate.liberty` set to the same resolved liberty this
+synthesis run used (so the netlist's standard-cell instances resolve as
+real combinational logic, not an undefined blackbox — see `klt equiv`'s
+"Request" section) — and runs it. The generated equiv request and its own
+artifacts (the `.ys` script, the flattened combined netlist, the raw Yosys
+log) land under `.klt/synthesize/.klt/equiv/`, alongside this run's own
+`script_path`/`netlist_path` — never deleted, kept as debuggable artifacts
+like every other file this command writes. The outcome:
+
+- **`"equivalent"`** — attached to the response's `equivalence` field (see
+  "Response" below); `klt synthesize` itself still exits `0`.
+- **`"counterexample"` or `"inconclusive"`** (a proven divergence or a
+  solver/process timeout) — a **hard failure**: `SynthesizeError`, exit `1`,
+  never a silent warning folded into a `status: "ok"` response. An
+  `"inconclusive"` verdict (timeout) is never treated as a pass, mirroring
+  `klt equiv`'s own "timeout is never equivalent" discipline one level up.
+
+**Combinational designs only** — `klt equiv`'s Phase 0 MVP scope (#707) is
+combinational-only; a design containing flip-flops, latches, or memories
+(e.g. the GCD worked example below) makes the gate itself fail with a clear
+scope error, even though synthesis succeeded. `--verify-equivalence` is not
+yet usable on sequential designs — see `docs/cli/equiv.md`'s "Scope"
+section and Out of scope below.
+
 ## Request
 
 ```json
@@ -169,7 +214,8 @@ must run STA for place-and-route signoff.
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
     "input": { "content_hash": "sha256:<hex>" }
-  }
+  },
+  "equivalence": null
 }
 ```
 
@@ -187,13 +233,14 @@ must run STA for place-and-route signoff.
 | `netlist_path` | string | The mapped gate-level netlist (`write_verilog -noattr`'s output), an absolute path. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | string | The generated `.ys` script, an absolute path — kept as a debuggable artifact. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
+| `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Synthesis succeeded, netlist written. |
-| `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), or a Yosys/ABC engine error. |
+| `0` | Synthesis succeeded, netlist written (and, with `--verify-equivalence`, proven equivalent to its source RTL). |
+| `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), a Yosys/ABC engine error — or, with `--verify-equivalence`, a non-equivalent (`"counterexample"`) or inconclusive (timeout) `klt equiv` verdict against the produced netlist. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 
 **No exit code `3`.** Matching `klt extract`'s reasoning exactly — there is
@@ -224,10 +271,52 @@ $ klt synthesize request.json --format json
 ```
 
 335 standard-cell instances, 2951.5808 µm² total (1251.2 µm² sequential),
-matching the Yosys survey's own live-verified numbers exactly.
+matching the Yosys survey's own live-verified numbers exactly. Note this
+particular design is **sequential** (it has a clocked `always` block) — see
+"Equivalence gate" above, `--verify-equivalence` is not usable on it.
+
+A 4-bit ripple-carry adder (`adder4.v`, combinational — no clock, so it is
+in-scope for the gate — the same design [`docs/cli/equiv.md`](equiv.md)'s
+own worked example uses), synthesized with the gate enabled:
+
+```console
+$ klt synthesize adder4_request.json --verify-equivalence --format json
+{
+  "schema_version": 1,
+  "engine": "yosys",
+  "hdl_toplevel": "adder4",
+  "status": "ok",
+  ...
+  "equivalence": {
+    "status": "equivalent",
+    "engine": "yosys",
+    "engine_version": "0.67+post",
+    "timeout_s": 60.0,
+    "elapsed_s": 0.08,
+    "artifacts": {
+      "script_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.ys",
+      "netlist_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv_netlist.v",
+      "log_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.log"
+    }
+  }
+}
+```
+
+A synthesized netlist that diverges from its own source RTL (e.g. a
+corrupted/mis-synthesized output) makes the gate fail hard instead —
+`klt synthesize` exits `1` with a message naming the diverging outputs,
+never a `status: "ok"` response — see `tests/test_synthesize_equiv_gate.py`
+for the full seeded-mismatch demonstration.
 
 ## Out of scope
 
+- **Sequential-design equivalence checking.** `--verify-equivalence` only
+  works on combinational designs today — `klt equiv`'s Phase 0 MVP scope
+  (#707). A future phase of #707 (temporal induction / BMC via SymbiYosys)
+  extends the gate to sequential designs; until then, running
+  `--verify-equivalence` against a design with flip-flops, latches, or
+  memories fails the gate with a clear scope error, not a misleadingly
+  confident verdict.
 - **Timing.** See "`timing` is always `null`" above — deferred to Phase 4.
 - **Place-and-route.** `netlist_path` is this command's own deliverable and
   the input to Phase 4's `klt place-and-route` (`netlist_path` becomes that
