@@ -482,12 +482,47 @@ pub fn analyze(module: &Module, lib: &Library, cfg: &StaConfig) -> Result<StaRes
     };
 
     // --- Global worst path (any endpoint, either edge) ----------------------
+    // `timing` is a HashMap, whose iteration order is randomized per process;
+    // on a bit-sliced datapath (e.g. `gcd`) many parallel D-pin paths land on
+    // the exact same worst delay, so iterating it directly picked an
+    // arbitrary tied endpoint from run to run of the identical binary. Walk a
+    // sorted `Vec` of net names instead, and break ties deterministically:
+    // prefer a genuine STA endpoint (a register D pin, then a primary output)
+    // over an arbitrary internal net, then fall back to net name.
+    let register_d_nets: std::collections::HashSet<&str> = module
+        .cells
+        .iter()
+        .filter(|cell| is_sequential_cell(lib, &cell.cell_type))
+        .filter_map(|cell| cell.connections.get("D"))
+        .map(|s| s.as_str())
+        .collect();
+    let endpoint_rank = |net: &str| -> u8 {
+        if register_d_nets.contains(net) {
+            0
+        } else if output_ports.contains(net) {
+            1
+        } else {
+            2
+        }
+    };
+    let mut sorted_nets: Vec<&str> = timing.keys().map(|s| s.as_str()).collect();
+    sorted_nets.sort_unstable();
+
     let mut worst: Option<(&str, Edge, f64)> = None;
-    for (net, t) in &timing {
+    for net in sorted_nets {
+        let t = timing.get(net).expect("net taken from timing.keys()");
         for (edge, rec) in [(Edge::Rise, &t.rise), (Edge::Fall, &t.fall)] {
             if let Some(rec) = rec {
-                if worst.is_none() || rec.arrival_ns > worst.unwrap().2 {
-                    worst = Some((net.as_str(), edge, rec.arrival_ns));
+                let is_new_worst = match worst {
+                    None => true,
+                    Some((cur_net, _, cur_delay)) => {
+                        rec.arrival_ns > cur_delay
+                            || (rec.arrival_ns == cur_delay
+                                && endpoint_rank(net) < endpoint_rank(cur_net))
+                    }
+                };
+                if is_new_worst {
+                    worst = Some((net, edge, rec.arrival_ns));
                 }
             }
         }
