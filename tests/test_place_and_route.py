@@ -983,6 +983,8 @@ _STAGE_METRICS = {
         "design__core__area": 7607.3,
         "design__instance__utilization": 0.446546,
         "power__total": 0.0116,
+        # Issue #783: only cts/route stages call `report_clock_skew_metric`.
+        "clock__skew__setup": 0.0621,
     },
     "route": {
         "route__wirelength": 9616,
@@ -994,6 +996,7 @@ _STAGE_METRICS = {
         "design__core__area": 7607.3,
         "design__instance__utilization": 0.446546,
         "power__total": 0.0116,
+        "clock__skew__setup": 0.0621,
     },
 }
 
@@ -1455,10 +1458,13 @@ def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
     run_place_and_route(request_path)
 
     cts_lines = _script_lines(_stage_script(request_path, "cts"))
-    assert (
-        "clock_tree_synthesis -root_buf gf180mcu_fd_sc_mcu9t5v0__buf_4 "
-        "-buf_list gf180mcu_fd_sc_mcu9t5v0__buf_4"
-    ) in cts_lines
+    assert any(
+        line.startswith(
+            "clock_tree_synthesis -root_buf gf180mcu_fd_sc_mcu9t5v0__buf_4 "
+            "-buf_list gf180mcu_fd_sc_mcu9t5v0__buf_4"
+        )
+        for line in cts_lines
+    )
     # The platform's own `MIN_BUF_CELL_AND_PORTS` names a `dlya` delay cell
     # (a hold-fixing buffer) -- the wrong shape for a clock-tree root buffer,
     # and deliberately not what this table carries.
@@ -1492,10 +1498,13 @@ def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
     run_place_and_route(request_path)
 
     cts_lines = _script_lines(_stage_script(request_path, "cts"))
-    assert (
-        "clock_tree_synthesis -root_buf sky130_fd_sc_hd__buf_4 "
-        "-buf_list sky130_fd_sc_hd__buf_4"
-    ) in cts_lines
+    assert any(
+        line.startswith(
+            "clock_tree_synthesis -root_buf sky130_fd_sc_hd__buf_4 "
+            "-buf_list sky130_fd_sc_hd__buf_4"
+        )
+        for line in cts_lines
+    )
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
     assert "set_routing_layers -signal met1-met5" in route_lines
@@ -1587,6 +1596,76 @@ def test_cts_stage_runs_post_cts_hold_repair(tmp_path, monkeypatch):
         i for i, line in enumerate(cts_lines) if line == "detailed_placement"
     )
     assert cts_index < hold_index < placement_index
+
+
+def test_cts_stage_enables_sink_clustering(tmp_path, monkeypatch):
+    """Issue #783 (P&R survey section 3.4): `clock_tree_synthesis` gains
+    `-sink_clustering_enable` -- a real, still-functional TritonCTS flag
+    (`cts::set_sink_clustering`, off by default). `-obstruction_aware` and
+    `-balance_levels` are deliberately never passed: verified live against a
+    real `openroad/orfs:latest` container that OpenROAD's current
+    TritonCTS.tcl treats both as obsolete no-ops (each only emits a
+    `utl::warn` and has no functional effect -- obstruction-aware buffer
+    placement is already the unconditional default this command never
+    disables via `-no_obstruction_aware`)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    cts_call = next(
+        line for line in cts_lines if line.startswith("clock_tree_synthesis")
+    )
+    assert "-sink_clustering_enable" in cts_call
+    assert "-obstruction_aware" not in cts_call
+    assert "-balance_levels" not in cts_call
+
+
+def test_cts_and_route_stages_report_clock_skew_metric(tmp_path, monkeypatch):
+    """Issue #783: `report_clock_skew_metric` only runs once a real clock
+    tree exists -- the `cts`/`route` stages, never `floorplan`/`place` (both
+    of which only have OpenROAD's ideal, zero-latency clock, before
+    `clock_tree_synthesis` has run)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    assert "report_clock_skew_metric" not in _script_lines(
+        _stage_script(request_path, "floorplan")
+    )
+    assert "report_clock_skew_metric" not in _script_lines(
+        _stage_script(request_path, "place")
+    )
+    assert "report_clock_skew_metric" in _script_lines(
+        _stage_script(request_path, "cts")
+    )
+    assert "report_clock_skew_metric" in _script_lines(
+        _stage_script(request_path, "route")
+    )
+
+
+def test_stubbed_full_route_reports_clock_skew_ns(tmp_path, monkeypatch):
+    """Issue #783: the additive `clock_skew_ns` response field maps
+    OpenROAD's `clock__skew__setup` metric key, present at top level (from
+    `stage_reached`) and on the `cts`/`route` stage entries, but absent from
+    `floorplan`/`place` (neither stage requests the metric -- see
+    `test_cts_and_route_stages_report_clock_skew_metric` above)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["clock_skew_ns"] == pytest.approx(0.0621)
+    stage_by_name = {stage["name"]: stage for stage in report["stages"]}
+    assert "clock_skew_ns" not in stage_by_name["floorplan"]
+    assert "clock_skew_ns" not in stage_by_name["place"]
+    assert stage_by_name["cts"]["clock_skew_ns"] == pytest.approx(0.0621)
+    assert stage_by_name["route"]["clock_skew_ns"] == pytest.approx(0.0621)
 
 
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):

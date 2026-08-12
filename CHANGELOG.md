@@ -349,6 +349,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-11 — `klt place-and-route`'s `cts` stage now enables TritonCTS's
+  sink-clustering pass (`-sink_clustering_enable`, issue #783, P&R survey
+  §3.4, Phase 1 of Epic #700) and reports a new additive `clock_skew_ns`
+  response field (`report_clock_skew_metric`'s `clock__skew__setup`,
+  populated from the `cts` stage onward, `null` before it — no real clock
+  tree exists at `floorplan`/`place`). `-obstruction_aware`/`-balance_levels`
+  are deliberately **not** passed: verified live against a real
+  `openroad/orfs:latest` container (`26Q3-1080-gab6fd26351`) that current
+  OpenROAD treats both as obsolete no-ops (`utl::warn`-only; obstruction-aware
+  buffer placement is already the unconditional default this command never
+  disables). A real end-to-end A/B run of the `gcd` corpus fixture
+  (`tests/corpus/place_and_route/regenerate.sh`'s own recipe) through a real
+  OpenROAD showed **no measurable change** to `worst_slack_ns`,
+  `total_negative_slack_ns`, `setup_violation_count`/`hold_violation_count`,
+  `estimated_power_mw`, `wirelength_um`, or the routed DEF (byte-identical) —
+  expected per the survey's own priority note that this corpus's small
+  designs are a low-yield target for clock-tree tuning; `clock_skew_ns` itself
+  reports a small but real non-null value (0.006 ns at `route`) that was
+  previously unmeasured. No `schema_version` bump — purely additive.
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on

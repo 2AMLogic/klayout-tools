@@ -53,6 +53,7 @@ def _print_text(report: dict) -> None:
     print(f"setup_violation_count: {report['setup_violation_count']}")
     print(f"hold_violation_count: {report['hold_violation_count']}")
     print(f"estimated_power_mw: {report['estimated_power_mw']}")
+    print(f"clock_skew_ns: {report['clock_skew_ns']}")
 
     stages = report["stages"]
     if stages:

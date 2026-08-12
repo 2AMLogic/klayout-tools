@@ -76,6 +76,19 @@ The `"place"` stage's `global_placement` call runs with `-routability_driven
 requires a linked `create_clock`, which is already in effect by this point in
 every non-floorplan stage script.
 
+The `"cts"` stage's `clock_tree_synthesis` call passes `-sink_clustering_enable`
+(issue #783, P&R survey §3.4) — TritonCTS's sink-clustering pass, off by
+default, groups nearby sink pins under a shared sub-tree buffer instead of
+routing each leaf buffer straight to a single sink. `-obstruction_aware` and
+`-balance_levels` are deliberately **not** passed, despite both being named in
+the source survey: verified live against a real `openroad/orfs:latest`
+container that OpenROAD's current TritonCTS.tcl treats both as obsolete —
+each only emits a warning with no functional effect (obstruction-aware buffer
+placement is already the unconditional default this command never disables
+via `-no_obstruction_aware`). `report_clock_skew_metric` also runs on this
+stage (and `"route"`, never `"floorplan"`/`"place"` — no real clock tree
+exists before CTS), populating the additive `clock_skew_ns` response field.
+
 The `"route"` stage runs `repair_antennas <diode_cell>` immediately after
 `detailed_route`, followed by a second `detailed_route` pass (issue #759, P&R
 survey §2.7/§3.3 Priority 3) — inserting a diode instance on a violating net
@@ -294,6 +307,7 @@ Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
   "hold_violation_count": 1,
   "antenna_violation_count": 0,
   "estimated_power_mw": 11.6,
+  "clock_skew_ns": 0.0621,
   "stages": [
     { "name": "floorplan", "die_area_um2": 8487.94, "core_area_um2": 7607.3, "utilization_pct": 38.7993, "worst_slack_ns": -3.71641, "total_negative_slack_ns": -143.072 },
     { "name": "place", "...": "..." },
@@ -330,6 +344,7 @@ Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
+| `clock_skew_ns` | number \| null | Worst setup clock skew (`report_clock_skew_metric`'s `clock__skew__setup`), always non-negative. `null` before the `"cts"` stage — no real clock tree exists until `clock_tree_synthesis` has run, so the ideal, zero-latency pre-CTS clock has no meaningful skew to report. |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
