@@ -2,7 +2,7 @@
 name = "klt-mom-native"
 version = "0.1.0"
 edition = "2021"
-description = "Method-of-Moments quasi-static capacitance solver core for `klt mom` (2AMLogic/klayout-tools)"
+description = "Method-of-Moments quasi-static capacitance + PEEC inductance/resistance solver core for `klt mom` (2AMLogic/klayout-tools)"
 license = "MIT"
 publish = false
 

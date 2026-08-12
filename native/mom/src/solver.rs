@@ -421,6 +421,7 @@ mod tests {
                 z0_um: z,
                 z1_um: z,
             }],
+            conductivity_s_per_m: None,
         }
     }
 
@@ -539,6 +540,7 @@ mod tests {
                         z0_um: gap_um,
                         z1_um: gap_um,
                     }],
+                    conductivity_s_per_m: None,
                 }
             })
             .collect();
@@ -553,6 +555,7 @@ mod tests {
                 z0_um: 0.0,
                 z1_um: 0.0,
             }],
+            conductivity_s_per_m: None,
         });
         conductors
     }
