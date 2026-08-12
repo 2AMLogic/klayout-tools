@@ -37,6 +37,13 @@ serde_json = "1"
 # parallel panel fill is a follow-up once conductor/panel counts grow enough
 # to matter (see docs/cli/mom.md's "Performance" note).
 nalgebra = "0.33"
+# Complex arithmetic for the frequency-domain (retarded-kernel) full-wave
+# solve (#893, Phase 2a of the MoM epic #701): partial impedance, propagation
+# constant, and characteristic impedance are all genuinely complex-valued at
+# nonzero frequency. Already resolved transitively via nalgebra's `simba`
+# dependency (see Cargo.lock) -- declaring it directly here is not a new
+# external dependency in practice, just naming what was already vendored.
+num-complex = "0.4"
 
 [dev-dependencies]
 approx = "0.5"

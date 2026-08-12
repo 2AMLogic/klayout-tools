@@ -39,10 +39,20 @@ DEFAULT_PANEL_SIZE_UM = 0.5
 #: consulted when the spec sets ``compute_inductance: true``.
 DEFAULT_FILAMENT_SIZE_UM = 1.0
 
+#: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_SEGMENT_SIZE_UM`` --
+#: same manual-sync convention as the other two defaults above. Only
+#: consulted when the spec sets a non-empty ``frequencies_hz`` (issue #893).
+DEFAULT_SEGMENT_SIZE_UM = 5.0
+
 #: `1` -- capacitance-only (issue #718/#719).
 #: `2` -- adds the PEEC inductance/resistance fields (issue #797), each
 #:        present only when the spec sets ``compute_inductance: true`` --
 #:        see ``native/mom/src/contract.rs``'s own schema-version note.
+#:        Issue #893's full-wave sweep fields (present only when the spec
+#:        sets a non-empty ``frequencies_hz``) are added without a further
+#:        bump -- purely additive, per ``docs/json-contract.md``'s envelope
+#:        policy (see ``native/mom/src/contract.rs``'s
+#:        ``RESPONSE_SCHEMA_VERSION`` doc for the full note).
 SCHEMA_VERSION = 2
 
 
@@ -258,6 +268,18 @@ def run_mom(
       filament edge length in micrometers; defaults to
       :data:`DEFAULT_FILAMENT_SIZE_UM`. Only consulted when
       ``compute_inductance`` is set.
+    - ``frequencies_hz`` (optional, array of float, default empty): opt into
+      the frequency-domain, full-wave (retarded Green's function)
+      partial-impedance sweep alongside capacitance -- issue #893, Phase 2a
+      of the Method-of-Moments epic #701. Each entry is a frequency in Hz
+      (must be positive and finite). Every conductor must satisfy the same
+      bar-shaped-conductor MVP restriction ``compute_inductance`` uses (see
+      docs/cli/mom.md's "Full-wave frequency sweep" section), independent of
+      whether ``compute_inductance`` is also set.
+    - ``segment_size_um`` (optional, float): target axial mesh segment edge
+      length in micrometers for the full-wave solve; defaults to
+      :data:`DEFAULT_SEGMENT_SIZE_UM`. Only consulted when
+      ``frequencies_hz`` is non-empty.
 
     ``top`` selects the top cell to discretise when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -293,11 +315,15 @@ def run_mom(
     panel_size_um = float(spec.get("panel_size_um", DEFAULT_PANEL_SIZE_UM))
     compute_inductance = bool(spec.get("compute_inductance", False))
     filament_size_um = float(spec.get("filament_size_um", DEFAULT_FILAMENT_SIZE_UM))
+    frequencies_hz = [float(f) for f in spec.get("frequencies_hz", [])]
+    segment_size_um = float(spec.get("segment_size_um", DEFAULT_SEGMENT_SIZE_UM))
     request = {
         "background_permittivity": float(spec["background_permittivity"]),
         "panel_size_um": panel_size_um,
         "compute_inductance": compute_inductance,
         "filament_size_um": filament_size_um,
+        "frequencies_hz": frequencies_hz,
+        "segment_size_um": segment_size_um,
         "conductors": [
             {
                 "name": name,
@@ -336,4 +362,10 @@ def run_mom(
         result["inductance_matrix_nh"] = response["inductance_matrix_nh"]
         result["resistance_ohm"] = response["resistance_ohm"]
         result["filament_count"] = response["filament_count"]
+    if frequencies_hz:
+        # Only present when requested -- same None-omitted convention as
+        # compute_inductance above (issue #893).
+        result["segment_size_um"] = segment_size_um
+        result["full_wave_segment_count"] = response["full_wave_segment_count"]
+        result["full_wave_sweep"] = response["full_wave_sweep"]
     return result

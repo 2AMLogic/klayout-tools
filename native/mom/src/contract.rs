@@ -23,6 +23,13 @@ pub const DEFAULT_PANEL_SIZE_UM: f64 = 0.5;
 /// module docs for the filament discretisation this feeds.
 pub const DEFAULT_FILAMENT_SIZE_UM: f64 = 1.0;
 
+/// Default axial mesh segment edge length (micrometers) used when a request
+/// sets `frequencies_hz` but omits `segment_size_um`. See `fullwave.rs`'s
+/// module docs for the axial discretisation this feeds -- larger than
+/// `DEFAULT_FILAMENT_SIZE_UM` since it targets the (typically longer)
+/// current-flow axis rather than a cross-section.
+pub const DEFAULT_SEGMENT_SIZE_UM: f64 = 5.0;
+
 #[derive(Debug, Deserialize)]
 pub struct MomRequest {
     /// Relative permittivity of the uniform background dielectric. The MVP
@@ -54,6 +61,23 @@ pub struct MomRequest {
     /// when `compute_inductance` is set.
     #[serde(default)]
     pub filament_size_um: Option<f64>,
+    /// Opt into the frequency-domain, full-wave (retarded Green's function)
+    /// partial-impedance solve (`fullwave.rs`, issue #893) alongside the
+    /// quasi-static capacitance solve. Empty (the default) preserves the
+    /// original contract exactly. Each entry is a frequency in Hz (must be
+    /// positive and finite); every conductor must satisfy the same
+    /// bar-shaped-conductor MVP restriction `compute_inductance` uses (see
+    /// docs/cli/mom.md's "Full-wave frequency sweep" section) -- independent
+    /// of whether `compute_inductance` is also set.
+    #[serde(default)]
+    pub frequencies_hz: Vec<f64>,
+    /// Target axial mesh segment edge length in micrometers used to
+    /// discretise the shared current-flow axis for the full-wave solve.
+    /// Smaller values give more segments (more accurate, more expensive);
+    /// omit to use `DEFAULT_SEGMENT_SIZE_UM`. Only consulted when
+    /// `frequencies_hz` is non-empty.
+    #[serde(default)]
+    pub segment_size_um: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +161,56 @@ pub struct MomResponse {
     /// mirrors `panel_count`). `Some` only when `compute_inductance` was set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filament_count: Option<usize>,
+    /// One entry per `frequencies_hz` request entry, in the same order --
+    /// the frequency-domain full-wave sweep (`fullwave.rs`, issue #893).
+    /// `Some` only when the request's `frequencies_hz` was non-empty; `None`
+    /// (omitted from the JSON entirely) otherwise, so a request that never
+    /// asked for a full-wave solve gets a byte-for-byte unchanged response
+    /// shape -- this addition is purely additive, no `schema_version` bump.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_wave_sweep: Option<Vec<FullWavePoint>>,
+    /// Total axial segment count across every conductor for the full-wave
+    /// solve's mesh (informational, mirrors `panel_count`/`filament_count`;
+    /// identical at every swept frequency since the mesh does not depend on
+    /// frequency). `Some` only when `full_wave_sweep` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_wave_segment_count: Option<usize>,
+}
+
+/// One frequency point of the full-wave sweep (`fullwave.rs`): the complex
+/// partial-impedance matrix between every conductor pair, plus -- for
+/// exactly two conductors -- the derived characteristic impedance and
+/// propagation constant of the modeled transmission-line segment. See
+/// `fullwave.rs`'s module docs for the method and docs/cli/mom.md's
+/// "Full-wave frequency sweep" section for how to read these fields.
+#[derive(Debug, Serialize)]
+pub struct FullWavePoint {
+    pub frequency_hz: f64,
+    /// Real part of the partial-impedance matrix, ohms:
+    /// `impedance_matrix_real_ohm[j][k]` is conductor `j`'s partial self
+    /// impedance (`j == k`) or the partial mutual impedance between
+    /// conductors `j` and `k` (`j != k`) at this frequency, in the same
+    /// Ruehli-PEEC sense as `inductance_matrix_nh` (no implied return path)
+    /// -- generalised to nonzero frequency via the retarded Green's
+    /// function. Same conductor order as `conductors`.
+    pub impedance_matrix_real_ohm: Vec<Vec<f64>>,
+    /// Imaginary part of the same matrix, ohms.
+    pub impedance_matrix_imag_ohm: Vec<Vec<f64>>,
+    /// Real part of the characteristic impedance, ohms. `Some` only when
+    /// the request had exactly two conductors (the canonical
+    /// two-conductor transmission-line case); `None` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub characteristic_impedance_real_ohm: Option<f64>,
+    /// Imaginary part of the characteristic impedance, ohms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub characteristic_impedance_imag_ohm: Option<f64>,
+    /// Attenuation constant (the real part of the propagation constant
+    /// gamma = alpha + j*beta), nepers per meter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attenuation_np_per_m: Option<f64>,
+    /// Phase constant (the imaginary part of gamma), radians per meter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_rad_per_m: Option<f64>,
 }
 
 /// `1` -- capacitance-only (issue #718/#719).
@@ -146,4 +220,11 @@ pub struct MomResponse {
 ///        are byte-for-byte unaffected; the version bumps because the
 ///        *response shape* gained new fields, per this contract's own
 ///        convention (see docs/cli/mom.md's JSON schema table).
+///
+/// Issue #893 adds `full_wave_sweep`/`full_wave_segment_count` (each
+/// `null`/omitted unless the request set `frequencies_hz`) **without**
+/// bumping this constant: per `docs/json-contract.md`'s general envelope
+/// policy ("adding new fields does not require a bump"), which the `#2`
+/// bump above predates and did not strictly need either -- see this issue's
+/// acceptance criteria for the explicit "no schema_version bump" call.
 pub const RESPONSE_SCHEMA_VERSION: u32 = 2;

@@ -440,6 +440,26 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt mom` gains an optional frequency-domain, full-wave
+  partial-impedance sweep — issue #893, Phase 2a of the Method-of-Moments
+  epic #701 (the entry point for RF/EM blocks and S-parameter extraction).
+  Setting a non-empty `frequencies_hz` in the spec file (plus the optional
+  `segment_size_um` mesh knob) solves each conductor pair's complex partial
+  impedance at every requested frequency via a retarded free-space Green's
+  function (`exp(-jkR)/(4*pi*R)`), reusing PEEC's bar-shaped-conductor
+  restriction but refining the mesh axially (one equivalent thin wire per
+  conductor) rather than across the cross-section. For the canonical
+  two-conductor transmission-line case, it additionally derives the
+  characteristic impedance and propagation constant from the per-unit-length
+  series impedance and a differential-mode line capacitance. Validated
+  against the classical two-wire-line closed form and the lossless-TEM
+  propagation identity, and shown to converge under axial mesh refinement
+  (`tests/test_mom_fullwave_validation.py`,
+  `native/mom/src/fullwave.rs`'s own Rust-level tests). Purely additive —
+  new response fields (`full_wave_sweep`, `full_wave_segment_count`,
+  `segment_size_um`) present only when requested; `schema_version` stays at
+  `2`. See `docs/cli/mom.md`'s "Full-wave frequency sweep" section.
+
 - 2026-08-12 — Cross-checked the compiled sky130 LVS device-extraction rules
   (`EXTRACTION_DECK`, issues #868/#867) against the real, hand-written
   upstream `sky130.lvs` deck they were transcribed from — issue #869, Phase

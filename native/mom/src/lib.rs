@@ -17,6 +17,7 @@
 //! (`docs/json-contract.md`).
 
 mod contract;
+mod fullwave;
 mod geometry;
 mod peec;
 mod solver;
@@ -26,7 +27,7 @@ use pyo3::prelude::*;
 
 use contract::{
     MomRequest, MomResponse, DEFAULT_FILAMENT_SIZE_UM, DEFAULT_PANEL_SIZE_UM,
-    RESPONSE_SCHEMA_VERSION,
+    DEFAULT_SEGMENT_SIZE_UM, RESPONSE_SCHEMA_VERSION,
 };
 
 /// Run the quasi-static capacitance solve end to end: parse `request_json`,
@@ -72,6 +73,21 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
         (None, None, None)
     };
 
+    let (full_wave_sweep, full_wave_segment_count) = if !request.frequencies_hz.is_empty() {
+        let segment_size_um = request.segment_size_um.unwrap_or(DEFAULT_SEGMENT_SIZE_UM);
+        let (points, segment_count) = fullwave::solve_full_wave_sweep(
+            &request.conductors,
+            request.background_permittivity,
+            &request.frequencies_hz,
+            segment_size_um,
+            &capacitance_matrix_ff,
+        )
+        .map_err(PyValueError::new_err)?;
+        (Some(points), Some(segment_count))
+    } else {
+        (None, None)
+    };
+
     let conductors: Vec<String> = request.conductors.into_iter().map(|c| c.name).collect();
     let warnings = solver::physicality_warnings(&capacitance_matrix_ff, &conductors);
 
@@ -84,6 +100,8 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
         inductance_matrix_nh,
         resistance_ohm,
         filament_count,
+        full_wave_sweep,
+        full_wave_segment_count,
     };
 
     serde_json::to_string(&response)

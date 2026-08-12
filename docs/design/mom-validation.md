@@ -1,10 +1,12 @@
 # `klt mom` numeric validation: closed-form oracles and convergence
 
-Phase 1 of the Method-of-Moments epic
+Phase 1 (and Phase 2a) of the Method-of-Moments epic
 ([#701](https://github.com/2AMLogic/klayout-tools/issues/701)), delivered by
-[#719](https://github.com/2AMLogic/klayout-tools/issues/719) (capacitance)
-and [#797](https://github.com/2AMLogic/klayout-tools/issues/797) (PEEC
-inductance/resistance, Phase 1a). Where
+[#719](https://github.com/2AMLogic/klayout-tools/issues/719) (capacitance),
+[#797](https://github.com/2AMLogic/klayout-tools/issues/797) (PEEC
+inductance/resistance, Phase 1a), and
+[#893](https://github.com/2AMLogic/klayout-tools/issues/893) (full-wave
+frequency sweep, Phase 2a). Where
 [#718](https://github.com/2AMLogic/klayout-tools/issues/718) set `klt mom`'s
 bar at "produces a numeric capacitance-matrix result", this document records
 what that result is actually *worth*: the analytic oracles it is checked
@@ -12,10 +14,12 @@ against, the tolerances chosen, and the measured numbers behind them.
 
 The executable form of the capacitance sections below is
 `tests/test_mom_validation.py`; the inductance/resistance section ("§
-Inductance/resistance") is `tests/test_mom_peec_validation.py`. This file is
-the rationale, those files are the gate. Values below were measured on
-`native/mom` at the commit that introduced each harness; re-run
-`pytest tests/test_mom_validation.py tests/test_mom_peec_validation.py -v
+Inductance/resistance") is `tests/test_mom_peec_validation.py`; the
+full-wave frequency sweep section ("§ Full-wave frequency sweep") is
+`tests/test_mom_fullwave_validation.py`. This file is the rationale, those
+files are the gate. Values below were measured on `native/mom` at the
+commit that introduced each harness; re-run `pytest tests/test_mom_validation.py
+tests/test_mom_peec_validation.py tests/test_mom_fullwave_validation.py -v
 --capture=tee-sys` to reprint them.
 
 ## Why analytic oracles at all
@@ -388,6 +392,98 @@ The remaining residual (all `< 0.05%`, vs. the `~0.3%` before) is the
 mutual-term bundle-averaging approximation and the asymptote's own
 `O((a/l)^2)` remainder, not the self-GMD substitution #836 removed.
 
+## Full-wave frequency sweep
+
+Phase 2a of the Method-of-Moments epic, delivered by
+[#893](https://github.com/2AMLogic/klayout-tools/issues/893), which extends
+`klt mom` from the quasi-static solves above to a genuine frequency-domain,
+full-wave sweep — a retarded free-space Green's function
+(`exp(-jkR)/(4*pi*R)`) rather than the quasi-static `1/(4*pi*R)` kernel — for
+the same bar-shaped-conductor geometry PEEC uses (see
+[`docs/cli/mom.md`](../cli/mom.md#full-wave-frequency-sweep) for the method
+and scope). The executable form of this section is
+`tests/test_mom_fullwave_validation.py`; re-run
+`pytest tests/test_mom_fullwave_validation.py -v --capture=tee-sys` to
+reprint the numbers below.
+
+### The oracles
+
+- **Two-wire transmission-line characteristic impedance** — for two
+  identical parallel round wires of radius `a` separated by `D` (`a << D`),
+  `Z0 = (eta0 / pi) * acosh(D / (2*a))`, `eta0 = sqrt(mu0/eps0)` the
+  free-space wave impedance. Same shape-substituted-oracle convention as the
+  inductance/resistance section above (`a` is the equal-area-circle radius
+  of the square bar cross-section).
+- **TEM propagation** — in a homogeneous, lossless background medium, any
+  uniform two-conductor transmission line's propagation constant is exactly
+  `gamma = j*omega*sqrt(er)/c0` (`beta = omega*sqrt(er)/c0`, `alpha = 0`),
+  independent of the line's cross-sectional geometry — the identity
+  `L' * C' = er / c0^2` any TEM line satisfies. Unlike the `acosh` oracle
+  above, this one is **not** shape-substituted: it holds exactly for this
+  fixture's vacuum background regardless of the bar cross-section or
+  separation, so it is the tighter of the two checks in principle (its
+  measured error below is dominated by the solve's own MVP approximations —
+  the equivalent-thin-wire shape substitution and the point-collocation
+  axial fill — not by the oracle).
+
+### 1. Characteristic impedance vs the two-wire-line closed form
+
+Fixture: 500 µm long, 2×2 µm bars ("go"/"return"), 40 µm separation,
+`panel_size_um = 2.0`, `segment_size_um = 5.0`, 1 MHz (`k*length ~= 1.6e-5`,
+deeply quasi-TEM).
+
+| measured `Z0` | two-wire-line oracle | rel. error |
+| -------------- | --------------------- | ---------- |
+| 452.3668 ohm    | 427.7799 ohm           | 5.75%      |
+
+**Stated tolerance**: 10% (measured: 5.75%) — looser than the static
+loop-inductance check's 5% (`docs/design/mom-validation.md`'s
+"Inductance/resistance" section) because this measurement compounds three
+independent MVP approximations rather than one: the capacitance solve's own
+point-collocation discretisation error, the full-wave solve's
+equivalent-thin-wire shape substitution, and the finite-length/end-effect
+gap between a 500 µm finite bar and the oracle's infinite-line assumption.
+
+### 2. Propagation constant vs the TEM identity
+
+Same fixture, at 1 GHz (large enough to measure `beta` precisely).
+
+| measured `beta`  | TEM oracle `omega/c0` | rel. error | measured `alpha` |
+| ------------------ | ------------------------ | ---------- | ------------------- |
+| 22.647 rad/m         | 20.958 rad/m               | 8.06%      | 1.7e-9 Np/m (~0)     |
+
+**Stated tolerance**: 10% (measured: 8.06%), attenuation asserted `< 0.1%`
+of the phase constant (effectively lossless, as expected for a vacuum
+background with no loss mechanism modeled). The residual is the same MVP
+approximation budget as §1 above, since `beta` is derived from the same
+measured `Z'`/`C'` pair.
+
+### Convergence under axial mesh refinement
+
+Same fixture as §1, four `segment_size_um` refinement levels:
+
+| `segment_size_um` | `Z0`          |
+| -------------------- | --------------- |
+| 40.00                  | 921.567293 ohm  |
+| 20.00                  | 686.121716 ohm  |
+| 10.00                  | 531.408270 ohm  |
+| 5.00                   | 452.366829 ohm  |
+
+Successive `|differences|`: `235.445577 -> 154.713446 -> 79.041441` — each
+step strictly smaller than the last (the gate
+`test_characteristic_impedance_converges_under_segment_refinement` asserts,
+mirroring the "A non-converging solver is not accepted" discipline above).
+The refinement has not yet reached the asymptotic regime at
+`segment_size_um = 5.0` (the differences are still shrinking by roughly a
+factor of 2 per halving, not yet the faster falloff a fully-resolved
+point-collocation fill would show) — consistent with §1's oracle comparison
+landing at 5.75% rather than closer to 0%. A materially finer
+`segment_size_um` is not in the test suite (cheap to run manually, but not
+worth the added CI time for a signal the four levels above already
+establish); the remaining gap to the oracle is expected to keep shrinking
+the same way `docs/design/mom-iterative-solver.md`'s own refinement
+discussion frames the tradeoff for the capacitance solve.
+
 ## What is *not* validated here
 
 - **Absolute accuracy of a general layout.** These are canonical fixtures
@@ -403,13 +499,16 @@ mutual-term bundle-averaging approximation and the asymptote's own
   openEMS for full-wave work and geode-fem's quasi-static/DC-extrapolation
   mode as the cheaper in-house cross-check for exactly this regime; either
   would be a natural follow-up, and would test something these analytic
-  oracles cannot (general geometry).
-- **Non-bar-shaped PEEC geometry, ports, S-parameters.** The PEEC solve's
-  own MVP scope (a single, elongated, axis-aligned bar per conductor — see
-  `docs/cli/mom.md`'s "PEEC inductance/resistance") is a separate,
-  documented restriction, not something this section's oracles exercise;
-  general-mesh PEEC, ports, and frequency-dependent (AC/skin-effect) behavior
-  remain later phases of #701.
+  oracles cannot (general geometry). [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
+  tracks this specifically for the full-wave sweep above.
+- **Non-bar-shaped PEEC/full-wave geometry, ports, S-parameters.** The PEEC
+  and full-wave solves' shared MVP scope (a single, elongated, axis-aligned
+  bar per conductor — see `docs/cli/mom.md`'s "PEEC inductance/resistance")
+  is a separate, documented restriction, not something this section's
+  oracles exercise; general-mesh PEEC, port definition/de-embedding
+  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)), and
+  skin-effect (frequency-dependent resistance/capacitance) behavior remain
+  later phases of #701.
 
 ## See also
 
@@ -421,3 +520,10 @@ mutual-term bundle-averaging approximation and the asymptote's own
   Richardson-extrapolated result against an analytic oracle.
 - [`design-evidence-tiers.md`](../design-evidence-tiers.md) — where this kind
   of evidence sits on the repo's evidence ladder.
+- `tests/test_mom_fullwave_validation.py` — the executable form of the
+  "Full-wave frequency sweep" section above.
+- [#893](https://github.com/2AMLogic/klayout-tools/issues/893) — delivered
+  the full-wave frequency sweep (Phase 2a); [#894](https://github.com/2AMLogic/klayout-tools/issues/894)
+  (port definition/de-embedding) and
+  [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
+  (cross-validation against an external solver) are its planned follow-ons.
