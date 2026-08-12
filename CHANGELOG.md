@@ -460,6 +460,34 @@ not `klt --version`, if you need to detect this kind of drift.
   `docs/cli/extract.md`'s "Device rule provenance" section. Like
   `DrcRule.provenance`, not yet surfaced in `klt extract`'s JSON output.
 
+- 2026-08-12 — `klt signoff`'s tier-verdict mode now binds the T1
+  checklist's post-layout item (item 7, "Post-layout verification") to a
+  `klt pex` schematic-vs-extracted-netlist delta report, and makes item 7
+  the first — and so far only — **kind-restricted** item: it renders
+  `"met"` only on a `pex`-kind citation. Issue #871, Phase 2b of epic
+  #706. Previously `_build_tier_item` was kind-agnostic per item, so a
+  manifest could satisfy item 7 with *any* recognised, passing envelope —
+  a clean `klt drc` report, or a pre-layout schematic `klt sim` — none of
+  which prove anything about post-layout behaviour. A passing citation of
+  a kind the item does not accept now renders `"unmet"` with a new
+  machine-readable `reason: "wrong_kind"`, grouped with the other "no
+  runnable check exists for this item" reasons rather than with
+  `"check_failed"` (the cited check did not fail on its own terms; it
+  simply does not prove what this item requires). Items 1-6 and 8-10 are
+  unaffected — they pass `allowed_kinds=None` and keep the original
+  unrestricted behaviour. **The `pex` envelope shape is provisional.**
+  `klt pex` (Epic #709) does not exist in this codebase yet, and its
+  defining issue #801 ("Define `klt pex`") is stalled with an empty body
+  under `loom:operator-only`/`loom:operator-decision` — there is no
+  ratified JSON shape to build against. `_classify` therefore recognises a
+  Curator-proposed, provisional shape (a top-level `delta` list plus a
+  `reference_netlist` field, mirroring how `sim` is detected by
+  `measurements`+`corner_count` and `extract` by `device_count`+`nets`),
+  chosen narrowly enough that #801's eventual real shape is very likely
+  additive to it rather than a rewrite. Reconcile against #801 once it
+  lands. See `docs/cli/signoff.md`'s "Item 7 is kind-restricted: `klt
+  pex`" section.
+
 - 2026-08-12 — `klt signoff`'s tier-verdict mode now grades the T1
   checklist's statistical-evidence item (item 6, "Statistical claims carry
   Monte Carlo evidence") against a `klt yield` report — issue #870, Phase 2a
