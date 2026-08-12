@@ -29,7 +29,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -37,7 +36,9 @@ LEGALIZE_CRATE = os.path.join(REPO_ROOT, "native", "legalize")
 CORPUS_DIR = os.path.dirname(os.path.abspath(__file__))
 DESIGNS = ("gcd", "modexp")
 
-_COMPONENT_RE = re.compile(r"^\s*-\s+(\S+)\s+\S+\s+\+\s+PLACED\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+_COMPONENT_RE = re.compile(
+    r"^\s*-\s+(\S+)\s+\S+\s+\+\s+PLACED\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)"
+)
 
 
 def _read_text(path: str) -> str:
@@ -64,7 +65,9 @@ def _component_positions(def_text: str) -> dict[str, tuple[int, int]]:
     return positions
 
 
-def _total_displacement_um(gp_text: str, legal_text: str, dbu: int) -> tuple[float, float]:
+def _total_displacement_um(
+    gp_text: str, legal_text: str, dbu: int
+) -> tuple[float, float]:
     gp_pos = _component_positions(gp_text)
     legal_pos = _component_positions(legal_text)
     total_dbu = 0
@@ -116,7 +119,15 @@ def compare_design(binary: str, design: str) -> dict:
     rust_out_def = os.path.join(design_dir, f"{design}_rust_legal.def")
     t0 = time.monotonic()
     rust_legalize_result = _run_json(
-        [binary, "legalize", gp_def_gz, tech_lef_gz, cell_lef_gz, "unithd", rust_out_def]
+        [
+            binary,
+            "legalize",
+            gp_def_gz,
+            tech_lef_gz,
+            cell_lef_gz,
+            "unithd",
+            rust_out_def,
+        ]
     )
     rust_process_wallclock_ms = (time.monotonic() - t0) * 1000.0
 
@@ -126,7 +137,9 @@ def compare_design(binary: str, design: str) -> dict:
     oracle_metrics = _run_json(
         [binary, "metrics", oracle_def_gz, tech_lef_gz, cell_lef_gz, "unithd"]
     )
-    gp_metrics = _run_json([binary, "metrics", gp_def_gz, tech_lef_gz, cell_lef_gz, "unithd"])
+    gp_metrics = _run_json(
+        [binary, "metrics", gp_def_gz, tech_lef_gz, cell_lef_gz, "unithd"]
+    )
 
     oracle_total_um, oracle_max_um = _total_displacement_um(gp_text, oracle_text, dbu)
 
@@ -157,7 +170,9 @@ def compare_design(binary: str, design: str) -> dict:
         },
         "delta_vs_oracle": {
             "hpwl_pct": round(
-                100.0 * (rust_metrics["hpwl_um"] - oracle_metrics["hpwl_um"]) / oracle_metrics["hpwl_um"],
+                100.0
+                * (rust_metrics["hpwl_um"] - oracle_metrics["hpwl_um"])
+                / oracle_metrics["hpwl_um"],
                 2,
             ),
             "total_displacement_pct": round(
@@ -189,12 +204,14 @@ def main() -> int:
     for r in results:
         print(
             f"{r['design']:<8} {'oracle':<8} {r['oracle']['overlap_count']:<9} "
-            f"{r['oracle']['hpwl_um']:<11.1f} {r['oracle']['total_displacement_um']:<10.1f} "
+            f"{r['oracle']['hpwl_um']:<11.1f} "
+            f"{r['oracle']['total_displacement_um']:<10.1f} "
             f"{r['oracle']['detailed_placement_wallclock_ms']:<13}"
         )
         print(
             f"{r['design']:<8} {'rust':<8} {r['rust']['overlap_count']:<9} "
-            f"{r['rust']['hpwl_um']:<11.1f} {r['rust']['total_displacement_um']:<10.1f} "
+            f"{r['rust']['hpwl_um']:<11.1f} "
+            f"{r['rust']['total_displacement_um']:<10.1f} "
             f"{r['rust']['legalize_wallclock_ms']:<13.3f}"
         )
         print(

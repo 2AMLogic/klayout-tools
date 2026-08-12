@@ -71,7 +71,9 @@ def main() -> int:
         missing = wanted - {
             m.group(1) for m in re.finditer(r"^MACRO (\S+)", filtered, re.MULTILINE)
         }
-        print(f"warning: missing macros in source LEF: {sorted(missing)}", file=sys.stderr)
+        print(
+            f"warning: missing macros in source LEF: {sorted(missing)}", file=sys.stderr
+        )
     return 0
 
 

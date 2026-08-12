@@ -86,12 +86,28 @@ def main() -> int:
 
         rust_def_path = os.path.join(design_dir, f"{design}_rust_legal.def")
         binary = os.path.join(
-            CORPUS_DIR, "..", "..", "..", "native", "legalize", "target", "release", "klt-legalize"
+            CORPUS_DIR,
+            "..",
+            "..",
+            "..",
+            "native",
+            "legalize",
+            "target",
+            "release",
+            "klt-legalize",
         )
         tech_lef_gz = os.path.join(CORPUS_DIR, "sky130_fd_sc_hd_tech.lef.gz")
         cell_lef_gz = os.path.join(CORPUS_DIR, "sky130_fd_sc_hd_cells_used.lef.gz")
         subprocess.run(
-            [binary, "legalize", gp_def_gz, tech_lef_gz, cell_lef_gz, "unithd", rust_def_path],
+            [
+                binary,
+                "legalize",
+                gp_def_gz,
+                tech_lef_gz,
+                cell_lef_gz,
+                "unithd",
+                rust_def_path,
+            ],
             check=True,
             capture_output=True,
         )
@@ -106,11 +122,13 @@ def main() -> int:
 
         # --- DRC, both variants, placement-only (pre-route) GDS ---------
         drc_counts = {}
-        for label, def_path, def_text in (
+        for label, _def_path, def_text in (
             ("oracle", oracle_def_gz, oracle_text),
             ("rust", rust_def_path, rust_text),
         ):
-            plain_def_path = os.path.join(design_dir, f"{design}_{label}_placement_only.def")
+            plain_def_path = os.path.join(
+                design_dir, f"{design}_{label}_placement_only.def"
+            )
             with open(plain_def_path, "w", encoding="utf-8") as handle:
                 handle.write(def_text)
             gds_path = os.path.join(design_dir, f"{design}_{label}_placement_only.gds")
