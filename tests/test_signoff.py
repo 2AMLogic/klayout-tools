@@ -16,6 +16,7 @@ fixtures, so splitting them out would only add a cross-file import.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
 import subprocess
@@ -1621,6 +1622,26 @@ def test_command_takes_precedence_over_file_when_both_given(monkeypatch, tmp_pat
 
 _DESIGN_PIPELINE_DIR = _REPO_ROOT / "examples" / "design-pipeline"
 
+#: `examples/yield/` (issue #816) -- reused below by the fleet roll-up's
+#: "measured, not asserted" regression (issue #872) to run a genuine `klt
+#: yield` subprocess, the same convention as the drc/lvs/extract/sim real-gate
+#: tests above.
+_YIELD_EXAMPLES_DIR = _REPO_ROOT / "examples" / "yield"
+
+#: `klt yield`'s statistics core needs the `klt_yield_native` Rust extension
+#: built (`uv sync --group yield` or `maturin develop --release` in
+#: `native/yield/`) -- skip gracefully, exactly like tests/test_yield.py's own
+#: `requires_native`, rather than failing in an environment without a Rust
+#: toolchain.
+requires_native_yield = pytest.mark.skipif(
+    importlib.util.find_spec("klt_yield_native") is None,
+    reason=(
+        "klt_yield_native is not built -- run `maturin develop --release` in "
+        "native/yield/ (or `uv sync --group yield`); see "
+        "docs/cli/yield.md#building-the-native-extension"
+    ),
+)
+
 
 def _klt_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "klayout_tools.cli", *args]
@@ -2007,6 +2028,180 @@ def test_fleet_report_never_reparses_evidence_itself(tmp_path):
     blocking_item = fleet_result["blocks"][0]["blocking_item"]
     assert blocking_item["id"] == first_unmet["id"]
     assert blocking_item["reason"] == first_unmet["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Fleet roll-up picks up the statistical (#870) and post-layout (#871) items
+# -- issue #872, Phase 2c of epic #706.
+#
+# build_fleet_report() needed no code change to pick these two items up: it
+# already reduces whatever items[] build_tier_report() renders (see its own
+# "Fleet roll-up" docstring section), and build_tier_report() has rendered
+# all 10 T1 items -- including item 6 (statistical) and item 7 (post-layout)
+# -- since Phase 0 (#722). What changed under #870/#871 is which evidence
+# shapes those two items can now be *satisfied by* (a `klt yield` report for
+# item 6, a `klt pex` report -- and only that kind -- for item 7); before
+# those phases landed, a manifest citing genuine yield/pex evidence for them
+# rendered "unrecognized_envelope", so a canary with real statistical/
+# post-layout evidence already assembled was still reported blocked "on
+# statistical/post-layout evidence" by the roll-up, same as one with no
+# evidence at all. These tests are the regression proving the roll-up's
+# per-canary blocking-item determination -- not just build_tier_report()'s
+# own item grading -- now resolves both items to their real verdict.
+# --------------------------------------------------------------------------- #
+
+
+def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
+    tmp_path,
+):
+    """A block manifest missing only items 6 and 7 is blocked on item 6
+    first (doc order); providing item 6's `klt yield` evidence advances the
+    blocker to item 7; citing a wrong-kind (non-`pex`) envelope for item 7
+    renders it `"wrong_kind"`, never a borrowed pass; and providing real
+    `klt pex` evidence for item 7 finally reaches `tier: "T1"`. Every step
+    is read back through the fleet roll-up, not `build_tier_report()`
+    directly -- this is `build_fleet_report()`'s own blocking-item
+    determination being exercised end to end."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    base_evidence = {str(i): drc_path for i in range(1, 11) if i not in (6, 7)}
+    base_evidence["4"] = lvs_path
+
+    def _row(evidence: dict[str, str]) -> dict[str, object]:
+        block = _fleet_block_manifest("stat-postlayout-canary", evidence=evidence)
+        result = build_fleet_report({"blocks": [block]})
+        return result["blocks"][0]
+
+    # Step 1: items 6 and 7 both missing -> blocked on item 6 (doc order).
+    row = _row(base_evidence)
+    assert row["tier"] is None
+    assert row["blocking_item"] == {
+        "id": 6,
+        "title": "Statistical claims carry Monte Carlo evidence",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+
+    # Step 2: bind item 6's `klt yield` evidence -> blocker advances to
+    # item 7, still missing.
+    with_item_6 = dict(base_evidence, **{"6": yield_path})
+    row = _row(with_item_6)
+    assert row["tier"] is None
+    assert row["blocking_item"] == {
+        "id": 7,
+        "title": "Post-layout verification",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+
+    # Step 3: cite a non-`pex` envelope (a clean DRC report) for item 7 --
+    # kind-restricted since #871, so this must never borrow a pass.
+    wrong_kind = dict(with_item_6, **{"7": drc_path})
+    row = _row(wrong_kind)
+    assert row["tier"] is None
+    assert row["blocking_item"] == {
+        "id": 7,
+        "title": "Post-layout verification",
+        "partition": None,
+        "reason": "wrong_kind",
+    }
+
+    # Step 4: bind real `klt pex` evidence for item 7 -> the block reaches
+    # T1, and the roll-up's t1_met_count/tier both reflect it.
+    fully_met = dict(with_item_6, **{"7": pex_path})
+    row = _row(fully_met)
+    assert row["tier"] == "T1"
+    assert row["t1_met_count"] == 10
+    assert row["blocking_item"] is None
+
+
+@requires_native_yield
+def test_fleet_tier_verdict_changes_once_real_yield_evidence_is_bound(tmp_path):
+    """AC (issue #872): "re-run against at least one canary whose tier
+    verdict changes ... once the new items are bound, measured not
+    asserted." Measured here by genuinely running `klt yield` as a
+    subprocess against this repo's own worked `examples/yield/` Monte Carlo
+    campaign -- the same "real gate" convention the drc/lvs/extract/sim
+    tests above use -- not by asserting a canned fixture.
+
+    BEFORE: item 6 has no evidence -> not T1, blocked on item 6.
+    AFTER: the same block, now citing a real command-backed `klt yield` run
+    over that campaign -> item 6 "met" on a freshly-observed exit status
+    and envelope, block reaches T1.
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    base_evidence = {str(i): drc_path for i in range(1, 11) if i != 6}
+    base_evidence["4"] = lvs_path
+    base_evidence["7"] = pex_path
+
+    before_block = _fleet_block_manifest("gf180-sar-adc-canary", evidence=base_evidence)
+    before = build_fleet_report({"blocks": [before_block]})
+    before_row = before["blocks"][0]
+    assert before_row["tier"] is None
+    assert before_row["blocking_item"] == {
+        "id": 6,
+        "title": "Statistical claims carry Monte Carlo evidence",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+
+    # Deliberately generous limits -- this test proves the roll-up wires a
+    # genuine `klt yield` run through to the tier verdict, it is not meant
+    # to exercise `klt yield`'s own statistics engine (covered separately by
+    # tests/test_yield.py).
+    limits_path = _write(
+        tmp_path,
+        "wide-limits.json",
+        {
+            "confidence": 0.95,
+            "target_ci_halfwidth": 0.05,
+            "measurements": {
+                "vref": {"min": 0.0, "max": 10.0, "target_yield": 0.5},
+                "iq_ua": {"max": 100.0, "target_yield": 0.5},
+            },
+        },
+    )
+    after_evidence = dict(
+        base_evidence,
+        **{
+            "6": {
+                "command": _klt_command(
+                    "yield",
+                    "mc-samples.json",
+                    "--limits",
+                    limits_path,
+                    "--format",
+                    "json",
+                ),
+                "cwd": str(_YIELD_EXAMPLES_DIR),
+            }
+        },
+    )
+    after_block = _fleet_block_manifest("gf180-sar-adc-canary", evidence=after_evidence)
+    after = build_fleet_report({"blocks": [after_block]})
+    after_row = after["blocks"][0]
+
+    assert after_row["tier"] == "T1"
+    assert after_row["blocking_item"] is None
+
+    # The tier changed because a real klt yield subprocess actually ran and
+    # was graded, not by coincidence -- confirm item 6's own citation.
+    tier_report = build_tier_report(
+        _manifest(block="gf180-sar-adc-canary", evidence=after_evidence)
+    )
+    item_6 = next(item for item in tier_report["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["kind"] == "yield"
+    assert item_6["citation"]["check_status"] == "pass"
+    assert item_6["citation"]["exit_status"] == 0
+    assert item_6["citation"]["command"] is not None
+    assert item_6["citation"]["content_hash"] is not None
 
 
 def test_fleet_manifest_blocks_accept_inline_or_file_path(tmp_path):

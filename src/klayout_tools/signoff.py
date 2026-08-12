@@ -132,6 +132,23 @@ about *why* a block is or isn't T1. This turns "which canaries are at which
 tier, and what's blocking each not-yet-T1 block" from a survey (open N
 tier reports) into one query.
 
+**Statistical/post-layout items flow through automatically (issue #872, Phase
+2c of epic #706).** Because :func:`build_fleet_report` reduces whatever
+``items[]`` :func:`build_tier_report` renders, and :func:`build_tier_report`
+has always rendered all 10 T1 items (item 6, item 7 included, since Phase 0),
+this needed no roll-up-side code change once #870/#871 taught
+:func:`_classify`/:func:`_check_passed` to recognise ``klt yield``/``klt
+pex`` evidence: a block's blocking item now resolves against those two
+items' *real* verdicts, not just against whether they have any evidence at
+all. Before #870/#871, a manifest citing genuine statistical/post-layout
+evidence for items 6/7 rendered ``"unrecognized_envelope"`` -- so a canary
+with that evidence already assembled was reported blocked "on statistical/
+post-layout evidence" by the roll-up, indistinguishable from a canary with
+no evidence for those items at all. See the fleet-roll-up regression tests
+in ``tests/test_signoff.py`` (issue #872) for the walk-through, including one
+that runs a real ``klt yield`` subprocess and shows a block's ``tier``
+change from ``null`` to ``"T1"`` once that evidence is bound.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.

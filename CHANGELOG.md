@@ -440,6 +440,30 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt signoff --fleet`'s fleet-wide roll-up now resolves a
+  canary's real verdict on the statistical (item 6, `klt yield`, #870) and
+  post-layout (item 7, `klt pex`, #871) T1 items, instead of always naming
+  them "blocked on statistical/post-layout evidence" — issue #872, Phase 2c
+  of epic #706. `build_fleet_report()` needed no functional change: it has
+  always reduced whichever `items[]` `build_tier_report()` renders, and that
+  render has included items 6/7 since Phase 0 — what changed is that those
+  two items can now be *satisfied* by real `klt yield`/`klt pex` evidence
+  (#870/#871), so a manifest citing that evidence resolves its
+  `blocking_item` to the item's actual reason (`met`, `check_failed`,
+  `wrong_kind`, ...) rather than the pre-#870/#871 `unrecognized_envelope`.
+  New regression coverage in `tests/test_signoff.py` walks a block through
+  all four states (item 6 missing -> item 6 bound, item 7 missing -> item 7
+  bound with a wrong-kind citation -> item 7 bound with real `pex`
+  evidence -> `tier: "T1"`), plus a "measured, not asserted" test that runs a
+  real `klt yield` subprocess against `examples/yield/`'s Monte Carlo
+  campaign and confirms the block's `tier` changes from `null` to `"T1"`
+  once that evidence is bound. No response-shape change; both
+  `TIER_REPORT_SCHEMA_VERSION` and `FLEET_REPORT_SCHEMA_VERSION` are
+  unaffected. See `docs/cli/signoff.md`'s "Fleet roll-up" section and its
+  "Worked example: fleet roll-up across four canaries", which now carries a
+  canary blocked on item 6 and shows that block reaching T1 once real
+  `klt yield` evidence is bound.
+
 - 2026-08-12 — `klt drc`/`klt extract`/`klt lvs` gain a third built-in deck,
   `sg13g2` (IHP-Open-PDK's SG13G2) — issue #905, Phase 3b of the DRC/LVS deck
   compiler epic #711, "the second PDK-generality proof" alongside sky130
