@@ -30,6 +30,7 @@ from . import (
     mom_cmd,
     pdk_cmd,
     place_and_route_cmd,
+    power_cmd,
     precheck_cmd,
     render_cmd,
     report_cmd,
@@ -1552,6 +1553,44 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(mom_parser)
     mom_parser.set_defaults(func=mom_cmd.run)
+
+    power_parser = subparsers.add_parser(
+        "power",
+        help="extract a routed layout's power grid as a resistive network",
+        description=(
+            "Extract a routed layout's named power/ground nets into a graph "
+            "of nodes + segment resistances -- issue #844, Phase 1a of the "
+            "power/IR-drop + EM signoff epic #712. This phase delivers the "
+            "klt power interface and the resistive-network extraction only; "
+            "the static IR-drop solve and per-net EM verdict are later "
+            "phases. See docs/cli/power.md for the spec-file schema and the "
+            "JSON contract."
+        ),
+    )
+    power_parser.add_argument(
+        "file", help="path to a routed GDSII or OASIS layout file"
+    )
+    power_parser.add_argument(
+        "spec",
+        help=(
+            "path to a JSON spec file: a non-empty 'power_nets' array, a "
+            "non-empty 'stackup' array mapping GDS layer/datatype pairs to "
+            "metal roles + sheet resistance (at least one with a "
+            "'label_layer'), and an optional 'vias' array -- see "
+            "docs/cli/power.md's 'Spec file' section"
+        ),
+    )
+    power_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to analyse when the stream has more than one "
+            "(required in that case -- klt power operates on exactly one "
+            "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    _add_format_arg(power_parser)
+    power_parser.set_defaults(func=power_cmd.run)
 
     return parser
 
