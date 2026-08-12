@@ -43,6 +43,7 @@ from . import (
     stats_cmd,
     synthesize_cmd,
     trajectory_cmd,
+    yield_cmd,
 )
 
 
@@ -1650,6 +1651,85 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(power_parser)
     power_parser.set_defaults(func=power_cmd.run)
+
+    yield_parser = subparsers.add_parser(
+        "yield",
+        help="Monte Carlo sample set + spec limits -> yield estimate with CIs",
+        description=(
+            "Turn a Monte Carlo sample set and its spec limits into a yield "
+            "estimate that always carries its confidence interval, "
+            "Cpk/sigma-to-spec, and a sample-size verdict -- issue #816, "
+            "Phase 1a of the statistical/yield epic #710. A `klt sim` Monte "
+            "Carlo report is consumed directly (no intermediate format). "
+            "The tool never emits a bare point estimate: a request that "
+            "could only produce one -- a single sample, a confidence level "
+            "of 0 or 1, a measurement with no limits -- is an error, not a "
+            "warning. Statistics run in the klt_yield_native Rust extension "
+            "(native/yield/); see docs/cli/yield.md for the input/output "
+            "schema and how to build the extension."
+        ),
+    )
+    yield_parser.add_argument(
+        "samples",
+        help=(
+            "path to a `klt sim --format json` Monte Carlo report, or a "
+            "sample-set document ({'measurements': [{'name', 'samples', "
+            "'limits'}, ...]}) -- auto-detected; see docs/cli/yield.md"
+        ),
+    )
+    yield_parser.add_argument(
+        "--limits",
+        default=None,
+        help=(
+            "path to a spec-limits file supplying (or overriding) each "
+            "measurement's min/max/target_yield, plus optional run-level "
+            "confidence/target_ci_halfwidth/min_samples defaults. Required "
+            "when the sample document carries no limits of its own"
+        ),
+    )
+    yield_parser.add_argument(
+        "--confidence",
+        type=float,
+        default=None,
+        help=(
+            "two-sided confidence level for every reported interval, "
+            "strictly between 0 and 1 (default: 0.95). A value of 1 admits "
+            "no finite interval and is rejected"
+        ),
+    )
+    yield_parser.add_argument(
+        "--target-ci-halfwidth",
+        dest="target_ci_halfwidth",
+        type=float,
+        default=None,
+        help=(
+            "half-width, in absolute yield, the sample-size verdict is "
+            "measured against (default: 0.01, i.e. +/-1 percentage point)"
+        ),
+    )
+    yield_parser.add_argument(
+        "--min-samples",
+        dest="min_samples",
+        type=int,
+        default=None,
+        help=(
+            "minimum usable samples per measurement (default and hard "
+            "floor: 2 -- below that no confidence interval exists)"
+        ),
+    )
+    yield_parser.add_argument(
+        "--measurement",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "restrict the analysis to this measurement; repeatable, and "
+            "comma-separated names are accepted. A named measurement with "
+            "no spec limits is an error rather than a silent skip"
+        ),
+    )
+    _add_format_arg(yield_parser)
+    yield_parser.set_defaults(func=yield_cmd.run)
 
     return parser
 

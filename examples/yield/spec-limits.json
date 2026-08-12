@@ -1,0 +1,15 @@
+{
+  "confidence": 0.95,
+  "target_ci_halfwidth": 0.01,
+  "measurements": {
+    "vref": {
+      "min": 1.15,
+      "max": 1.25,
+      "target_yield": 0.99
+    },
+    "iq_ua": {
+      "max": 10.0,
+      "target_yield": 0.99
+    }
+  }
+}

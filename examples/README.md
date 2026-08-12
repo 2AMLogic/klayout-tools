@@ -24,6 +24,9 @@ directory has its own README, start there.
   `generate.py` regenerates both.
 - [`spec-review/`](spec-review/) — the spec-review skill applied to a draft
   block spec: input spec and resulting review. See its README.
+- [`yield/`](yield/) — a seeded 300-sample Monte Carlo campaign for `klt
+  yield`, in both accepted input shapes (sample-set document and `klt sim`
+  MC report) plus its spec limits; `generate.py` regenerates. See its README.
 
 Running an example in place may write generated artifacts (e.g. `.klt/`)
 next to its request document — those are gitignored, see the root

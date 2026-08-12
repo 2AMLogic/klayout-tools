@@ -1,0 +1,910 @@
+//! Turn a Monte Carlo sample set + spec limits into a yield estimate that
+//! **always** carries its confidence interval and sample count.
+//!
+//! Two estimates are reported side by side for every measurement, because
+//! they fail in opposite directions and disagreeing is the useful signal:
+//!
+//! - **Empirical** (`method: "clopper-pearson"`) -- the fraction of samples
+//!   inside the limits, with an exact binomial interval. Makes no
+//!   distributional assumption at all, but cannot see past the samples it
+//!   has: with zero observed failures it can only say "the yield is at least
+//!   `low`", never resolve a `1e-6` tail.
+//! - **Parametric normal** (`method: "normal-delta"`) -- the fitted normal's
+//!   probability mass inside the limits, with a delta-method interval
+//!   propagating the sampling variance of both `mu` and `sigma`. Extrapolates
+//!   into the tail, but is only as good as the normality assumption --
+//!   which is exactly why an Anderson-Darling verdict ships alongside it and
+//!   a rejection raises a warning.
+//!
+//! Issue #816 (Phase 1a of the statistical/yield epic #710).
+
+use crate::contract::{
+    Capability, Distribution, Estimate, Interval, Limits, MeasurementReport, MeasurementRequest,
+    Normality, SampleSize, YieldBlock, YieldRequest, YieldResponse, ABSOLUTE_MIN_SAMPLES,
+    SCHEMA_VERSION,
+};
+use crate::stats;
+
+/// Run the full analysis for a request, or return a human-readable error.
+pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
+    let confidence = request.confidence;
+    if !(confidence > 0.0 && confidence < 1.0) {
+        return Err(format!(
+            "confidence must be strictly between 0 and 1 (got {confidence}); a confidence of \
+             0 or 1 admits no finite interval, and `klt yield` does not emit a yield number \
+             without one"
+        ));
+    }
+    let target_ci_halfwidth = request.target_ci_halfwidth;
+    if !(target_ci_halfwidth > 0.0 && target_ci_halfwidth < 0.5) {
+        return Err(format!(
+            "target_ci_halfwidth must be strictly between 0 and 0.5 (got {target_ci_halfwidth})"
+        ));
+    }
+    let min_samples = request.min_samples.unwrap_or(ABSOLUTE_MIN_SAMPLES);
+    if min_samples < ABSOLUTE_MIN_SAMPLES {
+        return Err(format!(
+            "min_samples must be at least {ABSOLUTE_MIN_SAMPLES} (got {min_samples}): a single \
+             sample has no standard deviation and no confidence interval, so it can only \
+             produce the bare point estimate this tool refuses to emit"
+        ));
+    }
+    if request.measurements.is_empty() {
+        return Err("no measurements to analyze".to_string());
+    }
+
+    let mut reports = Vec::with_capacity(request.measurements.len());
+    for m in &request.measurements {
+        let report = analyze_measurement(m, confidence, target_ci_halfwidth, min_samples)?;
+        guard_no_bare_point_estimate(&report)?;
+        reports.push(report);
+    }
+
+    let status = if reports.iter().any(|r| r.status == "fail") {
+        "fail"
+    } else if reports.iter().any(|r| r.status == "pass") {
+        "pass"
+    } else {
+        "reported"
+    };
+
+    let mut warnings = Vec::new();
+    if reports.iter().all(|r| r.limits.target_yield.is_none()) {
+        warnings.push(
+            "no measurement declared a target_yield, so no yield claim was checked -- the \
+             estimates below are reported, never failed"
+                .to_string(),
+        );
+    }
+
+    Ok(YieldResponse {
+        schema_version: SCHEMA_VERSION,
+        confidence,
+        target_ci_halfwidth,
+        min_samples,
+        status: status.to_string(),
+        measurement_count: reports.len(),
+        measurements: reports,
+        warnings,
+    })
+}
+
+fn analyze_measurement(
+    m: &MeasurementRequest,
+    confidence: f64,
+    target_ci_halfwidth: f64,
+    min_samples: usize,
+) -> Result<MeasurementReport, String> {
+    let name = &m.name;
+    if m.limits.min.is_none() && m.limits.max.is_none() {
+        return Err(format!(
+            "measurement '{name}' declares no spec limits (min and max are both absent): \
+             there is no yield to estimate without a limit to estimate it against"
+        ));
+    }
+    if let (Some(lo), Some(hi)) = (m.limits.min, m.limits.max) {
+        if hi <= lo {
+            return Err(format!(
+                "measurement '{name}' has limits.max ({hi}) <= limits.min ({lo})"
+            ));
+        }
+    }
+    if let Some(t) = m.limits.target_yield {
+        if !(t > 0.0 && t <= 1.0) {
+            return Err(format!(
+                "measurement '{name}' has target_yield {t}, which must be in (0, 1]"
+            ));
+        }
+    }
+    if m.samples.iter().any(|s| !s.is_finite()) {
+        return Err(format!(
+            "measurement '{name}' has a non-finite sample value (NaN or infinity)"
+        ));
+    }
+
+    let n = m.samples.len();
+    if n < min_samples {
+        return Err(format!(
+            "measurement '{name}' has {n} usable sample(s), below the minimum of {min_samples}: \
+             refusing to report a yield number that cannot carry a confidence interval \
+             (see docs/cli/yield.md, 'Never a bare point estimate')"
+        ));
+    }
+
+    let mut sorted = m.samples.clone();
+    sorted.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("non-finite sample already rejected")
+    });
+
+    let mean = stats::mean(&sorted);
+    let stddev = stats::sample_stddev(&sorted).expect("n >= 2 checked above");
+    let n_u = n as u64;
+    let mut warnings: Vec<String> = Vec::new();
+
+    // ---- distribution fit ------------------------------------------------ //
+    let normality = normality_verdict(&sorted, n, &mut warnings, name);
+    let distribution = Distribution {
+        model: "normal".to_string(),
+        mean,
+        stddev,
+        min: sorted[0],
+        max: sorted[n - 1],
+        median: stats::quantile_sorted(&sorted, 0.5),
+        skewness: stats::skewness(&sorted),
+        excess_kurtosis: stats::excess_kurtosis(&sorted),
+        normality,
+    };
+
+    // ---- empirical yield ------------------------------------------------- //
+    let passing = sorted.iter().filter(|x| within(**x, &m.limits)).count() as u64;
+    let (cp_low, cp_high) = stats::clopper_pearson(passing, n_u, confidence);
+    let empirical = Estimate {
+        method: "clopper-pearson".to_string(),
+        estimate: passing as f64 / n as f64,
+        confidence,
+        confidence_interval: Interval {
+            low: cp_low,
+            high: cp_high,
+        },
+        n: n_u,
+    };
+    if passing == n_u {
+        warnings.push(format!(
+            "measurement '{name}': no sample fell outside the limits, so the empirical yield is \
+             bounded only from below -- \"at least {:.4}% at {:.0}% confidence, N = {n}\" is the \
+             honest statement, not \"100% yield\"",
+            cp_low * 100.0,
+            confidence * 100.0
+        ));
+    }
+
+    // ---- parametric (normal) yield --------------------------------------- //
+    let normal = if stddev > 0.0 {
+        Some(normal_estimate(mean, stddev, n, &m.limits, confidence))
+    } else {
+        warnings.push(format!(
+            "measurement '{name}': every sample has the same value, so the normal fit, Cpk and \
+             sigma-to-spec are undefined and are reported as null"
+        ));
+        None
+    };
+
+    // ---- capability ------------------------------------------------------ //
+    let capability = capability(mean, stddev, n, &m.limits, confidence);
+
+    // ---- sample-size verdict --------------------------------------------- //
+    let sample_size = sample_size_verdict(
+        passing,
+        n_u,
+        confidence,
+        target_ci_halfwidth,
+        m.limits.target_yield,
+        empirical.confidence_interval,
+    );
+    // Scoped to the *precision* half of the verdict specifically: the verdict
+    // can also be "insufficient" purely because the claim needs more samples,
+    // which the separate warning below states in its own terms.
+    if sample_size.observed_ci_halfwidth > target_ci_halfwidth || n_u < sample_size.required_n {
+        warnings.push(format!(
+            "measurement '{name}': N = {n} resolves the yield only to +/-{:.4} at {:.0}% \
+             confidence; {} samples are needed for the requested +/-{target_ci_halfwidth}",
+            sample_size.observed_ci_halfwidth,
+            confidence * 100.0,
+            sample_size.required_n
+        ));
+    }
+    if let Some(required) = sample_size.required_n_for_target {
+        if n_u < required {
+            warnings.push(format!(
+                "measurement '{name}': the observed pass rate clears the {} target, but N = {n} \
+                 is too small to *claim* it at {:.0}% confidence (the lower bound is {:.6}); \
+                 {required} samples at this rate would support the claim",
+                m.limits.target_yield.unwrap_or(f64::NAN),
+                confidence * 100.0,
+                cp_low
+            ));
+        }
+    } else if let Some(target) = m.limits.target_yield {
+        if empirical.estimate <= target {
+            warnings.push(format!(
+                "measurement '{name}': the observed pass rate ({:.6}) is at or below the {target} \
+                 target, so no sample count can support the claim -- this is the design falling \
+                 short, not the campaign",
+                empirical.estimate
+            ));
+        }
+    }
+    if m.errored > 0 {
+        warnings.push(format!(
+            "measurement '{name}': {} sample(s) produced no usable value and were excluded from \
+             every statistic below",
+            m.errored
+        ));
+    }
+    if m.source_corners.len() > 1 {
+        warnings.push(format!(
+            "measurement '{name}': samples were pooled across {} originating corners; each \
+             corner is its own population, so the pooled estimate is a worst-case envelope \
+             rather than a distribution anyone sampled",
+            m.source_corners.len()
+        ));
+    }
+
+    // ---- verdict --------------------------------------------------------- //
+    let status = match m.limits.target_yield {
+        None => "reported",
+        Some(target) => {
+            if empirical.confidence_interval.low >= target {
+                "pass"
+            } else {
+                "fail"
+            }
+        }
+    };
+
+    Ok(MeasurementReport {
+        name: name.clone(),
+        unit: m.unit.clone(),
+        n: n_u,
+        errored: m.errored,
+        limits: m.limits,
+        source_corners: m.source_corners.clone(),
+        distribution,
+        yield_: YieldBlock { empirical, normal },
+        capability,
+        sample_size,
+        status: status.to_string(),
+        warnings,
+    })
+}
+
+fn within(x: f64, limits: &Limits) -> bool {
+    limits.min.map(|lo| x >= lo).unwrap_or(true) && limits.max.map(|hi| x <= hi).unwrap_or(true)
+}
+
+fn normality_verdict(
+    sorted: &[f64],
+    n: usize,
+    warnings: &mut Vec<String>,
+    name: &str,
+) -> Normality {
+    let statistic = stats::anderson_darling_normal(sorted);
+    let verdict = match statistic {
+        None => "degenerate",
+        Some(_) if n < stats::AD_MIN_SAMPLES => "insufficient_samples",
+        Some(a2) if a2 > stats::AD_CRITICAL_VALUE_5PCT => "rejected",
+        Some(_) => "consistent",
+    };
+    if verdict == "rejected" {
+        warnings.push(format!(
+            "measurement '{name}': the sample set is not consistent with a normal distribution \
+             (Anderson-Darling A2* = {:.4} > {:.3}); treat the parametric yield estimate and \
+             Cpk as indicative only and prefer the empirical estimate",
+            statistic.unwrap_or(f64::NAN),
+            stats::AD_CRITICAL_VALUE_5PCT
+        ));
+    } else if verdict == "insufficient_samples" {
+        warnings.push(format!(
+            "measurement '{name}': N = {n} is below the {} samples the Anderson-Darling critical \
+             values assume, so normality was not tested",
+            stats::AD_MIN_SAMPLES
+        ));
+    }
+    Normality {
+        test: "anderson-darling".to_string(),
+        statistic,
+        critical_value: stats::AD_CRITICAL_VALUE_5PCT,
+        significance: 0.05,
+        verdict: verdict.to_string(),
+    }
+}
+
+/// `phi(z)`, treating an infinite `z` (a one-sided spec) as contributing
+/// nothing rather than producing `inf * 0 = NaN`.
+fn phi(z: f64) -> f64 {
+    if z.is_finite() {
+        stats::norm_pdf(z)
+    } else {
+        0.0
+    }
+}
+
+/// `z * phi(z)`, with the same infinite-`z` guard as [`phi`].
+fn z_phi(z: f64) -> f64 {
+    if z.is_finite() {
+        z * stats::norm_pdf(z)
+    } else {
+        0.0
+    }
+}
+
+/// The fitted normal's yield, with a delta-method confidence interval.
+///
+/// `Y = Phi(z_u) - Phi(z_l)` with `z_l = (LSL - mu) / sigma`,
+/// `z_u = (USL - mu) / sigma`. Propagating the (asymptotically independent)
+/// sampling variances `Var(mu_hat) = sigma^2 / n` and
+/// `Var(sigma_hat) = sigma^2 / (2n)`:
+///
+/// ```text
+/// dY/dmu    = (phi(z_l) - phi(z_u)) / sigma
+/// dY/dsigma = (z_l phi(z_l) - z_u phi(z_u)) / sigma
+/// Var(Y)    = (dY/dmu)^2 sigma^2/n + (dY/dsigma)^2 sigma^2/(2n)
+/// ```
+///
+/// The interval is clamped to `[0, 1]` (a probability cannot leave it); the
+/// clamp is documented in `docs/cli/yield.md` rather than hidden, since a
+/// clamped endpoint is a signal that the normal approximation to the
+/// *interval* is being pushed past where it is informative.
+fn normal_estimate(mean: f64, stddev: f64, n: usize, limits: &Limits, confidence: f64) -> Estimate {
+    let z_l = limits
+        .min
+        .map(|lo| (lo - mean) / stddev)
+        .unwrap_or(f64::NEG_INFINITY);
+    let z_u = limits
+        .max
+        .map(|hi| (hi - mean) / stddev)
+        .unwrap_or(f64::INFINITY);
+
+    let y = stats::norm_cdf(z_u) - stats::norm_cdf(z_l);
+    let d_mu = (phi(z_l) - phi(z_u)) / stddev;
+    let d_sigma = (z_phi(z_l) - z_phi(z_u)) / stddev;
+    let n_f = n as f64;
+    let var =
+        d_mu * d_mu * stddev * stddev / n_f + d_sigma * d_sigma * stddev * stddev / (2.0 * n_f);
+    let z = stats::norm_ppf(0.5 + confidence / 2.0);
+    let half = z * var.sqrt();
+
+    Estimate {
+        method: "normal-delta".to_string(),
+        estimate: y.clamp(0.0, 1.0),
+        confidence,
+        confidence_interval: Interval {
+            low: (y - half).clamp(0.0, 1.0),
+            high: (y + half).clamp(0.0, 1.0),
+        },
+        n: n as u64,
+    }
+}
+
+/// Cp / Cpk / sigma-to-spec, with Bissell's normal-approximation interval
+/// for Cpk: `Cpk +/- z * sqrt(1/(9n) + Cpk^2 / (2(n-1)))`.
+fn capability(mean: f64, stddev: f64, n: usize, limits: &Limits, confidence: f64) -> Capability {
+    if stddev <= 0.0 {
+        return Capability {
+            cp: None,
+            cpk: None,
+            cpk_confidence_interval: None,
+            sigma_to_spec: None,
+            sigma_to_spec_confidence_interval: None,
+            limiting_side: None,
+        };
+    }
+    let cp = match (limits.min, limits.max) {
+        (Some(lo), Some(hi)) => Some((hi - lo) / (6.0 * stddev)),
+        _ => None,
+    };
+    let cpl = limits.min.map(|lo| (mean - lo) / (3.0 * stddev));
+    let cpu = limits.max.map(|hi| (hi - mean) / (3.0 * stddev));
+    let (cpk, side) = match (cpl, cpu) {
+        (Some(l), Some(u)) => {
+            if l <= u {
+                (Some(l), Some("lower"))
+            } else {
+                (Some(u), Some("upper"))
+            }
+        }
+        (Some(l), None) => (Some(l), Some("lower")),
+        (None, Some(u)) => (Some(u), Some("upper")),
+        (None, None) => (None, None),
+    };
+
+    let z = stats::norm_ppf(0.5 + confidence / 2.0);
+    let (cpk_ci, sigma_ci) = match cpk {
+        Some(c) => {
+            let se = (1.0 / (9.0 * n as f64) + c * c / (2.0 * (n as f64 - 1.0))).sqrt();
+            let ci = Interval {
+                low: c - z * se,
+                high: c + z * se,
+            };
+            (
+                Some(ci),
+                Some(Interval {
+                    low: 3.0 * ci.low,
+                    high: 3.0 * ci.high,
+                }),
+            )
+        }
+        None => (None, None),
+    };
+
+    Capability {
+        cp,
+        cpk,
+        cpk_confidence_interval: cpk_ci,
+        sigma_to_spec: cpk.map(|c| 3.0 * c),
+        sigma_to_spec_confidence_interval: sigma_ci,
+        limiting_side: side.map(str::to_string),
+    }
+}
+
+/// The largest sample count [`required_n_for_target`] will search up to
+/// before giving up and reporting `null`. A campaign needing more than ten
+/// million samples is not a sample-size problem a verdict can usefully state.
+const MAX_SEARCHED_N: u64 = 10_000_000;
+
+/// "Is N large enough?", answered twice -- for precision and for the claim.
+///
+/// **`required_n` (precision)** -- how many samples the interval needs to
+/// reach `target_ci_halfwidth`. Two regimes, because the usual
+/// `n = z^2 p(1-p) / h^2` formula collapses to `n = 0` exactly where a yield
+/// campaign usually lands (`p_hat == 1`, zero observed failures):
+///
+/// - **Zero observed failures** (`k == n`, or symmetrically `k == 0`): the
+///   exact Clopper-Pearson interval is `[(alpha/2)^(1/n), 1]`, so requiring a
+///   half-width `<= h` gives `n >= ln(alpha/2) / ln(1 - 2h)`.
+/// - **Otherwise**: the standard normal-approximation sample size at the
+///   observed proportion.
+///
+/// **`required_n_for_target` (the claim)** -- how many samples the *lower*
+/// bound needs to reach the declared `target_yield`. Searched directly
+/// against the same exact interval the report publishes, rather than through
+/// a normal approximation, so the two can never disagree.
+fn sample_size_verdict(
+    passing: u64,
+    n: u64,
+    confidence: f64,
+    target: f64,
+    target_yield: Option<f64>,
+    observed: Interval,
+) -> SampleSize {
+    let alpha = 1.0 - confidence;
+    let p_hat = passing as f64 / n as f64;
+    let (required, method) = if passing == n || passing == 0 {
+        let required = (alpha / 2.0).ln() / (1.0 - 2.0 * target).ln();
+        (
+            required.ceil().max(ABSOLUTE_MIN_SAMPLES as f64) as u64,
+            "clopper-pearson-zero-failures",
+        )
+    } else {
+        let z = stats::norm_ppf(0.5 + confidence / 2.0);
+        let required = z * z * p_hat * (1.0 - p_hat) / (target * target);
+        (
+            required.ceil().max(ABSOLUTE_MIN_SAMPLES as f64) as u64,
+            "normal-approximation",
+        )
+    };
+    let required_for_target =
+        target_yield.and_then(|t| required_n_for_target(p_hat, confidence, t));
+    let observed_half = observed.half_width();
+    let precision_ok = observed_half <= target && n >= required;
+    let claim_ok = required_for_target.map(|r| n >= r).unwrap_or(true);
+    SampleSize {
+        n,
+        observed_ci_halfwidth: observed_half,
+        target_ci_halfwidth: target,
+        required_n: required,
+        required_n_for_target: required_for_target,
+        verdict: if precision_ok && claim_ok {
+            "sufficient".to_string()
+        } else {
+            "insufficient".to_string()
+        },
+        method: method.to_string(),
+    }
+}
+
+/// Smallest `n` whose exact lower bound at the observed pass rate reaches
+/// `target_yield`, or `None` when the observed rate is at/below the target
+/// (unreachable at any `n`) or the search exceeds [`MAX_SEARCHED_N`].
+fn required_n_for_target(p_hat: f64, confidence: f64, target_yield: f64) -> Option<u64> {
+    if p_hat <= target_yield {
+        return None;
+    }
+    let reaches = |n: u64| -> bool {
+        // Round the observed rate back to a whole pass count at this `n` --
+        // the interval is only defined on integer counts.
+        let k = (p_hat * n as f64).round().min(n as f64) as u64;
+        stats::clopper_pearson(k, n, confidence).0 >= target_yield
+    };
+    let mut hi = ABSOLUTE_MIN_SAMPLES as u64;
+    while !reaches(hi) {
+        hi = hi.saturating_mul(2);
+        if hi > MAX_SEARCHED_N {
+            return None;
+        }
+    }
+    let mut lo = ABSOLUTE_MIN_SAMPLES as u64;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if reaches(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(lo)
+}
+
+/// The runtime half of issue #816's "never a bare point estimate" rule.
+///
+/// The response *types* already make an interval-less estimate
+/// unrepresentable (`Estimate` has no optional-interval variant), but a
+/// non-finite or inverted interval would be a bare number wearing an
+/// interval's clothes. This rejects that before anything is serialised, so
+/// the failure is a clean error rather than a published yield number nobody
+/// can check.
+pub fn guard_no_bare_point_estimate(report: &MeasurementReport) -> Result<(), String> {
+    let check = |estimate: &Estimate, which: &str| -> Result<(), String> {
+        if estimate.n == 0 {
+            return Err(format!(
+                "internal invariant violated: measurement '{}' would have emitted a {which} \
+                 yield estimate with no sample count",
+                report.name
+            ));
+        }
+        if !estimate.confidence_interval.is_finite() {
+            return Err(format!(
+                "internal invariant violated: measurement '{}' would have emitted a {which} \
+                 yield estimate ({}) without a usable confidence interval [{}, {}] -- `klt \
+                 yield` does not publish a bare point estimate",
+                report.name,
+                estimate.estimate,
+                estimate.confidence_interval.low,
+                estimate.confidence_interval.high
+            ));
+        }
+        Ok(())
+    };
+    check(&report.yield_.empirical, "empirical")?;
+    if let Some(normal) = &report.yield_.normal {
+        check(normal, "normal")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::DEFAULT_TARGET_CI_HALFWIDTH;
+    use crate::stats::norm_ppf;
+
+    fn close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() <= tol, "{a} != {b} (tol {tol})");
+    }
+
+    /// `n` inverse-CDF-spaced draws from `N(mu, sigma)` -- a deterministic
+    /// stand-in for an infinite Monte Carlo campaign, with no RNG and no
+    /// seed to pin. The empirical CDF of this set matches the analytic one
+    /// to `O(1/n)` by construction, which is what makes a closed-form
+    /// comparison meaningful at all.
+    fn normal_grid(n: usize, mu: f64, sigma: f64) -> Vec<f64> {
+        (1..=n)
+            .map(|i| mu + sigma * norm_ppf((i as f64 - 0.5) / n as f64))
+            .collect()
+    }
+
+    fn request(samples: Vec<f64>, limits: Limits) -> YieldRequest {
+        YieldRequest {
+            confidence: 0.95,
+            target_ci_halfwidth: DEFAULT_TARGET_CI_HALFWIDTH,
+            min_samples: None,
+            measurements: vec![MeasurementRequest {
+                name: "m".to_string(),
+                unit: None,
+                samples,
+                errored: 0,
+                limits,
+                source_corners: vec![],
+            }],
+        }
+    }
+
+    /// The closed-form case issue #816's fourth acceptance criterion asks
+    /// for: a standard normal against symmetric +/-2 sigma limits has an
+    /// analytic yield of `erf(sqrt(2)) = 0.9544997...`.
+    #[test]
+    fn normal_yield_matches_the_closed_form_two_sigma_case() {
+        let analytic = stats::norm_cdf(2.0) - stats::norm_cdf(-2.0);
+        close(analytic, 0.954_499_736_103_641_6, 1e-14);
+
+        let req = request(
+            normal_grid(4000, 0.0, 1.0),
+            Limits {
+                min: Some(-2.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+
+        // The fitted normal reproduces the closed form to well under a
+        // tenth of a percent.
+        let parametric = m.yield_.normal.as_ref().unwrap();
+        close(parametric.estimate, analytic, 5e-4);
+        assert!(parametric.confidence_interval.low <= parametric.estimate);
+        assert!(parametric.confidence_interval.high >= parametric.estimate);
+
+        // The non-parametric estimate agrees, and its exact interval covers
+        // the analytic truth.
+        let empirical = &m.yield_.empirical;
+        close(empirical.estimate, analytic, 2e-3);
+        assert!(
+            empirical.confidence_interval.low <= analytic
+                && analytic <= empirical.confidence_interval.high,
+            "Clopper-Pearson interval {:?} misses the analytic yield {analytic}",
+            empirical.confidence_interval
+        );
+
+        // Cpk for a symmetric +/-2 sigma window is exactly 2/3, and
+        // sigma-to-spec is exactly 2.
+        close(m.capability.cpk.unwrap(), 2.0 / 3.0, 5e-3);
+        close(m.capability.sigma_to_spec.unwrap(), 2.0, 1.5e-2);
+        close(m.capability.cp.unwrap(), 2.0 / 3.0, 5e-3);
+        assert_eq!(m.distribution.normality.verdict, "consistent");
+    }
+
+    /// A one-sided spec exercises the infinite-`z` paths in both the CDF and
+    /// the delta-method derivative. Closed form: `Phi(3) = 0.99865010...`.
+    #[test]
+    fn one_sided_spec_matches_the_closed_form_three_sigma_tail() {
+        let analytic = stats::norm_cdf(3.0);
+        close(analytic, 0.998_650_101_968_369_9, 1e-14);
+
+        let req = request(
+            normal_grid(4000, 0.0, 1.0),
+            Limits {
+                min: None,
+                max: Some(3.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let parametric = m.yield_.normal.as_ref().unwrap();
+        close(parametric.estimate, analytic, 5e-4);
+        assert!(parametric.confidence_interval.low.is_finite());
+        assert_eq!(m.capability.limiting_side.as_deref(), Some("upper"));
+        close(m.capability.sigma_to_spec.unwrap(), 3.0, 2e-2);
+        assert!(m.capability.cp.is_none());
+    }
+
+    #[test]
+    fn a_shifted_mean_fails_a_declared_target_yield() {
+        // Mean sits right on the upper limit: ~50% yield, nowhere near 99%.
+        let req = request(
+            normal_grid(500, 1.0, 0.1),
+            Limits {
+                min: Some(0.5),
+                max: Some(1.0),
+                target_yield: Some(0.99),
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        assert_eq!(resp.status, "fail");
+        assert_eq!(resp.measurements[0].status, "fail");
+        assert!(resp.measurements[0].yield_.empirical.estimate < 0.6);
+    }
+
+    #[test]
+    fn a_centered_distribution_passes_a_declared_target_yield() {
+        let req = request(
+            normal_grid(2000, 1.2, 0.005),
+            Limits {
+                min: Some(1.15),
+                max: Some(1.25),
+                target_yield: Some(0.99),
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        assert_eq!(resp.status, "pass");
+        assert_eq!(resp.measurements[0].status, "pass");
+        assert!(
+            resp.measurements[0]
+                .yield_
+                .empirical
+                .confidence_interval
+                .low
+                >= 0.99
+        );
+    }
+
+    #[test]
+    fn every_estimate_carries_an_interval_and_a_sample_count() {
+        let req = request(
+            normal_grid(64, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: Some(3.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.yield_.empirical.n, 64);
+        assert!(m.yield_.empirical.confidence_interval.is_finite());
+        let parametric = m.yield_.normal.as_ref().unwrap();
+        assert_eq!(parametric.n, 64);
+        assert!(parametric.confidence_interval.is_finite());
+        guard_no_bare_point_estimate(m).unwrap();
+    }
+
+    #[test]
+    fn a_single_sample_is_an_error_not_a_point_estimate() {
+        let req = request(
+            vec![1.0],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    #[test]
+    fn a_degenerate_confidence_is_an_error() {
+        let mut req = request(
+            normal_grid(100, 0.0, 1.0),
+            Limits {
+                min: Some(-1.0),
+                max: Some(1.0),
+                target_yield: None,
+            },
+        );
+        req.confidence = 1.0;
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("no finite interval"), "{err}");
+    }
+
+    #[test]
+    fn missing_spec_limits_is_an_error() {
+        let req = request(
+            normal_grid(100, 0.0, 1.0),
+            Limits {
+                min: None,
+                max: None,
+                target_yield: None,
+            },
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("no spec limits"), "{err}");
+    }
+
+    #[test]
+    fn zero_failures_reports_a_one_sided_interval_and_a_sample_size_requirement() {
+        // 30 samples, limits wide enough that nothing fails.
+        let req = request(
+            normal_grid(30, 0.0, 1.0),
+            Limits {
+                min: Some(-10.0),
+                max: Some(10.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.yield_.empirical.estimate, 1.0);
+        assert_eq!(m.yield_.empirical.confidence_interval.high, 1.0);
+        assert!(m.yield_.empirical.confidence_interval.low < 1.0);
+        assert_eq!(m.sample_size.method, "clopper-pearson-zero-failures");
+        assert_eq!(m.sample_size.verdict, "insufficient");
+        // ln(0.025) / ln(0.98) = 182.6 -> 183
+        assert_eq!(m.sample_size.required_n, 183);
+    }
+
+    #[test]
+    fn a_zero_failure_run_reports_how_many_samples_the_claim_would_need() {
+        // 300 clean samples cannot support a 99% claim at 95% confidence:
+        // the exact lower bound for k = n is (alpha/2)^(1/n), which reaches
+        // 0.99 only at n = ln(0.025)/ln(0.99) = 367.03 -> 368.
+        let req = request(
+            normal_grid(300, 0.0, 1.0),
+            Limits {
+                min: Some(-10.0),
+                max: Some(10.0),
+                target_yield: Some(0.99),
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.status, "fail");
+        assert_eq!(m.yield_.empirical.estimate, 1.0);
+        assert_eq!(m.sample_size.required_n_for_target, Some(368));
+        assert_eq!(m.sample_size.verdict, "insufficient");
+        assert!(m
+            .warnings
+            .iter()
+            .any(|w| w.contains("too small to *claim*")));
+
+        // At 368 samples the same clean run does support the claim.
+        let req = request(
+            normal_grid(368, 0.0, 1.0),
+            Limits {
+                min: Some(-10.0),
+                max: Some(10.0),
+                target_yield: Some(0.99),
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        assert_eq!(resp.measurements[0].status, "pass");
+        assert_eq!(resp.measurements[0].sample_size.verdict, "sufficient");
+    }
+
+    #[test]
+    fn an_unreachable_target_reports_no_required_n_and_blames_the_design() {
+        // Mean on the upper limit: ~50% pass rate, so no sample count can
+        // ever support a 99% claim.
+        let req = request(
+            normal_grid(400, 1.0, 0.1),
+            Limits {
+                min: Some(0.5),
+                max: Some(1.0),
+                target_yield: Some(0.99),
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.sample_size.required_n_for_target, None);
+        assert!(m.warnings.iter().any(|w| w.contains("no sample count")));
+    }
+
+    #[test]
+    fn a_zero_spread_sample_set_drops_the_parametric_fit_but_keeps_the_interval() {
+        let req = request(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert!(m.yield_.normal.is_none());
+        assert!(m.capability.cpk.is_none());
+        assert_eq!(m.distribution.normality.verdict, "degenerate");
+        assert!(m.yield_.empirical.confidence_interval.is_finite());
+    }
+
+    #[test]
+    fn a_non_normal_sample_set_is_flagged() {
+        // A flat uniform grid: normality must be rejected, and the warning
+        // must say so rather than letting the parametric number stand alone.
+        let xs: Vec<f64> = (0..300).map(|i| i as f64 / 299.0).collect();
+        let req = request(
+            xs,
+            Limits {
+                min: Some(0.0),
+                max: Some(1.0),
+                target_yield: None,
+            },
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.distribution.normality.verdict, "rejected");
+        assert!(m.warnings.iter().any(|w| w.contains("not consistent")));
+    }
+}

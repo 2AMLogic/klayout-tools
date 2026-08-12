@@ -76,6 +76,14 @@ functional-verification = [
 # `mom` above (optional Rust toolchain, in-repo-only path source) -- this is
 # a research/library component, not a shipped `klt` CLI verb, so it is
 # likewise a dependency group rather than an installable extra.
+#
+# `native/yield/` (issue #816, Phase 1a of the statistical/yield epic #710):
+# the `klt_yield_native` pyo3 extension backing `klt yield`'s statistics core
+# (distribution fit, exact + parametric yield estimates with confidence
+# intervals, Cp/Cpk, sample-size verdict). Same two reasons as `mom` above --
+# an optional Rust toolchain and an in-repo-only path source -- so `klt yield`
+# likewise fails cleanly with a build pointer when the extension is absent
+# (see docs/cli/yield.md).
 [dependency-groups]
 mom = [
     "klt-mom-native",
@@ -83,10 +91,14 @@ mom = [
 congestion = [
     "klt-congestion-native",
 ]
+yield = [
+    "klt-yield-native",
+]
 
 [tool.uv.sources]
 klt-mom-native = { path = "native/mom" }
 klt-congestion-native = { path = "native/congestion" }
+klt-yield-native = { path = "native/yield" }
 
 [build-system]
 requires = ["hatchling"]
