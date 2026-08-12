@@ -15,6 +15,7 @@ fixtures, so splitting them out would only add a cross-file import.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import subprocess
@@ -203,6 +204,101 @@ SIM_FAIL_ENVELOPE = {
     "failed": 1,
 }
 
+#: `klt yield` (issue #816, Phase 1a of epic #710) JSON report shape, per
+#: docs/cli/yield.md's "JSON schema (the contract)" section -- hand-built
+#: here exactly like every other kind's fixture (no dependency on the
+#: klt_yield_native extension being built, and #816 hasn't merged into main
+#: yet -- see signoff.py's "Statistical-evidence binding" docstring
+#: section). Deliberately carries **no** `provenance` block, matching that
+#: doc's schema today -- the whole reason signoff.py's yield binding
+#: computes its own content hash instead of reading one off the envelope.
+YIELD_PASS_ENVELOPE = {
+    "schema_version": 1,
+    "samples": "mc-samples.json",
+    "limits": "spec-limits.json",
+    "source": {
+        "kind": "sample-set",
+        "netlist": None,
+        "monte_carlo": None,
+        "sample_count": 300,
+    },
+    "confidence": 0.95,
+    "target_ci_halfwidth": 0.01,
+    "min_samples": 2,
+    "status": "pass",
+    "measurement_count": 1,
+    "measurements": [
+        {
+            "name": "vref",
+            "unit": "V",
+            "n": 300,
+            "errored": 0,
+            "limits": {"min": 1.15, "max": 1.25, "target_yield": 0.95},
+            "source_corners": [],
+            "distribution": {
+                "model": "normal",
+                "mean": 1.2,
+                "stddev": 0.01,
+                "min": 1.17,
+                "max": 1.23,
+                "median": 1.2,
+                "skewness": 0.0,
+                "excess_kurtosis": 0.0,
+                "normality": {
+                    "test": "anderson-darling",
+                    "statistic": 0.2,
+                    "critical_value": 0.787,
+                    "significance": 0.05,
+                    "verdict": "consistent",
+                },
+            },
+            "yield": {
+                "empirical": {
+                    "method": "clopper-pearson",
+                    "estimate": 1.0,
+                    "confidence": 0.95,
+                    "confidence_interval": {"low": 0.99, "high": 1.0},
+                    "n": 300,
+                },
+                "normal": {
+                    "method": "normal-delta",
+                    "estimate": 0.999,
+                    "confidence": 0.95,
+                    "confidence_interval": {"low": 0.995, "high": 1.0},
+                    "n": 300,
+                },
+            },
+            "capability": {
+                "cp": 1.5,
+                "cpk": 1.4,
+                "cpk_confidence_interval": {"low": 1.2, "high": 1.6},
+                "sigma_to_spec": 4.2,
+                "sigma_to_spec_confidence_interval": {"low": 3.6, "high": 4.8},
+                "limiting_side": "upper",
+            },
+            "sample_size": {
+                "n": 300,
+                "observed_ci_halfwidth": 0.005,
+                "target_ci_halfwidth": 0.01,
+                "required_n": 100,
+                "required_n_for_target": 150,
+                "verdict": "sufficient",
+                "method": "clopper-pearson-zero-failures",
+            },
+            "status": "pass",
+            "warnings": [],
+        }
+    ],
+    "warnings": [],
+}
+
+YIELD_FAIL_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "fail"}
+
+#: `status: "reported"` -- no measurement declared a `target_yield`, so
+#: nothing could fail (docs/cli/yield.md's `status` field); this must still
+#: count as a passing check, distinct from `"fail"`.
+YIELD_REPORTED_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "reported"}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -281,6 +377,41 @@ def test_sim_pass_check_passes(tmp_path):
 
 def test_sim_fail_check_fails(tmp_path):
     path = _write(tmp_path, "sim.json", SIM_FAIL_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["passed"] is False
+
+
+def test_yield_pass_check_passes(tmp_path):
+    path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["kind"] == "yield"
+    assert check["passed"] is True
+    assert check["detail"]["measurement_count"] == 1
+    assert check["detail"]["samples"] == "mc-samples.json"
+    assert check["detail"]["source_kind"] == "sample-set"
+    assert check["detail"]["sample_count"] == 300
+
+
+def test_yield_reported_check_passes(tmp_path):
+    """`status: "reported"` (no measurement declared a `target_yield`, so
+    nothing could fail) counts as passing, distinct from `"fail"`."""
+    path = _write(tmp_path, "yield.json", YIELD_REPORTED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    assert result["checks"][0]["passed"] is True
+
+
+def test_yield_fail_check_fails(tmp_path):
+    path = _write(tmp_path, "yield.json", YIELD_FAIL_ENVELOPE)
 
     result = build_signoff([path])
 
@@ -793,6 +924,178 @@ def test_lvs_evidence_populates_lvs_kind_check(tmp_path):
     # klt lvs's provenance.input is always null (docs/json-contract.md) --
     # the citation still carries the field, just unpopulated.
     assert item_4["citation"]["content_hash"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Statistical-evidence binding: item 6 <- `klt yield` (issue #870, Phase 2a
+# of epic #706)
+# --------------------------------------------------------------------------- #
+
+
+def test_yield_evidence_populates_yield_kind_check_on_item_6(tmp_path):
+    samples_path = tmp_path / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["reason"] is None
+    citation = item_6["citation"]
+    assert citation["file"] == yield_path
+    assert citation["command"] is None
+    assert citation["kind"] == "yield"
+    assert citation["check_status"] == "pass"
+    assert citation["exit_status"] == 0
+    # klt yield's current JSON shape carries no `provenance` block of its
+    # own (issue #816) -- signoff.py hashes the referenced samples document
+    # itself instead of reading a pre-existing content hash off the
+    # envelope. See _yield_samples_content_hash().
+    expected_hash = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    assert citation["content_hash"] == expected_hash
+
+
+def test_yield_reported_status_renders_met_on_item_6(tmp_path):
+    """`status: "reported"` (no measurement declared a `target_yield`) is a
+    legitimate "met" outcome, distinct from `"fail"`."""
+    yield_path = _write(tmp_path, "yield.json", YIELD_REPORTED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+
+
+def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
+    yield_path = _write(tmp_path, "yield.json", YIELD_FAIL_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "check_failed"
+    assert item_6["citation"] is None
+
+
+def test_no_backing_yield_campaign_renders_unmet_never_assumed_met():
+    """AC (issue #870): "An item with no backing Monte-Carlo campaign
+    renders unmet, never assumed met." -- item 6 goes through the exact same
+    `_REASON_NO_EVIDENCE` machinery as every other item; there is no
+    separate "statistical" code path that could fabricate a "met" here."""
+    result = build_tier_report(_manifest(evidence={}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "no_evidence"
+    assert item_6["citation"] is None
+
+
+def test_yield_evidence_missing_samples_file_leaves_content_hash_none(tmp_path):
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "/nonexistent/mc-samples.json"}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] is None
+
+
+def test_yield_matching_pinned_content_hash_renders_met(tmp_path):
+    samples_path = tmp_path / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    expected_hash = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(
+        _manifest(evidence={"6": {"file": yield_path, "content_hash": expected_hash}})
+    )
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+
+
+def test_yield_stale_pinned_content_hash_renders_unmet(tmp_path):
+    samples_path = tmp_path / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "6": {"file": yield_path, "content_hash": "sha256:stale-revision"}
+            }
+        )
+    )
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "stale_evidence"
+    assert item_6["citation"] is None
+
+
+def test_command_evidence_yield_hashes_samples_relative_to_command_cwd(
+    tmp_path, monkeypatch
+):
+    """A command-backed yield entry's referenced ``samples`` path is
+    resolved relative to the subprocess's own ``cwd`` -- the same directory
+    a relative argument in ``<argv>`` would have resolved against."""
+    samples_path = tmp_path / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+
+    def fake_run(command, **kwargs):
+        assert kwargs.get("cwd") == str(tmp_path)
+        return _FakeCompletedProcess(0, stdout=json.dumps(envelope))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "6": {
+                    "command": [
+                        "klt",
+                        "yield",
+                        "mc-samples.json",
+                        "--limits",
+                        "spec-limits.json",
+                        "--format",
+                        "json",
+                    ],
+                    "cwd": str(tmp_path),
+                }
+            }
+        )
+    )
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["command"] is not None
+    expected_hash = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    assert item_6["citation"]["content_hash"] == expected_hash
+
+
+def test_mixed_signal_manifest_shares_bare_item_6_yield_evidence_across_partitions(
+    tmp_path,
+):
+    """Item 6 is kind-independent, so a mixed-signal manifest can cite the
+    same `klt yield` evidence for both partitions via the bare `"6"` key --
+    same convention every other kind-independent item already follows."""
+    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="mixed-signal", evidence={"6": yield_path})
+    )
+
+    item_6_rows = [item for item in result["items"] if item["id"] == 6]
+    assert len(item_6_rows) == 2
+    assert {row["partition"] for row in item_6_rows} == {"analog", "digital"}
+    assert all(row["status"] == "met" for row in item_6_rows)
 
 
 # --------------------------------------------------------------------------- #

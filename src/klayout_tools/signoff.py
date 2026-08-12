@@ -56,6 +56,40 @@ returned -- Phase 0's ``exit_status: 0`` for a file-backed entry remains
 must have exited zero); a command-backed entry's ``exit_status`` is
 *observed*.
 
+## Statistical-evidence binding (issue #870, Phase 2a of epic #706)
+
+Phase 1 bound the four *deterministic* gates (DRC/LVS/netlist regeneration/
+corner sim). This phase extends the same evidence model to the T1 checklist's
+statistical item (item 6, "Statistical claims carry Monte Carlo evidence"):
+:func:`_classify`/:func:`_check_passed`/:func:`_detail` now also recognise a
+``klt yield`` (issue #816, Phase 1a of epic #710) JSON report -- reachable
+via a file-backed *or* command-backed ``evidence`` entry exactly like every
+other kind, no new evidence shape. A ``"met"`` verdict passes on ``status ==
+"pass"`` (every declared ``target_yield`` met) or ``status == "reported"``
+(no measurement declared one, so nothing could fail); ``status == "fail"``
+(a declared ``target_yield`` was not supported at the stated confidence)
+renders ``"unmet"``, same as every other kind's failing check.
+
+`klt yield`'s current JSON shape (as of issue #816) carries no `provenance`
+block of its own -- unlike drc/lvs/extract/sim, its envelope names no content
+hash for the Monte Carlo sample document it analysed. Rather than leave a
+`"met"` yield citation with no input hash at all (see :func:`_grade_evidence`
+below), this module hashes that referenced samples document directly, the
+same ``sha256_file`` helper every other kind's own `provenance` block already
+uses -- see :func:`_yield_samples_content_hash`. This is a Phase-2a
+reconciliation against #710's *current* report shape, exactly as the issue
+anticipated ("this issue's binding logic and interface can be built and
+tested against #710's current report shape now, with a follow-up
+reconciliation if that shape changes"): if a later #710 phase adds its own
+`provenance.input.content_hash` to `klt yield`'s JSON, that value takes
+precedence automatically and this fallback stops firing, no code change
+needed here.
+
+An item with no backing Monte Carlo campaign evidence renders `"unmet"` via
+the same `_REASON_NO_EVIDENCE`/`_REASON_UNREADABLE_EVIDENCE`/etc. machinery
+every other item already uses -- there is no separate "statistical" code
+path to fabricate a `"met"` for, by construction.
+
 ## Fleet roll-up (issue #827, Phase 1c of epic #706)
 
 :func:`build_fleet_report` is a third, additive entry point: instead of
@@ -95,6 +129,7 @@ import subprocess
 import sys
 from typing import Any
 
+from ._provenance import sha256_file
 from .design_evidence_tiers import DesignEvidenceTiersError, parse_tier_doc
 
 __all__ = [
@@ -214,7 +249,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
             "checks": [
                 {
                     "source": <str, the entry from `sources`>,
-                    "kind": "drc" | "lvs" | "extract" | "sim" | "error",
+                    "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -352,14 +387,25 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if isinstance(envelope.get("measurements"), list) and "corner_count" in envelope:
         return "sim"
 
+    # `klt yield` (issue #816, Phase 1a of epic #710): also carries a
+    # `measurements` list, but never a `corner_count` (checked above first,
+    # so the two can never collide) -- `measurement_count` plus a `source`
+    # object are unique to this shape (docs/cli/yield.md's JSON schema).
+    if (
+        isinstance(envelope.get("measurements"), list)
+        and "measurement_count" in envelope
+        and isinstance(envelope.get("source"), dict)
+    ):
+        return "yield"
+
     if "device_count" in envelope and isinstance(envelope.get("nets"), list):
         return "extract"
 
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
-        f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim "
-        "success or error envelope -- klt signoff aggregates only those "
-        "four verbs today (see docs/cli/signoff.md)"
+        f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
+        "yield success or error envelope -- klt signoff aggregates only "
+        "those five verbs today (see docs/cli/signoff.md)"
     )
 
 
@@ -386,6 +432,12 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     - ``drc`` passes on ``status == "clean"``.
     - ``lvs`` passes on ``status == "match"``.
     - ``sim`` passes on ``status == "pass"``.
+    - ``yield`` (issue #870) passes on ``status == "pass"`` (every
+      measurement that declared a ``target_yield`` met it at the stated
+      confidence) or ``status == "reported"`` (no measurement declared one,
+      so nothing could fail -- docs/cli/yield.md's ``status`` field). A
+      ``"fail"`` status (a declared ``target_yield`` was not supported) does
+      not pass.
     - ``extract`` has no independent pass/fail: ``klt extract`` either
       produces a ``status: "extracted"`` envelope or raises (which surfaces
       here as the ``error`` kind, not a JSON envelope at all) -- so a
@@ -401,6 +453,8 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
         return envelope.get("status") == "match"
     if kind == "sim":
         return envelope.get("status") == "pass"
+    if kind == "yield":
+        return envelope.get("status") in ("pass", "reported")
     if kind == "extract":
         return True
     return False  # kind == "error"
@@ -432,6 +486,15 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "passed": envelope.get("passed"),
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
+        }
+    if kind == "yield":
+        source = envelope.get("source") or {}
+        return {
+            "samples": envelope.get("samples"),
+            "limits": envelope.get("limits"),
+            "measurement_count": envelope.get("measurement_count"),
+            "source_kind": source.get("kind"),
+            "sample_count": source.get("sample_count"),
         }
     if kind == "extract":
         return {
@@ -629,10 +692,12 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
 
     An item's ``status`` is ``"met"`` only when its ``evidence`` entry
     resolves to a *readable* ``klt`` JSON envelope, classifiable as one of
-    ``drc``/``lvs``/``extract``/``sim`` (:func:`_classify`), whose own check
-    passed (:func:`_check_passed`) -- and, if the evidence entry pinned an
-    expected ``content_hash``, whose ``provenance.input.content_hash``
-    matches it (a mismatch means the check ran against a *different* layout
+    ``drc``/``lvs``/``extract``/``sim``/``yield`` (:func:`_classify`), whose
+    own check passed (:func:`_check_passed`) -- and, if the evidence entry
+    pinned an expected ``content_hash``, whose input content hash matches it
+    (``provenance.input.content_hash`` for drc/lvs/extract/sim; the hashed
+    ``samples`` document for yield, per :func:`_yield_samples_content_hash`
+    -- a mismatch means the check ran against a *different* layout/sample
     revision than the one being claimed -- stale, so it renders ``"unmet"``,
     never a false pass). Every other case (no evidence entry, a malformed
     entry, an unreadable/unparsable evidence file, a command that could not
@@ -689,7 +754,10 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
     file-backed entry -- no command was run to produce it), the envelope's
     own status, its input content hash (``None`` when the envelope's own
     provenance doesn't populate one -- ``klt lvs``/``klt sim`` don't, per
-    ``docs/json-contract.md``), and ``exit_status``: for a file-backed entry
+    ``docs/json-contract.md``; for a ``klt yield`` envelope, which carries no
+    ``provenance`` block of its own at all as of issue #816's current shape,
+    this is instead the hash of the samples document it names -- see
+    :func:`_yield_samples_content_hash`), and ``exit_status``: for a file-backed entry
     this is *inferred* as ``0`` (a readable, classifiable, non-error
     envelope implies the producing command exited zero -- every ``klt``
     verb emits an ``error``-kind envelope, not a success envelope, on any
@@ -863,6 +931,48 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     return {"kind": "file", "file": file, "content_hash": expected_hash}
 
 
+def _yield_samples_content_hash(
+    envelope: dict[str, Any], spec: dict[str, Any]
+) -> str | None:
+    """The citation's ``content_hash`` for a ``klt yield`` evidence entry
+    (issue #870, Phase 2a of epic #706).
+
+    `klt yield`'s current JSON shape (issue #816, Phase 1a of epic #710)
+    carries no `provenance` block of its own -- unlike drc/lvs/extract/sim,
+    nothing inside the envelope names a content hash for the Monte Carlo
+    sample document (``envelope["samples"]``) the report was computed from.
+    Rather than leave a ``"met"`` yield citation with no input hash at all --
+    the exact "assumed met" gap this module exists to close -- this hashes
+    that referenced samples document directly, via the same ``sha256_file``
+    helper every other kind's own `provenance` block already uses
+    (``_provenance.py``).
+
+    The path is resolved relative to ``spec["cwd"]`` for a command-backed
+    entry -- the same directory the subprocess that produced ``samples``
+    ran in, so a relative path in the report resolves exactly as it did for
+    that subprocess -- or relative to this process's own current working
+    directory for a file-backed entry, matching how the evidence *file*
+    itself is resolved (no recorded cwd exists for a pre-existing report).
+
+    Returns ``None`` when the envelope names no ``samples`` document (or it
+    isn't a string), or the referenced file can't be hashed (missing,
+    unreadable) -- exactly mirroring ``sha256_file``'s own "unhashable
+    input" fallback, never raising.
+
+    Follow-up reconciliation: if a later #710 phase adds its own
+    ``provenance.input.content_hash`` to `klt yield`'s JSON shape, the
+    generic ``input_block`` lookup in :func:`_grade_evidence` finds it first
+    and this fallback simply never fires again -- no change needed here.
+    """
+    samples = envelope.get("samples")
+    if not isinstance(samples, str):
+        return None
+    cwd = spec.get("cwd") if spec.get("kind") == "command" else None
+    path = os.path.join(cwd, samples) if cwd and not os.path.isabs(samples) else samples
+    digest = sha256_file(path)
+    return f"sha256:{digest}" if digest is not None else None
+
+
 def _grade_evidence(
     spec: dict[str, Any],
 ) -> tuple[str, str | None, dict[str, Any] | None]:
@@ -905,6 +1015,15 @@ def _grade_evidence(
     the contract, an application-level error leaves stdout empty, so there is
     genuinely no evidence to grade). ``exit_status`` is the subprocess's
     *actually observed* return code, never inferred.
+
+    **Content hash** (either binding): normally read from the resolved
+    envelope's own ``provenance.input.content_hash``. A ``klt yield`` kind
+    envelope carries no `provenance` block at all (issue #816's current
+    shape) -- for that kind only, :func:`_yield_samples_content_hash`
+    computes it instead, by hashing the samples document the report names,
+    so the staleness gate (and the citation's ``content_hash``) still work
+    for the statistical-evidence item, not just the four deterministic
+    kinds.
     """
     expected_hash = spec.get("content_hash")
 
@@ -965,6 +1084,12 @@ def _grade_evidence(
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
+    if actual_hash is None and check_kind == "yield":
+        # klt yield's current JSON shape (issue #816) carries no
+        # `provenance` block of its own -- see this module's "Statistical-
+        # evidence binding" docstring section and
+        # :func:`_yield_samples_content_hash`.
+        actual_hash = _yield_samples_content_hash(envelope, spec)
     if expected_hash is not None and actual_hash != expected_hash:
         return "unmet", _REASON_STALE_EVIDENCE, None
 

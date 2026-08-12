@@ -3,8 +3,9 @@
 Three modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
-   more `klt drc`/`klt lvs`/`klt extract`/`klt sim` JSON envelopes into a
-   single pass/fail signoff verdict — the mechanical piece that
+   more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield` JSON
+   envelopes into a single pass/fail signoff verdict — the mechanical piece
+   that
    [`.claude/skills/design-signoff/SKILL.md`](../../.claude/skills/design-signoff/SKILL.md)
    hand-assembled before this verb existed.
 2. **Tier-verdict report** (`--manifest`, issue #722 — Phase 0 of epic #706)
@@ -14,7 +15,9 @@ Three modes, one verb:
    evidence locations — either a pre-existing `klt` JSON envelope file, or
    (issue #825, Phase 1 of epic #706) a `klt drc`/`klt lvs`/`klt
    extract`/`klt sim` command to actually run and grade against its own
-   exit status and stdout. See "Tier-verdict report" below.
+   exit status and stdout, or (issue #870, Phase 2a of epic #706) a `klt
+   yield` command/report backing the statistical-evidence item. See
+   "Tier-verdict report" below.
 3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
    every block named in a **fleet manifest** (one tier-verdict report per
    block) and reduce each block's result down to its current tier and, for
@@ -48,8 +51,8 @@ klt signoff --fleet <fleet-manifest-file> [--format text|json]
 `klt signoff` reads each `<file>` as a JSON object, classifies it by its own
 structural shape (mirroring `klt report`'s envelope-kind detection — see
 [`report.md`](report.md#envelope-kind-detection) — extended here to also
-recognise `klt extract`'s and `klt sim`'s shapes), and combines them into
-one verdict in two steps:
+recognise `klt extract`'s, `klt sim`'s, and `klt yield`'s shapes), and
+combines them into one verdict in two steps:
 
 1. **Provenance consistency.** Every input's `provenance` block (issue
    #251, [`../json-contract.md`](../json-contract.md#shared-provenance-block))
@@ -65,7 +68,10 @@ one verdict in two steps:
    "Provenance consistency" below for the exact comparison rules.
 2. **Per-check pass/fail**, only once provenance is consistent: `klt drc`
    passes on `status: "clean"`, `klt lvs` on `status: "match"`, `klt sim` on
-   `status: "pass"`. `klt extract` has no independent pass/fail — a present
+   `status: "pass"`, `klt yield` on `status: "pass"` or `status: "reported"`
+   (no measurement declared a `target_yield`, so nothing could fail —
+   [`yield.md`](yield.md#exit-codes)). `klt extract` has no independent
+   pass/fail — a present
    extract envelope is definitionally a successful extraction (`klt
    extract` either produces one or raises, which surfaces here as an
    `error`-kind check instead) — so it always counts as passed, but is
@@ -101,9 +107,12 @@ klt signoff drc.json lvs.json extract.json sim.json --format json
 | `input.content_hash` | `klt drc`, `klt extract` only | All checks that populate it, together |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
-A check with no `provenance` block (an `error`-kind entry) or a `null`
-`provenance` is excluded from every comparison — it already fails the check
-itself, it does not also need to fail the provenance gate. See
+A check with no `provenance` block (an `error`-kind entry, or a `klt yield`
+envelope — which carries no `provenance` block at all as of its current
+shape, issue #816) or a `null` `provenance` is excluded from every
+comparison — a `yield` check still counts toward `passed_count`/
+`failed_count` on its own `status`, it just never participates in the
+cross-check above. See
 [`../json-contract.md`](../json-contract.md#shared-provenance-block) for
 which fields each verb populates and why some are `null` by design (e.g.
 `klt lvs`'s `provenance.input`, which already covers its two netlist inputs
@@ -140,6 +149,11 @@ against a caller-supplied **block manifest**:
       "command": ["klt", "sim", "corners.json", "--format", "json"],
       "cwd": "sim/",
       "content_hash": "sha256:<expected input hash>"
+    },
+    "6": {
+      "command": ["klt", "yield", "mc-samples.json", "--limits", "spec-limits.json", "--format", "json"],
+      "cwd": "yield/",
+      "content_hash": "sha256:<expected samples-document hash>"
     }
   }
 }
@@ -153,36 +167,43 @@ against a caller-supplied **block manifest**:
 - `evidence` — optional (default `{}`), a map from item id to an evidence
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
-    drc`/`lvs`/`extract`/`sim` `--format json` envelope, or `"-"` for
-    stdin) or `{"file": ..., "content_hash": ...}` to also pin the check to
-    an expected layout revision.
+    drc`/`lvs`/`extract`/`sim`/`yield` `--format json` envelope, or `"-"`
+    for stdin) or `{"file": ..., "content_hash": ...}` to also pin the check
+    to an expected input revision.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...}`: `klt
     signoff` actually runs `<argv>` (e.g. `klt drc`/`klt lvs`/`klt extract`
-    for netlist regeneration/`klt sim` for corner sim) as a subprocess,
-    optionally in `cwd` (default: this process's own working directory),
-    and grades the item against *that run's own* exit status and stdout —
-    never a pre-existing file's say-so. `content_hash` pins the same
-    staleness gate as the file-backed form.
+    for netlist regeneration/`klt sim` for corner sim/`klt yield` for
+    statistical evidence — issue #870, Phase 2a of epic #706) as a
+    subprocess, optionally in `cwd` (default: this process's own working
+    directory), and grades the item against *that run's own* exit status
+    and stdout — never a pre-existing file's say-so. `content_hash` pins
+    the same staleness gate as the file-backed form.
 
   Keys are `"<item id>"` for a kind-independent item (3, 4, 6, 8, 9, 10), or
   `"<item id>.<analog|digital>"` for a per-kind item — a `"mixed-signal"`
   manifest may still use the bare `"<item id>"` key for a kind-independent
   item to cite the same evidence in both partitions' rows, per the doc's
-  mixed-signal guidance.
+  mixed-signal guidance. Item 6 ("Statistical claims carry Monte Carlo
+  evidence") is kind-independent, so a `klt yield` evidence entry is keyed
+  bare `"6"` even for a mixed-signal block.
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
-`drc`/`lvs`/`extract`/`sim`, whose own check passed — and, if the evidence
-entry pinned an expected `content_hash`, whose own
-`provenance.input.content_hash` matches it (a mismatch means the check ran
-against a *different* layout revision than the one being claimed: stale, so
-it renders `"unmet"`, never a false pass). Every other case — no evidence
-entry, a malformed entry, an unreadable/unparsable evidence file, a
-command-backed entry whose subprocess couldn't be launched/timed out/exited
-nonzero/produced stdout that isn't valid JSON, an unrecognised envelope
-shape, or a failing check — also renders `"unmet"`: **this phase never
-infers a `"met"` verdict for an item with no runnable check behind it.**
+`drc`/`lvs`/`extract`/`sim`/`yield`, whose own check passed — and, if the
+evidence entry pinned an expected `content_hash`, whose own input content
+hash matches it (`provenance.input.content_hash` for
+drc/lvs/extract/sim; for `yield`, the hash of the samples document its
+report names — see "`klt yield` evidence and content hashing" below, since
+`klt yield`'s current JSON shape carries no `provenance` block of its own —
+a mismatch means the check ran against a *different* input revision than
+the one being claimed: stale, so it renders `"unmet"`, never a false pass).
+Every other case — no evidence entry, a malformed entry, an
+unreadable/unparsable evidence file, a command-backed entry whose
+subprocess couldn't be launched/timed out/exited nonzero/produced stdout
+that isn't valid JSON, an unrecognised envelope shape, or a failing check —
+also renders `"unmet"`: **this phase never infers a `"met"` verdict for an
+item with no runnable check behind it.**
 
 `T2`-`T4` render as single ladder-row items (per the doc's "The ladder"
 table — only `T1` has an itemized checklist) and are always `"unmet"`: this
@@ -194,6 +215,25 @@ interface, reading only pre-existing `klt` JSON envelopes named by the
 manifest. **Phase 1 (issue #825)** wires the actual DRC/LVS/netlist-
 regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
+**Phase 2a (issue #870)** extends the same evidence model to item 6, the
+statistical-evidence item, binding a `klt yield`
+([`yield.md`](yield.md), epic #710) campaign report the same way.
+
+### `klt yield` evidence and content hashing
+
+Item 6's evidence resolves through the exact same file-backed/command-backed
+machinery as every other item — no special evidence shape. The one
+difference: `klt yield`'s JSON report (as of its current shape, issue #816)
+carries no `provenance` block of its own, so it has no
+`provenance.input.content_hash` for `klt signoff` to read the way it does
+for drc/lvs/extract/sim. Rather than leave a `"met"` yield citation with no
+input hash at all, `klt signoff` hashes the samples document the report
+itself names (`report["samples"]`) directly — the same `sha256:`-prefixed
+SHA-256 form every other kind's `content_hash` already uses — and uses that
+both for the citation and for the `content_hash` staleness pin. A future
+`klt yield` release that adds its own `provenance.input.content_hash` is
+picked up automatically and takes precedence, with no manifest change
+required.
 
 ### Tier-report JSON schema
 
@@ -282,9 +322,9 @@ runs, rather than only reading a file someone else already produced.
 | --------------- | --------------- | ------------------------------------------------------------------------------------- |
 | `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
 | `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
-| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, or `"sim"` — the resolved envelope's classified kind.   |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, or `"yield"` — the resolved envelope's classified kind. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
-| `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated.              |
+| `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 
 #### `reason` values
@@ -488,7 +528,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | Field         | Type              | Description                                                                          |
 | ------------- | ------------------ | ---------------------------------------------------------------------------------------- |
 | `source`      | string              | The input file path (or `"-"`) this check was read from, exactly as given.               |
-| `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, or `"error"` — see "What it does" above.          |
+| `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, or `"error"` — see "What it does" above. |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
 | `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). |
@@ -536,7 +576,7 @@ to stdout. No Python traceback is printed.
     "schema_version": 1,
     "error": {
       "command": "signoff",
-      "message": "envelope 'bad.json' has an unrecognized shape (schema_version=1): not a klt drc/lvs/extract/sim success or error envelope -- klt signoff aggregates only those four verbs today (see docs/cli/signoff.md)"
+      "message": "envelope 'bad.json' has an unrecognized shape (schema_version=1): not a klt drc/lvs/extract/sim/yield success or error envelope -- klt signoff aggregates only those five verbs today (see docs/cli/signoff.md)"
     }
   }
   ```
@@ -664,6 +704,46 @@ readable file the way a file-backed citation's `exit_status: 0` is. A
 broken or hanging gate command renders `"unmet"` with `reason:
 "command_failed"` (a launch failure, a timeout, or a nonzero exit) instead
 of silently reading like a skipped check or a fabricated pass.
+
+## Worked example: binding the statistical-evidence item to `klt yield`
+
+Issue #870 (Phase 2a of epic #706): item 6 ("Statistical claims carry Monte
+Carlo evidence") binds the same way, against a `klt yield` report:
+
+```
+$ cat manifest.json
+{
+  "block": "my-bandgap",
+  "kind": "analog",
+  "evidence": {
+    "6": {
+      "command": ["klt", "yield", "mc-samples.json", "--limits", "spec-limits.json", "--format", "json"]
+    }
+  }
+}
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 6) | {status, reason, citation}'
+{
+  "status": "met",
+  "reason": null,
+  "citation": {
+    "file": null,
+    "command": "klt yield mc-samples.json --limits spec-limits.json --format json",
+    "kind": "yield",
+    "check_status": "pass",
+    "content_hash": "sha256:...",
+    "exit_status": 0
+  }
+}
+```
+
+`content_hash` here is not read off a `provenance` block (`klt yield`'s
+current JSON shape carries none) — it is the hash `klt signoff` itself
+computed from the samples document (`mc-samples.json`) the report named, so
+the same staleness discipline applies: pinning an expected `content_hash` on
+this evidence entry still catches a campaign re-run against different
+sample data. A block with no `klt yield` evidence for item 6 at all renders
+`"unmet"` with `reason: "no_evidence"` — never `"met"` by assumption, exactly
+like every other item this checklist grades.
 
 ## Worked example: fleet roll-up across three canaries
 
