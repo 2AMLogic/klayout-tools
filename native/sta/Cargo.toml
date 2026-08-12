@@ -1,0 +1,28 @@
+[package]
+name = "klt-sta-native"
+version = "0.1.0"
+edition = "2021"
+description = "Gate-level static timing spike for `klt synthesize` (2AMLogic/klayout-tools, issue #809)"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "klt-sta"
+path = "src/main.rs"
+
+[lib]
+name = "klt_sta_native"
+path = "src/lib.rs"
+
+# Deliberately a plain binary+rlib crate: no `pyo3`/`maturin`/`cdylib`, unlike
+# `native/mom/` (this repo's shipped Rust convention). Issue #809 is a go/no-go
+# spike; the Python<->Rust boundary is *documented* (README.md, "The
+# Python-Rust boundary this spike did not build") rather than built, so a
+# "No-go" verdict costs no maintained FFI surface. `native/legalize/` (issue
+# #784) took the same posture for the same reason.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true

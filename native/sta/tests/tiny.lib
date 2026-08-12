@@ -1,0 +1,132 @@
+/* A two-cell hand-written NLDM library for this crate's unit tests.
+ *
+ * Deliberately tiny and hand-checkable: an inverter and a positive-edge
+ * flip-flop, each with 2x2 delay/transition tables whose interpolation can be
+ * done on paper. It is NOT a fragment of any real PDK -- the numbers are
+ * invented, and no test here asserts anything about sky130. The real-library
+ * checks live in tests/corpus/sta/, gated on a PDK install.
+ */
+library ("tiny") {
+    delay_model : "table_lookup";
+    time_unit : "1ns";
+    voltage_unit : "1V";
+    capacitive_load_unit(1.0, "pf");
+    default_max_transition : 1.5;
+
+    lu_table_template ("del_2_2") {
+        variable_1 : "input_net_transition";
+        variable_2 : "total_output_net_capacitance";
+        index_1("1, 2");
+        index_2("1, 2");
+    }
+    lu_table_template ("con_2_2") {
+        variable_1 : "related_pin_transition";
+        variable_2 : "constrained_pin_transition";
+        index_1("1, 2");
+        index_2("1, 2");
+    }
+
+    cell ("INV") {
+        area : 3.75;
+        pin ("A") {
+            direction : "input";
+            capacitance : 0.0020;
+            rise_capacitance : 0.0021;
+            fall_capacitance : 0.0019;
+        }
+        pin ("Y") {
+            direction : "output";
+            function : "!A";
+            timing () {
+                related_pin : "A";
+                timing_sense : "negative_unate";
+                timing_type : "combinational";
+                cell_rise ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.100, 0.200", \
+                           "0.120, 0.240");
+                }
+                cell_fall ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.050, 0.150", \
+                           "0.070, 0.190");
+                }
+                rise_transition ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.020, 0.300", \
+                           "0.030, 0.330");
+                }
+                fall_transition ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.010, 0.200", \
+                           "0.020, 0.230");
+                }
+            }
+        }
+    }
+
+    cell ("DFF") {
+        area : 20.0;
+        pin ("CLK") {
+            direction : "input";
+            clock : "true";
+            capacitance : 0.0018;
+        }
+        pin ("D") {
+            direction : "input";
+            capacitance : 0.0020;
+            timing () {
+                related_pin : "CLK";
+                timing_type : "setup_rising";
+                rise_constraint ("con_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.01, 0.10");
+                    values("0.100, 0.110", \
+                           "0.120, 0.130");
+                }
+                fall_constraint ("con_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.01, 0.10");
+                    values("0.200, 0.210", \
+                           "0.220, 0.230");
+                }
+            }
+        }
+        pin ("Q") {
+            direction : "output";
+            timing () {
+                related_pin : "CLK";
+                timing_sense : "non_unate";
+                timing_type : "rising_edge";
+                cell_rise ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.300, 0.400", \
+                           "0.310, 0.420");
+                }
+                cell_fall ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.320, 0.440", \
+                           "0.330, 0.460");
+                }
+                rise_transition ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.040, 0.200", \
+                           "0.050, 0.220");
+                }
+                fall_transition ("del_2_2") {
+                    index_1("0.01, 0.10");
+                    index_2("0.001, 0.010");
+                    values("0.030, 0.180", \
+                           "0.040, 0.190");
+                }
+            }
+        }
+    }
+}

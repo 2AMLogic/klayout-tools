@@ -557,6 +557,25 @@ recommendation, argued on measurement grounds rather than on beating ABC.
 
 ### 3.7 Native-Rust gate-level static timing — the one Rust recommendation (Priority 7 to build, but see below)
 
+> **Spiked (issue #809): No-go**, on the wrap-vs-native trade-off, not on
+> accuracy. The native-Rust engine (`native/sta/`) matched OpenSTA's
+> critical-path delay to sub-picosecond precision on five of six corpus
+> designs (0.69%/24.8 ps on the sixth, a bounded and documented residual);
+> its warm/iter wall-clock advantage — the metric this section's own
+> "Wrap-vs-native trade-off" paragraph says the case rests on — was 3–5x on
+> the two smallest designs (136–172 cells) but washed out to noise (1x,
+> sign-flipping between repeated runs) on the four largest (384–778 cells),
+> even measured under conditions (native `arm64` execution vs. OpenSTA under
+> `amd64` emulation) that could only bias the comparison toward the native
+> engine. Per this section's own explicit No-go condition — "the wrapped
+> path is within noise on the metric that actually motivated the native
+> one" — that is what the majority of the corpus slice shows. See
+> `native/sta/README.md` for the full measured comparison, the crate-layout
+> deliverable, and the Python↔Rust boundary/CI-wheel story documented as
+> the "first-Rust-in-the-repo cost" this section's item (5) named. This
+> section's own reasoning below is left unchanged as the historical record
+> of the proposal that was tested.
+
 - **Technique:** a Rust liberty parser plus a topological critical-path
   engine over the mapped netlist: NLDM lookup-table interpolation for
   cell delay/transition, longest-path propagation over the timing graph,

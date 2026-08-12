@@ -145,6 +145,15 @@ see [`legalize/README.md`](legalize/README.md) for what they are and
 issue #784 / `native/legalize/README.md` for the native-Rust legalizer
 spike they back (go/no-go result: **No-go**, documented there).
 
+## STA-spike fixtures — `tests/corpus/sta/`
+
+Mapped gate netlists (`write_verilog` output, post-technology-mapping,
+pre-placement) for six designs, generated the same way as the
+`place_and_route/` fixture above but at a different pipeline stage — see
+[`sta/README.md`](sta/README.md) for what they are and issue #809 /
+`native/sta/README.md` for the native-Rust gate-level static-timing spike
+they back (go/no-go result: **No-go**, documented there).
+
 ## Adding a new corpus file
 
 1. Download the file into `tests/corpus/<pdk>/`, verifying the upstream
