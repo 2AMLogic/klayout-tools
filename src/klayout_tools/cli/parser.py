@@ -1025,19 +1025,22 @@ def create_parser() -> argparse.ArgumentParser:
 
     erc_parser = subparsers.add_parser(
         "erc",
-        help="build a per-gate layer-by-layer connectivity model (antenna/ERC signoff)",
+        help=(
+            "build a per-gate layer-by-layer connectivity model and "
+            "antenna-ratio verdict (antenna/ERC signoff)"
+        ),
         description=(
-            "Define the klt erc interface and build the layer-by-layer "
-            "connectivity model that both the antenna-ratio check and core "
-            "ERC checks depend on -- issue #859, Phase 1a of the antenna + "
-            "ERC signoff epic #713. For every net whose geometry includes "
-            "the declared gate-role layer, accumulate that net's connected "
-            "conductor area at each fabrication step (the spec's stackup "
-            "order). This phase delivers the klt erc interface and the "
-            "connectivity model only; the antenna-ratio verdict (Phase 1b) "
-            "and the ERC finding list (Phase 1c) are later phases that add "
-            "response fields additively. See docs/cli/erc.md for the "
-            "spec-file schema and the JSON contract."
+            "Build the klt erc layer-by-layer connectivity model (issue "
+            "#859, Phase 1a) and the per-gate antenna-ratio verdict (issue "
+            "#860, Phase 1b) of the antenna + ERC signoff epic #713. For "
+            "every net whose geometry includes the declared gate-role "
+            "layer, accumulate that net's connected conductor area at each "
+            "fabrication step (the spec's stackup order), and, when --pdk "
+            "is given, compare each level's cumulative-area/gate-area "
+            "ratio against that PDK's real antenna-ratio limit. The ERC "
+            "finding list (Phase 1c) is a later phase that adds response "
+            "fields additively. See docs/cli/erc.md for the spec-file "
+            "schema and the JSON contract."
         ),
     )
     erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
@@ -1058,6 +1061,19 @@ def create_parser() -> argparse.ArgumentParser:
             "top cell to analyse when the stream has more than one "
             "(required in that case -- klt erc operates on exactly one "
             "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    erc_parser.add_argument(
+        "--pdk",
+        default=None,
+        help=(
+            "PDK antenna-ratio limit table to check each level's "
+            "antenna_ratio against (currently: sky130). Optional -- omit "
+            "to still report every level's antenna_ratio, just with "
+            "verdict 'unchecked' everywhere. Not validated by argparse -- "
+            "an unknown name exits 1 with a clean error, per "
+            "docs/cli/erc.md's exit-code contract, rather than argparse's "
+            "usage-error exit 2."
         ),
     )
     _add_format_arg(erc_parser)

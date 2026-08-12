@@ -1,21 +1,25 @@
-"""Define ``klt erc`` and build the layer-by-layer connectivity model (issue
-#859, Phase 1a of the antenna + ERC signoff epic #713).
+"""Define ``klt erc``, the layer-by-layer connectivity model (issue #859,
+Phase 1a), and the per-gate antenna-ratio verdict (issue #860, Phase 1b) --
+both part of the antenna + ERC signoff epic #713.
 
 Pure library: :func:`run_erc` returns plain Python data (a JSON-serialisable
 ``dict``) and never prints -- serialisation and human-readable formatting
 live in ``cli/erc_cmd.py``, matching every other ``klt`` verb (see
 ``layers.py``'s docstring on the same convention).
 
-Scope of this phase (see ``docs/cli/erc.md`` for the full picture): ``klt
+Scope of these phases (see ``docs/cli/erc.md`` for the full picture): ``klt
 erc``'s full, intended interface (per epic #713) is JSON in (a routed
 layout, a netlist, and the PDK's antenna/ERC rules) / JSON out (a per-gate
 antenna-ratio verdict citing the PDK limit, plus an ERC finding list --
-floating gate, missing tie, supply short, ...). **This issue delivers only
-the interface and the layer-by-layer connectivity model** -- the per-gate
-accumulation of connected metal area at each fabrication step that both
-1b's antenna-ratio check and 1c's core ERC checks consume. Neither an
-antenna-ratio verdict (checked against a PDK limit) nor any ERC finding is
-computed here; see "Phase scope" in ``docs/cli/erc.md``.
+floating gate, missing tie, supply short, ...). **Phase 1a delivered the
+interface and the layer-by-layer connectivity model** -- the per-gate
+accumulation of connected metal area at each fabrication step. **Phase 1b
+(this issue) adds the antenna-ratio verdict**: each level's ``antenna_ratio``
+(``cumulative_area_um2 / gate_area_um2``) compared against a real PDK
+antenna-ratio limit (``--pdk``), with the limit and its source citation
+echoed on every checked level -- see :data:`_SKY130_ANTENNA_RATIO_MAX_EGAR`
+below. An ERC finding list (floating gate, missing tie, supply short) is
+still not computed here; that is Phase 1c (#861).
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
 purely for wire/via connectivity (no device recognition registered) --
@@ -50,20 +54,105 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 
-#: `1` -- interface + connectivity model only (issue #859, Phase 1a of epic
-#: #713). A future phase adds `antenna_ratios`/`erc_findings` fields
-#: additively (no bump needed -- see docs/cli/erc.md's "Phase scope").
+#: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (this issue) adds
+#: `pdk`/`gates[].antenna_verdict`/`levels[].antenna_ratio`/
+#: `levels[].antenna_ratio_max`/`levels[].antenna_ratio_source`/
+#: `levels[].verdict` fields additively -- no bump needed, per
+#: docs/cli/erc.md's "Phase scope" and docs/json-contract.md's additive-
+#: envelope design. A future phase adds `erc_findings` the same way.
 SCHEMA_VERSION = 1
 
 
 class ErcError(Exception):
     """Raised when ``klt erc`` cannot run: a bad layout/spec file, a
-    malformed stackup/via declaration, an unresolvable top cell, or a spec
-    whose gate role matches no geometry at all.
+    malformed stackup/via declaration, an unresolvable top cell, an unknown
+    ``--pdk`` name, or a spec whose gate role matches no geometry at all.
 
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback -- see ``docs/json-contract.md``.
     """
+
+
+#: Real sky130 antenna-ratio limits ("MAX_EGAR" -- the maximum effective-
+#: area/gate-area ratio *without* an antenna diode), transcribed from the
+#: official SkyWater sky130 antenna-rule table for the 5-metal "S8D" stack
+#: option:
+#: https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/table-Ia-antenna-rules-s8d.csv
+#: -- each value is that table's own "Max EA/A w/o diode" column for the
+#: named rule id (fetched 2026-08-12 via `gh search code` against
+#: `google/skywater-pdk`, the canonical SkyWater sky130 PDK repository).
+#:
+#: Verified stack-invariant for every role below: the poly/licon1/li1/mcon/
+#: met1/via1/met2 limits are identical across every sky130 metal-stack
+#: option table checked (S8D, S8P/SP8P/S8P-10R, S8TM/S8TMC/S8TMA-5R,
+#: S8P12/S8PIR/S8PF-10R, S8TNV-5R -- `docs/rules/antenna/table-I{a,e,c,g,b}-
+#: antenna-rules-*.csv`), so this one table applies to every sky130 stack
+#: variant, not just S8D specifically. met3-and-above limits *do* vary by
+#: stack option (0.8-2.0 range across the checked tables) and are
+#: intentionally not transcribed here -- a candidate follow-on, not a
+#: silent omission (matching `decks/sky130.py`'s own convention of calling
+#: out every deliberately-uncovered rule rather than pretending full
+#: coverage).
+#:
+#: `licon1`/`mcon`/`via1` are kept here for citation completeness but are
+#: never matched against a `stackup` role in practice: those are `klt erc`
+#: *via* roles (see `_validate_vias`), not `stackup` roles, so they never
+#: get a `levels[]` entry to attach a verdict to -- see this module's own
+#: "Per gate" docstring section above. The source table also treats them
+#: as area-only "Horizontal" checks (`<via-layer> area/gate area`, no
+#: perimeter term) rather than the perimeter-based "Vertical" checks the
+#: `stackup` roles use, a distinction this connectivity-area-only model
+#: does not represent either way.
+_SKY130_ANTENNA_RATIO_MAX_EGAR: dict[str, tuple[float, str]] = {
+    "poly": (50.0, ".poly.1"),
+    "licon1": (3.0, ".licon.1"),
+    "li1": (75.0, ".li.1"),
+    "mcon": (3.0, ".mcon.1"),
+    "met1": (400.0, ".met1.1"),
+    "via1": (6.0, ".via.1"),
+    "met2": (400.0, ".met2.1"),
+}
+
+_SKY130_ANTENNA_SOURCE_URL = (
+    "https://github.com/google/skywater-pdk/blob/main/docs/rules/antenna/"
+    "table-Ia-antenna-rules-s8d.csv"
+)
+
+#: PDK name -> (role name -> (limit, source rule id)) lookup for `--pdk`.
+#: sky130 only, per this repo's "open PDKs, sky130 first" scope (see
+#: CLAUDE.md) -- gf180mcu antenna limits are a candidate follow-on, not
+#: silently dropped.
+_ANTENNA_LIMITS_BY_PDK: dict[str, dict[str, tuple[float, str]]] = {
+    "sky130": _SKY130_ANTENNA_RATIO_MAX_EGAR,
+}
+
+_ANTENNA_SOURCE_URL_BY_PDK: dict[str, str] = {
+    "sky130": _SKY130_ANTENNA_SOURCE_URL,
+}
+
+
+def _resolve_antenna_limits(pdk: str | None) -> dict[str, tuple[float, str]] | None:
+    """Resolve ``--pdk`` to its antenna-ratio limit table.
+
+    Returns ``None`` when ``pdk`` is ``None`` -- antenna ratios are still
+    computed and reported on every level (see ``run_erc``), just with no
+    PDK limit to compare against, so every level's ``verdict`` comes back
+    ``"unchecked"``.
+
+    Raises :class:`ErcError` for an unrecognised ``pdk`` name, matching
+    ``klt drc``'s own ``--deck`` convention: an unknown name is a clean
+    exit-1 error (not an argparse usage error), checked eagerly before any
+    layout is even loaded.
+    """
+    if pdk is None:
+        return None
+    limits = _ANTENNA_LIMITS_BY_PDK.get(pdk)
+    if limits is None:
+        raise ErcError(
+            f"unknown --pdk {pdk!r} (supported: "
+            f"{', '.join(sorted(_ANTENNA_LIMITS_BY_PDK))})"
+        )
+    return limits
 
 
 def _load_spec(spec_path: str) -> dict[str, Any]:
@@ -218,8 +307,10 @@ def run_erc(
     spec_path: str,
     *,
     top: str | None = None,
+    pdk: str | None = None,
 ) -> dict[str, Any]:
-    """Run ``klt erc``'s connectivity-model extraction end to end.
+    """Run ``klt erc``'s connectivity-model extraction and antenna-ratio
+    check end to end.
 
     ``file`` is a routed GDSII/OASIS layout; ``spec_path`` is a JSON file
     with:
@@ -236,12 +327,20 @@ def run_erc(
     one (required in that case, matching ``select_top_cells``'s convention
     -- see ``docs/cli/layers.md``'s ``--top``).
 
+    ``pdk`` (optional, e.g. ``"sky130"``) selects the antenna-ratio limit
+    table each non-gate ``stackup`` level's ``antenna_ratio`` is compared
+    against -- see :data:`_SKY130_ANTENNA_RATIO_MAX_EGAR`. Omit it to still
+    get every level's derived ``antenna_ratio``, just with ``verdict``
+    ``"unchecked"`` everywhere (no PDK limit to compare against).
+
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``. Raises
-    :class:`ErcError` for a malformed spec, an unresolvable layout/top
-    cell, or a layout in which no net carries any geometry on the declared
-    gate role at all.
+    :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
+    unresolvable layout/top cell, or a layout in which no net carries any
+    geometry on the declared gate role at all.
     """
+    antenna_limits = _resolve_antenna_limits(pdk)
+
     spec = _load_spec(spec_path)
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
@@ -319,23 +418,63 @@ def run_erc(
 
         levels: list[dict[str, Any]] = []
         cumulative_um2 = 0.0
-        for entry in stackup:
+        for i, entry in enumerate(stackup):
             step_region = l2n.polygons_of_net(net, layer_index[entry["name"]])
             step_um2 = step_region.merged().area() * dbu2_um2
             cumulative_um2 += step_um2
+
+            # `cumulative_area_um2 / gate_area_um2` per docs/cli/erc.md's
+            # own Phase-1a "Phase scope" note on what 1b delivers. The gate
+            # role itself (i == 0) is never PDK-checked: its ratio is
+            # trivially 1.0 (cumulative == gate area at that level), and
+            # the source table's own poly rule measures a different
+            # quantity entirely (poly perimeter, not cumulative connected
+            # area) -- not something this area-only model computes.
+            antenna_ratio = round(cumulative_um2 / gate_area_um2, 6)
+            limit_entry = (
+                None
+                if i == 0 or antenna_limits is None
+                else antenna_limits.get(entry["name"])
+            )
+            if limit_entry is not None:
+                limit_value, rule_id = limit_entry
+                antenna_ratio_max: float | None = limit_value
+                antenna_ratio_source: str | None = (
+                    f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
+                    "'Max EA/A w/o diode' column"
+                )
+                verdict = "violate" if antenna_ratio > limit_value else "pass"
+            else:
+                antenna_ratio_max = None
+                antenna_ratio_source = None
+                verdict = "unchecked"
+
             levels.append(
                 {
                     "layer": entry["name"],
                     "step_area_um2": round(step_um2, 9),
                     "cumulative_area_um2": round(cumulative_um2, 9),
+                    "antenna_ratio": antenna_ratio,
+                    "antenna_ratio_max": antenna_ratio_max,
+                    "antenna_ratio_source": antenna_ratio_source,
+                    "verdict": verdict,
                 }
             )
+
+        level_verdicts = {level["verdict"] for level in levels}
+        if "violate" in level_verdicts:
+            antenna_verdict = "violate"
+        elif "pass" in level_verdicts:
+            antenna_verdict = "pass"
+        else:
+            antenna_verdict = "unchecked"
 
         gates.append(
             {
                 "gate_id": f"gate{len(gates)}",
                 "net": net.name or None,
                 "gate_area_um2": round(gate_area_um2, 9),
+                "antenna_verdict": antenna_verdict,
                 "levels": levels,
             }
         )
@@ -352,6 +491,7 @@ def run_erc(
         "schema_version": SCHEMA_VERSION,
         "file": file,
         "spec": spec_path,
+        "pdk": pdk,
         "gate_role": gate_role,
         "gate_count": len(gates),
         "gates": gates,

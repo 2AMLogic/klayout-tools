@@ -440,6 +440,31 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt erc` gains a per-gate antenna-ratio verdict — issue
+  #860, Phase 1b of the antenna + ERC signoff epic #713, built on Phase
+  1a's (#859) layer-by-layer connectivity model. Every non-gate `stackup`
+  level's `antenna_ratio` (`cumulative_area_um2 / gate_area_um2`) is now
+  reported, and, when the new `--pdk` flag names a supported PDK
+  (currently `sky130`), compared against that PDK's real antenna-ratio
+  limit for the role, adding `antenna_ratio_max`/`antenna_ratio_source`/
+  `verdict` (`"pass"`/`"violate"`/`"unchecked"`) per level and an aggregate
+  `antenna_verdict` per gate. sky130's limits (`li1`: 75, `met1`: 400,
+  `met2`: 400) are transcribed from the official SkyWater PDK repository's
+  own published antenna-rule table
+  (`google/skywater-pdk`, `docs/rules/antenna/table-Ia-antenna-rules-s8d.csv`,
+  "Max EA/A w/o diode" column), verified stack-invariant across every
+  sky130 metal-stack option table checked; the gate role itself is never
+  PDK-checked (its ratio is trivially `1.0`, and the source table's poly
+  rule measures perimeter, not cumulative area). Validated against golden
+  violate/pass layout pairs for every checked layer, cross-checked against
+  klayout's own independently-implemented `LayoutToNetlist.antenna_check`
+  engine on the same fixtures (the Tiny Tapeout corpus named in epic
+  #713's own acceptance criteria, issue #520, has no ingestion harness or
+  cached GDS yet, so is not yet usable for this cross-check — see
+  `docs/cli/erc.md`'s "Cross-checked against klayout's own built-in
+  antenna engine" section). Purely additive: `schema_version` stays `1`,
+  and every field Phase 1a shipped is unchanged. See `docs/cli/erc.md`.
+
 - 2026-08-12 — Every sky130 LVS device-extraction rule that carries a
   `RuleProvenance` citation (issue #868, Phase 2a) now also ships a golden
   layout→netlist pair validating it end-to-end — issue #867, Phase 2b of

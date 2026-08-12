@@ -95,7 +95,7 @@ klt lvs request.json                     # compare extracted vs reference netlis
 klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
 klt place-and-route request.json         # netlist -> placed+routed DEF/GDS (OpenROAD), JSON out
 klt power routed.gds power.json          # routed power/ground nets -> resistive network (nodes + segment R)
-klt erc routed.gds erc.json              # per-gate layer-by-layer connectivity model (antenna/ERC signoff)
+klt erc routed.gds erc.json --pdk sky130 # per-gate connectivity model + antenna-ratio verdict (antenna/ERC signoff)
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage
 klt equiv request.json                   # combinational equivalence (Yosys miter/SAT) -> proof or counterexample
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
