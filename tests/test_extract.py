@@ -8796,3 +8796,109 @@ def test_mom_net_cli_json_and_text(tmp_path, capsys):
     assert exit_code == 0
     text_out = capsys.readouterr().out
     assert "mom_crosscheck: net=Y" in text_out
+
+
+def test_mom_net_swap_targets_the_actually_measured_island_not_a_same_named_one(
+    tmp_path, monkeypatch
+):
+    """Regression/investigation for issue #811: does `--mom-net`'s
+    net-object lookup (`_extract_netlist`'s unsorted `circuit.each_net()`
+    first-match loop, which decides which island's geometry `klt mom`
+    actually measures) ever disagree with `run_extract`'s independent
+    by-*name* `ground_nets` lookup (which decides which `parasitics.nets[]`
+    entry's `capacitance_ff` gets overwritten with that measurement) when
+    the `--mom-net` name is shared by two distinct, disconnected net
+    islands -- e.g. two un-strapped `VGND` rail islands, the exact
+    duplicate-label shape issue #765 hardened elsewhere in this module (see
+    `_make_two_disjoint_nmos_shared_label_layout`, reused here) and
+    `_compute_parasitics`'s own docstring documents (105 such islands on the
+    `gcd` corpus).
+
+    **Finding: they do not disagree.** `_mom_ground_capacitance_for_net` is
+    monkeypatched here (no `klt_mom_native` build required -- this test
+    asserts *which island gets selected*, not the field-solve numerics
+    `test_mom_net_swaps_capacitance_and_reports_crosscheck` already covers)
+    to record the `net.cluster_id` of the net object `_extract_netlist`'s
+    loop actually resolved and hands to the MoM cross-check, and returns a
+    sentinel capacitance recognizable in the swapped `ground_nets` entry.
+    The entry that is overwritten always carries that same `net_id` --
+    i.e. `run_extract`'s name-keyed `ground_nets` lookup always resolves to
+    the identical net object `_extract_netlist` measured, never a different
+    same-named island.
+
+    This holds because `kdb.Circuit.each_net()` iterates in strictly
+    ascending `cluster_id` order on the pinned `klayout` version this repo
+    tests against (verified directly, both on this two-island synthetic
+    fixture and across the full 2133-net/105-VGND-island `gcd` corpus
+    fixture used by `test_parasitics_...gcd...` above) -- so
+    `_extract_netlist`'s first-match-wins loop and `ground_nets`'s
+    `(net, net_id)`-ascending sort's first-match-wins lookup both always
+    select the same-named entry with the *smallest* `net_id`, by
+    construction of that shared ordering, not by accident of this
+    particular fixture's geometry. `pyproject.toml` pins only
+    ``klayout>=0.30`` (no upper bound) -- if a future `klayout` release
+    changes `each_net()`'s iteration order, this test (and
+    ``test_parasitics_disjoint_same_label_nets_get_distinct_instance_names``
+    a few hundred lines above, which depends on the same ordering
+    assumption for its own `_dup1` suffix check) would be the first to
+    catch the regression.
+    """
+    import klayout_tools.extract as extract_mod
+
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd_mom.gds")
+
+    captured: dict[str, int] = {}
+    _SENTINEL_MOM_CAPACITANCE_FF = 123456.0
+
+    def _spy_mom_ground_capacitance(
+        l2n, net, dbu, parasitics_deck, metal_index, background_permittivity=3.9
+    ):
+        # This is exactly the net object `_extract_netlist`'s
+        # `circuit.each_net()` first-match loop resolved for `--mom-net`.
+        captured["matched_net_cluster_id"] = net.cluster_id
+        return {
+            "net": extract_mod.spice_safe_net_name(net.expanded_name()),
+            "mom_capacitance_ff": _SENTINEL_MOM_CAPACITANCE_FF,
+            "background_permittivity": background_permittivity,
+            "panel_size_um": 1.0,
+            "panel_count": 1,
+            "ground_pad_factor": extract_mod._MOM_CROSSCHECK_GROUND_PAD_FACTOR,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        extract_mod, "_mom_ground_capacitance_for_net", _spy_mom_ground_capacitance
+    )
+
+    report = extract_mod.run_extract(
+        path,
+        "sky130",
+        parasitics=True,
+        mom_net="VGND",
+        output=str(tmp_path / "two_vgnd_mom.spice"),
+    )
+
+    vgnd_entries = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(vgnd_entries) == 2
+    assert vgnd_entries[0]["net_id"] != vgnd_entries[1]["net_id"]
+
+    swapped = [
+        e for e in vgnd_entries if e["capacitance_ff"] == _SENTINEL_MOM_CAPACITANCE_FF
+    ]
+    assert len(swapped) == 1, (
+        "exactly one of the two same-named VGND entries must carry the "
+        "MoM-derived capacitance"
+    )
+
+    # The core property under investigation: the entry that got overwritten
+    # (found by `run_extract`'s independent by-name `ground_nets` lookup)
+    # is the *same* net object `_extract_netlist` actually measured (found
+    # by the unsorted `circuit.each_net()` first-match loop) -- not a
+    # different same-named island.
+    assert swapped[0]["net_id"] == captured["matched_net_cluster_id"]
+
+    # And it is always the smallest `net_id` among the same-named entries --
+    # confirming the mechanism (both first-match lookups agreeing via
+    # `each_net()`'s ascending-`cluster_id` order), not just the outcome.
+    assert swapped[0]["net_id"] == min(e["net_id"] for e in vgnd_entries)
