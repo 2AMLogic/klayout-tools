@@ -299,6 +299,43 @@ YIELD_FAIL_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "fail"}
 #: count as a passing check, distinct from `"fail"`.
 YIELD_REPORTED_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "reported"}
 
+#: `klt pex` (Epic #709) JSON report shape -- hand-built here exactly like
+#: every other kind's fixture. `klt pex` does not exist in this codebase as
+#: of issue #871 (its defining issue, #801, is stalled with an empty body,
+#: no ratified shape) -- this is a **Curator-proposed, provisional** shape
+#: (issue #871's own proposal, not #801's), scoped narrowly enough that
+#: #801's eventual real shape is very likely additive to it. See
+#: signoff.py's "Post-layout binding" docstring section.
+PEX_PASS_ENVELOPE = {
+    "schema_version": 1,
+    "status": "pass",
+    "netlist": "extracted.spice",
+    "reference_netlist": "schematic.spice",
+    "corner_count": 3,
+    "delta": [
+        {
+            "spec_row": "gain_db",
+            "corner_id": "tt/1.800V/27C",
+            "schematic_value": 42.1,
+            "extracted_value": 41.6,
+            "delta_pct": -1.19,
+            "status": "pass",
+        }
+    ],
+    "passed": 3,
+    "failed": 0,
+    "errored": 0,
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130A", "source": "volare", "version": "20240101"},
+        "deck": None,
+        "input": {"content_hash": "sha256:extractedpex"},
+    },
+}
+
+PEX_FAIL_ENVELOPE = {**PEX_PASS_ENVELOPE, "status": "fail", "passed": 2, "failed": 1}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -1099,6 +1136,107 @@ def test_mixed_signal_manifest_shares_bare_item_6_yield_evidence_across_partitio
 
 
 # --------------------------------------------------------------------------- #
+# Post-layout binding: item 7 <- `klt pex` (issue #871, Phase 2b of epic
+# #706). `klt pex` (Epic #709) does not exist in this codebase yet -- these
+# tests exercise the Curator-proposed, provisional envelope shape
+# (PEX_PASS_ENVELOPE/PEX_FAIL_ENVELOPE above), not #801's eventual ratified
+# shape (still stalled with an empty body as of this writing).
+# --------------------------------------------------------------------------- #
+
+
+def test_pex_evidence_satisfies_item_7(tmp_path):
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": pex_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"] == {
+        "file": pex_path,
+        "command": None,
+        "kind": "pex",
+        "check_status": "pass",
+        "content_hash": "sha256:extractedpex",
+        "exit_status": 0,
+    }
+
+
+def test_pex_fail_status_renders_unmet_check_failed(tmp_path):
+    pex_path = _write(tmp_path, "pex.json", PEX_FAIL_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": pex_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "check_failed"
+    assert item_7["citation"] is None
+
+
+def test_non_pex_evidence_for_item_7_renders_unmet(tmp_path):
+    """The concrete gap this issue closes: before this phase, item 7 was
+    kind-agnostic and would render "met" on citing any recognised, passing
+    envelope -- even a bare `klt drc` report with nothing to do with
+    post-layout re-simulation. A genuinely clean, passing DRC citation must
+    now render item 7 "unmet" with reason "wrong_kind", never a borrowed
+    pass."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": drc_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+    assert item_7["citation"] is None
+
+
+def test_no_backing_pex_evidence_renders_unmet_never_assumed_met():
+    """AC: "An item with no backing `klt pex` run renders unmet, never
+    assumed met." -- item 7 goes through the exact same `_REASON_NO_EVIDENCE`
+    machinery as every other item."""
+    result = build_tier_report(_manifest(evidence={}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "no_evidence"
+    assert item_7["citation"] is None
+
+
+def test_command_evidence_pex_wrong_kind_renders_unmet(monkeypatch):
+    """The kind restriction applies to command-backed evidence exactly like
+    file-backed evidence -- a `klt sim` invocation cited for item 7 still
+    renders "unmet", even though `klt sim` itself passed."""
+
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(SIM_PASS_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(evidence={"7": {"command": ["klt", "sim", "request.json"]}})
+    )
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+    assert item_7["citation"] is None
+
+
+def test_items_other_than_7_are_unaffected_by_the_kind_restriction(tmp_path):
+    """Regression: items 1-6 and 8-10 still accept any recognised, passing
+    envelope kind -- only item 7 is kind-restricted."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    evidence = {str(i): drc_path for i in range(1, 11) if i != 7}
+    result = build_tier_report(_manifest(evidence=evidence))
+
+    for item in result["items"]:
+        if item["tier"] == "T1" and item["id"] != 7:
+            assert item["status"] == "met", item["id"]
+            assert item["citation"]["kind"] == "drc"
+
+
+# --------------------------------------------------------------------------- #
 # `reason`: distinguishing missing evidence from a check that ran and failed
 # (issue #826, Phase 1b of epic #706)
 # --------------------------------------------------------------------------- #
@@ -1168,9 +1306,13 @@ def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_p
     met."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
 
     evidence = {str(i): drc_path for i in range(2, 11)}  # 2-10, never 1
     evidence["4"] = lvs_path
+    # Item 7 is kind-restricted (issue #871) -- give it real `pex` evidence
+    # so this test's "every other item is genuinely met" claim still holds.
+    evidence["7"] = pex_path
 
     result = build_tier_report(_manifest(evidence=evidence))
 
@@ -1197,9 +1339,13 @@ def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_p
 def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
 
+    # Item 7 is kind-restricted (issue #871) -- a `pex`-shaped citation is
+    # required there; every other item still accepts the shared DRC fixture.
     evidence = {str(i): drc_path for i in range(1, 11)}
     evidence["4"] = lvs_path
+    evidence["7"] = pex_path
 
     result = build_tier_report(_manifest(evidence=evidence))
 
@@ -1549,12 +1695,20 @@ def test_real_extract_gate_reproduces_the_canarys_netlist_regeneration(tmp_path)
     # not merely present. `-o` redirects the written netlist to tmp_path so
     # this test never leaves a generated .spice file behind in the checked-
     # in examples/design-pipeline/ directory.
+    #
+    # Cited against item 9 ("Testbenches shipped"), not item 7: item 7
+    # ("Post-layout verification") is kind-restricted to `pex`-kind evidence
+    # only as of issue #871 -- a bare `klt extract` citation there now
+    # renders "unmet" (reason "wrong_kind"). Item 9 is kind-independent and
+    # unrestricted, so it still proves the same thing this test exists to
+    # prove: the command-backed gate actually re-runs `klt extract` and
+    # grades that run's own output, not a pre-existing file's say-so.
     output_netlist = tmp_path / "regenerated.spice"
     result = build_tier_report(
         _manifest(
             kind="analog",
             evidence={
-                "7": {
+                "9": {
                     "command": _klt_command(
                         "extract",
                         "06-layout.gds",
@@ -1575,14 +1729,13 @@ def test_real_extract_gate_reproduces_the_canarys_netlist_regeneration(tmp_path)
 
     assert output_netlist.exists()
 
-    # A plain (non-mixed-signal) "analog" manifest renders every T1 item
-    # with partition=None -- only a "mixed-signal" manifest doubles items
-    # 1/2/5/7 per partition -- so the bare "7" evidence key (not "7.analog")
-    # is what a plain-analog manifest actually looks up (_lookup_evidence).
-    item_7 = next(item for item in result["items"] if item["id"] == 7)
-    assert item_7["partition"] is None
-    assert item_7["status"] == "met"
-    citation = item_7["citation"]
+    # Item 9 is kind-independent (unlike per-kind items 1/2/5/7), so a plain
+    # "analog" manifest's bare "9" evidence key is what every manifest kind
+    # looks up (_lookup_evidence) -- no per-partition column to select here.
+    item_9 = next(item for item in result["items"] if item["id"] == 9)
+    assert item_9["partition"] is None
+    assert item_9["status"] == "met"
+    citation = item_9["citation"]
     assert citation["kind"] == "extract"
     assert citation["check_status"] == "extracted"
     assert citation["exit_status"] == 0
@@ -1671,8 +1824,11 @@ def test_cli_manifest_json_output(tmp_path, capsys):
 def test_cli_manifest_all_met_exits_zero(tmp_path, capsys):
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
     evidence = {str(i): drc_path for i in range(1, 11)}
     evidence["4"] = lvs_path
+    # Item 7 is kind-restricted to `pex` evidence (issue #871).
+    evidence["7"] = pex_path
     manifest_path = _write(tmp_path, "manifest.json", _manifest(evidence=evidence))
 
     exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
@@ -1790,10 +1946,13 @@ def _fleet_write(tmp_path, blocks: list) -> str:
 def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
 
-    # canary-a: every T1 item met -> T1, no blocking item.
+    # canary-a: every T1 item met -> T1, no blocking item. Item 7 is
+    # kind-restricted to `pex` evidence (issue #871).
     full_evidence = {str(i): drc_path for i in range(1, 11)}
     full_evidence["4"] = lvs_path
+    full_evidence["7"] = pex_path
     block_a = _fleet_block_manifest("canary-a", evidence=full_evidence)
 
     # canary-b: everything but item 4 (LVS clean) met -> blocked on #4.
@@ -1925,8 +2084,10 @@ def test_fleet_block_manifest_non_object_raises(tmp_path):
 def test_cli_fleet_json_output(tmp_path, capsys):
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
     full_evidence = {str(i): drc_path for i in range(1, 11)}
     full_evidence["4"] = lvs_path
+    full_evidence["7"] = pex_path  # item 7 is kind-restricted (issue #871)
     fleet_path = _fleet_write(
         tmp_path,
         [
@@ -1946,8 +2107,10 @@ def test_cli_fleet_json_output(tmp_path, capsys):
 def test_cli_fleet_all_t1_exits_zero(tmp_path, capsys):
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
     full_evidence = {str(i): drc_path for i in range(1, 11)}
     full_evidence["4"] = lvs_path
+    full_evidence["7"] = pex_path  # item 7 is kind-restricted (issue #871)
     fleet_path = _fleet_write(
         tmp_path, [_fleet_block_manifest("canary-a", evidence=full_evidence)]
     )

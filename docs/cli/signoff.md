@@ -3,7 +3,7 @@
 Three modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
-   more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield` JSON
+   more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield`/`klt pex` JSON
    envelopes into a single pass/fail signoff verdict — the mechanical piece
    that
    [`.claude/skills/design-signoff/SKILL.md`](../../.claude/skills/design-signoff/SKILL.md)
@@ -16,8 +16,10 @@ Three modes, one verb:
    (issue #825, Phase 1 of epic #706) a `klt drc`/`klt lvs`/`klt
    extract`/`klt sim` command to actually run and grade against its own
    exit status and stdout, or (issue #870, Phase 2a of epic #706) a `klt
-   yield` command/report backing the statistical-evidence item. See
-   "Tier-verdict report" below.
+   yield` command/report backing the statistical-evidence item, or (issue
+   #871, Phase 2b of epic #706) a `klt pex` command/report backing the
+   post-layout-verification item — the only item this mode kind-restricts.
+   See "Tier-verdict report" below.
 3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
    every block named in a **fleet manifest** (one tier-verdict report per
    block) and reduce each block's result down to its current tier and, for
@@ -32,10 +34,11 @@ klt signoff --fleet <fleet-manifest-file> [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
-  sim` JSON envelope files (`--format json` output from any of those four
-  verbs), in the order they should appear in `checks[]`. Any entry may be
-  `-`, which reads one envelope from stdin (same convention as `klt
-  report`/`klt lvs`). Mutually exclusive with `--manifest`/`--fleet`.
+  sim`/`klt yield`/`klt pex` JSON envelope files (`--format json` output
+  from any of those six verbs), in the order they should appear in
+  `checks[]`. Any entry may be `-`, which reads one envelope from stdin
+  (same convention as `klt report`/`klt lvs`). Mutually exclusive with
+  `--manifest`/`--fleet`.
 - `--manifest` — path to a block manifest JSON file (or `-` for stdin);
   switches to the tier-verdict report mode instead of aggregating `<file>...`
   arguments. Mutually exclusive with `<file>...`/`--fleet`.
@@ -51,14 +54,15 @@ klt signoff --fleet <fleet-manifest-file> [--format text|json]
 `klt signoff` reads each `<file>` as a JSON object, classifies it by its own
 structural shape (mirroring `klt report`'s envelope-kind detection — see
 [`report.md`](report.md#envelope-kind-detection) — extended here to also
-recognise `klt extract`'s, `klt sim`'s, and `klt yield`'s shapes), and
-combines them into one verdict in two steps:
+recognise `klt extract`'s, `klt sim`'s, `klt yield`'s, and `klt pex`'s
+shapes), and combines them into one verdict in two steps:
 
 1. **Provenance consistency.** Every input's `provenance` block (issue
    #251, [`../json-contract.md`](../json-contract.md#shared-provenance-block))
    is compared: all checks that resolved a PDK must name the same
    `pdk.name`/`pdk.version`; all checks that populate `provenance.input`
-   (`klt drc`/`klt extract`) must agree on `input.content_hash`; any two
+   (`klt drc`/`klt extract`, and `klt pex` per its provisional shape) must
+   agree on `input.content_hash`; any two
    checks naming the *same* deck must agree on that deck's
    `content_hash`. If any of these disagree, `klt signoff` **refuses** to
    produce a pass/fail verdict at all (`status: "refused"`) — a "clean" DRC
@@ -70,14 +74,16 @@ combines them into one verdict in two steps:
    passes on `status: "clean"`, `klt lvs` on `status: "match"`, `klt sim` on
    `status: "pass"`, `klt yield` on `status: "pass"` or `status: "reported"`
    (no measurement declared a `target_yield`, so nothing could fail —
-   [`yield.md`](yield.md#exit-codes)). `klt extract` has no independent
-   pass/fail — a present
-   extract envelope is definitionally a successful extraction (`klt
+   [`yield.md`](yield.md#exit-codes)), `klt pex` on `status: "pass"` (every
+   graded schematic-vs-extracted delta row met its tolerance — see "Item 7
+   is kind-restricted: `klt pex`" below for this envelope shape's current,
+   provisional status). `klt extract` has no independent pass/fail — a
+   present extract envelope is definitionally a successful extraction (`klt
    extract` either produces one or raises, which surfaces here as an
    `error`-kind check instead) — so it always counts as passed, but is
    still listed in `checks[]` so its `provenance` block participates in
    step 1 and its device/net counts are visible in the aggregated result.
-   An `error`-kind entry (any of the four verbs' own `--format json`
+   An `error`-kind entry (any of the six verbs' own `--format json`
    failure output, e.g. a captured `klt drc` run that hit a missing file)
    never passes.
 
@@ -102,9 +108,9 @@ klt signoff drc.json lvs.json extract.json sim.json --format json
 
 | Field compared | Populated by (per `provenance` block) | Comparison scope |
 | --- | --- | --- |
-| `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`; `klt drc` resolves none) | All checks that populate it, together |
+| `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract` only | All checks that populate it, together |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt pex` (per its provisional shape — see "Item 7 is kind-restricted: `klt pex`" below) | All checks that populate it, together |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 A check with no `provenance` block (an `error`-kind entry, or a `klt yield`
@@ -120,7 +126,7 @@ via its own `environment.layout_sha256`/`reference_sha256` fields).
 
 ### What this does not do yet
 
-`klt signoff` combines what four `klt` verbs' own JSON already asserts. It
+`klt signoff` combines what each `klt` verb's own JSON already asserts. It
 does **not** diff the aggregated result against a block's declared spec —
 [`docs/design/design-pipeline.md`](../design/design-pipeline.md)'s S3 stage
 (block specs) has no machine-readable schema yet (see that doc's §4 gap
@@ -154,6 +160,11 @@ against a caller-supplied **block manifest**:
       "command": ["klt", "yield", "mc-samples.json", "--limits", "spec-limits.json", "--format", "json"],
       "cwd": "yield/",
       "content_hash": "sha256:<expected samples-document hash>"
+    },
+    "7": {
+      "command": ["klt", "pex", "extracted.spice", "schematic.spice", "--format", "json"],
+      "cwd": "pex/",
+      "content_hash": "sha256:<expected extracted-netlist hash>"
     }
   }
 }
@@ -167,18 +178,19 @@ against a caller-supplied **block manifest**:
 - `evidence` — optional (default `{}`), a map from item id to an evidence
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
-    drc`/`lvs`/`extract`/`sim`/`yield` `--format json` envelope, or `"-"`
-    for stdin) or `{"file": ..., "content_hash": ...}` to also pin the check
-    to an expected input revision.
+    drc`/`lvs`/`extract`/`sim`/`yield`/`pex` `--format json` envelope, or
+    `"-"` for stdin) or `{"file": ..., "content_hash": ...}` to also pin the
+    check to an expected input revision.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...}`: `klt
     signoff` actually runs `<argv>` (e.g. `klt drc`/`klt lvs`/`klt extract`
     for netlist regeneration/`klt sim` for corner sim/`klt yield` for
-    statistical evidence — issue #870, Phase 2a of epic #706) as a
-    subprocess, optionally in `cwd` (default: this process's own working
-    directory), and grades the item against *that run's own* exit status
-    and stdout — never a pre-existing file's say-so. `content_hash` pins
-    the same staleness gate as the file-backed form.
+    statistical evidence — issue #870, Phase 2a of epic #706/`klt pex` for
+    post-layout re-simulation evidence — issue #871, Phase 2b of epic #706)
+    as a subprocess, optionally in `cwd` (default: this process's own
+    working directory), and grades the item against *that run's own* exit
+    status and stdout — never a pre-existing file's say-so. `content_hash`
+    pins the same staleness gate as the file-backed form.
 
   Keys are `"<item id>"` for a kind-independent item (3, 4, 6, 8, 9, 10), or
   `"<item id>.<analog|digital>"` for a per-kind item — a `"mixed-signal"`
@@ -190,10 +202,10 @@ against a caller-supplied **block manifest**:
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
-`drc`/`lvs`/`extract`/`sim`/`yield`, whose own check passed — and, if the
-evidence entry pinned an expected `content_hash`, whose own input content
-hash matches it (`provenance.input.content_hash` for
-drc/lvs/extract/sim; for `yield`, the hash of the samples document its
+`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`, whose own check passed — and, if
+the evidence entry pinned an expected `content_hash`, whose own input
+content hash matches it (`provenance.input.content_hash` for
+drc/lvs/extract/sim/pex; for `yield`, the hash of the samples document its
 report names — see "`klt yield` evidence and content hashing" below, since
 `klt yield`'s current JSON shape carries no `provenance` block of its own —
 a mismatch means the check ran against a *different* input revision than
@@ -201,9 +213,10 @@ the one being claimed: stale, so it renders `"unmet"`, never a false pass).
 Every other case — no evidence entry, a malformed entry, an
 unreadable/unparsable evidence file, a command-backed entry whose
 subprocess couldn't be launched/timed out/exited nonzero/produced stdout
-that isn't valid JSON, an unrecognised envelope shape, or a failing check —
-also renders `"unmet"`: **this phase never infers a `"met"` verdict for an
-item with no runnable check behind it.**
+that isn't valid JSON, an unrecognised envelope shape, a failing check, or
+(item 7 only — see below) a passing check of a kind that item does not
+accept — also renders `"unmet"`: **this phase never infers a `"met"`
+verdict for an item with no runnable check behind it.**
 
 `T2`-`T4` render as single ladder-row items (per the doc's "The ladder"
 table — only `T1` has an itemized checklist) and are always `"unmet"`: this
@@ -217,7 +230,69 @@ regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
 **Phase 2a (issue #870)** extends the same evidence model to item 6, the
 statistical-evidence item, binding a `klt yield`
-([`yield.md`](yield.md), epic #710) campaign report the same way.
+([`yield.md`](yield.md), epic #710) campaign report the same way. **Phase 2b
+(issue #871)** binds item 7, the post-layout-verification item, to a `klt
+pex` report — and, unlike every other item, restricts which envelope
+*kinds* satisfy it (see "Item 7 is kind-restricted: `klt pex`" below).
+
+### Item 7 is kind-restricted: `klt pex`
+
+Every T1 item except item 7 accepts *any* recognised, passing envelope kind
+— a `klt drc` report can satisfy item 8 just as well as item 3, since Phase
+0/1 (issues #722/#825) graded each item purely on whether *some* passing
+check was cited, not on whether that check was the *right kind* of check.
+Item 7 ("Post-layout verification" — the schematic-vs-extracted-netlist
+re-simulation delta) is the one exception, added in issue #871 (Phase 2b of
+epic #706): its evidence must classify as kind `"pex"` specifically. A
+`drc`/`lvs`/`sim`/`extract`/`yield` citation for item 7 — even one whose own
+check genuinely passed — renders `"unmet"` with `reason: "wrong_kind"`,
+never a borrowed pass. This closes a concrete gap Phase 0/1 left open: prior
+to issue #871, a manifest could render item 7 `"met"` by citing, say, a
+clean `klt drc` report, with nothing enforcing that the cited evidence
+actually proved a post-layout re-simulation happened.
+
+**`klt pex`'s envelope shape is provisional.** `klt pex` (Epic #709) does
+not exist in this codebase as of issue #871 — its defining issue, **#801**
+("Define `klt pex`"), is stalled with an empty body pending an operator
+decision, so there is no ratified JSON shape to bind against yet. `klt
+signoff` instead recognises a **Curator-proposed, provisional** shape (issue
+#871's own proposal, not #801's): a top-level `delta` array (per-corner,
+per-spec-row schematic-vs-extracted comparisons) plus a `reference_netlist`
+field (the schematic netlist compared against) — mirroring how `klt sim`'s
+shape is detected by `measurements`/`corner_count` and `klt extract`'s by
+`device_count`/`nets`. This recognition rule is deliberately narrow, so that
+#801's eventual real shape is very likely additive to it (new fields), not a
+breaking rewrite — but it **is not** #801's ratified shape, and should be
+reconciled against it once #801 lands.
+
+```json
+{
+  "schema_version": 1,
+  "status": "pass",
+  "netlist": "extracted.spice",
+  "reference_netlist": "schematic.spice",
+  "corner_count": 3,
+  "delta": [
+    {
+      "spec_row": "gain_db",
+      "corner_id": "tt/1.800V/27C",
+      "schematic_value": 42.1,
+      "extracted_value": 41.6,
+      "delta_pct": -1.19,
+      "status": "pass"
+    }
+  ],
+  "passed": 3,
+  "failed": 0,
+  "errored": 0,
+  "provenance": {"...": "shared provenance block, see json-contract.md"}
+}
+```
+
+`klt pex` passes on `status: "pass"` (every graded delta row met its
+tolerance), mirroring `klt sim`. Its `_detail()` excerpt (envelope
+aggregation mode) carries `netlist`, `reference_netlist`, `corner_count`,
+`passed`, `failed`, and `errored`.
 
 ### `klt yield` evidence and content hashing
 
@@ -322,7 +397,7 @@ required.
 | --------------- | --------------- | ------------------------------------------------------------------------------------- |
 | `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
 | `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
-| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, or `"yield"` — the resolved envelope's classified kind. |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, or `"pex"` — the resolved envelope's classified kind. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
@@ -347,6 +422,7 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — today, only item 7 restricts kinds (it requires `"pex"`; see "Item 7 is kind-restricted: `klt pex`" above). The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 
 ## Fleet roll-up (`--fleet`)
 
@@ -528,7 +604,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | Field         | Type              | Description                                                                          |
 | ------------- | ------------------ | ---------------------------------------------------------------------------------------- |
 | `source`      | string              | The input file path (or `"-"`) this check was read from, exactly as given.               |
-| `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, or `"error"` — see "What it does" above. |
+| `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, or `"error"` — see "What it does" above. |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
 | `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). |
@@ -541,7 +617,7 @@ Envelope-aggregation mode:
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | `status: "pass"` — every check passed and provenance was consistent.     |
-| `1`       | An input file was missing/unreadable/not valid JSON, was not a JSON object, did not match a recognized `klt drc`/`lvs`/`extract`/`sim`/error envelope shape, neither `<file>...` nor `--manifest` was given, or both were given together. |
+| `1`       | An input file was missing/unreadable/not valid JSON, was not a JSON object, did not match a recognized `klt drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/error envelope shape, neither `<file>...` nor `--manifest` was given, or both were given together. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `status: "fail"` — provenance was consistent, but at least one check did not pass. |
 | `4`       | `status: "refused"` — two or more inputs' provenance blocks disagree; no pass/fail verdict was produced. |
@@ -576,7 +652,7 @@ to stdout. No Python traceback is printed.
     "schema_version": 1,
     "error": {
       "command": "signoff",
-      "message": "envelope 'bad.json' has an unrecognized shape (schema_version=1): not a klt drc/lvs/extract/sim/yield success or error envelope -- klt signoff aggregates only those five verbs today (see docs/cli/signoff.md)"
+      "message": "envelope 'bad.json' has an unrecognized shape (schema_version=1): not a klt drc/lvs/extract/sim/yield/pex success or error envelope -- klt signoff aggregates only those six verbs today (see docs/cli/signoff.md)"
     }
   }
   ```
@@ -744,6 +820,59 @@ this evidence entry still catches a campaign re-run against different
 sample data. A block with no `klt yield` evidence for item 6 at all renders
 `"unmet"` with `reason: "no_evidence"` — never `"met"` by assumption, exactly
 like every other item this checklist grades.
+
+## Worked example: binding the post-layout item to `klt pex`, and why a bare DRC citation no longer satisfies it
+
+Issue #871 (Phase 2b of epic #706): item 7 ("Post-layout verification")
+binds to a `klt pex` report (see "Item 7 is kind-restricted: `klt pex`"
+above for its provisional envelope shape, pending #801):
+
+```
+$ cat manifest.json
+{
+  "block": "my-bandgap",
+  "kind": "analog",
+  "evidence": {
+    "7": {
+      "command": ["klt", "pex", "extracted.spice", "schematic.spice", "--format", "json"]
+    }
+  }
+}
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 7) | {status, reason, citation}'
+{
+  "status": "met",
+  "reason": null,
+  "citation": {
+    "file": null,
+    "command": "klt pex extracted.spice schematic.spice --format json",
+    "kind": "pex",
+    "check_status": "pass",
+    "content_hash": "sha256:...",
+    "exit_status": 0
+  }
+}
+```
+
+Unlike every other T1 item, item 7 also refuses a citation of the *wrong*
+kind — even one that itself passed. Point it at a clean `klt drc` report
+instead (a report with nothing to do with post-layout re-simulation) to see
+the rejection:
+
+```
+$ cat manifest.json
+{"block": "my-bandgap", "kind": "analog", "evidence": {"7": "drc.json"}}
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 7) | {status, reason, citation}'
+{
+  "status": "unmet",
+  "reason": "wrong_kind",
+  "citation": null
+}
+```
+
+`drc.json`'s own check passed (`status: "clean"`), but its kind (`"drc"`) is
+not `"pex"`, so it is not accepted as proof of post-layout re-simulation —
+`klt signoff` refuses the borrowed pass rather than fabricate a `"met"` for
+an item nothing actually checked.
 
 ## Worked example: fleet roll-up across three canaries
 
