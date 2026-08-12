@@ -584,12 +584,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m3.1": m3.width(0.3, euclidian)
         # -> "m3.1 : min. m3 width : 0.3um"
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="m3.1",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.1"),
     ),
     DrcRule(
         id="met3.space.1",
@@ -603,12 +598,7 @@ DECK: list[DrcRule] = [
         # the same approximation met1.space.1/met2.space.1 above already
         # make for their own wide-metal exceptions.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="m3.2",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.2"),
     ),
     DrcRule(
         id="via2.width.1",
@@ -627,12 +617,7 @@ DECK: list[DrcRule] = [
         # requires the via be rectangular ("via2.1a") and capped at the same
         # 0.2um length ("via2.1a_b") -- only the min-size half is enforced.)
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="via2.1a_a",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.1a_a"),
     ),
     DrcRule(
         id="via2.space.1",
@@ -643,12 +628,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via2.2": via2.space(0.2, euclidian)
         # -> "via2.2 : min. via2 spacing : 0.2um"
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="via2.2",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.2"),
     ),
     DrcRule(
         id="met2.enclosing.via2.1",
@@ -687,12 +667,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m4.1": m4.width(0.3, euclidian)
         # -> "m4.1 : min. m4 width : 0.3um"
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="m4.1",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.1"),
     ),
     DrcRule(
         id="met4.space.1",
@@ -706,12 +681,7 @@ DECK: list[DrcRule] = [
         # the same approximation met3.space.1 above already makes for its
         # own wide-metal exception.)
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="m4.2",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.2"),
     ),
     DrcRule(
         id="via3.width.1",
@@ -729,12 +699,7 @@ DECK: list[DrcRule] = [
         # requires the via be rectangular ("via3.1") and capped at the same
         # 0.2um length ("via3.1_b") -- only the min-size half is enforced.)
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="via3.1_a",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.1_a"),
     ),
     DrcRule(
         id="via3.space.1",
@@ -745,12 +710,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via3.2": via3.space(0.2, euclidian)
         # -> "via3.2 : min. via3 spacing : 0.2um"
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="via3.2",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.2"),
     ),
     DrcRule(
         id="met3.enclosing.via3.1",
@@ -789,12 +749,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.1": m5.width(1.6, euclidian)
         # -> "m5.1 : min. m5 width : 1.6um"
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="m5.1",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.1"),
     ),
     DrcRule(
         id="met5.space.1",
@@ -805,12 +760,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.2": m5.space(1.6, euclidian)
         # -> "m5.2 : min. m5 spacing : 1.6um"
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="m5.2",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.2"),
     ),
     DrcRule(
         id="via4.width.1",
@@ -828,12 +778,7 @@ DECK: list[DrcRule] = [
         # requires the via be rectangular ("via4.1") and capped at the same
         # 0.8um length ("via4.1_b") -- only the min-size half is enforced.)
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="via4.1_a",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.1_a"),
     ),
     DrcRule(
         id="via4.space.1",
@@ -844,12 +789,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via4.2": via4.space(0.8, euclidian)
         # -> "via4.2 : min. via4 spacing : 0.8um"
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="via4.2",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.2"),
     ),
     DrcRule(
         id="met4.enclosing.via4.1",
@@ -886,12 +826,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "capm.1": capm.width(1.0, euclidian)
         # -> "capm.1 : min. capm width : 1.0um"
         scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="capm.1",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "capm.1"),
     ),
     DrcRule(
         id="capm.space.1",
@@ -902,12 +837,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "capm.2a": capm.space(0.84, euclidian)
         # -> "capm.2a : min. capm spacing : 0.84um"
         scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="capm.2a",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "capm.2a"),
     ),
     DrcRule(
         id="met3.enclosing.capm.1",
@@ -960,12 +890,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "cap2m.1": cap2m.width(1.0, euclidian)
         # -> "cap2m.1 : min. cap2m width : 1.0um"
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="cap2m.1",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "cap2m.1"),
     ),
     DrcRule(
         id="capm2.space.1",
@@ -976,12 +901,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "cap2m.2a": cap2m.space(0.84, euclidian)
         # -> "cap2m.2a : min. cap2m spacing : 0.84um"
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
-        provenance=RuleProvenance(
-            source_repo=_OPEN_PDKS_REPO,
-            source_path="sky130/klayout/sky130A_mr.drc",
-            rule_id="cap2m.2a",
-            commit=_OPEN_PDKS_COMMIT,
-        ),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "cap2m.2a"),
     ),
     DrcRule(
         id="met4.enclosing.capm2.1",
