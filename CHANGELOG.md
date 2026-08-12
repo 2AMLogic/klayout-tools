@@ -440,6 +440,28 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt mom` gains port definition + de-embedding, reporting
+  **de-embedded S-parameters** for the full-wave sweep's canonical two-port
+  transmission-line case — issue #894, Phase 2b of the Method-of-Moments
+  epic #701. A two-entry `ports` array in the spec file (each entry a
+  `position_um` reference-plane location plus an optional
+  `reference_impedance_ohm`, default 50 ohm) turns the raw partial-impedance/
+  characteristic-impedance output Phase 2a (#893) added into the standard
+  RF two-port network representation: the full modeled structure is treated
+  as three cascaded uniform-line segments (feed/DUT/feed) at the line's own
+  `Z0(omega)`/`gamma(omega)`, and the DUT's ABCD matrix is recovered by
+  cascading the inverse of each feed segment's ABCD matrix around the
+  total, then converted to S-parameters at each port's reference impedance
+  (the standard ABCD-to-S conversion). Validated against the classical
+  matched-transmission-line closed form (`S11 == S22 == 0`, `S21 == S12 ==
+  exp(-gamma*L)`) and, for the de-embedding step specifically, against
+  modeling the device-under-test segment alone with no feed stubs at all
+  (`tests/test_mom_ports_validation.py`,
+  `native/mom/src/fullwave.rs`'s own Rust-level tests). Purely additive —
+  new response fields (`ports`, and each `full_wave_sweep` entry's
+  `s_parameters`) present only when requested; `schema_version` stays at
+  `2`. See `docs/cli/mom.md`'s "Port definition and de-embedding" section.
+
 - 2026-08-12 — `klt mom` gains an optional frequency-domain, full-wave
   partial-impedance sweep — issue #893, Phase 2a of the Method-of-Moments
   epic #701 (the entry point for RF/EM blocks and S-parameter extraction).

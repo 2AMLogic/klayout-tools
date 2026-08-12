@@ -15,6 +15,7 @@ subcommand.)
 """
 
 import argparse
+import cmath
 
 from ..mom import MomError, run_mom
 from .output import emit_error, emit_success
@@ -68,6 +69,15 @@ def _print_text(report: dict) -> None:
         for name, r in zip(conductors, report["resistance_ohm"], strict=True):
             print(f"  {name.ljust(name_width)}  {r:.6g}")
 
+    if "ports" in report:
+        print()
+        print("ports:")
+        for i, port in enumerate(report["ports"], start=1):
+            print(
+                f"  port {i}: position_um={port['position_um']:.6g}  "
+                f"reference_impedance_ohm={port['reference_impedance_ohm']:.6g}"
+            )
+
     if "full_wave_sweep" in report:
         print()
         print(f"segment_size_um: {report['segment_size_um']}")
@@ -88,6 +98,14 @@ def _print_text(report: dict) -> None:
                     f"  Z0={z0.real:.6g}{z0.imag:+.6g}j ohm"
                     f"  alpha={point['attenuation_np_per_m']:.6g} Np/m"
                     f"  beta={point['phase_rad_per_m']:.6g} rad/m"
+                )
+            s = point.get("s_parameters")
+            if s is not None:
+                s11 = complex(s["s11_real"], s["s11_imag"])
+                s21 = complex(s["s21_real"], s["s21_imag"])
+                line += (
+                    f"  S11={abs(s11):.4g}∠{cmath.phase(s11):+.4g}rad"
+                    f"  S21={abs(s21):.4g}∠{cmath.phase(s21):+.4g}rad"
                 )
             print(line)
 

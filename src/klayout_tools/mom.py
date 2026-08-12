@@ -44,6 +44,13 @@ DEFAULT_FILAMENT_SIZE_UM = 1.0
 #: consulted when the spec sets a non-empty ``frequencies_hz`` (issue #893).
 DEFAULT_SEGMENT_SIZE_UM = 5.0
 
+#: Mirrors ``native/mom/src/contract.rs``'s
+#: ``DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM`` -- same manual-sync convention
+#: as the other defaults above. Only consulted for a ``ports`` entry that
+#: omits ``reference_impedance_ohm`` (issue #894, Phase 2b of the MoM epic
+#: #701).
+DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM = 50.0
+
 #: `1` -- capacitance-only (issue #718/#719).
 #: `2` -- adds the PEEC inductance/resistance fields (issue #797), each
 #:        present only when the spec sets ``compute_inductance: true`` --
@@ -52,7 +59,9 @@ DEFAULT_SEGMENT_SIZE_UM = 5.0
 #:        sets a non-empty ``frequencies_hz``) are added without a further
 #:        bump -- purely additive, per ``docs/json-contract.md``'s envelope
 #:        policy (see ``native/mom/src/contract.rs``'s
-#:        ``RESPONSE_SCHEMA_VERSION`` doc for the full note).
+#:        ``RESPONSE_SCHEMA_VERSION`` doc for the full note). Issue #894's
+#:        ``ports``/``s_parameters`` fields (present only when the spec sets
+#:        exactly two ``ports``) are added under the same "no bump" policy.
 SCHEMA_VERSION = 2
 
 
@@ -187,6 +196,39 @@ def _stackup_boxes(
     return order, boxes, conductivity
 
 
+def _parse_ports(spec: dict[str, Any], spec_path: str) -> list[dict[str, float]]:
+    """Parse the spec's optional ``ports`` array (issue #894), resolving each
+    entry's ``reference_impedance_ohm`` default. Returns an empty list when
+    the spec omits ``ports`` (the original contract, byte-for-byte
+    unaffected). Raises :class:`MomError` for a malformed entry -- the
+    native solver is the source of truth for the *value* checks (position
+    within the modeled bar span, port count, ascending order); this only
+    validates the JSON shape itself.
+    """
+    raw = spec.get("ports", [])
+    if not isinstance(raw, list):
+        raise MomError(f"spec '{spec_path}': 'ports' must be an array")
+    ports = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict) or "position_um" not in entry:
+            raise MomError(
+                f"spec '{spec_path}': ports[{i}] must be an object with a "
+                "'position_um' field"
+            )
+        ports.append(
+            {
+                "position_um": float(entry["position_um"]),
+                "reference_impedance_ohm": float(
+                    entry.get(
+                        "reference_impedance_ohm",
+                        DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM,
+                    )
+                ),
+            }
+        )
+    return ports
+
+
 def solve_capacitance_matrix(
     conductors: list[dict[str, Any]],
     background_permittivity: float,
@@ -280,6 +322,15 @@ def run_mom(
       length in micrometers for the full-wave solve; defaults to
       :data:`DEFAULT_SEGMENT_SIZE_UM`. Only consulted when
       ``frequencies_hz`` is non-empty.
+    - ``ports`` (optional, array, default empty): opt into port definition +
+      de-embedding -- issue #894, Phase 2b of the Method-of-Moments epic
+      #701. Each entry is ``{"position_um": <float>,
+      "reference_impedance_ohm": <float>}`` (the latter optional, defaults
+      to :data:`DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM`). When non-empty, must
+      have **exactly two** entries (the MVP's canonical two-port case), and
+      requires a non-empty ``frequencies_hz`` and exactly two conductors
+      satisfying the full-wave solve's own bar-shaped-conductor restriction.
+      See docs/cli/mom.md's "Port definition and de-embedding" section.
 
     ``top`` selects the top cell to discretise when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -317,6 +368,7 @@ def run_mom(
     filament_size_um = float(spec.get("filament_size_um", DEFAULT_FILAMENT_SIZE_UM))
     frequencies_hz = [float(f) for f in spec.get("frequencies_hz", [])]
     segment_size_um = float(spec.get("segment_size_um", DEFAULT_SEGMENT_SIZE_UM))
+    ports = _parse_ports(spec, spec_path)
     request = {
         "background_permittivity": float(spec["background_permittivity"]),
         "panel_size_um": panel_size_um,
@@ -324,6 +376,7 @@ def run_mom(
         "filament_size_um": filament_size_um,
         "frequencies_hz": frequencies_hz,
         "segment_size_um": segment_size_um,
+        "ports": ports,
         "conductors": [
             {
                 "name": name,
@@ -368,4 +421,10 @@ def run_mom(
         result["segment_size_um"] = segment_size_um
         result["full_wave_segment_count"] = response["full_wave_segment_count"]
         result["full_wave_sweep"] = response["full_wave_sweep"]
+    if ports:
+        # Only present when requested (issue #894) -- echoes the resolved
+        # port config (defaults applied) for provenance; each
+        # `full_wave_sweep` entry above already carries its own
+        # `s_parameters` from the native response.
+        result["ports"] = ports
     return result

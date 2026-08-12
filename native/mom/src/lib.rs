@@ -73,6 +73,13 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
         (None, None, None)
     };
 
+    if !request.ports.is_empty() && request.frequencies_hz.is_empty() {
+        return Err(PyValueError::new_err(
+            "ports requires a non-empty frequencies_hz -- S-parameters are only defined at a \
+             swept frequency",
+        ));
+    }
+
     let (full_wave_sweep, full_wave_segment_count) = if !request.frequencies_hz.is_empty() {
         let segment_size_um = request.segment_size_um.unwrap_or(DEFAULT_SEGMENT_SIZE_UM);
         let (points, segment_count) = fullwave::solve_full_wave_sweep(
@@ -81,6 +88,7 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
             &request.frequencies_hz,
             segment_size_um,
             &capacitance_matrix_ff,
+            &request.ports,
         )
         .map_err(PyValueError::new_err)?;
         (Some(points), Some(segment_count))
