@@ -2145,6 +2145,340 @@ def test_integration_real_yosys_constant_ties_become_tie_cells(tmp_path, monkeyp
     assert "sky130_fd_sc_hd__conb_1" in netlist_text
 
 
+# --------------------------------------------------------------------------- #
+# `restructure_timing` gate (issue #926, Epic #704 Phase 3): wires
+# `klayout_tools.restructure.restructure_for_timing`'s bounded cell-resizing
+# loop in as an opt-in stage after `sta`. `restructure_for_timing` itself is
+# fully covered hermetically in `tests/test_restructure.py`; these tests only
+# exercise `synthesize.py`'s own wiring -- the hard-failure guards, the
+# `klt equiv` gate on an applied resize, and the response shape -- via a
+# stubbed `synthesize.restructure_for_timing`.
+# --------------------------------------------------------------------------- #
+
+_FAKE_STA_RESULT = {
+    "source": "klt_statime_native",
+    "input_transition_ns": 0.05,
+    "output_load_pf": 0.03,
+    "top": "gcd",
+    "num_cells": 353,
+    "num_nets": 388,
+    "worst_path": {
+        "startpoint": "_640_/Q",
+        "startpoint_kind": "flip-flop (rising edge)",
+        "endpoint": "_035_",
+        "endpoint_kind": "internal net",
+        "delay_ns": 4.4642972825718,
+        "hops": [],
+    },
+    "worst_reg_to_reg_path": None,
+}
+
+_FAKE_RESTRUCTURE_NO_VIOLATION = {
+    "target_period_ns": 5.0,
+    "max_iterations": 8,
+    "initial_worst_path_delay_ns": 4.4642972825718,
+    "final_worst_path_delay_ns": 4.4642972825718,
+    "converged": True,
+    "iterations_used": 0,
+    "gave_up_reason": None,
+    "resizes_applied": [],
+    "restructured_netlist_path": None,
+}
+
+
+def _fake_restructure_with_resize(output_netlist_path: str) -> dict:
+    with open(output_netlist_path, "w", encoding="utf-8") as handle:
+        handle.write("// fake restructured netlist\n")
+    return {
+        "target_period_ns": 3.0,
+        "max_iterations": 8,
+        "initial_worst_path_delay_ns": 4.4642972825718,
+        "final_worst_path_delay_ns": 2.9,
+        "converged": True,
+        "iterations_used": 1,
+        "gave_up_reason": None,
+        "resizes_applied": [
+            {
+                "instance": "_377_",
+                "from_cell": "sky130_fd_sc_hd__xnor2_1",
+                "to_cell": "sky130_fd_sc_hd__xnor2_2",
+            }
+        ],
+        "restructured_netlist_path": output_netlist_path,
+    }
+
+
+def test_restructure_timing_default_off_never_calls_restructure(tmp_path, monkeypatch):
+    """`restructure_timing` defaults to `False` -- additive/opt-in, no
+    behaviour change for every pre-existing caller. `report["restructuring"]`
+    is explicitly `None`, and `restructure_for_timing` is never even
+    called."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        synthesize, "restructure_for_timing", lambda *a, **k: calls.append(1)
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["restructuring"] is None
+    assert calls == []
+
+
+def test_restructure_timing_requires_clock_period_ns(tmp_path, monkeypatch):
+    """The flag was explicitly requested but there is no target to
+    restructure against -- a hard, actionable failure, never a silent
+    no-op."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize, "compute_critical_path", lambda *a, **k: _FAKE_STA_RESULT
+    )
+
+    with pytest.raises(
+        SynthesizeError, match="requires request.constraints.clock_period_ns"
+    ):
+        run_synthesize(request_path, restructure_timing=True)
+
+
+def test_restructure_timing_requires_working_sta_stage(tmp_path, monkeypatch):
+    """`sta` degrades to `None` when the optional extension is missing or
+    analysis fails; `restructure_timing` cannot proceed without it, and --
+    since it was explicitly requested -- reports that clearly rather than
+    silently doing nothing."""
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 3.0}),
+    )
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _stub_yosys_success(monkeypatch)
+    # No `compute_critical_path` stub -- the fake netlist from
+    # `_stub_yosys_success` is unanalyzable, so `sta` naturally stays `None`.
+
+    with pytest.raises(SynthesizeError, match="requires a working sta stage"):
+        run_synthesize(request_path, restructure_timing=True)
+
+
+def test_restructure_timing_no_violation_skips_equiv_gate(tmp_path, monkeypatch):
+    """When the restructuring loop applies no resize (already meets target),
+    no `klt equiv` check is run at all -- there is nothing new to verify."""
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 5.0}),
+    )
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize, "compute_critical_path", lambda *a, **k: _FAKE_STA_RESULT
+    )
+    monkeypatch.setattr(
+        synthesize,
+        "restructure_for_timing",
+        lambda *a, **k: dict(_FAKE_RESTRUCTURE_NO_VIOLATION),
+    )
+    equiv_calls = []
+    monkeypatch.setattr(synthesize, "run_equiv", lambda *a, **k: equiv_calls.append(1))
+
+    report = run_synthesize(request_path, restructure_timing=True)
+
+    assert report["restructuring"]["converged"] is True
+    assert report["restructuring"]["resizes_applied"] == []
+    assert report["restructuring"]["equivalence"] is None
+    assert equiv_calls == []
+
+
+def test_restructure_timing_applied_resize_is_verified_by_equiv(tmp_path, monkeypatch):
+    """Acceptance criterion 3: any resize the loop actually applies is
+    validated by `klt equiv` against the source RTL before the report is
+    returned, using a distinct request file from `--verify-equivalence`'s
+    own (so the two gates, if both requested in one run, never clobber each
+    other's artifact)."""
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 3.0}),
+    )
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize, "compute_critical_path", lambda *a, **k: _FAKE_STA_RESULT
+    )
+
+    def fake_restructure(
+        netlist_path,
+        liberty_path,
+        top,
+        target_period_ns,
+        *,
+        output_netlist_path,
+        **kwargs,
+    ):
+        return _fake_restructure_with_resize(output_netlist_path)
+
+    monkeypatch.setattr(synthesize, "restructure_for_timing", fake_restructure)
+
+    captured_request_paths = []
+
+    def fake_run_equiv(request, *, timeout_s=None):
+        captured_request_paths.append(request)
+        return _FAKE_EQUIV_EQUIVALENT
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+
+    report = run_synthesize(request_path, restructure_timing=True)
+
+    assert report["restructuring"]["resizes_applied"] != []
+    assert report["restructuring"]["equivalence"]["status"] == "equivalent"
+    assert len(captured_request_paths) == 1
+    assert (
+        os.path.basename(captured_request_paths[0])
+        == "equiv_request_gcd_restructured.json"
+    )
+
+    with open(captured_request_paths[0], encoding="utf-8") as handle:
+        equiv_request = json.load(handle)
+    assert equiv_request["gate"]["sources"] == [
+        report["restructuring"]["restructured_netlist_path"]
+    ]
+
+
+def test_restructure_timing_applied_resize_non_equivalent_is_hard_failure(
+    tmp_path, monkeypatch
+):
+    """A restructured netlist that `klt equiv` cannot prove equivalent to
+    its source RTL must never ship -- 'never just re-timed at the cost of
+    correctness' (acceptance criterion 3)."""
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 3.0}),
+    )
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize, "compute_critical_path", lambda *a, **k: _FAKE_STA_RESULT
+    )
+
+    def fake_restructure(
+        netlist_path,
+        liberty_path,
+        top,
+        target_period_ns,
+        *,
+        output_netlist_path,
+        **kwargs,
+    ):
+        return _fake_restructure_with_resize(output_netlist_path)
+
+    monkeypatch.setattr(synthesize, "restructure_for_timing", fake_restructure)
+    monkeypatch.setattr(
+        synthesize,
+        "run_equiv",
+        lambda request, *, timeout_s=None: _FAKE_EQUIV_COUNTEREXAMPLE,
+    )
+
+    with pytest.raises(SynthesizeError, match="NOT equivalent"):
+        run_synthesize(request_path, restructure_timing=True)
+
+
+def test_restructure_timing_max_iterations_passed_through(tmp_path, monkeypatch):
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 3.0}),
+    )
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize, "compute_critical_path", lambda *a, **k: _FAKE_STA_RESULT
+    )
+
+    captured_kwargs = {}
+
+    def fake_restructure(
+        netlist_path,
+        liberty_path,
+        top,
+        target_period_ns,
+        *,
+        output_netlist_path,
+        **kwargs,
+    ):
+        captured_kwargs.update(kwargs)
+        return dict(_FAKE_RESTRUCTURE_NO_VIOLATION)
+
+    monkeypatch.setattr(synthesize, "restructure_for_timing", fake_restructure)
+
+    run_synthesize(request_path, restructure_timing=True, restructure_max_iterations=3)
+
+    assert captured_kwargs == {"max_iterations": 3}
+
+
+def test_cli_restructure_timing_flag_wires_through_and_exits_zero(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 5.0}),
+    )
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _stub_yosys_success(monkeypatch)
+    monkeypatch.setattr(
+        synthesize, "compute_critical_path", lambda *a, **k: _FAKE_STA_RESULT
+    )
+    monkeypatch.setattr(
+        synthesize,
+        "restructure_for_timing",
+        lambda *a, **k: dict(_FAKE_RESTRUCTURE_NO_VIOLATION),
+    )
+
+    exit_code = main(
+        ["synthesize", request_path, "--restructure-timing", "--format", "json"]
+    )
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["restructuring"]["converged"] is True
+
+
+def test_cli_restructure_timing_not_given_defaults_false(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        synthesize, "restructure_for_timing", lambda *a, **k: calls.append(1)
+    )
+
+    exit_code = main(["synthesize", request_path, "--format", "json"])
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["restructuring"] is None
+    assert calls == []
+
+
 # Sanity: `subprocess` really is the module this file's stubs patch (guards
 # against a future refactor silently making the stubs a no-op).
 def test_synthesize_uses_stdlib_subprocess():

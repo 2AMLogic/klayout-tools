@@ -6,12 +6,16 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/synthesize.md`` for the full table):
     0 - synthesis succeeded, netlist written (and, with `--verify-
-        equivalence`, proven equivalent to its source RTL)
+        equivalence` and/or `--restructure-timing`, proven equivalent to its
+        source RTL)
     1 - failed to run (bad request, unreadable RTL source, elaboration/
         hierarchy error, unresolvable pdk.cell_library/corner, a Yosys/ABC
         engine error) -- or, with `--verify-equivalence`, a non-equivalent
         or inconclusive `klt equiv` verdict against the produced netlist --
-        returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        or, with `--restructure-timing`, a missing `constraints.
+        clock_period_ns`/`sta` stage, or a non-equivalent verdict against
+        a netlist it actually resized -- returned by ``emit_error`` as
+        ``output.ERROR_EXIT_CODE``
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. There is no exit code 3 -- synthesis has no pass/fail concept of
 its own, matching ``klt extract``'s reasoning exactly; see
@@ -36,6 +40,8 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
+            restructure_timing=args.restructure_timing,
+            restructure_max_iterations=args.restructure_max_iterations,
         )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
@@ -93,3 +99,22 @@ def _print_text(report: dict) -> None:
     if equivalence is not None:
         print()
         print(f"equivalence: {equivalence['status']}")
+
+    restructuring = report.get("restructuring")
+    if restructuring is not None:
+        print()
+        print(
+            f"restructuring: converged={restructuring['converged']} "
+            f"target={restructuring['target_period_ns']:.4f}ns "
+            f"delay {restructuring['initial_worst_path_delay_ns']:.4f}ns -> "
+            f"{restructuring['final_worst_path_delay_ns']:.4f}ns "
+            f"({len(restructuring['resizes_applied'])} resize(s), "
+            f"{restructuring['iterations_used']} iteration(s))"
+        )
+        if restructuring["gave_up_reason"]:
+            print(f"  gave_up_reason: {restructuring['gave_up_reason']}")
+        if restructuring["restructured_netlist_path"]:
+            print(
+                "  restructured_netlist_path: "
+                f"{restructuring['restructured_netlist_path']}"
+            )
