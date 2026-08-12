@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/em-site-export.schema.json",
+  "title": "geode-fem site export (Epic #840 Phase 1a)",
+  "description": "The mesh + swept-field + S-parameter + provenance record a geode-fem solver run is converted into for browser display on klayout-tools.org (issue #849, Phase 1a of Epic #840). `mesh`/`frames` are deliberately shaped to be a strict superset of `site/src/components/field/types.ts`'s `FieldMesh`/`FieldFrame` (an `{mesh, frames}` slice of this document validates directly as that component's `FieldViewerData` prop) so a future consumer (issue #850, not yet built) can feed this file to `FieldViewer` without a translation layer, while `s_parameters`/`radiation_pattern`/`provenance` carry the rest of a solver run's record that a generic mesh+field viewer has no concept of. Produced by `examples/em/patch_antenna/generate.py`; see `docs/design/em-site-export-format.md` for the full design rationale.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "benchmark", "mesh", "frames", "s_parameters", "provenance"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Export format version, independent of any `klt` command's own JSON `schema_version` (docs/json-contract.md) -- this is solver/site-pipeline output, not a `klt` command response."
+    },
+    "benchmark": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Which geode-fem benchmark family this export was generated from, e.g. `\"patch_antenna\"`."
+    },
+    "mesh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vertices", "cells"],
+      "description": "A 3D surface mesh -- same shape as `FieldMesh` (site/src/components/field/types.ts). For a volumetric FEM solve this is a derived planar cross-section (marching-tetrahedra slice), never the raw tetrahedral volume mesh directly (a tet's 4 vertices are not a renderable polygon) -- see `provenance.mesh_reduction` for how a given export's slice/crop was chosen.",
+      "properties": {
+        "vertices": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "description": "One `[x, y, z]` position per vertex, in the solver's native length units (millimeters for geode-fem)."
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 3
+          },
+          "description": "Cells (polygons) as 0-based index arrays into `vertices`, in winding order -- triangles for a marching-tetrahedra slice, but not required to be (FieldViewer fan-triangulates n-gons)."
+        }
+      }
+    },
+    "frames": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One or more swept-parameter/frequency field samples, each vertex-aligned 1:1 with `mesh.vertices` -- same shape as an array of `FieldFrame` (site/src/components/field/types.ts), with an added `frequency_hz` FieldViewer itself does not need but a solver-run record does.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label"],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Display label for this sweep point, e.g. `\"2.275 GHz\"`."
+          },
+          "frequency_hz": {
+            "type": ["number", "null"],
+            "description": "The drive frequency this frame was solved at, in Hz, or `null` for a non-frequency-swept frame."
+          },
+          "scalar": {
+            "type": "array",
+            "items": { "type": "number" },
+            "description": "Per-vertex scalar magnitude (geode-fem: `|E|`, folding real+imaginary components), colormapped directly by FieldViewer. Length must equal `mesh.vertices` length."
+          },
+          "vector": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "description": "Per-vertex vector field `[x, y, z]` (geode-fem: the real part of the driven `E` field). Length must equal `mesh.vertices` length."
+          }
+        }
+      }
+    },
+    "s_parameters": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["ports", "points", "resonance"],
+      "description": "The frequency-swept port response of the solved structure -- the piece a generic mesh+field viewer has no concept of.",
+      "properties": {
+        "ports": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Port names, e.g. `[\"p1\"]` for a single-port (S11-only) sweep."
+        },
+        "reference_impedance_ohm": {
+          "type": "number",
+          "description": "Port reference impedance S11 is computed against."
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["frequency_hz", "s11_db"],
+            "properties": {
+              "frequency_hz": { "type": "number" },
+              "z_re_ohm": { "type": "number" },
+              "z_im_ohm": { "type": "number" },
+              "s11_re": { "type": "number" },
+              "s11_im": { "type": "number" },
+              "s11_db": { "type": "number" },
+              "p_in": { "type": "number" },
+              "p_rad": { "type": "number" },
+              "efficiency": { "type": "number" },
+              "solve_residual_rel": { "type": "number" }
+            }
+          },
+          "description": "One entry per swept frequency point."
+        },
+        "resonance": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["f_res_hz", "s11_dip_db"],
+          "properties": {
+            "f_res_hz": { "type": "number" },
+            "s11_dip_db": { "type": "number" },
+            "s11_dip_frequency_hz": { "type": "number" },
+            "bandwidth_10db_hz": {
+              "type": ["number", "null"],
+              "description": "The -10 dB return-loss bandwidth, or `null` when the sweep's frequency grid does not bracket both -10 dB crossings around the dip (see `bandwidth_10db_note`) -- a documented, honest gap, never a fabricated interpolation past the sweep's own data."
+            },
+            "bandwidth_10db_note": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "radiation_pattern": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "Optional near-to-far-field (NTFF) radiation-pattern block -- present for benchmarks (like the patch antenna) that exercise it, `null`/omitted otherwise.",
+      "properties": {
+        "frequency_hz": { "type": "number" },
+        "efficiency": { "type": "number" },
+        "directivity_max_dbi": { "type": "number" },
+        "directivity_broadside_dbi": { "type": "number" },
+        "gain_broadside_dbi": { "type": "number" },
+        "cuts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["theta_deg", "e_norm"],
+            "properties": {
+              "theta_deg": { "type": "array", "items": { "type": "number" } },
+              "e_norm": { "type": "array", "items": { "type": "number" } }
+            }
+          },
+          "description": "Principal-plane cuts (e.g. `e_plane`/`h_plane`), each a `theta_deg` vs. normalized `|E|` pair of equal-length arrays."
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["generator", "geometry", "generated_at"],
+      "description": "Reproducibility record -- mirrors the discipline of `klt`'s own shared `provenance` block (docs/json-contract.md) and `examples/sim/`'s generated-fixture convention: every field in this file traces back to an exact solver build, commit, and geometry, never a silent 'trust me'.",
+      "properties": {
+        "generator": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["repo", "commit"],
+          "properties": {
+            "repo": { "type": "string" },
+            "license": { "type": "string" },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "Full git commit hash of the geode-fem checkout the solve ran against."
+            },
+            "version": { "type": ["string", "null"] },
+            "backend": { "type": "string" },
+            "build_profile": { "type": "string" }
+          }
+        },
+        "geometry": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["fixture"],
+          "properties": {
+            "fixture": { "type": "string" },
+            "fixture_sha256": { "type": ["string", "null"] },
+            "description": { "type": "string" }
+          }
+        },
+        "solve_parameters": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Solver boundary-condition / material parameters (port resistance, absorber, substrate properties, ...) -- fields vary by benchmark family."
+        },
+        "mesh_reduction": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "description": "How `mesh`/`frames` were derived from the solver's native volumetric output, when applicable (e.g. a planar slice + crop). `null` when `mesh` is the solver's native mesh unmodified."
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "UTC timestamp this export file was generated (not when geode-fem was solved -- the two can differ if `--skip-run` re-converted an earlier solver run)."
+        }
+      }
+    }
+  }
+}

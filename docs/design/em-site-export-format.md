@@ -1,0 +1,189 @@
+# geode-fem site export format (Epic #840 Phase 1a)
+
+Issue [#849](https://github.com/2AMLogic/klayout-tools/issues/849), Phase 1a
+of Epic [#840](https://github.com/2AMLogic/klayout-tools/issues/840) ("real
+E&M results in the browser on klayout-tools.org — integrate geode-fem
+(WebGPU)"). This document defines the JSON export format a
+[geode-fem](https://github.com/rjwalters/geode-fem) solver run is converted
+into for browser display, and records the one real generated instance this
+issue ships: the patch-antenna benchmark.
+
+**Scope note**: this issue defines the format and generates one export. It
+does not build the gallery UI ([#851](https://github.com/2AMLogic/klayout-tools/issues/851),
+an unapproved Architect proposal) or wire `FieldViewer` up to consume it
+live ([#850](https://github.com/2AMLogic/klayout-tools/issues/850), not yet
+built) — those are separate, sibling issues.
+
+## Why this shape
+
+Three things had to be reconciled:
+
+1. **`FieldViewer` already exists** ([#841](https://github.com/2AMLogic/klayout-tools/issues/841),
+   `site/src/components/field/`) and defines its own prop shape,
+   `FieldViewerData = { mesh: FieldMesh, frames: FieldFrame[] }`
+   (`site/src/components/field/types.ts`). That component has no dependency
+   on geode-fem — it renders whatever mesh+field data it's handed — but its
+   types.ts docstring says it was "shaped to match the geode-fem
+   browser-EM epic's (#840) Phase-1a export format so #850 can feed it
+   directly without a translation layer." This export's `mesh`/`frames`
+   fields are therefore a **strict superset** of `FieldMesh`/`FieldFrame`:
+   pulling `{mesh, frames: [{label, scalar, vector}, ...]}` out of an export
+   file validates directly as `FieldViewerData`.
+2. **A solver-run record needs more than a viewer prop.** S-parameters,
+   the NTFF radiation pattern, and full reproducibility provenance
+   (solver commit, geometry, solve parameters) have no place in a generic
+   mesh+field viewer's prop shape, and shouldn't — `FieldViewer` stays
+   agnostic to where its data came from. So the export nests the viewer-
+   compatible slice inside a larger document that also carries
+   `s_parameters`, `radiation_pattern`, and `provenance`.
+3. **"No illustrative/faked data."** Per the issue's Champion-approval
+   comment, every number in the shipped export must trace to a real,
+   reproducible geode-fem solver run — see "Generating the export" below.
+
+The full schema (JSON Schema, draft 2020-12) is
+[`docs/schemas/em-site-export.schema.json`](../schemas/em-site-export.schema.json).
+This document is the narrative rationale; the schema file is the
+machine-checked contract, validated in `tests/test_em_site_export.py`.
+
+## Shape summary
+
+```jsonc
+{
+  "schema_version": 1,
+  "benchmark": "patch_antenna",
+  "mesh": { "vertices": [[x, y, z], ...], "cells": [[i0, i1, i2], ...] },
+  "frames": [
+    { "label": "2.275 GHz", "frequency_hz": 2274530000.0, "scalar": [...], "vector": [[x,y,z], ...] }
+  ],
+  "s_parameters": {
+    "ports": ["p1"],
+    "reference_impedance_ohm": 50,
+    "points": [ { "frequency_hz": ..., "s11_db": ..., "z_re_ohm": ..., "efficiency": ..., ... }, ... ],
+    "resonance": { "f_res_hz": ..., "s11_dip_db": ..., "bandwidth_10db_hz": null, "bandwidth_10db_note": "..." }
+  },
+  "radiation_pattern": {
+    "directivity_broadside_dbi": ..., "gain_broadside_dbi": ...,
+    "cuts": { "e_plane": { "theta_deg": [...], "e_norm": [...] }, "h_plane": { ... } }
+  },
+  "provenance": {
+    "generator": { "repo": "...", "commit": "<40-hex sha>", "version": "0.3.0", "backend": "...", "build_profile": "release" },
+    "geometry": { "fixture": "tests/fixtures/patch_2g4.msh", "fixture_sha256": "<hex>", "description": "..." },
+    "solve_parameters": { ... },
+    "mesh_reduction": { "method": "...", "slice_z_mm": 0.8, "crop_bbox_mm": { "x": [...], "y": [...] } },
+    "generated_at": "2026-08-12T04:12:16Z"
+  }
+}
+```
+
+### `mesh` / `frames` — the `FieldViewer`-compatible slice
+
+For a volumetric FEM solve, `mesh` is **not** the solver's native
+tetrahedral volume mesh — a tetrahedron's 4 vertices are not a planar
+polygon, so dumping them into `FieldMesh.cells` verbatim would not be
+renderable (and at tens of thousands of tets, would not be a
+committable-sized asset either). Instead `mesh` is a **derived planar
+cross-section**: a marching-tetrahedra slice through the volumetric solve
+at a fixed height, linearly interpolating the real, solved per-node field
+onto the new cut vertices. This is exactly the operation ParaView's own
+"Slice" filter performs (which is how geode-fem's own near-field tearsheet
+images are made, per its README) — a real, deterministic derivation of the
+real solve, not a fabrication. Every scalar/vector sample in `frames[]`
+traces to a linear interpolation between two real solved nodal E-field
+values. The exact slice height/crop window used for a given export is
+recorded in `provenance.mesh_reduction`, so the reduction is auditable, not
+a silent lossy step.
+
+### `s_parameters` — the frequency-swept port response
+
+One entry in `points[]` per swept frequency, plus a `resonance` summary
+(FEM resonant frequency, S11 dip, -10 dB bandwidth). `bandwidth_10db_hz` is
+explicitly nullable: a sweep whose frequency grid doesn't bracket both -10
+dB crossings around the dip cannot report a bandwidth without
+extrapolating past its own data, so the field is `null` with a
+`bandwidth_10db_note` explaining why — never a fabricated interpolation.
+
+### `radiation_pattern` — NTFF
+
+Optional (present when the benchmark exercises a near-to-far-field
+transform, as the patch antenna does): broadside directivity, gain, and
+E-/H-plane principal-plane radiation cuts (`theta_deg` vs. normalized
+`|E|`).
+
+### `provenance` — reproducibility
+
+Mirrors the discipline of `klt`'s own shared `provenance` block
+(`docs/json-contract.md`, `src/klayout_tools/_provenance.py`) and
+`examples/sim/`'s generated-fixture convention (`examples/sim/generate.py`):
+solver identity (`repo`/`commit`/`version`/`backend`/`build_profile`),
+exact geometry (`fixture` path + `fixture_sha256`), the solve's boundary
+conditions/material parameters, and (when `mesh`/`frames` are a derived
+reduction, not the solver's raw output) exactly how that reduction was
+computed. Fields that cannot be resolved are `null`, never fabricated —
+the same rule `_provenance.py`'s docstring states for `klt`'s own block.
+
+## Generating the export
+
+`examples/em/patch_antenna/generate.py` is the reproducible generation
+script (module docstring has the full detail). It drives a **separate,
+locally-built** [rjwalters/geode-fem](https://github.com/rjwalters/geode-fem)
+checkout (MIT; not vendored into this repo — see
+[`docs/design/em-field-sim-spike.md`](em-field-sim-spike.md) Section 5,
+"wrap the numerics, build the geometry pipeline," which this issue's Phase
+1a does not yet touch since it consumes geode-fem's own bundled benchmark
+fixture, not a klayout-tools-produced geometry) through its own
+`examples/patch_antenna` benchmark binary:
+
+```sh
+git clone https://github.com/rjwalters/geode-fem.git /tmp/geode-fem
+cd /tmp/geode-fem && cargo build -p patch_antenna --release
+cd /path/to/klayout-tools
+uv run python3 examples/em/patch_antenna/generate.py --geode-fem-dir /tmp/geode-fem
+```
+
+This runs three real solves against geode-fem's own bundled, validated
+`tests/fixtures/patch_2g4.msh` fixture (built from its own
+`reference/gmsh/patch_antenna.geo`, the same reference geometry the
+Champion-approval comment on issue #849 cites): the 13-point S11 sweep
+(`results.toml`), the NTFF radiation pattern (`pattern.toml`), and the
+per-node driven near field (`E_patch.vtu`) — all at the identical FEM
+resonant frequency on the identical fixture, so the shipped export's mesh,
+S-parameters, and radiation pattern are facets of one physically
+consistent antenna solve, not stitched together from mismatched runs.
+
+## The shipped instance: `patch_antenna.em-export.json`
+
+[`examples/em/patch_antenna/patch_antenna.em-export.json`](../../examples/em/patch_antenna/patch_antenna.em-export.json)
+was generated exactly this way, from geode-fem commit
+`90759f103fdbdc42e47b1941ccd8d0e0b031c4e6`, `geode-fem` workspace version
+`0.3.0`, on the `burn::backend::NdArray<f64, i32>` CPU backend (no GPU
+feature compiled in — the sandbox that generated this file had no GPU
+device; geode-fem's own README documents this as its headless-CI fallback
+path, so nothing about the physics differs from a GPU run, only wall-clock
+time). Its `provenance` block carries the full detail; see that file
+directly rather than duplicating the numbers here (they would drift out of
+sync with the committed file otherwise).
+
+Why the patch antenna: per the issue and its Champion-approval comment, it
+is geode-fem's own validated benchmark that exercises S11, bandwidth, and
+NTFF together, and has a recognizable geometry for a future gallery
+(#851). The 13-point default sweep used here does not bracket a -10 dB
+bandwidth (its own committed `results.toml` documents this — the shallow
+-6 dB dip on this coarse grid); this is an honest, documented gap
+(`s_parameters.resonance.bandwidth_10db_hz: null`), not a shortcoming that
+blocks this issue — the schema fully supports a bracketed bandwidth
+number (geode-fem's own finer 21-point `results_matched.toml` sweep
+demonstrates one, `bw_10db_ghz = 3.87e-2` GHz), and a future export can
+choose that finer sweep without any schema change.
+
+## Regenerating / validating
+
+```sh
+uv run python3 examples/em/patch_antenna/generate.py --geode-fem-dir /tmp/geode-fem
+uv run pytest tests/test_em_site_export.py -v
+```
+
+`tests/test_em_site_export.py` validates the schema itself is well-formed,
+validates the committed export instance against it, and asserts internal
+consistency (frame/mesh vertex-count alignment, cell indices in bounds,
+provenance fields non-empty) — the executable form of the claims in this
+document.
