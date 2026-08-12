@@ -134,13 +134,16 @@ _REASON_STALE_EVIDENCE = "stale_evidence"
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
 #: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
 #: subprocess itself did not complete usably -- it could not be launched, it
-#: timed out, or it exited nonzero. Distinct from
-#: :data:`_REASON_CHECK_ERRORED` (the command *did* run and produced a
-#: readable ``klt`` ``error`` envelope) and from
-#: :data:`_REASON_UNREADABLE_EVIDENCE` (the command exited zero but its
-#: stdout wasn't valid JSON) -- three different ways "no runnable check
-#: proves this item" can happen, kept distinguishable per issue #826's
-#: invariant.
+#: timed out, or it exited nonzero *without* leaving a parseable envelope on
+#: stdout (per docs/json-contract.md, exit code 1/2 leaves stdout empty).
+#: A nonzero exit that *does* carry a parseable envelope on stdout -- e.g.
+#: `klt drc`'s `EXIT_VIOLATIONS = 3`, a successful run that found violations
+#: -- is not this case; it flows into :func:`_classify`/:func:`_check_passed`
+#: exactly like the file-backed path, landing on :data:`_REASON_CHECK_ERRORED`
+#: or :data:`_REASON_CHECK_FAILED`. Distinct from
+#: :data:`_REASON_UNREADABLE_EVIDENCE` (the command exited *zero* but its
+#: stdout wasn't valid JSON) -- different ways "no runnable check proves this
+#: item" can happen, kept distinguishable per issue #826's invariant.
 _REASON_COMMAND_FAILED = "command_failed"
 
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
@@ -620,9 +623,12 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
       but is not a JSON object, or is a JSON object that does not match any
       recognised ``klt`` envelope shape (:func:`_classify`).
     - ``"command_failed"`` -- a command-backed entry's subprocess could not
-      be launched, timed out, or exited nonzero -- distinct from
-      ``"check_errored"`` below, which requires the command to have
-      actually produced a readable ``klt`` ``error`` envelope.
+      be launched, timed out, or exited nonzero *without* leaving a
+      parseable envelope on stdout. A nonzero exit whose stdout *does* parse
+      (e.g. a ``klt drc``/``klt lvs``/``klt sim`` extension exit code for a
+      successful run that found a violation/mismatch/failure) is not this
+      case -- it is graded by its envelope content instead, landing on
+      ``"check_errored"`` or ``"check_failed"`` below.
     - ``"check_errored"`` -- the evidence resolved to a ``klt`` ``error``
       envelope: the underlying command itself failed to run to completion.
     - ``"check_failed"`` -- the evidence resolved to a recognised, non-error
@@ -847,15 +853,23 @@ def _grade_evidence(
     **Command-backed** (``spec["kind"] == "command"``, issue #825): actually
     runs the given argv as a subprocess (``cwd=spec["cwd"]`` when given),
     bounded by :data:`_COMMAND_EVIDENCE_TIMEOUT_S`. A launch failure or
-    timeout renders :data:`_REASON_COMMAND_FAILED`; so does a nonzero exit
-    (every ``klt`` verb emits an ``error``-kind envelope on nonzero exit --
-    see :func:`_classify` below -- so a well-behaved gate command's nonzero
-    exit is already covered by :data:`_REASON_CHECK_ERRORED` once its stdout
-    is actually read, but a nonzero exit whose stdout isn't even usable
-    gets no further chance to explain itself). Stdout that doesn't parse as
-    JSON renders :data:`_REASON_UNREADABLE_EVIDENCE` -- the command-backed
-    analogue of an unreadable evidence file. ``exit_status`` is the
-    subprocess's *actually observed* return code, never inferred.
+    timeout renders :data:`_REASON_COMMAND_FAILED`. Stdout is parsed as JSON
+    *before* the exit status is ever inspected -- exactly like the
+    file-backed path, which does not gate on an inferred exit code at all --
+    because a ``klt`` verb's own nonzero exit can mean "ran successfully and
+    found a problem" (e.g. ``klt drc``'s ``EXIT_VIOLATIONS = 3``) just as
+    easily as it can mean a genuine failure; per docs/json-contract.md, both
+    shapes leave a documented envelope on stdout. If stdout parses, the
+    envelope flows into :func:`_classify`/:func:`_check_passed` regardless of
+    ``exit_status``, so :data:`_REASON_CHECK_ERRORED`/:data:`_REASON_CHECK_FAILED`
+    work correctly whether the verb exited 0 or with an extension code. Only
+    when stdout does *not* parse as JSON does ``exit_status`` matter: a zero
+    exit with unparsable stdout renders :data:`_REASON_UNREADABLE_EVIDENCE`
+    (the command-backed analogue of an unreadable evidence file); a nonzero
+    exit with unparsable stdout renders :data:`_REASON_COMMAND_FAILED` (per
+    the contract, an application-level error leaves stdout empty, so there is
+    genuinely no evidence to grade). ``exit_status`` is the subprocess's
+    *actually observed* return code, never inferred.
     """
     expected_hash = spec.get("content_hash")
 
@@ -874,13 +888,13 @@ def _grade_evidence(
             return "unmet", _REASON_COMMAND_FAILED, None
 
         exit_status = completed.returncode
-        if exit_status != 0:
-            return "unmet", _REASON_COMMAND_FAILED, None
 
         try:
             envelope = json.loads(completed.stdout)
         except json.JSONDecodeError:
-            return "unmet", _REASON_UNREADABLE_EVIDENCE, None
+            if exit_status == 0:
+                return "unmet", _REASON_UNREADABLE_EVIDENCE, None
+            return "unmet", _REASON_COMMAND_FAILED, None
 
         if not isinstance(envelope, dict):
             return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None

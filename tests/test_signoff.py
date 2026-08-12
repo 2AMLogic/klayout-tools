@@ -978,8 +978,11 @@ def test_command_evidence_passes_cwd_through_to_subprocess(monkeypatch):
 
 
 def test_command_evidence_nonzero_exit_renders_unmet_command_failed(monkeypatch):
+    # Mirrors the real contract (docs/json-contract.md): an application-level
+    # error (exit 1) writes its error envelope to stderr and leaves stdout
+    # empty -- there is genuinely no evidence on stdout to grade.
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(1, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+        return _FakeCompletedProcess(1, stdout="")
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
@@ -1048,8 +1051,10 @@ def test_command_evidence_error_envelope_renders_check_errored(monkeypatch):
 
 
 def test_command_evidence_failing_check_renders_check_failed(monkeypatch):
+    # Real `klt drc` exits 3 (EXIT_VIOLATIONS), never 0, when it finds
+    # violations -- exercise that real exit code, not an unrealistic zero.
     def fake_run(command, **kwargs):
-        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_VIOLATIONS_ENVELOPE))
+        return _FakeCompletedProcess(3, stdout=json.dumps(DRC_VIOLATIONS_ENVELOPE))
 
     monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
 
