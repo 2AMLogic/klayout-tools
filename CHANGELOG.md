@@ -506,7 +506,7 @@ not `klt --version`, if you need to detect this kind of drift.
   all, or whose negative control fails to show the expected degradation, is
   flagged with a run-level warning rather than silently accepted. An
   **analytic cross-check** compares a measurement's empirical mean/stddev
-  against a closed-form prediction: `kt_c_noise` (`sigma = sqrt(kB*T/C)` for
+  against a closed-form prediction: `ktc_noise` (`sigma = sqrt(kB*T/C)` for
   a given sampling capacitance and temperature) or `mismatch_offset` (a
   caller-supplied sigma, e.g. from a Pelgrom-model prediction already
   evaluated), each with its own confidence interval via the same asymptotic
