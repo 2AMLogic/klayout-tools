@@ -1161,6 +1161,51 @@ commands — see each generator's own docs above. gf180mcu's curated deck
 declares no `dummy` layer yet, so this mechanism stays unreachable there
 until a follow-on issue wires it up.
 
+## Device rule provenance (issue #868)
+
+`klt drc`'s deck rules gained a machine-readable, per-rule provenance
+citation in issue #747 (see [`docs/cli/drc.md`](drc.md)'s "Rule provenance
+and the golden-pair manifest") — Epic #711's Phase 1. This is the same
+mechanism's extension to the LVS/device-recognition side (Phase 2a):
+[`RuleProvenance`](../../src/klayout_tools/decks/__init__.py) — the exact
+type `DrcRule.provenance` uses — is now also a field on
+[`ResistorDevice`](../../src/klayout_tools/decks/__init__.py),
+[`CapacitorDevice`](../../src/klayout_tools/decks/__init__.py),
+[`BipolarDevice`](../../src/klayout_tools/decks/__init__.py), and
+[`DiodeDevice`](../../src/klayout_tools/decks/__init__.py), and MOS
+recognition gets its own `ExtractionDeck.nfet_provenance`/
+`pfet_provenance` pair (MOS has no per-entry list the way
+resistor/capacitor/bipolar/diode do — a deck declares exactly one NMOS and
+one PMOS recognition rule via its own `active`/`poly`/`nwell` fields, so the
+two citations live directly on the deck).
+
+For a device-recognition entry, `source_path`/`rule_id` typically cite the
+PDK's **KLayout LVS deck** (a different upstream file than the DRC-side
+`.lydrc`/`.drc` script `DrcRule.provenance` cites — sky130's `sky130.lvs`,
+from a *different* upstream repo, `efabless/sky130_klayout_pdk`, than the
+`fossi-foundation/open-pdks` mono-repo the DRC rules above come from) and
+its official device-class name (e.g. `"sky130_fd_pr__nfet_01v8"`,
+`"sky130_fd_pr__res_generic_po"`, `"sky130_fd_pr__model__cap_mim"`) as
+`rule_id` — the LVS analogue of a DRC rule id, naming *which specific
+device* an entry's geometry/coefficients were transcribed from.
+
+As of this issue, `provenance` is populated for sky130's curated MOS
+(`nfet`/`pfet`), all three resistor entries, both capacitor entries, and the
+one bipolar entry — see `decks/sky130.py`'s `EXTRACTION_DECK` for the
+concrete citations, and `tests/test_lvs_device_provenance.py` for the
+validating tests (provenance-populated assertions plus a golden
+layout→netlist pair per device class: MOSFET, resistor, and capacitor —
+each drawn with hand-computable geometry and asserted against a device
+parameter computed independently from the deck's own provenance-cited
+coefficient). gf180mcu's device entries are left unpopulated (`None`, the
+default) for this pass — the prose citation each entry's own inline comment
+already carries remains the record for those entries, exactly as an unset
+`DrcRule.provenance` does. Like `DrcRule.provenance`, this field is not
+(yet) surfaced in `klt extract`'s JSON output; it is queryable only by a
+caller that imports `klayout_tools.decks` directly (e.g. a coverage-audit
+script) — see Epic #711's Phase 2b/2c for compiling and cross-checking a
+full PDK's device rules against this model.
+
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 
 Extraction ends by turning named nets into the top circuit's `.SUBCKT` pins
