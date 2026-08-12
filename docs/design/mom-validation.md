@@ -494,13 +494,17 @@ discussion frames the tradeoff for the capacitance solve.
 - **Multi-dielectric stacks.** The MVP solves one homogeneous medium; the
   permittivity check above only exercises the linear scaling of that single
   value.
-- **Cross-validation against an external solver.** #719 lists this as
-  optional. [`em-field-sim-spike.md`](em-field-sim-spike.md) recommends
-  openEMS for full-wave work and geode-fem's quasi-static/DC-extrapolation
-  mode as the cheaper in-house cross-check for exactly this regime; either
-  would be a natural follow-up, and would test something these analytic
-  oracles cannot (general geometry). [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  tracks this specifically for the full-wave sweep above.
+- **Cross-validation against an external solver on a general (non-analytic)
+  benchmark.** [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
+  (Phase 2c) delivered this for the full-wave sweep + ports above -- see
+  [`mom-external-crossval.md`](mom-external-crossval.md) for the benchmark,
+  the external FEM solver, and the measured agreement. It cross-checks the
+  *same* canonical two-wire-line fixture this section's own oracles use
+  (not yet a genuinely general/irregular layout, which remains future
+  work) against a second, independently-implemented solver rather than an
+  analytic closed form -- testing something the closed-form oracles above
+  structurally cannot (a solver that does not share this repo's own
+  approximation choices).
 - **Non-bar-shaped PEEC/full-wave geometry, ports, S-parameters.** The PEEC
   and full-wave solves' shared MVP scope (a single, elongated, axis-aligned
   bar per conductor — see `docs/cli/mom.md`'s "PEEC inductance/resistance")
@@ -522,8 +526,9 @@ discussion frames the tradeoff for the capacitance solve.
   of evidence sits on the repo's evidence ladder.
 - `tests/test_mom_fullwave_validation.py` — the executable form of the
   "Full-wave frequency sweep" section above.
+- [`mom-external-crossval.md`](mom-external-crossval.md) — the external FEM
+  cross-check (issue #895, Phase 2c) mentioned above.
 - [#893](https://github.com/2AMLogic/klayout-tools/issues/893) — delivered
   the full-wave frequency sweep (Phase 2a); [#894](https://github.com/2AMLogic/klayout-tools/issues/894)
-  (port definition/de-embedding) and
-  [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  (cross-validation against an external solver) are its planned follow-ons.
+  delivered port definition/de-embedding (Phase 2b); [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
+  delivered the external-solver cross-check (Phase 2c) above.

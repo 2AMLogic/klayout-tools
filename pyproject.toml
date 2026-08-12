@@ -52,6 +52,23 @@ functional-verification = [
     "cocotb>=2.0.1,<2.1; python_version < \"3.14\"",
 ]
 
+# Backs `scripts/research/mom_external_fem_crossval.py` (issue #895, Phase 2c
+# of the Method-of-Moments epic #701) -- the external 2-D finite-element
+# cross-check for `klt mom`'s full-wave S-parameters. `numpy`/`scikit-fem`
+# are a real (BSD-licensed, independently developed) FEM implementation,
+# not something this repo authors, matching the epic's Phase 0
+# "cross-check against an external MoM/FEM solver" requirement -- see that
+# module's own docstring for why scikit-fem was chosen over openEMS
+# (GPL-3.0, forecloses in-process embedding) or geode-fem (a sibling repo,
+# no in-repo integration path). Not needed for any shipped `klt` CLI verb,
+# so this is an `[project.optional-dependencies]` extra (plain PyPI
+# packages, no in-repo path source like the `[dependency-groups]` below
+# need) rather than a runtime dependency of the package.
+mom-crossval = [
+    "numpy>=1.24",
+    "scikit-fem>=9.0",
+]
+
 # Backs `klt mom` (issue #718, Phase 0/1 of the Method-of-Moments epic #701):
 # the `klt_mom_native` pyo3 extension whose crate lives in `native/mom/`, this
 # repo's first Rust component.

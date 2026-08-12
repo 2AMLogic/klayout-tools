@@ -131,6 +131,22 @@ jobs:
             exit 1
           }
 
+      - name: Cross-validate against the external FEM solver (issue #895)
+        # `--extra mom-crossval` pulls in numpy/scikit-fem (a real,
+        # independently-developed FEM library, see
+        # scripts/research/mom_external_fem_crossval.py's docstring) so
+        # tests/test_mom_external_fem_crossval.py always runs here rather
+        # than silently skipping -- the same "never let the skip be the only
+        # thing CI sees" discipline the step above enforces for
+        # klt_mom_native. --capture=tee-sys so the S-parameter agreement
+        # table lands in this job's log on a green run too, not just on
+        # failure.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --extra mom-crossval --group mom
+          uv run --frozen --extra dev --extra mom-crossval --group mom pytest \
+            tests/test_mom_external_fem_crossval.py -v --capture=tee-sys
+
   native-congestion:
     name: Native engines (Rust) — congestion pre-check
     # `native/congestion/` (issue #785, Epic #700 Phase 1 §3.6) is this

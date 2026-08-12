@@ -895,9 +895,9 @@ analogous cap on the full-wave solve's axial mesh.
   the full-wave frequency sweep documented above (Phase 2a).
 - [#894](https://github.com/2AMLogic/klayout-tools/issues/894) — delivered
   the port definition + de-embedding documented above (Phase 2b).
-  [#895](https://github.com/2AMLogic/klayout-tools/issues/895) (Phase 2c,
-  cross-validation against an external MoM/FEM solver) is the next planned
-  follow-on.
+- [#895](https://github.com/2AMLogic/klayout-tools/issues/895) — delivered
+  the external MoM/FEM cross-check (Phase 2c); see
+  [`docs/design/mom-external-crossval.md`](../design/mom-external-crossval.md).
 - [`docs/design/mom-validation.md`](../design/mom-validation.md) — closed-form
   validation and convergence-under-refinement for both the capacitance solver
   ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)) and the PEEC
