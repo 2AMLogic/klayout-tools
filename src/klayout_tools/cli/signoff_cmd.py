@@ -184,6 +184,12 @@ def _print_tier_report_text(result: dict) -> None:
                 f"content_hash={citation['content_hash']}, "
                 f"exit_status={citation['exit_status']})"
             )
+        elif item["reason"]:
+            # Loud, not silent: an unmet item always names *why* -- "no
+            # runnable check exists" (e.g. no_evidence) reads distinctly
+            # from "a check ran and did not pass" (e.g. check_failed) even
+            # in the terminal-first text rendering, not just the JSON.
+            print(f"        {_RED}reason: {item['reason']}{_RESET}")
 
     print()
     print(f"source: {result['source_doc']}")

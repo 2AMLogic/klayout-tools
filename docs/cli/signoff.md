@@ -182,6 +182,7 @@ DRC/LVS/sim *gates* is a follow-on phase of epic #706.
       "text": "latest `klt drc` JSON report: ...",
       "notes": [],
       "status": "met",
+      "reason": null,
       "citation": {
         "file": "drc.json",
         "kind": "drc",
@@ -191,6 +192,17 @@ DRC/LVS/sim *gates* is a follow-on phase of epic #706.
       }
     },
     {
+      "tier": "T1",
+      "id": 4,
+      "title": "LVS clean",
+      "partition": null,
+      "text": "latest `klt lvs` JSON report: ...",
+      "notes": [],
+      "status": "unmet",
+      "reason": "no_evidence",
+      "citation": null
+    },
+    {
       "tier": "T2",
       "id": null,
       "title": "T2 — signoff-validated",
@@ -198,6 +210,7 @@ DRC/LVS/sim *gates* is a follow-on phase of epic #706.
       "text": "Validated on commercial signoff tools (T1, plus DRC/LVS signoff and simulation on commercial tools with the foundry's own decks)",
       "notes": [],
       "status": "unmet",
+      "reason": "tier_not_supported",
       "citation": null
     }
   ]
@@ -226,7 +239,27 @@ DRC/LVS/sim *gates* is a follow-on phase of epic #706.
 | `text`      | string \| null      | The item's body text (the matching column for a per-kind item, or the shared text).      |
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
+| `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "kind", "check_status", "content_hash", "exit_status"}`. |
+
+#### `reason` values
+
+An `"unmet"` item's `reason` always distinguishes **"no runnable check exists
+for this item"** from **"a check ran and did not pass"** — the exact failure
+mode this verb refuses to hide (epic #706's reality-grounding discipline: a
+skipped check must never read as a pass, and it must not even read as merely
+"the same shade of unmet" as one that actually ran and failed):
+
+| Reason                  | No runnable check attached? | Meaning |
+| ------------------------ | :--------------------------: | ------- |
+| `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
+| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (not a string, and not an object with a string `"file"`). |
+| `"unreadable_evidence"`   | yes | The named evidence file does not exist, is not readable, or is not valid JSON. |
+| `"unrecognized_envelope"` | yes | The evidence file parsed as JSON but is not a JSON object, or does not match any recognised `klt` envelope shape. |
+| `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
+| `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
+| `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
+| `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
 
 ## Envelope-aggregation JSON schema (the contract)
 
@@ -377,21 +410,54 @@ tier: none
 T1: 1/10 items met
 
 [UNMET] T1 #1 Design sources
+        reason: no_evidence
 [UNMET] T1 #2 Layout
+        reason: no_evidence
 [MET  ] T1 #3 DRC clean
         cite: drc.json (kind=drc, status=clean, content_hash=sha256:..., exit_status=0)
 [UNMET] T1 #4 LVS clean
+        reason: no_evidence
 ...
 [UNMET] T2 #- T2 — signoff-validated
+        reason: tier_not_supported
 [UNMET] T3 #- T3 — silicon-validated
+        reason: tier_not_supported
 [UNMET] T4 #- T4 — production-validated
+        reason: tier_not_supported
 
 source: docs/design-evidence-tiers.md
 ```
 
-(`UNMET`/`MET` render in red/green respectively in a real terminal.) Only
-item 3 has evidence in the manifest, so only item 3 is `"met"` — every
-other item, including the whole T2-T4 ladder, renders `"unmet"` with no
-fabricated citation. `klt signoff` exits `3` here (`tier: null`); it would
-exit `0` only once every T1 item's manifest entry resolves to a passing,
-fresh check.
+(`UNMET`/`MET` render in red/green respectively in a real terminal, and each
+`UNMET` line's `reason:` also renders in red.) Only item 3 has evidence in
+the manifest, so only item 3 is `"met"` — every other item, including the
+whole T2-T4 ladder, renders `"unmet"` with no fabricated citation, and its
+`reason` names *why* (`"no_evidence"`: the manifest simply never named a
+check for it; `"tier_not_supported"`: this repo has no T2+ check mechanism
+at all) rather than leaving it ambiguous whether a check ran and failed.
+`klt signoff` exits `3` here (`tier: null`); it would exit `0` only once
+every T1 item's manifest entry resolves to a passing, fresh check.
+
+### Proving a skipped check is caught, not silently passed
+
+The failure mode this verb exists to kill: an item with **no** backing
+check must never render `"met"`, and must be visibly distinguishable from
+an item whose check *did* run and failed. Deliberately omit one item's
+evidence from an otherwise-fully-evidenced manifest to see both at once:
+
+```
+$ klt drc design.gds --deck sky130 --format json > drc.json
+$ klt lvs request.json --format json > lvs.json          # deliberately has a mismatch
+$ cat manifest.json
+{"block": "my-bandgap", "kind": "analog",
+ "evidence": {"3": "drc.json", "4": "lvs.json"}}
+ # item 1 ("Design sources") has no evidence entry at all -- deliberately skipped
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 1 or .id == 4) | {id, status, reason}'
+{"id": 1, "status": "unmet", "reason": "no_evidence"}
+{"id": 4, "status": "unmet", "reason": "check_failed"}
+```
+
+Both items render `"unmet"`, but `reason` makes the difference unambiguous:
+item 1 was never checked at all (`"no_evidence"`); item 4's `klt lvs` check
+ran and reported a mismatch (`"check_failed"`). Neither is silently
+"assumed met" — the aggregator refuses to guess at either.

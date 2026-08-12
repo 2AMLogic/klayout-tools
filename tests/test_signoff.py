@@ -691,6 +691,7 @@ def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "met"
+    assert item_3["reason"] is None
     assert item_3["citation"] == {
         "file": drc_path,
         "kind": "drc",
@@ -708,6 +709,7 @@ def test_failing_check_renders_unmet_with_no_citation(tmp_path):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_failed"
     assert item_3["citation"] is None
 
 
@@ -716,6 +718,9 @@ def test_no_evidence_renders_unmet_never_assumed_met():
 
     assert all(item["status"] == "unmet" for item in result["items"])
     assert all(item["citation"] is None for item in result["items"])
+    # Every item lacking a runnable check names why it is unmet -- never a
+    # bare "unmet" with no further signal (issue #826).
+    assert all(item["reason"] is not None for item in result["items"])
 
 
 def test_missing_evidence_file_renders_unmet_not_an_error():
@@ -723,6 +728,7 @@ def test_missing_evidence_file_renders_unmet_not_an_error():
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "unreadable_evidence"
     assert item_3["citation"] is None
 
 
@@ -731,6 +737,7 @@ def test_malformed_evidence_entry_renders_unmet_not_an_error():
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_evidence"
 
 
 def test_stale_content_hash_renders_unmet_not_a_false_pass(tmp_path):
@@ -744,6 +751,7 @@ def test_stale_content_hash_renders_unmet_not_a_false_pass(tmp_path):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "stale_evidence"
     assert item_3["citation"] is None
 
 
@@ -756,6 +764,7 @@ def test_matching_content_hash_renders_met(tmp_path):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "met"
+    assert item_3["reason"] is None
 
 
 def test_lvs_evidence_populates_lvs_kind_check(tmp_path):
@@ -769,6 +778,102 @@ def test_lvs_evidence_populates_lvs_kind_check(tmp_path):
     # klt lvs's provenance.input is always null (docs/json-contract.md) --
     # the citation still carries the field, just unpopulated.
     assert item_4["citation"]["content_hash"] is None
+
+
+# --------------------------------------------------------------------------- #
+# `reason`: distinguishing missing evidence from a check that ran and failed
+# (issue #826, Phase 1b of epic #706)
+# --------------------------------------------------------------------------- #
+
+
+def test_unrecognized_envelope_evidence_renders_unmet_with_that_reason(tmp_path):
+    # Valid JSON, but not a recognized klt envelope shape at all (no
+    # 'schema_version') -- distinct from an unreadable file and from a
+    # malformed manifest entry.
+    bogus_path = _write(tmp_path, "bogus.json", {"not": "an envelope"})
+
+    result = build_tier_report(_manifest(evidence={"3": bogus_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "unrecognized_envelope"
+    assert item_3["citation"] is None
+
+
+def test_error_envelope_evidence_renders_unmet_with_check_errored_reason(tmp_path):
+    error_path = _write(tmp_path, "error.json", DRC_ERROR_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": error_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_errored"
+    assert item_3["citation"] is None
+
+
+def test_ladder_rows_render_tier_not_supported_reason():
+    result = build_tier_report(_manifest(evidence={}))
+
+    ladder_items = [item for item in result["items"] if item["tier"] != "T1"]
+    assert ladder_items  # sanity: T2-T4 rows exist
+    assert all(item["reason"] == "tier_not_supported" for item in ladder_items)
+    assert all(item["status"] == "unmet" for item in ladder_items)
+
+
+def test_missing_evidence_reason_is_never_the_same_as_a_failed_check_reason(tmp_path):
+    """The exact ambiguity issue #826 exists to kill: a JSON reader must be
+    able to tell "nobody ever checked this" apart from "somebody checked
+    this and it failed" without any information outside the item itself."""
+    drc_violations_path = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": drc_violations_path})  # item 4 deliberately skipped
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)  # ran, failed
+    item_4 = next(item for item in result["items"] if item["id"] == 4)  # skipped
+
+    assert item_3["status"] == "unmet"
+    assert item_4["status"] == "unmet"
+    assert item_3["reason"] != item_4["reason"]
+    assert item_3["reason"] == "check_failed"
+    assert item_4["reason"] == "no_evidence"
+
+
+def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_path):
+    """AC: "A deliberately-skipped check on a test fixture is caught and
+    reported as unmet." Every T1 item except #1 gets real, passing
+    evidence; #1's evidence is deliberately omitted from the manifest, as
+    if that check was simply never run. The aggregator must still catch
+    it, render it unmet with a "no runnable check" reason, and must not
+    let the block reach tier T1 despite every other item being genuinely
+    met."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    evidence = {str(i): drc_path for i in range(2, 11)}  # 2-10, never 1
+    evidence["4"] = lvs_path
+
+    result = build_tier_report(_manifest(evidence=evidence))
+
+    item_1 = next(item for item in result["items"] if item["id"] == 1)
+    assert item_1["status"] == "unmet"
+    assert item_1["reason"] == "no_evidence"
+    assert item_1["citation"] is None
+
+    # Every other T1 item is genuinely met, with a real citation.
+    other_t1_items = [
+        item for item in result["items"] if item["tier"] == "T1" and item["id"] != 1
+    ]
+    assert other_t1_items
+    assert all(item["status"] == "met" for item in other_t1_items)
+    assert all(item["citation"] is not None for item in other_t1_items)
+
+    # The skipped item is exactly what stops the tier from being T1 -- a
+    # skipped check must never silently pass through as "assumed met".
+    assert result["t1_met_count"] == 9
+    assert result["t1_item_count"] == 10
+    assert result["tier"] is None
 
 
 def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
@@ -867,6 +972,42 @@ def test_cli_manifest_text_format_colors_met_items_green(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "\033[32m" in out  # met items render green
     assert "MET" in out
+
+
+def test_cli_manifest_json_output_distinguishes_skipped_from_failed_check(
+    tmp_path, capsys
+):
+    """AC: JSON output makes the missing-evidence case unambiguous (distinct
+    from a check that ran and failed)."""
+    drc_violations_path = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": drc_violations_path}),  # item 4 deliberately skipped
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 3
+    items_by_id = {item["id"]: item for item in out["items"]}
+    assert items_by_id[3]["status"] == "unmet"
+    assert items_by_id[3]["reason"] == "check_failed"
+    assert items_by_id[4]["status"] == "unmet"
+    assert items_by_id[4]["reason"] == "no_evidence"
+    assert items_by_id[3]["reason"] != items_by_id[4]["reason"]
+
+
+def test_cli_manifest_text_format_shows_reason_for_unmet_items_in_red(tmp_path, capsys):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert "reason: no_evidence" in out
+    # The reason line itself is rendered red, not just the UNMET marker --
+    # a skipped check must read as loudly as a failed one, not blend in.
+    assert "\033[31mreason: no_evidence\033[0m" in out
 
 
 def test_cli_manifest_and_files_together_is_an_error(tmp_path, capsys):
