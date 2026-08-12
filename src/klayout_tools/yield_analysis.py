@@ -191,6 +191,73 @@ def _analytic_cross_check_from(
     return out
 
 
+#: Which fields each `sampling.strategy` accepts, mirroring
+#: `native/yield/src/contract.rs`'s `SamplingRequest` variants (issue #907,
+#: Phase 2b of the statistical/yield epic #710).
+_SAMPLING_STRATEGY_FIELDS = {
+    "plain_random": set(),
+    "latin_hypercube": {"replicates"},
+    "importance": {"weights"},
+}
+
+
+def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
+    """Normalise one measurement's ``sampling`` object (issue #907's
+    variance-reduction sampling strategies), or ``None`` when absent -- in
+    which case the native core treats it as Phase 1's plain random Monte
+    Carlo, unaffected by any of this.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise YieldError(f"{where}: measurement '{name}' has a non-object sampling")
+    strategy = raw.get("strategy")
+    if strategy not in _SAMPLING_STRATEGY_FIELDS:
+        raise YieldError(
+            f"{where}: measurement '{name}' sampling.strategy must be one of "
+            f"{sorted(_SAMPLING_STRATEGY_FIELDS)} (got {strategy!r})"
+        )
+    allowed = _SAMPLING_STRATEGY_FIELDS[strategy]
+    for key in raw:
+        if key not in {"strategy", *allowed}:
+            raise YieldError(
+                f"{where}: measurement '{name}' sampling.{key} is not valid for "
+                f"strategy '{strategy}' (allowed: {sorted(allowed)})"
+            )
+
+    if strategy == "latin_hypercube":
+        replicates = raw.get("replicates")
+        if (
+            isinstance(replicates, bool)
+            or not isinstance(replicates, int)
+            or replicates < 2
+        ):
+            raise YieldError(
+                f"{where}: measurement '{name}' sampling.replicates must be an "
+                f"integer >= 2 (got {replicates!r})"
+            )
+        return {"strategy": strategy, "replicates": replicates}
+
+    if strategy == "importance":
+        raw_weights = raw.get("weights")
+        if not isinstance(raw_weights, list) or not raw_weights:
+            raise YieldError(
+                f"{where}: measurement '{name}' sampling.weights must be a "
+                "non-empty array"
+            )
+        weights: list[float] = []
+        for value in raw_weights:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise YieldError(
+                    f"{where}: measurement '{name}' sampling.weights entries must "
+                    "be numbers"
+                )
+            weights.append(float(value))
+        return {"strategy": strategy, "weights": weights}
+
+    return {"strategy": strategy}
+
+
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a `klt sim` Monte Carlo report into this module's request shape.
 
@@ -266,6 +333,11 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 "analytic_cross_check": _analytic_cross_check_from(
                     entry.get("analytic_cross_check"), name, "sim report"
                 ),
+                # A variance-reduction sampling strategy (issue #907) is
+                # metadata about the measurement's draw, supplied the same
+                # way regardless of input shape -- same as the two blocks
+                # above.
+                "sampling": _sampling_from(entry.get("sampling"), name, "sim report"),
             }
         )
     return out
@@ -317,6 +389,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "analytic_cross_check": _analytic_cross_check_from(
                     entry.get("analytic_cross_check"), name, "sample set"
                 ),
+                "sampling": _sampling_from(entry.get("sampling"), name, "sample set"),
             }
         )
     return out

@@ -118,11 +118,13 @@ For a draw that did not come from `klt sim`:
 | `source_corners` | array\<string\> | Optional; the originating corners the draw was pooled from. |
 | `negative_control` | object | Optional; see "Negative control" below. |
 | `analytic_cross_check` | object | Optional; see "Analytic cross-check" below. |
+| `sampling` | object | Optional; see "Sampling strategies (variance reduction)" below. |
 
-A `klt sim` Monte Carlo report accepts the same two fields on its own
-`measurements[]` rollup entries (alongside `limits`) — a negative control or
-an analytic model is metadata about the measurement, not a corner, so it is
-supplied the same way regardless of which input shape carries the draw.
+A `klt sim` Monte Carlo report accepts the same three fields on its own
+`measurements[]` rollup entries (alongside `limits`) — a negative control, an
+analytic model, or a sampling strategy is metadata about the measurement, not
+a corner, so each is supplied the same way regardless of which input shape
+carries the draw.
 
 ### Spec-limits file (`--limits`)
 
@@ -299,6 +301,88 @@ sigma^2/(2n)`):
 `analytic_cross_check` is `null` when a measurement declares none — there is
 no requirement that every measurement have a closed form to check against;
 only that when one exists, it is checked rather than assumed.
+
+### Sampling strategies (variance reduction)
+
+Phase 2b of epic #710
+([#907](https://github.com/2AMLogic/klayout-tools/issues/907)): plain random
+Monte Carlo needs sample counts that scale badly for a rare-event (high-sigma)
+yield question — brute-forcing a 5-6 sigma tail estimate is impractical for
+most canaries. `sampling` declares which strategy a measurement's `samples`
+were drawn with, as an alternative to Phase 1's plain random Monte Carlo (the
+default when `sampling` is omitted, or stated explicitly as
+`{"strategy": "plain_random"}`):
+
+| `strategy` | Fields | What it buys |
+| --- | --- | --- |
+| `plain_random` | (none) | Phase 1's baseline — every sample is an independent, equally-weighted draw. |
+| `latin_hypercube` | `replicates` (integer, >= 2) | Stratified coverage: `samples` is `replicates` consecutive equal-sized Latin-hypercube designs, in that order. Replication is what makes the design's own variance estimable (McKay, Conover & Beckman 1979) — a single unreplicated LHS draw's within-sample proportion has a genuinely *smaller* true variance than an iid draw the same size (the whole point of stratifying), so scoring it with the plain Clopper-Pearson formula (which assumes iid) would understate what the design earned. |
+| `importance` | `weights` (array\<number\>, one positive finite weight per sample, same order as `samples`) | Rare-event / high-sigma estimation: `samples` are drawn from a biased proposal distribution concentrated in the failure region, and `weights[i]` is the importance weight (`f_target(x_i) / f_proposal(x_i)`) that reweights draw `i` back to the target distribution. |
+
+```json
+"sampling": { "strategy": "latin_hypercube", "replicates": 6 }
+```
+
+```json
+"sampling": { "strategy": "importance", "weights": [0.87, 1.42, "..."] }
+```
+
+A non-`plain_random` strategy adds a **third**, strategy-aware yield estimate
+alongside `yield.empirical`/`yield.normal` (the "Two yield estimates" table
+above is unaffected — the plain estimates are computed exactly the same way
+regardless of `sampling`):
+
+| `sampling.strategy` | `yield.variance_reduced.method` | Point estimate | Interval |
+| --- | --- | --- | --- |
+| `latin_hypercube` | `lhs-replicated` | Mean of each replicate's own empirical pass fraction | Normal approximation from the **across-replicate** spread — `se = stddev(replicate proportions) / sqrt(replicates)` |
+| `importance` | `importance-weighted` | Horvitz-Thompson estimator: `sum(w_i * pass_i) / sum(w_i)` | Normal-approximation delta-method interval on the ratio estimator (the standard sandwich/robust variance for a self-normalized importance-sampling estimator; Hesterberg 1995) |
+
+`null` for `plain_random` — `yield.empirical` already is that estimate, so
+there is nothing to add. Every `variance_reduced` estimate still carries its
+own `confidence_interval` and `n` — the "never a bare point estimate" rule
+applies here exactly as it does everywhere else in this payload.
+
+Each measurement also always carries a `sampling` report (even for
+`plain_random`, so the strategy is never ambiguous by its absence):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `strategy` | string | `"plain_random"` / `"latin_hypercube"` / `"importance"`. |
+| `replicates` | integer \| null | Echoed from the request; `null` unless `strategy == "latin_hypercube"`. |
+| `effective_sample_size` | number \| null | Kish's effective sample size for an importance-weighted draw — `(sum w)^2 / sum(w^2)`, "how many equally-weighted samples this reweighted draw is worth". Equals `n` exactly when every weight is equal, and falls toward `1` as the weight mass concentrates on a few draws. `null` unless `strategy == "importance"`. A campaign whose weights are highly concentrated (`effective_sample_size` under 5% of `n`) is flagged with a warning — the reweighted estimate then has far less statistical power than `n` alone would suggest. |
+
+**The sampling strategy's effect on the sample-size verdict is surfaced
+too**, not just the point estimate: `sample_size.variance_reduced` (`null`
+unless `yield.variance_reduced` exists) is the same *precision* verdict as
+`sample_size.observed_ci_halfwidth`/`required_n`, recomputed from the
+strategy-aware estimate instead of the plain empirical interval:
+
+```json
+"sample_size": {
+  "...": "the Phase 1 fields, unchanged",
+  "variance_reduced": {
+    "observed_ci_halfwidth": 0.0021,
+    "target_ci_halfwidth": 0.01,
+    "verdict": "sufficient"
+  }
+}
+```
+
+**Validated, not just implemented**: `native/yield/src/estimate.rs`'s own
+test suite includes a matched-sample-count comparison against a known
+analytic distribution for each strategy — `latin_hypercube` reaches a
+measurably tighter confidence interval than plain random Monte Carlo at the
+*same* total sample count (so it needs fewer samples than plain MC for the
+same CI width, not just a coincidentally narrower one), and `importance`
+resolves a one-sided 4-sigma tail (`Phi(4) = 0.99996833...`, a fail rate
+~3.17e-5 that a 5000-sample plain-MC run at the same budget essentially never
+observes even once) correctly centered on the analytic answer, using **fewer**
+total samples than that plain-MC run. Both tests build their own sample sets
+with a small, dependency-free, deterministically-seeded PRNG (no external
+`rand` crate, per this crate's "dependency-free numerics" convention) —
+genuinely random draws, not the exact quantile-grid construction Phase 1's
+own tests use, since a variance-reduction claim has to be checked against
+sampling noise, not sidestepped around it.
 
 ## Worked example
 
@@ -530,7 +614,8 @@ item-6 claim for the full ratified spec row.
           "confidence": 0.95,
           "confidence_interval": { "low": 0.9966262637409, "high": 0.9997183082392 },
           "n": 300
-        }
+        },
+        "variance_reduced": null
       },
       "capability": {
         "cp": 1.043500309378121,
@@ -547,10 +632,16 @@ item-6 claim for the full ratified spec row.
         "required_n": 183,
         "required_n_for_target": 368,
         "verdict": "insufficient",
-        "method": "clopper-pearson-zero-failures"
+        "method": "clopper-pearson-zero-failures",
+        "variance_reduced": null
       },
       "negative_control": null,
       "analytic_cross_check": null,
+      "sampling": {
+        "strategy": "plain_random",
+        "replicates": null,
+        "effective_sample_size": null
+      },
       "status": "fail",
       "warnings": ["..."]
     }
@@ -566,7 +657,12 @@ none — see "Negative control" for its populated shape
 `analytic_cross_check`'s (`{"kind", "analytic_mean", "analytic_stddev",
 "empirical_mean", "empirical_stddev",
 "empirical_mean_confidence_interval", "empirical_stddev_confidence_interval",
-"stddev_relative_delta", "mean_delta", "verdict"}`).
+"stddev_relative_delta", "mean_delta", "verdict"}`). `yield.variance_reduced`
+and `sample_size.variance_reduced` are likewise `null` above because the
+worked example declares no `sampling` strategy — see "Sampling strategies
+(variance reduction)" for their populated shapes
+(`{"method", "estimate", "confidence", "confidence_interval", "n"}` and
+`{"observed_ci_halfwidth", "target_ci_halfwidth", "verdict"}` respectively).
 
 ### Top-level fields
 
@@ -594,11 +690,12 @@ none — see "Negative control" for its populated shape
 | `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
 | `distribution` | object | See "Distribution fit" above. |
-| `yield` | object | `empirical` (always present) and `normal` (`null` when the fit is degenerate) — see "Two yield estimates". |
+| `yield` | object | `empirical` (always present), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |
 | `capability` | object | See "Capability" above. |
-| `sample_size` | object | See "Sample-size verdict" above. |
+| `sample_size` | object | See "Sample-size verdict" above; its own `variance_reduced` field is `null` unless `yield.variance_reduced` exists — see "Sampling strategies (variance reduction)". |
 | `negative_control` | object \| null | `null` unless the input declared one — see "Negative control" above. |
 | `analytic_cross_check` | object \| null | `null` unless the input declared one — see "Analytic cross-check" above. |
+| `sampling` | object | Always present, even for the `plain_random` default — see "Sampling strategies (variance reduction)" above. |
 | `status` | string | `"pass"`, `"fail"`, or `"reported"`. |
 | `warnings` | array\<string\> | Per-measurement warnings. |
 
@@ -615,9 +712,13 @@ modified-Lentz continued fraction — the last of which is what makes the
 normal approximation. Each is a published, citable algorithm with its own
 closed-form unit test, so the numbers are checkable rather than trusted.
 
-Later epic phases (campaign orchestration, importance/Latin-hypercube
-sampling for rare-event yield, sensitivity ranking) are the compute-bound
-work this core is positioned for.
+Phase 2b ([#907](https://github.com/2AMLogic/klayout-tools/issues/907)) adds
+the variance-reduction estimators described in "Sampling strategies (variance
+reduction)" above — still dependency-free (no `rand` crate; the crate's own
+test suite ships a small seeded PRNG, test-only, to validate them against
+sampling noise rather than a noise-free quantile grid). Campaign
+orchestration (Phase 2a) and sensitivity ranking (Phase 3) are the remaining
+compute-bound work this core is positioned for.
 
 ## Building the native extension
 
@@ -679,9 +780,15 @@ whole epic:
   pooled into one population, with a warning that this is an envelope rather
   than a sampled distribution. A per-corner breakdown (`klt sim`'s
   `by_corner`) is not yet reproduced here.
-- **No campaign orchestration.** `klt yield` consumes a campaign; it does not
-  drive one. Seed management, adaptive sampling, and importance/Latin-hypercube
-  sampling for rare-event tails are epic #710 Phase 2.
+- **No campaign orchestration, and `klt yield` never draws a sample itself.**
+  It consumes a campaign; it does not drive one. `sampling` (Phase 2b,
+  [#907](https://github.com/2AMLogic/klayout-tools/issues/907)) is metadata
+  about how the caller already drew `samples` — the caller (or a future
+  campaign-orchestration layer, epic #710 Phase 2a) is responsible for
+  actually running a Latin-hypercube design or an importance-sampling
+  proposal and handing the resulting draw (plus, for `importance`, its
+  weights) to `klt yield`. Seed management and adaptive sampling remain
+  Phase 2a's scope.
 - **The negative-control and analytic cross-check are opt-in, not
   mandatory.** Phase 1b ([#817](https://github.com/2AMLogic/klayout-tools/issues/817))
   makes `klt yield` *flag* a campaign that omits a negative control or whose
@@ -710,9 +817,10 @@ was missed" precedent rather than inventing a new number.
   and the report shape this command consumes directly.
 - [#710](https://github.com/2AMLogic/klayout-tools/issues/710) — the parent
   statistical/yield epic ([#817](https://github.com/2AMLogic/klayout-tools/issues/817)
-  delivered the negative control and analytic cross-check above; later
-  phases: campaign orchestration + variance reduction, sensitivity and
-  design centering).
+  delivered the negative control and analytic cross-check above;
+  [#907](https://github.com/2AMLogic/klayout-tools/issues/907) delivered the
+  Latin-hypercube/importance sampling strategies above; remaining phases:
+  campaign orchestration, sensitivity and design centering).
 - [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) — the T1
   statistical-row bar this command produces evidence for.
 - [`docs/json-contract.md`](../json-contract.md) — the shared envelope,

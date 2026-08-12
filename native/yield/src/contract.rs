@@ -75,6 +75,13 @@ pub struct MeasurementRequest {
     /// mean/stddev against (issue #817's analytic cross-check).
     #[serde(default)]
     pub analytic_cross_check: Option<AnalyticCrossCheckRequest>,
+    /// The strategy `samples` were drawn with -- `None` (the default) means
+    /// Phase 1's plain random Monte Carlo, unaffected by any of this. A
+    /// variance-reduction strategy (issue #907, Phase 2b of epic #710) adds a
+    /// second, strategy-aware yield estimate (`yield.variance_reduced`)
+    /// alongside the plain empirical/normal ones.
+    #[serde(default)]
+    pub sampling: Option<SamplingRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +130,51 @@ pub enum AnalyticCrossCheckRequest {
 
 fn default_temperature_k() -> f64 {
     300.0
+}
+
+/// How a measurement's `samples` were drawn -- Phase 2b of the
+/// statistical/yield epic #710 (issue #907). Makes a rare-event (high-sigma)
+/// yield question answerable without brute-forcing millions of plain-random
+/// draws: Latin-hypercube sampling (stratified coverage, replicated so its
+/// own variance is estimable) and importance sampling (a biased proposal
+/// distribution, reweighted back to the target) are both selectable
+/// alternatives to Phase 1's plain random Monte Carlo.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "strategy", rename_all = "snake_case")]
+pub enum SamplingRequest {
+    /// Phase 1's plain random Monte Carlo -- every sample is an independent,
+    /// equally-weighted draw. Stating it explicitly (rather than just
+    /// omitting `sampling`) lets a caller record its provenance even though
+    /// it changes nothing about the analysis.
+    PlainRandom,
+    /// Latin-hypercube sampling, run as `replicates` independent LHS designs
+    /// of `samples.len() / replicates` points each -- `samples` must be
+    /// `replicates` consecutive equal-sized blocks, each one full LHS design,
+    /// in that order. Replication (McKay, Conover & Beckman 1979) is what
+    /// makes the design's own variance estimable at all: a single
+    /// unreplicated LHS draw's within-sample proportion has a *smaller* true
+    /// variance than an iid draw of the same size (that is the whole point of
+    /// stratifying), so treating it as iid (the plain Clopper-Pearson
+    /// formula) would silently overstate its uncertainty rather than
+    /// understate it -- still honest, but not the tighter, correctly-sized
+    /// interval the strategy earns. The mean and spread *across* replicate
+    /// proportions is what actually captures that.
+    LatinHypercube {
+        /// Number of independent LHS designs `samples` is divided into; must
+        /// be at least 2 (a single replicate has no across-replicate spread
+        /// to estimate a variance from -- the same "never a bare point
+        /// estimate" floor Phase 1 applies to the plain sample count).
+        replicates: u32,
+    },
+    /// Importance sampling: `samples` were drawn from a biased proposal
+    /// distribution (e.g. concentrated in the failure region for a
+    /// rare-event tail), and `weights[i]` is the importance weight
+    /// `f_target(x_i) / f_proposal(x_i)` that reweights draw `i` back to the
+    /// target distribution -- same length and order as `samples`.
+    Importance {
+        /// One positive, finite weight per sample, same order as `samples`.
+        weights: Vec<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -181,8 +233,31 @@ pub struct MeasurementReport {
     pub negative_control: Option<NegativeControlReport>,
     /// `null` when this measurement declared no `analytic_cross_check`.
     pub analytic_cross_check: Option<AnalyticCrossCheckReport>,
+    /// The sampling strategy this measurement's `yield.variance_reduced`
+    /// (if any) was computed from -- always present, even for
+    /// `"plain_random"` (issue #907, Phase 2b of epic #710).
+    pub sampling: SamplingReport,
     pub status: String,
     pub warnings: Vec<String>,
+}
+
+/// Echoes which sampling strategy produced `samples`, plus the numbers a
+/// variance-reduction strategy needs beyond `n` itself (issue #907, Phase 2b
+/// of epic #710).
+#[derive(Debug, Serialize)]
+pub struct SamplingReport {
+    /// `"plain_random"` / `"latin_hypercube"` / `"importance"`.
+    pub strategy: String,
+    /// Number of replicate LHS designs `samples` was divided into. `null`
+    /// unless `strategy == "latin_hypercube"`.
+    pub replicates: Option<u32>,
+    /// Kish's effective sample size for an importance-weighted draw --
+    /// `(sum w)^2 / sum(w^2)` -- "how many equally-weighted samples this
+    /// reweighted draw is worth". Equals `n` exactly when every weight is
+    /// equal and falls toward `1` as the weight mass concentrates on a few
+    /// draws. `null` unless `strategy == "importance"`, where every sample
+    /// already carries equal weight and this number adds nothing.
+    pub effective_sample_size: Option<f64>,
 }
 
 /// The negative control's own yield estimate against the nominal
@@ -271,6 +346,12 @@ pub struct YieldBlock {
     /// with a delta-method interval. `null` when the fit is degenerate
     /// (zero sample spread).
     pub normal: Option<Estimate>,
+    /// The strategy-aware estimate: `"lhs-replicated"` (across-replicate mean
+    /// and spread) or `"importance-weighted"` (the Horvitz-Thompson
+    /// estimator, reweighted back to the target distribution). `null` for
+    /// `"plain_random"` -- `empirical` above already is that estimate, so
+    /// there is nothing to add (issue #907, Phase 2b of epic #710).
+    pub variance_reduced: Option<Estimate>,
 }
 
 /// **Every** yield number this crate emits is one of these -- there is no
@@ -338,4 +419,25 @@ pub struct SampleSize {
     /// How `required_n` was derived, so the number is checkable:
     /// `"clopper-pearson-zero-failures"` or `"normal-approximation"`.
     pub method: String,
+    /// The same precision verdict as `observed_ci_halfwidth`/`required_n`
+    /// above, but computed from `yield.variance_reduced` instead of the
+    /// plain Clopper-Pearson empirical interval. `null` unless this
+    /// measurement's `sampling.strategy` produced a `variance_reduced`
+    /// estimate -- this is how a variance-reduction strategy's actual effect
+    /// on the sample-size verdict is surfaced, not just its point estimate
+    /// (issue #907, Phase 2b of epic #710).
+    pub variance_reduced: Option<VarianceReducedSampleSize>,
+}
+
+/// The precision half of the sample-size verdict, recomputed from the
+/// strategy-aware `yield.variance_reduced` estimate. There is no
+/// `required_n`/`required_n_for_target` analog here in this phase -- only
+/// the observed-width verdict, which is what a variance-reduction strategy's
+/// convergence claim is checked against.
+#[derive(Debug, Serialize)]
+pub struct VarianceReducedSampleSize {
+    pub observed_ci_halfwidth: f64,
+    pub target_ci_halfwidth: f64,
+    /// `"sufficient"` / `"insufficient"` -- precision only.
+    pub verdict: String,
 }

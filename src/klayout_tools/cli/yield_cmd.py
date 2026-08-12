@@ -103,6 +103,25 @@ def _print_text(report: dict) -> None:
                 f"{norm['confidence_interval']['high']:.6f}] "
                 f"at {norm['confidence']:.0%}, N={norm['n']}"
             )
+        vr = m["yield"]["variance_reduced"]
+        if vr is not None:
+            sampling = m["sampling"]
+            extra = (
+                f" replicates={sampling['replicates']}"
+                if sampling.get("replicates") is not None
+                else (
+                    f" effective_n={sampling['effective_sample_size']:.1f}"
+                    if sampling.get("effective_sample_size") is not None
+                    else ""
+                )
+            )
+            print(
+                f"  yield ({sampling['strategy']}, {vr['method']}): "
+                f"{vr['estimate']:.6f} "
+                f"[{vr['confidence_interval']['low']:.6f}, "
+                f"{vr['confidence_interval']['high']:.6f}] "
+                f"at {vr['confidence']:.0%}, N={vr['n']}{extra}"
+            )
         cap = m["capability"]
         cpk_ci = cap["cpk_confidence_interval"]
         ci_text = (
@@ -131,6 +150,14 @@ def _print_text(report: dict) -> None:
                     if needed is not None
                     else "unreachable at the observed pass rate"
                 )
+            )
+        vr_ss = ss.get("variance_reduced")
+        if vr_ss is not None:
+            print(
+                f"    variance-reduced ({m['sampling']['strategy']}): "
+                f"{vr_ss['verdict']} "
+                f"(observed +/-{vr_ss['observed_ci_halfwidth']:.6f} vs target "
+                f"+/-{vr_ss['target_ci_halfwidth']})"
             )
         nc = m.get("negative_control")
         if nc is None:
