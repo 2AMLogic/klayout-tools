@@ -42,6 +42,7 @@ from . import (
     socket_check_cmd,
     stats_cmd,
     synthesize_cmd,
+    techmap_cmd,
     trajectory_cmd,
     yield_campaign_cmd,
     yield_cmd,
@@ -980,6 +981,56 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
+
+    techmap_parser = subparsers.add_parser(
+        "techmap",
+        help="Liberty-driven technology mapping of a generic netlist (native Rust)",
+        description=(
+            "Map a `klt.synth.generic-netlist/1` (a small, technology-"
+            "independent 10-primitive gate netlist -- see "
+            "docs/design/synth-techmap-stage-contract.md section 2) onto a "
+            "resolved standard-cell Liberty via `native/techmap`'s own "
+            "Liberty-driven cell selection (issue #874), reporting instance "
+            "count, area, and cell-type breakdown -- Phase 2 of Epic #704. "
+            "Invokes the standalone `klt-techmap` binary as a subprocess "
+            "(built via `cargo build --release` inside native/techmap/); "
+            "never re-implements the mapping algorithm in Python. Takes a "
+            "request-document path (like `klt lvs`/`klt sim`/`klt "
+            "synthesize`), not positional netlist file args. "
+            "`--verify-equivalence` optionally gates the mapped netlist "
+            "through `klt equiv` against the pre-mapping generic netlist "
+            "before returning -- a hard failure on a non-equivalent "
+            "verdict, never a silent warning (#704 Phase 2c, issue #875)."
+        ),
+    )
+    techmap_parser.add_argument(
+        "request", help="path to a klt.synth.techmap.request/1 JSON file"
+    )
+    techmap_parser.add_argument(
+        "--verify-equivalence",
+        dest="verify_equivalence",
+        action="store_true",
+        help=(
+            "gate the mapped netlist through `klt equiv` against the "
+            "pre-mapping generic netlist before returning -- a non-"
+            "equivalent or inconclusive verdict is a hard failure (exit "
+            "1), never a silent warning. Combinational designs only (klt "
+            "equiv's own Phase 0 scope, #707); off by default."
+        ),
+    )
+    techmap_parser.add_argument(
+        "--equiv-timeout-s",
+        dest="equiv_timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "overall wall-clock timeout in seconds for the `--verify-"
+            "equivalence` proof (default: klt equiv's own 60s default); "
+            "has no effect unless `--verify-equivalence` is given."
+        ),
+    )
+    _add_format_arg(techmap_parser)
+    techmap_parser.set_defaults(func=techmap_cmd.run)
 
     equiv_parser = subparsers.add_parser(
         "equiv",

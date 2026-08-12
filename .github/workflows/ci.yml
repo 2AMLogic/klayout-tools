@@ -292,6 +292,45 @@ jobs:
             exit 1
           }
 
+  native-techmap:
+    name: Native engines (Rust) — technology mapping
+    # `native/techmap/` (issue #874, Epic #704 Phase 2b) is a plain `cargo
+    # build`/`cargo test` binary crate -- no `pyo3` extension, following
+    # `native/statime/`'s/`native/legalize/`'s own precedent, so this job
+    # only needs the Rust-only checks (fmt/clippy/test); the real end-to-end
+    # exercise of the compiled `klt-techmap` binary (issue #875's
+    # `--verify-equivalence` gate) happens in the `test` job below, which
+    # already provisions a real `yosys`/`iverilog` `klt equiv` needs.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/techmap
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo --version
+        run: cargo --version && rustc --version
+
+      - name: Cache cargo registry + build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/techmap/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/techmap/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        # GATES, like the ruff steps above -- do not add continue-on-error.
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -444,6 +483,29 @@ jobs:
 
       - name: Verify Verilator runs headlessly
         run: verilator --version
+
+      - name: Cache native/techmap cargo build (debug)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/techmap/target
+          key: cargo-techmap-debug-${{ runner.os }}-${{ hashFiles('native/techmap/Cargo.lock') }}
+          restore-keys: cargo-techmap-debug-${{ runner.os }}-
+
+      - name: Build klt-techmap (native/techmap, debug profile)
+        # tests/test_techmap_equiv_gate.py (issue #875) invokes the real
+        # `klt-techmap` binary via subprocess -- built here (debug profile,
+        # functional correctness only, no lto) so the equivalence-gate
+        # tests run for real rather than skip. ubuntu-latest images ship a
+        # rustup-managed stable Rust already (see the `native` job's own
+        # comment above), so no toolchain-install step is needed. Rebuilt
+        # once per matrix entry (this job has no dedicated single-crate
+        # job the way `native-mom`/`native-congestion`/`native-yield` do,
+        # since `klt-techmap` has no `pyo3` extension surface to build);
+        # the cache step above keeps a warm-cache rebuild fast.
+        run: cargo build --manifest-path native/techmap/Cargo.toml
 
       - name: pytest
         # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`

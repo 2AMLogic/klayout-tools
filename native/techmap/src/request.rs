@@ -38,4 +38,11 @@ pub struct Response {
     pub instance_counts_by_type: BTreeMap<String, usize>,
     pub timing: Option<Timing>,
     pub mapped_netlist_path: String,
+    /// **Additive** field, issue #875 -- the pre-mapping generic netlist
+    /// (`request.generic_netlist`) re-emitted as self-contained behavioral
+    /// Verilog (`verilog::write_generic`), for use as `klt equiv`'s `gold`
+    /// side against `mapped_netlist_path`'s own `gate` side. Per
+    /// `docs/json-contract.md`'s convention this does not bump
+    /// `schema_version` -- no existing field changed shape or meaning.
+    pub generic_netlist_verilog_path: String,
 }

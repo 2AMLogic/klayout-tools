@@ -12,10 +12,12 @@ publish = false
 # `native/mom/`'s production shape. Per
 # `docs/design/synth-techmap-stage-contract.md` section 7 ("Where it
 # lives"): this issue creates the crate and its own standalone CLI for
-# corpus benchmarking; wiring it into `klt synthesize`/a future `klt synth`
-# and gating it with `klt equiv` is a follow-on issue's job (#875), which
-# is also where a `pyo3` extension-module shape (`native/mom/Cargo.toml`'s
-# own comments document that shape) would land if warranted.
+# corpus benchmarking; #875 (closed) wired the `klt equiv` acceptance gate
+# in from the Python side (`klayout_tools.techmap.run_techmap`, invoking
+# this binary as a subprocess) without changing this shape -- folding this
+# crate into `klt synthesize`/a future `klt synth`, and a `pyo3`
+# extension-module shape (`native/mom/Cargo.toml`'s own comments document
+# that shape), remain open, deferred until a "Go" verdict warrants them.
 
 [[bin]]
 name = "klt-techmap"
