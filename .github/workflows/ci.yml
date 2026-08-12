@@ -131,6 +131,35 @@ jobs:
             exit 1
           }
 
+      - name: Install the external NEC2++ oracle and run the cross-validation test
+        # tests/test_mom_cross_validation.py (issue #895, Phase 2c) checks
+        # klt mom's full-wave S-parameters (#893/#894) against PyNEC
+        # (NEC2++), a genuinely external, independently-implemented
+        # Method-of-Moments solver -- see
+        # docs/design/mom-cross-validation.md for the full methodology and
+        # why PyNEC (license-handling: it is never imported by this repo's
+        # own code, only by scripts/mom_nec_reference.py, always invoked as
+        # its own subprocess). `--extra mom-cross-validation` requires
+        # Python >=3.11 (this job's runner default satisfies that; see that
+        # extra's own pyproject.toml comment for the marker), so this step
+        # runs after the klt_mom_native checks above rather than folded into
+        # the same `uv sync` line, keeping the two dependency surfaces easy
+        # to attribute independently on a failure.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group mom --extra mom-cross-validation
+          uv run --frozen --extra dev --group mom --extra mom-cross-validation \
+            pytest tests/test_mom_cross_validation.py -v --capture=tee-sys
+
+      - name: Assert the cross-validation test actually ran (no silent skip)
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group mom --extra mom-cross-validation \
+            python -c "import PyNEC" || {
+            echo "::error::PyNEC did not install -- tests/test_mom_cross_validation.py would have skipped"
+            exit 1
+          }
+
   native-congestion:
     name: Native engines (Rust) — congestion pre-check
     # `native/congestion/` (issue #785, Epic #700 Phase 1 §3.6) is this

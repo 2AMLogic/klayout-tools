@@ -895,14 +895,21 @@ analogous cap on the full-wave solve's axial mesh.
   the full-wave frequency sweep documented above (Phase 2a).
 - [#894](https://github.com/2AMLogic/klayout-tools/issues/894) — delivered
   the port definition + de-embedding documented above (Phase 2b).
-  [#895](https://github.com/2AMLogic/klayout-tools/issues/895) (Phase 2c,
-  cross-validation against an external MoM/FEM solver) is the next planned
-  follow-on.
+- [#895](https://github.com/2AMLogic/klayout-tools/issues/895) — delivered
+  Phase 2c: cross-validation of the full-wave S-parameters above against an
+  external MoM solver (NEC2++) on a shared benchmark — see
+  [`docs/design/mom-cross-validation.md`](../design/mom-cross-validation.md).
 - [`docs/design/mom-validation.md`](../design/mom-validation.md) — closed-form
   validation and convergence-under-refinement for both the capacitance solver
   ([#719](https://github.com/2AMLogic/klayout-tools/issues/719)) and the PEEC
   inductance/resistance solve (#797): the analytic oracles, the measured
   agreement, and the stated tolerances.
+- [`docs/design/mom-cross-validation.md`](../design/mom-cross-validation.md) —
+  cross-validation of the full-wave S-parameters (#893/#894) against an
+  **external** MoM solver (NEC2++, via `PyNEC`) on a shared benchmark (#895,
+  Phase 2c): why NEC2++, the license-handling (subprocess-only, never
+  embedded — GPL-3.0), the benchmark, the tolerance/metric definitions, and
+  the measured agreement.
 - [`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md) —
   the iterative (preconditioned Conjugate Gradient) solve step
   ([#799](https://github.com/2AMLogic/klayout-tools/issues/799)): why CG over
@@ -917,3 +924,8 @@ analogous cap on the full-wave solve's axial mesh.
   definition + de-embedding (#894): the matched-line S-parameter closed
   form, and the de-embedding-recovers-the-DUT-alone check, with the same
   measured-agreement/tolerance convention as its full-wave sibling above.
+- `tests/test_mom_cross_validation.py` — cross-validation of the full-wave
+  S-parameters (#893/#894) against the external NEC2++ MoM oracle (#895,
+  Phase 2c), backed by `scripts/mom_nec_reference.py`'s subprocess-invoked
+  reference solve — see `docs/design/mom-cross-validation.md` for the full
+  methodology.
