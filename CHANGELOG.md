@@ -440,6 +440,28 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — New verb `klt power` extracts a routed layout's named
+  power/ground nets into a resistive network (nodes + segment resistances) —
+  issue #844, Phase 1a of the power/IR-drop + EM signoff epic #712. A JSON
+  spec declares `power_nets` (names to extract), a `stackup` (metal roles:
+  drawing layer, optional pin/label layer, sheet resistance), and optional
+  `vias` (bridging two stackup roles, with a resistance). Connectivity is
+  traced with `klayout.db.LayoutToNetlist` used purely for wire/via
+  connectivity (no device recognition) — the same API `klt extract` uses
+  internally, scoped down to only the declared power-grid layers. A named
+  net commonly resolves to several electrically disconnected **islands**
+  (reported separately, each its own `island_id`) rather than one connected
+  mesh: `klt place-and-route` deliberately runs no PDN generation, so a
+  routed design's power/ground geometry is whatever the standard-cell rows
+  themselves contribute. Validated against the real, OpenROAD-produced
+  `gcd` corpus fixture (`tests/corpus/place_and_route/gcd.gds.gz`): 88
+  separate `VPWR` islands and 105 separate `VGND` islands, 386 nodes, 193
+  edges, zero warnings. This phase delivers the `klt power` interface and
+  the resistive-network extraction only — the static IR-drop solve (#845)
+  and the per-net EM verdict (#846) are later phases that add response
+  fields additively (no `schema_version` bump needed for either). See
+  `docs/cli/power.md`.
+
 - 2026-08-12 — `klt extract --parasitics --mom-net <net>` cross-checks (and
   replaces) one net's lumped-RC ground capacitance with `klt mom`'s
   Method-of-Moments field solver (#798, Phase 1b of the MoM epic #701 —
