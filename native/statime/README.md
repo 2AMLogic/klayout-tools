@@ -1,11 +1,22 @@
-# `klt-statime-native` — Epic #704 Phase 1c spike (issue #809)
+# `klt-statime-native` — Epic #704 Phase 1c spike (issue #809), now integrated (issue #925)
 
 **Verdict: Go**, on both halves of this issue's own acceptance criteria —
 accuracy against OpenSTA, and a concrete latency advantage over wrapping it
 that requires no new engineering — measured on a 3-design corpus slice,
-documented below. This crate stays a spike artifact (not wired into `klt
-synthesize`) until a follow-on issue does that integration; see "Not in
-scope" at the end.
+documented below.
+
+**Status update (issue #925, Epic #704 Phase 3):** the follow-on integration
+this document's "Not in scope" section deferred has landed. This crate is no
+longer a spike artifact: it now also builds as a `pyo3`/`maturin` extension
+module (`klt_statime_native`, exactly the shape sketched in "Crate layout"
+below) and backs `klt synthesize`'s additive `sta` response field via
+`src/klayout_tools/sta.py`. The standalone `klt-statime` CLI binary is
+unchanged and still builds from the same crate. **Everything measured and
+documented below — the accuracy table, the performance table, and every
+entry in "Known simplifications" — still describes the engine exactly as
+integrated; none of those caveats were resolved by the integration**, and
+`docs/cli/synthesize.md`'s `sta` section restates them for callers who never
+read this file.
 
 **Correction (during PR review, same session):** an earlier draft of this
 document reported a "~30–40×" native advantage and "still ~1.5–2× faster"
@@ -259,6 +270,19 @@ on a dependency-footprint claim that does not hold up.
    follow-on `pyo3` integration issue should measure this directly before
    leaning further on it.
 
+**None of the six above were resolved by issue #925's integration** — it
+wired this engine into `klt synthesize` unchanged, deliberately: the
+integration issue's own scope was the wiring, not the numerics. In
+particular #2 is the one a `klt synthesize` caller feels directly, since
+`sta`'s boundary condition is the same uniform, SDC-free 0.05 ns / 0.03 pF
+pair used for the accuracy table above rather than anything derived from the
+request's `constraints.clock_period_ns` — see `docs/cli/synthesize.md`'s
+`sta` section. #6 likewise remains unmeasured: issue #925 chose the
+`pyo3` boundary (over a subprocess call to the `klt-statime` binary) so the
+in-process regime *exists* for #926's restructuring loop to exploit, but did
+not benchmark it, so the published 1.5–2.1× cold-regime number is still the
+only measured performance claim this crate makes.
+
 ## Crate layout, the Python↔Rust boundary, and the CI/wheel story
 
 The issue asks this be documented explicitly, since paying this cost was
@@ -279,32 +303,33 @@ zero decision-making overhead, just the numerics.
 
 ```
 native/statime/
-├── Cargo.toml         # klt-statime-native — plain [[bin]] + [lib], no pyo3 (see below)
+├── Cargo.toml         # klt-statime-native — [[bin]] + cdylib/rlib [lib] + pyo3 (issue #925)
 ├── Cargo.lock
-├── README.md           # this file
+├── pyproject.toml      # maturin build backend for the klt_statime_native extension (issue #925)
+├── README.md            # this file
 └── src/
-    ├── lib.rs           # public module tree
-    ├── liberty.rs        # .lib tokenizer/parser (825 lines incl. tests)
-    ├── netlist.rs         # Yosys write_verilog -noattr parser (367 lines incl. tests)
-    ├── nldm.rs             # bilinear interpolation + extrapolation (130 lines incl. tests)
-    ├── sta.rs               # timing graph + rise/fall-aware propagation (537 lines incl. tests)
+    ├── lib.rs            # public module tree + the #[pyfunction] critical_path_json boundary
+    ├── liberty.rs         # .lib tokenizer/parser (825 lines incl. tests)
+    ├── netlist.rs          # Yosys write_verilog -noattr parser (367 lines incl. tests)
+    ├── nldm.rs              # bilinear interpolation + extrapolation (130 lines incl. tests)
+    ├── sta.rs                # timing graph + rise/fall-aware propagation (537 lines incl. tests)
     └── main.rs                # `klt-statime critical-path` CLI
 ```
-2,029 lines total including unit tests (11 tests, all in-module — no
+2,029 lines total including unit tests (12 tests, all in-module — no
 integration-test harness needed yet). Dependencies: `serde` +
 `serde_json` only — no numerics crate (`nalgebra`, the one `native/mom/`
 needs) and no pyo3, so this is a lighter build than either existing crate.
 `cargo build --release` from clean: ~6–11 s (measured, this session).
 
-**Deliberately a plain `cargo build`/`cargo test` binary crate for this
-spike** — no `pyo3`/`maturin` wiring, following `native/legalize/`'s
+**Issue #809 deliberately shipped this as a plain `cargo build`/`cargo test`
+binary crate** — no `pyo3`/`maturin` wiring, following `native/legalize/`'s
 precedent (issue #784) rather than `native/mom/`'s production shape, and
-for the identical stated reason: issue #809 is explicitly go/no-go, and
+for the identical stated reason: issue #809 was explicitly go/no-go, and
 adding the production-integration surface before the verdict was known
 would have spent real maintenance cost on a result that might have been
-"No-go." Since the verdict *is* "Go," the natural next step (a **separate**
-follow-on issue, not this one — see "Not in scope") is exactly the
-`native/mom/Cargo.toml` shape already proven in this repo:
+"No-go." Since the verdict *is* "Go," **issue #925 took exactly the next
+step sketched here** — the `native/mom/Cargo.toml` shape already proven in
+this repo, implemented as described below rather than merely proposed:
 
 - `[lib] crate-type = ["cdylib", "rlib"]` (the `rlib` half is why `cargo
   test` keeps working unmodified — a `cdylib`-only crate can't link as a
@@ -314,46 +339,62 @@ follow-on issue, not this one — see "Not in scope") is exactly the
   `cargo test`'s own linking against libpython) — instead a sibling
   `pyproject.toml`'s `[tool.maturin] features = ["pyo3/extension-module"]`
   turns it on only for the `maturin build`/`develop` path.
-- **The Python↔Rust boundary itself**, mirrored exactly from
+- **The Python↔Rust boundary itself**, mirrored from
   `native/mom/src/lib.rs`'s own `solve_mom_json`: a single `#[pyfunction]`
-  taking a JSON-string request and returning a JSON-string response
-  (`PyResult<String>`, errors mapped to `PyValueError`) — e.g. a
-  `critical_path_json(netlist_v: &str, liberty_lib: &str, top: &str,
-  input_transition_ns: f64, output_load_pf: f64) -> PyResult<String>`
-  wrapping this crate's existing `sta::analyze` and serialising its
-  existing `StaResult`. The boundary stays a plain data contract — no
-  bespoke object graph crosses the FFI boundary, consistent with every
-  other `klt` verb being JSON-contracted end to end
+  returning a JSON-string response (`PyResult<String>`, errors mapped to
+  `PyValueError`) — `critical_path_json(netlist_path: &str, liberty_path:
+  &str, top: &str, input_transition_ns: f64, output_load_pf: f64) ->
+  PyResult<String>`, wrapping this crate's existing `sta::analyze` and
+  serialising its existing `StaResult`. (One deviation from the sketch: the
+  two file arguments are *paths*, not file contents — the liberty is ~13 MB
+  and `klt synthesize` already has both files on disk, so reading them in
+  Rust avoids a pointless copy across the FFI boundary.) The boundary stays
+  a plain data contract — no bespoke object graph crosses it, consistent
+  with every other `klt` verb being JSON-contracted end to end
   (`docs/json-contract.md`). This crate's `StaResult`/`PathReport` types
-  already derive `serde::Serialize`, so no new serialisation code would be
-  needed for that binding — only the `#[pyfunction]`/`#[pymodule]`
-  wrapper itself (`native/mom/src/lib.rs` is ~40 lines of that wrapper
-  code for comparison).
+  already derive `serde::Serialize`, so no new serialisation code was
+  needed — only the `#[pyfunction]`/`#[pymodule]` wrapper itself.
 
-**CI/wheel story**: `native/legalize/` (the precedent this crate follows)
-has **zero CI wiring** today — confirmed by grep against `.github/
-workflows/ci.yml`, which has no `legalize` job. This crate follows the
-same posture deliberately, for the same reason (a spike crate's tests
-don't need to gate every PR in the repo before its own verdict is known).
-`native/mom/` is the CI template a "Go" follow-on would copy: `ci.yml`'s
-`native:` job (lines ~48–100) is ~50 lines — no Rust toolchain install
-step needed (`ubuntu-latest` GitHub runners ship a rustup-managed stable
-Rust already), a `~/.cargo/registry` + `native/<crate>/target` cache keyed
-on `Cargo.lock`, then `cargo fmt --check` / `cargo clippy --all-targets --
--D warnings` / `cargo test` as gating steps, followed by a `maturin`-driven
-build + install of the extension and a real end-to-end `klt <verb>` run
-against it. Adding this crate's own job is a ~15-line copy of that
-existing block (swap `native/mom` for `native/statime`, `klt mom` for the
-verb this engine would eventually back) — a bounded, already-proven cost,
-not an open question.
+  **Plus one thing the sketch did not anticipate**: `liberty.rs`/
+  `netlist.rs` are hand-written recursive-descent parsers that `panic!` on
+  unexpected input (fine for the CLI binary, where a panic just exits
+  nonzero), but a panic crossing into Python surfaces as an opaque
+  `pyo3_runtime.PanicException` that a plain `except ValueError` will not
+  catch — which would turn `klt synthesize`'s deliberately best-effort
+  `sta` stage into a hard crash on a malformed input. `critical_path_json`
+  therefore wraps the whole analysis in `catch_unwind` and re-raises any
+  panic as the same `ValueError` every other failure mode already raises.
+
+**CI/wheel story**: `ci.yml` grew a `native-statime` job with issue #925 —
+the one-job-per-native-engine convention `native-mom`/`native-congestion`/
+`native-yield` already set. No Rust toolchain install step is needed
+(`ubuntu-latest` GitHub runners ship a rustup-managed stable Rust already);
+the job caches `~/.cargo/registry` + `native/statime/target` keyed on
+`Cargo.lock`, runs `cargo fmt --check` / `cargo clippy --all-targets -- -D
+warnings` / `cargo test` as gating steps, then `uv sync --group statime`
+(which drives `maturin` to compile the extension via `pyproject.toml`'s
+`[tool.uv.sources]`) and runs the Python-side tests against the real
+extension, asserting `import klt_statime_native` succeeds so a silent skip
+can never be the only thing CI sees. The corpus-accuracy comparison
+(`tests/test_sta_corpus.py`) still skips in CI, since it needs a real ~13 MB
+sky130 liberty CI does not provision — same posture as
+`tests/test_synthesize.py`'s own real-PDK tier.
 
 ## Running it yourself
 
 ```bash
 cd native/statime
-cargo test              # 11 unit tests, no PDK/OpenROAD/Docker required
+cargo test              # 12 unit tests, no PDK/OpenROAD/Docker required
 cargo build --release
 uv run python3 ../../tests/corpus/statime/compare.py   # the table above
+```
+
+Through the **integrated** path `klt synthesize` actually uses (issue #925) —
+the same comparison, via the `pyo3` extension rather than the CLI binary:
+
+```bash
+uv sync --extra dev --group statime      # maturin-builds klt_statime_native
+uv run --extra dev --group statime pytest tests/test_sta_corpus.py -v
 ```
 
 Regenerating the checked-in netlist fixtures themselves needs real Yosys +
@@ -363,12 +404,20 @@ regenerating the OpenSTA oracle snapshot additionally needs Docker + the
 is required to reproduce the comparison above, which reads the checked-in
 snapshot.
 
-## Not in scope (per the issue)
+## Not in scope (per issue #809; updated for issue #925)
 
 Native elaboration, logic optimization, or technology mapping (Epic #704
-Phases 1–2 proper). Wiring this engine into `klt synthesize`'s response
-contract — a separate follow-on issue, now that this spike says "Go";
-issue #807 fills the `timing` field in the meantime with a caveated ABC
-`stime` estimate (§3.3 of the survey). The `pyo3`/`maturin` production
-integration sketched above is likewise a separate issue's scope, not this
-one's.
+Phases 1–2 proper) remain out of scope for this crate.
+
+**Resolved since:** the two items issue #809 deferred here — wiring this
+engine into `klt synthesize`'s response contract, and the `pyo3`/`maturin`
+production integration sketched above — are both done as of issue #925
+(Epic #704 Phase 3). `klt synthesize` reports this engine's critical path in
+its additive `sta` field; the existing `timing` field still carries issue
+#807's caveated ABC `stime` estimate, unchanged and unreplaced (the two are
+different numbers computed different ways — see `docs/cli/synthesize.md`).
+
+**Still deferred:** timing-*driven* restructuring — feeding this report back
+into the mapper to optimize against it — is issue #926's scope, not this
+crate's, and none of "Known simplifications" above is resolved by either
+issue.

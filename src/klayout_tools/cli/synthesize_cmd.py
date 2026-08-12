@@ -63,6 +63,21 @@ def _print_text(report: dict) -> None:
             f"wire_load: {timing['wire_load'] or 'none'} -- pre-layout estimate)"
         )
 
+    sta = report["sta"]
+    if sta:
+        worst = sta["worst_path"]
+        print(
+            f"sta.worst_path: {worst['delay_ns']:.4f} ns "
+            f"({worst['startpoint']} -> {worst['endpoint']}, source: "
+            f"{sta['source']})"
+        )
+        r2r = sta.get("worst_reg_to_reg_path")
+        if r2r:
+            print(
+                f"sta.worst_reg_to_reg_path: {r2r['delay_ns']:.4f} ns "
+                f"({r2r['startpoint']} -> {r2r['endpoint']})"
+            )
+
     instance_counts_by_type = report["instance_counts_by_type"]
     if instance_counts_by_type:
         print()

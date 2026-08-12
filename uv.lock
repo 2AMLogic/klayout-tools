@@ -194,6 +194,9 @@ congestion = [
 mom = [
     { name = "klt-mom-native" },
 ]
+statime = [
+    { name = "klt-statime-native" },
+]
 yield = [
     { name = "klt-yield-native" },
 ]
@@ -212,6 +215,7 @@ provides-extras = ["dev", "functional-verification", "mom-cross-validation"]
 [package.metadata.requires-dev]
 congestion = [{ name = "klt-congestion-native", directory = "native/congestion" }]
 mom = [{ name = "klt-mom-native", directory = "native/mom" }]
+statime = [{ name = "klt-statime-native", directory = "native/statime" }]
 yield = [{ name = "klt-yield-native", directory = "native/yield" }]
 
 [[package]]
@@ -223,6 +227,11 @@ source = { directory = "native/congestion" }
 name = "klt-mom-native"
 version = "0.1.0"
 source = { directory = "native/mom" }
+
+[[package]]
+name = "klt-statime-native"
+version = "0.1.0"
+source = { directory = "native/statime" }
 
 [[package]]
 name = "klt-yield-native"

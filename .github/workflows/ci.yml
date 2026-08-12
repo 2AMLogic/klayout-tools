@@ -296,11 +296,107 @@ jobs:
             exit 1
           }
 
+  native-statime:
+    name: Native engines (Rust) — static timing
+    # `native/statime/` (issue #809, Epic #704 Phase 1c) shipped as a plain
+    # `cargo build`/`cargo test` spike binary with no CI job at all -- issue
+    # #925 (Epic #704 Phase 3) promoted it to the `klt_statime_native` pyo3
+    # extension backing `klt synthesize`'s additive `sta` critical-path
+    # field, so it gets its own job here, per the one-job-per-native-engine
+    # precedent `native`/`native-congestion`/`native-yield` set above. The
+    # crate still builds its standalone `klt-statime` CLI binary from the
+    # same source -- `cargo test`/`clippy` below cover both targets
+    # (`--all-targets`).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/statime
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo --version
+        run: cargo --version && rustc --version
+
+      - name: Cache cargo registry + build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/statime/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/statime/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        # GATES, like the ruff steps above -- do not add continue-on-error.
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        # The engine's own 11 unit tests (liberty tokenizer, NLDM bilinear
+        # interpolation, netlist parser, timing-graph propagation). Issue
+        # #925 integrated this crate without touching its numerics, so these
+        # must keep passing unmodified.
+        run: cargo test
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build + install the extension, then run the klt sta tests
+        # `--group statime` resolves klt-statime-native from native/statime/
+        # via pyproject.toml's [tool.uv.sources] and drives maturin to
+        # compile it. tests/test_sta.py is hermetic (no PDK, no Rust needed
+        # -- it also runs in the `test` job below); the extension-backed
+        # tier here is what proves the real pyo3 boundary works.
+        # tests/test_sta_corpus.py still self-skips: it needs a real ~13 MB
+        # sky130 liberty this workflow does not provision, same posture as
+        # tests/test_synthesize.py's own real-PDK tier.
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group statime
+          uv run --frozen --extra dev --group statime pytest \
+            tests/test_sta.py tests/test_sta_corpus.py \
+            -v --capture=tee-sys
+
+      - name: Assert the extension actually installed (no silent skip)
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group statime python -c "import klt_statime_native" || {
+            echo "::error::klt_statime_native did not install -- tests/test_sta.py's extension tier would have skipped"
+            exit 1
+          }
+
+      - name: Smoke-test the pyo3 boundary end to end
+        # A real critical_path_json() call through the extension against a
+        # checked-in corpus netlist would need the liberty this workflow has
+        # no access to -- so instead assert the boundary's *error* contract,
+        # which needs no PDK: a missing file must surface as a plain
+        # ValueError (klayout_tools.sta.StaError), never a
+        # pyo3_runtime.PanicException that `klt synthesize`'s best-effort
+        # `sta` stage would fail to catch (see native/statime/src/lib.rs's
+        # catch_unwind).
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group statime python -c "
+          from klayout_tools.sta import StaError, compute_critical_path
+          try:
+              compute_critical_path('/nonexistent/netlist.v', '/nonexistent/lib.lib', 'top')
+          except StaError as exc:
+              print('OK: StaError ->', exc)
+          else:
+              raise SystemExit('expected StaError from the pyo3 boundary')
+          "
+
   native-techmap:
     name: Native engines (Rust) — technology mapping
     # `native/techmap/` (issue #874, Epic #704 Phase 2b) is a plain `cargo
     # build`/`cargo test` binary crate -- no `pyo3` extension, following
-    # `native/statime/`'s/`native/legalize/`'s own precedent, so this job
+    # `native/legalize/`'s own precedent (`native/statime/` followed it too
+    # until issue #925 promoted that crate to a pyo3 extension), so this job
     # only needs the Rust-only checks (fmt/clippy/test); the real end-to-end
     # exercise of the compiled `klt-techmap` binary (issue #875's
     # `--verify-equivalence` gate) happens in the `test` job below, which

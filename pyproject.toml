@@ -114,6 +114,14 @@ mom-cross-validation = [
 # an optional Rust toolchain and an in-repo-only path source -- so `klt yield`
 # likewise fails cleanly with a build pointer when the extension is absent
 # (see docs/cli/yield.md).
+#
+# `native/statime/` (issue #809, promoted from a plain-binary spike to a
+# production pyo3 extension by issue #925, Epic #704 Phase 3): the
+# `klt_statime_native` extension backing `klt synthesize`'s integrated `sta`
+# critical-path report. Same two reasons as `mom` above -- an optional Rust
+# toolchain and an in-repo-only path source -- so `klt synthesize`'s `sta`
+# field degrades to `null` (never a hard failure) when the extension is
+# absent, per `klayout_tools/sta.py`'s own docstring.
 [dependency-groups]
 mom = [
     "klt-mom-native",
@@ -124,11 +132,15 @@ congestion = [
 yield = [
     "klt-yield-native",
 ]
+statime = [
+    "klt-statime-native",
+]
 
 [tool.uv.sources]
 klt-mom-native = { path = "native/mom" }
 klt-congestion-native = { path = "native/congestion" }
 klt-yield-native = { path = "native/yield" }
+klt-statime-native = { path = "native/statime" }
 
 [build-system]
 requires = ["hatchling"]
