@@ -136,6 +136,15 @@ steps. This is a **deliberate, reviewed** regeneration, like
 `tests/corpus/generate_golden.py` / `tests/golden_metrics/
 generate_golden_metrics.py` — never hand-edit the binary fixture.
 
+## Legalizer-spike fixtures — `tests/corpus/legalize/`
+
+Pre-legalization ("global placement") and OpenROAD-legalized DEF checkpoint
+pairs for two designs (`gcd`, `modexp`), generated the same way as the
+`place_and_route/` fixture above but at a different pipeline granularity —
+see [`legalize/README.md`](legalize/README.md) for what they are and
+issue #784 / `native/legalize/README.md` for the native-Rust legalizer
+spike they back (go/no-go result: **No-go**, documented there).
+
 ## Adding a new corpus file
 
 1. Download the file into `tests/corpus/<pdk>/`, verifying the upstream

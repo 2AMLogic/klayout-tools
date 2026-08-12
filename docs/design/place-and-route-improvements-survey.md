@@ -334,6 +334,17 @@ than a foregone conclusion.
 
 ### 3.5 Native-Rust standard-cell legalizer — Epic #700 Phase 1's proposed first slice
 
+> **Spiked (issue #784): No-go**, on QoR grounds — the native-Rust Abacus
+> legalizer (`native/legalize/`) matched OpenROAD's own `detailed_placement`
+> on legality (zero overlap, DRC-clean to the same known baseline) but was
+> 21.8%/26.6% worse on HPWL and 213.8%/403.4% worse on total displacement
+> across the two-design corpus slice below, both well outside any
+> reasonable reading of this section's own "ship when it matches or beats"
+> bar. See `native/legalize/README.md` for the full measured comparison and
+> root-cause analysis (row *assignment*, not row *legalization*, is the
+> identified gap). This section's own reasoning below is left unchanged as
+> the historical record of the proposal that was tested.
+
 - **Technique:** implement Abacus-style minimal-displacement row
   legalization (§2.2) in Rust, taking a global-placement solution (from
   OpenROAD's own `gpl`, or a later native global placer) and producing a

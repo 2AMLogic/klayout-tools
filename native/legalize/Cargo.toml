@@ -1,0 +1,36 @@
+[package]
+name = "klt-legalize-native"
+version = "0.1.0"
+edition = "2021"
+description = "Native-Rust Abacus-style standard-cell row legalizer spike for `klt` (2AMLogic/klayout-tools, issue #784 -- Epic #700 Phase 1)"
+license = "MIT"
+publish = false
+
+# Deliberately a plain `cargo test`/`cargo run` binary crate for this spike --
+# no `pyo3`/`maturin` wiring yet (unlike `native/mom/`, the reference
+# convention this crate otherwise follows: self-contained `Cargo.toml` at
+# `native/<engine>/`, wired into the top-level build only once there is
+# something to wire in). Issue #784 is explicitly go/no-go: adding the
+# `pyo3`/`maturin`/CI-wiring surface before a "Go" verdict would be spending
+# real maintenance surface on a result that might be "No-go". If this spike
+# reports "Go", a follow-on issue adds the `pyo3` extension-module shape
+# `native/mom/Cargo.toml`'s own comments document, without relocating this
+# crate (already at the `native/<engine>/` path the eventual shape needs).
+
+[[bin]]
+name = "klt-legalize"
+path = "src/main.rs"
+
+[lib]
+name = "klt_legalize_native"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Lets the CLI and its tests read the checked-in `.def.gz`/`.lef.gz` corpus
+# fixtures (tests/corpus/legalize/) directly, without shelling out to `gzip`.
+flate2 = "1"
+
+[profile.release]
+lto = true

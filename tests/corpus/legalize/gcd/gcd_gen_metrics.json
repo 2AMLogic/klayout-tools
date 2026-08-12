@@ -1,0 +1,16 @@
+{
+  "toplevel": "gcd",
+  "cell_library": "sky130_fd_sc_hd",
+  "corner": "tt_025C_1v80",
+  "seed": 1,
+  "openroad_version": "26Q3-1080-gab6fd26351",
+  "pdk_variant": "sky130A",
+  "pdk_root": "/workdir/volare",
+  "liberty_path": "/workdir/volare/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
+  "tech_lef": "/workdir/volare/sky130A/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef",
+  "cell_lef": "/workdir/volare/sky130A/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef",
+  "oracle_detailed_placement_wallclock_ms": 16,
+  "full_process_wallclock_s": 2.801,
+  "gp_def": "/workdir/scratch/out/gcd/gcd_gp.def",
+  "oracle_legal_def": "/workdir/scratch/out/gcd/gcd_oracle_legal.def"
+}
