@@ -570,3 +570,202 @@ pub fn analyze(module: &Module, lib: &Library, cfg: &StaConfig) -> Result<StaRes
         worst_reg_to_reg_path,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::liberty::{Cell, Library, Pin, Table2D, TimingArcTables};
+    use crate::netlist::{CellInstance, Port, PortDirection};
+
+    /// A 1x1 NLDM table that always interpolates to `delay_ns` regardless of
+    /// input slew / output load -- see `nldm::tests::single_row_or_column_table`
+    /// for why a single-point axis pins the result to the sole table entry.
+    fn flat_table(delay_ns: f64) -> Table2D {
+        Table2D {
+            index1: vec![0.0],
+            index2: vec![0.0],
+            values: vec![vec![delay_ns]],
+        }
+    }
+
+    /// Builds a synthetic library with two combinational cell types:
+    /// - `BUF`: `A` (input) -> `Y` (output), a plain combinational arc whose
+    ///   rise/fall delay is exactly `delay_ns` regardless of slew/load (via
+    ///   `flat_table`), and zero pin capacitance everywhere so every net's
+    ///   `net_load_pf` is identical (no capacitance-driven skew between the
+    ///   two BUF instances below).
+    /// - `DFF`: `D` (input, unused for propagation), `Q` (output) with a
+    ///   `rising_edge` arc on `CLK` -- present only so `is_sequential_cell`
+    ///   classifies `DFF` as a register and `D`'s net is recognized as a
+    ///   register D-pin net by `analyze`'s tie-break (`register_d_nets`).
+    fn synthetic_library(delay_ns: f64) -> Library {
+        let mut cells = HashMap::new();
+
+        let mut buf_pins = HashMap::new();
+        buf_pins.insert(
+            "A".to_string(),
+            Pin {
+                name: "A".to_string(),
+                direction: Direction::Input,
+                capacitance_pf: 0.0,
+                arcs: Vec::new(),
+            },
+        );
+        buf_pins.insert(
+            "Y".to_string(),
+            Pin {
+                name: "Y".to_string(),
+                direction: Direction::Output,
+                capacitance_pf: 0.0,
+                arcs: vec![TimingArcTables {
+                    related_pin: "A".to_string(),
+                    kind: Some(ArcKind::Combinational),
+                    sense: TimingSense::Positive,
+                    cell_rise: Some(flat_table(delay_ns)),
+                    cell_fall: Some(flat_table(delay_ns)),
+                    rise_transition: None,
+                    fall_transition: None,
+                }],
+            },
+        );
+        cells.insert(
+            "BUF".to_string(),
+            Cell {
+                name: "BUF".to_string(),
+                pins: buf_pins,
+            },
+        );
+
+        let mut dff_pins = HashMap::new();
+        dff_pins.insert(
+            "D".to_string(),
+            Pin {
+                name: "D".to_string(),
+                direction: Direction::Input,
+                capacitance_pf: 0.0,
+                arcs: Vec::new(),
+            },
+        );
+        dff_pins.insert(
+            "Q".to_string(),
+            Pin {
+                name: "Q".to_string(),
+                direction: Direction::Output,
+                capacitance_pf: 0.0,
+                arcs: vec![TimingArcTables {
+                    related_pin: "CLK".to_string(),
+                    kind: Some(ArcKind::RisingEdge),
+                    sense: TimingSense::NonUnate,
+                    cell_rise: Some(flat_table(delay_ns)),
+                    cell_fall: Some(flat_table(delay_ns)),
+                    rise_transition: None,
+                    fall_transition: None,
+                }],
+            },
+        );
+        cells.insert(
+            "DFF".to_string(),
+            Cell {
+                name: "DFF".to_string(),
+                pins: dff_pins,
+            },
+        );
+
+        Library {
+            name: "test_lib".to_string(),
+            time_unit_to_ns: 1.0,
+            cap_unit_to_pf: 1.0,
+            cells,
+        }
+    }
+
+    fn conn(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// A module with two independent, equal-delay combinational chains from
+    /// primary inputs that tie for the global worst arrival:
+    /// `inA -> buf1/Y -> n_internal` (an internal net with no sequential
+    /// sink -- endpoint rank "internal net") and
+    /// `inB -> buf2/Y -> net_d -> dff1/D` (a register D-pin net -- endpoint
+    /// rank "register D pin"). Both `BUF` instances use identical flat delay
+    /// tables and zero pin capacitance, so their computed arrivals are
+    /// bit-for-bit equal -- a genuine tie, not an approximation. `cell_order`
+    /// lets the caller permute instantiation order to confirm the result
+    /// does not depend on it.
+    fn tied_module(cell_order: [usize; 3]) -> Module {
+        let all_cells = [
+            CellInstance {
+                instance_name: "buf1".to_string(),
+                cell_type: "BUF".to_string(),
+                connections: conn(&[("A", "inA"), ("Y", "n_internal")]),
+            },
+            CellInstance {
+                instance_name: "buf2".to_string(),
+                cell_type: "BUF".to_string(),
+                connections: conn(&[("A", "inB"), ("Y", "net_d")]),
+            },
+            CellInstance {
+                instance_name: "dff1".to_string(),
+                cell_type: "DFF".to_string(),
+                connections: conn(&[("D", "net_d"), ("Q", "q_out")]),
+            },
+        ];
+        let cells = cell_order.iter().map(|&i| all_cells[i].clone()).collect();
+
+        Module {
+            name: "tied".to_string(),
+            ports: vec![
+                Port {
+                    name: "inA".to_string(),
+                    direction: PortDirection::Input,
+                    nets: vec!["inA".to_string()],
+                },
+                Port {
+                    name: "inB".to_string(),
+                    direction: PortDirection::Input,
+                    nets: vec!["inB".to_string()],
+                },
+            ],
+            cells,
+        }
+    }
+
+    /// Regression test for the non-determinism PR #830 fixed: `analyze`'s
+    /// global worst-path selection used to iterate a `HashMap<String,
+    /// NetTiming>` directly, so a tie between an internal net and a register
+    /// D-pin net (both landing on the exact same worst delay, as on a
+    /// bit-sliced datapath like `gcd`) picked whichever the HashMap's
+    /// randomized-per-instance iteration order happened to visit first. The
+    /// fix walks a sorted `Vec` of net names and breaks ties by endpoint kind
+    /// (register D pin > primary output > internal net) then net name, so
+    /// the register D-pin net (`net_d`) must win every time regardless of
+    /// (a) how many times `analyze` is called -- `std::collections::HashMap`
+    /// uses a fresh randomized hash state per instance, so repeated calls
+    /// resample the very iteration-order randomness the bug depended on --
+    /// and (b) the order the tied cells were declared in the netlist.
+    #[test]
+    fn worst_path_tie_break_is_deterministic() {
+        let lib = synthetic_library(1.0);
+        let cfg = StaConfig {
+            input_transition_ns: 0.1,
+            output_load_pf: 0.0,
+        };
+
+        for cell_order in [[0, 1, 2], [1, 0, 2], [2, 0, 1], [2, 1, 0]] {
+            for _ in 0..25 {
+                let module = tied_module(cell_order);
+                let result = analyze(&module, &lib, &cfg).expect("analyze should succeed");
+                assert_eq!(
+                    result.worst_path.endpoint, "net_d",
+                    "worst_path must deterministically pick the register D-pin net \
+                     over the tied internal net (cell_order={cell_order:?})"
+                );
+                assert_eq!(result.worst_path.delay_ns, 1.0);
+            }
+        }
+    }
+}
