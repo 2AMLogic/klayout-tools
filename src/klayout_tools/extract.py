@@ -393,8 +393,15 @@ def _mom_ground_capacitance_for_net(
     `docs/design/extract-fidelity-roadmap.md` section 2.2's description of
     how a PDK's own area/fringe coefficient table is derived).
 
-    Returns ``{"net", "mom_capacitance_ff", "background_permittivity",
-    "panel_size_um", "panel_count", "ground_pad_factor", "warnings"}``.
+    Returns ``{"net", "net_id", "mom_capacitance_ff",
+    "background_permittivity", "panel_size_um", "panel_count",
+    "ground_pad_factor", "warnings"}``. ``net_id`` is ``net.cluster_id`` --
+    the identity of the exact net *object* whose geometry was solved, which
+    ``net`` (a layout label) does **not** pin down: several genuinely
+    distinct, un-strapped islands can share one label (issue #765/#811), so
+    the caller resolves this solve back to its ``_compute_parasitics`` ground
+    entry by ``net_id`` rather than re-matching by name (see
+    :func:`_mom_ground_entry_for_crosscheck`).
     ``mom_capacitance_ff`` is ``None`` (with an explanatory ``warnings``
     entry, never a silent zero) when ``net`` has no ground-eligible geometry
     on any curated ``metals`` role. Raises :class:`~klayout_tools.mom.
@@ -460,6 +467,7 @@ def _mom_ground_capacitance_for_net(
     if not net_boxes or min_gap_um is None:
         return {
             "net": spice_safe_net_name(net.expanded_name()),
+            "net_id": net.cluster_id,
             "mom_capacitance_ff": None,
             "background_permittivity": background_permittivity,
             "panel_size_um": None,
@@ -495,6 +503,7 @@ def _mom_ground_capacitance_for_net(
 
     return {
         "net": spice_safe_net_name(net.expanded_name()),
+        "net_id": net.cluster_id,
         "mom_capacitance_ff": round(mom_capacitance_ff, 6),
         "background_permittivity": background_permittivity,
         "panel_size_um": round(panel_size_um, 6),
@@ -502,6 +511,32 @@ def _mom_ground_capacitance_for_net(
         "ground_pad_factor": _MOM_CROSSCHECK_GROUND_PAD_FACTOR,
         "warnings": warning_notes + list(response["warnings"]),
     }
+
+
+def _mom_ground_entry_for_crosscheck(
+    ground_nets: list[dict[str, Any]], mom_crosscheck: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Return the :func:`_compute_parasitics` ground entry belonging to the
+    exact net object :func:`_mom_ground_capacitance_for_net` solved, or
+    ``None`` if that net carries no ground-eligible parasitics geometry.
+
+    **Resolved by ``net_id`` (``Net.cluster_id``), never by name (issue
+    #811)** -- the same rule :func:`_inject_parasitics` already follows for
+    issue #765. A ``--mom-net`` *name* does not identify a net object:
+    several genuinely distinct, electrically unconnected islands can carry
+    one layout label (the ``gcd`` corpus block has 105 separate un-strapped
+    ``VGND`` islands, 88 ``VPWR``). The solver measures one specific island's
+    geometry, while a name-keyed lookup over the ``(net, net_id)``-sorted
+    ground list would always return the *smallest-``net_id``* entry sharing
+    that label -- so for any duplicated label the solved island's
+    capacitance could be written onto a different island's SPICE ``C`` card
+    and ``parasitics.nets[]`` entry, with the reported
+    ``lumped_rc_capacitance_ff``/``delta_ff`` comparing two different pieces
+    of geometry. Keying both halves on the id the solve already carries makes
+    them agree by construction rather than by iteration-order coincidence.
+    """
+    net_id = mom_crosscheck["net_id"]
+    return next((entry for entry in ground_nets if entry["net_id"] == net_id), None)
 
 
 class ExtractError(Exception):
@@ -637,6 +672,16 @@ def run_extract(
     value, not a best-effort diagnostic -- unlike, say, ``metals_without_
     coefficient``, silently falling back to the lumped-RC value would hide
     exactly the failure a caller invoking this flag wants to know about).
+    A ``mom_net`` name shared by several genuinely distinct, un-strapped
+    net islands (issue #811 -- the ``gcd`` corpus block has 105 same-labelled
+    ``VGND`` islands) solves the **lowest-``net_id``** one, i.e. the first
+    entry carrying that name in ``parasitics.nets[]``, reports which island
+    that was as ``mom_crosscheck.net_id``, warns that the name was
+    ambiguous, and leaves every other same-named island's lumped-RC value
+    untouched. The entry whose ``capacitance_ff`` is overwritten is resolved
+    from that same ``net_id`` (:func:`_mom_ground_entry_for_crosscheck`), so
+    the swapped island and the measured island are the same one by
+    construction rather than by iteration-order coincidence.
     ``mom_background_permittivity`` (not currently exposed as its own CLI
     flag) overrides :data:`MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY`, the
     relative permittivity assumed when inverting each metal role's
@@ -1381,10 +1426,18 @@ def run_extract(
         # already raised `ExtractError`), so `mom_crosscheck` here is always
         # a dict with a non-`None` `mom_capacitance_ff` when `mom_net` was
         # given.
+        #
+        # The entry to swap is resolved from the solve's own `net_id`, not by
+        # re-matching the `--mom-net` *name* against `ground_nets` a second
+        # time (issue #811) -- see `_mom_ground_entry_for_crosscheck`. A
+        # layout label is not a net identity, so two by-name lookups over two
+        # differently-ordered net lists are not guaranteed to select the same
+        # island; keying on the id the solve already carries removes the
+        # question.
         if mom_net is not None:
             assert mom_crosscheck is not None
-            matched_entry = next(
-                (entry for entry in ground_nets if entry["net"] == mom_net), None
+            matched_entry = _mom_ground_entry_for_crosscheck(
+                ground_nets, mom_crosscheck
             )
             if matched_entry is None:
                 raise ExtractError(
@@ -1397,6 +1450,7 @@ def run_extract(
             delta_ff = mom_capacitance_ff - lumped_rc_capacitance_ff
             mom_crosscheck_report = {
                 "net": mom_net,
+                "net_id": mom_crosscheck["net_id"],
                 "lumped_rc_capacitance_ff": round(lumped_rc_capacitance_ff, 6),
                 "mom_capacitance_ff": round(mom_capacitance_ff, 6),
                 "delta_ff": round(delta_ff, 6),
@@ -3356,7 +3410,12 @@ def _extract_netlist(
     --mom-net <net>``) is ``None`` unless ``mom_net`` is given, in which case
     it is :func:`_mom_ground_capacitance_for_net`'s result for the net named
     ``mom_net`` -- computed here, alongside ``parasitic_nets``, for the same
-    reason: it needs ``l2n``/``circuit`` while they are still alive. A
+    reason: it needs ``l2n``/``circuit`` while they are still alive. When
+    ``mom_net`` names a label shared by several distinct net islands, the
+    lowest-``cluster_id`` one is solved and the ambiguity is appended to the
+    result's ``warnings`` (issue #811); the result's ``net_id`` records which
+    island that was, so ``run_extract`` can resolve the ground entry to swap
+    by id instead of re-matching the name. A
     ``mom_net`` naming no net with ground-eligible parasitics geometry still
     returns a dict (with ``mom_capacitance_ff: None`` and an explanatory
     ``warnings`` entry), never ``None`` -- ``run_extract`` is what turns an
@@ -4250,15 +4309,31 @@ def _extract_netlist(
         # `run_extract`, for the same "`l2n` must still be alive" reason as
         # `parasitic_nets` immediately above -- `polygons_of_net` is a live
         # `LayoutToNetlist` API, unusable once this function returns.
+        #
+        # A `--mom-net` *name* can match several genuinely distinct,
+        # electrically unconnected net objects -- the `gcd` corpus block has
+        # 105 separate un-strapped `VGND` islands sharing one label (issue
+        # #765). Take the **lowest `cluster_id`** among the matches rather
+        # than whichever `each_net()` happens to yield first (issue #811):
+        # that iteration order is not a documented contract (a net rescued by
+        # `_purge_preserving_named_nets` is recreated at the *end* of the
+        # circuit's net list while keeping its original, possibly low, id),
+        # whereas `_compute_parasitics` sorts its ground list by `(net,
+        # net_id)` -- so the lowest-id island is exactly the first entry a
+        # caller sees for that label in `parasitics.nets[]`, and the choice
+        # is reproducible run to run as `--mom-net`'s documented contract
+        # requires. Which island was solved is reported back as the
+        # cross-check's own `net_id`, and `run_extract` resolves the entry to
+        # swap from that id rather than by name.
         if mom_net is not None and circuit is not None:
-            matched_net = None
-            for candidate in circuit.each_net():
-                if candidate.cluster_id == 0:
-                    continue
-                if spice_safe_net_name(candidate.expanded_name()) == mom_net:
-                    matched_net = candidate
-                    break
-            if matched_net is not None:
+            matched_nets = [
+                candidate
+                for candidate in circuit.each_net()
+                if candidate.cluster_id != 0
+                and spice_safe_net_name(candidate.expanded_name()) == mom_net
+            ]
+            if matched_nets:
+                matched_net = min(matched_nets, key=lambda net: net.cluster_id)
                 mom_crosscheck = _mom_ground_capacitance_for_net(
                     l2n,
                     matched_net,
@@ -4267,6 +4342,21 @@ def _extract_netlist(
                     metal_index,
                     mom_background_permittivity,
                 )
+                if len(matched_nets) > 1:
+                    # Say so explicitly rather than silently picking one of
+                    # several same-labelled islands: the reported delta is
+                    # only meaningful for the island actually solved, and a
+                    # caller pointing `--mom-net` at a shared power/ground
+                    # label is far more likely to have meant "the net" than
+                    # "this particular one of 105 islands".
+                    mom_crosscheck["warnings"].append(
+                        f"--mom-net '{mom_net}' matches {len(matched_nets)} "
+                        "distinct, electrically unconnected nets sharing that "
+                        f"layout label -- solved the one with net_id "
+                        f"{matched_net.cluster_id} (the lowest, i.e. the first "
+                        "entry carrying this name in parasitics.nets[]); every "
+                        "other same-named net keeps its lumped-RC capacitance"
+                    )
 
     # `l2n` (and the Region/Texts objects it owns) would otherwise be
     # garbage-collected once this function returns, which invalidates the

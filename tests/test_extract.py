@@ -41,6 +41,7 @@ from klayout_tools.extract import (
     _exclude_capacitor_top_via_overlap,
     _extract_netlist,
     _mom_crosscheck_gap_um,
+    _mom_ground_entry_for_crosscheck,
     _n_squares,
     _promote_orphan_named_nets,
     _purge_preserving_named_nets,
@@ -7554,13 +7555,23 @@ def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
 # --------------------------------------------------------------------------- #
 
 
-def _make_two_disjoint_nmos_shared_label_layout() -> kdb.Layout:
+def _make_two_disjoint_nmos_shared_label_layout(
+    second_source_li1_extension_dbu: int = 0,
+) -> kdb.Layout:
     """Two independent, non-touching NMOS devices on sky130 deck layers, like
     :func:`_make_two_nmos_layout`, but both devices' source terminals carry
     the *identical* layout label (``VGND``) -- two genuinely distinct,
     electrically unconnected nets sharing one name, the exact shape issue
     #765 reports (105 un-strapped ``VGND`` islands on the ``gcd`` corpus, all
-    sharing one label with nothing tying them together)."""
+    sharing one label with nothing tying them together).
+
+    ``second_source_li1_extension_dbu`` widens the *second* island's source
+    li1 shape leftwards by that many database units (issue #811), so the two
+    same-named islands carry measurably *different* interconnect geometry --
+    and therefore different parasitics. With the default ``0`` the two
+    islands are geometrically identical, which makes any confusion between
+    them invisible in the reported numbers.
+    """
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
 
@@ -7572,11 +7583,11 @@ def _make_two_disjoint_nmos_shared_label_layout() -> kdb.Layout:
             kdb.Text(text, kdb.Trans(x, y))
         )
 
-    def build_nmos(x0, gate_label, drain_label, source_label):
+    def build_nmos(x0, gate_label, drain_label, source_label, source_li1_extra=0):
         draw(65, 20, kdb.Box(x0, 0, x0 + 2000, 1000))  # diff.drawing (active)
         draw(66, 20, kdb.Box(x0 + 800, -200, x0 + 1200, 1300))  # poly.drawing
         draw(66, 44, kdb.Box(x0 + 100, 300, x0 + 300, 700))  # licon1 (S)
-        draw(67, 20, kdb.Box(x0, 200, x0 + 400, 800))  # li1 (S)
+        draw(67, 20, kdb.Box(x0 - source_li1_extra, 200, x0 + 400, 800))  # li1 (S)
         draw(66, 44, kdb.Box(x0 + 1700, 300, x0 + 1900, 700))  # licon1 (D)
         draw(67, 20, kdb.Box(x0 + 1600, 200, x0 + 2000, 800))  # li1 (D)
         draw(66, 44, kdb.Box(x0 + 900, 1000, x0 + 1100, 1200))  # licon1 (G)
@@ -7589,7 +7600,13 @@ def _make_two_disjoint_nmos_shared_label_layout() -> kdb.Layout:
     # x=6000, nothing straps them), so extraction sees two distinct nets
     # that happen to share a name.
     build_nmos(0, "AG", "AD", "VGND")
-    build_nmos(6000, "BG", "BD", "VGND")
+    build_nmos(
+        6000,
+        "BG",
+        "BD",
+        "VGND",
+        source_li1_extra=second_source_li1_extension_dbu,
+    )
     return layout
 
 
@@ -8801,47 +8818,39 @@ def test_mom_net_cli_json_and_text(tmp_path, capsys):
 def test_mom_net_swap_targets_the_actually_measured_island_not_a_same_named_one(
     tmp_path, monkeypatch
 ):
-    """Regression/investigation for issue #811: does `--mom-net`'s
-    net-object lookup (`_extract_netlist`'s unsorted `circuit.each_net()`
-    first-match loop, which decides which island's geometry `klt mom`
-    actually measures) ever disagree with `run_extract`'s independent
-    by-*name* `ground_nets` lookup (which decides which `parasitics.nets[]`
-    entry's `capacitance_ff` gets overwritten with that measurement) when
-    the `--mom-net` name is shared by two distinct, disconnected net
-    islands -- e.g. two un-strapped `VGND` rail islands, the exact
-    duplicate-label shape issue #765 hardened elsewhere in this module (see
+    """Regression for issue #811: `--mom-net`'s net-object lookup
+    (`_extract_netlist`, which decides which island's geometry `klt mom`
+    actually measures) and `run_extract`'s lookup of the
+    `parasitics.nets[]` entry whose `capacitance_ff` gets overwritten with
+    that measurement must resolve to the *same* net object when the
+    `--mom-net` name is shared by two distinct, disconnected net islands --
+    e.g. two un-strapped `VGND` rail islands, the exact duplicate-label
+    shape issue #765 hardened elsewhere in this module (see
     `_make_two_disjoint_nmos_shared_label_layout`, reused here) and
     `_compute_parasitics`'s own docstring documents (105 such islands on the
     `gcd` corpus).
 
-    **Finding: they do not disagree.** `_mom_ground_capacitance_for_net` is
-    monkeypatched here (no `klt_mom_native` build required -- this test
-    asserts *which island gets selected*, not the field-solve numerics
+    `_mom_ground_capacitance_for_net` is monkeypatched here (no
+    `klt_mom_native` build required -- this test asserts *which island gets
+    selected*, not the field-solve numerics
     `test_mom_net_swaps_capacitance_and_reports_crosscheck` already covers)
-    to record the `net.cluster_id` of the net object `_extract_netlist`'s
-    loop actually resolved and hands to the MoM cross-check, and returns a
-    sentinel capacitance recognizable in the swapped `ground_nets` entry.
-    The entry that is overwritten always carries that same `net_id` --
-    i.e. `run_extract`'s name-keyed `ground_nets` lookup always resolves to
-    the identical net object `_extract_netlist` measured, never a different
-    same-named island.
+    to record the `net.cluster_id` of the net object `_extract_netlist`
+    resolved and hands to the MoM cross-check, and returns a sentinel
+    capacitance recognizable in the swapped `ground_nets` entry. The entry
+    that is overwritten always carries that same `net_id`.
 
-    This holds because `kdb.Circuit.each_net()` iterates in strictly
-    ascending `cluster_id` order on the pinned `klayout` version this repo
-    tests against (verified directly, both on this two-island synthetic
-    fixture and across the full 2133-net/105-VGND-island `gcd` corpus
-    fixture used by `test_parasitics_...gcd...` above) -- so
-    `_extract_netlist`'s first-match-wins loop and `ground_nets`'s
-    `(net, net_id)`-ascending sort's first-match-wins lookup both always
-    select the same-named entry with the *smallest* `net_id`, by
-    construction of that shared ordering, not by accident of this
-    particular fixture's geometry. `pyproject.toml` pins only
-    ``klayout>=0.30`` (no upper bound) -- if a future `klayout` release
-    changes `each_net()`'s iteration order, this test (and
-    ``test_parasitics_disjoint_same_label_nets_get_distinct_instance_names``
-    a few hundred lines above, which depends on the same ordering
-    assumption for its own `_dup1` suffix check) would be the first to
-    catch the regression.
+    **This originally held only by ordering coincidence** -- both lookups
+    were by *name*, over two independently-ordered lists, agreeing only
+    because `kdb.Circuit.each_net()` happened to iterate in ascending
+    `cluster_id` order (which it does *not* do in general: a net rescued by
+    `_purge_preserving_named_nets` is recreated at the end of the circuit's
+    net list while keeping its original, low, id). It is now structural:
+    `_extract_netlist` deliberately solves the lowest-`cluster_id` match and
+    reports it as the cross-check's own `net_id`, and `run_extract` resolves
+    the entry to swap from that id (`_mom_ground_entry_for_crosscheck`)
+    rather than re-matching the name -- so this test no longer depends on
+    any `klayout` iteration-order behaviour (`pyproject.toml` pins only
+    ``klayout>=0.30``, no upper bound).
     """
     import klayout_tools.extract as extract_mod
 
@@ -8854,11 +8863,15 @@ def test_mom_net_swap_targets_the_actually_measured_island_not_a_same_named_one(
     def _spy_mom_ground_capacitance(
         l2n, net, dbu, parasitics_deck, metal_index, background_permittivity=3.9
     ):
-        # This is exactly the net object `_extract_netlist`'s
-        # `circuit.each_net()` first-match loop resolved for `--mom-net`.
+        # This is exactly the net object `_extract_netlist` resolved for
+        # `--mom-net`.
         captured["matched_net_cluster_id"] = net.cluster_id
         return {
             "net": extract_mod.spice_safe_net_name(net.expanded_name()),
+            # Issue #811: the solve reports *which* net object it measured,
+            # and that id -- not the name -- is what selects the entry to
+            # overwrite.
+            "net_id": net.cluster_id,
             "mom_capacitance_ff": _SENTINEL_MOM_CAPACITANCE_FF,
             "background_permittivity": background_permittivity,
             "panel_size_um": 1.0,
@@ -8891,14 +8904,136 @@ def test_mom_net_swap_targets_the_actually_measured_island_not_a_same_named_one(
         "MoM-derived capacitance"
     )
 
-    # The core property under investigation: the entry that got overwritten
-    # (found by `run_extract`'s independent by-name `ground_nets` lookup)
-    # is the *same* net object `_extract_netlist` actually measured (found
-    # by the unsorted `circuit.each_net()` first-match loop) -- not a
-    # different same-named island.
+    # The core property: the entry that got overwritten is the *same* net
+    # object `_extract_netlist` actually measured -- not a different
+    # same-named island.
     assert swapped[0]["net_id"] == captured["matched_net_cluster_id"]
+    assert report["parasitics"]["mom_crosscheck"]["net_id"] == swapped[0]["net_id"]
 
-    # And it is always the smallest `net_id` among the same-named entries --
-    # confirming the mechanism (both first-match lookups agreeing via
-    # `each_net()`'s ascending-`cluster_id` order), not just the outcome.
+    # And it is the smallest `net_id` among the same-named entries -- the
+    # island `_extract_netlist` deliberately selects (issue #811), i.e. the
+    # first entry carrying this name in the `(net, net_id)`-sorted
+    # `parasitics.nets[]`.
     assert swapped[0]["net_id"] == min(e["net_id"] for e in vgnd_entries)
+
+
+def test_mom_ground_entry_resolves_by_net_id_not_by_name():
+    """Regression (issue #811): the `ground_nets` entry whose
+    `capacitance_ff` gets overwritten with the MoM-solved value is resolved
+    by the **net id of the island that was actually solved**, never by the
+    `--mom-net` name.
+
+    `_compute_parasitics` sorts its output by `(net, net_id)`, so a
+    name-keyed `next(entry for entry in ground_nets if entry["net"] ==
+    mom_net)` always returns the *smallest-`net_id`* entry among the entries
+    sharing that layout label -- which is a different net object from the one
+    the solver measured whenever the solver picked any other same-named
+    island. This synthetic pair is exactly that case: the solver measured
+    `net_id` 7, the smallest same-named `net_id` is 1."""
+    ground_nets = [
+        {"net": "VGND", "net_id": 1, "resistance_ohm": 10.0, "capacitance_ff": 0.5},
+        {"net": "VGND", "net_id": 7, "resistance_ohm": 20.0, "capacitance_ff": 0.25},
+    ]
+    crosscheck = {"net": "VGND", "net_id": 7, "mom_capacitance_ff": 0.3}
+
+    entry = _mom_ground_entry_for_crosscheck(ground_nets, crosscheck)
+    assert entry is ground_nets[1]
+
+    # A solved island with no ground-eligible geometry of its own resolves to
+    # `None` (the caller turns that into a clean `ExtractError`) rather than
+    # falling back to some *other* island that happens to share the name.
+    assert (
+        _mom_ground_entry_for_crosscheck(
+            ground_nets, {"net": "VGND", "net_id": 99, "mom_capacitance_ff": 0.3}
+        )
+        is None
+    )
+
+
+@_SKIP_NO_KLT_MOM_NATIVE
+def test_mom_net_duplicate_named_islands_swap_the_solved_island(tmp_path):
+    """Regression (issue #811): with two distinct, disconnected net islands
+    sharing one layout label (the `gcd` corpus's un-strapped `VGND` pattern),
+    `--mom-net <that label>` must overwrite the capacitance of *the island
+    the solver actually measured* -- not whichever same-named island happens
+    to sort first.
+
+    The two islands are deliberately built with different interconnect
+    geometry (the second's source li1 is wider), so their lumped-RC
+    capacitances differ and a swap onto the wrong island is visible in the
+    numbers rather than hidden behind two identical values."""
+    layout = _make_two_disjoint_nmos_shared_label_layout(
+        second_source_li1_extension_dbu=3000
+    )
+    path = _write_gds(layout, tmp_path / "two_vgnd.gds")
+
+    baseline = run_extract(
+        path,
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "two_vgnd_baseline.spice"),
+    )
+    baseline_by_id = {
+        entry["net_id"]: entry
+        for entry in baseline["parasitics"]["nets"]
+        if entry["net"] == "VGND"
+    }
+    assert len(baseline_by_id) == 2
+    # The fixture genuinely distinguishes the two islands -- otherwise this
+    # test could not tell a correct swap from a swap onto the wrong island.
+    assert len({e["capacitance_ff"] for e in baseline_by_id.values()}) == 2
+
+    report = run_extract(
+        path,
+        "sky130",
+        parasitics=True,
+        mom_net="VGND",
+        output=str(tmp_path / "two_vgnd_mom.spice"),
+    )
+    crosscheck = report["parasitics"]["mom_crosscheck"]
+    solved_id = crosscheck["net_id"]
+    assert solved_id in baseline_by_id
+
+    entries = {
+        entry["net_id"]: entry
+        for entry in report["parasitics"]["nets"]
+        if entry["net"] == "VGND"
+    }
+    assert set(entries) == set(baseline_by_id)
+
+    # The solved island -- and only it -- carries the MoM value; the other
+    # same-named island keeps its lumped-RC value untouched.
+    assert entries[solved_id]["capacitance_ff"] == crosscheck["mom_capacitance_ff"]
+    (other_id,) = set(entries) - {solved_id}
+    assert (
+        entries[other_id]["capacitance_ff"]
+        == baseline_by_id[other_id]["capacitance_ff"]
+    )
+
+    # The reported "before" number belongs to the solved island too, so
+    # `delta_ff`/`delta_pct` compare the two models on the *same* geometry.
+    assert (
+        crosscheck["lumped_rc_capacitance_ff"]
+        == baseline_by_id[solved_id]["capacitance_ff"]
+    )
+    assert crosscheck["mom_capacitance_ff"] != crosscheck["lumped_rc_capacitance_ff"]
+
+    # The ambiguity is stated explicitly rather than silently resolved --
+    # both in the cross-check's own warnings and in the top-level list.
+    assert any(
+        "matches 2 distinct" in w and f"net_id {solved_id}" in w
+        for w in crosscheck["warnings"]
+    )
+    assert any("matches 2 distinct" in w for w in report["warnings"])
+
+    # And the written SPICE carries the same pair of numbers: KLayout's
+    # writer renames the duplicate label (`VGND`, `VGND$1`), so both islands'
+    # `C` cards are present and distinct.
+    spice_text = (tmp_path / "two_vgnd_mom.spice").read_text()
+    written_ff = {
+        round(float(line.split()[-1]) * 1e15, 6)
+        for line in spice_text.splitlines()
+        if line.startswith("CVGND")
+    }
+    assert crosscheck["mom_capacitance_ff"] in written_ff
+    assert baseline_by_id[other_id]["capacitance_ff"] in written_ff
