@@ -17,6 +17,7 @@ from . import (
     draw_cmd,
     drc_cmd,
     equiv_cmd,
+    erc_cmd,
     eval_cmd,
     extract_cmd,
     functional_verification_cmd,
@@ -1020,6 +1021,46 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(equiv_parser)
     equiv_parser.set_defaults(func=equiv_cmd.run)
+
+    erc_parser = subparsers.add_parser(
+        "erc",
+        help="build a per-gate layer-by-layer connectivity model (antenna/ERC signoff)",
+        description=(
+            "Define the klt erc interface and build the layer-by-layer "
+            "connectivity model that both the antenna-ratio check and core "
+            "ERC checks depend on -- issue #859, Phase 1a of the antenna + "
+            "ERC signoff epic #713. For every net whose geometry includes "
+            "the declared gate-role layer, accumulate that net's connected "
+            "conductor area at each fabrication step (the spec's stackup "
+            "order). This phase delivers the klt erc interface and the "
+            "connectivity model only; the antenna-ratio verdict (Phase 1b) "
+            "and the ERC finding list (Phase 1c) are later phases that add "
+            "response fields additively. See docs/cli/erc.md for the "
+            "spec-file schema and the JSON contract."
+        ),
+    )
+    erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
+    erc_parser.add_argument(
+        "spec",
+        help=(
+            "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
+            "mapping GDS layer/datatype pairs to fabrication-order "
+            'conductor roles -- stackup[0] sets "role": "gate" -- and '
+            "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
+            "section"
+        ),
+    )
+    erc_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to analyse when the stream has more than one "
+            "(required in that case -- klt erc operates on exactly one "
+            "top cell, unlike klt layers' default of summing across all)"
+        ),
+    )
+    _add_format_arg(erc_parser)
+    erc_parser.set_defaults(func=erc_cmd.run)
 
     functional_verification_parser = subparsers.add_parser(
         "functional-verification",
