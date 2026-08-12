@@ -789,9 +789,33 @@ def _nominal_supply(lib_dir: str) -> dict[str, Any]:
     supplies_v = sorted({entry["voltage"] for entry in candidates})
     return {
         "voltage": best["voltage"],
-        "corner": best["corner"],
+        "corner": _strip_library_prefix(best["corner"], os.path.basename(lib_dir)),
         "supplies_v": supplies_v,
     }
+
+
+def _strip_library_prefix(corner: str | None, library_name: str) -> str | None:
+    """Strip a leading ``<library_name>__`` prefix from ``corner``, if present.
+
+    Some vendor-shipped `.lib` files' ``default_operating_conditions``
+    Liberty attribute (see :func:`_parse_lib_corner`) already embeds the
+    `<cell_library>__` prefix that :func:`_resolve_liberty` callers
+    (``synthesize.py``, ``place_and_route.py``) prepend themselves when
+    building `<cell_library>__<corner>.lib` from a bare ``nominal_corner`` --
+    e.g. `gf180mcu_fd_sc_mcu9t5v0`, whose `.lib` files declare
+    ``default_operating_conditions: gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80``
+    rather than the bare `tt_025C_1v80` sky130's `.lib` files use. Without
+    this normalization, ``nominal_corner`` reports the doubled-prefix form
+    and those callers' filename construction doubles the prefix again
+    (issue #820). A no-op when ``corner`` is already bare (sky130's shape)
+    or ``None`` (no `.lib` files parsed).
+    """
+    if corner is None:
+        return None
+    prefix = f"{library_name}__"
+    if corner.startswith(prefix):
+        return corner[len(prefix) :]
+    return corner
 
 
 def _parse_lib_corner(path: str) -> dict[str, Any]:

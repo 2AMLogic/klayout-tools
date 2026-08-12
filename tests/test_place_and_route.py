@@ -161,6 +161,7 @@ def _make_pdk_install(
     *,
     cell_library: str = "sky130_fd_sc_hd",
     corner: str = "tt_025C_1v80",
+    attribute_corner: str | None = None,
     with_lib: bool = True,
     with_lef: bool = True,
     with_gds: bool = True,
@@ -169,7 +170,16 @@ def _make_pdk_install(
     library's `lib/`/`techlef/`/`lef/`/`gds/` views -- enough for
     `run_place_and_route`'s own resolution, never real, engine-parseable
     file contents (the stubbed-OpenROAD tests never invoke a real
-    `openroad`; the GDS merge is separately stubbed in those tests)."""
+    `openroad`; the GDS merge is separately stubbed in those tests).
+
+    ``corner`` is used for the on-disk filename suffix
+    (`<cell_library>__<corner>.lib`). ``attribute_corner`` -- when given --
+    lets the file's `default_operating_conditions` attribute value diverge
+    from ``corner``: gf180mcu's real shape, where that attribute already
+    carries the `<cell_library>__` prefix while the filename suffix stays
+    bare (issue #820). Defaults to ``corner`` (sky130's shape, already bare)
+    when omitted.
+    """
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
     lib_dir = variant_dir / "libs.ref" / cell_library
@@ -178,7 +188,8 @@ def _make_pdk_install(
         lib_views_dir = lib_dir / "lib"
         lib_views_dir.mkdir(parents=True, exist_ok=True)
         content = (
-            f'    default_operating_conditions : "{corner}";\n'
+            f"    default_operating_conditions : "
+            f'"{attribute_corner if attribute_corner is not None else corner}";\n'
             "    nom_process : 1.0;\n"
             "    nom_temperature : 25.0;\n"
             "    nom_voltage : 1.8;\n"
@@ -487,6 +498,52 @@ def test_run_lef_not_found(tmp_path, monkeypatch):
     request_path = _write_request(tmp_path / "request.json", _base_request())
     with pytest.raises(PlaceAndRouteError, match="LEF not found for deck"):
         run_place_and_route(request_path)
+
+
+def test_resolve_liberty_nominal_corner_default(tmp_path, monkeypatch):
+    """Omitting `pdk.corner` resolves the nominal corner via
+    `list_cell_libraries()`'s own `nominal_corner` selection -- mirrors
+    `test_synthesize.py`'s `test_run_synthesize_nominal_corner_default` for
+    this module's own `_resolve_liberty` copy."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = place_and_route._resolve_liberty(
+        "sky130_fd_sc_hd", None
+    )
+    assert corner == "tt_025C_1v80"
+    assert liberty_path.endswith("sky130_fd_sc_hd__tt_025C_1v80.lib")
+    assert info["variant"] == "sky130A"
+
+
+def test_resolve_liberty_nominal_corner_default_gf180mcu_prefixed_attribute_shape(
+    tmp_path, monkeypatch
+):
+    """gf180mcu_fd_sc_mcu9t5v0's real `.lib` files' `default_operating_conditions`
+    attribute already carries the `<cell_library>__` prefix even though the
+    on-disk filename suffix stays bare. Omitting `pdk.corner` must still
+    resolve to the correct, single-prefixed on-disk path -- not double the
+    prefix (issue #820)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuD",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        corner="tt_025C_1v80",
+        attribute_corner="gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80",
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    liberty_path, corner, info = place_and_route._resolve_liberty(
+        "gf180mcu_fd_sc_mcu9t5v0", None
+    )
+    assert corner == "tt_025C_1v80"
+    assert liberty_path.endswith("gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80.lib")
+    assert "__gf180mcu_fd_sc_mcu9t5v0__" not in liberty_path
+    assert info["variant"] == "gf180mcuD"
 
 
 def test_run_unknown_cell_library_rejects_cts_stage(tmp_path, monkeypatch):
