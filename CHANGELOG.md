@@ -440,6 +440,26 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — New verb `klt erc` builds a per-gate, layer-by-layer
+  connectivity model — issue #859, Phase 1a of the antenna + ERC signoff
+  epic #713. A JSON spec declares a `stackup` (fabrication order from the
+  gate/poly layer up through the metal stack; `stackup[0]` sets `"role":
+  "gate"`) and optional `vias` (bridging two stackup roles). Connectivity is
+  traced with `klayout.db.LayoutToNetlist` used purely for wire/via
+  connectivity (no device recognition) — the same API `klt power` already
+  uses for its own resistive-network extraction. For every net whose
+  geometry includes the gate-role layer, `klt erc` reports that net's own
+  merged area at each fabrication step plus a running cumulative total
+  (`gates[].levels[].step_area_um2`/`cumulative_area_um2`) — "per gate"
+  means "per electrically distinct gate net", matching real
+  process-antenna-area-ratio (PAAR) methodology directly, and needs no net
+  labelling to discover (unlike `klt power`'s caller-named `power_nets`).
+  This phase delivers the `klt erc` interface and the connectivity model
+  only — the per-gate antenna-ratio verdict against a PDK limit (#860,
+  Phase 1b) and the core ERC finding list (#861, Phase 1c) are later phases
+  that add response fields additively (no `schema_version` bump needed for
+  either). See `docs/cli/erc.md`.
+
 - 2026-08-12 — `klt signoff --fleet <file>` adds a third mode to `klt
   signoff`: a fleet-wide tier roll-up (issue #827, Phase 1c of epic #706).
   Given a **fleet manifest** naming several blocks (each a per-block

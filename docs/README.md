@@ -23,6 +23,7 @@ docs/
     deck.md
     draw.md
     drc.md
+    erc.md
     eval.md
     extract.md
     functional-verification.md
