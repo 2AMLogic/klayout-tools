@@ -1361,6 +1361,99 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
         run_place_and_route(request_path)
 
 
+# --------------------------------------------------------------------------- #
+# `DRT-0305` constant-tie diagnosis (issue #854)
+# --------------------------------------------------------------------------- #
+
+#: The two lines a real `openroad` route stage prints when TritonRoute hits a
+#: constant-tie net -- the informative one on stdout (utl's logger), the
+#: uninformative Tcl-level summary on stderr. Copied verbatim from issue
+#: #854's own transcript (`openroad/orfs:latest`, `26Q3-1080-gab6fd26351`).
+_DRT_0305_STDOUT = (
+    "[INFO DRT-0149] Post-processing.\n"
+    "[ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by "
+    "TritonRoute. Move to special nets.\n"
+)
+_DRT_0305_STDERR = "Error: pnr_modexp_route.tcl, 6 DRT-0305\n"
+
+
+def test_engine_error_message_explains_drt_0305_constant_tie(tmp_path):
+    """`DRT-0305` is diagnosed, not passed through: the message names the
+    offending net and says what to do about it, instead of surfacing only
+    OpenROAD's own Tcl line-number summary (`Error: …route.tcl, 6
+    DRT-0305`), which is what a caller saw before issue #854."""
+    completed = _FakeCompleted(
+        returncode=1, stdout=_DRT_0305_STDOUT, stderr=_DRT_0305_STDERR
+    )
+
+    message = place_and_route._engine_error_message("route", completed)
+
+    assert "DRT-0305" in message
+    assert "zero_" in message
+    assert "tie cell" in message
+    assert "klt synthesize" in message
+
+
+def test_engine_error_message_drt_0305_names_a_one_net_too(tmp_path):
+    """The tie-high half (`one_`, signal type POWER) is diagnosed the same
+    way -- the net name and type both come from the matched error line, not
+    from a hardcoded `zero_`."""
+    completed = _FakeCompleted(
+        returncode=1,
+        stdout=(
+            "[ERROR DRT-0305] Net one_ of signal type POWER is not routable "
+            "by TritonRoute. Move to special nets.\n"
+        ),
+        stderr="Error: pnr_top_route.tcl, 6 DRT-0305\n",
+    )
+
+    message = place_and_route._engine_error_message("route", completed)
+
+    assert "one_" in message
+    assert "POWER" in message
+
+
+def test_engine_error_message_without_drt_0305_is_unchanged(tmp_path):
+    """Every other engine failure keeps exactly its pre-#854 message -- the
+    hint is appended only for the error code it explains."""
+    completed = _FakeCompleted(
+        returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
+    )
+
+    message = place_and_route._engine_error_message("place", completed)
+
+    assert message == (
+        "openroad 'place' stage failed: [ERROR PPL-0001] no valid pin placement found"
+    )
+
+
+def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
+    """The diagnosis reaches the caller through `PlaceAndRouteError`, i.e.
+    through `klt place-and-route`'s own JSON `error.message` -- not just
+    through the helper that builds it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return _FakeCompleted(stdout="26Q3-1080-gab6fd26351 \n")
+        script_path = cmd[5]
+        stage = _stage_from_script_path(script_path)
+        if stage == "route":
+            return _FakeCompleted(
+                returncode=1, stdout=_DRT_0305_STDOUT, stderr=_DRT_0305_STDERR
+            )
+        checkpoint_out = _script_write_db_path(script_path)
+        Path(checkpoint_out).write_text("fake odb\n")
+        with open(cmd[4], "w", encoding="utf-8") as handle:
+            json.dump(_STAGE_METRICS[stage], handle)
+        return _FakeCompleted(returncode=0)
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+    with pytest.raises(PlaceAndRouteError, match=r"DRT-0305.*zero_"):
+        run_place_and_route(request_path)
+
+
 def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path, monkeypatch, target_stage="floorplan", constraints=None, io=None

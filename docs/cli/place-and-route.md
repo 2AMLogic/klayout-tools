@@ -368,6 +368,27 @@ eval`'s descriptor with an explicit threshold, the same mechanism
 `docs/cli/eval.md`'s own example already uses for `layout-metrics`'s
 `cell_count`.
 
+### Diagnosed engine errors: `DRT-0305` (constant-tie nets)
+
+One OpenROAD error is translated rather than echoed. If the netlist handed
+to this command still contains bare `1'b0`/`1'b1` constant drivers, OpenSTA's
+Verilog reader materialises one net per constant value (conventionally
+`zero_`/`one_`), OpenROAD types those nets `GROUND`/`POWER`, and TritonRoute
+aborts the `route` stage with `DRT-0305`. OpenROAD prints the informative
+line on stdout and an uninformative Tcl summary (`Error:
+pnr_<top>_route.tcl, 6 DRT-0305`) on stderr, so the default surface was the
+script line number and nothing else. The `error.message` now names the
+offending net and the fix instead (issue #854):
+
+```
+openroad 'route' stage failed: [ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute. -- net 'zero_' is a constant tie, not a real signal: … Re-synthesize the netlist so its constants are driven by real tie cells …
+```
+
+Netlists produced by `klt synthesize` no longer hit this: it maps constants
+onto the resolved library's own tie cells via Yosys's `hilomap` pass — see
+[`docs/cli/synthesize.md`](synthesize.md)'s "Constant ties" section. The
+diagnosis remains for netlists produced by anything else.
+
 ## Out of scope
 
 - **Tapcell insertion, power-grid generation (PDN), metal fill,

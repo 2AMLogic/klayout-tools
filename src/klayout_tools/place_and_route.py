@@ -378,6 +378,14 @@ _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
 #: :func:`_count_antenna_violations`.
 _ANTENNA_VIOLATION_COUNT_RE = re.compile(r"Found (\d+) net violations")
 
+#: Matches TritonRoute's own constant-tie rejection, e.g. ``"[ERROR
+#: DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute.
+#: Move to special nets."`` -- see :func:`_constant_tie_diagnosis` (#854).
+_DRT_CONSTANT_NET_RE = re.compile(
+    r"\[ERROR DRT-0305\][^\n]*?Net (?P<net>\S+) of signal type "
+    r"(?P<sig_type>\S+)[^\n]*"
+)
+
 #: Markers delimiting each `report_check_types -violators` block in a
 #: stage's captured stdout, so :func:`_count_violations` can isolate the
 #: setup-check block from the hold-check block within one run's combined
@@ -1451,7 +1459,17 @@ def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) ->
     """Build an actionable error message from a failed per-stage OpenROAD
     run -- prefers the last ``[ERROR ...]``/``Error:`` line OpenROAD itself
     printed, on either stream (mirrors ``synthesize.py``'s
-    ``_synthesis_error_message``)."""
+    ``_synthesis_error_message``).
+
+    ``DRT-0305`` (a constant-tie net reaching TritonRoute) is additionally
+    *diagnosed* rather than passed through -- see
+    :func:`_constant_tie_diagnosis`.
+    """
+    diagnosis = _constant_tie_diagnosis(completed)
+    if diagnosis is not None:
+        error_line, hint = diagnosis
+        return f"openroad '{stage}' stage failed: {error_line} -- {hint}"
+
     for stream in (completed.stderr or "", completed.stdout or ""):
         error_lines = [
             line.strip()
@@ -1465,6 +1483,45 @@ def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) ->
     snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
     return (
         f"openroad '{stage}' stage exited with code {completed.returncode}: {snippet}"
+    )
+
+
+def _constant_tie_diagnosis(
+    completed: subprocess.CompletedProcess,
+) -> tuple[str, str] | None:
+    """``(error_line, hint)`` when a failed run hit ``DRT-0305``, else
+    ``None`` (issue #854).
+
+    ``DRT-0305`` is the one OpenROAD error this module translates rather
+    than echoes, because its default surface is actively unhelpful: the
+    informative line goes to **stdout** (utl's logger) while the
+    uninformative Tcl summary -- ``Error: pnr_<top>_route.tcl, 6 DRT-0305``
+    -- goes to **stderr**, which :func:`_engine_error_message`'s stderr-first
+    preference would otherwise pick. So a caller saw a script line number
+    and nothing else.
+
+    What it actually means: OpenSTA's Verilog reader materialises one net
+    per constant *value* it reads in a netlist (conventionally ``zero_`` and
+    ``one_``), OpenROAD types those nets ``GROUND``/``POWER``, and
+    TritonRoute refuses to route a power/ground-typed net as signal. The fix
+    is upstream, in synthesis: map constants onto real tie cells so no bare
+    constant literal ever reaches place-and-route -- which ``klt synthesize``
+    now does for every ``cell_library`` in its own tie-cell table (#854).
+    """
+    combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    match = _DRT_CONSTANT_NET_RE.search(combined)
+    if match is None:
+        return None
+    net, sig_type = match.group("net"), match.group("sig_type")
+    return (
+        match.group(0).strip(),
+        f"net '{net}' is a constant tie, not a real signal: a bare 1'b0/1'b1 "
+        f"literal in the netlist becomes a net OpenROAD types {sig_type}, and "
+        f"TritonRoute will not route one. Re-synthesize the netlist so its "
+        f"constants are driven by real tie cells -- `klt synthesize` does this "
+        f"via yosys's `hilomap` pass for every standard-cell library in its "
+        f"tie-cell table -- or hand-edit the netlist to instantiate tie-high/"
+        f"tie-low cells before place-and-route.",
     )
 
 

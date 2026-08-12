@@ -1301,6 +1301,131 @@ def test_cell_library_without_table_entries_keeps_the_pre_807_script(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Constant-tie mapping (`hilomap`, issue #854)
+# --------------------------------------------------------------------------- #
+
+
+def _script_lines(script_path: str) -> list[str]:
+    with open(script_path, encoding="utf-8") as handle:
+        return [line.rstrip("\n") for line in handle]
+
+
+def _script_hilomap_line(script_path: str) -> str | None:
+    for line in _script_lines(script_path):
+        if line.startswith("hilomap "):
+            return line
+    return None
+
+
+def test_generated_script_maps_constants_to_tie_cells(tmp_path, monkeypatch):
+    """`sky130_fd_sc_hd` has a tie-cell table entry, so the generated script
+    carries the `hilomap` pass that replaces every bare `1'b0`/`1'b1`
+    constant driver with a real tie cell -- ORFS's own
+    `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT` values for that platform
+    (issue #854)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_hilomap_line(report["script_path"]) == (
+        "hilomap -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO"
+    )
+
+
+def test_hilomap_runs_after_mapping_and_before_stat(tmp_path, monkeypatch):
+    """Ordering is load-bearing: `hilomap` can only see the constants ABC
+    left behind, so it must follow `abc`/`clean`, and the tie cells it
+    inserts are real instances, so it must precede `stat` (which populates
+    `instance_count`/`area_um2`) and `write_verilog`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    lines = _script_lines(report["script_path"])
+    index = {
+        "clean": lines.index("clean"),
+        "hilomap": next(
+            i for i, line in enumerate(lines) if line.startswith("hilomap")
+        ),
+        "stat": next(i for i, line in enumerate(lines) if " stat -liberty " in line),
+        "write_verilog": next(
+            i for i, line in enumerate(lines) if line.startswith("write_verilog ")
+        ),
+    }
+
+    assert index["clean"] < index["hilomap"] < index["stat"] < index["write_verilog"]
+
+
+def test_generated_script_maps_constants_to_tie_cells_gf180mcu(tmp_path, monkeypatch):
+    """The second supported library gets its **own** verified tie cells
+    (`__tieh`/`__tiel`, two distinct cells) -- never sky130's single
+    dual-output `conb_1` carried over by analogy."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuD",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        corners=(("tt_025C_5v00", 1.0, 25.0, 5.0),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={
+                "cell_library": "gf180mcu_fd_sc_mcu9t5v0",
+                "corner": "tt_025C_5v00",
+            }
+        ),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_hilomap_line(report["script_path"]) == (
+        "hilomap -hicell gf180mcu_fd_sc_mcu9t5v0__tieh Z "
+        "-locell gf180mcu_fd_sc_mcu9t5v0__tiel ZN"
+    )
+
+
+def test_cell_library_without_tie_cell_entry_emits_no_hilomap(tmp_path, monkeypatch):
+    """A `cell_library` with no `_TIE_CELLS` entry is never given a guessed
+    tie cell: the `hilomap` pass is omitted entirely rather than the run
+    failing on a cell name that does not exist in that library -- the same
+    graceful degradation `_ABC_CONSTR_INPUTS`/`_ABC_DONT_USE_GLOBS` already
+    apply."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "acme_sc_hd", "corner": "tt_025C_1v80"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_hilomap_line(report["script_path"]) is None
+
+
+def test_tie_cell_table_entries_are_hi_then_lo(tmp_path):
+    """Each `_TIE_CELLS` entry is `((hi_cell, hi_port), (lo_cell, lo_port))`
+    -- guards against an entry being written the other way round, which
+    `hilomap` would happily accept while inverting every constant in the
+    design."""
+    for cell_library, entry in synthesize._TIE_CELLS.items():
+        (hi_cell, hi_port), (lo_cell, lo_port) = entry
+        for cell in (hi_cell, lo_cell):
+            assert cell.startswith(f"{cell_library}__"), cell
+        assert hi_port and lo_port
+        assert (hi_cell, hi_port) != (lo_cell, lo_port)
+
+
 def test_timing_reports_the_maximum_over_every_stime_report(tmp_path, monkeypatch):
     """Yosys invokes ABC once per combinational region, so a multi-region
     run prints several `stime` summaries -- the reported critical path is
@@ -1873,6 +1998,74 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
 def _setup_success_env_real(tmp_path: Path) -> str:
     _write(tmp_path / "gcd.v", _GCD_RTL)
     return _write_request(tmp_path / "request.json", _base_request())
+
+
+#: RTL whose synthesized netlist provably needs constant ties: `q[5]` is a
+#: constant-0 output port and the `q[0]` flop's `D` pin is a constant 1.
+#: Measured live (Yosys 0.33 + real sky130 liberty, issue #854): without the
+#: `hilomap` pass the mapped netlist carries a bare `assign q[5] = 1'h0;`
+#: and a bare `.D(1'h1)` -- exactly the shape OpenSTA's Verilog reader turns
+#: into the `zero_`/`one_` nets TritonRoute rejects with `DRT-0305`.
+_TIE_CONST_RTL = """\
+module tie_const (
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire [3:0] d,
+    output reg  [5:0] q
+);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) q <= 6'b0;
+        else        q <= {1'b0, d, 1'b1};
+    end
+endmodule
+"""
+
+#: Matches any bare Verilog constant literal (`1'h0`, `2'b10`, `6'd3`, ...)
+#: in a mapped netlist -- what issue #854's fix must leave none of.
+_BARE_CONSTANT_RE = re.compile(r"\d+'[bdho][0-9a-fxzA-FXZ_]+")
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+def test_integration_real_yosys_constant_ties_become_tie_cells(tmp_path, monkeypatch):
+    """Issue #854, end to end against a real Yosys and a real sky130
+    install: a design that needs constant ties synthesizes to a netlist with
+    **zero** bare constant literals, every one of them replaced by a real
+    `sky130_fd_sc_hd__conb_1` tie-cell instance.
+
+    This is the root-cause check for `DRT-0305` (`Net zero_ of signal type
+    GROUND is not routable by TritonRoute`): OpenSTA's Verilog reader
+    synthesizes a `zero_`/`one_` net for every bare constant it reads, and
+    OpenROAD types those nets GROUND/POWER, which `detailed_route` refuses.
+    No bare constant in the netlist means no such net exists to reject."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    _write(tmp_path / "tie_const.v", _TIE_CONST_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=["tie_const.v"], hdl_toplevel="tie_const"),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    with open(report["netlist_path"], encoding="utf-8") as handle:
+        netlist_text = handle.read()
+
+    body = "\n".join(
+        line for line in netlist_text.splitlines() if not line.lstrip().startswith("//")
+    )
+    assert _BARE_CONSTANT_RE.search(body) is None, (
+        "mapped netlist still carries a bare constant literal -- OpenROAD "
+        "would build a `zero_`/`one_` power/ground net from it and "
+        "`detailed_route` would abort with DRT-0305"
+    )
+    assert report["instance_counts_by_type"]["sky130_fd_sc_hd__conb_1"] >= 1
+    assert "sky130_fd_sc_hd__conb_1" in netlist_text
 
 
 # Sanity: `subprocess` really is the module this file's stubs patch (guards

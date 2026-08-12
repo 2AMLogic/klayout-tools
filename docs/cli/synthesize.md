@@ -77,6 +77,7 @@ synth -top <hdl_toplevel>
 dfflibmap -liberty <resolved liberty path>
 tee -q -o <abc log path> abc -liberty <resolved liberty path> -constr <constr path> [-D <picoseconds>] [-dont_use <glob> ...]
 clean
+[hilomap -hicell <tie-hi cell> <port> -locell <tie-lo cell> <port>]
 tee -q -o <stats path> stat -liberty <resolved liberty path> -json -top <hdl_toplevel>
 write_verilog -noattr <netlist path>
 ```
@@ -134,6 +135,58 @@ per run and omits the exclusion list on builds that do not support it,
 rather than failing — the same graceful degradation `sequential_area_um2`
 already applies to those builds. `-constr`/`-D`/`stime -p` are supported on
 both.
+
+### Constant ties (`hilomap`)
+
+Yosys leaves constant drivers in a mapped netlist as bare Verilog literals
+— `assign q[5] = 1'h0;`, `.D(1'h1)`. That is fine for simulation and
+formal, and fatal for place-and-route: OpenSTA's Verilog reader materialises
+one net per constant *value* it reads (conventionally `zero_` and `one_`),
+OpenROAD types those nets `GROUND`/`POWER`, and TritonRoute refuses to route
+a power/ground-typed net —
+
+```
+[ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute. Move to special nets.
+```
+
+— which aborts the whole `route` stage before it does any work. Constant
+ties are ubiquitous in real RTL, so this made every design that needs one
+un-routable end to end (issue #854).
+
+The generated script therefore ends with a `hilomap` pass that replaces
+each constant driver with a real tie cell, whenever the resolved
+`pdk.cell_library` has an entry in `synthesize.py`'s own `_TIE_CELLS`
+table:
+
+| `cell_library` | tie-high | tie-low |
+| --- | --- | --- |
+| `sky130_fd_sc_hd` | `sky130_fd_sc_hd__conb_1` `HI` | `sky130_fd_sc_hd__conb_1` `LO` |
+| `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
+
+Both rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT` for
+that platform, cross-checked against the installed liberty (the sky130 cell
+drives both constants from one instance; gf180mcu has two distinct cells,
+and its `__filltie` is a well-tie filler, not a logic constant driver — the
+sky130 shape is deliberately **not** carried over by analogy). This mirrors
+where ORFS runs the same pass, at the end of its own `synth.tcl`.
+
+Two consequences worth knowing:
+
+- **`hilomap` runs before `stat`**, so the tie cells it inserts are counted
+  in `instance_count`, `instance_counts_by_type`, and `area_um2` — they are
+  real instances that occupy real area, not bookkeeping.
+- **No `-singleton`.** ORFS collapses every constant onto one tie-hi and one
+  tie-lo instance and splits that fanout back out at floorplan time with
+  OpenROAD's `repair_tie_fanout` (which only duplicates tie cells that
+  *already exist*). `klt place-and-route` runs no such step, so this command
+  uses Yosys's default instead — one tie instance per constant bit — and
+  leaves any residual high-fanout tie net to the `place` stage's existing
+  `repair_design`.
+
+A `cell_library` with no `_TIE_CELLS` entry emits no `hilomap` line at all,
+rather than a guessed cell name. A design that needs no constant tie (the
+repo's own `gcd.v`) is unaffected: its netlist and `stat` output are
+byte-identical with and without the pass.
 
 ## PDK / liberty resolution
 

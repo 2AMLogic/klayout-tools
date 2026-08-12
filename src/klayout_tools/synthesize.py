@@ -65,6 +65,16 @@ never signoff STA -- hence the self-labelling ``timing`` object shape
 documented in ``docs/cli/synthesize.md``, never a bare ``delay_ps`` float.
 Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
 
+Constant drivers are mapped to real tie cells (issue #854). Yosys leaves
+``1'b0``/``1'b1`` constants as bare Verilog literals, which OpenSTA's
+Verilog reader turns into ``zero_``/``one_`` nets that OpenROAD types
+``GROUND``/``POWER`` and TritonRoute then refuses to route (``[ERROR
+DRT-0305] … is not routable by TritonRoute``) -- so a netlist with a bare
+constant is un-place-and-routable end to end. The generated script therefore
+runs Yosys's ``hilomap`` pass with the resolved library's own tie-high/
+tie-low cells (:data:`_TIE_CELLS`, ORFS's ``TIEHI_CELL_AND_PORT``/
+``TIELO_CELL_AND_PORT`` values), exactly as ORFS's own ``synth.tcl`` does.
+
 **Acceptance gate**: :func:`run_synthesize`'s ``verify_equivalence`` flag
 (the CLI's ``--verify-equivalence``, default off/additive) wires the just-
 produced netlist through ``klt equiv``
@@ -213,6 +223,73 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
     "sky130_fd_sc_hd": (
         "sky130_fd_sc_hd__lpflow_*",
         "sky130_fd_sc_hd__probe*",
+    ),
+}
+
+#: Per-cell-library tie-high/tie-low cell for Yosys's ``hilomap`` pass,
+#: as ``((hi_cell, hi_port), (lo_cell, lo_port))`` -- issue #854.
+#:
+#: **Why this exists.** Yosys's ``synth``/``abc`` passes leave constant
+#: drivers as bare Verilog literals (``assign q[5] = 1'h0;``, ``.D(1'h1)``).
+#: OpenSTA's Verilog reader materialises one net per constant *value* when
+#: it reads such a netlist -- conventionally named ``zero_``/``one_`` -- and
+#: OpenROAD types those nets ``GROUND``/``POWER``. TritonRoute then refuses
+#: them outright: ``[ERROR DRT-0305] Net zero_ of signal type GROUND is not
+#: routable by TritonRoute. Move to special nets.`` So *any* design needing
+#: a constant tie (i.e. almost any real design -- the repo's own ``gcd.v``
+#: happening not to need one is the exception) was unroutable by ``klt
+#: place-and-route`` end to end. ``hilomap`` replaces each constant driver
+#: with a real, routable standard-cell instance before the netlist ever
+#: leaves this command, so no such net is ever created downstream.
+#:
+#: This mirrors ORFS, which runs the same pass at the same point in its own
+#: synthesis script (``flow/scripts/synth.tcl``: ``splitnets`` ->
+#: ``opt_clean -purge`` -> ``hilomap -singleton -hicell {*}$::env(TIEHI_CELL
+#: _AND_PORT) -locell {*}$::env(TIELO_CELL_AND_PORT)``), and the values below
+#: are that flow's own ``TIEHI_CELL_AND_PORT``/``TIELO_CELL_AND_PORT`` per
+#: platform, each cross-checked against the installed liberty (read
+#: 2026-08-12 from ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @
+#: ``master``; liberty checks run against a real volare install):
+#:
+#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__conb_1``, ports ``HI``/``LO``.
+#:   One cell drives both constants: the installed
+#:   ``sky130_fd_sc_hd__tt_025C_1v80.lib`` gives ``conb_1`` exactly two
+#:   non-power pins, ``HI`` with ``function : "1"`` and ``LO`` with
+#:   ``function : "0"`` (everything else is a ``pg_pin``). Present as
+#:   ``MACRO sky130_fd_sc_hd__conb_1`` / ``CLASS CORE`` in that library's own
+#:   LEF, and not matched by :data:`_ABC_DONT_USE_GLOBS`.
+#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> two **distinct** cells,
+#:   ``gf180mcu_fd_sc_mcu9t5v0__tieh`` port ``Z`` (``function : "1"``) and
+#:   ``gf180mcu_fd_sc_mcu9t5v0__tiel`` port ``ZN`` (``function : "0"``),
+#:   confirmed in the installed ``gf180mcu_fd_sc_mcu9t5v0__tt_025C_5v00.lib``.
+#:   Deliberately **not** sky130's single dual-output shape carried over by
+#:   analogy -- this library has no ``conb``-equivalent, and its own
+#:   ``__filltie`` cell is a well-tie filler, not a logic constant driver.
+#:
+#: **Deviation from ORFS: no ``-singleton``.** ORFS collapses every constant
+#: in the design onto one tie-hi and one tie-lo instance, then splits that
+#: (potentially design-wide) fanout back out at floorplan time with
+#: ``repair_tie_fanout``, which only ever *duplicates cells that already
+#: exist* (``Resizer::repairTieFanout`` iterates
+#: ``findCellInstances(tie_cell, …)``). ``klt place-and-route`` runs no such
+#: step, so ``-singleton`` here would hand P&R a single net with every
+#: constant load on it. Yosys's default -- one tie instance per constant bit
+#: -- distributes that fanout at the only stage this flow can, and any
+#: residual high-fanout tie net is still picked up by the ``place`` stage's
+#: existing ``repair_design``.
+#:
+#: A ``cell_library`` with no entry gets **no** ``hilomap`` pass at all
+#: (byte-identical script to before #854) rather than a guessed cell name --
+#: the same graceful degradation :data:`_ABC_CONSTR_INPUTS`/
+#: :data:`_ABC_DONT_USE_GLOBS` already apply.
+_TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
+    "sky130_fd_sc_hd": (
+        ("sky130_fd_sc_hd__conb_1", "HI"),
+        ("sky130_fd_sc_hd__conb_1", "LO"),
+    ),
+    "gf180mcu_fd_sc_mcu9t5v0": (
+        ("gf180mcu_fd_sc_mcu9t5v0__tieh", "Z"),
+        ("gf180mcu_fd_sc_mcu9t5v0__tiel", "ZN"),
     ),
 }
 
@@ -377,6 +454,7 @@ def run_synthesize(
         abc_log_path=abc_log_path,
         delay_target_ps=delay_target_ps,
         dont_use_globs=dont_use_globs,
+        tie_cells=_TIE_CELLS.get(cell_library),
     )
 
     _run_yosys(script_path)
@@ -728,11 +806,12 @@ def _write_script(
     abc_log_path: str | None = None,
     delay_target_ps: int | None = None,
     dont_use_globs: tuple[str, ...] = (),
+    tie_cells: tuple[tuple[str, str], tuple[str, str]] | None = None,
 ) -> None:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
-    ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``stat``/
-    ``write_verilog``) into ``script_path``.
+    ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``hilomap`` ->
+    ``stat``/``write_verilog``) into ``script_path``.
 
     The ``abc`` line carries the issue #807 additions when the resolved
     ``cell_library`` has table entries for them:
@@ -751,8 +830,16 @@ def _write_script(
     file, per the #396 spike's explicit warning against regexing the
     interleaved Yosys log.
 
-    With none of those (a ``cell_library`` in neither table), the emitted
-    script is byte-identical to the pre-#807 one.
+    ``tie_cells`` (issue #854, a :data:`_TIE_CELLS` entry) adds one
+    ``hilomap -hicell <cell> <port> -locell <cell> <port>`` line, mapping
+    every remaining constant driver onto a real standard cell. Its position
+    is load-bearing: **after** ``clean`` (it can only rewrite the constants
+    ABC/``clean`` left behind) and **before** ``stat``/``write_verilog`` (the
+    tie cells it inserts are real instances, so they must be counted in
+    ``instance_count``/``area_um2`` and present in the emitted netlist).
+
+    With none of those (a ``cell_library`` in no table), the emitted script
+    is byte-identical to the pre-#807 one.
 
     Every path embedded in the script is absolute, so the script runs
     correctly regardless of the invoking process's own working directory --
@@ -775,6 +862,11 @@ def _write_script(
         f"dfflibmap -liberty {liberty_path}",
         abc_command,
         "clean",
+    ]
+    if tie_cells is not None:
+        (hi_cell, hi_port), (lo_cell, lo_port) = tie_cells
+        lines.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
+    lines += [
         f"tee -q -o {stats_path} "
         f"stat -liberty {liberty_path} -json -top {hdl_toplevel}",
         f"write_verilog -noattr {netlist_path}",
