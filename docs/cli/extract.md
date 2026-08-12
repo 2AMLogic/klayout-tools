@@ -1161,7 +1161,7 @@ commands — see each generator's own docs above. gf180mcu's curated deck
 declares no `dummy` layer yet, so this mechanism stays unreachable there
 until a follow-on issue wires it up.
 
-## Device rule provenance (issue #868)
+## Device rule provenance (issues #868, #867)
 
 `klt drc`'s deck rules gained a machine-readable, per-rule provenance
 citation in issue #747 (see [`docs/cli/drc.md`](drc.md)'s "Rule provenance
@@ -1189,22 +1189,38 @@ its official device-class name (e.g. `"sky130_fd_pr__nfet_01v8"`,
 `rule_id` — the LVS analogue of a DRC rule id, naming *which specific
 device* an entry's geometry/coefficients were transcribed from.
 
-As of this issue, `provenance` is populated for sky130's curated MOS
-(`nfet`/`pfet`), all three resistor entries, both capacitor entries, and the
-one bipolar entry — see `decks/sky130.py`'s `EXTRACTION_DECK` for the
-concrete citations, and `tests/test_lvs_device_provenance.py` for the
-validating tests (provenance-populated assertions plus a golden
-layout→netlist pair per device class: MOSFET, resistor, and capacitor —
-each drawn with hand-computable geometry and asserted against a device
-parameter computed independently from the deck's own provenance-cited
-coefficient). gf180mcu's device entries are left unpopulated (`None`, the
-default) for this pass — the prose citation each entry's own inline comment
-already carries remains the record for those entries, exactly as an unset
+`provenance` is populated for sky130's curated MOS (`nfet`/`pfet`), all
+three resistor entries, both capacitor entries, and the one bipolar entry —
+8 device rules total — see `decks/sky130.py`'s `EXTRACTION_DECK` for the
+concrete citations. gf180mcu's device entries are left unpopulated (`None`,
+the default) — the prose citation each entry's own inline comment already
+carries remains the record for those entries, exactly as an unset
 `DrcRule.provenance` does. Like `DrcRule.provenance`, this field is not
 (yet) surfaced in `klt extract`'s JSON output; it is queryable only by a
 caller that imports `klayout_tools.decks` directly (e.g. a coverage-audit
-script) — see Epic #711's Phase 2b/2c for compiling and cross-checking a
-full PDK's device rules against this model.
+script).
+
+Issue #868 (Phase 2a, the rule-model pilot) validated one entry per named
+device *class* against a golden layout→netlist pair (MOSFET: `nfet` only;
+resistor: `res_generic_po` only; capacitor: `sky130_fd_pr__model__cap_mim`
+only). Issue #867 (Phase 2b) extends this to **every** provenance-cited
+device rule — `pfet`, `res_high_po`, `res_xhigh_po`,
+`sky130_fd_pr__model__cap_mim_m4`, and the `pnp` bipolar, on top of the
+three #868 already covered — mirroring Phase 1's width/spacing golden-pair
+discipline applied to the LVS side: each device rule ships a minimal, hand-
+computed synthetic layout, run through `run_extract`, asserting the
+extracted netlist's device parameters exactly match a value computed
+independently from the deck's own provenance-cited coefficient (or, for the
+bipolar — whose citation is a fixed device-class-name selection with no
+per-rule numeric coefficient the way a resistor's `sheet_rho_ohm_sq` or a
+capacitor's `area_cap_f_um2` is — the correct device class and net
+resolution). See `tests/test_lvs_device_provenance.py`, whose own
+`test_golden_pairs_cover_every_provenanced_sky130_device_rule` enforces this
+1:1 coverage: it fails if a future provenance-backfilled device rule ships
+without a matching golden pair, mirroring `tests/golden_deck/`'s own
+coverage test for `klt drc`'s width/space rules. Epic #711's Phase 2c
+(cross-checking the compiled sky130 LVS device rules against the
+hand-written deck on the #520 corpus) remains a separate, later phase.
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 

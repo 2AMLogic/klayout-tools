@@ -440,6 +440,25 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — Every sky130 LVS device-extraction rule that carries a
+  `RuleProvenance` citation (issue #868, Phase 2a) now also ships a golden
+  layout→netlist pair validating it end-to-end — issue #867, Phase 2b of
+  the DRC/LVS deck compiler epic #711. Phase 2a validated one entry per
+  named device *class* as its model-definition pilot (MOSFET: `nfet` only;
+  resistor: `res_generic_po` only; capacitor: `sky130_fd_pr__model__cap_mim`
+  only); this closes the remaining five: `pfet`, `res_high_po`,
+  `res_xhigh_po`, `sky130_fd_pr__model__cap_mim_m4`, and the `pnp` bipolar
+  — all 8 of `EXTRACTION_DECK`'s provenance-cited device rules now have a
+  golden pair, mirroring Phase 1's own width/spacing golden-pair discipline
+  applied to the LVS side. A new coverage test,
+  `test_golden_pairs_cover_every_provenanced_sky130_device_rule`
+  (`tests/test_lvs_device_provenance.py`), asserts this 1:1 coverage stays
+  true — a future provenance-backfilled device rule that ships without a
+  matching golden pair fails it, the same discipline
+  `tests/golden_deck/`'s own coverage test already enforces for `klt drc`'s
+  width/space rules. No response-shape change (pure test/doc addition); see
+  `docs/cli/extract.md`'s "Device rule provenance" section.
+
 - 2026-08-12 — LVS device-extraction rules now carry the same machine-readable
   `RuleProvenance` citation `DrcRule.provenance` introduced for DRC rules in
   issue #747 — issue #868, Phase 2a of the DRC/LVS deck compiler epic #711.
