@@ -229,20 +229,67 @@ Unlike the capacitance solver's oracles above (each a well-known closed
 form, safely recalled and cross-checked against a second source), the
 standard PEEC partial-inductance literature (Ruehli 1972; Hoer & Love 1965's
 exact rectangular-bar formulas) has multi-term closed forms whose exact
-coefficients this issue's Curator review flagged as unsafe to transcribe from
-memory. Live web search was not usable from the build environment either
-(queries came back with unrelated decoy results rather than a clean
-failure). Rather than risk a subtly wrong transcribed formula, the whole
-method — the Neumann mutual-inductance double integral, and the self
-geometric mean distance (self-GMD) of a circular cross-section — was
+coefficients #797's Curator review flagged as unsafe to transcribe from
+memory. Live web search was not usable from the build environment either at
+that time (queries came back with unrelated decoy results rather than a
+clean failure). #797 shipped with the mutual-term Neumann double integral
 **independently re-derived from first principles and numerically verified**
-(symbolic integration via `sympy` for the Neumann formula; Monte Carlo double
-integration for the self-GMD constant), then cross-checked end to end against
-two classical closed forms it should reproduce in the thin-wire limit (Rosa's
-straight-wire self-inductance, and the two-wire transmission-line loop
-inductance) — both by hand and by a brute-force filament-bundle simulation of
-a round wire. See `native/mom/src/peec.rs`'s module docs for the full
-derivation.
+(symbolic integration via `sympy`), but paired it with an equal-area-circle
+substitution for each filament's own self term (a circular cross-section's
+self geometric mean distance, self-GMD, Monte-Carlo-verified rather than
+transcribed) — safe to derive, but not exact for a rectangular filament: a
+square's *true* self-GMD is ~1.7% larger than the equal-area circle's, which
+systematically over-predicted self inductance by a measured ~0.3%
+([#836](https://github.com/2AMLogic/klayout-tools/issues/836)).
+
+#836 closed that gap by porting Hoer & Love's exact rectangular-bar closed
+form for the self term specifically (`native/mom/src/peec.rs`'s
+`self_partial_inductance_nh`), while keeping the mutual-term Neumann formula
+above unchanged (filaments in `discretize_bars`'s grid never coincide, so the
+thin-filament limit it assumes is accurate there). The same
+transcription-trust problem #797 was worried about applies here too, so the
+closed form is **not taken on trust**: it is defined by the property
+`d^6 f / dx^2 dy^2 dz^2 = 1 / sqrt(x^2 + y^2 + z^2)`, and
+`f_is_the_sixfold_antiderivative_of_the_static_kernel` checks exactly that by
+sixth-order finite differencing, independently of any inductance formula — a
+dropped term or sign error cannot survive it. The assembled self-inductance
+is further cross-checked against the classical mean-distance asymptote for a
+long straight bar, whose two constants (the cross-section's self geometric
+and arithmetic mean distances) are themselves computed from their integral
+definitions by quadrature, not transcribed. See `native/mom/src/peec.rs`'s
+module docs for the full derivation of both the #797 mutual term and the
+#836 self term.
+
+### 0. Self-inductance closed form vs the mean-distance asymptote
+
+The oracle #836 added, and the one that is *not* shape-substituted (unlike
+Rosa's formula in §1 below): the classical mean-distance asymptote for the
+partial self-inductance of a long straight bar,
+
+```
+Lp = (mu0 * l / 2*pi) * [ ln(2*l / GMD) - 1 + AMD/l + O((a/l)^2) ]
+```
+
+with `GMD`/`AMD` the cross-section's self geometric/arithmetic mean
+distances — computed by 2-D quadrature straight from their `E[ln|r1-r2|]` /
+`E[|r1-r2|]` definitions
+(`self_gmd_of_a_square_matches_its_published_value`,
+`self_mean_distance_of_a_square_matches_its_published_value`), reproducing
+Rosa's published `GMD/a = 0.44705` (measured: `0.44704916`) and the classical
+`AMD/a = 0.521405433` to `1e-8` relative. This is checked directly against
+`self_partial_inductance_nh` (one filament, no bundle averaging), not
+end-to-end through `klt mom`.
+
+Fixture: 200 µm long, 0.25×0.25 µm square cross section (`l/(w+t) = 400`,
+deep in the asymptote's regime — also the slender-bar geometry that a naive
+port of the closed form without the far-field guard misfires 6.3% low on;
+see `native/mom/src/peec.rs`'s "far-field branch" module docs).
+
+| computed self-inductance | mean-distance asymptote | rel. error |
+| ------------------------- | ------------------------ | ---------- |
+| 0.287339648 nH             | 0.287339895 nH            | 8.598e-7   |
+
+**Stated tolerance**: `5e-6` (measured: `8.6e-7`, ~6x headroom).
 
 ### 1. Straight-wire self-inductance — Rosa's formula
 
@@ -256,21 +303,22 @@ L = (mu0 * l / 2*pi) * (ln(2*l / a) - 3/4)
 `klt mom`'s bar is rectangular, not round; the oracle's radius `a` is taken
 as the equal-area circle's, `a = sqrt(width * height / pi)` — a
 **shape-substituted oracle**, the same role the Kirchhoff-disk oracle plays
-for the capacitance solver's square plates (§2 above). A square
-cross-section's *true* self-GMD was independently measured (Monte Carlo) to
-be ~1.7% larger than the equal-area circle's, so the converged PEEC answer is
-expected to sit slightly *below* this oracle, not to converge exactly onto
-it.
+for the capacitance solver's square plates (§2 above). Because the oracle
+itself is circular, the gap between it and `klt mom`'s (now-exact, per §0)
+rectangular self term is the same ~1.7%-in-GMD, ~0.2%-in-inductance offset
+regardless of #836's fix — this section is a shape-substituted end-to-end
+pipeline sanity check, not the precision claim for the self term (§0 is).
 
 Fixture: 2000 µm long, 4×4 µm square cross section (aspect ratio 500:1),
 copper conductivity, `filament_size_um = 0.5`.
 
 | measured `L₀₀` | Rosa oracle | rel. error | filaments |
 | -------------- | ----------- | ---------- | --------- |
-| 2.685764 nH    | 2.692048 nH | 0.2334%    | 64 (8×8)  |
+| 2.685629 nH    | 2.692048 nH | 0.2384%    | 64 (8×8)  |
 
-**Stated tolerance**: 2% (measured: 0.23%, well inside — and in the expected
-direction, slightly below the oracle).
+**Stated tolerance**: 2% (measured: 0.24%, well inside — and in the expected
+direction, slightly below the oracle, matching the theoretical circle-vs-
+square GMD gap rather than solver imprecision).
 
 ### 2. Loop inductance — the two-wire transmission-line formula
 
@@ -286,11 +334,12 @@ Fixture: 5000 µm long, 4×4 µm bars ("go"/"return"), 60 µm separation
 
 | measured `L_loop` | two-wire-line oracle | rel. error |
 | ------------------ | --------------------- | ---------- |
-| 7.004233 nH         | 7.060830 nH            | 0.8016%    |
+| 7.007499 nH         | 7.060830 nH            | 0.7553%    |
 
-**Stated tolerance**: 5% (measured: 0.80%) — looser than the straight-wire
+**Stated tolerance**: 5% (measured: 0.76%) — looser than the straight-wire
 check because the loop oracle compounds two asymptotic approximations
-(`l ≫ a` *and* `l ≫ D`), each contributing its own residual.
+(`l ≫ a` *and* `l ≫ D`), each contributing its own residual (also a
+shape-substituted, circular-radius oracle, same caveat as §1).
 
 ### 3. DC resistance — exact
 
@@ -305,20 +354,39 @@ refinement levels (1×1 → 2×2 → 4×4 → 8×8 filaments):
 
 | `filament_size_um` | filaments | `L₀₀`         |
 | ------------------- | --------- | ------------- |
-| 4.00 (1×1)           | 1         | 2.69239952 nH |
-| 2.00 (2×2)           | 4         | 2.68832537 nH |
-| 1.00 (4×4)           | 16        | 2.68635383 nH |
-| 0.50 (8×8)           | 64        | 2.68576441 nH |
+| 4.00 (1×1)           | 1         | 2.68555391 nH |
+| 2.00 (2×2)           | 4         | 2.68660626 nH |
+| 1.00 (4×4)           | 16        | 2.68592860 nH |
+| 0.50 (8×8)           | 64        | 2.68562896 nH |
 
-Successive `|differences|`: `0.004074 → 0.001972 → 0.000589` nH — each step
+Successive `|differences|`: `0.001052 → 0.000678 → 0.000300` nH — each step
 strictly smaller than the last (the gate this test asserts, mirroring §"A
-non-converging solver is not accepted" above). Observed order between the
-first pair of steps: **p ≈ 1.05**; between the second pair: **p ≈ 1.74**
-(accelerating, consistent with the self-GMD approximation resolving better as
-filaments shrink). Richardson-extrapolating from the last three levels gives
-a limit of **2.685513 nH**, 0.24% below the Rosa oracle — matching §1's
-observation that the converged answer sits slightly, and consistently, below
-the shape-substituted oracle rather than drifting further from it.
+non-converging solver is not accepted" above). Post-#836 the self term no
+longer contributes to this refinement signal at all (`self_partial_inductance_nh`
+is exact for every filament regardless of grid), so what is left is purely
+the bundle-of-filaments average's convergence as the mutual-term thin
+-filament approximation is resolved on a finer cross-section grid — a
+different (and, per the smaller absolute differences above, already tighter)
+signal than pre-#836's coupled self-GMD-and-bundle convergence.
+
+### 4. Systematic self-inductance error vs a square-bar geometry sweep
+
+The five square-bar geometries #836 measured the pre-fix ~0.24–0.37%
+over-prediction on, re-measured end-to-end through `klt mom` (`filament_size_um`
+chosen for a 10×10 filament grid per bar) against the §0 mean-distance
+asymptote:
+
+| bar (`l × a × a`)      | pre-#836 (equal-area circle) | post-#836 (exact rectangle) | asymptote    |
+| ------------------------ | ------------------------------ | ------------------------------ | ------------ |
+| 100 × 1 × 1 µm            | 0.102501 nH (+0.32%)            | 0.102175 nH (+0.0028%)          | 0.102172 nH  |
+| 20 × 1 × 1 µm              | 0.014132 nH (+0.37%)            | 0.014080 nH (+0.0041%)          | 0.014080 nH  |
+| 10 × 1 × 1 µm              | 0.005723 nH (+0.30%)            | 0.005704 nH (+0.0306%)          | 0.005706 nH  |
+| 200 × 0.25 × 0.25 µm      | 0.288027 nH (+0.24%)            | 0.287342 nH (+0.0006%)          | 0.287340 nH  |
+| 50 × 2 × 2 µm              | 0.037519 nH (+0.37%)            | 0.037379 nH (+0.0013%)          | 0.037380 nH  |
+
+The remaining residual (all `< 0.05%`, vs. the `~0.3%` before) is the
+mutual-term bundle-averaging approximation and the asymptote's own
+`O((a/l)^2)` remainder, not the self-GMD substitution #836 removed.
 
 ## What is *not* validated here
 

@@ -353,18 +353,20 @@ closed-form Neumann double integral:
 M(l, d) = (mu0 / 2*pi) * l * [ asinh(l/d) - sqrt(1 + (d/l)^2) + d/l ]
 ```
 
-A filament's own self term reuses this formula with `d` set to its self
-geometric mean distance (self-GMD) — `a * exp(-1/4)` for a filament of
-equivalent circular radius `a = sqrt(area / pi)`. A conductor's partial self
-inductance, and the partial mutual inductance between two conductors, are
-each the plain average of every pairwise filament term within (or between)
-their filament bundles — the standard PEEC bundle-of-filaments technique.
-This combination reproduces two independent textbook closed forms in the
-thin-wire limit (Rosa's straight-wire self-inductance, and the classical
-two-wire transmission-line loop inductance) — see
-`native/mom/src/peec.rs`'s module docs for the full derivation and
-`docs/design/mom-validation.md`'s "Inductance/resistance" section for the
-measured validation against both.
+A filament's own self term is computed exactly, via Hoer & Love's closed
+form for the partial inductance of a rectangular bar against itself (rather
+than substituting an equivalent-circle self geometric mean distance into the
+formula above, which over-predicted self inductance by a systematic ~0.3%
+— see [issue #836](https://github.com/2AMLogic/klayout-tools/issues/836)).
+A conductor's partial self inductance, and the partial mutual inductance
+between two conductors, are each the plain average of every pairwise
+filament term within (or between) their filament bundles — the standard
+PEEC bundle-of-filaments technique. This combination reproduces two
+independent textbook closed forms in the thin-wire limit (Rosa's
+straight-wire self-inductance, and the classical two-wire transmission-line
+loop inductance) — see `native/mom/src/peec.rs`'s module docs for the full
+derivation and `docs/design/mom-validation.md`'s "Inductance/resistance"
+section for the measured validation against both.
 
 DC resistance needs no approximation: `R = length / (conductivity *
 cross_sectional_area)` (Ohm's law), computed directly from the same bar
