@@ -17,12 +17,21 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
+from klayout_tools import signoff as signoff_module
 from klayout_tools.cli import main
 from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
 from klayout_tools.signoff import SignoffError, build_signoff, build_tier_report
+
+#: Repo root, resolved once -- used by the real-subprocess gate-binding
+#: tests below (issue #825) to locate `examples/design-pipeline/`'s
+#: already-passing artifacts without depending on pytest's cwd.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -694,6 +703,7 @@ def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
     assert item_3["reason"] is None
     assert item_3["citation"] == {
         "file": drc_path,
+        "command": None,
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
@@ -887,6 +897,415 @@ def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
 
     assert result["t1_met_count"] == 10
     assert result["tier"] == "T1"
+
+
+# --------------------------------------------------------------------------- #
+# Command-backed evidence: gate binding (issue #825, Phase 1 of epic #706)
+#
+# Mirrors tests/test_equiv.py's two-tier structure: mocked-subprocess unit
+# tests for every resolution branch (fast, no external tool needed), plus a
+# real-subprocess integration test at the bottom that actually invokes `klt
+# drc`/`klt lvs`/`klt extract`/`klt sim` against genuine, already-passing
+# artifacts checked into examples/design-pipeline/ -- proving gate binding
+# end to end against real evidence, not a canned fixture.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_command_evidence_runs_and_grades_met(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_run(command, **kwargs):
+        calls.append({"command": command, **kwargs})
+        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {"command": ["klt", "drc", "design.gds", "--deck", "sky130"]}
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"] == {
+        "file": None,
+        "command": "klt drc design.gds --deck sky130",
+        "kind": "drc",
+        "check_status": "clean",
+        "content_hash": "sha256:layoutA",
+        "exit_status": 0,
+    }
+    assert calls == [
+        {
+            "command": ["klt", "drc", "design.gds", "--deck", "sky130"],
+            "cwd": None,
+            "capture_output": True,
+            "text": True,
+            "timeout": signoff_module._COMMAND_EVIDENCE_TIMEOUT_S,
+        }
+    ]
+
+
+def test_command_evidence_passes_cwd_through_to_subprocess(monkeypatch):
+    seen_cwd = []
+
+    def fake_run(command, **kwargs):
+        seen_cwd.append(kwargs.get("cwd"))
+        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    build_tier_report(
+        _manifest(
+            evidence={
+                "3": {"command": ["klt", "drc", "design.gds"], "cwd": "/tmp/block"}
+            }
+        )
+    )
+
+    assert seen_cwd == ["/tmp/block"]
+
+
+def test_command_evidence_nonzero_exit_renders_unmet_command_failed(monkeypatch):
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(1, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", "drc"]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "command_failed"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise OSError("No such file or directory: 'klt'")
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", "drc"]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "command_failed"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", "sim"]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "command_failed"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_unparsable_stdout_renders_unreadable_evidence(monkeypatch):
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout="not valid json")
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", "drc"]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "unreadable_evidence"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_error_envelope_renders_check_errored(monkeypatch):
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_ERROR_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", "drc"]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_errored"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_failing_check_renders_check_failed(monkeypatch):
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_VIOLATIONS_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", "drc"]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_failed"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_stale_content_hash_renders_unmet(monkeypatch):
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "command": ["klt", "drc"],
+                    "content_hash": "sha256:stale-revision",
+                }
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "stale_evidence"
+    assert item_3["citation"] is None
+
+
+def test_command_evidence_matching_content_hash_renders_met(monkeypatch):
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {"command": ["klt", "drc"], "content_hash": "sha256:layoutA"}
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["exit_status"] == 0
+
+
+def test_empty_command_list_renders_invalid_evidence():
+    result = build_tier_report(_manifest(evidence={"3": {"command": []}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_evidence"
+
+
+def test_non_string_command_element_renders_invalid_evidence():
+    result = build_tier_report(_manifest(evidence={"3": {"command": ["klt", 5]}}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_evidence"
+
+
+def test_command_takes_precedence_over_file_when_both_given(monkeypatch, tmp_path):
+    # The manifest schema does not ask a caller to send both keys, but
+    # _normalize_evidence_entry() documents that it checks "command" first
+    # -- confirm that contract holds.
+    drc_path = _write(
+        tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE
+    )  # would render unmet
+
+    def fake_run(command, **kwargs):
+        return _FakeCompletedProcess(
+            0, stdout=json.dumps(DRC_CLEAN_ENVELOPE)
+        )  # would render met
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["klt", "drc"], "file": drc_path}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"  # graded via the command, not the file
+    assert item_3["citation"]["file"] is None
+    assert item_3["citation"]["command"] == "klt drc"
+
+
+# --------------------------------------------------------------------------- #
+# Real-subprocess gate binding: reproduces an already-bronze canary's claim
+# against genuine evidence (issue #825 AC: "reproduces the hand-assembled
+# tier claim of at least one already-bronze canary, measured against real
+# evidence, not synthetic"). examples/design-pipeline/ is this repo's own
+# worked example (a sky130 5T OTA) with a real, checked-in DRC-clean layout,
+# a matching LVS reference, a real extraction, and a passing post-extraction
+# corner sim -- exactly the T1 "DRC clean"/"LVS clean"/"post-layout
+# verification" claims examples/design-pipeline/README.md already asserts
+# by hand. These tests actually run `klt drc`/`klt lvs`/`klt extract`/
+# `klt sim` as subprocesses (via `sys.executable -m klayout_tools.cli`, not
+# relying on a `klt` console script being on PATH) against that real
+# artifact set and confirm the tier report reproduces the same verdict from
+# a genuine, freshly-observed run -- not a pre-existing envelope file.
+# --------------------------------------------------------------------------- #
+
+_DESIGN_PIPELINE_DIR = _REPO_ROOT / "examples" / "design-pipeline"
+
+
+def _klt_command(*args: str) -> list[str]:
+    return [sys.executable, "-m", "klayout_tools.cli", *args]
+
+
+@pytest.mark.skipif(
+    not (_DESIGN_PIPELINE_DIR / "06-layout.gds").exists(),
+    reason="examples/design-pipeline/06-layout.gds not present in this checkout",
+)
+def test_real_drc_gate_reproduces_the_canarys_drc_clean_claim():
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "command": _klt_command(
+                        "drc", "06-layout.gds", "--deck", "sky130", "--format", "json"
+                    ),
+                    "cwd": str(_DESIGN_PIPELINE_DIR),
+                }
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    citation = item_3["citation"]
+    assert citation["kind"] == "drc"
+    assert citation["check_status"] == "clean"
+    assert citation["exit_status"] == 0
+    assert citation["command"] is not None
+    assert citation["file"] is None
+    # A real content hash was actually observed, not fabricated.
+    assert citation["content_hash"] is not None
+    assert citation["content_hash"].startswith("sha256:")
+
+
+@pytest.mark.skipif(
+    not (_DESIGN_PIPELINE_DIR / "08-lvs.request.json").exists(),
+    reason="examples/design-pipeline/08-lvs.request.json not present in this checkout",
+)
+def test_real_lvs_gate_reproduces_the_canarys_lvs_match_claim():
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "4": {
+                    "command": _klt_command(
+                        "lvs", "08-lvs.request.json", "--format", "json"
+                    ),
+                    "cwd": str(_DESIGN_PIPELINE_DIR),
+                }
+            }
+        )
+    )
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["status"] == "met"
+    citation = item_4["citation"]
+    assert citation["kind"] == "lvs"
+    assert citation["check_status"] == "match"
+    assert citation["exit_status"] == 0
+
+
+@pytest.mark.skipif(
+    not (_DESIGN_PIPELINE_DIR / "06-layout.gds").exists(),
+    reason="examples/design-pipeline/06-layout.gds not present in this checkout",
+)
+def test_real_extract_gate_reproduces_the_canarys_netlist_regeneration(tmp_path):
+    # "netlist regeneration" (issue #825's phrasing, module docstring): a
+    # freshly re-run `klt extract`, not a checked-in .spice file read off
+    # disk -- proves the extracted netlist is reproducible from the layout,
+    # not merely present. `-o` redirects the written netlist to tmp_path so
+    # this test never leaves a generated .spice file behind in the checked-
+    # in examples/design-pipeline/ directory.
+    output_netlist = tmp_path / "regenerated.spice"
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "7": {
+                    "command": _klt_command(
+                        "extract",
+                        "06-layout.gds",
+                        "--deck",
+                        "sky130",
+                        "--top",
+                        "ota_5t_layout_0",
+                        "-o",
+                        str(output_netlist),
+                        "--format",
+                        "json",
+                    ),
+                    "cwd": str(_DESIGN_PIPELINE_DIR),
+                }
+            },
+        )
+    )
+
+    assert output_netlist.exists()
+
+    # A plain (non-mixed-signal) "analog" manifest renders every T1 item
+    # with partition=None -- only a "mixed-signal" manifest doubles items
+    # 1/2/5/7 per partition -- so the bare "7" evidence key (not "7.analog")
+    # is what a plain-analog manifest actually looks up (_lookup_evidence).
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["partition"] is None
+    assert item_7["status"] == "met"
+    citation = item_7["citation"]
+    assert citation["kind"] == "extract"
+    assert citation["check_status"] == "extracted"
+    assert citation["exit_status"] == 0
+
+
+@pytest.mark.skipif(
+    not (_DESIGN_PIPELINE_DIR / "09-sim.request.json").exists(),
+    reason="examples/design-pipeline/09-sim.request.json not present in this checkout",
+)
+def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
+    # "corner sim" (issue #825's phrasing): the post-extraction corner
+    # sweep -- a real, multi-corner `klt sim` run against the layout's own
+    # extracted netlist, not a canned pass/fail JSON fixture.
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "5": {
+                    "command": _klt_command(
+                        "sim", "09-sim.request.json", "--format", "json"
+                    ),
+                    "cwd": str(_DESIGN_PIPELINE_DIR),
+                }
+            },
+        )
+    )
+
+    # See test_real_extract_gate_...'s comment: a plain "analog" manifest
+    # looks up the bare "5" key, not "5.analog".
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["partition"] is None
+    assert item_5["status"] == "met"
+    citation = item_5["citation"]
+    assert citation["kind"] == "sim"
+    assert citation["check_status"] == "pass"
+    assert citation["exit_status"] == 0
 
 
 def test_non_object_manifest_raises():

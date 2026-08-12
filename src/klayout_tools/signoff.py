@@ -33,10 +33,28 @@ when its evidence resolves to a *passing* ``klt`` JSON envelope with fresh
 provenance; anything else (no evidence given, an unreadable/malformed
 evidence file, an envelope whose own check did not pass, or a stale
 input-hash pairing) renders ``"unmet"`` -- this phase never fabricates a
-``"met"`` verdict for an item with no runnable check behind it. Wiring the
-actual DRC/LVS/sim *gates* (deciding which item maps to which verb, running
-them, not just reading pre-existing JSON) is Phase 1; this phase is the item
-model, the doc parser, and the interface only.
+``"met"`` verdict for an item with no runnable check behind it.
+
+## Gate binding (issue #825, Phase 1 of epic #706)
+
+Phase 0 above only *read* pre-existing envelope files a human (or another
+process) had already produced. A manifest ``evidence`` entry may now name a
+**command** instead of a file -- ``{"command": [<argv>, ...]}`` -- and
+:func:`build_tier_report` actually runs it (``klt drc``/``klt
+lvs``/``klt extract`` for netlist regeneration/``klt sim`` for corner sim,
+whichever gate the manifest points at) as a subprocess, grading the item
+against *that run's own* exit status and stdout, never a pre-existing
+file's say-so. A nonzero exit, a timeout, a launch failure, or stdout that
+doesn't parse as a recognized ``klt`` envelope all render ``"unmet"``,
+exactly like every other ungrounded case Phase 0 already refused to
+fabricate a ``"met"`` for -- see :func:`_grade_evidence`. A ``"met"``
+citation now always carries a ``"command"`` field (the executed argv,
+joined for display; ``None`` for a file-backed entry, since no command was
+run to produce it) alongside the ``exit_status`` that command actually
+returned -- Phase 0's ``exit_status: 0`` for a file-backed entry remains
+*inferred* (a readable, passing envelope implies its producing command
+must have exited zero); a command-backed entry's ``exit_status`` is
+*observed*.
 
 Pure library: both :func:`build_signoff` and :func:`build_tier_report`
 return plain Python data (a ``dict`` of JSON-serialisable primitives) and
@@ -56,6 +74,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import sys
 from typing import Any
 
@@ -112,6 +132,23 @@ _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
 _REASON_STALE_EVIDENCE = "stale_evidence"
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
+#: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
+#: subprocess itself did not complete usably -- it could not be launched, it
+#: timed out, or it exited nonzero. Distinct from
+#: :data:`_REASON_CHECK_ERRORED` (the command *did* run and produced a
+#: readable ``klt`` ``error`` envelope) and from
+#: :data:`_REASON_UNREADABLE_EVIDENCE` (the command exited zero but its
+#: stdout wasn't valid JSON) -- three different ways "no runnable check
+#: proves this item" can happen, kept distinguishable per issue #826's
+#: invariant.
+_REASON_COMMAND_FAILED = "command_failed"
+
+#: Wall-clock cap on a command-backed evidence entry's subprocess (issue
+#: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
+#: signoff` itself. Generous (corner-matrix sims are slow) but finite; a
+#: timeout renders that item "unmet" (see :func:`_grade_evidence`), never an
+#: exception that aborts the whole report.
+_COMMAND_EVIDENCE_TIMEOUT_S = 1800
 
 
 class SignoffError(Exception):
@@ -496,6 +533,11 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
             "evidence": {                      # optional, default {}
                 "3": "drc.json",
                 "4": {"file": "lvs.json", "content_hash": "sha256:..."},
+                "5": {
+                    "command": ["klt", "sim", "corners.json", "--format", "json"],
+                    "cwd": "sim/",                  # optional, default: this cwd
+                    "content_hash": "sha256:...",   # optional, same staleness gate
+                },
                 # for a mixed-signal block, per-kind items (1, 2, 5, 7) key
                 # on "<item id>.<analog|digital>"; kind-independent items
                 # (3, 4, 6, 8, 9, 10) may use the bare "<item id>" key and
@@ -503,6 +545,15 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
                 # kind" subsection for which items split which way.
             }
         }
+
+    An evidence entry is either **file-backed** (a bare string, or
+    ``{"file": ..., "content_hash": ...}`` -- Phase 0, issue #722: read a
+    pre-existing ``klt`` JSON envelope off disk) or **command-backed**
+    (``{"command": [<argv>, ...], "cwd": ..., "content_hash": ...}`` --
+    Phase 1, issue #825: actually run the named gate -- ``klt
+    drc``/``klt lvs``/``klt extract`` (netlist regeneration)/``klt sim``
+    (corner sim) -- as a subprocess and grade *that run's* exit status and
+    stdout). See :func:`_normalize_evidence_entry`/:func:`_grade_evidence`.
 
     Returns (JSON out)::
 
@@ -526,6 +577,7 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
                     "reason": None,
                     "citation": {
                         "file": "drc.json",
+                        "command": None,
                         "kind": "drc",
                         "check_status": "clean",
                         "content_hash": "sha256:...",
@@ -545,9 +597,11 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
     matches it (a mismatch means the check ran against a *different* layout
     revision than the one being claimed -- stale, so it renders ``"unmet"``,
     never a false pass). Every other case (no evidence entry, a malformed
-    entry, an unreadable/unparsable evidence file, an unrecognised envelope
-    shape, or a failing check) also renders ``"unmet"``: this phase never
-    infers a ``"met"`` verdict for an item with no runnable check behind it.
+    entry, an unreadable/unparsable evidence file, a command that could not
+    be run to completion or whose stdout didn't parse, an unrecognised
+    envelope shape, or a failing check) also renders ``"unmet"``: this phase
+    never infers a ``"met"`` verdict for an item with no runnable check
+    behind it.
 
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
@@ -556,13 +610,19 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
     - ``"no_evidence"`` -- the manifest gave no ``evidence`` entry for this
       item at all.
     - ``"invalid_evidence"`` -- the manifest's entry for this item is
-      present but malformed (not a string, and not an object with a string
-      ``"file"``).
-    - ``"unreadable_evidence"`` -- the named evidence file does not exist,
-      is not readable, or is not valid JSON.
-    - ``"unrecognized_envelope"`` -- the evidence file parsed as JSON but is
-      not a JSON object, or is a JSON object that does not match any
+      present but malformed (neither a string, nor an object with a string
+      ``"file"``, nor an object with a non-empty list-of-strings
+      ``"command"``).
+    - ``"unreadable_evidence"`` -- a file-backed entry's named file does not
+      exist, is not readable, or is not valid JSON; or a command-backed
+      entry's subprocess exited zero but its stdout was not valid JSON.
+    - ``"unrecognized_envelope"`` -- the resolved evidence parsed as JSON
+      but is not a JSON object, or is a JSON object that does not match any
       recognised ``klt`` envelope shape (:func:`_classify`).
+    - ``"command_failed"`` -- a command-backed entry's subprocess could not
+      be launched, timed out, or exited nonzero -- distinct from
+      ``"check_errored"`` below, which requires the command to have
+      actually produced a readable ``klt`` ``error`` envelope.
     - ``"check_errored"`` -- the evidence resolved to a ``klt`` ``error``
       envelope: the underlying command itself failed to run to completion.
     - ``"check_failed"`` -- the evidence resolved to a recognised, non-error
@@ -577,18 +637,23 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
 
     ``reason`` is ``None`` (and omitted from a plain-text reading, but
     always present as a JSON key) exactly when ``status`` is ``"met"``. The
-    first four reasons above ("no runnable check exists for this item") and
-    the last are always distinct, in the JSON, from the three "a check ran
+    "no runnable check exists for this item" reasons above and the last are
+    always distinct, in the JSON, from the "a check ran (or tried to run)
     and did not pass" reasons -- never collapsed into one ambiguous
     ``"unmet"`` with no further signal.
 
-    A ``"met"`` item's ``citation`` always carries the evidence file, the
-    envelope's own status, its input content hash (``None`` when the
-    envelope's own provenance doesn't populate one -- ``klt lvs``/``klt
-    sim`` don't, per ``docs/json-contract.md``), and ``exit_status: 0``
-    (inferred: a readable, classifiable, non-error envelope implies the
-    producing command exited zero -- every ``klt`` verb emits an
-    ``error``-kind envelope, not a success envelope, on any nonzero exit).
+    A ``"met"`` item's ``citation`` always carries: the evidence file
+    (``None`` for a command-backed entry -- no static file backs it), the
+    executed command (the argv joined for display, ``None`` for a
+    file-backed entry -- no command was run to produce it), the envelope's
+    own status, its input content hash (``None`` when the envelope's own
+    provenance doesn't populate one -- ``klt lvs``/``klt sim`` don't, per
+    ``docs/json-contract.md``), and ``exit_status``: for a file-backed entry
+    this is *inferred* as ``0`` (a readable, classifiable, non-error
+    envelope implies the producing command exited zero -- every ``klt``
+    verb emits an ``error``-kind envelope, not a success envelope, on any
+    nonzero exit); for a command-backed entry it is the subprocess's
+    *actually observed* return code, never inferred.
 
     T2-T4 render as single ladder-row items (per the doc's "The ladder"
     table -- a Curator correction on issue #722: only T1 has an itemized
@@ -708,32 +773,60 @@ def _lookup_evidence(
     return evidence.get(str(item_id))
 
 
-def _normalize_evidence_entry(raw: Any) -> tuple[str | None, str | None]:
-    """Return ``(file, expected_content_hash)`` from a manifest evidence[]
-    entry -- either a bare file-path string, or an object with a required
-    ``"file"`` string and an optional ``"content_hash"`` string to pin the
-    check to a specific layout revision. Returns ``(None, None)`` for any
-    entry whose shape isn't recognised -- a malformed *single* entry
-    degrades that one item to ``"unmet"`` rather than aborting the whole
-    report (see :func:`build_tier_report`'s docstring)."""
+def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
+    """Normalize a manifest ``evidence[]`` entry into one of two shapes, or
+    ``None`` if it matches neither -- a malformed *single* entry degrades
+    that one item to ``"unmet"`` rather than aborting the whole report (see
+    :func:`build_tier_report`'s docstring):
+
+    - **File-backed** (Phase 0, issue #722): a bare file-path string, or
+      ``{"file": <str>, "content_hash": <str>?}`` -- returned as
+      ``{"kind": "file", "file": ..., "content_hash": ...}``.
+    - **Command-backed** (Phase 1, issue #825): ``{"command": [<str>, ...],
+      "cwd": <str>?, "content_hash": <str>?}`` -- a non-empty list of
+      strings is required; returned as ``{"kind": "command", "command":
+      ..., "cwd": ..., "content_hash": ...}``. Checked before the file
+      shape so a dict carrying both keys (which the schema does not ask
+      for, but a caller might send) is treated as command-backed.
+    """
     if isinstance(raw, str):
-        return raw, None
-    if isinstance(raw, dict):
-        file = raw.get("file")
-        if not isinstance(file, str):
-            return None, None
+        return {"kind": "file", "file": raw, "content_hash": None}
+    if not isinstance(raw, dict):
+        return None
+
+    command = raw.get("command")
+    if (
+        isinstance(command, list)
+        and command
+        and all(isinstance(part, str) for part in command)
+    ):
         expected_hash = raw.get("content_hash")
         if expected_hash is not None and not isinstance(expected_hash, str):
             expected_hash = None
-        return file, expected_hash
-    return None, None
+        cwd = raw.get("cwd")
+        if not isinstance(cwd, str):
+            cwd = None
+        return {
+            "kind": "command",
+            "command": command,
+            "cwd": cwd,
+            "content_hash": expected_hash,
+        }
+
+    file = raw.get("file")
+    if not isinstance(file, str):
+        return None
+    expected_hash = raw.get("content_hash")
+    if expected_hash is not None and not isinstance(expected_hash, str):
+        expected_hash = None
+    return {"kind": "file", "file": file, "content_hash": expected_hash}
 
 
 def _grade_evidence(
-    file: str, expected_hash: str | None
+    spec: dict[str, Any],
 ) -> tuple[str, str | None, dict[str, Any] | None]:
-    """Grade one resolved evidence ``file`` (plus its optional pinned
-    ``expected_hash``) and return ``(status, reason, citation)``.
+    """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
+    and return ``(status, reason, citation)``.
 
     ``status`` is ``"met"`` or ``"unmet"``. ``reason`` is ``None`` when
     ``status == "met"``, otherwise one of the ``_REASON_*`` constants
@@ -741,22 +834,76 @@ def _grade_evidence(
     verdict -- see :func:`build_tier_report`'s docstring for what each
     reason means. ``citation`` is populated only when ``status == "met"``.
 
-    This is a pure grading step over an already-resolved file path -- it
-    does not decide *whether* evidence was given at all (that is
+    This is a pure grading step over an already-normalized evidence spec --
+    it does not decide *whether* evidence was given at all (that is
     :func:`_build_tier_item`'s job, via :data:`_REASON_NO_EVIDENCE` /
-    :data:`_REASON_INVALID_EVIDENCE`), only what a given evidence file
-    proves once one *is* named.
+    :data:`_REASON_INVALID_EVIDENCE`), only what a given spec proves once
+    one *is* named.
+
+    **File-backed** (``spec["kind"] == "file"``): reads the envelope off
+    disk, exactly as Phase 0 (issue #722) did -- ``exit_status`` is
+    *inferred* as ``0``.
+
+    **Command-backed** (``spec["kind"] == "command"``, issue #825): actually
+    runs the given argv as a subprocess (``cwd=spec["cwd"]`` when given),
+    bounded by :data:`_COMMAND_EVIDENCE_TIMEOUT_S`. A launch failure or
+    timeout renders :data:`_REASON_COMMAND_FAILED`; so does a nonzero exit
+    (every ``klt`` verb emits an ``error``-kind envelope on nonzero exit --
+    see :func:`_classify` below -- so a well-behaved gate command's nonzero
+    exit is already covered by :data:`_REASON_CHECK_ERRORED` once its stdout
+    is actually read, but a nonzero exit whose stdout isn't even usable
+    gets no further chance to explain itself). Stdout that doesn't parse as
+    JSON renders :data:`_REASON_UNREADABLE_EVIDENCE` -- the command-backed
+    analogue of an unreadable evidence file. ``exit_status`` is the
+    subprocess's *actually observed* return code, never inferred.
     """
-    try:
-        envelope = _read_envelope(file)
-    except SignoffError:
-        return "unmet", _REASON_UNREADABLE_EVIDENCE, None
+    expected_hash = spec.get("content_hash")
 
-    if not isinstance(envelope, dict):
-        return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
+    if spec["kind"] == "command":
+        command = spec["command"]
+        command_label = shlex.join(command)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=spec.get("cwd"),
+                capture_output=True,
+                text=True,
+                timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "unmet", _REASON_COMMAND_FAILED, None
+
+        exit_status = completed.returncode
+        if exit_status != 0:
+            return "unmet", _REASON_COMMAND_FAILED, None
+
+        try:
+            envelope = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return "unmet", _REASON_UNREADABLE_EVIDENCE, None
+
+        if not isinstance(envelope, dict):
+            return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
+
+        file_label: str | None = None
+        source_label = command_label
+    else:
+        file = spec["file"]
+        try:
+            envelope = _read_envelope(file)
+        except SignoffError:
+            return "unmet", _REASON_UNREADABLE_EVIDENCE, None
+
+        if not isinstance(envelope, dict):
+            return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
+
+        file_label = file
+        command_label = None
+        exit_status = 0
+        source_label = file
 
     try:
-        check_kind = _classify(envelope, file)
+        check_kind = _classify(envelope, source_label)
     except SignoffError:
         return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
 
@@ -773,11 +920,12 @@ def _grade_evidence(
         return "unmet", _REASON_STALE_EVIDENCE, None
 
     citation = {
-        "file": file,
+        "file": file_label,
+        "command": command_label,
         "kind": check_kind,
         "check_status": envelope.get("status"),
         "content_hash": actual_hash,
-        "exit_status": 0,
+        "exit_status": exit_status,
     }
     return "met", None, citation
 
@@ -801,11 +949,11 @@ def _build_tier_item(
 
     raw_entry = _lookup_evidence(evidence, item_id, partition)
     if raw_entry is not None:
-        file, expected_hash = _normalize_evidence_entry(raw_entry)
-        if file is None:
+        spec = _normalize_evidence_entry(raw_entry)
+        if spec is None:
             reason = _REASON_INVALID_EVIDENCE
         else:
-            status, reason, citation = _grade_evidence(file, expected_hash)
+            status, reason, citation = _grade_evidence(spec)
 
     return {
         "tier": tier,

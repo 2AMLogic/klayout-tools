@@ -41,15 +41,17 @@ renders the **full T1-T4 item skeleton**, mechanically parsed from
 manifest's declared kind and per-item evidence citations -- a strict
 superset of the checklist table this skill hand-assembles below, including
 the T2-T4 ladder rows and every T1 item, not only the drc/lvs/extract/sim
-ones. This phase is the item model and interface only: an item is `"met"`
-only when the manifest cites a passing, fresh `klt` JSON envelope for it,
-so items with no `klt` verb JSON to cite (design-source/layout hygiene,
-README/license/CI, testbench-shipped) still render `"unmet"` in its output
-today, exactly as this skill still grades them by hand -- see
-`docs/cli/signoff.md`'s "Tier-verdict report" section for the manifest
-shape and JSON schema. Wiring the actual DRC/LVS/sim *gates* (rather than
-reading pre-existing envelope files) is a follow-on phase of epic #706;
-until then this skill's hand-assembled report remains the complete picture.
+ones. An item is `"met"` only when the manifest's evidence resolves to a
+passing, fresh `klt` JSON envelope for it -- either a pre-existing envelope
+file (Phase 0), or (#825, Phase 1 of epic #706) a `klt
+drc`/`lvs`/`extract`/`sim` command `klt signoff` actually runs and grades
+against that run's own exit status and stdout, rather than only reading a
+file someone else already produced. Items with no `klt` verb JSON to cite
+at all (design-source/layout hygiene, README/license/CI, testbench-shipped)
+still render `"unmet"` in its output today, exactly as this skill still
+grades them by hand -- see `docs/cli/signoff.md`'s "Tier-verdict report"
+section for the manifest shape and JSON schema, including the
+command-backed evidence entry's shape.
 
 ## Producing a qualification report
 

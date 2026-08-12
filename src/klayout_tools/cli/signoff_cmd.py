@@ -6,7 +6,11 @@
 2. **Tier-verdict report** (``--manifest``, issue #722 -- Phase 0 of epic
    #706): render the T1-T4 evidence-tier item skeleton, mechanically parsed
    from ``docs/design-evidence-tiers.md``, graded against a block manifest's
-   declared kind and per-item evidence locations.
+   declared kind and per-item evidence locations -- either a pre-existing
+   ``klt`` JSON envelope file, or (issue #825, Phase 1 of epic #706) a
+   ``klt drc``/``klt lvs``/``klt extract``/``klt sim`` command to actually
+   run and grade against its own exit status and stdout. See
+   :mod:`..signoff` for the full evidence-resolution contract.
 
 The two modes are mutually exclusive: ``--manifest`` replaces the positional
 ``<file>...`` arguments, it does not combine with them.
@@ -178,8 +182,17 @@ def _print_tier_report_text(result: dict) -> None:
         )
         citation = item["citation"]
         if citation:
+            # Command-backed evidence (issue #825) has no static file --
+            # show the executed command instead; file-backed evidence
+            # (issue #722) has no command -- show the evidence file, as
+            # before.
+            source = (
+                citation["file"]
+                if citation["file"] is not None
+                else citation["command"]
+            )
             print(
-                f"        cite: {citation['file']} "
+                f"        cite: {source} "
                 f"(kind={citation['kind']}, status={citation['check_status']}, "
                 f"content_hash={citation['content_hash']}, "
                 f"exit_status={citation['exit_status']})"

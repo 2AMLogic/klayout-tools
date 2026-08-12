@@ -11,7 +11,10 @@ Two modes, one verb:
    — render the full T1-T4 evidence-tier item skeleton, mechanically parsed
    from [`../design-evidence-tiers.md`](../design-evidence-tiers.md), and
    grade each item against a block manifest's declared kind and per-item
-   evidence locations. See "Tier-verdict report" below.
+   evidence locations — either a pre-existing `klt` JSON envelope file, or
+   (issue #825, Phase 1 of epic #706) a `klt drc`/`klt lvs`/`klt
+   extract`/`klt sim` command to actually run and grade against its own
+   exit status and stdout. See "Tier-verdict report" below.
 
 ```
 klt signoff <file>... [--format text|json]
@@ -121,7 +124,12 @@ against a caller-supplied **block manifest**:
   "kind": "analog",
   "evidence": {
     "3": "drc.json",
-    "4": {"file": "lvs.json", "content_hash": "sha256:<expected input hash>"}
+    "4": {"file": "lvs.json", "content_hash": "sha256:<expected input hash>"},
+    "5": {
+      "command": ["klt", "sim", "corners.json", "--format", "json"],
+      "cwd": "sim/",
+      "content_hash": "sha256:<expected input hash>"
+    }
   }
 }
 ```
@@ -131,14 +139,26 @@ against a caller-supplied **block manifest**:
   doc's "Block kind" subsection). Selects which column of the doc's
   per-kind T1 items (1, 2, 5, 7) applies; a `"mixed-signal"` manifest
   renders **both** columns, once per partition.
-- `evidence` — optional (default `{}`), a map from item id to either a bare
-  file path (a `klt drc`/`lvs`/`extract`/`sim` `--format json` envelope, or
-  `"-"` for stdin) or `{"file": ..., "content_hash": ...}` to also pin the
-  check to an expected layout revision. Keys are `"<item id>"` for a
-  kind-independent item (3, 4, 6, 8, 9, 10), or `"<item id>.<analog|
-  digital>"` for a per-kind item — a `"mixed-signal"` manifest may still use
-  the bare `"<item id>"` key for a kind-independent item to cite the same
-  evidence in both partitions' rows, per the doc's mixed-signal guidance.
+- `evidence` — optional (default `{}`), a map from item id to an evidence
+  entry, either **file-backed** or **command-backed**:
+  - **File-backed** (issue #722) — a bare file path (a `klt
+    drc`/`lvs`/`extract`/`sim` `--format json` envelope, or `"-"` for
+    stdin) or `{"file": ..., "content_hash": ...}` to also pin the check to
+    an expected layout revision.
+  - **Command-backed** (issue #825, Phase 1 of epic #706) —
+    `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...}`: `klt
+    signoff` actually runs `<argv>` (e.g. `klt drc`/`klt lvs`/`klt extract`
+    for netlist regeneration/`klt sim` for corner sim) as a subprocess,
+    optionally in `cwd` (default: this process's own working directory),
+    and grades the item against *that run's own* exit status and stdout —
+    never a pre-existing file's say-so. `content_hash` pins the same
+    staleness gate as the file-backed form.
+
+  Keys are `"<item id>"` for a kind-independent item (3, 4, 6, 8, 9, 10), or
+  `"<item id>.<analog|digital>"` for a per-kind item — a `"mixed-signal"`
+  manifest may still use the bare `"<item id>"` key for a kind-independent
+  item to cite the same evidence in both partitions' rows, per the doc's
+  mixed-signal guidance.
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
@@ -147,20 +167,22 @@ entry pinned an expected `content_hash`, whose own
 `provenance.input.content_hash` matches it (a mismatch means the check ran
 against a *different* layout revision than the one being claimed: stale, so
 it renders `"unmet"`, never a false pass). Every other case — no evidence
-entry, a malformed entry, an unreadable/unparsable evidence file, an
-unrecognised envelope shape, or a failing check — also renders `"unmet"`:
-**this phase never infers a `"met"` verdict for an item with no runnable
-check behind it.**
+entry, a malformed entry, an unreadable/unparsable evidence file, a
+command-backed entry whose subprocess couldn't be launched/timed out/exited
+nonzero/produced stdout that isn't valid JSON, an unrecognised envelope
+shape, or a failing check — also renders `"unmet"`: **this phase never
+infers a `"met"` verdict for an item with no runnable check behind it.**
 
 `T2`-`T4` render as single ladder-row items (per the doc's "The ladder"
 table — only `T1` has an itemized checklist) and are always `"unmet"`: this
 toolkit's closed loop targets T1, and T2+ require commercial tools/fab
 access this repo has no mechanism to check.
 
-**This phase (issue #722) is the item model, the doc parser, and the
-interface only** — it does not run any check itself, only reads
-pre-existing `klt` JSON envelopes named by the manifest. Wiring the actual
-DRC/LVS/sim *gates* is a follow-on phase of epic #706.
+**Phase 0 (issue #722)** shipped the item model, the doc parser, and the
+interface, reading only pre-existing `klt` JSON envelopes named by the
+manifest. **Phase 1 (issue #825)** wires the actual DRC/LVS/netlist-
+regeneration/corner-sim *gates* — a command-backed evidence entry actually
+runs, rather than only reading a file someone else already produced.
 
 ### Tier-report JSON schema
 
@@ -185,6 +207,7 @@ DRC/LVS/sim *gates* is a follow-on phase of epic #706.
       "reason": null,
       "citation": {
         "file": "drc.json",
+        "command": null,
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:...",
@@ -240,23 +263,36 @@ DRC/LVS/sim *gates* is a follow-on phase of epic #706.
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "kind", "check_status", "content_hash", "exit_status"}`. |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`. |
+
+#### `citation` fields
+
+| Field           | Type            | Description                                                                          |
+| --------------- | --------------- | ------------------------------------------------------------------------------------- |
+| `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
+| `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, or `"sim"` — the resolved envelope's classified kind.   |
+| `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
+| `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated.              |
+| `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 
 #### `reason` values
 
 An `"unmet"` item's `reason` always distinguishes **"no runnable check exists
-for this item"** from **"a check ran and did not pass"** — the exact failure
-mode this verb refuses to hide (epic #706's reality-grounding discipline: a
-skipped check must never read as a pass, and it must not even read as merely
-"the same shade of unmet" as one that actually ran and failed):
+for this item"** from **"a check ran (or tried to run) and did not pass"** —
+the exact failure mode this verb refuses to hide (epic #706's
+reality-grounding discipline: a skipped check must never read as a pass, and
+it must not even read as merely "the same shade of unmet" as one that
+actually ran and failed):
 
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
-| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (not a string, and not an object with a string `"file"`). |
-| `"unreadable_evidence"`   | yes | The named evidence file does not exist, is not readable, or is not valid JSON. |
-| `"unrecognized_envelope"` | yes | The evidence file parsed as JSON but is not a JSON object, or does not match any recognised `klt` envelope shape. |
+| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`). |
+| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
+| `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, or does not match any recognised `klt` envelope shape. |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
+| `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
@@ -461,3 +497,41 @@ Both items render `"unmet"`, but `reason` makes the difference unambiguous:
 item 1 was never checked at all (`"no_evidence"`); item 4's `klt lvs` check
 ran and reported a mismatch (`"check_failed"`). Neither is silently
 "assumed met" — the aggregator refuses to guess at either.
+
+## Worked example: gate binding — a command-backed evidence entry
+
+Issue #825 (Phase 1 of epic #706): instead of pointing item 3 at a
+pre-existing `drc.json`, point it at the `klt drc` invocation itself. `klt
+signoff` runs it and grades *that run's* exit status and stdout:
+
+```
+$ cat manifest.json
+{
+  "block": "my-bandgap",
+  "kind": "analog",
+  "evidence": {
+    "3": {"command": ["klt", "drc", "design.gds", "--deck", "sky130", "--format", "json"]}
+  }
+}
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | {status, reason, citation}'
+{
+  "status": "met",
+  "reason": null,
+  "citation": {
+    "file": null,
+    "command": "klt drc design.gds --deck sky130 --format json",
+    "kind": "drc",
+    "check_status": "clean",
+    "content_hash": "sha256:...",
+    "exit_status": 0
+  }
+}
+```
+
+The citation's `file` is `null` (no static file backs a command-backed
+entry) and its `command` names exactly what ran; `exit_status: 0` here is
+the subprocess's actually-observed return code, not inferred from a
+readable file the way a file-backed citation's `exit_status: 0` is. A
+broken or hanging gate command renders `"unmet"` with `reason:
+"command_failed"` (a launch failure, a timeout, or a nonzero exit) instead
+of silently reading like a skipped check or a fabricated pass.
