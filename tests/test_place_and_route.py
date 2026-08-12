@@ -983,6 +983,10 @@ _STAGE_METRICS = {
         "design__core__area": 7607.3,
         "design__instance__utilization": 0.446546,
         "power__total": 0.0116,
+        # Issue #783: `report_clock_skew_metric -setup` only runs on the
+        # `"cts"`/`"route"` stages -- trimmed from a real
+        # `openroad/orfs:latest` A/B worked example.
+        "clock__skew__setup": 0.0421,
     },
     "route": {
         "route__wirelength": 9616,
@@ -994,6 +998,7 @@ _STAGE_METRICS = {
         "design__core__area": 7607.3,
         "design__instance__utilization": 0.446546,
         "power__total": 0.0116,
+        "clock__skew__setup": 0.0389,
     },
 }
 
@@ -1105,6 +1110,10 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert report["hold_violation_count"] == 1
     assert report["antenna_violation_count"] == 0
     assert report["estimated_power_mw"] == pytest.approx(11.6)
+    # Issue #783: `clock_skew_ns` is the `stage_reached` ("route") entry's
+    # own value, restated at top level -- same convention as every other
+    # top-level metric field.
+    assert report["clock_skew_ns"] == pytest.approx(0.0389)
 
     assert [stage["name"] for stage in report["stages"]] == list(
         place_and_route.STAGE_ORDER
@@ -1119,6 +1128,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # place stage onward does.
     assert "wirelength_um" in report["stages"][1]
     assert report["stages"][3]["setup_violation_count"] == 3
+
+    # `clock_skew_ns` only exists from `"cts"` onward -- no clock tree yet
+    # at floorplan/place (issue #783).
+    assert "clock_skew_ns" not in report["stages"][0]  # floorplan
+    assert "clock_skew_ns" not in report["stages"][1]  # place
+    assert report["stages"][2]["clock_skew_ns"] == pytest.approx(0.0421)  # cts
+    assert report["stages"][3]["clock_skew_ns"] == pytest.approx(0.0389)  # route
 
     assert report["def_path"] is not None
     assert os.path.isfile(report["def_path"])
@@ -1263,6 +1279,9 @@ def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     # `antenna_violation_count` is `null` before the `route` stage runs --
     # the route stage is where `repair_antennas`/`check_antennas` live.
     assert report["antenna_violation_count"] is None
+    # `clock_skew_ns` is `null` before the `cts` stage runs -- no clock tree
+    # exists yet at `"place"` (issue #783).
+    assert report["clock_skew_ns"] is None
 
 
 def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
@@ -1457,7 +1476,8 @@ def test_gf180mcu_cts_and_route_scripts_carry_verified_reference_data(
     cts_lines = _script_lines(_stage_script(request_path, "cts"))
     assert (
         "clock_tree_synthesis -root_buf gf180mcu_fd_sc_mcu9t5v0__buf_4 "
-        "-buf_list gf180mcu_fd_sc_mcu9t5v0__buf_4"
+        "-buf_list gf180mcu_fd_sc_mcu9t5v0__buf_4 "
+        "-sink_clustering_enable -obstruction_aware"
     ) in cts_lines
     # The platform's own `MIN_BUF_CELL_AND_PORTS` names a `dlya` delay cell
     # (a hold-fixing buffer) -- the wrong shape for a clock-tree root buffer,
@@ -1494,7 +1514,8 @@ def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
     cts_lines = _script_lines(_stage_script(request_path, "cts"))
     assert (
         "clock_tree_synthesis -root_buf sky130_fd_sc_hd__buf_4 "
-        "-buf_list sky130_fd_sc_hd__buf_4"
+        "-buf_list sky130_fd_sc_hd__buf_4 "
+        "-sink_clustering_enable -obstruction_aware"
     ) in cts_lines
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
@@ -1587,6 +1608,59 @@ def test_cts_stage_runs_post_cts_hold_repair(tmp_path, monkeypatch):
         i for i, line in enumerate(cts_lines) if line == "detailed_placement"
     )
     assert cts_index < hold_index < placement_index
+
+
+def test_cts_stage_enables_sink_clustering_and_obstruction_awareness(
+    tmp_path, monkeypatch
+):
+    """Issue #783 (P&R survey #735 section 3.4, priority 4): TritonCTS's
+    `-sink_clustering_enable`/`-obstruction_aware` flags must be present on
+    the `clock_tree_synthesis` call, alongside the existing `-root_buf`/
+    `-buf_list` pair -- and `-balance_levels` must NOT be added (confirmed
+    live, via `info body clock_tree_synthesis` against a real
+    `openroad/orfs:latest` container, that this OpenROAD version treats
+    `-balance_levels` as obsolete: it only emits a warning, never a real
+    effect)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    cts_call = next(
+        line for line in cts_lines if line.startswith("clock_tree_synthesis")
+    )
+    assert "-root_buf sky130_fd_sc_hd__buf_4" in cts_call
+    assert "-buf_list sky130_fd_sc_hd__buf_4" in cts_call
+    assert "-sink_clustering_enable" in cts_call
+    assert "-obstruction_aware" in cts_call
+    assert "-balance_levels" not in cts_call
+    assert not any("-balance_levels" in line for line in cts_lines)
+
+
+def test_cts_and_route_stages_report_clock_skew_metric(tmp_path, monkeypatch):
+    """Issue #783: `report_clock_skew_metric -setup` (the response's new
+    `clock_skew_ns` field) must run on the `"cts"` and `"route"` stages --
+    where a real clock tree exists -- but never on `"place"`/`"floorplan"`,
+    which run before `clock_tree_synthesis`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    cts_lines = _script_lines(_stage_script(request_path, "cts"))
+    assert "report_clock_skew_metric -setup" in cts_lines
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "report_clock_skew_metric -setup" in route_lines
+
+    place_lines = _script_lines(_stage_script(request_path, "place"))
+    assert not any("report_clock_skew_metric" in line for line in place_lines)
+
+    floorplan_lines = _script_lines(_stage_script(request_path, "floorplan"))
+    assert not any("report_clock_skew_metric" in line for line in floorplan_lines)
 
 
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
