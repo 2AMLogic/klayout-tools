@@ -25,6 +25,22 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
   genuinely exercises the `subprocess.TimeoutExpired` path, not mocked).
   Counterexample-confirmation tests additionally skip when `iverilog` is
   not on `$PATH`.
+- **Seeded-broken negative controls** (issue #832, Phase 1a of Epic #707):
+  two additional deliberately-broken pairs, each derived from an existing
+  known-good/equivalent fixture already in this module rather than built
+  from scratch -- a "seeded inversion" (an inverted `cout`, derived from
+  `_ADDER4_RTL`) and a "dropped register" (a register-readback mux missing
+  one register's own case arm, derived from `_REGSEL_RTL`, itself first
+  proven equivalent to a structurally different rewrite). `klt equiv`'s
+  Phase 1 scope is combinational-only (see `equiv.py`'s module docstring),
+  so a *literal* dropped flip-flop cannot exercise the counterexample path
+  at all -- it hits the scope-rejection error `test_sequential_design_is_
+  rejected` below already covers, never a counterexample -- making a
+  combinational register-readback mux the nearest faithful in-scope
+  analogue of that bug class. Both pairs assert `status == "counterexample"`
+  (never a false `"equivalent"`) and that the solver's counterexample
+  vector is independently confirmed by re-running it through both
+  netlists via iverilog/vvp.
 - **Corpus integration test** (skipif when `yosys`/`iverilog` are missing,
   or no real PDK standard-cell library resolves) runs `klt synthesize`
   (this repo's own Yosys-backed synthesis flow) on a small, real
@@ -124,6 +140,78 @@ module adder4 (
     output wire       cout
 );
   assign {cout, sum} = a + b;
+endmodule
+"""
+
+# Issue #832: "seeded inversion" negative control, derived from the same
+# `_ADDER4_RTL` known-good fixture used above (and in
+# `tests/test_synthesize_equiv_gate.py`) rather than built from scratch.
+# `cout` is inverted -- a real "carry-out polarity flip" bug class (e.g. a
+# stray `~`, or the classic active-high/active-low mixup), structurally
+# distinct from `_ADDER4_RTL_BROKEN`'s "dropped operand" bug above.
+_ADDER4_RTL_INVERTED_COUT = """\
+module adder4 (
+    input  wire [3:0] a,
+    input  wire [3:0] b,
+    input  wire       cin,
+    output wire [3:0] sum,
+    output wire       cout
+);
+  wire [4:0] result = a + b + cin;
+  assign sum = result[3:0];
+  assign cout = ~result[4];
+endmodule
+"""
+
+# Issue #832: "dropped register" negative control. `klt equiv`'s Phase 1
+# scope is combinational-only (see `equiv.py`'s module docstring and
+# `test_sequential_design_is_rejected` below) -- a design that actually
+# contains a flip-flop is rejected outright with a scope `EquivError`, never
+# reported as a counterexample, so a *literal* dropped-flip-flop pair cannot
+# exercise the counterexample path this issue is proving. The nearest
+# faithful, in-scope analogue is a combinational register **readback mux**
+# (the block that selects among already-latched register outputs by
+# address -- itself always pure combinational logic, even inside a real
+# sequential register file) where one register's own case arm was never
+# wired in. `_REGSEL_RTL` is the known-good mux; `sel == 2'd2` selects `r2`.
+_REGSEL_RTL = """\
+module regsel (
+    input  wire [1:0] sel,
+    input  wire [7:0] r0,
+    input  wire [7:0] r1,
+    input  wire [7:0] r2,
+    output reg  [7:0] dout
+);
+  always @* begin
+    case (sel)
+      2'd0: dout = r0;
+      2'd1: dout = r1;
+      2'd2: dout = r2;
+      default: dout = 8'h00;
+    endcase
+  end
+endmodule
+"""
+
+# Seeded-broken: register `r2` was never wired into the mux -- a real
+# "forgot to hook the new register into the read path" bug class -- so
+# `sel == 2'd2` silently reads back `r1` instead of `r2`.
+_REGSEL_RTL_DROPPED_REGISTER = """\
+module regsel (
+    input  wire [1:0] sel,
+    input  wire [7:0] r0,
+    input  wire [7:0] r1,
+    input  wire [7:0] r2,
+    output reg  [7:0] dout
+);
+  always @* begin
+    case (sel)
+      2'd0: dout = r0;
+      2'd1: dout = r1;
+      2'd2: dout = r1;
+      default: dout = 8'h00;
+    endcase
+  end
 endmodule
 """
 
@@ -652,6 +740,184 @@ def test_counterexample_is_confirmed_by_independent_simulation(tmp_path):
     # diverged.
     assert simulation["gold_outputs"]["y"] == counterexample["gold_outputs"]["y"]["bin"]
     assert simulation["gate_outputs"]["y"] == counterexample["gate_outputs"]["y"]["bin"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #832: seeded-broken negative controls (Phase 1a of Epic #707)
+#
+# Both pairs below are derived from an *existing* known-good/equivalent
+# fixture already used elsewhere in this module (`_ADDER4_RTL` for the
+# inversion, `_REGSEL_RTL` established as equivalent to itself here for the
+# register-mux case), never built from scratch. Each seeded-broken pair must
+# (a) report `"counterexample"`, never a false `"equivalent"`, and (b) have
+# its solver-reported counterexample vector independently confirmed by
+# re-running it through both flattened netlists via iverilog/vvp -- the
+# epic's own "a counterexample is executable" discipline -- not just
+# accepted on the SAT solver's say-so.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_regsel_known_good_pair_is_equivalent(tmp_path):
+    """Establishes `_REGSEL_RTL` as a genuine known-good/equivalent pair
+    (compared against itself under a different top-level instantiation is
+    trivial, so this compares it against a structurally different but
+    functionally identical rewrite) before the "dropped register" mutant
+    below is derived from it."""
+    _write(tmp_path / "gold.v", _REGSEL_RTL)
+    # Structurally different (nested ternary instead of a case statement)
+    # but functionally identical -- same "structurally different,
+    # functionally identical" shape as `_GATE_AND_EQUIVALENT` above.
+    gate_source = """\
+module regsel (
+    input  wire [1:0] sel,
+    input  wire [7:0] r0,
+    input  wire [7:0] r1,
+    input  wire [7:0] r2,
+    output wire [7:0] dout
+);
+  assign dout = (sel == 2'd0) ? r0 :
+                (sel == 2'd1) ? r1 :
+                (sel == 2'd2) ? r2 : 8'h00;
+endmodule
+"""
+    _write(tmp_path / "gate.v", gate_source)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"], top="regsel"),
+            "gate": _side(["gate.v"], top="regsel"),
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent"
+    assert report["counterexample"] is None
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_seeded_inversion_pair_produces_counterexample(tmp_path):
+    """Acceptance criterion: the "seeded inversion" negative control
+    (inverted `cout`, derived from the existing `_ADDER4_RTL` known-good
+    fixture) must produce a counterexample, never `"equivalent"`."""
+    _write(tmp_path / "gold.v", _ADDER4_RTL)
+    _write(tmp_path / "gate.v", _ADDER4_RTL_INVERTED_COUT)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"], top="adder4"),
+            "gate": _side(["gate.v"], top="adder4"),
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    # `cout` is inverted for every input combination, so it always diverges;
+    # `sum` is untouched and must never be reported as diverging.
+    assert counterexample["diverging_outputs"] == ["cout"]
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+def test_seeded_inversion_counterexample_confirmed_by_simulation(tmp_path):
+    """The seeded-inversion counterexample vector is independently re-run
+    through both netlists via iverilog/vvp and confirmed to actually
+    diverge -- not just accepted on the solver's say-so."""
+    _write(tmp_path / "gold.v", _ADDER4_RTL)
+    _write(tmp_path / "gate.v", _ADDER4_RTL_INVERTED_COUT)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"], top="adder4"),
+            "gate": _side(["gate.v"], top="adder4"),
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    simulation = counterexample["simulation"]
+    assert simulation["engine"] == "icarus"
+    assert simulation["diverging_outputs"] == ["cout"]
+    assert (
+        simulation["gold_outputs"]["cout"]
+        == counterexample["gold_outputs"]["cout"]["bin"]
+    )
+    assert (
+        simulation["gate_outputs"]["cout"]
+        == counterexample["gate_outputs"]["cout"]["bin"]
+    )
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_dropped_register_pair_produces_counterexample(tmp_path):
+    """Acceptance criterion: the "dropped register" negative control
+    (register `r2` never wired into the readback mux, derived from the
+    `_REGSEL_RTL` known-good fixture established above) must produce a
+    counterexample, never `"equivalent"`. The bug only manifests when
+    `sel == 2'd2` and `r1 != r2` -- the SAT solver must pick exactly such a
+    vector."""
+    _write(tmp_path / "gold.v", _REGSEL_RTL)
+    _write(tmp_path / "gate.v", _REGSEL_RTL_DROPPED_REGISTER)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"], top="regsel"),
+            "gate": _side(["gate.v"], top="regsel"),
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["diverging_outputs"] == ["dout"]
+    assert counterexample["inputs"]["sel"]["value"] == 2
+    assert (
+        counterexample["inputs"]["r1"]["value"]
+        != counterexample["inputs"]["r2"]["value"]
+    )
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+def test_dropped_register_counterexample_confirmed_by_simulation(tmp_path):
+    """The dropped-register counterexample vector is independently re-run
+    through both netlists via iverilog/vvp and confirmed to actually
+    diverge -- not just accepted on the solver's say-so."""
+    _write(tmp_path / "gold.v", _REGSEL_RTL)
+    _write(tmp_path / "gate.v", _REGSEL_RTL_DROPPED_REGISTER)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"], top="regsel"),
+            "gate": _side(["gate.v"], top="regsel"),
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    simulation = counterexample["simulation"]
+    assert simulation["engine"] == "icarus"
+    assert simulation["diverging_outputs"] == ["dout"]
+    assert (
+        simulation["gold_outputs"]["dout"]
+        == counterexample["gold_outputs"]["dout"]["bin"]
+    )
+    assert (
+        simulation["gate_outputs"]["dout"]
+        == counterexample["gate_outputs"]["dout"]["bin"]
+    )
 
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
