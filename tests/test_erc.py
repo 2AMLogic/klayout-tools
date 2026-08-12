@@ -1,7 +1,7 @@
 """Tests for `klt erc` and the `run_erc` library function: the layer-by-
-layer connectivity model (issue #859, Phase 1a) and the per-gate antenna-
-ratio verdict (issue #860, Phase 1b) of the antenna + ERC signoff epic
-#713.
+layer connectivity model (issue #859, Phase 1a), the per-gate antenna-ratio
+verdict (issue #860, Phase 1b), and the core ERC finding checks (issue
+#861, Phase 1c) of the antenna + ERC signoff epic #713.
 
 Fixtures are generated programmatically with `klayout.db` inside the tests,
 mirroring `tests/test_power.py`'s convention (`klt power` is the closest
@@ -605,6 +605,452 @@ def test_antenna_verdict_agrees_with_klayout_builtin_antenna_check(
         assert builtin_violates == want_violate == klt_erc_violates
 
 
+# --- erc_findings: floating gate (issue #861) --------------------------------
+#
+# Golden pairs mirror the reality-grounding discipline used for the antenna
+# check / deck compiler: every rule below ships one deliberately-violating
+# fixture that must be flagged, and one clean counterpart that must not be.
+
+
+def _nets_fixture_layout():
+    """A layout with just a gate poly (required by `stackup[0]`) plus a
+    labelled ``li1`` role, used by the ``nets``/``ties``-driven finding
+    tests below. Returns ``(layout, poly, li1, label)`` layer indices."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    # A trivially strapped gate so `run_erc` always has at least one gate
+    # net -- these tests are about `nets`/`ties` findings, not the gate
+    # model itself.
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    return layout, top, poly, li1, label
+
+
+def _nets_spec(nets=None, ties=None):
+    return {
+        "stackup": [
+            {"name": "poly", "layer": "1/0", "role": "gate"},
+            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+        ],
+        "nets": nets or [],
+        "ties": ties or [],
+    }
+
+
+def test_floating_gate_flags_unstrapped_gate(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec))
+    floating = [f for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"]
+
+    assert len(floating) == 1
+    assert floating[0]["net"] is None  # Gate B (the unstrapped one) has no label
+    assert floating[0]["gate_id"] == "gate1"
+    assert floating[0]["layer"] == "poly"
+    assert floating[0]["bbox"] is not None
+
+
+def test_floating_gate_does_not_flag_fully_strapped_gate(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec))
+    floating_nets = {
+        f["net"] for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"
+    }
+
+    assert "GATE_A" not in floating_nets
+
+
+# --- erc_findings: unconnected / multiply-driven net (issue #861) ------------
+
+
+def test_unconnected_net_flags_split_island(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    # Two disjoint li1 shapes both labelled "VDD" -- the same declared net
+    # split into two electrical islands that never touch.
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+
+    gds = tmp_path / "split.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "split.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VDD"
+    assert "2 disconnected electrical islands" in findings[0]["description"]
+
+
+def test_unconnected_net_flags_unmatched_name(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    # No geometry anywhere carries a "VDD" label.
+
+    gds = tmp_path / "unmatched.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "unmatched.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VDD"
+    assert "matches no labelled geometry" in findings[0]["description"]
+
+
+def test_unconnected_net_does_not_flag_single_island(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+
+    gds = tmp_path / "single.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "single.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+
+    assert findings == []
+
+
+def test_multiply_driven_net_flags_shorted_signal_nets(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    # One shape, two different declared (non-supply) net names -- shorted.
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(0), _um(12), _um(1)))
+    top.shapes(label).insert(kdb.Text("A", kdb.Trans(_um(10.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("B", kdb.Trans(_um(11.5), _um(0.5))))
+
+    gds = tmp_path / "shorted_signals.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "shorted_signals.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "A", "kind": "signal"},
+                {"name": "B", "kind": "signal"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    findings = [
+        f for f in report["erc_findings"] if f["rule"] == "erc.multiply_driven_net"
+    ]
+
+    assert len(findings) == 1
+    assert {findings[0]["net"], findings[0]["other_net"]} == {"A", "B"}
+    assert not any(f["rule"] == "erc.supply_short" for f in report["erc_findings"])
+
+
+def test_multiply_driven_net_does_not_flag_separate_nets(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(0), _um(11), _um(1)))
+    top.shapes(label).insert(kdb.Text("A", kdb.Trans(_um(10.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(15), _um(0), _um(16), _um(1)))
+    top.shapes(label).insert(kdb.Text("B", kdb.Trans(_um(15.5), _um(0.5))))
+
+    gds = tmp_path / "separate_signals.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "separate_signals.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "A", "kind": "signal"},
+                {"name": "B", "kind": "signal"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    assert not any(
+        f["rule"] in ("erc.multiply_driven_net", "erc.supply_short")
+        for f in report["erc_findings"]
+    )
+
+
+# --- erc_findings: supply short (issue #861) ----------------------------------
+
+
+def test_supply_short_flags_shorted_supply_nets(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(0), _um(12), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(10.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(11.5), _um(0.5))))
+
+    gds = tmp_path / "shorted_supplies.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "shorted_supplies.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.supply_short"]
+
+    assert len(findings) == 1
+    assert {findings[0]["net"], findings[0]["other_net"]} == {"VDD", "VSS"}
+    assert not any(
+        f["rule"] == "erc.multiply_driven_net" for f in report["erc_findings"]
+    )
+
+
+def test_supply_short_does_not_flag_separate_supplies(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(0), _um(11), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(10.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(15), _um(0), _um(16), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(15.5), _um(0.5))))
+
+    gds = tmp_path / "separate_supplies.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "separate_supplies.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    assert not any(
+        f["rule"] in ("erc.multiply_driven_net", "erc.supply_short")
+        for f in report["erc_findings"]
+    )
+
+
+# --- erc_findings: missing substrate/well tie (issue #861) -------------------
+
+
+def _ties_fixture_layout():
+    """A layout with a gate poly, a labelled ``li1`` role, and an ``nwell``/
+    ``tap`` layer pair for the ``ties`` finding tests below."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    nwell = layout.layer(10, 0)
+    tap = layout.layer(11, 0)
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    return layout, top, li1, label, nwell, tap
+
+
+def _ties_spec():
+    return _nets_spec(
+        ties=[
+            {
+                "name": "nwell_tie",
+                "well_layer": "10/0",
+                "tap_layer": "11/0",
+                "connect_to": "li1",
+                "net": "VDD",
+            }
+        ]
+    )
+
+
+def test_missing_tie_flags_well_with_no_tap(tmp_path):
+    layout, top, li1, label, nwell, tap = _ties_fixture_layout()
+    # A well with no tap contact drawn inside it at all.
+    top.shapes(nwell).insert(kdb.Box.new(_um(30), _um(0), _um(34), _um(4)))
+
+    gds = tmp_path / "no_tap.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "no_tap.erc.json"
+    _write_spec(spec, _ties_spec())
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VDD"
+    assert "no 'nwell_tie' tap contact drawn" in findings[0]["description"]
+
+
+def test_missing_tie_flags_tap_connected_to_wrong_net(tmp_path):
+    layout, top, li1, label, nwell, tap = _ties_fixture_layout()
+    # A well with a tap present, but the tap's own net is labelled "VSS",
+    # not the tie's declared "VDD".
+    top.shapes(nwell).insert(kdb.Box.new(_um(40), _um(0), _um(44), _um(4)))
+    top.shapes(tap).insert(kdb.Box.new(_um(41), _um(1), _um(42), _um(2)))
+    top.shapes(li1).insert(kdb.Box.new(_um(40.5), _um(0.5), _um(42.5), _um(2.5)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(41), _um(1.5))))
+
+    gds = tmp_path / "wrong_net.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "wrong_net.erc.json"
+    _write_spec(spec, _ties_spec())
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VDD"
+    assert "not connected to declared net 'VDD'" in findings[0]["description"]
+
+
+def test_missing_tie_does_not_flag_properly_connected_tap(tmp_path):
+    layout, top, li1, label, nwell, tap = _ties_fixture_layout()
+    top.shapes(nwell).insert(kdb.Box.new(_um(20), _um(0), _um(24), _um(4)))
+    top.shapes(tap).insert(kdb.Box.new(_um(21), _um(1), _um(22), _um(2)))
+    top.shapes(li1).insert(kdb.Box.new(_um(20.5), _um(0.5), _um(22.5), _um(2.5)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(21), _um(1.5))))
+
+    gds = tmp_path / "connected.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "connected.erc.json"
+    _write_spec(spec, _ties_spec())
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+
+    assert findings == []
+
+
+# --- nets/ties: spec validation -----------------------------------------------
+
+
+def test_nets_kind_must_be_signal_or_supply(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "nets": [{"name": "VDD", "kind": "bogus"}],
+        },
+    )
+    with pytest.raises(ErcError, match="must be 'signal' or 'supply'"):
+        run_erc(str(gds), str(spec))
+
+
+def test_nets_rejects_duplicate_names(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "nets": [{"name": "VDD"}, {"name": "VDD"}],
+        },
+    )
+    with pytest.raises(ErcError, match="duplicate net name"):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_requires_connect_to_naming_a_stackup_entry(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "connect_to": "nope",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="connect_to must name a 'stackup' entry"):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_rejects_duplicate_names(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "name": "t0",
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "connect_to": "li1",
+                    "net": "VDD",
+                },
+                {
+                    "name": "t0",
+                    "well_layer": "12/0",
+                    "tap_layer": "13/0",
+                    "connect_to": "li1",
+                    "net": "VSS",
+                },
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="duplicate tie name"):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_missing_required_field_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [{"well_layer": "10/0", "tap_layer": "11/0", "connect_to": "li1"}],
+        },
+    )
+    with pytest.raises(ErcError, match="missing 'net'"):
+        run_erc(str(gds), str(spec))
+
+
 # --- CLI ----------------------------------------------------------------
 
 
@@ -625,6 +1071,8 @@ def test_cli_json_contract(tmp_path, capsys):
         "gate_role",
         "gate_count",
         "gates",
+        "erc_findings",
+        "erc_finding_count",
     }
     assert data["schema_version"] == 1
     assert data["pdk"] is None

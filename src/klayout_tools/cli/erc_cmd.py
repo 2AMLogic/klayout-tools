@@ -52,3 +52,9 @@ def _print_text(report: dict) -> None:
                 f"(max={level['antenna_ratio_max']}) "
                 f"verdict={level['verdict']}"
             )
+
+    print()
+    print(f"erc_findings: {report['erc_finding_count']}")
+    for finding in report["erc_findings"]:
+        subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"
+        print(f"  [{finding['rule']}] {subject}: {finding['description']}")
