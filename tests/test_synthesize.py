@@ -15,17 +15,24 @@ Three tiers:
   generated `.ys` script's own `tee`/`write_verilog` lines, so the stub
   never hardcodes this module's private path-naming scheme) -- no `yosys`
   binary required, covering a successful synthesis, a Yosys/ABC elaboration
-  error, and a missing-binary error.
+  error, and a missing-binary error. The stub also answers the
+  `yosys -p 'help abc'` capability probe (issue #807) and writes a real
+  `stime -p` summary line into whatever ABC log the generated script
+  `tee`s, so the `timing` object's parsing path is exercised too.
 - **Integration test** (`@pytest.mark.skipif` when either `yosys` is not on
   `$PATH` or no real PDK install resolving a `sky130_fd_sc_hd` liberty is
   found) runs the *real* GCD worked example from
-  `docs/design/yosys-synthesis-spike.md` section 4 end to end and asserts
-  the exact numbers that survey's live Yosys run reported (335 instances,
-  2951.5808 um^2, 1251.2 um^2 sequential) -- this is the acceptance
-  criterion's "verified end to end against a real sky130 install" check;
-  it is not required for CI (CI installs neither `yosys` nor a real sky130
-  standard-cell PDK today, matching the Yosys survey's own noted CI gap),
-  but runs (and passes) on any machine with both.
+  `docs/design/yosys-synthesis-spike.md` section 4 end to end -- this is the
+  acceptance criterion's "verified end to end against a real sky130 install"
+  check; it is not required for CI (CI installs neither `yosys` nor a real
+  sky130 standard-cell PDK today, matching the Yosys survey's own noted CI
+  gap), but runs on any machine with both. Its build-independent assertions
+  (zero excluded cells, a populated `timing` object) always run; the exact
+  instance/area numbers `docs/cli/synthesize.md`'s worked example documents
+  are asserted only on the Yosys build that produced them, since Yosys's
+  own mapping result moves between releases (measured, issue #807: the
+  pre-#807 flow maps this design to 335 cells on 0.68 and 326 on Ubuntu
+  24.04's 0.33).
 """
 
 from __future__ import annotations
@@ -362,8 +369,37 @@ def test_run_synthesize_nominal_corner_default(tmp_path, monkeypatch):
 # Stubbed Yosys: full `run_synthesize` without a real `yosys` binary
 # --------------------------------------------------------------------------- #
 
-_TEE_RE = re.compile(r"^tee -q -o (\S+) ")
+_TEE_RE = re.compile(r"^tee -q -o (\S+) stat ")
+_ABC_TEE_RE = re.compile(r"^tee -q -o (\S+) abc ")
 _WRITE_VERILOG_RE = re.compile(r"^write_verilog -noattr (\S+)$")
+
+#: A real `abc -constr` run's own `stime -p` summary line as it reaches the
+#: Yosys log -- captured verbatim from a live Yosys 0.68+48 run of the GCD
+#: worked example against `sky130_fd_sc_hd` (issue #807), so the parser is
+#: checked against byte-accurate real output, not an invented shape.
+_ABC_STIME_LINE = (
+    'ABC: WireLoad = "none"  Gates =    297 (  5.7 %)   Cap =  6.2 ff ( 12.4 %)'
+    "   Area =     1986.91 ( 66.3 %)   Delay =  2485.93 ps  ( 32.3 %)               "
+)
+
+#: The `-dont_use` fragment of `yosys -p 'help abc'` (Yosys 0.68's own
+#: wording, verbatim) -- what the capability probe looks for.
+_ABC_HELP_WITH_DONT_USE = """
+    -dont_use <cell_name>
+        avoid usage of the technology cell <cell_name> when mapping the design.
+        this option can be used multiple times with different cell names and
+        supports simple glob patterns in the cell name.
+        only supported with Liberty cell libraries.
+"""
+
+#: Ubuntu 24.04's Yosys 0.33 documents `-constr`/`-D` but has no `-dont_use`
+#: option at all (verified live, issue #807) -- passing it there is a hard
+#: error, which is why the probe exists.
+_ABC_HELP_WITHOUT_DONT_USE = """
+    -constr <file>
+        pass this file with timing constraints to ABC.
+        use with -liberty/-genlib.
+"""
 
 #: Trimmed, but numerically real, `stat -liberty ... -json`-shaped stats for
 #: the GCD worked example -- Yosys survey section 4's own live-captured
@@ -400,6 +436,27 @@ def _script_output_paths(script_path: str) -> tuple[str, str]:
     return stats_path, netlist_path
 
 
+def _script_abc_log_path(script_path: str) -> str | None:
+    """The path the generated script `tee`s the `abc` pass's own output to,
+    or `None` when the script does not capture it (no `-constr`)."""
+    with open(script_path, encoding="utf-8") as handle:
+        for line in handle:
+            match = _ABC_TEE_RE.match(line.rstrip("\n"))
+            if match:
+                return match.group(1)
+    return None
+
+
+def _script_abc_line(script_path: str) -> str:
+    """The generated script's own `abc` line (with any `tee` wrapper)."""
+    with open(script_path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if line.startswith("abc ") or _ABC_TEE_RE.match(line):
+                return line
+    raise AssertionError("generated .ys script has no `abc` line")
+
+
 class _FakeCompleted:
     def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
         self.returncode = returncode
@@ -413,13 +470,22 @@ def _stub_yosys_success(
     hdl_toplevel: str = "gcd",
     module_stats: dict | None = None,
     version: str = "0.67+post",
+    supports_dont_use: bool = True,
+    abc_log_lines: str | None = None,
 ) -> None:
     stats = module_stats if module_stats is not None else _GCD_MODULE_STATS
+    abc_log = _ABC_STIME_LINE if abc_log_lines is None else abc_log_lines
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-V"]:
             return _FakeCompleted(
                 stdout=f"Yosys {version} (git sha1 deadbeef, Release)\n"
+            )
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return _FakeCompleted(
+                stdout=_ABC_HELP_WITH_DONT_USE
+                if supports_dont_use
+                else _ABC_HELP_WITHOUT_DONT_USE
             )
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
@@ -428,6 +494,10 @@ def _stub_yosys_success(
             json.dump({"modules": {f"\\{hdl_toplevel}": stats}}, handle)
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write("// fake mapped netlist\n")
+        abc_log_path = _script_abc_log_path(script_path)
+        if abc_log_path is not None:
+            with open(abc_log_path, "w", encoding="utf-8") as handle:
+                handle.write(abc_log + "\n")
         return _FakeCompleted(returncode=0)
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
@@ -460,7 +530,12 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
         report["instance_counts_by_type"]
     )
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
-    assert report["timing"] is None
+    assert report["timing"] == {
+        "source": "abc_stime",
+        "wire_load": None,
+        "critical_path_ps": 2485.93,
+        "delay_target_ps": None,
+    }
 
     assert os.path.isabs(report["netlist_path"])
     assert os.path.isfile(report["netlist_path"])
@@ -551,6 +626,8 @@ def test_run_synthesize_stubbed_elaboration_error(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
 
     def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
         return _FakeCompleted(
             returncode=1, stderr="ERROR: Module `not_a_module' not found!\n"
@@ -566,6 +643,8 @@ def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
 
     def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return _FakeCompleted(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
         return _FakeCompleted(returncode=2, stdout="something went wrong\n")
 
@@ -668,6 +747,188 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
+# ABC delay target / cell exclusion / `stime -p` timing (issue #807)
+# --------------------------------------------------------------------------- #
+
+
+def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
+    """The default (no `clock_period_ns`) run passes `-constr` -- which is
+    what unlocks ABC's `buffer`/`upsize`/`dnsize` sizing steps and its
+    `stime -p` report -- plus exactly one `-dont_use` per exclusion-table
+    entry for the resolved library, and **no** `-D`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(report["script_path"])
+
+    constr_path = os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+    assert f"-constr {constr_path}" in abc_line
+    assert " -D " not in abc_line
+
+    globs = synthesize._ABC_DONT_USE_GLOBS["sky130_fd_sc_hd"]
+    assert globs, "the sky130 exclusion table entry must not be empty"
+    assert abc_line.count("-dont_use ") == len(globs)
+    for glob in globs:
+        assert f"-dont_use {glob}" in abc_line
+
+
+def test_generated_script_delay_target_from_clock_period_ns(tmp_path, monkeypatch):
+    """`constraints.clock_period_ns` becomes ABC's own `-D <picoseconds>`
+    delay target -- the field `docs/cli/synthesize.md` used to document as
+    "accepted but not consumed"."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": 2.5}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert " -D 2500 " in _script_abc_line(report["script_path"]) + " "
+    assert report["timing"]["delay_target_ps"] == 2500
+
+
+@pytest.mark.parametrize("clock_period_ns", ["fast", True, [1]])
+def test_clock_period_ns_must_be_a_number(tmp_path, monkeypatch, clock_period_ns):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": clock_period_ns}),
+    )
+    with pytest.raises(SynthesizeError, match="clock_period_ns must be a positive"):
+        run_synthesize(request_path)
+
+
+@pytest.mark.parametrize("clock_period_ns", [0, -1.5])
+def test_clock_period_ns_must_be_positive(tmp_path, monkeypatch, clock_period_ns):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clock_period_ns": clock_period_ns}),
+    )
+    with pytest.raises(SynthesizeError, match="greater than zero"):
+        run_synthesize(request_path)
+
+
+def test_abc_constr_file_is_written_from_the_table(tmp_path, monkeypatch):
+    """The `<top>_abc.constr` artifact is the exact two-line file
+    `help abc`/ORFS both use, built from this library's own table entry --
+    never a hardcoded cell name."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    constr_path = os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+    driving_cell, load_ff = synthesize._ABC_CONSTR_INPUTS["sky130_fd_sc_hd"]
+    with open(constr_path, encoding="utf-8") as handle:
+        assert (
+            handle.read() == f"set_driving_cell {driving_cell}\nset_load {load_ff:g}\n"
+        )
+
+
+def test_dont_use_omitted_when_abc_pass_does_not_support_it(tmp_path, monkeypatch):
+    """Ubuntu 24.04's Yosys 0.33 has no `abc -dont_use` at all (verified
+    live, issue #807) and errors on an unknown option -- so the exclusion
+    list degrades away on such builds instead of failing the run, the same
+    posture `sequential_area_um2` already takes toward them (#560).
+    `-constr`/`-D`/`stime` are unaffected: 0.33 documents all three."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, version="0.33", supports_dont_use=False)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(report["script_path"])
+
+    assert "-dont_use" not in abc_line
+    assert "-constr " in abc_line
+    assert report["timing"]["critical_path_ps"] == 2485.93
+
+
+def test_cell_library_without_table_entries_keeps_the_pre_807_script(
+    tmp_path, monkeypatch
+):
+    """A `cell_library` in neither new table is never given a guessed
+    driving cell or exclusion list: the emitted `abc` line stays exactly
+    what it was before issue #807, and `timing` stays `null`."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "acme_sc_hd", "corner": "tt_025C_1v80"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(report["script_path"])
+
+    assert abc_line.startswith("abc -liberty ")
+    assert "-constr" not in abc_line
+    assert "-dont_use" not in abc_line
+    assert report["timing"] is None
+    assert not os.path.isfile(
+        os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+    )
+
+
+def test_timing_reports_the_maximum_over_every_stime_report(tmp_path, monkeypatch):
+    """Yosys invokes ABC once per combinational region, so a multi-region
+    run prints several `stime` summaries -- the reported critical path is
+    the largest of them, not whichever was mapped last."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        abc_log_lines=(
+            _ABC_STIME_LINE
+            + "\n"
+            + _ABC_STIME_LINE.replace("2485.93 ps", "3910.55 ps")
+            + "\n"
+            + _ABC_STIME_LINE.replace("2485.93 ps", "1204.10 ps")
+        ),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["critical_path_ps"] == 3910.55
+
+
+def test_timing_echoes_a_non_none_wire_load(tmp_path, monkeypatch):
+    """`wire_load` is ABC's own `WireLoad = "..."` echo, normalised to
+    `None` only for its literal `"none"` -- the pre-layout caveat made
+    machine-readable rather than assumed."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        abc_log_lines=_ABC_STIME_LINE.replace('WireLoad = "none"', 'WireLoad = "5K"'),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["wire_load"] == "5K"
+
+
+def test_timing_is_null_when_abc_printed_no_stime_line(tmp_path, monkeypatch):
+    """No invented number when ABC's own summary is absent (e.g. a build
+    whose `stime -p` output shape this parser does not recognise)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, abc_log_lines="ABC: nothing to report here\n")
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"] is None
+
+
+# --------------------------------------------------------------------------- #
 # Non-sky130 cell library + `--pdk`/`--pdk-root` (issue #629)
 # --------------------------------------------------------------------------- #
 
@@ -723,6 +984,17 @@ def test_run_synthesize_stubbed_success_gf180mcu(tmp_path, monkeypatch):
     assert (
         report["provenance"]["deck"]["name"] == "gf180mcu_fd_sc_mcu9t5v0__tt_025C_1v80"
     )
+
+    # Issue #807: this library has an ABC `-constr` table entry (so it gets
+    # sizing + a `timing` number) but deliberately **no** `-dont_use` entry
+    # -- ORFS's own `DONT_USE_CELLS = *_1` for this platform is a P&R
+    # congestion policy, measured here to cost +31% area at synthesis time.
+    # See `_ABC_DONT_USE_GLOBS`'s own docstring.
+    abc_line = _script_abc_line(report["script_path"])
+    assert "-constr " in abc_line
+    assert "-dont_use" not in abc_line
+    assert "gf180mcu_fd_sc_mcu9t5v0" not in synthesize._ABC_DONT_USE_GLOBS
+    assert report["timing"]["source"] == "abc_stime"
 
 
 def test_cli_pdk_flag_pins_variant(tmp_path, monkeypatch, capsys):
@@ -1079,6 +1351,12 @@ def test_cli_verify_equivalence_not_given_defaults_false(tmp_path, monkeypatch, 
 
 HAVE_YOSYS = shutil.which("yosys") is not None
 
+#: The Yosys build `docs/cli/synthesize.md`'s worked-example numbers were
+#: measured on (0.68+48, issue #807). Only that build's exact
+#: instance/area figures are asserted below -- see the integration test's
+#: own docstring.
+_WORKED_EXAMPLE_YOSYS = "0.68"
+
 
 def _find_real_sky130_variant() -> tuple[str, str] | None:
     """Search *every* install/variant `list_pdks()` discovers (not just
@@ -1111,7 +1389,16 @@ _REAL_SKY130_VARIANT = _find_real_sky130_variant()
 def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
     """The exact worked example from `docs/design/yosys-synthesis-spike.md`
     section 4, run against a real Yosys binary and a real, host-resolved
-    sky130 PDK install -- asserts the survey's own live-captured numbers."""
+    sky130 PDK install.
+
+    The build-independent assertions -- **zero** excluded (`lpflow_*`/
+    `probe*`) cells in `instance_counts_by_type`, and a populated, self-
+    labelling `timing` object -- are the issue #807 acceptance criteria and
+    always run. The exact instance/area numbers are asserted only on the
+    Yosys build `docs/cli/synthesize.md`'s worked example was measured on,
+    because Yosys's own mapping result legitimately moves between releases
+    (measured: the pre-#807 flow maps this design to 335 cells on 0.68 and
+    326 on Ubuntu 24.04's 0.33)."""
     root, variant = _REAL_SKY130_VARIANT
     monkeypatch.setenv("PDK_ROOT", root)
     monkeypatch.setenv("PDK", variant)
@@ -1121,13 +1408,39 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
 
     assert report["status"] == "ok"
     assert report["engine"] == "yosys"
-    assert report["instance_count"] == 335
-    assert report["area_um2"] == pytest.approx(2951.5808)
-    assert report["sequential_area_um2"] == pytest.approx(1251.2)
+    assert report["instance_count"] > 0
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
-    assert report["timing"] is None
+
+    # Issue #807: no power-domain isolation or test-probe cell survives the
+    # `-dont_use` list (the pre-#807 flow mapped 19 of them into this exact
+    # design -- 16 `lpflow_isobufsrc_1` + 3 `lpflow_inputiso1p_1`).
+    if synthesize._abc_supports_dont_use():
+        excluded = {
+            cell: count
+            for cell, count in report["instance_counts_by_type"].items()
+            if "lpflow" in cell or "probe" in cell
+        }
+        assert excluded == {}
+
+    # Issue #807: ABC's own `stime -p` number, labelled as the pre-layout,
+    # wire-free estimate it is -- never `null` for a library with a
+    # `-constr` table entry.
+    timing = report["timing"]
+    assert timing["source"] == "abc_stime"
+    assert timing["wire_load"] is None
+    assert timing["critical_path_ps"] > 0
+    assert timing["delay_target_ps"] is None  # no `constraints` in this request
+
+    if (report["engine_version"] or "").startswith(_WORKED_EXAMPLE_YOSYS):
+        assert report["instance_count"] == 347
+        assert report["area_um2"] == pytest.approx(3238.1056)
+        assert report["sequential_area_um2"] == pytest.approx(1251.2)
+
     assert os.path.isfile(report["netlist_path"])
     assert os.path.isfile(report["script_path"])
+    assert os.path.isfile(
+        os.path.join(os.path.dirname(report["script_path"]), "gcd_abc.constr")
+    )
 
     # `write_verilog -noattr`'s own output is a real, non-trivial netlist --
     # sanity-check it names the top module and at least one mapped cell.

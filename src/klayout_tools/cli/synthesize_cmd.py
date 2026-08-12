@@ -53,6 +53,16 @@ def _print_text(report: dict) -> None:
     print(f"area_um2: {report['area_um2']}")
     print(f"sequential_area_um2: {report['sequential_area_um2']}")
 
+    timing = report["timing"]
+    if timing:
+        target = timing["delay_target_ps"]
+        print(
+            f"critical_path_ps: {timing['critical_path_ps']} "
+            f"(source: {timing['source']}, target: "
+            f"{'none' if target is None else f'{target} ps'}, "
+            f"wire_load: {timing['wire_load'] or 'none'} -- pre-layout estimate)"
+        )
+
     instance_counts_by_type = report["instance_counts_by_type"]
     if instance_counts_by_type:
         print()

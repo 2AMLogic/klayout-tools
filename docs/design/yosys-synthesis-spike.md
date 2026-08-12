@@ -141,6 +141,16 @@ optimizes against. This is a Phase 2 scoping decision, not resolved here;
 flagging it now so #399's contract proposal does not assume Yosys reads
 constraints it structurally cannot.
 
+> **Update (issue #807, 2026-08-12).** Settled, and neither (a) nor (b): the
+> shipped command translates `constraints.clock_period_ns` into **ABC's**
+> own delay target, `abc -D <picoseconds>`, alongside an `abc -constr` file
+> carrying `set_driving_cell`/`set_load`. The finding above is unchanged —
+> nothing in this flow reads an SDC, and there is still no per-path timing
+> budget — but "Yosys reads no constraints" turns out not to imply "the
+> engine exposes no delay target". See
+> [`synthesize-qor-improvements-survey.md`](synthesize-qor-improvements-survey.md)
+> §1.2/§3.1 and [`../cli/synthesize.md`](../cli/synthesize.md).
+
 ## 2. Output parsing: JSON stats vs. text-netlist parsing
 
 Yosys offers (at least) three distinct output surfaces after a synthesis
@@ -383,6 +393,23 @@ run STA for P&R signoff) rather than committing to a Yosys-native timing
 field this spike could not get working. This is a scope boundary worth
 resolving explicitly in #399's contract design, the same way the LVS spike
 explicitly deferred parasitics rather than half-committing to it.
+
+> **Update (issue #807, 2026-08-12) — the three findings above stand; one
+> conclusion drawn from them was too strong.** `sta`, `read_liberty` + `sta`,
+> and `ltp` all still fail exactly as recorded here (re-verified in
+> [`synthesize-qor-improvements-survey.md`](synthesize-qor-improvements-survey.md)
+> §1.4, which reproduces the `ltp` result on the shipped flow). What the
+> spike missed is that the delay number does not have to come from *Yosys*:
+> **ABC** computes one itself, via `stime -p`, inside the same subprocess
+> this command already runs — and it was being discarded only because
+> `abc` was invoked without `-constr`, which is what gates that step
+> (survey §1.2). `klt synthesize` now passes `-constr` and publishes that
+> number in the reserved `timing` object, labelled as what it is: a
+> **pre-layout, wire-free** combinational estimate (`WireLoad = "none"`),
+> not signoff STA. The recommendation's substance is unchanged —
+> authoritative timing is still Phase 4's OpenSTA — so this is an additive
+> fill of a reserved field, not a reversal. Contract shape and caveats:
+> [`../cli/synthesize.md`](../cli/synthesize.md) → "`timing`".
 
 ## 4. Worked example: GCD synthesized against `sky130_fd_sc_hd`
 

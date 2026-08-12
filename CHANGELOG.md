@@ -427,6 +427,33 @@ not `klt --version`, if you need to detect this kind of drift.
   `--equiv-timeout-s` flag overrides `klt equiv`'s own default proof
   timeout. See `docs/cli/synthesize.md`'s "Equivalence gate" section.
 
+- 2026-08-12 — `klt synthesize` now drives ABC's constraint-gated half of
+  the mapping flow (#807, Epic #704 Phase 1a). Three additive changes, all
+  unlocked by one flag: (1) `constraints.clock_period_ns` is **consumed**
+  rather than carried — it becomes `abc -D <picoseconds>`, and the command
+  always writes a `<top>_abc.constr` file (`set_driving_cell`/`set_load`,
+  per-`cell_library` values sourced from ORFS's own
+  `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` and cross-checked against the installed
+  liberty) passed as `abc -constr`, which is what turns on ABC's
+  `buffer`/`upsize`/`dnsize` sizing and buffering steps at all; (2) non-logic
+  cells are excluded via `abc -dont_use` — for `sky130_fd_sc_hd` the
+  `lpflow_*` power-isolation and `probe*` test-probe classes ORFS's own
+  `DONT_USE_CELLS` names, so a plain `gcd` netlist no longer contains 19
+  power-domain isolation cells it has no use for; (3) the reserved `timing`
+  field is now populated with ABC's own `stime -p` critical path, as a
+  self-labelling object (`{"source": "abc_stime", "wire_load": null,
+  "critical_path_ps": …, "delay_target_ps": …}`) — **a pre-layout,
+  wire-free estimate, never signoff STA**, which remains Phase 4's
+  OpenROAD/OpenSTA step. Measured on Yosys 0.68+48 against a volare
+  `sky130A` install: `gcd` goes from 335 cells / 2951.5808 µm² / no delay
+  number to 347 cells / 3238.1056 µm² / 2485.93 ps with zero excluded cells,
+  and supplying `clock_period_ns: 10` maps it to 3001.6288 µm² at 3072.40 ps
+  — the area/delay trade-off is now caller-controlled instead of pinned to
+  one unlabelled point. `klt equiv` reports `"equivalent"` before and after
+  on every combinational design measured. `cell_library` values in neither
+  new table (and Yosys builds whose `abc` predates `-dont_use`, e.g. Ubuntu
+  24.04's 0.33) keep the previous behaviour exactly rather than failing.
+
 - 2026-08-11 — `klt extract --parasitics` now models **vertical-overlap
   (crossover) net-to-net coupling capacitance** (#760, Stage 2a of
   `docs/design/extract-fidelity-roadmap.md`). Where one net's conductor on
