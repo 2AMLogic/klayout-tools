@@ -460,6 +460,14 @@ DRC report, a check that failed) never aborts anything: it renders with
 `tier: null` and a `blocking_item` naming exactly what's missing, same as
 single-block tier-report mode.
 
+**Statistical and post-layout items participate too (issue #872, Phase 2c of
+epic #706).** Since the roll-up reduces the same `items[]` the tier-verdict
+report renders, a block whose only gap is item 6 ("Statistical claims carry
+Monte Carlo evidence", bound to `klt yield` in #870) or item 7 ("Post-layout
+verification", bound to `klt pex` in #871) is named as the `blocking_item`
+exactly like any other unmet item — and resolves to `tier: "T1"` once real
+`klt yield`/`klt pex` evidence backs it, the same as every other T1 item.
+
 ### Fleet-report JSON schema
 
 ```json
