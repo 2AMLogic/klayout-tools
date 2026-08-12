@@ -36,12 +36,14 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from klayout_tools.decks import (  # noqa: E402
     DrcRule,  # noqa: E402
     gf180mcu,
+    sg13g2,
     sky130,
 )
 
 DECKS: dict[str, list[DrcRule]] = {
     "sky130": sky130.DECK,
     "gf180mcu": gf180mcu.DECK,
+    "sg13g2": sg13g2.DECK,
 }
 
 #: Fixed bar dimensions (database units), independent of any individual

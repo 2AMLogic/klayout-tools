@@ -28,8 +28,12 @@ tests/golden_deck/
   __init__.py            # package marker (tests/ import convention, see below)
   manifest.py            # load_manifest() / build_layout() / write_layout()
   generate_golden_deck.py  # regeneration script (see "Regenerating" below)
-  sky130/manifest.json     # 11 entries
+  sky130/manifest.json     # 27 entries (11 at issue #747, grown since)
   gf180mcu/manifest.json   # 26 entries
+  sg13g2/manifest.json     # 14 entries (issue #905, Epic #711 Phase 3b --
+                            # see that deck's own module docstring; this
+                            # manifest mechanism is unchanged, only DECK_NAMES/
+                            # DECKS grew a third entry)
 ```
 
 `tests/test_golden_deck.py` is the consuming test module (not under this

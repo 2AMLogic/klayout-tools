@@ -4,7 +4,7 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu [--top <cell>] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2 [--top <cell>] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
 ```
 
@@ -12,7 +12,7 @@ klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-roo
   auto-detects the stream format on read; the extension is not authoritative.
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
-  `gf180mcu`.
+  `gf180mcu`, `sg13g2`.
 - `--top` — top cell to check when the stream has more than one; omit to
   check every top cell (today's default, unchanged). `coverage` (see below)
   is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`

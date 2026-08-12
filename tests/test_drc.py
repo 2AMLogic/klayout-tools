@@ -4103,3 +4103,325 @@ def test_run_drc_antenna_check_requires_other_layer(tmp_path, monkeypatch):
 
     with pytest.raises(DrcError, match="other_layer"):
         run_drc(str(path), "synthetic")
+
+
+# --------------------------------------------------------------------------- #
+# sg13g2 (Epic #711 Phase 3b, issue #905)
+# --------------------------------------------------------------------------- #
+#
+# `sg13g2.py`'s 14 width/space rules already have full golden violate/clean
+# coverage via `tests/golden_deck/sg13g2/manifest.json` (parametrized by
+# `tests/test_golden_deck.py`, which also asserts their `provenance` is
+# populated). The 5 rules below (`gatpoly.separation.activ.1`,
+# `activ.enclosing.cont.1`, `gatpoly.enclosing.cont.1`,
+# `metal1.enclosing.via1.1`, `metal2.enclosing.via2.1`) are `enclosing`/
+# `separation` checks, out of that manifest's width/space-only scope (see its
+# own README.md) -- mirroring how sky130/gf180mcu's own enclosing/separation
+# rules are hand-tested directly in this module (e.g.
+# `test_run_drc_sky130_met1_enclosing_via_violation` above).
+
+
+def test_run_drc_sg13g2_every_rule_has_provenance():
+    """Every one of sg13g2's 19 curated `DrcRule` entries carries a populated
+    `provenance` citation (issue #905's own acceptance criterion: "every
+    compiled rule cites its SG13G2 PDK source line") -- not just the 14
+    width/space rules `tests/test_golden_deck.py`'s generic check already
+    covers."""
+    deck = get_deck("sg13g2")
+    assert len(deck) == 19
+    for rule in deck:
+        assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
+        assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
+        assert rule.provenance.source_path, f"sg13g2/{rule.id}: empty source_path"
+        assert rule.provenance.rule_id, f"sg13g2/{rule.id}: empty rule_id"
+        assert rule.provenance.commit == "5cccb161f7492697cfa52eb14dc03beb00bdca9e"
+
+
+def test_run_drc_sg13g2_gatpoly_separation_activ_violation(tmp_path):
+    """A GatPoly shape closer than the 70 dbu (0.07 um)
+    `gatpoly.separation.activ.1` threshold to an unrelated (non-overlapping)
+    Activ shape trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    gatpoly = layout.layer(5, 0)
+    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
+    activ = layout.layer(1, 0)
+    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
+    top.shapes(gatpoly).insert(kdb.Box(0, 0, 500, 500))
+    top.shapes(activ).insert(kdb.Box(550, 0, 1000, 500))  # 50 dbu gap < 70
+    path = tmp_path / "sg13g2_gat_d_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"gatpoly.separation.activ.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "gatpoly.separation.activ.1"
+    assert violation["check"] == "separation"
+    assert violation["layer"] == "GatPoly.drawing"
+
+
+def test_run_drc_sg13g2_gatpoly_separation_activ_clean(tmp_path):
+    """A GatPoly shape spaced exactly at the 70 dbu threshold from an
+    unrelated Activ shape passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    gatpoly = layout.layer(5, 0)
+    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
+    activ = layout.layer(1, 0)
+    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
+    top.shapes(gatpoly).insert(kdb.Box(0, 0, 500, 500))
+    top.shapes(activ).insert(kdb.Box(570, 0, 1000, 500))  # 70 dbu gap == threshold
+    path = tmp_path / "sg13g2_gat_d_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sg13g2_gatpoly_over_activ_not_flagged_as_separation(tmp_path):
+    """A GatPoly gate drawn directly over its own Activ (the ordinary
+    "transistor gate" case) does not trip `gatpoly.separation.activ.1` --
+    `separation_check` only measures the gap between *non-interacting*
+    shapes, matching the real `Gat.d` rule's own `.sep()` semantics (see
+    `sg13g2.py`'s own docstring note on this rule)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    gatpoly = layout.layer(5, 0)
+    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
+    activ = layout.layer(1, 0)
+    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
+    top.shapes(activ).insert(kdb.Box(0, 0, 2000, 1000))  # W=1um active strip
+    top.shapes(gatpoly).insert(kdb.Box(800, -200, 1200, 1200))  # crosses it, L=0.4um
+    path = tmp_path / "sg13g2_gate_over_active.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert "gatpoly.separation.activ.1" not in report["rule_counts"]
+
+
+def test_run_drc_sg13g2_activ_enclosing_cont_violation(tmp_path):
+    """A Cont shape hanging off the edge of its Activ landing region by less
+    than the 70 dbu (0.07 um) `activ.enclosing.cont.1` margin trips exactly
+    one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    activ = layout.layer(1, 0)
+    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
+    cont = layout.layer(6, 0)
+    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    top.shapes(activ).insert(kdb.Box(0, 0, 1000, 1000))
+    # 400 dbu margin on 3 sides, only 10 dbu (< 70) margin on the right.
+    top.shapes(cont).insert(kdb.Box(400, 400, 990, 600))
+    path = tmp_path / "sg13g2_activ_enclosing_cont_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"activ.enclosing.cont.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "activ.enclosing.cont.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Activ.drawing"
+
+
+def test_run_drc_sg13g2_activ_enclosing_cont_clean(tmp_path):
+    """A Cont shape enclosed by its Activ landing region with >= 70 dbu
+    margin on every side passes `activ.enclosing.cont.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    activ = layout.layer(1, 0)
+    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
+    cont = layout.layer(6, 0)
+    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    top.shapes(activ).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(cont).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 70
+    path = tmp_path / "sg13g2_activ_enclosing_cont_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sg13g2_gatpoly_enclosing_cont_violation(tmp_path):
+    """A Cont shape hanging off the edge of its GatPoly landing region by
+    less than the 70 dbu (0.07 um) `gatpoly.enclosing.cont.1` margin trips
+    exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    gatpoly = layout.layer(5, 0)
+    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
+    cont = layout.layer(6, 0)
+    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    top.shapes(gatpoly).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(cont).insert(kdb.Box(400, 400, 990, 600))  # 10 dbu margin < 70
+    path = tmp_path / "sg13g2_gatpoly_enclosing_cont_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"gatpoly.enclosing.cont.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "gatpoly.enclosing.cont.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "GatPoly.drawing"
+
+
+def test_run_drc_sg13g2_gatpoly_enclosing_cont_clean(tmp_path):
+    """A Cont shape enclosed by its GatPoly landing region with >= 70 dbu
+    margin on every side passes `gatpoly.enclosing.cont.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    gatpoly = layout.layer(5, 0)
+    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
+    cont = layout.layer(6, 0)
+    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    top.shapes(gatpoly).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(cont).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 70
+    path = tmp_path / "sg13g2_gatpoly_enclosing_cont_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sg13g2_metal1_enclosing_via1_violation(tmp_path):
+    """A Via1 shape hanging off the edge of its Metal1 landing pad by less
+    than the 10 dbu (0.01 um) `metal1.enclosing.via1.1` margin trips exactly
+    one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal1 = layout.layer(8, 0)
+    layout.set_info(metal1, kdb.LayerInfo(8, 0, "Metal1.drawing"))
+    via1 = layout.layer(19, 0)
+    layout.set_info(via1, kdb.LayerInfo(19, 0, "Via1.drawing"))
+    top.shapes(metal1).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via1).insert(kdb.Box(400, 400, 995, 600))  # 5 dbu margin < 10
+    path = tmp_path / "sg13g2_metal1_enclosing_via1_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal1.enclosing.via1.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal1.enclosing.via1.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Metal1.drawing"
+
+
+def test_run_drc_sg13g2_metal1_enclosing_via1_clean(tmp_path):
+    """A Via1 shape enclosed by its Metal1 landing pad with >= 10 dbu margin
+    on every side passes `metal1.enclosing.via1.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal1 = layout.layer(8, 0)
+    layout.set_info(metal1, kdb.LayerInfo(8, 0, "Metal1.drawing"))
+    via1 = layout.layer(19, 0)
+    layout.set_info(via1, kdb.LayerInfo(19, 0, "Via1.drawing"))
+    top.shapes(metal1).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via1).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 10
+    path = tmp_path / "sg13g2_metal1_enclosing_via1_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sg13g2_metal2_enclosing_via2_violation(tmp_path):
+    """A Via2 shape hanging off the edge of its Metal2 landing pad by less
+    than the 5 dbu (0.005 um) `metal2.enclosing.via2.1` margin trips exactly
+    one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal2 = layout.layer(10, 0)
+    layout.set_info(metal2, kdb.LayerInfo(10, 0, "Metal2.drawing"))
+    via2 = layout.layer(29, 0)
+    layout.set_info(via2, kdb.LayerInfo(29, 0, "Via2.drawing"))
+    top.shapes(metal2).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via2).insert(kdb.Box(400, 400, 998, 600))  # 2 dbu margin < 5
+    path = tmp_path / "sg13g2_metal2_enclosing_via2_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal2.enclosing.via2.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "metal2.enclosing.via2.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Metal2.drawing"
+
+
+def test_run_drc_sg13g2_metal2_enclosing_via2_clean(tmp_path):
+    """A Via2 shape enclosed by its Metal2 landing pad with >= 5 dbu margin
+    on every side passes `metal2.enclosing.via2.1`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    metal2 = layout.layer(10, 0)
+    layout.set_info(metal2, kdb.LayerInfo(10, 0, "Metal2.drawing"))
+    via2 = layout.layer(29, 0)
+    layout.set_info(via2, kdb.LayerInfo(29, 0, "Via2.drawing"))
+    top.shapes(metal2).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(via2).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 5
+    path = tmp_path / "sg13g2_metal2_enclosing_via2_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sg13g2_coverage_deck_scope_matches_rule_scopes(tmp_path):
+    """`coverage.deck_scope` (#566) is every distinct non-empty `DrcRule.scope`
+    across the sg13g2 deck's rules, deduplicated and sorted -- mirrors
+    `test_run_drc_coverage_deck_scope_matches_sky130_rule_scopes` above."""
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    path = tmp_path / "sg13g2_empty.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    expected_scope = sorted({rule.scope for rule in get_deck("sg13g2") if rule.scope})
+    assert expected_scope
+    assert report["coverage"]["deck_scope"] == expected_scope
+
+
+def test_run_drc_sg13g2_unmodeled_voltage_marker_registered():
+    """sg13g2 registers `ThickGateOx` (44/0) as an unmodeled voltage-domain
+    marker (issue #552's mechanism, mirroring gf180mcu's `Dualgate`) -- see
+    `sg13g2.py`'s own `UNMODELED_VOLTAGE_MARKERS` docstring note."""
+    markers = get_unmodeled_voltage_markers("sg13g2")
+    assert (44, 0) in markers
+    assert "ThickGateOx" in markers[(44, 0)]
+
+
+def test_sg13g2_extraction_deck_declares_mos_recognition():
+    """sg13g2's `EXTRACTION_DECK` declares the curated `active`/`poly`/
+    `nwell`/`contact` MOS-recognition layers and a two-level Metal1/Metal2
+    connectivity stack joined by Via1 -- the same fields
+    `test_golden_pair_sg13g2_*` in `tests/test_sg13g2_deck.py` exercise
+    end-to-end."""
+    deck = get_extraction_deck("sg13g2")
+    assert deck.active == (1, 0)
+    assert deck.poly == (5, 0)
+    assert deck.nwell == (31, 0)
+    assert deck.contact == (6, 0)
+    assert deck.metals == ((8, 0), (10, 0))
+    assert deck.vias == ((19, 0),)
+    assert deck.tap is None
+    assert deck.device_classes == ("nfet", "pfet")

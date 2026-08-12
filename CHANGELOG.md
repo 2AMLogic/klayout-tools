@@ -440,6 +440,41 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — `klt drc`/`klt extract`/`klt lvs` gain a third built-in deck,
+  `sg13g2` (IHP-Open-PDK's SG13G2) — issue #905, Phase 3b of the DRC/LVS deck
+  compiler epic #711, "the second PDK-generality proof" alongside sky130
+  (Phases 0-2) and gf180mcu (Phase 3a). Unlike sky130/gf180mcu (both of which
+  had a hand-curated deck *before* Epic #711 existed, so earlier phases
+  backfilled `RuleProvenance` citations onto an already-shipping deck),
+  `decks/sg13g2.py` did not exist before this issue — issue #524 (the
+  traditional hand-written route) remains open, repeatedly rejected by
+  Champion for an oversized single-PR scope, so this deck is transcribed
+  with `RuleProvenance` citations from the start. 19 curated `DrcRule`
+  entries (Activ, GatPoly, Cont, Metal1, Via1, Metal2, Via2 — width/space/
+  enclosing/separation checks) transcribed from a real, pinned IHP-Open-PDK
+  v0.3.0 install (`scripts/fetch-ihp-sg13g2.sh`, commit
+  `5cccb161f7492697cfa52eb14dc03beb00bdca9e`)'s own `.drc` rule-deck files
+  and `sg13g2_tech_default.json` threshold table, each cross-verified
+  against both sources; every rule ships a golden violate/clean pair (14
+  width/space rules via the existing `tests/golden_deck/` manifest
+  mechanism, extended to a third deck; the 5 enclosing/separation rules via
+  hand-written pairs in `tests/test_drc.py`, mirroring sky130/gf180mcu's own
+  pattern). `EXTRACTION_DECK` recognises thin-oxide ("-LV") NMOS/PMOS
+  (`sg13_lv_nmos`/`sg13_lv_pmos`, transcribed from `mos_extraction.lvs`),
+  each with a golden layout→netlist pair in the new
+  `tests/test_sg13g2_deck.py`; the thick-oxide ("-HV") voltage domain is
+  registered as an unmodeled-marker gap (`ThickGateOx`, 44/0), the same
+  mechanism gf180mcu's `Dualgate` already uses. Issue #905's own acceptance
+  criteria ask for a cross-check against #524's hand-written deck if it has
+  landed — it has not (still open, unmerged), so this deck ships with
+  golden-pair validation only, stated explicitly rather than silently
+  skipped (see `sg13g2.py`'s own "No #524 cross-check" docstring section).
+  Resistor/capacitor/bipolar/diode device recognition and RC parasitics are
+  not curated in this increment (`ParasiticsDeck()` registers empty, so
+  `--parasitics` reports an honest uncalibrated gap rather than an "unknown
+  deck" error) — a follow-on scope, the same incremental-growth pattern
+  sky130/gf180mcu's own coverage already followed.
+
 - 2026-08-12 — `klt mom` gains port definition + de-embedding, reporting
   **de-embedded S-parameters** for the full-wave sweep's canonical two-port
   transmission-line case — issue #894, Phase 2b of the Method-of-Moments
