@@ -21,15 +21,20 @@ pub struct Panel {
 const EPS_UM: f64 = 1e-9;
 
 /// Upper bound on total panel count. The dense potential-coefficient matrix
-/// is `O(n^2)` in both memory and fill/solve time (a full matrix at this cap
-/// is `8000^2 * 8 bytes` ~= 512 MiB), so an unreasonably fine
+/// is `O(n^2)` in both memory and per-iteration solve time (a full matrix at
+/// this cap is `8000^2 * 8 bytes` ~= 512 MiB), so an unreasonably fine
 /// `panel_size_um` relative to a large conductor -- most likely a caller
 /// mismatching scale between a tiny and a huge conductor in the same request
 /// -- fails fast with a clear message instead of exhausting memory or
-/// hanging on the `O(n^3)` LU solve. MVP conductor counts (a handful of
-/// plates/coax cross-sections) stay far under this cap at the default
-/// `panel_size_um`; raise it, or increase `panel_size_um`, if a legitimate
-/// geometry needs more panels than this.
+/// hanging on an oversized solve. `solver.rs`'s iterative (preconditioned CG)
+/// solve (#799) is materially cheaper at this scale than the direct `O(n^3)`
+/// LU factorisation it replaced -- see
+/// `docs/design/mom-iterative-solver.md` -- but the dense `O(n^2)` fill this
+/// guard bounds is unchanged by that; a matrix-free reformulation would be
+/// needed to lift this cap meaningfully, not just a faster solve step. MVP
+/// conductor counts (a handful of plates/coax cross-sections) stay far under
+/// this cap at the default `panel_size_um`; raise it, or increase
+/// `panel_size_um`, if a legitimate geometry needs more panels than this.
 const MAX_PANELS: usize = 8000;
 
 /// Discretise every conductor's boxes into panels, target panel edge length
@@ -92,8 +97,54 @@ pub fn discretize(
                 conductor.name
             ));
         }
+        dedupe_coincident_panels(&mut panels, before);
     }
     Ok(panels)
+}
+
+/// Remove exact-duplicate panels (identical center, within `EPS_UM`) that
+/// were added for *this* conductor since index `start`, keeping the first
+/// occurrence of each.
+///
+/// A multi-box conductor -- e.g. a coax-style shield built from several
+/// abutting wall boxes (see `docs/cli/mom.md`'s "Worked example: coax") --
+/// can have two different boxes meet at a right-angle corner such that one
+/// box's outward face and its neighbour's outward face occupy the *exact
+/// same* 3D rectangle (one wall's `y0` face and the perpendicular wall's
+/// `y1` face, both spanning the same `x`/`z` range at their shared `y`).
+/// Both panels describe the identical physical patch of the conductor's own
+/// surface: keeping both double-counts that patch in the potential-
+/// coefficient fill, and gives `solver.rs` two panels at `r = 0` of each
+/// other -- a divide-by-zero in the off-diagonal `1/(4 pi eps r)` kernel.
+///
+/// This generalises the flat-plate case just above (`z0_um == z1_um` emits
+/// one face, not six coincident ones, "avoiding... a singular matrix") from
+/// one box's own opposite faces to two *different* boxes of the same
+/// conductor. Only ever compares panels within one conductor -- a genuine
+/// coincidence *between* different conductors (overlapping/short-circuited
+/// surfaces) is a malformed request, not a discretisation artefact to paper
+/// over, and is left for the solver to report as singular/ill-conditioned.
+fn dedupe_coincident_panels(panels: &mut Vec<Panel>, start: usize) {
+    let mut seen: std::collections::HashSet<[i64; 3]> = std::collections::HashSet::new();
+    let mut write = start;
+    for read in start..panels.len() {
+        if seen.insert(quantize(&panels[read].center)) {
+            panels.swap(write, read);
+            write += 1;
+        }
+    }
+    panels.truncate(write);
+}
+
+/// Quantise a panel center to `EPS_UM` resolution for exact-duplicate
+/// detection (a `HashSet` needs `Eq`/`Hash`, which `f64` does not
+/// implement).
+fn quantize(center: &[f64; 3]) -> [i64; 3] {
+    [
+        (center[0] / EPS_UM).round() as i64,
+        (center[1] / EPS_UM).round() as i64,
+        (center[2] / EPS_UM).round() as i64,
+    ]
 }
 
 /// Upper bound on the number of panels `discretize_box` would emit for `b`,
@@ -400,5 +451,91 @@ mod tests {
         );
         let err = discretize(&[tiny, big], 0.001).unwrap_err();
         assert!(err.contains("panels"), "unexpected error message: {err}");
+    }
+
+    #[test]
+    fn abutting_boxes_at_a_right_angle_corner_do_not_emit_coincident_panels() {
+        // Two boxes of the same conductor meeting at a right-angle corner --
+        // the exact shape of the coax fixture's shield walls
+        // (docs/design/mom-iterative-solver.md's "Fixing a fill bug the
+        // direct solve had been hiding", #799). Box "north" spans the full
+        // x range at y=[8,9]; box "east" spans x=[8,9] at y=[1,8]. North's
+        // y0 (bottom) face and east's y1 (top) face both lie in the y=8
+        // plane and overlap over x=[8,9] -- without deduplication this
+        // would emit two panels at the exact same 3-D location, each a
+        // divide-by-zero (`r = 0`) away from the other in the
+        // potential-coefficient fill.
+        let c = ConductorRequest {
+            name: "shield".to_string(),
+            boxes: vec![
+                BoxRequest {
+                    x0_um: 0.0,
+                    y0_um: 8.0,
+                    x1_um: 9.0,
+                    y1_um: 9.0,
+                    z0_um: 0.0,
+                    z1_um: 0.5,
+                },
+                BoxRequest {
+                    x0_um: 8.0,
+                    y0_um: 1.0,
+                    x1_um: 9.0,
+                    y1_um: 8.0,
+                    z0_um: 0.0,
+                    z1_um: 0.5,
+                },
+            ],
+        };
+        let panels = discretize(&[c], 0.5).unwrap();
+
+        // No two panels share a (quantised) center -- the coincident pair
+        // this fixture is built to trigger was actually removed, not just
+        // absent by chance.
+        let mut seen = std::collections::HashSet::new();
+        for panel in &panels {
+            let key = quantize(&panel.center);
+            assert!(
+                seen.insert(key),
+                "duplicate panel center {:?} survived deduplication",
+                panel.center
+            );
+        }
+
+        // Sanity: deduplication actually removed panels relative to the
+        // naive per-box sum (2 panels at the shared corner, at panel_size
+        // 0.5um over a 1x0.5um overlap strip) -- this assertion would catch
+        // a regression where `dedupe_coincident_panels` silently became a
+        // no-op.
+        let naive_total: usize = [
+            BoxRequest {
+                x0_um: 0.0,
+                y0_um: 8.0,
+                x1_um: 9.0,
+                y1_um: 9.0,
+                z0_um: 0.0,
+                z1_um: 0.5,
+            },
+            BoxRequest {
+                x0_um: 8.0,
+                y0_um: 1.0,
+                x1_um: 9.0,
+                y1_um: 8.0,
+                z0_um: 0.0,
+                z1_um: 0.5,
+            },
+        ]
+        .iter()
+        .map(|b| {
+            let mut out = Vec::new();
+            discretize_box(b, 0.5, 0, &mut out);
+            out.len()
+        })
+        .sum();
+        assert!(
+            panels.len() < naive_total,
+            "expected deduplication to remove at least one coincident panel: \
+             deduped={}, naive sum={naive_total}",
+            panels.len()
+        );
     }
 }

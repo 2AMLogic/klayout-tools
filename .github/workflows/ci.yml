@@ -85,7 +85,12 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test
+        # `--nocapture` so `solver::tests::iterative_solve_matches_direct_lu_solve`'s
+        # printed convergence-rate report (issue #799's acceptance criterion
+        # that the rate be *reported*, not only asserted) lands in this job's
+        # log on a green run too, matching how the Python job already does
+        # this for tests/test_mom_validation.py's convergence tables.
+        run: cargo test -- --nocapture
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v9.0.0
