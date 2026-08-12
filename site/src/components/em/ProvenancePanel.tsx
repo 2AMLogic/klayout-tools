@@ -70,6 +70,21 @@ export function ProvenancePanel({ provenance }: ProvenancePanelProps) {
               )}
             </TableCell>
           </TableRow>
+          {geometry.source_repo && geometry.source_commit && (
+            <TableRow>
+              <TableHead>Source</TableHead>
+              <TableCell>
+                <a href={geometry.source_repo}>
+                  {geometry.source_repo.replace(/^https?:\/\/(www\.)?/, "")}
+                </a>
+                {" @ "}
+                <span data-testid="em-provenance-source-commit">{geometry.source_commit.slice(0, 12)}</span>
+                {geometry.source_block && (
+                  <span className="text-fog-dim"> · block {geometry.source_block}</span>
+                )}
+              </TableCell>
+            </TableRow>
+          )}
           {solveParamEntries.length > 0 && (
             <TableRow>
               <TableHead>Solve parameters</TableHead>

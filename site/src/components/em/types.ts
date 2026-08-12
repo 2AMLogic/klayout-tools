@@ -82,6 +82,16 @@ export interface EmProvenance {
     fixture: string;
     fixture_sha256?: string | null;
     description?: string;
+    /** klayout-tools source-repo provenance (issue #842's real-fleet-geometry
+     *  entries only, e.g. `interconnect_coupling`) -- distinct from
+     *  `generator`, which identifies the geode-fem *solver*, not the
+     *  klayout-tools commit the input geometry traces to. Absent for a
+     *  benchmark whose geometry is geode-fem's own bundled fixture (e.g.
+     *  `patch_antenna`). */
+    source_repo?: string;
+    source_commit?: string;
+    source_block?: string;
+    source_layer?: string;
   };
   /** Solver boundary-condition / material parameters — shape varies by
    *  benchmark family, so this is a read-only string-keyed bag rendered
@@ -93,17 +103,59 @@ export interface EmProvenance {
 }
 
 /**
+ * One conductor pair's Maxwell capacitance-matrix result
+ * (`docs/schemas/em-site-export.schema.json`'s `capacitance` object) — the
+ * sibling of `s_parameters` for a benchmark with no driven-port frequency
+ * sweep at all (issue #842's `interconnect_coupling` benchmark: a DC
+ * multi-conductor electrostatic extraction). A document carries
+ * `s_parameters`, `capacitance`, or both — never neither (enforced by the
+ * schema's own `anyOf`). Only the fields `InterconnectCouplingResult`
+ * actually reads are typed here; the schema marks `capacitance`/`oracle`
+ * as `additionalProperties: true`.
+ */
+export interface EmCapacitanceOracle {
+  description?: string;
+  source?: string;
+  conductor?: string;
+  predicted_self_capacitance_farad: number;
+  fem_self_capacitance_farad: number;
+  rel_err: number | null;
+}
+
+export interface EmCapacitance {
+  /** Conductor names in `matrix_farad` row/column order, e.g.
+   *  `["vgnd", "vpwr"]`. */
+  conductors: string[];
+  /** The N x N Maxwell capacitance matrix (farads). */
+  matrix_farad: number[][];
+  matrix_flux_diag_farad?: (number | null)[];
+  /** Maxwell-reciprocity hard check — near-zero for a correct extraction,
+   *  regardless of mesh quality (see the schema's own field description). */
+  max_rel_asymmetry?: number;
+  /** Honest, wide-tolerance independent sanity cross-check (e.g. a public
+   *  PDK-published parasitic-capacitance model) — `null`/omitted when no
+   *  cross-check applies. */
+  oracle?: EmCapacitanceOracle | null;
+}
+
+/**
  * The full geode-fem site export document. NOTE: `frames.length` and
  * `s_parameters.points.length` are **not** index-aligned in general — the
  * committed patch-antenna export has exactly 1 frame (the FEM resonant
  * frequency) but 13 S-parameter sweep points on a different frequency grid.
  * Never assume a shared integer index between the two arrays.
+ *
+ * `s_parameters` and `capacitance` are each optional, but the schema's own
+ * `anyOf` guarantees at least one is present on any real export (issue
+ * #842's addendum) — `patch_antenna` carries `s_parameters` only,
+ * `interconnect_coupling` carries `capacitance` only.
  */
 export interface EmSiteExport {
   schema_version: number;
   benchmark: string;
   mesh: FieldMesh;
   frames: EmFrame[];
-  s_parameters: EmSParameters;
+  s_parameters?: EmSParameters;
+  capacitance?: EmCapacitance;
   provenance: EmProvenance;
 }

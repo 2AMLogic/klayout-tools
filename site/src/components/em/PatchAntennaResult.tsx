@@ -94,7 +94,11 @@ export function PatchAntennaResult({
   }, [dataUrl]);
 
   const data = typeof state === "object" ? state : null;
-  const points = data?.s_parameters.points ?? [];
+  // `s_parameters` is optional on the shared `EmSiteExport` type (issue
+  // #842's addendum added the `capacitance`-only sibling shape) -- the
+  // patch-antenna export itself always carries it, but the type no longer
+  // guarantees that, hence the extra `?.`.
+  const points = data?.s_parameters?.points ?? [];
   const clampedIndex = Math.min(Math.max(pointIndex, 0), Math.max(points.length - 1, 0));
   const activePoint = points[clampedIndex];
 

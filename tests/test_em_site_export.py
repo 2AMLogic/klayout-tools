@@ -105,6 +105,46 @@ def test_minimal_instance_validates():
     jsonschema.validate(instance=minimal, schema=_load_schema())
 
 
+def test_minimal_capacitance_only_instance_validates():
+    """A `capacitance`-shaped instance with no `s_parameters` at all also
+    validates (issue #842's addendum: `s_parameters` is no longer globally
+    required, and `capacitance` is its sibling for non-frequency-swept
+    electrostatic-extraction benchmarks)."""
+    minimal = {
+        "schema_version": 1,
+        "benchmark": "toy_capacitance",
+        "mesh": {"vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "cells": [[0, 1, 2]]},
+        "frames": [{"label": "f0"}],
+        "capacitance": {
+            "conductors": ["a", "b"],
+            "matrix_farad": [[1.0e-15, -1.0e-16], [-1.0e-16, 1.0e-15]],
+        },
+        "provenance": {
+            "generator": {"repo": "https://example.invalid/x", "commit": "0" * 40},
+            "geometry": {"fixture": "x.msh"},
+            "generated_at": "2026-01-01T00:00:00Z",
+        },
+    }
+    jsonschema.validate(instance=minimal, schema=_load_schema())
+
+
+def test_instance_missing_both_s_parameters_and_capacitance_fails_schema():
+    """Every document must carry at least one physical-response payload."""
+    broken = {
+        "schema_version": 1,
+        "benchmark": "toy",
+        "mesh": {"vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "cells": [[0, 1, 2]]},
+        "frames": [{"label": "f0"}],
+        "provenance": {
+            "generator": {"repo": "https://example.invalid/x", "commit": "0" * 40},
+            "geometry": {"fixture": "x.msh"},
+            "generated_at": "2026-01-01T00:00:00Z",
+        },
+    }
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        jsonschema.validate(instance=broken, schema=_load_schema())
+
+
 def test_instance_missing_provenance_fails_schema():
     broken = {
         "schema_version": 1,
