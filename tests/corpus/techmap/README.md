@@ -13,6 +13,9 @@ measured Yosys/`abc` comparison these fixtures feed.
 | `yosys_to_generic.py` | The converter itself — see its own module docstring for the exact cell-type/polarity translation it does (Yosys's `$_AND_`/`$_DFF_PN0_`/... simple-cell set → the contract's `$and2`/`$dff`/... vocabulary, including the clock/reset/enable polarity normalisation and the `"$const0"`/`"$const1"` tie-net convention). |
 | `regenerate.sh` | Regenerates the three `*_generic.json` fixtures from Yosys, fresh. Deliberate, reviewed, never a CI step — same convention as `tests/corpus/statime/regenerate.sh`. |
 | `compare.py` | Runs `klt-techmap` against each fixture, `klt synthesize` (Yosys/`abc`) against the same design's own RTL, and `klt-statime critical-path` (issue #809) against both mapped netlists for a same-engine delay comparison. The table `native/techmap/README.md`'s own "Results" section reports is this script's output. |
+| `adder4.v` / `adder4_generic.json` / `adder4_mapped.v` | The **acceptance-gate** fixture triple (issue #875): a 4-bit ripple-carry adder — purely combinational, so in scope for `klt equiv`'s Phase 0 MVP, unlike `gcd`/`modexp` — its Yosys-derived generic netlist, and `native/techmap`'s own mapping of that netlist (real mapper output, banner-checked by the test, never hand-written). `tests/test_techmap_equiv_gate.py` proves the two are equivalent with a real Yosys SAT proof. |
+| `adder4_broken.v` / `adder4_broken_generic.json` / `adder4_broken_mapped.v` | The **seeded mismatch** for the same gate: the identical adder with the carry-in dropped from the sum, its own generic netlist, and the real mapper's own output for it. Substituted in place of `adder4_mapped.v`, it is a structurally valid but functionally wrong mapping the gate must reject — proving the gate catches divergence rather than only passing the happy path. |
+| `regenerate-gate-fixtures.sh` | Regenerates the six `adder4*` files above, fresh, from Yosys + the real `klt-techmap` binary. Needs strictly more than `regenerate.sh` (cargo and a real resolvable sky130_fd_sc_hd liberty), which is why it is a separate script. Deliberate, reviewed, never a CI step. |
 
 ## Why plain-text JSON, not gzipped
 
@@ -26,6 +29,10 @@ small even uncompressed (largest fixture, `modexp_generic.json`, is
 `sky130_fd_sc_hd__tt_025C_1v80.lib` is ~13 MB — this repo resolves it live
 via `klt pdk find` / a local `volare` install, same as every other `klt`
 command that needs a liberty. `compare.py` needs a real PDK install for
-this reason; the checked-in fixtures above do not (they only need
+this reason; the `*_generic.json` fixtures above do not (they only need
 `native/techmap`'s own `celllib.rs` classification logic, which runs
-against whatever liberty a caller resolves).
+against whatever liberty a caller resolves). The `adder4*_mapped.v`
+fixtures *are* library-specific — they instantiate real
+`sky130_fd_sc_hd__*` cells — so the gate tests that consume them resolve
+that same liberty at run time (CI provisions it; a machine without it
+skips those tests with a clear reason rather than passing silently).

@@ -11,12 +11,21 @@ corpus (`gcd`, `mult8`, `modexp`) prior Epic #704 phases already use — see
 
 ## What this is
 
-Not (yet) a `klt` subcommand — per the contract's section 1, wiring this
-into `klt synthesize`/a future `klt synth` and gating it with `klt equiv`
-is issue #875's job. This crate is a standalone binary
+Not (yet) a `klt` subcommand. This crate is a standalone binary
 (`klt-techmap <request.json>`) plus library, following `native/statime/`'s
 own precedent (issue #809) of shipping the engine and its own CLI first,
 production integration later.
+
+**It does, however, have an acceptance gate as of issue #875** (Epic #704
+Phase 2c): `klayout_tools.techmap.run_techmap(request,
+verify_equivalence=True)` runs this binary and then proves its mapped
+netlist logically equivalent to the *pre-mapping generic netlist* it was
+produced from, via `klt equiv` — a mapped netlist that cannot be proven
+equivalent is not accepted (a hard `TechmapError`, never a silent
+warning). See `src/klayout_tools/techmap.py`'s module docstring for how
+the generic netlist is rendered as the proof's `gold` side, and
+`tests/test_techmap_equiv_gate.py` for the gate proven against both a real
+mapping of this crate's own and a deliberately-broken one.
 
 **Pipeline** (`src/`):
 
@@ -192,8 +201,10 @@ by `compare.py` if missing).
 
 ## Not in scope (per the issue)
 
-Wiring this crate into `klt synthesize`/a future `klt synth` and gating it
-with `klt equiv` — issue #875. A native elaboration/logic-optimization
+Wiring this crate into `klt synthesize`/a future `klt synth` as a `klt` CLI
+verb — the `klt equiv` acceptance gate half of issue #875 has since landed
+(see "What this is" above); exposing the stage as a user-facing subcommand
+has not. A native elaboration/logic-optimization
 stage that would emit `klt.synth.generic-netlist/1` directly (rather than
 via the interim Yosys-derived on-ramp this issue's own corpus harness
 uses) — Epic #704 Phase 1/3, already-shipped/future work this issue

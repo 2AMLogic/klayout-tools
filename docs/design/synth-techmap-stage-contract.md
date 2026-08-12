@@ -294,6 +294,26 @@ this repo already agree on.
 | `timing` | object \| null | `{source, critical_path_ps, delay_target_ps}` once a delay-aware engine is wired in (`source: "statime"`, per the accepted `native/statime` spike, issue #809) — or `null` until that wiring lands (§8). `delay_target_ps` echoes `constraints.clock_period_ns × 1000` when given, `null` otherwise — matching `klt synthesize`'s own `timing.delay_target_ps` semantics exactly. |
 | `mapped_netlist_path` | string | The mapped gate-level netlist, absolute path — see §4/§5. |
 
+#### `equivalence` — the acceptance gate's own field (#875)
+
+`klayout_tools.techmap.run_techmap()` (the Python runner that invokes the
+`klt-techmap` binary) adds one **additive** field to the response above:
+`equivalence`. It is `null` by default and, when the caller passes
+`verify_equivalence=True`, carries the `klt equiv` proof summary
+(`{status, engine, engine_version, timeout_s, elapsed_s,
+generic_netlist_verilog_path, artifacts}`) for the proof that the mapped
+netlist is logically equivalent to the *pre-mapping generic netlist*
+(§2) it was produced from. A non-`"equivalent"` verdict is never returned
+— it raises, so a mapped netlist the gate could not prove faithful is
+never accepted. The `klt-techmap` binary itself is unchanged and never
+emits this field.
+
+Scope: `klt equiv`'s Phase 0 MVP is combinational-only, so a generic
+netlist containing §2.2's `$dff` cannot be gated today — the gate rejects
+it up front with a scope error naming #707 rather than emitting sequential
+Verilog for Yosys to reject less legibly. Same limitation `klt synthesize
+--verify-equivalence` already carries at the RTL stage.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -374,7 +394,10 @@ issue creates no crate — #874 does.
   synthesis for `klt`.
 - #874 — implement Liberty-driven cell selection for technology mapping,
   benchmarked against Yosys/abc, against this contract.
-- #875 — wire `klt equiv` as this stage's own acceptance gate.
+- #875 — wire `klt equiv` as this stage's own acceptance gate
+  (**shipped**: `src/klayout_tools/techmap.py`, §6's `equivalence` field,
+  proven in `tests/test_techmap_equiv_gate.py` against both a real mapping
+  and a seeded mismatch).
 - #809 / `native/statime/` — the accepted native-Rust gate-level STA spike
   this stage's `timing` field is designed to plug into.
 - #700 — `klt place-and-route`, the consumer this stage's

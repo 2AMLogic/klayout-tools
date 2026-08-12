@@ -1,0 +1,232 @@
+{
+  "schema": "klt.synth.generic-netlist/1",
+  "top": "adder4",
+  "ports": [
+    {
+      "name": "a",
+      "direction": "input",
+      "bits": [
+        "a[3]",
+        "a[2]",
+        "a[1]",
+        "a[0]"
+      ]
+    },
+    {
+      "name": "b",
+      "direction": "input",
+      "bits": [
+        "b[3]",
+        "b[2]",
+        "b[1]",
+        "b[0]"
+      ]
+    },
+    {
+      "name": "cin",
+      "direction": "input",
+      "bits": [
+        "cin"
+      ]
+    },
+    {
+      "name": "sum",
+      "direction": "output",
+      "bits": [
+        "sum[3]",
+        "sum[2]",
+        "sum[1]",
+        "sum[0]"
+      ]
+    },
+    {
+      "name": "cout",
+      "direction": "output",
+      "bits": [
+        "cout"
+      ]
+    }
+  ],
+  "cells": [
+    {
+      "name": "_g0_",
+      "type": "$and2",
+      "connections": {
+        "A": "a[0]",
+        "B": "b[0]",
+        "Y": "n16"
+      }
+    },
+    {
+      "name": "_g1_",
+      "type": "$and2",
+      "connections": {
+        "A": "a[1]",
+        "B": "b[1]",
+        "Y": "n17"
+      }
+    },
+    {
+      "name": "_g2_",
+      "type": "$and2",
+      "connections": {
+        "A": "a[2]",
+        "B": "b[2]",
+        "Y": "n18"
+      }
+    },
+    {
+      "name": "_g3_",
+      "type": "$and2",
+      "connections": {
+        "A": "a[3]",
+        "B": "b[3]",
+        "Y": "n19"
+      }
+    },
+    {
+      "name": "_g4_",
+      "type": "$xor2",
+      "connections": {
+        "A": "a[0]",
+        "B": "b[0]",
+        "Y": "sum[0]"
+      }
+    },
+    {
+      "name": "_g5_",
+      "type": "$xor2",
+      "connections": {
+        "A": "a[1]",
+        "B": "b[1]",
+        "Y": "n20"
+      }
+    },
+    {
+      "name": "_g6_",
+      "type": "$xor2",
+      "connections": {
+        "A": "a[2]",
+        "B": "b[2]",
+        "Y": "n21"
+      }
+    },
+    {
+      "name": "_g7_",
+      "type": "$xor2",
+      "connections": {
+        "A": "a[3]",
+        "B": "b[3]",
+        "Y": "n22"
+      }
+    },
+    {
+      "name": "_g8_",
+      "type": "$or2",
+      "connections": {
+        "A": "n18",
+        "B": "n23",
+        "Y": "n24"
+      }
+    },
+    {
+      "name": "_g9_",
+      "type": "$and2",
+      "connections": {
+        "A": "n21",
+        "B": "n25",
+        "Y": "n23"
+      }
+    },
+    {
+      "name": "_g10_",
+      "type": "$or2",
+      "connections": {
+        "A": "n26",
+        "B": "n27",
+        "Y": "cout"
+      }
+    },
+    {
+      "name": "_g11_",
+      "type": "$and2",
+      "connections": {
+        "A": "n28",
+        "B": "n25",
+        "Y": "n27"
+      }
+    },
+    {
+      "name": "_g12_",
+      "type": "$and2",
+      "connections": {
+        "A": "n22",
+        "B": "n21",
+        "Y": "n28"
+      }
+    },
+    {
+      "name": "_g13_",
+      "type": "$or2",
+      "connections": {
+        "A": "n19",
+        "B": "n29",
+        "Y": "n26"
+      }
+    },
+    {
+      "name": "_g14_",
+      "type": "$and2",
+      "connections": {
+        "A": "n22",
+        "B": "n18",
+        "Y": "n29"
+      }
+    },
+    {
+      "name": "_g15_",
+      "type": "$or2",
+      "connections": {
+        "A": "n17",
+        "B": "n30",
+        "Y": "n25"
+      }
+    },
+    {
+      "name": "_g16_",
+      "type": "$and2",
+      "connections": {
+        "A": "n20",
+        "B": "n16",
+        "Y": "n30"
+      }
+    },
+    {
+      "name": "_g17_",
+      "type": "$xor2",
+      "connections": {
+        "A": "n20",
+        "B": "n16",
+        "Y": "sum[1]"
+      }
+    },
+    {
+      "name": "_g18_",
+      "type": "$xor2",
+      "connections": {
+        "A": "n21",
+        "B": "n25",
+        "Y": "sum[2]"
+      }
+    },
+    {
+      "name": "_g19_",
+      "type": "$xor2",
+      "connections": {
+        "A": "n22",
+        "B": "n24",
+        "Y": "sum[3]"
+      }
+    }
+  ]
+}

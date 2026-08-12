@@ -440,6 +440,33 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-12 — the technology-mapping stage gains an acceptance gate: a
+  mapped gate-level netlist is accepted only when `klt equiv` proves it
+  logically equivalent to the **pre-mapping generic netlist**
+  (`klt.synth.generic-netlist/1`) it was produced from — issue #875, Phase
+  2c of Epic #704, extending the same gate #808 already wired one stage
+  earlier (RTL vs. the synthesized netlist). New library module
+  `klayout_tools.techmap`: `run_techmap(request,
+  verify_equivalence=True)` invokes `native/techmap`'s `klt-techmap`
+  binary and, before returning its `klt.synth.techmap.response/1`
+  response, renders the generic netlist as behavioural Verilog (one
+  `assign` per generic primitive, using the exact functions
+  `docs/design/synth-techmap-stage-contract.md` §2.2 defines) and runs it
+  against the mapped netlist as a real Yosys miter/SAT proof. A
+  `"counterexample"` *or* an `"inconclusive"` verdict is a hard
+  `TechmapError` — never a silent warning, and a timeout is never a pass.
+  The response's `equivalence` field is additive (`null` when the gate did
+  not run); the `klt-techmap` binary itself is unchanged and no `klt` CLI
+  verb or envelope changed, so no `schema_version` is affected. Proven,
+  not assumed, in `tests/test_techmap_equiv_gate.py`: the real mapper's own
+  output for a 4-bit ripple-carry adder passes, and the *same real mapper's*
+  output for a carry-in-dropped variant of that adder (a seeded mismatch,
+  never hand-edited gate-level Verilog) is caught with a
+  simulation-confirmed counterexample on `sum`. Gate scope is
+  combinational-only, because `klt equiv`'s Phase 0 MVP is: a generic
+  netlist containing `$dff` is rejected up front with a scope error naming
+  #707 rather than failing obscurely later.
+
 - 2026-08-12 — `klt signoff --fleet`'s fleet-wide roll-up now resolves a
   canary's real verdict on the statistical (item 6, `klt yield`, #870) and
   post-layout (item 7, `klt pex`, #871) T1 items, instead of always naming
