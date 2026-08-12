@@ -1,6 +1,6 @@
 """Tests for `klt equiv` and the `klayout_tools.equiv` library.
 
-Three tiers, mirroring `tests/test_synthesize.py`'s own structure:
+Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
 
 - **Pure unit tests** exercise request validation (`run_equiv`'s own
   error paths -- missing/malformed `gold`/`gate`, bad `timeout_s`/
@@ -8,6 +8,14 @@ Three tiers, mirroring `tests/test_synthesize.py`'s own structure:
   the stdout-parsing helpers (`_classify_sat_result`, `_parse_signal_table`,
   `_decode_bin`, `_build_counterexample`) directly against **canned** text,
   no subprocess involved -- these always run, in any CI environment.
+- **Deterministic timeout tests** (mocked `subprocess.run`, no real `yosys`
+  needed) drive the full `run_equiv()` pipeline -- not just
+  `_classify_sat_result` in isolation -- through every "incomplete solve"
+  flavor (internal SAT-solver timeout, external process-level kill,
+  unrecognized solver output) and confirm each is always `"inconclusive"`,
+  never `"equivalent"`, with proof metadata explaining why. See that
+  section's own docstring for why a real, genuinely-hard miter was tried
+  and rejected as flaky.
 - **Real-Yosys integration tests** (`@pytest.mark.skipif` when `yosys` is
   not on `$PATH`) run the actual orchestration end to end: a genuinely
   equivalent pair, a **seeded-broken** (deliberately non-equivalent) pair
@@ -381,6 +389,193 @@ def test_confirm_counterexample_degrades_when_iverilog_missing(tmp_path, monkeyp
     assert counterexample["confirmed_by_simulation"] is None
     assert counterexample["simulation"] is None
     assert diagnostics[0]["code"] == "simulation_unavailable"
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic timeout tests: mocked subprocess, no real yosys/wall-clock
+# --------------------------------------------------------------------------- #
+#
+# Issue #707 Phase 1b's own scope: "guarantee timeout reports inconclusive,
+# never equivalent", with a test that "forces the timeout/incomplete-solve
+# path deterministically (not relying on wall-clock flakiness)". A real,
+# genuinely-hard miter was tried while developing this test and rejected: a
+# `yosys`'s own `sat -timeout N` only interrupts once the solver reaches an
+# internal checkpoint, which a pathologically hard instance may not reach
+# for minutes (observed live: an 8-24 bit multiplier-vs-shift-add-multiplier
+# miter still had not hit a `-timeout 2` internal interrupt after 60s of
+# real wall-clock solving) -- exactly the flakiness the acceptance criterion
+# warns against, since "hard enough to not finish, but not so slow it stalls
+# CI" is not a portable, machine-independent property. Injecting the exact
+# stdout a real interrupted solve produces (`subprocess.run` mocked, no real
+# `yosys` binary involved at all) is the deterministic substitute the
+# issue's own "injected low timeout bound" wording calls for, and -- unlike
+# the real-Yosys tests below -- these run in *any* CI environment, including
+# one with no `yosys`/`iverilog` install.
+
+
+class _FakeCompleted:
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def _mock_yosys_run(*, run_stdout: str | None = None, raise_timeout: bool = False):
+    """Build a `subprocess.run` stand-in answering the two calls a real
+    `yosys` binary would receive from `run_equiv` -- the main
+    `yosys -s <script>` invocation and the `yosys -V` version probe -- from
+    canned data.
+
+    `raise_timeout=True` simulates the *external* process-level kill
+    (`subprocess.TimeoutExpired`, what a real too-small `timeout_s`
+    produces against a real subprocess); otherwise the main call
+    "completes" with `run_stdout` and returncode 0 (mirrors a real `yosys`
+    process that finishes running its script -- including an internal SAT
+    solver that gave up on its own `-timeout` -- without ever being killed).
+    """
+
+    def _run(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"]:
+            if raise_timeout:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+            return _FakeCompleted(stdout=run_stdout or "", returncode=0)
+        if cmd == ["yosys", "-V"]:
+            return _FakeCompleted(stdout="Yosys 0.67 (git sha1 deadbeef)\n")
+        raise AssertionError(f"unexpected subprocess.run call in mock: {cmd!r}")
+
+    return _run
+
+
+def test_solver_internal_timeout_is_inconclusive_never_equivalent(
+    tmp_path, monkeypatch
+):
+    """Forces the *internal* Yosys SAT-solver-timeout path (`sat -timeout N`
+    interrupting gracefully, process exits 0) through the full
+    `run_equiv()` pipeline -- not just the canned-text
+    `test_classify_sat_result_timeout_never_equivalent` unit test above,
+    which only exercises `_classify_sat_result` in isolation."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_yosys_run(run_stdout=_SAT_TIMEOUT_TEXT)
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "equivalent"
+    assert report["counterexample"] is None
+    assert report["diagnostics"][0]["code"] == "solver_timeout"
+    assert "timeout" in report["diagnostics"][0]["message"].lower()
+    assert "inconclusive" in report["diagnostics"][0]["message"].lower()
+
+
+def test_process_level_timeout_mocked_is_inconclusive_never_equivalent(
+    tmp_path, monkeypatch
+):
+    """The *external* process-kill flavor of the same guarantee, forced via
+    a mocked `subprocess.TimeoutExpired` rather than a real too-small
+    `timeout_s` racing a real subprocess -- portable to any CI environment,
+    complementing the real-`yosys`
+    `test_process_timeout_is_inconclusive_never_equivalent` below."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(equiv.subprocess, "run", _mock_yosys_run(raise_timeout=True))
+
+    report = run_equiv(request_path, timeout_s=5.0)
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "equivalent"
+    assert report["counterexample"] is None
+    assert report["diagnostics"][0]["code"] == "process_timeout"
+    assert "inconclusive" in report["diagnostics"][0]["message"].lower()
+
+
+def test_unrecognized_solver_output_mocked_is_inconclusive_never_equivalent(
+    tmp_path, monkeypatch
+):
+    """A third "incomplete solve" flavor: `yosys` exits 0 but its output
+    matches none of the known SAT-verdict patterns (a resource bound other
+    than the modelled `-timeout`, or a future Yosys version's own wording
+    change) -- also never reported as `"equivalent"`."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_yosys_run(run_stdout=_SAT_UNRECOGNIZED_TEXT)
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "equivalent"
+    assert report["diagnostics"][0]["code"] == "unrecognized_solver_output"
+
+
+def test_solver_success_mocked_is_equivalent_not_inconclusive(tmp_path, monkeypatch):
+    """Regression guard for the mocked-subprocess harness itself: a genuine
+    `SUCCESS!` verdict must still report `"equivalent"` -- the timeout
+    coverage above must not come at the cost of misclassifying a real
+    completed proof (acceptance criterion: existing equivalent/
+    counterexample cases stay correct)."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_yosys_run(run_stdout=_SAT_SUCCESS_TEXT)
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent"
+    assert report["diagnostics"] == []
+
+
+def test_cli_solver_internal_timeout_mocked_exits_four_never_zero(
+    tmp_path, capsys, monkeypatch
+):
+    """CLI-level counterpart of
+    `test_solver_internal_timeout_is_inconclusive_never_equivalent`: exit
+    code 4 (never 0), matching the real-yosys
+    `test_cli_inconclusive_exits_four_never_zero` below but for the
+    internal-solver-timeout flavor specifically, and without needing a
+    real `yosys` install."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_yosys_run(run_stdout=_SAT_TIMEOUT_TEXT)
+    )
+
+    exit_code = main(["equiv", request_path, "--format", "json"])
+
+    assert exit_code == 4
+    assert exit_code != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "inconclusive"
+    assert out["diagnostics"][0]["code"] == "solver_timeout"
 
 
 # --------------------------------------------------------------------------- #
