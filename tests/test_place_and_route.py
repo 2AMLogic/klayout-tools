@@ -1687,6 +1687,125 @@ def test_route_stage_runs_post_route_antenna_repair(tmp_path, monkeypatch):
     assert detailed_route_indices[1] < check_index < write_def_index
 
 
+def test_route_stage_omits_critical_nets_percentage_flag_by_default(
+    tmp_path, monkeypatch
+):
+    """Issue #939: `request.route_critical_nets_percentage` omitted must
+    reproduce the original `global_route` call exactly -- no flag emitted,
+    the A/B disable path."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "global_route" in route_lines
+    assert not any("critical_nets_percentage" in line for line in route_lines)
+
+
+def test_route_stage_passes_critical_nets_percentage_flag_when_requested(
+    tmp_path, monkeypatch
+):
+    """Issue #939 (native-routing survey section 4.1): a real
+    `global_route -critical_nets_percentage <percent>` flag, confirmed
+    against OpenROAD's own upstream `src/grt/src/GlobalRouter.tcl`/
+    `src/grt/README.md` (no live container available in this pass -- see
+    the module docstring's methodology note). Opt-in via
+    `request.route_critical_nets_percentage`."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, route_critical_nets_percentage=30
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "global_route -critical_nets_percentage 30" in route_lines
+
+
+@pytest.mark.parametrize("value", [-1, 101, 1.5, "30", True])
+def test_route_critical_nets_percentage_rejects_invalid_values(
+    tmp_path, monkeypatch, value
+):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, route_critical_nets_percentage=value
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    with pytest.raises(PlaceAndRouteError, match="route_critical_nets_percentage"):
+        run_place_and_route(request_path)
+
+
+def test_route_stage_repeats_antenna_repair_pass_bounded_multi_pass(
+    tmp_path, monkeypatch
+):
+    """Issue #939 (native-routing survey section 4.1): `-iterations` on
+    `repair_antennas` itself is the wrong tool once `detailed_route` has
+    already run (OpenROAD's own source warns against it -- see the module
+    docstring's citation), so the bounded multi-pass option is built at the
+    flow level instead: `request.max_antenna_repair_iterations` repeats the
+    `repair_antennas`/`detailed_route` reroute pair that many times."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, max_antenna_repair_iterations=3
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    detailed_route_indices = [
+        i for i, line in enumerate(route_lines) if line.startswith("detailed_route")
+    ]
+    repair_indices = [
+        i for i, line in enumerate(route_lines) if line.startswith("repair_antennas")
+    ]
+    # 1 initial detailed_route + 3 repair/reroute passes = 4 detailed_route
+    # calls, 3 repair_antennas calls, strictly interleaved.
+    assert len(detailed_route_indices) == 4
+    assert len(repair_indices) == 3
+    for repair_idx, before_dr, after_dr in zip(
+        repair_indices,
+        detailed_route_indices[:-1],
+        detailed_route_indices[1:],
+        strict=True,
+    ):
+        assert before_dr < repair_idx < after_dr
+
+
+def test_max_antenna_repair_iterations_defaults_to_single_pass(tmp_path, monkeypatch):
+    """Issue #939: omitting `request.max_antenna_repair_iterations`
+    reproduces the original single repair+reroute pass byte-for-byte."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    repair_indices = [
+        i for i, line in enumerate(route_lines) if line.startswith("repair_antennas")
+    ]
+    assert len(repair_indices) == 1
+
+
+@pytest.mark.parametrize("value", [0, 9, 1.5, "3", True])
+def test_max_antenna_repair_iterations_rejects_invalid_values(
+    tmp_path, monkeypatch, value
+):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, max_antenna_repair_iterations=value
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    with pytest.raises(PlaceAndRouteError, match="max_antenna_repair_iterations"):
+        run_place_and_route(request_path)
+
+
 def test_place_stage_enables_routability_and_timing_driven_global_placement(
     tmp_path, monkeypatch
 ):

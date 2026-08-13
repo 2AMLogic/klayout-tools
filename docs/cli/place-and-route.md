@@ -228,6 +228,47 @@ risk a false positive or negative — OpenROAD's own `link_design` remains
 the authority on whether the netlist and LEF actually agree structurally.
 Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
 
+## Timing-driven/repair-iteration routing flags (`route_critical_nets_percentage`, `max_antenna_repair_iterations`)
+
+Issue #939 (Epic #700 Phase 2's native-routing survey, `docs/design/
+native-routing-survey.md` §4.1) audited `detailed_route`/`global_route`'s
+own flag surface for a timing-driven or congestion-tuning mode not already
+passed, and `repair_antennas`'s optional iteration count as a bounded
+multi-pass alternative to the single-pass reroute #759 shipped.
+
+**Methodology note.** Unlike issue #783's `clock_tree_synthesis` audit
+(live `info body`/`help` introspection against a real `openroad/orfs`
+container), no such container was reachable in this task's environment.
+This audit instead reads OpenROAD's/OpenROAD-flow-scripts' own upstream Tcl
+and C++ source directly (`The-OpenROAD-Project/OpenROAD`@`9b2de5c`/
+`The-OpenROAD-Project/OpenROAD-flow-scripts`@`ef52564`, `master`, fetched
+2026-08-13) — real and citable, but not independently container-verified,
+and not cross-checked against the exact pinned build #783 used
+(`26Q3-1080-gab6fd26351`). Both new fields below default to reproducing
+today's exact behaviour for this reason, and neither was evaluated with a
+real A/B run against actual OpenROAD (also unavailable in this task's
+environment) — see `place_and_route.py`'s own module docstring for the full
+citations and findings.
+
+- **`global_route`** does carry a real timing-aware congestion knob,
+  `-critical_nets_percentage <percent>` — the percentage of worst-slack
+  nets given routing preference during congestion-removal iterations,
+  force-reset to `0` internally whenever no timing data is loaded (never a
+  silently-wrong result). Exposed as the optional
+  `route_critical_nets_percentage` request field.
+- **`detailed_route`** has **no** timing-driven or congestion-tuning flag
+  at all — a genuine, cited negative result (every flag in its
+  `sta::define_cmd_args` block was checked; none are timing-related).
+- **`repair_antennas`** does carry a real `-iterations` flag, but OpenROAD's
+  own source explicitly warns against using it once `detailed_route` has
+  already run — exactly this stage's own call pattern — so a bounded
+  multi-pass option is built at the **flow level** instead (mirroring
+  OpenROAD-flow-scripts' own `MAX_REPAIR_ANTENNAS_ITER_DRT` loop shape):
+  the optional `max_antenna_repair_iterations` request field repeats the
+  `"route"` stage's `repair_antennas`/`detailed_route` reroute pair that
+  many times, unconditionally (no Tcl-level early exit on a zero-violation
+  `check_antennas` result).
+
 ## Request
 
 ```json
@@ -271,6 +312,8 @@ Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
+| `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see `place_and_route.py`'s module docstring for the audit methodology and its limitations. |
+| `max_antenna_repair_iterations` | integer \| omitted | 1–8, default `1` (today's exact single-pass behaviour). Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
 
 ## Response
 
