@@ -505,6 +505,17 @@ _HOLD_VIOLATIONS_END = "===KLT_HOLD_VIOLATIONS_END==="
 _ANTENNA_VIOLATIONS_BEGIN = "===KLT_ANTENNA_VIOLATIONS_BEGIN==="
 _ANTENNA_VIOLATIONS_END = "===KLT_ANTENNA_VIOLATIONS_END==="
 
+#: Literal per-violation header line TritonRoute writes to its own
+#: `detailed_route -output_drc <rpt>` report -- one per violation, e.g.
+#: ``"violation type: Metal Short"`` followed by indented `srcs:`/`bbox =
+#: (...)`/`Layer: ...` detail lines. Confirmed live (`strings` against a
+#: real `openroad/orfs:latest` build's `openroad` binary) as the exact
+#: literal the binary both *writes* (`"violation type: "` -- issue #938)
+#: and internally *re-parses* the same report format with
+#: (`"\\s*violation type: (.*)"`) -- not guessed from documentation. See
+#: :func:`_count_route_drc_violations`.
+_ROUTE_DRC_VIOLATION_TYPE_LINE = "violation type: "
+
 #: Response fields whose value is always "the last completed stage's own
 #: value, restated at top level" -- see the contract spike section 5's
 #: `stages` field description. Built once via `dict.get` so a field a stage
@@ -520,6 +531,10 @@ _TOP_LEVEL_METRIC_KEYS = (
     "setup_violation_count",
     "hold_violation_count",
     "antenna_violation_count",
+    # Additive (issue #938, native-routing survey #935 section 4.5) --
+    # never replaces an existing field; `null` on any stage before
+    # `"route"` (only the `"route"` stage runs `detailed_route`).
+    "route_drc_violation_count",
     "estimated_power_mw",
     # Additive (issue #783, P&R survey #735 section 3.4) -- never replaces an
     # existing field; `null` on any stage that hasn't run CTS yet.
@@ -741,12 +756,21 @@ def run_place_and_route(
                 completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
             )
         antenna_count = None
+        route_drc_count = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
+            # Same deterministic path `_stage_script_lines`'s own `route`
+            # branch built for `detailed_route -output_drc` -- recomputed
+            # here (rather than threaded back out of that function) since
+            # both `output_dir`/`hdl_toplevel` are already in scope and the
+            # naming is a fixed, single-source-of-truth convention (issue
+            # #938).
+            drc_report_path = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
+            route_drc_count = _count_route_drc_violations(drc_report_path)
 
         stages.append(
             _extract_stage_metrics(
-                stage, metrics, setup_count, hold_count, antenna_count
+                stage, metrics, setup_count, hold_count, antenna_count, route_drc_count
             )
         )
         checkpoint_path = next_checkpoint
@@ -1784,6 +1808,35 @@ def _count_antenna_violations(stdout: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _count_route_drc_violations(drc_report_path: str) -> int | None:
+    """Count TritonRoute's own `detailed_route -output_drc <rpt>` violation
+    entries -- each violation in the report begins with a literal
+    ``"violation type: "`` header line (see
+    :data:`_ROUTE_DRC_VIOLATION_TYPE_LINE`; confirmed live via `strings`
+    against a real `openroad/orfs:latest` build's `openroad` binary, which
+    embeds this exact literal both to *write* the report and to *re-parse*
+    it internally), so counting occurrences of that line is exact -- one
+    per violation, never a partial match on unrelated report text (`comment:
+    `/`bbox = (...)`/`Layer: ...` detail lines never themselves start with
+    `"violation type: "`).
+
+    A 0-byte report -- confirmed live for a real, DRC-clean `detailed_route`
+    run on this repo's own `gcd` corpus fixture (issue #938) -- means zero
+    violations, correctly returned as ``0``, not ``None``. Returns ``None``
+    (never ``0`` defensively) only when the report file itself cannot be
+    read -- should not happen for a successful `"route"` stage run
+    (`detailed_route` always writes its `-output_drc` target, even when
+    empty), and keeps a genuinely missing signal distinguishable from a
+    confirmed-zero violation count, mirroring
+    :func:`_count_antenna_violations`."""
+    try:
+        with open(drc_report_path, encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return None
+    return content.count(_ROUTE_DRC_VIOLATION_TYPE_LINE)
+
+
 def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     if not os.path.isfile(metrics_path):
         raise PlaceAndRouteError(
@@ -1814,6 +1867,7 @@ def _extract_stage_metrics(
     setup_violation_count: int | None,
     hold_violation_count: int | None,
     antenna_violation_count: int | None = None,
+    route_drc_violation_count: int | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -1866,6 +1920,8 @@ def _extract_stage_metrics(
             entry["hold_violation_count"] = hold_violation_count
         if antenna_violation_count is not None:
             entry["antenna_violation_count"] = antenna_violation_count
+        if route_drc_violation_count is not None:
+            entry["route_drc_violation_count"] = route_drc_violation_count
 
     return entry
 
