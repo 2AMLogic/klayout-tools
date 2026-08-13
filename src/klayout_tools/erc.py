@@ -448,6 +448,36 @@ def _bbox_dict(box: Any) -> dict[str, int]:
     return {"left": box.left, "bottom": box.bottom, "right": box.right, "top": box.top}
 
 
+def _finding(
+    rule: str,
+    description: str,
+    *,
+    net: str | None = None,
+    other_net: str | None = None,
+    gate_id: str | None = None,
+    layer: str | None = None,
+    bbox: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """One ``erc_findings[]`` entry (issue #861's finding shape, see this
+    module's docstring "ERC finding checks"): the 7-key dict shared
+    verbatim by every rule id (``erc.floating_gate``,
+    ``erc.unconnected_net``, ``erc.multiply_driven_net``,
+    ``erc.supply_short``, ``erc.missing_tie``) -- only which of
+    ``net``/``other_net``/``gate_id``/``layer``/``bbox`` are populated vs.
+    left ``None`` varies per call site. Mirrors ``ring_check.py``'s own
+    keyword-only ``_violation()`` helper for the equivalent ``klt drc``-
+    shaped violation dict."""
+    return {
+        "rule": rule,
+        "description": description,
+        "net": net,
+        "other_net": other_net,
+        "gate_id": gate_id,
+        "layer": layer,
+        "bbox": bbox,
+    }
+
+
 def _antenna_remedy(
     levels: list[dict[str, Any]], index: int, net: str | None
 ) -> dict[str, Any]:
@@ -552,18 +582,17 @@ def _floating_gate_findings(
             continue
         if all(level["step_area_um2"] == 0.0 for level in levels[1:]):
             findings.append(
-                {
-                    "rule": "erc.floating_gate",
-                    "description": (
+                _finding(
+                    "erc.floating_gate",
+                    (
                         "gate net has no connected geometry above the gate "
                         "layer (floating/uncontacted gate)"
                     ),
-                    "net": gate_entry["net"],
-                    "other_net": None,
-                    "gate_id": gate_entry["gate_id"],
-                    "layer": gate_role,
-                    "bbox": _bbox_dict(gate_region.bbox()),
-                }
+                    net=gate_entry["net"],
+                    gate_id=gate_entry["gate_id"],
+                    layer=gate_role,
+                    bbox=_bbox_dict(gate_region.bbox()),
+                )
             )
     return findings
 
@@ -620,34 +649,26 @@ def _net_connectivity_findings(
         matches[decl["name"]] = matched
         if len(matched) == 0:
             findings.append(
-                {
-                    "rule": "erc.unconnected_net",
-                    "description": (
+                _finding(
+                    "erc.unconnected_net",
+                    (
                         f"declared net {decl['name']!r} matches no labelled "
                         "geometry in this layout"
                     ),
-                    "net": decl["name"],
-                    "other_net": None,
-                    "gate_id": None,
-                    "layer": None,
-                    "bbox": None,
-                }
+                    net=decl["name"],
+                )
             )
         elif len(matched) > 1:
             findings.append(
-                {
-                    "rule": "erc.unconnected_net",
-                    "description": (
+                _finding(
+                    "erc.unconnected_net",
+                    (
                         f"declared net {decl['name']!r} resolves to "
                         f"{len(matched)} disconnected electrical islands "
                         "(expected exactly one)"
                     ),
-                    "net": decl["name"],
-                    "other_net": None,
-                    "gate_id": None,
-                    "layer": None,
-                    "bbox": None,
-                }
+                    net=decl["name"],
+                )
             )
 
     cluster_to_names: dict[int, list[str]] = {}
@@ -668,18 +689,15 @@ def _net_connectivity_findings(
                 )
                 rule = "erc.supply_short" if both_supply else "erc.multiply_driven_net"
                 findings.append(
-                    {
-                        "rule": rule,
-                        "description": (
+                    _finding(
+                        rule,
+                        (
                             f"declared nets {a!r} and {b!r} are electrically "
                             "the same net (shorted together)"
                         ),
-                        "net": a,
-                        "other_net": b,
-                        "gate_id": None,
-                        "layer": None,
-                        "bbox": None,
-                    }
+                        net=a,
+                        other_net=b,
+                    )
                 )
     return findings
 
@@ -722,18 +740,16 @@ def _tie_findings(
             tap_here = tie["tap_region"].interacting(poly_region)
             if tap_here.is_empty():
                 findings.append(
-                    {
-                        "rule": "erc.missing_tie",
-                        "description": (
+                    _finding(
+                        "erc.missing_tie",
+                        (
                             f"well/tub region has no {tie['name']!r} tap "
                             "contact drawn inside it"
                         ),
-                        "net": tie["net"],
-                        "other_net": None,
-                        "gate_id": None,
-                        "layer": tie["name"],
-                        "bbox": _bbox_dict(well_poly.bbox()),
-                    }
+                        net=tie["net"],
+                        layer=tie["name"],
+                        bbox=_bbox_dict(well_poly.bbox()),
+                    )
                 )
                 continue
 
@@ -743,18 +759,16 @@ def _tie_findings(
 
             if owner_cluster_id is None or owner_cluster_id not in matched_cluster_ids:
                 findings.append(
-                    {
-                        "rule": "erc.missing_tie",
-                        "description": (
+                    _finding(
+                        "erc.missing_tie",
+                        (
                             "well/tub tap is not connected to declared net "
                             f"{tie['net']!r}"
                         ),
-                        "net": tie["net"],
-                        "other_net": None,
-                        "gate_id": None,
-                        "layer": tie["name"],
-                        "bbox": _bbox_dict(well_poly.bbox()),
-                    }
+                        net=tie["net"],
+                        layer=tie["name"],
+                        bbox=_bbox_dict(well_poly.bbox()),
+                    )
                 )
     return findings
 
