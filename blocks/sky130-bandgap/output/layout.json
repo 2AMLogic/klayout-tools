@@ -9,7 +9,24 @@
   "instance_count": 26,
   "layout_file": "bandgap_core_routed.gds",
   "renders": {
-    "overview": "renders/overview.png"
+    "overview": "renders/overview.png",
+    "layer_64_20": "renders/64_20.png",
+    "diff.drawing": "renders/65_20.png",
+    "tap.drawing": "renders/65_44.png",
+    "layer_66_13": "renders/66_13.png",
+    "poly.drawing": "renders/66_20.png",
+    "licon1.drawing": "renders/66_44.png",
+    "li1.drawing": "renders/67_20.png",
+    "mcon.drawing": "renders/67_44.png",
+    "layer_68_5": "renders/68_5.png",
+    "met1.drawing": "renders/68_20.png",
+    "via.drawing": "renders/68_44.png",
+    "met2.drawing": "renders/69_20.png",
+    "pnp.drawing": "renders/82_44.png",
+    "layer_83_20": "renders/83_20.png",
+    "layer_86_20": "renders/86_20.png",
+    "layer_94_20": "renders/94_20.png",
+    "center_crop": "renders/center_crop/overview.png"
   },
   "spec_summary": {
     "rows": [

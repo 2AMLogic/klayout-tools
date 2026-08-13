@@ -251,7 +251,16 @@ export interface Layout {
   instance_count?: number;
   /** From `klt drc`, present only when a DRC deck has been run for this block. */
   drc?: LayoutDrc;
-  /** Map of render id -> path relative to the layout.json location (#60). */
+  /**
+   * Map of render id -> path relative to the layout.json location (#60).
+   * `"overview"` is always the all-layers composite thumbnail (used by
+   * `LayoutCard.tsx`); every other key is a human-readable render label --
+   * a PDK layer name (e.g. `"li1.drawing"`, `"Metal2"`) when the content
+   * pipeline recognised the layer, a `"layer_<n>_<n>"` fallback otherwise,
+   * or `"center_crop"` for a zoomed composite (issue #942, "Option B" from
+   * #651) -- never a bare `"67_20"`-style filename stem. `DetailPage.tsx`
+   * renders the overview first, then every other entry grouped below it.
+   */
   renders?: Record<string, string>;
   /**
    * Whether `layout_file` may be linked as a download on the block detail

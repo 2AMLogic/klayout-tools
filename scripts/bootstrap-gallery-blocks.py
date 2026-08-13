@@ -49,20 +49,21 @@ bootstrap step is opt-in/best-effort, same as the DRC/renders fields
 regenerates only the base layers/cells metrics, unchanged from before
 issue #99, for a fast local iteration loop.
 
-Renders (issue #651, epic #650 "gallery visuals" phase 1)
-------------------------------------------------------------
+Renders (issue #651/#942, epic #650 "gallery visuals")
+--------------------------------------------------------
 
 For every block that gets a ``layout.json`` (i.e. not one of
 ``NO_ARTIFACTS_SLUGS``), this script also calls ``klt render``'s library
 function (:func:`klayout_tools.render.render_report`) against the corpus
-GDS and attaches ``layout.json``'s ``renders`` field as
-``{"overview": "renders/overview.png"}`` -- **Option A** from #651: only
-the all-layers composite thumbnail is tracked in git (``.gitignore``
-narrowed accordingly), not the per-layer PNGs the same call also writes
-alongside it, so the gallery gets a real thumbnail without putting KLayout
-on the deploy path. Best-effort: a render failure is printed as a warning
-and does not fail the bootstrap run or affect ``layout["status"]``, same
-treatment as the DRC/signals fields.
+GDS and attaches ``layout.json``'s ``renders`` field: the all-layers
+``"overview"`` composite plus one entry per non-empty layer, labeled with
+that PDK's curated layer names (``klayout_tools.decks.get_layer_names``)
+when known (issue #942 -- previously only the fixed ``{"overview": ...}``
+entry was tracked, "Option A" from #651; ``.gitignore`` now un-ignores the
+per-layer PNGs the same call always wrote alongside it, not just the
+composite). Best-effort: a render failure is printed as a warning and does
+not fail the bootstrap run or affect ``layout["status"]``, same treatment
+as the DRC/signals fields.
 """
 
 from __future__ import annotations
@@ -84,6 +85,8 @@ if str(SRC_DIR) not in sys.path:
 # _gallery_common imports from klayout_tools.render, so SRC_DIR must already
 # be on sys.path (above) before this import.
 from _gallery_common import attach_overview_render  # noqa: E402
+
+from klayout_tools.decks import get_layer_names  # noqa: E402
 
 # RenderError is not used directly in this module anymore (the shared
 # _gallery_common.attach_overview_render helper catches it) -- kept as
@@ -164,22 +167,34 @@ def _attach_signals(slug: str, block_dir: Path, layout: dict | None) -> None:
 
 
 def _attach_overview_render(
-    slug: str, block_dir: Path, gds_path: Path, layout: dict
+    slug: str, block_dir: Path, gds_path: Path, layout: dict, *, pdk: str
 ) -> None:
-    """Render ``gds_path``'s all-layers composite into ``output/renders/``
-    and attach it to ``layout["renders"]`` as ``{"overview": ...}``.
+    """Render ``gds_path`` into ``output/renders/`` and attach every
+    non-empty per-layer PNG plus the all-layers composite to
+    ``layout["renders"]`` (issue #942 -- previously only the fixed
+    ``{"overview": ...}`` entry was recorded, "Option A" from #651).
 
     Thin wrapper around the shared ``_gallery_common.attach_overview_render``
     helper (issue #670 -- deduped from a near-identical copy of this function
     in ``scripts/ingest-canary.py``): best-effort, mirroring
     ``_attach_signals``, a render failure prints a warning here and leaves
-    ``layout`` untouched rather than aborting the whole bootstrap run. Only
-    the fixed ``renders/overview.png`` relative path is recorded (Option A,
-    issue #651) -- the per-layer PNGs `render_report` also writes alongside
-    it are real files on disk (useful for local inspection) but deliberately
-    not listed in `renders`, since `.gitignore` only tracks the composite.
+    ``layout`` untouched rather than aborting the whole bootstrap run.
+    Per-layer entries are labeled via ``pdk``'s curated
+    ``klayout_tools.decks.get_layer_names`` table (this script already
+    knows ``pdk`` from the ``tests/corpus/<pdk>/`` directory it is
+    walking, unlike ``ingest-canary.py``'s slug-guessing equivalent). No
+    center-crop render here -- the #4 corpus blocks are single standard
+    cells, already small enough that the full-layout overview *is* the
+    detail shot; the crop option exists for the larger canary blocks (see
+    ``scripts/ingest-canary.py``).
     """
-    exc = attach_overview_render(gds_path, block_dir, layout, render_fn=render_report)
+    exc = attach_overview_render(
+        gds_path,
+        block_dir,
+        layout,
+        render_fn=render_report,
+        layer_names=get_layer_names(pdk),
+    )
     if exc is not None:
         print(f"  {slug}: (skipping render: {exc})")
 
@@ -238,7 +253,7 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
         "downloadable": True,
     }
 
-    _attach_overview_render(slug, block_dir, gds_path, layout)
+    _attach_overview_render(slug, block_dir, gds_path, layout, pdk=pdk)
 
     if not skip_signals:
         _attach_signals(slug, block_dir, layout)

@@ -132,3 +132,40 @@ describe("DetailPage Signals section (issue #653)", () => {
     expect(screen.queryByRole("heading", { name: "Signals" })).not.toBeInTheDocument();
   });
 });
+
+describe("DetailPage Renders section (issue #942)", () => {
+  it("shows the overview as a hero image, groups the rest below it with human-readable captions", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          renders: {
+            overview: "renders/overview.png",
+            "poly.drawing": "renders/66_20.png",
+            layer_69_44: "renders/69_44.png",
+            center_crop: "renders/center_crop/overview.png",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Overview")).toBeInTheDocument();
+    expect(screen.getByText("poly.drawing")).toBeInTheDocument();
+    // A numeric-fallback id is reformatted as "Layer N/M" -- never shown
+    // as the bare `69_44`-style id.
+    expect(screen.getByText("Layer 69/44")).toBeInTheDocument();
+    expect(screen.queryByText("69_44", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByText("Zoomed crop")).toBeInTheDocument();
+
+    const overviewImg = screen.getByAltText("Overview render of buf_4");
+    expect(overviewImg).toHaveAttribute(
+      "src",
+      "/blocks/sky130_fd_sc_hd__buf_4/renders/overview.png",
+    );
+  });
+
+  it("shows the placeholder text when no renders are present", () => {
+    render(<DetailPage layout={makeLayout({ renders: undefined })} />);
+
+    expect(screen.getByText("No renders yet.")).toBeInTheDocument();
+  });
+});
