@@ -80,18 +80,24 @@ output. Only the nominal corners are staged — the remaining 12 PVT corners
 keep their measurements in `layout.json` but their multi-megabyte rawfiles
 are not committed.
 
-## Renders (issue #651, epic #650 "gallery visuals" phase 1)
+## Renders (issue #651/#942, epic #650 "gallery visuals")
 
-All 6 blocks with a `layout.json` also carry a `renders` field —
-`{"overview": "renders/overview.png"}` — the gallery-thumbnail composite
-`klt render` produces (`src/klayout_tools/render.py`), attached by
-`bootstrap-gallery-blocks.py`. Only that fixed key is recorded: `klt
-render` also writes one PNG per non-empty layer into the same
-`output/renders/` directory, but those stay `.gitignore`d (Option A from
-#651) — checking in a single ~1024x768 composite per block is enough for a
-real gallery thumbnail without putting KLayout on the site's deploy path.
-`clkinv_1` has no `renders` field for the same reason it has no
-`layout.json` at all (see above).
+All 6 corpus blocks with a `layout.json` (plus the two canary blocks below)
+carry a `renders` field: the gallery-thumbnail `"overview"` composite `klt
+render` produces (`src/klayout_tools/render.py`), one entry per non-empty
+layer, and — for the canary blocks only — a zoomed `"center_crop"`
+composite, all attached by `scripts/_gallery_common.py`'s shared
+`attach_overview_render` helper. Per-layer keys are labeled with that PDK's
+curated `(layer, datatype) -> name` table
+(`klayout_tools.decks.get_layer_names`, e.g. `"poly.drawing"`,
+`"Metal2"`) when known, else a `"layer_<n>_<n>"` fallback — never a bare
+`"67_20"`-style filename stem (issue #942; previously only the fixed
+`{"overview": ...}` entry was recorded, "Option A" from #651, discarding
+the per-layer PNGs `klt render` always wrote alongside it). `.gitignore`
+now un-ignores those per-layer PNGs and each block's `renders/center_crop/
+overview.png`, not just the composite — still only a handful of
+~23-47 KB PNGs per block. `clkinv_1` has no `renders` field for the same
+reason it has no `layout.json` at all (see above).
 
 ## Design-pipeline worked example (Epic #105 Phase 3)
 
@@ -148,9 +154,12 @@ below), stages it into `blocks/<slug>/output/`, and derives
 `layer_count`/`cell_count`/`instance_count` via the same `klt
 layers`/`klt cells` library calls `klt layout-metrics` uses — `status`
 becomes `"ok"` (or `"partial"` if either extractor call fails) instead of
-the pre-layout status below, and a `renders.overview` thumbnail is attached
-the same way the #4 corpus blocks get theirs (issue #651). Both blocks are
-`downloadable: true`.
+the pre-layout status below, and `renders` (overview + per-layer + a zoomed
+`center_crop`, issue #942) is attached the same way the #4 corpus blocks
+get theirs, plus the crop (see "Renders" above). Layer labels come from
+`infer_layer_names()`'s slug-prefix PDK guess (`gf180-bandgap` ->
+gf180mcu, `sky130-bandgap` -> sky130), since a canary repo carries no
+explicit `pdk` field. Both blocks are `downloadable: true`.
 
 **GDS detection.** Canary repos don't share one fixed layout-output
 convention, so `find_layout_gds()` tries, under each of `layout/`, `gds/`,

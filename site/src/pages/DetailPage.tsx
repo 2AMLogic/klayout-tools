@@ -10,8 +10,11 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  *
  * One static route `/<slug>/` per block discovered by `loadLayouts()`
  * (including `no_artifacts` stubs, so the gallery index never links to a
- * 404). Shows the block's available per-layer renders (the `renders` map,
- * staged by `site/scripts/copy-renders.mjs`), name + description, source
+ * 404). Shows the block's available renders (the `renders` map, staged by
+ * `site/scripts/copy-renders.mjs`) -- the all-layers `overview` composite
+ * as a hero image, then every per-layer / zoomed-crop render grouped below
+ * it in a grid, captioned with `formatRenderLabel()`'s human-readable label
+ * rather than a raw id (issue #942) -- name + description, source
  * provenance (`layout.source`, issue #62), a Specification section gated
  * behind `layout.spec_summary` (issue #62, canary blocks' target-spec
  * table), a metrics table covering every present optional field
@@ -74,12 +77,35 @@ function gdsViewerUrl(fileUrl: string): string {
   return `https://gds-viewer.tinytapeout.com/?${params.toString()}`;
 }
 
+/**
+ * Human-readable caption for one `layout.renders` entry (issue #942).
+ *
+ * The content pipeline (`scripts/_gallery_common.py`) already keys
+ * `renders` with a human-readable label where possible -- a PDK layer name
+ * (e.g. `"li1.drawing"`), or a `"layer_<n>_<n>"` fallback for an
+ * unrecognised layer -- so most ids are shown verbatim; this just covers
+ * the two synthetic ids the pipeline also emits (`"overview"`,
+ * `"center_crop"`) and reformats the numeric fallback as `"Layer N/M"`
+ * rather than echoing the bare `layer_67_20`-style id.
+ */
+function formatRenderLabel(id: string): string {
+  if (id === "overview") return "Overview";
+  if (id === "center_crop") return "Zoomed crop";
+  const layerMatch = /^layer_(-?\d+)_(-?\d+)$/.exec(id);
+  if (layerMatch) return `Layer ${layerMatch[1]}/${layerMatch[2]}`;
+  return id;
+}
+
 export function DetailPage({ layout }: DetailPageProps) {
   const displayName = layout.name;
   const isPreLayout = layout.status === "in design — simulation evidence";
   const isBuilt = layout.status !== "no_artifacts" && !isPreLayout;
 
-  const renderEntries = Object.entries(layout.renders ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const allRenderEntries = Object.entries(layout.renders ?? {});
+  const overviewRender = allRenderEntries.find(([id]) => id === "overview");
+  const otherRenderEntries = allRenderEntries
+    .filter(([id]) => id !== "overview")
+    .sort(([a], [b]) => formatRenderLabel(a).localeCompare(formatRenderLabel(b)));
 
   type Row = { label: string; value: string };
   const rows: Row[] = [];
@@ -179,23 +205,44 @@ export function DetailPage({ layout }: DetailPageProps) {
 
       <section aria-label="Renders" className="mt-9">
         <h2 className="mb-4 font-mono text-[1.1rem] text-cyan">Renders</h2>
-        {renderEntries.length > 0 ? (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-4">
-            {renderEntries.map(([id, relPath]) => (
-              <figure key={id} className="overflow-hidden rounded-lg border border-border bg-panel">
+        {overviewRender || otherRenderEntries.length > 0 ? (
+          <>
+            {overviewRender && (
+              <figure className="overflow-hidden rounded-lg border border-border bg-panel">
                 <img
-                  src={blockAssetUrl(layout.slug, relPath)}
-                  alt={`Render "${id}" of ${displayName}`}
+                  src={blockAssetUrl(layout.slug, overviewRender[1])}
+                  alt={`Overview render of ${displayName}`}
                   loading="lazy"
                   decoding="async"
                   className="block aspect-4/3 w-full bg-night object-contain"
                 />
                 <figcaption className="border-t border-border px-2.5 py-1.5 text-center font-mono text-[0.75rem] text-fog-dim">
-                  {id}
+                  {formatRenderLabel(overviewRender[0])}
                 </figcaption>
               </figure>
-            ))}
-          </div>
+            )}
+            {otherRenderEntries.length > 0 && (
+              <div className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-4">
+                {otherRenderEntries.map(([id, relPath]) => (
+                  <figure
+                    key={id}
+                    className="overflow-hidden rounded-lg border border-border bg-panel"
+                  >
+                    <img
+                      src={blockAssetUrl(layout.slug, relPath)}
+                      alt={`${formatRenderLabel(id)} render of ${displayName}`}
+                      loading="lazy"
+                      decoding="async"
+                      className="block aspect-4/3 w-full bg-night object-contain"
+                    />
+                    <figcaption className="border-t border-border px-2.5 py-1.5 text-center font-mono text-[0.75rem] text-fog-dim">
+                      {formatRenderLabel(id)}
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
+            )}
+          </>
         ) : (
           <p className="text-fog-dim">No renders yet.</p>
         )}

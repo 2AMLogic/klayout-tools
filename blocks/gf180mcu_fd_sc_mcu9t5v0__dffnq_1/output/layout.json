@@ -11,7 +11,20 @@
   "layout_file": "gf180mcu_fd_sc_mcu9t5v0__dffnq_1.gds",
   "downloadable": true,
   "renders": {
-    "overview": "renders/overview.png"
+    "overview": "renders/overview.png",
+    "layer_0_0": "renders/0_0.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Dualgate": "renders/55_0.png",
+    "layer_63_63": "renders/63_63.png",
+    "layer_112_1": "renders/112_1.png",
+    "layer_204_0": "renders/204_0.png"
   },
   "signals": {
     "schema_version": 1,

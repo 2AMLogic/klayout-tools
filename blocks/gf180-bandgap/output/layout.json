@@ -9,7 +9,31 @@
   "instance_count": 0,
   "layout_file": "bandgap_top.gds",
   "renders": {
-    "overview": "renders/overview.png"
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "Via2": "renders/38_0.png",
+    "Via3": "renders/40_0.png",
+    "Via4": "renders/41_0.png",
+    "Metal3": "renders/42_0.png",
+    "Metal4": "renders/46_0.png",
+    "layer_49_0": "renders/49_0.png",
+    "layer_62_0": "renders/62_0.png",
+    "FuseTop": "renders/75_0.png",
+    "Metal5": "renders/81_0.png",
+    "layer_110_5": "renders/110_5.png",
+    "CAP_MK": "renders/117_5.png",
+    "MIM_L_MK": "renders/117_10.png",
+    "DRC_BJT": "renders/127_5.png",
+    "center_crop": "renders/center_crop/overview.png"
   },
   "spec_summary": {
     "rows": [

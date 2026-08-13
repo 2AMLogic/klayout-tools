@@ -349,11 +349,20 @@ def test_gds_found_upgrades_to_ok_status(tmp_path):
     assert layout["layout_file"] == "block.gds"
     assert (block_dir / "output" / "block.gds").is_file()
 
-    # Issue #651, Option A: a found GDS also gets the gallery-thumbnail
-    # composite rendered and attached -- only the fixed "overview" key, not
-    # one entry per per-layer PNG (those stay `.gitignore`d on disk).
-    assert layout["renders"] == {"overview": "renders/overview.png"}
+    # Issue #942: a found GDS gets the gallery-thumbnail composite, one
+    # entry per non-empty layer (label falls back to `layer_<n>_<n>` since
+    # "some-block" doesn't match a recognised PDK slug prefix -- see
+    # `infer_layer_names`), and a zoomed "center crop" composite, all
+    # rendered and attached (previously only the fixed "overview" key was
+    # recorded, "Option A" from #651).
+    assert layout["renders"] == {
+        "overview": "renders/overview.png",
+        "layer_1_0": "renders/1_0.png",
+        "center_crop": "renders/center_crop/overview.png",
+    }
     assert (block_dir / "output" / "renders" / "overview.png").is_file()
+    assert (block_dir / "output" / "renders" / "1_0.png").is_file()
+    assert (block_dir / "output" / "renders" / "center_crop" / "overview.png").is_file()
 
 
 def test_gds_found_dry_run_skips_render(tmp_path):
@@ -513,8 +522,22 @@ def test_full_ingest_real_public_canary_with_layout(tmp_path, repo):
     assert layout["layout_file"]
     staged_gds = blocks_dir / slug / "output" / layout["layout_file"]
     assert staged_gds.is_file()
-    assert layout["renders"] == {"overview": "renders/overview.png"}
+    # Issue #942: the overview composite, at least one per-layer render
+    # (labeled with a human-readable name -- never the bare `67_20`-style
+    # filename stem, see the module's `_render_label`), and a zoomed
+    # "center crop" composite (issue #673's `--bbox`) are all attached.
+    renders = layout["renders"]
+    assert renders["overview"] == "renders/overview.png"
     assert (blocks_dir / slug / "output" / "renders" / "overview.png").is_file()
+    per_layer = {
+        k: v for k, v in renders.items() if k not in ("overview", "center_crop")
+    }
+    assert per_layer
+    assert not any(re.fullmatch(r"\d+_\d+", key) for key in per_layer)
+    assert renders["center_crop"] == "renders/center_crop/overview.png"
+    assert (
+        blocks_dir / slug / "output" / "renders" / "center_crop" / "overview.png"
+    ).is_file()
     # source.path records exactly which file within the source repo this
     # came from, not just "somewhere in the repo".
     assert layout["source"]["path"].endswith(layout["layout_file"])

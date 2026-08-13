@@ -41,21 +41,44 @@ def _make_gds(path: Path) -> None:
     layout.write(str(path))
 
 
-def test_attach_overview_render_writes_overview_and_fixed_renders_key(tmp_path):
+def test_attach_overview_render_writes_overview_and_per_layer_renders(tmp_path):
     gds_path = tmp_path / "block.gds"
     _make_gds(gds_path)
     block_dir = tmp_path / "blocks" / "some-block"
     layout: dict = {"slug": "some-block"}
 
-    bg._attach_overview_render("some-block", block_dir, gds_path, layout)
+    bg._attach_overview_render("some-block", block_dir, gds_path, layout, pdk="sky130")
 
-    # Option A (#651): only the fixed "overview" key is recorded, not one
-    # entry per per-layer PNG -- even though render_report also writes
-    # per-layer PNGs alongside it (real files, just not listed here; they
-    # stay `.gitignore`d).
-    assert layout["renders"] == {"overview": "renders/overview.png"}
+    # Issue #942: the overview composite plus one entry per non-empty
+    # rendered layer -- layer (1, 0) isn't in sky130's curated LAYER_NAMES
+    # table, so it falls back to the `layer_<n>_<n>` label.
+    assert layout["renders"] == {
+        "overview": "renders/overview.png",
+        "layer_1_0": "renders/1_0.png",
+    }
     assert (block_dir / "output" / "renders" / "overview.png").is_file()
     assert (block_dir / "output" / "renders" / "1_0.png").is_file()
+
+
+def test_attach_overview_render_labels_known_layers_by_pdk_name(tmp_path):
+    """A layer present in the PDK's curated `LAYER_NAMES` table is keyed by
+    that human-readable name, not the `layer_<n>_<n>` fallback."""
+    layout_kdb = kdb.Layout()
+    top = layout_kdb.create_cell("TOP")
+    poly = layout_kdb.layer(66, 20)  # sky130 poly.drawing
+    top.shapes(poly).insert(kdb.Box(0, 0, 10, 10))
+    gds_path = tmp_path / "block.gds"
+    layout_kdb.write(str(gds_path))
+
+    block_dir = tmp_path / "blocks" / "some-block"
+    layout: dict = {"slug": "some-block"}
+
+    bg._attach_overview_render("some-block", block_dir, gds_path, layout, pdk="sky130")
+
+    assert layout["renders"] == {
+        "overview": "renders/overview.png",
+        "poly.drawing": "renders/66_20.png",
+    }
 
 
 def test_attach_overview_render_is_best_effort_on_failure(
@@ -69,7 +92,7 @@ def test_attach_overview_render_is_best_effort_on_failure(
     block_dir = tmp_path / "blocks" / "some-block"
     layout: dict = {"slug": "some-block"}
     bg._attach_overview_render(
-        "some-block", block_dir, tmp_path / "missing.gds", layout
+        "some-block", block_dir, tmp_path / "missing.gds", layout, pdk="sky130"
     )
 
     assert "renders" not in layout

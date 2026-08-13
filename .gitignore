@@ -22,14 +22,21 @@ pdks/*
 .cache/canary-repos/
 
 # klt render output (build artifact, not checked in — see docs/cli/render.md).
-# The gallery content pipeline (issue #651, Option A) checks in only the
-# all-layers composite `overview.png` per block, so the gallery has a real
-# thumbnail without a KLayout-in-the-deploy-path CI cost; per-layer PNGs
-# (and any `renders/` directory outside `blocks/*/output/`) stay ignored.
+# The gallery content pipeline (issue #651/#942) checks in the all-layers
+# `overview.png` composite, every non-empty per-layer PNG, and each block's
+# zoomed "center crop" composite (`renders/center_crop/overview.png`) — a
+# handful of ~23-47 KB PNGs per block, so this is not a repo-size concern.
+# Per-layer PNGs inside a crop subdirectory (and any `renders/` directory
+# outside `blocks/*/output/`) stay ignored — only each crop's own composite
+# overview is tracked.
 renders/
 !blocks/*/output/renders/
 blocks/*/output/renders/*
 !blocks/*/output/renders/overview.png
+!blocks/*/output/renders/*_*.png
+!blocks/*/output/renders/center_crop/
+blocks/*/output/renders/center_crop/*
+!blocks/*/output/renders/center_crop/overview.png
 
 # Artifacts a request-taking verb writes next to its request document
 # (`klt sim`, `klt synthesize`, `klt functional-verification`) — running

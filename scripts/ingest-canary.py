@@ -22,8 +22,10 @@ documented in `blocks/README.md`:
   standard-cell sweep this repo runs itself.
 
 When a canary's GDS lands (see "GDS detection" below), this script also
-attaches `renders: {"overview": "renders/overview.png"}` -- the gallery
-thumbnail (#651, Option A) -- via `klt render`'s library function.
+attaches `renders` -- the gallery-thumbnail composite (`"overview"`), one
+entry per non-empty layer, and a zoomed "center crop" composite (issue
+#942; previously just `{"overview": "renders/overview.png"}`, "Option A"
+from #651) -- via `klt render`'s library function.
 
 Public-repo gate (fail-closed)
 -------------------------------
@@ -109,7 +111,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from _gallery_common import attach_overview_render  # noqa: E402
+from _gallery_common import attach_overview_render, infer_layer_names  # noqa: E402
 
 from klayout_tools.cells import CellsError, cells_report  # noqa: E402
 from klayout_tools.layers import LayersError, layers_report  # noqa: E402
@@ -819,10 +821,19 @@ def _default_name(slug: str) -> str:
 def _attach_overview_render(
     slug: str, block_dir: Path, gds_path: Path, layout: dict
 ) -> None:
-    """Render `gds_path`'s all-layers composite into `output/renders/` and
-    attach it to `layout["renders"]` as `{"overview": "renders/overview.png"}`
-    (issue #651, Option A -- only the composite is tracked in git; per-layer
-    PNGs the same call writes alongside it stay `.gitignore`d).
+    """Render `gds_path` into `output/renders/` and attach every non-empty
+    per-layer PNG plus the all-layers composite to `layout["renders"]`
+    (issue #942 -- previously only the fixed `{"overview": ...}` entry was
+    recorded, "Option A" from #651, discarding the per-layer PNGs the same
+    call wrote alongside it), plus one extra zoomed "center crop" composite
+    (issue #673's `--bbox`, via `center_crop=True`) so a canary block's
+    detail page shows more than the full-die postage stamp.
+
+    Per-layer entries are labeled with `infer_layer_names(slug)` --
+    canary repos carry no explicit `pdk` field, so the label table is
+    guessed from the slug's `<pdk>-<name>` convention (see that function's
+    docstring); an unrecognised prefix just falls back to `layer_<n>_<n>`
+    keys instead of a wrong PDK's names.
 
     Thin wrapper around the shared `_gallery_common.attach_overview_render`
     helper (issue #670 -- deduped from a near-identical copy of this function
@@ -832,7 +843,14 @@ def _attach_overview_render(
     missing, not a required artifact, so it follows the same opt-in
     treatment as `spec_summary`/`signals` above.
     """
-    exc = attach_overview_render(gds_path, block_dir, layout, render_fn=render_report)
+    exc = attach_overview_render(
+        gds_path,
+        block_dir,
+        layout,
+        render_fn=render_report,
+        layer_names=infer_layer_names(slug),
+        center_crop=True,
+    )
     if exc is not None:
         print(f"ingest-canary: {slug}: skipping render: {exc}", file=sys.stderr)
 
