@@ -200,6 +200,109 @@ the cross-check is skipped entirely for that macro rather than risk a false
 positive or false negative on text it cannot actually parse -- OpenROAD's
 own ``link_design`` remains the authority on whether the netlist and LEF
 actually agree structurally.
+
+Timing-driven global routing + bounded antenna-repair iteration (issue #939)
+------------------------------------------------------------------------------
+
+Epic #700 Phase 2's native-routing survey (``docs/design/native-routing-
+survey.md`` #934, section 4.1) named this its own Priority 1 item: audit
+``detailed_route``/``global_route``'s documented flag surface for a
+timing-driven or congestion-tuning mode not currently passed, and evaluate
+``repair_antennas``'s optional iteration count as a bounded multi-pass
+alternative to the single-pass call issue #759 shipped.
+
+**Methodology note (limitation, stated up front):** issue #783's own audit
+of ``clock_tree_synthesis`` used live introspection (``info body
+<proc>``/``help <proc>``) against a real ``openroad/orfs:latest`` container.
+No such container was reachable in this task's environment (a Docker daemon
+is present but this task has no permission to use it). This audit instead
+reads OpenROAD's/OpenROAD-flow-scripts' own upstream Tcl **and C++** source
+directly from ``The-OpenROAD-Project/OpenROAD``@``9b2de5c``/
+``The-OpenROAD-Project/OpenROAD-flow-scripts``@``ef52564`` (``master``,
+fetched 2026-08-13) -- a real, citable, but *not independently
+container-verified* source; it has not been cross-checked against the exact
+pinned build #783 used (``26Q3-1080-gab6fd26351``), so there is a small
+residual risk of version drift between what this audit read and what any
+given deployed OpenROAD binary actually accepts. Both new flags below are
+additive and off by default specifically so a caller can still get today's
+exact behaviour if this risk ever manifests as a real mismatch.
+
+- **``global_route``'s flag surface** (``src/grt/src/GlobalRouter.tcl``/
+  ``src/grt/README.md``) does carry a genuine timing-aware congestion knob:
+  ``-critical_nets_percentage <percent>`` (0-100, default ``0``) -- "the
+  percentage of nets with the worst slack value that are considered timing
+  critical, having preference over other nets during congestion
+  iterations." (``src/grt/README.md``). Traced into
+  ``GlobalRouter::setCriticalNetsPercentage`` (``src/grt/src/
+  GlobalRouter.cpp``): it forwards straight into FastRoute's/CUGR's own net
+  ordering and is force-reset to ``0`` (with a logged warning) when no
+  liberty/timing is loaded -- never silently wrong, always a real no-op
+  when timing data is unavailable. This module's ``"route"`` stage always
+  has a linked liberty + clock by the time it runs (`_validate_constraints`
+  already requires a clock from ``"place"`` onward), so the flag is live
+  whenever it is set. Exposed as the optional
+  ``request.route_critical_nets_percentage`` field
+  (:func:`_validate_route_critical_nets_percentage`, 0-100, default ``0``)
+  -- ``0`` reproduces ``global_route``'s own default and emits no flag at
+  all, the explicit A/B disable path this issue's acceptance criteria
+  require. **Not evaluated with a real A/B run in this
+  pass** (no OpenROAD available in this task's environment either, see
+  below) -- shipped as an opt-in, off-by-default option rather than an
+  always-on flag like #783's CTS pair, precisely because its QoR effect on
+  this repo's own corpus is unmeasured.
+- **``detailed_route``'s flag surface** (``src/drt/src/TritonRoute.tcl``,
+  every key/flag in its ``sta::define_cmd_args``/``parse_key_args`` block
+  transcribed) has **no** timing-driven or congestion-tuning flag at all --
+  a genuine negative result, not an absence of searching: ``-or_seed``/
+  ``-or_k`` (already passed), ``-droute_end_iter`` (a rip-up-reroute
+  iteration cap, default/max 64, not scored by timing), ``-db_process_node``,
+  ``-disable_via_gen``, ``-via_in_pin_bottom_layer``/``-via_in_pin_top_layer``/
+  ``-via_access_layer``, ``-bottom_routing_layer``/``-top_routing_layer``
+  (both deprecated -- use ``set_routing_layers``, already what this stage
+  does), ``-verbose``, distributed-routing flags, ``-clean_patches``,
+  ``-no_pin_access``, ``-min_access_points``, ``-save_guide_updates``,
+  ``-repair_pdn_vias``, and an internal-only ``-single_step_dr`` (the
+  source's own comment: "not a user option ... intended for algorithm
+  development"). This confirms the survey's own open question (section 1)
+  the honest way -- no flag was added to ``detailed_route`` itself.
+- **``repair_antennas``'s iteration surface** (``src/grt/src/
+  GlobalRouter.tcl``) does carry a real ``-iterations <n>`` flag (default
+  ``1``, matching this stage's current single-pass call exactly) -- but
+  ``GlobalRouter.cpp``'s own implementation explicitly warns
+  (``"repair_antennas should perform only one iteration when the routing
+  source is detailed routing."``) when called with ``iterations != 1``
+  *after* ``detailed_route`` has already run -- exactly this stage's own
+  call pattern. Passing ``-iterations`` directly on the existing call would
+  therefore either warn-and-do-nothing-useful or (per the surrounding
+  ``IncrementalGRoute`` loop body) drift the global-route guides across
+  multiple internal iterations without ever legalizing them through a real
+  ``detailed_route`` pass in between -- the wrong tool for this stage's
+  shape. OpenROAD-flow-scripts' own canonical flow
+  (``flow/scripts/detail_route.tcl``, its ``MAX_REPAIR_ANTENNAS_ITER_DRT``
+  variable) instead loops at the **flow level**: a plain (default
+  1-iteration) ``repair_antennas`` call, a full ``detailed_route`` reroute,
+  then ``check_antennas``, repeated up to a bound. This stage now mirrors
+  that exact shape via the optional ``request.max_antenna_repair_iterations``
+  field (:func:`_validate_max_antenna_repair_iterations`, integer
+  ``1``-``8``, default ``1``) -- ``1`` reproduces today's exact generated
+  Tcl, byte-for-byte; a higher value repeats the ``repair_antennas``/
+  ``detailed_route`` pair that many times unconditionally (no Tcl-level
+  early exit on a zero-violation ``check_antennas`` result -- a deliberate
+  simplification: every other generated script in this module is a flat,
+  branch-free command sequence, and adding the first Tcl-level control flow
+  here to save wall-clock on an already-rare residual-violation case was
+  judged not worth that departure; a caller who wants the cost of extra
+  passes only when needed should leave this at its default).
+- **A/B measurement**: **not performed with real OpenROAD in this pass** --
+  no ``openroad`` binary or ``openroad/orfs`` container was available in
+  this task's environment (same constraint noted above), so
+  ``antenna_violation_count``/``route_drc_violation_count`` (the latter
+  still unimplemented -- survey section 4.5, a separate, not-yet-filed
+  issue)/``wirelength_um``/``worst_slack_ns``/wall-clock deltas on the
+  ``gcd``/``modexp``/``mult8`` corpus trio remain **unverified** against a
+  real engine run. Both new fields are additive, off-by-default, and
+  covered by unit tests asserting the exact generated Tcl (mirroring this
+  module's own existing per-flag test style) instead.
 """
 
 from __future__ import annotations
@@ -527,6 +630,12 @@ def run_place_and_route(
     clock_port, clock_period_ns = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    route_critical_nets_percentage = _validate_route_critical_nets_percentage(
+        request.get("route_critical_nets_percentage")
+    )
+    max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
+        request.get("max_antenna_repair_iterations")
+    )
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -613,6 +722,8 @@ def run_place_and_route(
             cell_library=cell_library,
             seed=seed,
             output_dir=output_dir,
+            route_critical_nets_percentage=route_critical_nets_percentage,
+            max_antenna_repair_iterations=max_antenna_repair_iterations,
         )
         _write_script(script_path, lines)
 
@@ -1043,6 +1154,61 @@ def _validate_target_stage(target_stage: Any) -> str:
     return target_stage
 
 
+def _validate_route_critical_nets_percentage(value: Any) -> int:
+    """Optional ``request.route_critical_nets_percentage`` (issue #939) --
+    ``global_route``'s own ``-critical_nets_percentage`` flag: the
+    percentage of worst-slack nets treated as timing-critical during
+    congestion-removal iterations (0-100, the same bound OpenROAD's own
+    ``sta::check_percent`` enforces). Omitted/``None`` defaults to ``0``,
+    matching ``global_route``'s own default and this module's prior
+    behaviour exactly -- the explicit A/B disable path this issue's
+    acceptance criteria require. See this module's own docstring, "Timing-
+    driven global routing + bounded antenna-repair iteration"."""
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PlaceAndRouteError(
+            "request.route_critical_nets_percentage must be an integer"
+        )
+    if not (0 <= value <= 100):
+        raise PlaceAndRouteError(
+            "request.route_critical_nets_percentage must be between 0 and 100"
+        )
+    return value
+
+
+#: Upper bound on ``request.max_antenna_repair_iterations`` (issue #939) --
+#: each additional iteration re-runs a full ``repair_antennas``/
+#: ``detailed_route`` pair (a real, potentially expensive detailed-routing
+#: pass), so this option is deliberately *bounded*, not unlimited, per this
+#: issue's own scope ("a bounded multi-pass option"). Chosen generously
+#: relative to ORFS's own default posture (``MAX_REPAIR_ANTENNAS_ITER_DRT``
+#: is unset in ORFS's own default flow, i.e. inactive/1) while still ruling
+#: out a runaway request.
+_MAX_ANTENNA_REPAIR_ITERATIONS_CAP = 8
+
+
+def _validate_max_antenna_repair_iterations(value: Any) -> int:
+    """Optional ``request.max_antenna_repair_iterations`` (issue #939) -- a
+    bounded multi-pass generalisation of the ``"route"`` stage's existing
+    single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
+    Omitted/``None`` defaults to ``1``, reproducing today's exact generated
+    Tcl byte-for-byte. See this module's own docstring, "Timing-driven
+    global routing + bounded antenna-repair iteration"."""
+    if value is None:
+        return 1
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PlaceAndRouteError(
+            "request.max_antenna_repair_iterations must be an integer"
+        )
+    if not (1 <= value <= _MAX_ANTENNA_REPAIR_ITERATIONS_CAP):
+        raise PlaceAndRouteError(
+            "request.max_antenna_repair_iterations must be between 1 and "
+            f"{_MAX_ANTENNA_REPAIR_ITERATIONS_CAP}"
+        )
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # PDK / LEF / liberty resolution
 # --------------------------------------------------------------------------- #
@@ -1279,6 +1445,8 @@ def _stage_script_lines(
     cell_library: str,
     seed: int,
     output_dir: str,
+    route_critical_nets_percentage: int,
+    max_antenna_repair_iterations: int,
 ) -> list[str]:
     if stage == "floorplan":
         # `create_clock` (`_clock_lines`) must come after `link_design` --
@@ -1381,24 +1549,49 @@ def _stage_script_lines(
             f"detailed_route -output_drc {drc_report} -output_maze {maze_log} "
             f"-or_seed {seed}"
         )
+        # `-critical_nets_percentage` (issue #939, native-routing survey
+        # section 4.1): a real, documented `global_route` flag -- see this
+        # module's own docstring, "Timing-driven global routing + bounded
+        # antenna-repair iteration" -- that weights the given percentage of
+        # worst-slack nets as timing-critical during congestion-removal
+        # iterations. `0` (unset, `request.route_critical_nets_percentage`
+        # omitted) reproduces `global_route`'s own default and this
+        # module's prior generated Tcl byte-for-byte -- the explicit A/B
+        # disable path.
+        global_route_call = "global_route"
+        if route_critical_nets_percentage:
+            global_route_call = (
+                "global_route "
+                f"-critical_nets_percentage {route_critical_nets_percentage}"
+            )
         lines += [
             f"set_routing_layers -signal {routing_range}",
-            "global_route",
-            detailed_route_call,
-            # Post-route antenna repair (survey section 2.7/3.3): inserting a
-            # diode instance on a violating net changes that net's routing,
-            # so -- mirroring ORFS's own `flow/scripts/detail_route.tcl`,
-            # which re-runs `detailed_route` immediately after
-            # `repair_antennas` to route/legalize each new diode instance --
-            # this repeats the identical `detailed_route` call once after
-            # `repair_antennas`. Deliberately a single repair+reroute pass,
-            # not ORFS's own opt-in `MAX_REPAIR_ANTENNAS_ITER_DRT` iterative
-            # loop (unset, and therefore inactive, in ORFS's own default
-            # flow). `check_antennas` then reports the post-repair violation
-            # count unconditionally, exactly as ORFS's own flow does.
-            f"repair_antennas {diode_cell}",
+            global_route_call,
             detailed_route_call,
         ]
+        # Post-route antenna repair (survey section 2.7/3.3): inserting a
+        # diode instance on a violating net changes that net's routing,
+        # so -- mirroring ORFS's own `flow/scripts/detail_route.tcl`,
+        # which re-runs `detailed_route` immediately after
+        # `repair_antennas` to route/legalize each new diode instance --
+        # this repeats the `repair_antennas`/`detailed_route` pair
+        # `max_antenna_repair_iterations` times (issue #939; default `1`,
+        # reproducing the original single repair+reroute pass byte-for-
+        # byte). `repair_antennas` itself is never called with `-iterations`
+        # here -- OpenROAD's own `GlobalRouter.cpp` explicitly warns against
+        # `-iterations != 1` once `detailed_route` has already run, exactly
+        # this stage's own call pattern (see the module docstring for the
+        # full citation) -- so the bounded multi-pass behaviour is built at
+        # the flow level instead, mirroring ORFS's own opt-in
+        # `MAX_REPAIR_ANTENNAS_ITER_DRT` loop shape (unset, and therefore
+        # inactive/single-pass, in ORFS's own default flow).
+        # `check_antennas` then reports the post-repair violation count
+        # unconditionally, exactly as ORFS's own flow does.
+        for _ in range(max_antenna_repair_iterations):
+            lines += [
+                f"repair_antennas {diode_cell}",
+                detailed_route_call,
+            ]
         lines += _antenna_check_lines()
         lines += ["estimate_parasitics -global_routing"]
 

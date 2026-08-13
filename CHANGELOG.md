@@ -440,6 +440,29 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-13 — `klt place-and-route`'s `"route"` stage gains two additive,
+  off-by-default request fields from issue #939's routing-flag audit (Epic
+  #700 Phase 2, `docs/design/native-routing-survey.md` §4.1):
+  `route_critical_nets_percentage` (0–100, default `0`) passes
+  `global_route -critical_nets_percentage <percent>`, a real timing-aware
+  congestion knob confirmed against OpenROAD's own upstream
+  `src/grt/src/GlobalRouter.tcl`/`README.md` source; and
+  `max_antenna_repair_iterations` (1–8, default `1`) generalises the
+  existing single `repair_antennas`/`detailed_route` reroute pass (#759)
+  into a bounded, flow-level multi-pass loop, mirroring
+  OpenROAD-flow-scripts' own `MAX_REPAIR_ANTENNAS_ITER_DRT` shape —
+  `repair_antennas`'s own `-iterations` flag was evaluated and deliberately
+  **not** used directly, since OpenROAD's own source warns against it once
+  `detailed_route` has already run (this stage's exact call pattern). A
+  genuine negative result was also found: `detailed_route` itself carries
+  no timing-driven or congestion-tuning flag at all. Both defaults
+  reproduce the prior generated Tcl byte-for-byte; **not evaluated with a
+  real OpenROAD A/B run** — no `openroad`/`openroad/orfs` container was
+  reachable in this task's environment, unlike issue #783's live-container
+  audit of `clock_tree_synthesis` — see `place_and_route.py`'s own module
+  docstring for the full citations, methodology, and limitations. No
+  `schema_version` bump. See `docs/cli/place-and-route.md`.
+
 - 2026-08-12 — New verb `klt design-centering` closes the loop between the
   statistical/yield epic #710 and the analog-sizing epic #705: it turns a
   `klt yield-sensitivity` parameter ranking (issue #923) into re-centering
