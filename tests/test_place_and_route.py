@@ -949,6 +949,7 @@ def test_full_route_rejects_wired_port_less_macro_pin_before_openroad(
 
 _WRITE_DB_RE = re.compile(r"^write_db (\S+)$")
 _WRITE_DEF_RE = re.compile(r"^write_def (\S+)$")
+_OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 
 class _FakeCompleted:
@@ -974,6 +975,18 @@ def _script_write_db_path(script_path: str) -> str:
 def _script_write_def_path(script_path: str) -> str | None:
     for line in _script_lines(script_path):
         match = _WRITE_DEF_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _script_output_drc_path(script_path: str) -> str | None:
+    """The `detailed_route -output_drc <rpt>` path a `"route"`-stage script
+    names -- both `detailed_route` calls in the route branch (pre/post
+    `repair_antennas`) write to the same deterministic path, so the first
+    match is sufficient (issue #938)."""
+    for line in _script_lines(script_path):
+        match = _OUTPUT_DRC_RE.match(line)
         if match:
             return match.group(1)
     return None
@@ -1044,6 +1057,7 @@ def _stub_openroad_success(
     setup_violations: dict[str, int] | None = None,
     hold_violations: dict[str, int] | None = None,
     antenna_violations: dict[str, int] | None = None,
+    route_drc_violations: int = 0,
     version: str = "26Q3-771-gdeadbeef",
 ) -> None:
     setup_violations = setup_violations or {}
@@ -1089,6 +1103,25 @@ def _stub_openroad_success(
                 "net violations."
             )
             stdout_lines.append(place_and_route._ANTENNA_VIOLATIONS_END)
+
+            # `detailed_route -output_drc <rpt>` writes its own report file
+            # (never stdout) -- fake one violation-type-tagged entry per
+            # `route_drc_violations`, mirroring the real per-violation
+            # `"violation type: <Type>"` header line format confirmed live
+            # against a real `openroad/orfs:latest` build (issue #938). A
+            # real DRC-clean run writes a 0-byte report, so
+            # `route_drc_violations=0` (the default) intentionally writes an
+            # empty file rather than skipping the write.
+            drc_report_path = _script_output_drc_path(script_path)
+            assert drc_report_path is not None
+            Path(drc_report_path).write_text(
+                "".join(
+                    f"violation type: Metal Short\n"
+                    f"\tsrcs:\n net: net{i}\n"
+                    f"\tbbox = ( 0.0, 0.0 ) - ( 0.1, 0.1 )\nLayer: met1\n"
+                    for i in range(route_drc_violations)
+                )
+            )
 
         def_path = _script_write_def_path(script_path)
         if def_path is not None:
@@ -1143,6 +1176,10 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert report["setup_violation_count"] == 3
     assert report["hold_violation_count"] == 1
     assert report["antenna_violation_count"] == 0
+    # Issue #938: a DRC-clean `detailed_route` run (the default,
+    # `route_drc_violations=0`) reports `0`, not `null` -- a 0-byte real
+    # `-output_drc` report means zero violations, a confirmed value.
+    assert report["route_drc_violation_count"] == 0
     assert report["estimated_power_mw"] == pytest.approx(11.6)
     # Issue #783: `clock_skew_ns` is the `stage_reached` ("route") entry's
     # own value, restated at top level -- same convention as every other
@@ -1156,12 +1193,17 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert "wirelength_um" not in report["stages"][0]
     assert "setup_violation_count" not in report["stages"][0]
     assert "antenna_violation_count" not in report["stages"][0]
+    assert "route_drc_violation_count" not in report["stages"][0]
     # place/cts stages report setup/hold but not antenna (route-only check).
     assert "antenna_violation_count" not in report["stages"][1]
     assert "antenna_violation_count" not in report["stages"][2]
+    # ... nor the route-only `detailed_route` DRC-violation count (#938).
+    assert "route_drc_violation_count" not in report["stages"][1]
+    assert "route_drc_violation_count" not in report["stages"][2]
     # place stage onward does.
     assert "wirelength_um" in report["stages"][1]
     assert report["stages"][3]["setup_violation_count"] == 3
+    assert report["stages"][3]["route_drc_violation_count"] == 0
 
     # `clock_skew_ns` only exists from `"cts"` onward -- no clock tree yet
     # at floorplan/place (issue #783).
@@ -1205,6 +1247,74 @@ def test_count_antenna_violations_defensive_when_markers_missing():
     `_count_violations`'s own defensive-`0` fallback shape but for a `None`
     sentinel (this field is nullable, unlike the setup/hold counts)."""
     assert place_and_route._count_antenna_violations("no markers here") is None
+
+
+def test_stubbed_full_route_reports_nonzero_route_drc_violation_count(
+    tmp_path, monkeypatch
+):
+    """`route_drc_violation_count` parses a multi-entry `-output_drc` report
+    (issue #938), not just the DRC-clean/zero-violations happy path above."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, route_drc_violations=5)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["route_drc_violation_count"] == 5
+    assert report["stages"][3]["route_drc_violation_count"] == 5
+
+
+def test_stubbed_target_stage_place_reports_null_route_drc_violation_count(
+    tmp_path, monkeypatch
+):
+    """A run that never reaches the `"route"` stage -- `detailed_route`
+    never ran, so there is no `-output_drc` report to parse -- reports
+    `route_drc_violation_count` as `null` (absent from the top level, via
+    `_TOP_LEVEL_METRIC_KEYS`'s `.get` degrade), mirroring
+    `antenna_violation_count`'s own pre-`"route"` `null` (issue #938)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "place"
+    assert report["route_drc_violation_count"] is None
+    assert "route_drc_violation_count" not in report["stages"][-1]
+
+
+def test_count_route_drc_violations_counts_violation_type_lines(tmp_path):
+    """`_count_route_drc_violations` counts one occurrence of the literal
+    `"violation type: "` header line per violation entry -- the exact
+    format confirmed live via `strings` against a real
+    `openroad/orfs:latest` build's `openroad` binary (issue #938), not
+    guessed from documentation."""
+    report_path = tmp_path / "route_drc.rpt"
+    report_path.write_text(
+        "violation type: Metal Short\n"
+        "\tsrcs:\n net: net0\n"
+        "\tbbox = ( 0.0, 0.0 ) - ( 0.1, 0.1 )\nLayer: met1\n"
+        "violation type: Metal Short\n"
+        "\tsrcs:\n net: net1\n"
+        "\tbbox = ( 0.2, 0.2 ) - ( 0.3, 0.3 )\nLayer: met2\n"
+    )
+    assert place_and_route._count_route_drc_violations(str(report_path)) == 2
+
+
+def test_count_route_drc_violations_zero_on_empty_report(tmp_path):
+    """A 0-byte `-output_drc` report -- what a real, DRC-clean
+    `detailed_route` run writes -- is a confirmed-zero count, not `None`."""
+    report_path = tmp_path / "route_drc.rpt"
+    report_path.write_text("")
+    assert place_and_route._count_route_drc_violations(str(report_path)) == 0
+
+
+def test_count_route_drc_violations_none_when_report_missing(tmp_path):
+    """`_count_route_drc_violations` returns `None` (never `0`) when the
+    report file itself cannot be read -- keeps a genuinely missing signal
+    distinguishable from a confirmed-zero violation count, mirroring
+    `_count_antenna_violations`'s own `None` sentinel."""
+    missing_path = tmp_path / "does_not_exist.rpt"
+    assert place_and_route._count_route_drc_violations(str(missing_path)) is None
 
 
 def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(

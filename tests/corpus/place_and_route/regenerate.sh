@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Regenerate tests/corpus/place_and_route/gcd.gds.gz -- a deliberate,
-# reviewed act (issue #436), never a CI step. See ../README.md's
-# "Machine-generated macro-scale fixture" section for what this fixture is
-# and why it exists.
+# Regenerate tests/corpus/place_and_route/{gcd.gds.gz,mult8/mult8.gds.gz} --
+# a deliberate, reviewed act (issue #436; mult8 added by issue #938), never a
+# CI step. See ../README.md's "Machine-generated macro-scale fixture" section
+# for what these fixtures are and why they exist.
 #
 # Requires, on the host (or reachable via Docker):
 #   - yosys (for `klt synthesize`)
@@ -23,30 +23,74 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
 
-echo "Scratch dir: $SCRATCH"
+# `mult8` (`tests/corpus/statime/mult8.v`, issue #809's STA-spike source) is
+# purely combinational -- "No handshake, no clock: `p` is a pure combinational
+# function of `a`/`b`" per its own header comment. `klt place-and-route`
+# still requires a `constraints.clock_port` naming a *real* port once
+# `target_stage` reaches `"place"` or later (no virtual/unconnected-clock
+# support exists in this command today) -- there is no register in this
+# design for a clock tree to drive either way, so the port choice only needs
+# to avoid corrupting the fixture, not to model a real clock.
+#
+# Verified live (issue #938): naming an *input* port (e.g. `a[0]`, which
+# fans out through the entire multiplier tree) makes `clock_tree_synthesis`
+# treat that broad combinational fanout as a clock network and build a real
+# (spurious) buffer tree across it -- utilization jumped from 39.6% to
+# 68.6% and wirelength from ~4.3k to ~10.1k um in that trial, a corrupted,
+# unrepresentative fixture. Naming an *output* port instead (`p[15]` here)
+# is a clean no-op: an output port is a sink with no fanout inside the
+# design, so `clock_tree_synthesis` has nothing to build (confirmed:
+# utilization/wirelength stay exactly at their post-placement values through
+# `"cts"`), and `report_checks` correctly reports the whole design as
+# unconstrained (`worst_slack_ns: 1e+39`, OpenSTA's own sentinel) --
+# consistent with `tests/corpus/statime/oracle_results.json`'s own
+# unconstrained OpenSTA boundary condition for this same design. `p[15]` is
+# an arbitrary choice among mult8's 16 output bits; any other output bit
+# would work identically.
+declare -A DESIGN_SRC=(
+  [gcd]="$REPO_ROOT/examples/functional-verification/gcd.v"
+  [mult8]="$REPO_ROOT/tests/corpus/statime/mult8.v"
+)
+declare -A DESIGN_CLOCK_PORT=(
+  [gcd]="clk"
+  [mult8]="p[15]"
+)
+declare -A DESIGN_CLOCK_PERIOD_NS=(
+  [gcd]="1.1"
+  [mult8]="6.0"
+)
+declare -A DESIGN_OUT_GDS_GZ=(
+  [gcd]="$REPO_ROOT/tests/corpus/place_and_route/gcd.gds.gz"
+  [mult8]="$REPO_ROOT/tests/corpus/place_and_route/mult8/mult8.gds.gz"
+)
 
-cp "$REPO_ROOT/examples/functional-verification/gcd.v" "$SCRATCH/gcd.v"
+for DESIGN in gcd mult8; do
+  SCRATCH="$(mktemp -d)"
+  trap 'rm -rf "$SCRATCH"' EXIT
 
-cat > "$SCRATCH/synth_request.json" <<'JSON'
+  echo "=== $DESIGN ==="
+  echo "Scratch dir: $SCRATCH"
+
+  cp "${DESIGN_SRC[$DESIGN]}" "$SCRATCH/$DESIGN.v"
+
+  cat > "$SCRATCH/synth_request.json" <<JSON
 {
   "schema": "klt.synthesize.request/1",
   "engine": "yosys",
-  "sources": ["gcd.v"],
-  "hdl_toplevel": "gcd",
+  "sources": ["$DESIGN.v"],
+  "hdl_toplevel": "$DESIGN",
   "pdk": { "cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80" },
   "constraints": { "clock_period_ns": null }
 }
 JSON
 
-cat > "$SCRATCH/par_request.json" <<'JSON'
+  cat > "$SCRATCH/par_request.json" <<JSON
 {
   "schema": "klt.place_and_route.request/1",
   "engine": "openroad",
-  "netlist": ".klt/synthesize/gcd_synth.v",
-  "hdl_toplevel": "gcd",
+  "netlist": ".klt/synthesize/${DESIGN}_synth.v",
+  "hdl_toplevel": "$DESIGN",
   "pdk": { "cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80" },
   "floorplan": {
     "method": "utilization",
@@ -56,37 +100,48 @@ cat > "$SCRATCH/par_request.json" <<'JSON'
     "site": "unithd"
   },
   "io": { "layer_h": "met3", "layer_v": "met2" },
-  "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
+  "constraints": { "clock_port": "${DESIGN_CLOCK_PORT[$DESIGN]}", "clock_period_ns": ${DESIGN_CLOCK_PERIOD_NS[$DESIGN]} },
   "seed": 1,
   "target_stage": "route"
 }
 JSON
 
-echo "==> klt synthesize (real Yosys, on host)"
-( cd "$REPO_ROOT" && PDK=sky130A uv run klt synthesize "$SCRATCH/synth_request.json" --format json )
+  echo "==> klt synthesize $DESIGN (real Yosys, on host)"
+  # Same YoWASP-sandbox note as tests/corpus/legalize/regenerate.sh and
+  # tests/corpus/statime/regenerate.sh: prepend /usr/bin so a native `yosys`
+  # build (not a WASI-sandboxed one whose preopens reject synthesize.py's
+  # absolute scratch-dir script paths) is used, if present. Harmless when
+  # the host only has one `yosys` already.
+  ( cd "$SCRATCH" && PATH="/usr/bin:$PATH" PDK=sky130A uv --project "$REPO_ROOT" run klt synthesize \
+      "$SCRATCH/synth_request.json" --format json )
 
-echo "==> klt place-and-route (real OpenROAD, via openroad/orfs:latest Docker image)"
-docker run --rm --platform linux/amd64 \
-  -v "$REPO_ROOT:/workdir/repo:ro" \
-  -v "$SCRATCH:/workdir/scratch" \
-  -v "$HOME/.volare:/workdir/volare:ro" \
-  -e PDK=sky130A \
-  -e PDK_ROOT=/workdir/volare \
-  -e PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  openroad/orfs:latest \
-  bash -c '
-    pip3 install -q /workdir/repo &&
-    python3 -c "
+  echo "==> klt place-and-route $DESIGN (real OpenROAD, via openroad/orfs:latest Docker image)"
+  docker run --rm --platform linux/amd64 \
+    -v "$REPO_ROOT:/workdir/repo:ro" \
+    -v "$SCRATCH:/workdir/scratch" \
+    -v "$HOME/.volare:/workdir/volare:ro" \
+    -e PDK=sky130A \
+    -e PDK_ROOT=/workdir/volare \
+    -e PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    openroad/orfs:latest \
+    bash -c '
+      pip3 install -q /workdir/repo &&
+      python3 -c "
 from klayout_tools.cli import main
 import sys
 sys.exit(main([\"place-and-route\", \"/workdir/scratch/par_request.json\", \"--format\", \"json\"]))
 "'
 
-GDS="$SCRATCH/.klt/place-and-route/gcd.gds"
-if [[ ! -f "$GDS" ]]; then
-  echo "error: expected $GDS to exist after place-and-route" >&2
-  exit 1
-fi
+  GDS="$SCRATCH/.klt/place-and-route/$DESIGN.gds"
+  if [[ ! -f "$GDS" ]]; then
+    echo "error: expected $GDS to exist after place-and-route" >&2
+    exit 1
+  fi
 
-gzip -9 -c "$GDS" > "$REPO_ROOT/tests/corpus/place_and_route/gcd.gds.gz"
-echo "wrote $REPO_ROOT/tests/corpus/place_and_route/gcd.gds.gz"
+  mkdir -p "$(dirname "${DESIGN_OUT_GDS_GZ[$DESIGN]}")"
+  gzip -9 -c "$GDS" > "${DESIGN_OUT_GDS_GZ[$DESIGN]}"
+  echo "wrote ${DESIGN_OUT_GDS_GZ[$DESIGN]}"
+
+  rm -rf "$SCRATCH"
+  trap - EXIT
+done
