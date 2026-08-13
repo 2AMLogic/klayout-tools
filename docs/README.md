@@ -66,6 +66,7 @@ docs/
     lvs-extraction-spike.md
     mom-iterative-solver.md
     mom-validation.md
+    native-routing-survey.md
     netlist-driven-layout-spike.md
     openroad-invocation-survey.md
     pdk-device-corner-metadata-spike.md
