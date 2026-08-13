@@ -245,10 +245,11 @@ opposite directions.
 
 **Provenance chain worth stating explicitly, since it is the load-bearing
 fact for §4.1 below**: this is not a hypothetical "a router *could* feed an
-extractor" — `_merge_def_to_gds` (`place_and_route.py:1422`, Phase 0's own
-shipped work) is the exact function that produced the GDS #737 extracted,
-and it merges the routed DEF's real geometry (not a placement-stage
-abstraction) with the standard-cell GDS views. Net names on that merged
+extractor" — `_merge_def_to_gds` (defined at `place_and_route.py:1934`,
+called from `place_and_route.py:782` in the `target_stage == "route"`
+branch, Phase 0's own shipped work) is the exact function that produced
+the GDS #737 extracted, and it merges the routed DEF's real geometry (not
+a placement-stage abstraction) with the standard-cell GDS views. Net names on that merged
 GDS come from `def2stream.py`'s own DEF→GDS label convention (metal-layer
 text labels carrying the DEF net name), the same convention `klt extract`'s
 own net-naming (`docs/cli/extract.md`'s "joined name" — a net's `nets[]`
