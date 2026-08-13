@@ -440,6 +440,21 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-13 — `klt place-and-route`'s `"route"` stage gains a new additive
+  `route_drc_violation_count` response field (issue #938, Epic #700 Phase 2,
+  `docs/design/native-routing-survey.md` §4.5), mirroring the existing
+  `antenna_violation_count` pattern: TritonRoute's `detailed_route
+  -output_drc <rpt>` already writes a real DRC report to disk on every
+  `"route"`-stage run, but its violation count was never parsed into the
+  JSON response until now. `_count_route_drc_violations()` counts the
+  report's own literal per-violation `"violation type: "` header lines —
+  the same literal TritonRoute uses both to write the report and to
+  re-parse it internally, confirmed live via `strings` against a real
+  `openroad/orfs:latest` build's `openroad` binary. `null` before the
+  `"route"` stage, `int` (including a confirmed `0` on a DRC-clean run)
+  from `"route"` onward. No `schema_version` bump. See
+  `docs/cli/place-and-route.md`.
+
 - 2026-08-13 — `klt place-and-route`'s `"route"` stage gains two additive,
   off-by-default request fields from issue #939's routing-flag audit (Epic
   #700 Phase 2, `docs/design/native-routing-survey.md` §4.1):
