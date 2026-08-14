@@ -215,6 +215,36 @@ against the repo's current `HEAD`, restages the GDS, re-renders the
 overview thumbnail, and rewrites `layout.json` in place — same slug, same
 card, no hand-editing required.
 
+## Field data (issue #958, Epic #840 Phase 3a)
+
+A block that has a committed layout can also carry
+`<slug>/output/<slug>.em-export.json` — real
+[geode-fem](https://github.com/rjwalters/geode-fem) electrostatic field and
+coupling-capacitance results **for that block's own geometry**, conforming to
+[`../docs/schemas/em-site-export.schema.json`](../docs/schemas/em-site-export.schema.json).
+Unlike the standalone benchmark exports under `../examples/em/`, these are an
+artifact of the gallery project itself, a sibling of its `layout.json` and its
+`signals/` waveforms. Two blocks ship one today:
+
+| Slug | Structure solved |
+| --- | --- |
+| `sky130-bandgap` | The bandgap core's differential branch bundle — `TAIL`, two unlabeled neighbours, `D2`, `D1` — running 182.5 µm in parallel on `met1` |
+| `gf180-bandgap` | The reference-output net `vref` packed against five unlabeled `Metal1` neighbours at drawn minimum spacing, running 94.5 µm |
+
+Everything in the artifact traces back to the committed GDS: conductor widths
+and spacings are the drawn ones, the parallel-run length is measured from the
+layout, the conductor names are the GDS's own label texts, and
+`provenance.geometry` pins the exact file, its sha256 and the commit that
+introduced it (`tests/test_em_block_exports.py` re-checks that hash against the
+file on disk, so an export cannot quietly outlive the layout it describes).
+
+Generation is reproducible from a committed script,
+[`../examples/em/block_coupling/generate.py`](../examples/em/block_coupling/generate.py) —
+**that directory's [`README.md`](../examples/em/block_coupling/README.md) is the
+recipe for adding the next block**, including the `--dry-run` bundle search
+that needs no solver checkout. Nothing on the site renders these yet; the
+detail-page field panel is Phase 3b.
+
 ## License note
 
 `layout.json` metrics here are derived from the #4 corpus GDS files, which
