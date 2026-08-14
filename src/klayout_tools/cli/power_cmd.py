@@ -1,5 +1,5 @@
-"""``klt power`` command: serialise the resistive-network extraction report
-as text or JSON.
+"""``klt power`` command: serialise the resistive-network extraction + static
+IR-drop report as text or JSON.
 
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
@@ -49,9 +49,52 @@ def _print_text(report: dict) -> None:
                 f"edges={island['edge_count']}"
             )
 
+    _print_ir_drop(report)
+
     warnings = report["warnings"]
     if warnings:
         print()
         print("warnings:")
         for warning in warnings:
             print(f"  {warning}")
+
+
+def _print_ir_drop(report: dict) -> None:
+    """The static IR-drop summary (issue #845). Silent when the spec asked
+    for no solve (no `pads`, no `current_model`) -- there is nothing to say
+    beyond the extraction above."""
+    ir_drop = report.get("ir_drop_map")
+    if ir_drop is None:
+        return
+
+    print()
+    print(
+        f"ir drop: {ir_drop['instance_count']} instance(s) drawing "
+        f"{ir_drop['total_current_a'] * 1e3:g} mA through "
+        f"{len(ir_drop['pads'])} pad(s)"
+    )
+    worst = ir_drop["worst_case"]
+    if worst is None:
+        print("  worst-case droop: (nothing solved)")
+    else:
+        print(
+            f"  worst-case droop: {worst['droop_mv']:.6g} mV at "
+            f"{worst['net']} {worst['island_id']}/{worst['node_id']} "
+            f"({worst['x_um']:g}, {worst['y_um']:g}) um -> "
+            f"{worst['voltage_v']:.6g} V"
+        )
+    if ir_drop["unsolved_current_a"]:
+        print(
+            f"  unsolved: {ir_drop['unsolved_current_a'] * 1e3:g} mA lands on "
+            "islands with no pad"
+        )
+
+    for net_entry in ir_drop["nets"]:
+        droop = net_entry["worst_case_droop_mv"]
+        print(
+            f"  net {net_entry['net']}: "
+            f"{net_entry['solved_island_count']}/"
+            f"{net_entry['solved_island_count'] + net_entry['unsolved_island_count']}"
+            " island(s) solved, worst droop "
+            + ("n/a" if droop is None else f"{droop:.6g} mV")
+        )

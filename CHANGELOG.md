@@ -442,6 +442,46 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-14 — `klt power` gains the **static (DC) IR-drop solve** — issue
+  #845, Phase 1b of the power/IR-drop + EM signoff epic #712. The spec file
+  takes two new optional inputs: `pads` (where each net's supply is
+  delivered, each held at a fixed `voltage_v`) and `current_model` (what
+  each instance draws, as a `current_a` magnitude off a `supply_net` and
+  back into a `ground_net`); the response gains two new fields,
+  `ir_drop_map` (per-net/per-island/per-node voltages and droop, plus the
+  per-branch currents Phase 1c's EM verdict will consume) and
+  `worst_case_droop_mv`. Both are **additive** — every field Phase 1a
+  promised is unchanged, so `schema_version` stays `1` per
+  `docs/json-contract.md`'s envelope design — and a spec declaring neither
+  `pads` nor `current_model` still runs extraction-only, with both fields
+  `null`. The numerics live in a new, deliberately **geometry-free**
+  `klayout_tools/ir_solver.py`: modified nodal analysis with pad nodes held
+  as a Dirichlet boundary, solved per island with Jacobi-preconditioned
+  conjugate gradients (no numpy/scipy — the runtime dependency set stays
+  `klayout`/`jsonschema`), with `resistance_ohm: 0` edges merged as ideal
+  shorts rather than divided by, and every island's iteration count and
+  achieved residual reported rather than hidden. An island with no pad has
+  no DC operating point and is reported `unsolved_reason: "no_pad"` — never
+  guessed at — with any current stranded there totalled into
+  `unsolved_current_a` and named in `warnings`. Validated two independent
+  ways, per the epic's own reality-grounding requirement: against
+  **canonical closed-form networks** (`tests/test_ir_solver.py` — a series
+  ladder's `I*N*R`, a uniformly loaded rail's triangular sum
+  `I*R*N*(N+1)/2`, a double-fed rail's textbook factor of 4, a current
+  divider, a balanced Wheatstone bridge's zero bridge current, and the
+  infinite-square-lattice Green's function at `R/2` adjacent and `2R/pi`
+  diagonal — to `1e-9` relative on the exact cases, 0.5 %/1 % on the two
+  lattice cases where finite-grid truncation of the *analytic* answer
+  dominates), and against an **independent implementation** —
+  ngspice's own `.op` DC operating point, the same engine `klt sim` already
+  uses (`tests/test_power_ir_cross_check.py`), node for node and branch for
+  branch, on a synthetic 2-D mesh and end to end on the real
+  OpenROAD-produced `gcd` corpus fixture, agreeing to `1e-9` V and `1e-12`
+  A. On that fixture (0.2 mA per `VPWR` rail, 17.6 mA total across 193
+  islands) all 386 nodes solve, no current is stranded, per-island
+  conservation holds exactly, and the worst droop is 4.84 mV. The per-net
+  EM current-density verdict (#846, Phase 1c) remains a later phase. See
+  `docs/cli/power.md`.
 - 2026-08-13 — **new verb `klt pex`** (issue #801, Epic #709 Phase 1a):
   extract a lumped-RC parasitic-annotated netlist from a routed layout,
   re-run one or more existing `klt sim` testbench requests against it per

@@ -1,20 +1,31 @@
-"""Extract a routed layout's power grid as a resistive network (``klt
-power``, issue #844, Phase 1a of the power/IR-drop + EM signoff epic #712).
+"""Extract a routed layout's power grid as a resistive network and solve it
+for its static (DC) IR drop (``klt power``, issues #844/#845, Phases 1a/1b of
+the power/IR-drop + EM signoff epic #712).
 
 Pure library: :func:`run_power` returns plain Python data (a JSON-
 serialisable ``dict``) and never prints -- serialisation and human-readable
 formatting live in ``cli/power_cmd.py``, matching every other ``klt`` verb
 (see ``layers.py``'s docstring on the same convention).
 
-Scope of this phase (see ``docs/cli/power.md`` for the full picture):
+Scope of this module (see ``docs/cli/power.md`` for the full picture):
 ``klt power`` is defined end to end as JSON in (a routed layout + a
-power-net definition + -- in a later phase -- a per-instance current model)
-/ JSON out (an IR-drop map + worst-case droop + a per-net EM verdict), but
-**this issue delivers only the interface and the resistive-network
-extraction** -- turning a routed layout's named power/ground nets into a
-graph of nodes + segment resistances. The static IR-drop solve (#845, Phase
-1b) and the per-net EM verdict (#846, Phase 1c) consume this module's output
-additively; neither is implemented here.
+power-net definition + a per-instance current model) / JSON out (an IR-drop
+map + worst-case droop + a per-net EM verdict). Two phases have landed:
+
+- **#844, Phase 1a** -- the interface and the resistive-network extraction:
+  turning a routed layout's named power/ground nets into a graph of nodes +
+  segment resistances (``networks[]`` below).
+- **#845, Phase 1b** -- the static IR-drop solve: given ``pads`` (where the
+  supply is delivered) and a ``current_model`` (what each instance draws),
+  solve that network for its DC node voltages, and report an IR-drop map +
+  the worst-case droop (``ir_drop_map``/``worst_case_droop_mv``). The linear
+  algebra lives in :mod:`klayout_tools.ir_solver`, deliberately geometry-free
+  so it can be validated against closed-form resistive networks with no
+  layout involved; this module is the geometry-to-network binding.
+
+The per-net EM verdict (#846, Phase 1c) consumes this module's output
+additively -- in particular ``ir_drop_map``'s per-edge branch currents -- and
+is not implemented here.
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
 purely for wire/via connectivity (no device recognition registered) --
@@ -66,13 +77,17 @@ from typing import TYPE_CHECKING, Any
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
+from .ir_solver import solve_ir_drop
 
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-#: `1` -- resistive-network extraction only (issue #844, Phase 1a of epic
-#: #712). A future phase adds `ir_drop_map`/`worst_case_droop_mv`/
-#: `em_verdict` fields additively (no bump needed -- see docs/cli/power.md).
+#: `1` -- the resistive-network extraction (issue #844, Phase 1a of epic
+#: #712) plus the static IR-drop solve (#845, Phase 1b). 1b added
+#: `ir_drop_map`/`worst_case_droop_mv` **additively** -- every field 1a
+#: documented is unchanged -- so no bump was needed (see docs/cli/power.md
+#: and docs/json-contract.md's additive-envelope design). A future phase adds
+#: `em_verdict` the same way.
 SCHEMA_VERSION = 1
 
 
@@ -252,6 +267,154 @@ def _validate_vias(
     return entries
 
 
+def _require_number(
+    entry: dict[str, Any], key: str, spec_path: str, field: str
+) -> float:
+    if key not in entry:
+        raise PowerError(f"spec '{spec_path}': {field} missing {key!r}")
+    try:
+        return float(entry[key])
+    except (TypeError, ValueError) as exc:
+        raise PowerError(
+            f"spec '{spec_path}': {field}.{key} must be a number (got {entry[key]!r})"
+        ) from exc
+
+
+def _validate_pads(
+    spec: dict[str, Any], spec_path: str, power_nets: list[str]
+) -> list[dict[str, Any]]:
+    """Validate the (optional) ``pads`` array: where each power net's supply
+    is actually delivered. Without at least one pad on a net, that net has no
+    DC path to a source and no operating point to solve for -- see
+    ``docs/cli/power.md``."""
+    raw = spec.get("pads", [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise PowerError(f"spec '{spec_path}': 'pads' must be an array")
+
+    pads: list[dict[str, Any]] = []
+    names: list[str] = []
+    for i, entry in enumerate(raw):
+        field = f"pads[{i}]"
+        if not isinstance(entry, dict):
+            raise PowerError(f"spec '{spec_path}': {field} must be a JSON object")
+        if "net" not in entry:
+            raise PowerError(f"spec '{spec_path}': {field} missing 'net'")
+        net = str(entry["net"])
+        if net not in power_nets:
+            raise PowerError(
+                f"spec '{spec_path}': {field}.net {net!r} is not one of "
+                f"'power_nets' ({', '.join(power_nets)})"
+            )
+        name = str(entry.get("name", f"pad{i}"))
+        if name in names:
+            raise PowerError(f"spec '{spec_path}': duplicate pad name {name!r}")
+        names.append(name)
+        pads.append(
+            {
+                "name": name,
+                "net": net,
+                "x_um": _require_number(entry, "x_um", spec_path, field),
+                "y_um": _require_number(entry, "y_um", spec_path, field),
+                "voltage_v": _require_number(entry, "voltage_v", spec_path, field),
+            }
+        )
+    return pads
+
+
+def _validate_current_model(
+    spec: dict[str, Any], spec_path: str, power_nets: list[str]
+) -> list[dict[str, Any]] | None:
+    """Validate the (optional) ``current_model``: what each instance draws,
+    and from/to which nets. Returns ``None`` when the spec declares no
+    current model at all (extraction-only, the Phase 1a behaviour), or a list
+    of normalised instance records."""
+    raw = spec.get("current_model")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise PowerError(f"spec '{spec_path}': 'current_model' must be a JSON object")
+
+    def _default_net(key: str) -> str | None:
+        value = raw.get(key)
+        if value is None:
+            return None
+        net = str(value)
+        if net not in power_nets:
+            raise PowerError(
+                f"spec '{spec_path}': current_model.{key} {net!r} is not one of "
+                f"'power_nets' ({', '.join(power_nets)})"
+            )
+        return net
+
+    default_supply = _default_net("supply_net")
+    default_ground = _default_net("ground_net")
+
+    instances_raw = raw.get("instances")
+    if not isinstance(instances_raw, list) or not instances_raw:
+        raise PowerError(
+            f"spec '{spec_path}': 'current_model' must have a non-empty "
+            "'instances' array"
+        )
+
+    instances: list[dict[str, Any]] = []
+    names: list[str] = []
+    for i, entry in enumerate(instances_raw):
+        field = f"current_model.instances[{i}]"
+        if not isinstance(entry, dict):
+            raise PowerError(f"spec '{spec_path}': {field} must be a JSON object")
+
+        name = str(entry.get("name", f"inst{i}"))
+        if name in names:
+            raise PowerError(f"spec '{spec_path}': duplicate instance name {name!r}")
+        names.append(name)
+
+        supply_net = (
+            str(entry["supply_net"]) if "supply_net" in entry else default_supply
+        )
+        if supply_net is None:
+            raise PowerError(
+                f"spec '{spec_path}': {field} has no 'supply_net' and "
+                "'current_model.supply_net' sets no default"
+            )
+        ground_net = (
+            str(entry["ground_net"]) if "ground_net" in entry else default_ground
+        )
+        for key, net in (("supply_net", supply_net), ("ground_net", ground_net)):
+            if net is not None and net not in power_nets:
+                raise PowerError(
+                    f"spec '{spec_path}': {field}.{key} {net!r} is not one of "
+                    f"'power_nets' ({', '.join(power_nets)})"
+                )
+        if ground_net == supply_net:
+            raise PowerError(
+                f"spec '{spec_path}': {field} draws from and returns to the "
+                f"same net {supply_net!r}"
+            )
+
+        current_a = _require_number(entry, "current_a", spec_path, field)
+        if current_a < 0:
+            raise PowerError(
+                f"spec '{spec_path}': {field}.current_a must be >= 0 (got "
+                f"{current_a!r}) -- an instance's draw is a magnitude; the "
+                "supply/ground sign convention is set by 'supply_net'/"
+                "'ground_net'"
+            )
+
+        instances.append(
+            {
+                "name": name,
+                "supply_net": supply_net,
+                "ground_net": ground_net,
+                "x_um": _require_number(entry, "x_um", spec_path, field),
+                "y_um": _require_number(entry, "y_um", spec_path, field),
+                "current_a": current_a,
+            }
+        )
+    return instances
+
+
 def _nearest_endpoint(
     rails: list[dict[str, Any]], x_um: float, y_um: float
 ) -> str | None:
@@ -383,13 +546,325 @@ def _build_island_network(
     return nodes, edges
 
 
+def _nearest_node(
+    net_nodes: list[tuple[int, dict[str, Any]]], x_um: float, y_um: float
+) -> tuple[int, dict[str, Any]] | None:
+    """``(island_index, node)`` of the node nearest ``(x_um, y_um)`` among
+    one net's whole extracted geometry, or ``None`` when the net has no nodes
+    at all. Ties resolve to the first node in extraction order, so a given
+    layout+spec always attaches a pad/instance to the same node.
+
+    This is the same "snap to the nearest existing node" approximation
+    ``_nearest_endpoint`` already uses for via taps (see this module's
+    docstring and ``docs/cli/power.md``'s "Scope and limitations"): a pad or
+    an instance is wired to the closest *extracted* node, not spliced into a
+    rail at its exact position."""
+    best: tuple[int, dict[str, Any]] | None = None
+    best_dist: float | None = None
+    for island_index, node in net_nodes:
+        dist = (node["x_um"] - x_um) ** 2 + (node["y_um"] - y_um) ** 2
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = (island_index, node)
+    return best
+
+
+def _solve_ir_drop(
+    networks: list[dict[str, Any]],
+    pads: list[dict[str, Any]],
+    instances: list[dict[str, Any]] | None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Solve every extracted island for its DC operating point and build the
+    ``ir_drop_map`` response block. See ``docs/cli/power.md`` for the shape
+    and :mod:`klayout_tools.ir_solver` for the numerics."""
+    by_net = {entry["net"]: entry for entry in networks}
+    nodes_by_net: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for net_name, entry in by_net.items():
+        nodes_by_net[net_name] = [
+            (island_index, node)
+            for island_index, island in enumerate(entry["islands"])
+            for node in island["nodes"]
+        ]
+
+    # (net, island_index) -> {node_id: value}
+    pad_voltages: dict[tuple[str, int], dict[str, float]] = {}
+    injections: dict[tuple[str, int], dict[str, float]] = {}
+    pad_counts: dict[tuple[str, int], int] = {}
+    instance_counts: dict[tuple[str, int], int] = {}
+    pad_reports: list[dict[str, Any]] = []
+
+    def _attach(
+        net_name: str, x_um: float, y_um: float
+    ) -> tuple[int, dict[str, Any]] | None:
+        return _nearest_node(nodes_by_net.get(net_name, []), x_um, y_um)
+
+    for pad in pads:
+        target = _attach(pad["net"], pad["x_um"], pad["y_um"])
+        report = dict(pad)
+        if target is None:
+            report["island_id"] = None
+            report["node_id"] = None
+            pad_reports.append(report)
+            warnings.append(
+                f"pad {pad['name']!r} on net {pad['net']!r} has no extracted "
+                "geometry on that net to attach to -- skipped"
+            )
+            continue
+        island_index, node = target
+        key = (pad["net"], island_index)
+        island_id = by_net[pad["net"]]["islands"][island_index]["island_id"]
+        report["island_id"] = island_id
+        report["node_id"] = node["id"]
+        pad_reports.append(report)
+        existing = pad_voltages.setdefault(key, {})
+        existing[node["id"]] = pad["voltage_v"]
+        pad_counts[key] = pad_counts.get(key, 0) + 1
+
+    def _inject(net_name: str, instance: dict[str, Any], current_a: float) -> None:
+        target = _attach(net_name, instance["x_um"], instance["y_um"])
+        if target is None:
+            warnings.append(
+                f"current_model instance {instance['name']!r} has no extracted "
+                f"{net_name!r} geometry to attach to -- its {abs(current_a) * 1e3:g} "
+                "mA is not modelled on that net"
+            )
+            return
+        island_index, node = target
+        key = (net_name, island_index)
+        bucket = injections.setdefault(key, {})
+        bucket[node["id"]] = bucket.get(node["id"], 0.0) + current_a
+        instance_counts[key] = instance_counts.get(key, 0) + 1
+
+    for instance in instances or []:
+        # An instance *draws* current off its supply net (a negative
+        # injection) and *returns* the same current to its ground net (a
+        # positive injection) -- the sign convention `ir_solver` documents.
+        _inject(instance["supply_net"], instance, -instance["current_a"])
+        if instance["ground_net"] is not None:
+            _inject(instance["ground_net"], instance, instance["current_a"])
+
+    net_reports: list[dict[str, Any]] = []
+    overall_worst: dict[str, Any] | None = None
+    overall_worst_droop = 0.0
+    unsolved_current_a = 0.0
+    solved_node_total = 0
+    unsolved_node_total = 0
+    quiet_no_pad_islands: list[str] = []
+
+    for entry in networks:
+        net_name = entry["net"]
+        net_worst: dict[str, Any] | None = None
+        net_worst_droop = 0.0
+        island_reports: list[dict[str, Any]] = []
+        net_current = 0.0
+        solved_islands = 0
+
+        for island_index, island in enumerate(entry["islands"]):
+            key = (net_name, island_index)
+            island_pads = pad_voltages.get(key, {})
+            island_injections = injections.get(key, {})
+            net_current += sum(abs(v) for v in island_injections.values())
+
+            solution = solve_ir_drop(
+                [node["id"] for node in island["nodes"]],
+                island["edges"],
+                pads=island_pads,
+                injections=island_injections,
+            )
+
+            solved_components = [c for c in solution["components"] if c["solved"]]
+            unsolved_components = [c for c in solution["components"] if not c["solved"]]
+            solved_nodes = sum(c["node_count"] for c in solved_components)
+            unsolved_nodes = sum(c["node_count"] for c in unsolved_components)
+            solved_node_total += solved_nodes
+            unsolved_node_total += unsolved_nodes
+
+            island_worst_id: str | None = None
+            island_worst_droop = 0.0
+            for node in island["nodes"]:
+                deviation = solution["deviations"][node["id"]]
+                if deviation is None:
+                    continue
+                if island_worst_id is None or abs(deviation) > island_worst_droop:
+                    island_worst_id = node["id"]
+                    island_worst_droop = abs(deviation)
+
+            reason = unsolved_components[0]["reason"] if unsolved_components else None
+            if unsolved_components:
+                stranded = sum(
+                    abs(c["injected_current_a"]) for c in unsolved_components
+                )
+                unsolved_current_a += stranded
+                if stranded or reason != "no_pad":
+                    # Worth naming individually: either the current model
+                    # puts real current somewhere with no return path to a
+                    # pad, or the solver itself did not converge.
+                    warnings.append(
+                        f"island {island['island_id']!r}: {unsolved_nodes} of "
+                        f"{len(island['nodes'])} node(s) not solved ({reason})"
+                        + (
+                            f" -- {stranded * 1e3:g} mA of the current model "
+                            "lands there with no pad to source it"
+                            if stranded
+                            else ""
+                        )
+                    )
+                else:
+                    quiet_no_pad_islands.append(island["island_id"])
+
+            island_report = {
+                "island_id": island["island_id"],
+                "solved": bool(solved_components),
+                "unsolved_reason": reason,
+                "pad_count": pad_counts.get(key, 0),
+                "instance_count": instance_counts.get(key, 0),
+                "current_a": round(
+                    float(sum(abs(v) for v in island_injections.values())), 12
+                ),
+                "reference_voltage_v": (
+                    solved_components[0]["reference_voltage_v"]
+                    if solved_components
+                    else None
+                ),
+                "pad_current_a": (
+                    round(float(sum(c["pad_current_a"] for c in solved_components)), 12)
+                    if solved_components
+                    else None
+                ),
+                "solved_node_count": solved_nodes,
+                "unsolved_node_count": unsolved_nodes,
+                "worst_case_droop_mv": (
+                    round(island_worst_droop * 1e3, 9)
+                    if island_worst_id is not None
+                    else None
+                ),
+                "worst_case_node_id": island_worst_id,
+                "iterations": max(
+                    (c["iterations"] for c in solution["components"]), default=0
+                ),
+                "residual": max(
+                    (c["residual"] for c in solution["components"]), default=0.0
+                ),
+                "nodes": [
+                    {
+                        "id": node["id"],
+                        "voltage_v": _round_or_none(
+                            solution["voltages"][node["id"]], 9
+                        ),
+                        "droop_mv": _round_or_none(
+                            _abs_or_none(solution["deviations"][node["id"]]), 9, 1e3
+                        ),
+                        # What the current model + pad snapping actually
+                        # attached here (signed: negative = drawn off this
+                        # net). Reported so a reader can reconstruct the exact
+                        # network that was solved -- see
+                        # tests/test_power_ir_cross_check.py, which rebuilds
+                        # it for ngspice from this field.
+                        "injected_current_a": round(
+                            float(island_injections.get(node["id"], 0.0)), 12
+                        ),
+                        "pad_voltage_v": island_pads.get(node["id"]),
+                    }
+                    for node in island["nodes"]
+                ],
+                "edges": [
+                    {
+                        "id": edge["id"],
+                        "current_a": _round_or_none(
+                            solution["edge_currents"][edge["id"]], 12
+                        ),
+                    }
+                    for edge in island["edges"]
+                ],
+            }
+            island_reports.append(island_report)
+            if solved_components:
+                solved_islands += 1
+
+            if island_worst_id is not None and (
+                net_worst is None or island_worst_droop > net_worst_droop
+            ):
+                node = next(n for n in island["nodes"] if n["id"] == island_worst_id)
+                net_worst_droop = island_worst_droop
+                net_worst = {
+                    "net": net_name,
+                    "island_id": island["island_id"],
+                    "node_id": island_worst_id,
+                    "layer": node["layer"],
+                    "x_um": node["x_um"],
+                    "y_um": node["y_um"],
+                    "voltage_v": _round_or_none(
+                        solution["voltages"][island_worst_id], 9
+                    ),
+                    "droop_mv": round(island_worst_droop * 1e3, 9),
+                }
+
+        net_reports.append(
+            {
+                "net": net_name,
+                "pad_count": sum(1 for pad in pads if pad["net"] == net_name),
+                "instance_count": sum(
+                    instance_counts.get((net_name, i), 0)
+                    for i in range(len(entry["islands"]))
+                ),
+                "current_a": round(float(net_current), 12),
+                "solved_island_count": solved_islands,
+                "unsolved_island_count": len(entry["islands"]) - solved_islands,
+                "worst_case_droop_mv": (
+                    round(net_worst_droop * 1e3, 9) if net_worst else None
+                ),
+                "worst_case_node": net_worst,
+                "islands": island_reports,
+            }
+        )
+
+        if net_worst and (
+            overall_worst is None or net_worst_droop > overall_worst_droop
+        ):
+            overall_worst_droop = net_worst_droop
+            overall_worst = net_worst
+
+    if quiet_no_pad_islands:
+        warnings.append(
+            f"{len(quiet_no_pad_islands)} island(s) have no pad and no modelled "
+            "current, so they have no DC operating point and were not solved "
+            f"(first: {quiet_no_pad_islands[0]!r}) -- see "
+            "ir_drop_map.nets[].islands[].unsolved_reason for the full list"
+        )
+
+    return {
+        "pads": pad_reports,
+        "instance_count": len(instances or []),
+        "total_current_a": round(
+            float(sum(instance["current_a"] for instance in instances or [])), 12
+        ),
+        "unsolved_current_a": round(float(unsolved_current_a), 12),
+        "solved_node_count": solved_node_total,
+        "unsolved_node_count": unsolved_node_total,
+        "worst_case": overall_worst,
+        "nets": net_reports,
+    }
+
+
+def _abs_or_none(value: float | None) -> float | None:
+    return None if value is None else abs(value)
+
+
+def _round_or_none(
+    value: float | None, digits: int, scale: float = 1.0
+) -> float | None:
+    return None if value is None else round(value * scale, digits)
+
+
 def run_power(
     file: str,
     spec_path: str,
     *,
     top: str | None = None,
 ) -> dict[str, Any]:
-    """Run ``klt power``'s resistive-network extraction end to end.
+    """Run ``klt power``'s resistive-network extraction (and, when the spec
+    asks for one, the static IR-drop solve) end to end.
 
     ``file`` is a routed GDSII/OASIS layout (e.g. a ``klt par`` output);
     ``spec_path`` is a JSON file with:
@@ -406,16 +881,25 @@ def run_power(
       ``stackup`` names -- ``{"name" (optional, defaults to "via<index>"),
       "layer": "<layer>/<datatype>", "between": ["<metal>", "<metal>"],
       "resistance_ohm"}``.
+    - ``pads`` (optional array, default ``[]``): where each net's supply is
+      delivered -- ``{"name" (optional), "net", "x_um", "y_um",
+      "voltage_v"}``.
+    - ``current_model`` (optional object): what each instance draws --
+      ``{"supply_net"/"ground_net" (optional per-model defaults),
+      "instances": [{"name" (optional), "x_um", "y_um", "current_a",
+      "supply_net"/"ground_net" (optional per-instance overrides)}]}``.
 
     ``top`` selects the top cell to analyse when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
     -- see ``docs/cli/layers.md``'s ``--top``).
 
     Returns a dict matching the documented ``klt power`` JSON schema (see
-    ``docs/cli/power.md``), including ``schema_version``. Raises
-    :class:`PowerError` for a malformed spec, an unresolvable layout/top
-    cell, or a request whose declared power nets match no geometry at all
-    (every requested net individually unmatched is reported in
+    ``docs/cli/power.md``), including ``schema_version``. ``ir_drop_map`` and
+    ``worst_case_droop_mv`` are ``None`` when the spec declares neither
+    ``pads`` nor a ``current_model`` (extraction only -- there is nothing to
+    solve). Raises :class:`PowerError` for a malformed spec, an unresolvable
+    layout/top cell, or a request whose declared power nets match no geometry
+    at all (every requested net individually unmatched is reported in
     ``warnings`` rather than raised, as long as at least one net resolved
     to at least one island).
     """
@@ -424,6 +908,8 @@ def run_power(
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
+    pads = _validate_pads(spec, spec_path, power_nets)
+    instances = _validate_current_model(spec, spec_path, power_nets)
 
     layout = load_layout(file, PowerError)
     top_cells = select_top_cells(layout, top, PowerError)
@@ -556,6 +1042,13 @@ def run_power(
             "layer map"
         )
 
+    ir_drop_map = None
+    worst_case_droop_mv = None
+    if pads or instances is not None:
+        ir_drop_map = _solve_ir_drop(networks, pads, instances, warnings)
+        worst_case = ir_drop_map["worst_case"]
+        worst_case_droop_mv = worst_case["droop_mv"] if worst_case else None
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -565,5 +1058,7 @@ def run_power(
         "node_count": sum(net_entry["node_count"] for net_entry in networks),
         "edge_count": sum(net_entry["edge_count"] for net_entry in networks),
         "island_count": total_islands,
+        "ir_drop_map": ir_drop_map,
+        "worst_case_droop_mv": worst_case_droop_mv,
         "warnings": warnings,
     }
