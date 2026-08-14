@@ -2063,6 +2063,23 @@ every same-named `*D_NET` block would overclaim. `klt place-and-route`'s
 own `post_route_spef` pass does this automatically, sourcing the DEF path
 from the same routed DEF `declared_pins` already reads.
 
+**Live-verified caveat (issue #961, 2026-08-14): the zero-ohm `*RES` leg
+above does not actually attach, in a real OpenSTA session.** The leg's own
+endpoint on the net side is the **bare net name** (`_031_` for net
+`_031_`), and OpenSTA's SPEF reader only accepts a bare net name as a
+**single-node** self-capacitance-to-ground reference — not as one of the
+two endpoints of a `*RES` or coupling `*CAP` entry, which must be either a
+`*CONN`-declared identifier (`*I <inst>:<pin>` / `*P <port>`) or an
+internal `<net>:<N>`-numbered node. `report_parasitic_annotation` against
+a live `gcd` run still reports 533 of 537 drivers as only partially
+annotated (down from 537 pre-`--def-net-connections`, a marginal
+improvement) — see
+[`docs/cli/place-and-route.md`](place-and-route.md)'s "`*CONN`
+device-terminal pin correlation" subsection for the isolated repro and the
+concrete next step (rework the RC topology so every two-terminal
+`*RES`/`*CAP` endpoint is a `*CONN`-declared identifier or a properly-scoped
+internal node number, never a bare net name).
+
 Direction on every declared `*PORTS` entry is always `B`
 (bidirectional/unspecified) — a GDS text label carries no I/O-direction
 metadata, so this is a declared "unknown," never a guessed `I`/`O`.

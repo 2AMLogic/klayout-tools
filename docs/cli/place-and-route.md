@@ -482,7 +482,7 @@ so the 537 / 537 net-name annotation ratio above is untouched.
 `tests/test_extract.py::test_declared_pins_restricts_spef_ports_on_the_routed_corpus`
 asserts both columns.
 
-### `*CONN` device-terminal pin correlation (issue #961, structurally implemented; live re-measurement pending)
+### `*CONN` device-terminal pin correlation (issue #961, structurally implemented; live re-measurement shows the acceptance criteria still unmet)
 
 Correct net *names* and a correct `*PORTS` list are necessary but not
 sufficient, and the finding below was the last **live-measured** state
@@ -529,16 +529,64 @@ only that each real design pin sits at the net's own lumped potential, which
 is what should let OpenSTA actually attach a net's capacitance to a real
 driver/load pin instead of discarding the `*D_NET` block outright.
 
-**This has been verified structurally, not live.** `tests/test_extract.py`
-asserts the exact written `*CONN`/`*RES` text for both a plain case and the
-duplicate-net-name skip, and defect 2 (coupling `*CAP` entries referencing
-the coupled net's own hub node rather than its bare name) is fixed and
-tested the same way — but no running Docker daemon was available while
-implementing this, so the `report_parasitic_annotation`/`worst_slack`
-before/after measurement above has **not** been re-run against a real
-OpenSTA session. Re-running it against `openroad/orfs:latest` is the
-concrete next step before rung 3 of the fidelity ladder below can be called
-a genuine higher-fidelity measurement.
+**This was verified structurally, not live, when it landed.**
+`tests/test_extract.py` asserts the exact written `*CONN`/`*RES` text for
+both a plain case and the duplicate-net-name skip, and defect 2 (coupling
+`*CAP` entries referencing the coupled net's own hub node rather than its
+bare name) is fixed and tested the same way — but no running Docker daemon
+was available while implementing it, so the
+`report_parasitic_annotation`/`worst_slack` before/after measurement above
+had **not** been re-run against a real OpenSTA session at merge time.
+
+**Re-measured live** (2026-08-14, `openroad/orfs:latest` OpenROAD
+`26Q3-1080-gab6fd26351`, sky130A, `gcd`, `seed: 1`, fresh
+`klt synthesize` → `klt place-and-route --post_route_spef` run, not the
+committed corpus fixture): `report_parasitic_annotation` in the same
+session that ran `read_spef` against the freshly written SPEF reports
+
+```
+Found 3 unannotated drivers.
+Found 533 partially unannotated drivers.
+```
+
+— a marginal improvement over the pre-`*CONN`-correlation baseline above
+(537 partially unannotated) but **not** the "no partially unannotated
+drivers" the acceptance criteria require: 533 of `gcd`'s 537 annotated
+drivers are still only partially wired to their RC network.
+
+**Root cause, isolated live**: the warnings are `[WARNING STA-1656] ...
+pin <net-name> not found`, and the unresolved name is consistently a
+**bare net name** — including, in a minimal 2-net reproduction built
+directly from `gcd_route.spef`'s own text, the *referencing* net's own
+name (e.g. net `_031_`'s own `*RES 1 _031_ _704_:D 0.000000` leg warns
+`pin _031_ not found`, with `_031_` being that same `*D_NET`'s own header
+name, defined on the very next line up — this is not a forward-reference
+ordering problem; reordering the two `*D_NET` blocks in the reproduction
+made no difference). OpenSTA's SPEF reader accepts a bare net name as a
+**single-node** self-capacitance-to-ground entry (`1 _031_ 2.247894`, no
+warning) but does **not** accept it as one of the two endpoints of a
+**two-node** `*RES` or coupling `*CAP` entry — only identifiers already
+introduced via that net's own `*CONN` section (`*I <inst>:<pin>` /
+`*P <port>`) resolve as a "pin" there. This repo's SPEF writer emits
+exactly that invalid shape: every zero-ohm `*RES` leg (`*RES 1 <net>
+<inst>:<pin> 0.000000`) and every coupling `*CAP` entry (`<n> <net>
+<other-net> <val>`) uses the **bare net name** as one endpoint, standing
+in for "the net's own lumped node" — a convention this repo's writer
+invented and unit-tests assert, but that OpenSTA's own `read_spef` does
+not recognize outside the single-node self-capacitance case.
+
+**Concrete next step**: the RC topology `_write_spef` emits needs
+reworking so every two-terminal `*RES`/`*CAP` entry's endpoints are always
+either a `*CONN`-declared identifier or a properly-scoped internal SPEF
+node number (`<net>:<N>`, IEEE 1481-1999's own convention for a net's
+non-pin internal nodes) — never a bare net name reused as an implicit hub.
+This is a topology change, not a one-line fix: it likely means restructuring
+the existing device-terminal ladder (`_031___t0`, … — themselves still
+present and still unresolved, per the `STA-1656` warnings above) to attach
+directly between `*CONN`-declared pins instead of through a synthesized
+hub node. Re-running this section's own live A/B protocol after that change
+is what will finally tell whether rung 3 of the fidelity ladder below reads
+pessimistically relative to rung 2, as the acceptance criteria require.
 
 Off by default: this adds real wall-clock cost on top of every existing
 `"route"`-stage caller (one more `klt extract --parasitics` pass over the
@@ -591,28 +639,31 @@ designs**, and — since issue #951 — resolves essentially every net name in
 it against the linked design.
 
 **The table above predates issue #961's own `*CONN` device-terminal pin
-correlation and has not yet been re-measured live against it.** As
-re-measured on 2026-08-14 (issue #951), rung 3 still reads optimistically
-relative to rung 2: `read_spef` matched the nets but discarded their RC
-networks, because the `*CAP`/`*RES` node names correlated to no pin in the
-design — see "`*CONN` device-terminal pin correlation" above, including the
-direct before/after `worst_slack` measurement showing `read_spef` changed
-nothing. Issue #961 (this doc's own remaining scope at that point) has since
-landed `def_net_connections`/`--def-net-connections`: `_post_route_spef_metrics`
-now parses the routed DEF's own `NETS` section and passes real
-`(instance, pin)` connectivity through to `klt extract --spef`, which emits
-`*I <inst>:<pin>` `*CONN` entries wired into each net's RC network — see
+correlation, and re-measuring it live against that fix (2026-08-14) shows
+rung 3 still reads identically to before the fix.** As measured on
+2026-08-14 (issue #951, pre-`*CONN`-correlation), rung 3 read
+optimistically relative to rung 2: `read_spef` matched the nets but
+discarded their RC networks, because the `*CAP`/`*RES` node names
+correlated to no pin in the design — see "`*CONN` device-terminal pin
+correlation" above, including the direct before/after `worst_slack`
+measurement showing `read_spef` changed nothing. Issue #961 (this doc's own
+remaining scope at that point) landed `def_net_connections`/
+`--def-net-connections`: `_post_route_spef_metrics` now parses the routed
+DEF's own `NETS` section and passes real `(instance, pin)` connectivity
+through to `klt extract --spef`, which emits `*I <inst>:<pin>` `*CONN`
+entries wired into each net's RC network — see
 [`docs/cli/extract.md`](extract.md)'s "SPEF export" section for the exact
-shape. **This was verified structurally (unit tests assert the written
-SPEF's exact `*CONN`/`*RES` text) but not against a live OpenSTA session —
-no running Docker daemon was available while implementing it.** The table
-above, and the "still reads optimistically" conclusion, therefore remain
-the last live-measured state; re-running the survey §5 A/B protocol
-(`report_parasitic_annotation` for unannotated-driver count,
-`worst_slack_ns` before/after `read_spef` in the same session) against a
-real `openroad/orfs:latest` container is the natural next step before this
-rung can be called a genuine higher-fidelity measurement rather than a
-completeness record. `mult8` is purely combinational with an output port
+shape. Re-measured live with that fix applied (2026-08-14, fresh
+`klt place-and-route --post_route_spef` run against `openroad/orfs:latest`,
+not the committed corpus fixture): `spef_sta.worst_slack_ns` /
+`.total_negative_slack_ns` on `gcd` came back `-1.72532` / `-63.8855` —
+**bit-identical** to the pre-`*CONN`-correlation row above, and
+`report_parasitic_annotation` still reports 533 (of 537) partially
+unannotated drivers (down from 537, a marginal change). Rung 3 does
+**not** yet read pessimistically relative to rung 2 — see "`*CONN`
+device-terminal pin correlation" above for the isolated root cause (a bare
+net name is not a valid two-terminal `*RES`/`*CAP` node reference for
+OpenSTA's SPEF reader) and the concrete next step. `mult8` is purely combinational with an output port
 named as its clock, so both post-route rungs correctly report OpenSTA's own
 unconstrained `1e+39` sentinel regardless.
 
