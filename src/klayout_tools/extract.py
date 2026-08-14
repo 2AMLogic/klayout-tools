@@ -498,6 +498,59 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
     return {name: tuple(pairs) for name, pairs in connections.items()}
 
 
+def _spef_net_topology_nodes(
+    spef_net: str, *, hub_differs: bool
+) -> tuple[str, str, int]:
+    """Plan the two SPEF node identifiers one ``*D_NET`` block's own RC star
+    needs -- ``net_node`` (where device-terminal legs, DEF-instance-pin legs,
+    and (when ``hub_differs``) the Gamma-shunt resistor all originate) and
+    ``hub_node`` (where the net's self- and coupling-capacitance attach) --
+    plus the next free internal-node index a caller should continue numbering
+    from for any additional per-block nodes (device-terminal legs).
+
+    **Issue #961's root-cause fix, live-verified against a real OpenSTA
+    session (six isolated reproductions built directly from a fresh
+    ``gcd_route.spef``, see ``docs/cli/place-and-route.md``'s "``*CONN``
+    device-terminal pin correlation" section for the full log):** OpenSTA's
+    SPEF reader only accepts a **colon-scoped, two-part identifier** --
+    ``*I <inst>:<pin>`` or a properly-scoped internal node ``<net>:<N>``
+    (IEEE 1481-1999's own convention for a net's non-pin internal nodes) --
+    as either endpoint of a two-node ``*RES``/coupling ``*CAP`` entry. A
+    *bare*, single-token identifier is **never** valid there, even when it
+    is the block's own ``*P``-declared port name and even within that same
+    block (live-reproduced: a zero-ohm ``*RES`` tying an internal hub node
+    to its own block's bare ``*P``-declared port name still warns ``pin
+    <port> not found``) -- contradicting this function's own earlier,
+    unverified assumption that a same-block ``*CONN``-declared bare name
+    would resolve. A bare net name remains valid only as a *single-node*
+    self-capacitance-to-ground reference (``*CAP 1 <net> <val>``, unrelated
+    to this function -- not exercised here since every hub below is always
+    colon-scoped too, for uniformity and because a coupling partner's hub
+    must be resolvable from a *different* block).
+
+    Given that, ``net_node`` is unconditionally a fresh internal node
+    ``<net>:1`` -- never the bare net name, regardless of port status.
+    ``hub_node`` is a second, distinct internal node (``<net>:2``) only when
+    the net's capacitance hub is not the net's own node (``hub_differs`` --
+    the no-device-terminal Gamma-shunt fallback, ``docs/cli/extract.md``'s
+    "The model: a star topology" section); when the hub *is* the net's own
+    node (the common case, at least one device terminal), ``hub_node`` is
+    simply ``net_node``. A port net's bare name still appears exactly once,
+    in its own ``*P <net> B`` ``*CONN`` line -- SPEF's block-level
+    "this net is also a port" association, which needs no separate resistor
+    tying it to the internal RC network (live-verified: omitting any such
+    tie is what actually clears the ``pin <port> not found`` warning above).
+    """
+    net_node = f"{spef_net}:1"
+    if hub_differs:
+        hub_node = f"{spef_net}:2"
+        next_idx = 3
+    else:
+        hub_node = net_node
+        next_idx = 2
+    return net_node, hub_node, next_idx
+
+
 def _write_spef(
     path: str,
     *,
@@ -523,6 +576,19 @@ def _write_spef(
     syntax instead. Nothing here re-derives or re-measures a single R or C
     value.
 
+    **Every two-terminal ``*RES``/``*CAP`` endpoint is a colon-scoped,
+    ``*CONN``-declared instance-pin identifier or a properly-scoped internal
+    node -- never a bare net or port name (issue #961's root-cause fix, live-
+    verified against a real OpenSTA session).** See
+    :func:`_spef_net_topology_nodes`'s own docstring for the exact
+    node-planning rule and the live reproductions that pinned it down: a bare
+    (single-token, no ``:``) identifier is never a valid two-node endpoint,
+    even when it is a ``*P``-declared port name in that *same* block --
+    contradicting this function's own earlier, unverified assumption to the
+    contrary. A bare net name remains valid only as the *unrelated*
+    single-node self-capacitance-to-ground case (not used by this function,
+    for uniformity -- see that docstring).
+
     **Net-name correlation, plus optional device-terminal ``*CONN``
     correlation (issue #948/#961 scope).** Each ``*D_NET`` block is keyed by
     ``entry["net"]`` -- the same layout-label-derived name ``docs/design/
@@ -532,26 +598,31 @@ def _write_spef(
     checks exactly that correlation (an explicit "N of M nets annotated"
     count) after loading this file. ``*CONN`` entries always name this
     net's own **port** membership (``*P <name> B``, when ``port_names``
-    marks it a top-level pin). When ``net_instance_pins`` is given (issue
-    #961's :func:`def_net_instance_pins`, sourced from the routed DEF's own
+    marks it a top-level pin) -- a block-level "this net is also a port"
+    association per the SPEF grammar, needing no separate resistor tying the
+    bare port name into the internal RC network (live-verified: attempting
+    such a tie is itself what produces a ``pin <port> not found`` warning).
+    When ``net_instance_pins`` is given (issue #961's
+    :func:`def_net_instance_pins`, sourced from the routed DEF's own
     ``NETS`` section rather than this repo's own layout-driven ``Device``
     naming, which has no asserted correlation to any digital-flow instance
     name -- the survey's own §4.1 "Risk" paragraph), it additionally emits
     one ``*I <inst>:<pin> B`` entry per real cell-instance connection **and**
     wires each into the RC network with a zero-ohm ``*RES`` leg from the
-    net's own primary node (``entry["net"]``) -- the same node every
-    device-terminal leg and Gamma-shunt fallback resistor already
-    originates from. This does not distribute resistance *between* DEF-level
-    pins (this model has no notion of which pin drives and which loads, nor
-    of the physical wire path between them); it makes every real design pin
-    on the net a genuine, resolvable node in the RC network at the net's own
-    lumped potential, which is what lets OpenSTA actually attach this net's
-    total capacitance to a real driver/load pin instead of discarding the
-    whole ``*D_NET`` block as unconnected. ``net_instance_pins`` omitted (or
-    a net absent from it) falls back to the pre-#961 port-only ``*CONN``
-    behavior. ``*CONN`` is optional per the SPEF grammar (IEEE 1481-1999),
-    so a net with neither a port nor any instance-pin correlation is still a
-    syntactically valid ``*D_NET`` block with no ``*CONN`` section at all.
+    net's own primary node (``net_node``, see :func:`_spef_net_topology_nodes`)
+    -- the same node every device-terminal leg and Gamma-shunt fallback
+    resistor already originates from. This does not distribute resistance
+    *between* DEF-level pins (this model has no notion of which pin drives
+    and which loads, nor of the physical wire path between them); it makes
+    every real design pin on the net a genuine, resolvable node in the RC
+    network at the net's own lumped potential, which is what lets OpenSTA
+    actually attach this net's total capacitance to a real driver/load pin
+    instead of discarding the whole ``*D_NET`` block as unconnected.
+    ``net_instance_pins`` omitted (or a net absent from it) falls back to the
+    pre-#961 port-only ``*CONN`` behavior. ``*CONN`` is optional per the SPEF
+    grammar (IEEE 1481-1999), so a net with neither a port nor any
+    instance-pin correlation is still a syntactically valid ``*D_NET`` block
+    with no ``*CONN`` section at all.
 
     **Duplicate net names are a known, inherited limitation -- and
     ``net_instance_pins`` correlation is skipped entirely for them.** A
@@ -574,27 +645,32 @@ def _write_spef(
     signal nets (which are not un-strapped, so never collide this way in
     practice).
 
-    Internal (non-port) nodes reuse the model's own naming verbatim: the
-    star's hub is either ``entry["net"]`` itself (the common case, when the
-    net has at least one device terminal) or ``entry["hub_net"]`` (the
-    Gamma-shunt fallback's synthesized node, when it has none); each
-    terminal's own ``leg_net`` becomes one further internal node bridged to
-    the hub by one ``*RES`` card -- the identical star topology
-    ``docs/cli/extract.md``'s "The model: a star topology" section
-    documents, expressed as SPEF resistor cards instead of SPICE ``R``
-    device cards.
+    **Internal (non-port) nodes are numbered ``<net>:<N>``, scoped to their
+    own ``*D_NET`` block (issue #961's root-cause fix), not named after the
+    model's own internal net names.** :func:`_spef_net_topology_nodes` plans
+    each block's ``net_node`` (where device-terminal legs, DEF-instance-pin
+    legs, and the Gamma-shunt resistor all originate) and ``hub_node`` (where
+    self- and coupling-capacitance attach); every device terminal's own
+    ``leg_net`` (a KLayout-internal net name, e.g. ``_031___t0``, that no
+    ``*CONN`` entry anywhere ever declares) becomes one further ``<net>:<N>``
+    node of its own, bridged to ``net_node`` by one ``*RES`` card -- the
+    identical star topology ``docs/cli/extract.md``'s "The model: a star
+    topology" section documents, expressed as SPEF resistor cards instead of
+    SPICE ``R`` device cards, but with SPEF-legal node identifiers instead of
+    the model's own (SPICE-legal, SPEF-illegal-as-a-two-node-endpoint)
+    internal net names.
 
-    **Coupling ``*CAP`` entries reference the coupled net's own hub node,
-    not its bare name (issue #961 defect 2).** The two coincide in the
-    common case (a net with at least one device terminal has ``hub_net ==
-    net``), but a Gamma-shunt-fallback net's actual self-capacitance node is
-    its synthesized ``hub_net``, not ``net`` itself -- referencing the bare
-    ``net`` from a *different* ``*D_NET`` block's coupling ``*CAP`` line
-    would name a node that block never declares as carrying that
-    capacitance. A ``net -> hub`` lookup built from every entry (first
-    occurrence wins for a duplicated net name, the same tolerance this
-    function's other duplicate-name handling already applies) resolves each
-    coupling partner to its real hub before it is written.
+    **Coupling ``*CAP`` entries reference the coupled net's own ``hub_node``,
+    not its bare name (issue #961 defect 2).** A Gamma-shunt-fallback net's
+    ``hub_node`` differs from its own ``net_node``; referencing the bare
+    ``net`` name (or even the bare ``hub_net`` name) from a *different*
+    ``*D_NET`` block's coupling ``*CAP`` line would both name an undeclared
+    two-node endpoint (defect 2) and repeat the general bare-name-as-two-node-
+    endpoint defect this function's fix addresses. A ``net -> hub_node``
+    lookup built from every entry's own planned topology (first occurrence
+    wins for a duplicated net name, the same tolerance this function's other
+    duplicate-name handling already applies) resolves each coupling partner
+    to its real, SPEF-legal hub node before it is written.
 
     Every identifier written -- ``*PORTS`` entries, ``*D_NET``/``*P`` names,
     and every ``*CAP``/``*RES`` node -- is rendered through
@@ -624,16 +700,27 @@ def _write_spef(
     # sort-by-name order).
     coupling_by_net: dict[str, list[dict[str, Any]]] = {}
     seen_pairs: set[tuple[str, str]] = set()
-    # `net -> hub` lookup (first occurrence wins for a duplicated net name)
-    # and a name-occurrence count -- issue #961 defects 2 and (for
+    # `net -> hub_node` lookup (first occurrence wins for a duplicated net
+    # name) and a name-occurrence count -- issue #961 defects 2 and (for
     # `net_instance_pins`) the duplicate-name guard, see this function's
-    # docstring for both.
+    # docstring for both. `hub_node` is the SPEF-legal internal-node
+    # identifier `_spef_net_topology_nodes` would plan for that entry's own
+    # block (`<net>:<N>`) -- never the model's own bare internal net name
+    # (not a valid two-node `*RES`/`*CAP` endpoint) and never the bare port
+    # name either, even for a port net (also not a valid two-node endpoint,
+    # live-verified -- see that function's own docstring for both root-cause
+    # findings).
     hub_by_net_name: dict[str, str] = {}
     name_counts: dict[str, int] = {}
     for entry in parasitics_report["nets"]:
         this_net = entry["net"]
         name_counts[this_net] = name_counts.get(this_net, 0) + 1
-        hub_by_net_name.setdefault(this_net, entry["hub_net"])
+        if this_net not in hub_by_net_name:
+            _, this_hub_node, _ = _spef_net_topology_nodes(
+                _spef_name(this_net),
+                hub_differs=entry["hub_net"] != this_net,
+            )
+            hub_by_net_name[this_net] = this_hub_node
         for coupled in entry.get("coupled", []):
             pair_key = tuple(sorted((this_net, coupled["net"])))
             if pair_key in seen_pairs:
@@ -682,7 +769,20 @@ def _write_spef(
         # extracted net names routinely carry (see that helper's docstring
         # for the live `read_spef` parse error this prevents).
         spef_net = _spef_name(net)
-        spef_hub = _spef_name(hub)
+        is_port = net in port_name_set
+        hub_differs = hub != net
+
+        # Issue #961's root-cause fix: `net_node`/`hub_node` are always
+        # SPEF-legal `<net>:<N>` internal-node two-node-entry endpoints --
+        # never the model's own bare internal net name, and never the bare
+        # port name either (even for a port net, and even within that same
+        # block -- live-verified, see this function's docstring and
+        # `_spef_net_topology_nodes`'s). `next_node_idx` is where any
+        # further per-block internal nodes (device-terminal legs, below)
+        # continue numbering from.
+        net_node, hub_node, next_node_idx = _spef_net_topology_nodes(
+            spef_net, hub_differs=hub_differs
+        )
 
         # Issue #961: real cell-instance connectivity from the routed DEF's
         # own `NETS` section, restricted to net names that are unambiguous
@@ -697,7 +797,7 @@ def _write_spef(
         lines.append("")
         lines.append(f"*D_NET {spef_net} {total_cap_ff:.6f}")
         conn_lines: list[str] = []
-        if net in port_name_set:
+        if is_port:
             conn_lines.append(f"*P {spef_net} B")
         for inst, pin in instance_pins:
             # Direction is unknown without a LEF pin-direction lookup (the
@@ -709,33 +809,43 @@ def _write_spef(
             lines.append("*CONN")
             lines += conn_lines
 
-        cap_lines: list[str] = [f"1 {spef_hub} {entry['capacitance_ff']:.6f}"]
+        cap_lines: list[str] = [f"1 {hub_node} {entry['capacitance_ff']:.6f}"]
         for i, coupled in enumerate(own_coupling, start=2):
-            # Issue #961 defect 2: reference the coupled net's own hub node,
-            # not its bare name -- see this function's docstring, "Coupling
-            # `*CAP` entries" paragraph.
-            coupled_hub = hub_by_net_name.get(coupled["net"], coupled["net"])
+            # Issue #961 defect 2: reference the coupled net's own hub
+            # *node* (a SPEF-legal identifier), not its bare name -- see
+            # this function's docstring, "Coupling `*CAP` entries"
+            # paragraph.
+            coupled_hub_node = hub_by_net_name.get(
+                coupled["net"], _spef_name(coupled["net"])
+            )
             cap_lines.append(
-                f"{i} {spef_hub} {_spef_name(coupled_hub)} "
-                f"{coupled['capacitance_ff']:.6f}"
+                f"{i} {hub_node} {coupled_hub_node} {coupled['capacitance_ff']:.6f}"
             )
 
         res_lines: list[str] = []
         next_res_idx = 1
+        node_idx = next_node_idx
         if terminals:
             for terminal in terminals:
+                # Each device terminal's own `leg_net` (a KLayout-internal
+                # name, e.g. `_031___t0`, that no `*CONN` entry ever
+                # declares) becomes a fresh `<net>:<N>` internal node rather
+                # than being referenced by its own bare name -- issue #961's
+                # root-cause fix, see this function's docstring.
+                leg_node = f"{spef_net}:{node_idx}"
+                node_idx += 1
                 res_lines.append(
-                    f"{next_res_idx} {spef_net} {_spef_name(terminal['leg_net'])} "
+                    f"{next_res_idx} {net_node} {leg_node} "
                     f"{terminal['resistance_ohm']:.6f}"
                 )
                 next_res_idx += 1
-        elif hub != net:
+        elif hub_differs:
             # No-device-terminal Gamma-shunt fallback (docs/cli/extract.md's
             # "The model: a star topology" section): a single resistor from
-            # the net to its own synthesized hub node -- the only case where
-            # `hub_net` differs from `net` itself.
+            # the net's own node to its (now internal-node-numbered) hub --
+            # the only case where `hub_node` differs from `net_node`.
             res_lines.append(
-                f"{next_res_idx} {spef_net} {spef_hub} {entry['resistance_ohm']:.6f}"
+                f"{next_res_idx} {net_node} {hub_node} {entry['resistance_ohm']:.6f}"
             )
             next_res_idx += 1
         for inst, pin in instance_pins:
@@ -745,7 +855,7 @@ def _write_spef(
             # does not attempt to apportion resistance between DEF-level
             # pins.
             conn_node = f"{_spef_name(inst)}:{_spef_name(pin)}"
-            res_lines.append(f"{next_res_idx} {spef_net} {conn_node} 0.000000")
+            res_lines.append(f"{next_res_idx} {net_node} {conn_node} 0.000000")
             next_res_idx += 1
 
         lines.append("*CAP")

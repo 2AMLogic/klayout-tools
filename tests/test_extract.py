@@ -9381,11 +9381,16 @@ def test_spef_cap_and_res_cards_match_parasitics_report(tmp_path):
     y_block_end = text.index("*END", y_block_start)
     y_block = text[y_block_start:y_block_end]
 
-    assert f"1 Y {y_entry['capacitance_ff']:.6f}" in y_block
+    # `Y`'s own primary node is always the internal `Y:1` node -- never the
+    # bare net/port name, even though `Y` is itself a declared port (issue
+    # #961's root-cause fix: a bare identifier, even a `*P`-declared one, is
+    # never a valid two-node `*RES`/`*CAP` endpoint for a real OpenSTA
+    # `read_spef` session, live-verified). Each device-terminal leg becomes
+    # a further internal `Y:<N>` node rather than being referenced by the
+    # model's own `leg_net` name. See `_spef_net_topology_nodes`.
+    assert f"1 Y:1 {y_entry['capacitance_ff']:.6f}" in y_block
     for i, terminal in enumerate(y_entry["terminals"], start=1):
-        assert (
-            f"{i} Y {terminal['leg_net']} {terminal['resistance_ohm']:.6f}" in y_block
-        )
+        assert f"{i} Y:1 Y:{i + 1} {terminal['resistance_ohm']:.6f}" in y_block
 
 
 def test_spef_coupling_cap_emitted_once_between_hub_nodes(tmp_path):
@@ -9405,14 +9410,24 @@ def test_spef_coupling_cap_emitted_once_between_hub_nodes(tmp_path):
     if para["cc_count"] == 0:
         pytest.skip("this fixture has no vertical-overlap coupling to cover")
     text = spef_path.read_text()
+    # A two-terminal `*CAP` card has four space-separated fields (`<idx>
+    # <hub_node> <coupled_hub_node> <val>`); the single-node self-cap card
+    # (index 1) has only three. Counted by field shape rather than by
+    # matching a bare coupled net name -- since issue #961's root-cause fix,
+    # a coupling `*CAP` card's node fields are SPEF-legal internal nodes
+    # (`<net>:<N>`) or `*CONN`-declared port names, never a bare internal
+    # net name (see `_spef_net_topology_nodes`).
     total_two_terminal_cap_cards = 0
     for entry in para["nets"]:
         block_start = text.index(f"*D_NET {entry['net']} ")
         block_end = text.index("*END", block_start)
         block = text[block_start:block_end]
-        for coupled in entry["coupled"]:
-            marker = f" {coupled['net']} {coupled['capacitance_ff']:.6f}"
-            if marker in block:
+        cap_start = block.index("*CAP")
+        cap_end = block.index("*RES") if "*RES" in block else len(block)
+        for line in block[cap_start:cap_end].splitlines():
+            if line == "*CAP" or not line.strip():
+                continue
+            if len(line.split()) == 4:
                 total_two_terminal_cap_cards += 1
     assert total_two_terminal_cap_cards == para["cc_count"]
 
@@ -9455,7 +9470,15 @@ def test_spef_gamma_shunt_fallback_uses_hub_net_node(tmp_path):
     block_start = text.index(f"*D_NET {entry['net']} ")
     block_end = text.index("*END", block_start)
     block = text[block_start:block_end]
-    assert f"1 DANGLE {entry['hub_net']} {entry['resistance_ohm']:.6f}" in block
+    # `DANGLE`'s own primary node is always the internal `DANGLE:1` node --
+    # never the bare net/port name, even though `DANGLE` is itself a
+    # declared port (issue #961's root-cause fix, live-verified: a bare
+    # identifier, even a `*P`-declared one, is never a valid two-node
+    # `*RES`/`*CAP` endpoint for a real OpenSTA `read_spef` session). The
+    # synthesized Gamma-shunt hub becomes a second internal `DANGLE:2` node
+    # rather than being referenced by the model's own `hub_net` name. See
+    # `_spef_net_topology_nodes`.
+    assert f"1 DANGLE:1 DANGLE:2 {entry['resistance_ohm']:.6f}" in block
 
 
 # --------------------------------------------------------------------------- #
@@ -9604,12 +9627,17 @@ def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     assert "*CONN" in block
     assert "*I u1:A B" in block
     assert "*I u2:Y B" in block
-    # The device-terminal leg keeps its own (non-zero) resistance; the two
-    # new connectivity legs are zero-ohm, appended after it, indices
-    # continuing rather than restarting.
-    assert "1 net1 net1_\\$1_G 5.000000" in block
-    assert "2 net1 u1:A 0.000000" in block
-    assert "3 net1 u2:Y 0.000000" in block
+    # `net1` is not a declared port, so its own primary node is the internal
+    # `net1:1` node (issue #961's root-cause fix -- a bare, undeclared net
+    # name is not a valid two-node `*RES` endpoint); the device-terminal
+    # leg's own `leg_net` name becomes a further internal `net1:2` node
+    # rather than being referenced directly. The device-terminal leg keeps
+    # its own (non-zero) resistance; the two new connectivity legs are
+    # zero-ohm, appended after it, indices continuing rather than
+    # restarting.
+    assert "1 net1:1 net1:2 5.000000" in block
+    assert "2 net1:1 u1:A 0.000000" in block
+    assert "3 net1:1 u2:Y 0.000000" in block
 
 
 def test_spef_conn_skips_duplicate_named_nets(tmp_path):
@@ -9706,7 +9734,15 @@ def test_spef_coupling_cap_references_coupled_net_hub_not_bare_name(tmp_path):
     sig_block_start = text.index("*D_NET sig ")
     sig_block_end = text.index("*END", sig_block_start)
     sig_block = text[sig_block_start:sig_block_end]
-    assert "sig noterm__hub 0.100000" in sig_block
+    # `noterm` is not a declared port, so its `*D_NET noterm` block's own hub
+    # is the internal `noterm:2` node (`noterm:1` is its own `net_node`,
+    # bridged to the hub by the Gamma-shunt `*RES`) -- never the model's own
+    # bare `hub_net` name (`noterm__hub`), which is not `*CONN`-declared
+    # anywhere and is not a valid two-node `*CAP` endpoint (issue #961's
+    # root-cause fix, on top of defect 2's "reference the real hub, not the
+    # bare net name" fix).
+    assert "sig:1 noterm:2 0.100000" in sig_block
+    assert "sig noterm__hub 0.100000" not in sig_block
     assert "sig noterm 0.100000" not in sig_block
 
 
@@ -9824,9 +9860,18 @@ def test_spef_escapes_reserved_characters_in_every_identifier_position(tmp_path)
     assert r"*D_NET a_in\[13\] " in text
     assert r"a_in\[13\] B" in text  # *PORTS entry and *CONN *P entry
     assert r"*P a_in\[13\] B" in text
-    assert r"1 \$1009 0.206207" in text  # ground *CAP card on the hub node
-    assert r"\$1009 a_in\[13\] 0.011843" in text  # coupling *CAP card
-    assert r"1 \$1009 \$1009__t0 62.626000" in text  # *RES leg card
+    # `$1009`'s own primary node is always the internal `\$1009:1` node
+    # (issue #961's root-cause fix); the ground `*CAP` card and the coupling
+    # `*CAP` card both attach there. The coupling card references
+    # `a_in[13]`'s own internal `a_in\[13\]:1` node -- never its bare
+    # `*CONN`-declared port name, even though `a_in[13]` *is* a port
+    # (live-verified: a bare identifier is never a valid two-node endpoint,
+    # even a same-block `*P`-declared one). The device-terminal leg becomes
+    # a further internal `\$1009:2` node rather than being referenced by its
+    # own bare `leg_net` name.
+    assert r"1 \$1009:1 0.206207" in text  # ground *CAP card on the hub node
+    assert r"\$1009:1 a_in\[13\]:1 0.011843" in text  # coupling *CAP card
+    assert r"1 \$1009:1 \$1009:2 62.626000" in text  # *RES leg card
     # No bare reserved character survives anywhere in the body.
     for line in text.splitlines():
         if line.startswith("*") and not line.startswith("*D_NET"):

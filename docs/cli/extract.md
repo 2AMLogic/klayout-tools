@@ -2047,8 +2047,8 @@ since DEF preserves the flow's original names verbatim (unlike this repo's
 own `Device` naming). For every net whose name appears exactly once in this
 extraction (see the duplicate-name caveat below), this emits one additional
 `*I <inst>:<pin> B` `*CONN` entry per connection and wires it into the RC
-network with a zero-ohm `*RES` leg from the net's own primary node — this
-does **not** model resistance *between* DEF-level pins (this repo's
+network with a zero-ohm `*RES` leg from the net's own primary internal node
+— this does **not** model resistance *between* DEF-level pins (this repo's
 extracted parasitics have no notion of which pin drives a net or the
 physical wire path to each load), only that each real design pin sits at
 the net's own lumped potential. This is what lets a real OpenSTA
@@ -2063,22 +2063,42 @@ every same-named `*D_NET` block would overclaim. `klt place-and-route`'s
 own `post_route_spef` pass does this automatically, sourcing the DEF path
 from the same routed DEF `declared_pins` already reads.
 
-**Live-verified caveat (issue #961, 2026-08-14): the zero-ohm `*RES` leg
-above does not actually attach, in a real OpenSTA session.** The leg's own
-endpoint on the net side is the **bare net name** (`_031_` for net
-`_031_`), and OpenSTA's SPEF reader only accepts a bare net name as a
-**single-node** self-capacitance-to-ground reference — not as one of the
-two endpoints of a `*RES` or coupling `*CAP` entry, which must be either a
-`*CONN`-declared identifier (`*I <inst>:<pin>` / `*P <port>`) or an
-internal `<net>:<N>`-numbered node. `report_parasitic_annotation` against
-a live `gcd` run still reports 533 of 537 drivers as only partially
-annotated (down from 537 pre-`--def-net-connections`, a marginal
-improvement) — see
+**Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped,
+properly-internal-node-numbered identifier — never a bare net or port name
+(issue #961's root-cause topology fix, live-verified 2026-08-14).**
+OpenSTA's SPEF reader only accepts a bare net name as a **single-node**
+self-capacitance-to-ground reference — never as one of the two endpoints of
+a `*RES` or coupling `*CAP` entry, and (live-verified, contradicting an
+earlier assumption here) **not even a `*CONN`-declared `*P <port>` bare
+name referenced from within that same block**. Only a colon-scoped,
+two-part identifier resolves there: `*I <inst>:<pin>` (a real DEF-derived
+instance pin) or `<net>:<N>` (a properly-scoped internal SPEF node, IEEE
+1481-1999's own convention for a net's non-pin internal nodes — and,
+live-verified, resolvable even when referenced *across* `*D_NET` blocks by
+a coupling `*CAP` entry, contrary to what a purely-per-block reading of the
+grammar might suggest). Every `*D_NET` block therefore plans its own
+`net_node` (`<net>:1`, unconditionally — where every device-terminal leg,
+`*I <inst>:<pin>` connectivity leg, and the no-device-terminal Gamma-shunt
+resistor originate) and `hub_node` (`<net>:2` only in that Gamma-shunt
+case, otherwise the same as `net_node` — where the self- and every coupling
+`*CAP` attach); a `*P <port> B` `*CONN` entry is still emitted for a
+declared port, but is a pure block-level "this net is also a port"
+association needing no resistor tying it into the internal RC network
+(live-verified: attempting one is what produces a `pin <port> not found`
+warning). `report_parasitic_annotation` against a live `gcd` run now
+reports **52** of 537 drivers as partially annotated — down from 533
+before this topology rework (a better than 90% reduction) — and
+`spef_sta.worst_slack_ns` now genuinely differs, and reads more
+pessimistically, across `read_spef` for the first time. The residual 52 is
+narrowly isolated to connections directly adjacent to a top-level design
+port pin (an input port's fanout, or an internal driver feeding a top-level
+output port) — see
 [`docs/cli/place-and-route.md`](place-and-route.md)'s "`*CONN`
-device-terminal pin correlation" subsection for the isolated repro and the
-concrete next step (rework the RC topology so every two-terminal
-`*RES`/`*CAP` endpoint is a `*CONN`-declared identifier or a properly-scoped
-internal node number, never a bare net name).
+device-terminal pin correlation" subsection for the full live-verification
+log (six isolated OpenSTA reproductions), the exact node-planning rule,
+and the residual's own isolated repro, whose root mechanism inside
+`report_parasitic_annotation` was not found despite several further live
+experiments.
 
 Direction on every declared `*PORTS` entry is always `B`
 (bidirectional/unspecified) — a GDS text label carries no I/O-direction
