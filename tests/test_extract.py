@@ -9550,3 +9550,54 @@ def test_def_net_names_recovers_the_routed_corpus_designs_own_net_names(
         for warning in def_names_report["warnings"]
         if "--def-net-names" in warning
     ]
+
+
+def test_declared_pins_restricts_spef_ports_on_the_routed_corpus(tmp_path_factory):
+    """Acceptance measurement for issue #961's defect 1, on the real routed
+    artifact. `--def-net-names` (test above) gives *every* routed net a real
+    name, and `Netlist.make_top_level_pins()` promotes every named net to a
+    top-level circuit pin -- so the SPEF written from that extraction
+    declared **463** `*PORTS` entries for `gcd`, i.e. ordinary internal nets
+    like `_019_` announced to `read_spef` as design boundary ports.
+
+    Passing the design's real port list as `declared_pins` (what
+    `place_and_route._def_pin_net_names` recovers from the routed DEF's own
+    `PINS` section) cuts that to exactly the 52 ports of
+    `examples/functional-verification/gcd.v` plus the two power nets -- while
+    leaving the `*D_NET` set bit-for-bit identical, so issue #951's net-name
+    annotation ratio is untouched by the fix.
+    """
+    tmp_path = tmp_path_factory.mktemp("gcd_declared_pins_spef")
+    layout_path = str(CORPUS_DIR / "place_and_route" / "gcd.gds.gz")
+
+    design_ports = {"clk", "rst_n", "start", "done", "VPWR", "VGND"}
+    for bit in range(16):
+        design_ports |= {f"a_in[{bit}]", f"b_in[{bit}]", f"result[{bit}]"}
+
+    spef_path = tmp_path / "gcd_declared_pins.spef"
+    run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "gcd_declared_pins.spice"),
+        parasitics=True,
+        spef_output=str(spef_path),
+        def_net_names=True,
+        declared_pins=frozenset(design_ports),
+    )
+    spef_text = spef_path.read_text()
+
+    ports_block = re.search(r"^\*PORTS$(.*?)^\*D_NET ", spef_text, re.M | re.S)
+    assert ports_block is not None
+    declared = {
+        # `*PORTS` entries are `<escaped name> <direction>`; unescape the
+        # SPEF special-character backslashes to compare against design names.
+        line.split()[0].replace("\\", "")
+        for line in ports_block.group(1).splitlines()
+        if line.strip()
+    }
+    assert declared == design_ports
+
+    # Unchanged by the restriction: the same 1392 `*D_NET` blocks the
+    # unrestricted extraction writes (measured on this same fixture), so the
+    # demotion moves nets out of `*PORTS` without dropping any parasitics.
+    assert len(re.findall(r"^\*D_NET ", spef_text, re.M)) == 1392
