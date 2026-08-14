@@ -847,6 +847,27 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--def-net-connections",
+        dest="def_net_connections",
+        default=None,
+        metavar="PATH",
+        help=(
+            "correlate --spef's `*D_NET` blocks against real cell-instance "
+            "pins by parsing this routed DEF file's own `NETS` section "
+            "(issue #961, Epic #700 Phase 3) -- emits `*I <inst>:<pin>` "
+            "`*CONN` entries (in addition to any `*P` port entry) and wires "
+            "each into the RC network with a zero-ohm connectivity leg from "
+            "the net's own node, which is what lets a real OpenSTA "
+            "`read_spef` session actually attach this net's parasitics to a "
+            "design pin instead of discarding the whole `*D_NET` block as "
+            "unconnected. A net name that appears more than once in the "
+            "extraction (e.g. several un-strapped `VGND` islands) is "
+            "skipped -- see docs/cli/extract.md's 'SPEF export' section. "
+            "Requires --spef. Off by default -- byte-identical to today's "
+            "behavior."
+        ),
+    )
+    extract_parser.add_argument(
         "--top-cell-pins",
         dest="top_cell_pins",
         action="store_true",

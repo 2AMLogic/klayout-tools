@@ -367,6 +367,107 @@ def _spef_name(name: str) -> str:
     return _SPEF_ESCAPE_RE.sub(lambda m: "\\" + m.group(0), name)
 
 
+#: Matches a DEF ``NETS`` section's opening line (``NETS <numNets> ;``,
+#: LEF/DEF 5.8 Language Reference section 6.9) -- anchored at line start so a
+#: ``SPECIALNETS <n> ;`` line (a different section, same trailing shape)
+#: never matches: after the leading whitespace the next literal characters
+#: must be exactly ``NETS``, which ``SPECIALNETS`` does not start with.
+_DEF_NETS_BEGIN_RE = re.compile(r"^\s*NETS\s+\d+\s*;\s*$")
+#: Matches the section's closing ``END NETS`` line -- same anchoring
+#: argument keeps it from matching ``END SPECIALNETS``.
+_DEF_NETS_END_RE = re.compile(r"^\s*END\s+NETS\s*$")
+#: Matches one net record's opening line, ``- <netName> ...`` -- a new
+#: record always starts a fresh line inside the section (LEF/DEF grammar),
+#: mirroring ``place_and_route.py``'s ``_DEF_PIN_START_RE``.
+_DEF_NET_START_RE = re.compile(r"^\s*-\s+(\S+)")
+#: Matches one ``( <ref> <pin> )`` connection tuple inside a net record's
+#: body -- ``<ref>`` is either an instance name or the literal ``PIN`` (a
+#: top-level design port connection, DEF's own convention, already covered
+#: by ``place_and_route.py``'s ``_def_pin_net_names``/``declared_pins`` and
+#: excluded by :func:`def_net_instance_pins` below).
+_DEF_NET_CONN_RE = re.compile(r"\(\s*(\S+)\s+(\S+)\s*\)")
+
+
+def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Parse ``def_path``'s own ``NETS`` section for each net's real
+    ``(instance, pin)`` connectivity (issue #961's device-terminal
+    ``*CONN`` correlation): a small, targeted scan in the same style as
+    ``place_and_route.py``'s ``_def_pin_net_names`` (not a general DEF
+    parser -- this repo already reads DEF geometry through
+    ``klayout.db``'s own LEF/DEF reader for every other purpose).
+
+    Each ``NETS`` record is ``- <netName> ( <ref> <pin> ) ... ;``, where
+    ``<ref>`` is either a cell instance name or the literal ``PIN`` (a
+    top-level design-port connection -- already covered by
+    :func:`_write_spef`'s existing ``port_names``/``*P`` handling via
+    ``place_and_route.py``'s ``declared_pins``, so ``PIN`` entries are
+    dropped here rather than double-reported). A record may span several
+    lines (a high-fanout net wraps in a real routed DEF), so this
+    accumulates a record's own text across lines until the terminating
+    ``;``, matching ``_def_pin_net_names``'s own multi-line handling.
+
+    These are exactly the ``<inst>``/``<pin>`` identifiers OpenSTA's own
+    linked gate-level design already uses (DEF preserves the flow's
+    original instance/pin names verbatim), which is what makes
+    ``*I <inst>:<pin>`` entries built from this data resolvable against a
+    real OpenSTA session -- unlike this repo's own layout-driven ``Device``
+    naming (``$1517:G``), which has no asserted correlation to any
+    digital-flow instance name (see :func:`_write_spef`'s docstring).
+
+    Returns ``{}`` (never raises) for a missing file, a DEF with no
+    ``NETS`` section, or a section that parses to no connections at all --
+    the caller's own "no restriction" default, matching
+    :func:`place_and_route._def_pin_net_names`'s "absence is not proof of
+    zero" posture but expressed as an empty mapping (every lookup is a
+    ``.get(name, ())`` at the call site, so there is no behavioral
+    difference between "absent" and "empty" here the way there is for
+    ``declared_pins``, which must distinguish "no restriction" from "empty
+    restriction").
+    """
+    try:
+        with open(def_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return {}
+
+    connections: dict[str, list[tuple[str, str]]] = {}
+    in_nets = False
+    current_net: str | None = None
+    current_body: list[str] = []
+
+    def _flush() -> None:
+        nonlocal current_net, current_body
+        if current_net is not None and current_body:
+            pairs = [
+                (ref, pin)
+                for ref, pin in _DEF_NET_CONN_RE.findall(" ".join(current_body))
+                if ref != "PIN"
+            ]
+            if pairs:
+                connections.setdefault(current_net, []).extend(pairs)
+        current_net = None
+        current_body = []
+
+    for line in text.splitlines():
+        if not in_nets:
+            if _DEF_NETS_BEGIN_RE.match(line):
+                in_nets = True
+            continue
+        if _DEF_NETS_END_RE.match(line):
+            _flush()
+            break
+        start_match = _DEF_NET_START_RE.match(line)
+        if start_match:
+            _flush()
+            current_net = start_match.group(1)
+        if current_net is not None:
+            current_body.append(line)
+        if line.rstrip().endswith(";"):
+            _flush()
+
+    return {name: tuple(pairs) for name, pairs in connections.items()}
+
+
 def _write_spef(
     path: str,
     *,
@@ -374,6 +475,7 @@ def _write_spef(
     klt_version: str | None,
     parasitics_report: Mapping[str, Any],
     port_names: Iterable[str],
+    net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> None:
     """Write ``parasitics_report`` (an already-computed :func:`_inject_parasitics`
     summary -- see ``run_extract``'s ``spef_output``/``klt extract --spef``
@@ -391,37 +493,56 @@ def _write_spef(
     syntax instead. Nothing here re-derives or re-measures a single R or C
     value.
 
-    **Net-name correlation only, by design (issue #948 scope).** Each
-    ``*D_NET`` block is keyed by ``entry["net"]`` -- the same layout-label-
-    derived name ``docs/design/post-route-sta-survey.md`` §2.1 flags as the
-    one identifier an STA tool reading this file needs to resolve against
-    its own (Verilog-derived) flat net list; ``docs/cli/place-and-route.md``'s
-    ``read_spef`` wiring checks exactly that correlation (an explicit "N of M
-    nets annotated" count) after loading this file. ``*CONN`` entries name
-    only this net's own **port** membership (``*P <name> B``, when
-    ``port_names`` marks it a top-level pin) -- device-terminal (``*I
-    <inst>:<pin>``) connectivity is deliberately **not** emitted, because the
-    per-device names inside ``parasitics_report`` are this repo's own
-    layout-driven ``Device`` naming (``$1``, ``$2``, ...), never asserted
-    anywhere to correlate with a digital flow's own linked-design instance
-    names -- a materially harder, and explicitly out-of-scope, correlation
-    question (the survey's own §4.1 "Risk" paragraph). ``*CONN`` is optional
-    per the SPEF grammar (IEEE 1481-1999), so this narrower, net-name-only
-    form is still a syntactically valid file; nothing downstream reads an
-    ``*I`` entry this writer never asserted.
+    **Net-name correlation, plus optional device-terminal ``*CONN``
+    correlation (issue #948/#961 scope).** Each ``*D_NET`` block is keyed by
+    ``entry["net"]`` -- the same layout-label-derived name ``docs/design/
+    post-route-sta-survey.md`` §2.1 flags as the one identifier an STA tool
+    reading this file needs to resolve against its own (Verilog-derived)
+    flat net list; ``docs/cli/place-and-route.md``'s ``read_spef`` wiring
+    checks exactly that correlation (an explicit "N of M nets annotated"
+    count) after loading this file. ``*CONN`` entries always name this
+    net's own **port** membership (``*P <name> B``, when ``port_names``
+    marks it a top-level pin). When ``net_instance_pins`` is given (issue
+    #961's :func:`def_net_instance_pins`, sourced from the routed DEF's own
+    ``NETS`` section rather than this repo's own layout-driven ``Device``
+    naming, which has no asserted correlation to any digital-flow instance
+    name -- the survey's own §4.1 "Risk" paragraph), it additionally emits
+    one ``*I <inst>:<pin> B`` entry per real cell-instance connection **and**
+    wires each into the RC network with a zero-ohm ``*RES`` leg from the
+    net's own primary node (``entry["net"]``) -- the same node every
+    device-terminal leg and Gamma-shunt fallback resistor already
+    originates from. This does not distribute resistance *between* DEF-level
+    pins (this model has no notion of which pin drives and which loads, nor
+    of the physical wire path between them); it makes every real design pin
+    on the net a genuine, resolvable node in the RC network at the net's own
+    lumped potential, which is what lets OpenSTA actually attach this net's
+    total capacitance to a real driver/load pin instead of discarding the
+    whole ``*D_NET`` block as unconnected. ``net_instance_pins`` omitted (or
+    a net absent from it) falls back to the pre-#961 port-only ``*CONN``
+    behavior. ``*CONN`` is optional per the SPEF grammar (IEEE 1481-1999),
+    so a net with neither a port nor any instance-pin correlation is still a
+    syntactically valid ``*D_NET`` block with no ``*CONN`` section at all.
 
-    **Duplicate net names are a known, inherited limitation.** A layout
-    label shared by several distinct, un-strapped net islands (e.g. the
-    `gcd` corpus's 105 separate ``VGND`` islands, see docs/cli/extract.md's
-    "Coverage" section) emits one independent ``*D_NET`` block per island
-    under the identical name -- SPEF's own net-name-keyed grammar has no
-    per-island qualifier to disambiguate them the way this response's own
-    ``net_id`` field does, so a reader that folds same-named ``*D_NET``
-    blocks together (rather than accumulating them) will not see every
-    island's own contribution. Immaterial for genuine signal nets (which
-    are not un-strapped, so never collide this way in practice); inherited
-    from the underlying per-net model, not solved by this format
-    translation.
+    **Duplicate net names are a known, inherited limitation -- and
+    ``net_instance_pins`` correlation is skipped entirely for them.** A
+    layout label shared by several distinct, un-strapped net islands (e.g.
+    the `gcd` corpus's 105 separate ``VGND`` islands, see
+    docs/cli/extract.md's "Coverage" section) emits one independent
+    ``*D_NET`` block per island under the identical name -- SPEF's own
+    net-name-keyed grammar has no per-island qualifier to disambiguate them
+    the way this response's own ``net_id`` field does, so a reader that
+    folds same-named ``*D_NET`` blocks together (rather than accumulating
+    them) will not see every island's own contribution. The DEF's own
+    ``NETS`` section, by contrast, declares each logical net name **once**
+    (with every one of its real connections), so blindly attaching that
+    full connection list to *every* same-named ``*D_NET`` island would
+    assert connectivity no single island actually has. This function
+    therefore only emits ``*I`` entries for a net name that appears exactly
+    once in ``parasitics_report["nets"]`` -- a duplicated name keeps its
+    pre-#961 port-only (or empty) ``*CONN`` section, the same known
+    limitation as before this feature existed. Immaterial for genuine
+    signal nets (which are not un-strapped, so never collide this way in
+    practice).
 
     Internal (non-port) nodes reuse the model's own naming verbatim: the
     star's hub is either ``entry["net"]`` itself (the common case, when the
@@ -432,6 +553,18 @@ def _write_spef(
     ``docs/cli/extract.md``'s "The model: a star topology" section
     documents, expressed as SPEF resistor cards instead of SPICE ``R``
     device cards.
+
+    **Coupling ``*CAP`` entries reference the coupled net's own hub node,
+    not its bare name (issue #961 defect 2).** The two coincide in the
+    common case (a net with at least one device terminal has ``hub_net ==
+    net``), but a Gamma-shunt-fallback net's actual self-capacitance node is
+    its synthesized ``hub_net``, not ``net`` itself -- referencing the bare
+    ``net`` from a *different* ``*D_NET`` block's coupling ``*CAP`` line
+    would name a node that block never declares as carrying that
+    capacitance. A ``net -> hub`` lookup built from every entry (first
+    occurrence wins for a duplicated net name, the same tolerance this
+    function's other duplicate-name handling already applies) resolves each
+    coupling partner to its real hub before it is written.
 
     Every identifier written -- ``*PORTS`` entries, ``*D_NET``/``*P`` names,
     and every ``*CAP``/``*RES`` node -- is rendered through
@@ -448,6 +581,9 @@ def _write_spef(
     Raises :class:`ExtractError` if ``path`` cannot be written.
     """
     port_name_set = frozenset(port_names)
+    net_instance_pins_map: Mapping[str, Sequence[tuple[str, str]]] = (
+        net_instance_pins or {}
+    )
 
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
     # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
@@ -458,8 +594,16 @@ def _write_spef(
     # sort-by-name order).
     coupling_by_net: dict[str, list[dict[str, Any]]] = {}
     seen_pairs: set[tuple[str, str]] = set()
+    # `net -> hub` lookup (first occurrence wins for a duplicated net name)
+    # and a name-occurrence count -- issue #961 defects 2 and (for
+    # `net_instance_pins`) the duplicate-name guard, see this function's
+    # docstring for both.
+    hub_by_net_name: dict[str, str] = {}
+    name_counts: dict[str, int] = {}
     for entry in parasitics_report["nets"]:
         this_net = entry["net"]
+        name_counts[this_net] = name_counts.get(this_net, 0) + 1
+        hub_by_net_name.setdefault(this_net, entry["hub_net"])
         for coupled in entry.get("coupled", []):
             pair_key = tuple(sorted((this_net, coupled["net"])))
             if pair_key in seen_pairs:
@@ -510,32 +654,69 @@ def _write_spef(
         spef_net = _spef_name(net)
         spef_hub = _spef_name(hub)
 
+        # Issue #961: real cell-instance connectivity from the routed DEF's
+        # own `NETS` section, restricted to net names that are unambiguous
+        # (see this function's docstring, "Duplicate net names" paragraph)
+        # -- a duplicated name (e.g. `VGND`) keeps the pre-#961 port-only
+        # `*CONN` behavior rather than asserting connectivity no single
+        # island actually has.
+        instance_pins = (
+            net_instance_pins_map.get(net, ()) if name_counts.get(net, 0) == 1 else ()
+        )
+
         lines.append("")
         lines.append(f"*D_NET {spef_net} {total_cap_ff:.6f}")
+        conn_lines: list[str] = []
         if net in port_name_set:
+            conn_lines.append(f"*P {spef_net} B")
+        for inst, pin in instance_pins:
+            # Direction is unknown without a LEF pin-direction lookup (the
+            # DEF `NETS` section alone does not carry it) -- declared `B`,
+            # matching the same "never guessed" posture the `*PORTS`/`*P`
+            # entries above already follow.
+            conn_lines.append(f"*I {_spef_name(inst)}:{_spef_name(pin)} B")
+        if conn_lines:
             lines.append("*CONN")
-            lines.append(f"*P {spef_net} B")
+            lines += conn_lines
 
         cap_lines: list[str] = [f"1 {spef_hub} {entry['capacitance_ff']:.6f}"]
         for i, coupled in enumerate(own_coupling, start=2):
+            # Issue #961 defect 2: reference the coupled net's own hub node,
+            # not its bare name -- see this function's docstring, "Coupling
+            # `*CAP` entries" paragraph.
+            coupled_hub = hub_by_net_name.get(coupled["net"], coupled["net"])
             cap_lines.append(
-                f"{i} {spef_hub} {_spef_name(coupled['net'])} "
+                f"{i} {spef_hub} {_spef_name(coupled_hub)} "
                 f"{coupled['capacitance_ff']:.6f}"
             )
 
         res_lines: list[str] = []
+        next_res_idx = 1
         if terminals:
-            for i, terminal in enumerate(terminals, start=1):
+            for terminal in terminals:
                 res_lines.append(
-                    f"{i} {spef_net} {_spef_name(terminal['leg_net'])} "
+                    f"{next_res_idx} {spef_net} {_spef_name(terminal['leg_net'])} "
                     f"{terminal['resistance_ohm']:.6f}"
                 )
+                next_res_idx += 1
         elif hub != net:
             # No-device-terminal Gamma-shunt fallback (docs/cli/extract.md's
             # "The model: a star topology" section): a single resistor from
             # the net to its own synthesized hub node -- the only case where
             # `hub_net` differs from `net` itself.
-            res_lines.append(f"1 {spef_net} {spef_hub} {entry['resistance_ohm']:.6f}")
+            res_lines.append(
+                f"{next_res_idx} {spef_net} {spef_hub} {entry['resistance_ohm']:.6f}"
+            )
+            next_res_idx += 1
+        for inst, pin in instance_pins:
+            # Zero-ohm connectivity leg from the net's own primary node to
+            # this real design pin -- see this function's docstring,
+            # "device-terminal `*CONN` correlation" paragraph, for why this
+            # does not attempt to apportion resistance between DEF-level
+            # pins.
+            conn_node = f"{_spef_name(inst)}:{_spef_name(pin)}"
+            res_lines.append(f"{next_res_idx} {spef_net} {conn_node} 0.000000")
+            next_res_idx += 1
 
         lines.append("*CAP")
         lines += cap_lines
@@ -832,6 +1013,7 @@ def run_extract(
     spef_output: str | None = None,
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
+    def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1003,6 +1185,16 @@ def run_extract(
     since a caller may legitimately name several candidate nets across
     several blocks/runs. ``None``/empty (the default) skips this entirely --
     byte-identical to before this feature existed.
+
+    ``def_net_connections`` (issue #961, Epic #700 Phase 3) is
+    :func:`def_net_instance_pins`'s own ``{net_name: ((inst, pin), ...)}``
+    mapping, parsed from the routed DEF's own ``NETS`` section -- only
+    meaningful together with ``spef_output`` (there is nowhere else this
+    data is used). Threaded straight through to :func:`_write_spef`'s
+    ``net_instance_pins`` parameter, whose docstring documents the exact
+    ``*CONN``/``*RES`` shape it produces and the duplicate-net-name guard
+    that skips it. ``None`` (the default) is byte-identical to the pre-#961
+    port-only ``*CONN`` behavior.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
@@ -1922,6 +2114,10 @@ def run_extract(
             klt_version=_klt_version(),
             parasitics_report=parasitics_report,
             port_names=(entry["name"] for entry in nets if entry["pin"]),
+            # Issue #961: real cell-instance `*CONN`/`*RES` correlation from
+            # the routed DEF's own `NETS` section -- `None` (the default)
+            # falls back to the pre-#961 port-only behavior.
+            net_instance_pins=def_net_connections,
         )
 
     writer = (

@@ -16,7 +16,7 @@ lvs``, there is no exit code 3; see docs/cli/extract.md.)
 
 import argparse
 
-from ..extract import ExtractError, run_extract
+from ..extract import ExtractError, def_net_instance_pins, run_extract
 from .output import emit_error, emit_success
 
 
@@ -65,10 +65,32 @@ def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
     return names
 
 
+def _parse_def_net_connections(
+    raw: str | None, *, spef_output: str | None
+) -> dict[str, tuple[tuple[str, str], ...]] | None:
+    """Parse the ``--def-net-connections`` flag's DEF path (issue #961) into
+    :func:`def_net_instance_pins`'s ``{net: ((inst, pin), ...)}`` mapping, or
+    ``None`` when the flag was omitted entirely.
+
+    Raises :class:`ExtractError` when given without ``--spef`` -- this data
+    is only ever consumed by the SPEF writer, so a caller passing it without
+    ``--spef`` almost certainly meant to pass both, and silently ignoring it
+    would hide that mistake.
+    """
+    if raw is None:
+        return None
+    if spef_output is None:
+        raise ExtractError("--def-net-connections requires --spef")
+    return def_net_instance_pins(raw)
+
+
 def run(args: argparse.Namespace) -> int:
     try:
         declared_pins = _parse_declared_pins(args.pins)
         deck_options = _parse_deck_options(args.deck_options)
+        def_net_connections = _parse_def_net_connections(
+            args.def_net_connections, spef_output=args.spef
+        )
         report = run_extract(
             args.file,
             args.deck,
@@ -114,6 +136,11 @@ def run(args: argparse.Namespace) -> int:
             # names. `None` when the flag was never given, unchanged from
             # every call site that predates it.
             critical_nets=args.critical_nets,
+            # `--def-net-connections` (issue #961): real cell-instance
+            # `*CONN`/`*RES` correlation for --spef, parsed from a routed
+            # DEF's own `NETS` section. `None` when the flag was never
+            # given, unchanged from every call site that predates it.
+            def_net_connections=def_net_connections,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
