@@ -136,6 +136,11 @@ def run(args: argparse.Namespace) -> int:
             # names. `None` when the flag was never given, unchanged from
             # every call site that predates it.
             critical_nets=args.critical_nets,
+            # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
+            # the star/Gamma-shunt R/C model with a distributed ladder for
+            # every `--critical-net`-named net. `False` when the flag was
+            # never given, unchanged from every call site that predates it.
+            distributed_rc=args.distributed_rc,
             # `--def-net-connections` (issue #961): real cell-instance
             # `*CONN`/`*RES` correlation for --spef, parsed from a routed
             # DEF's own `NETS` section. `None` when the flag was never
@@ -197,6 +202,12 @@ def _print_text(report: dict) -> None:
         critical_nets = parasitics.get("critical_nets")
         if critical_nets:
             print(f"critical_nets: {', '.join(critical_nets)}")
+        # Additive (issue #977): only printed when --distributed-rc was given.
+        if parasitics.get("distributed_rc"):
+            distributed_count = sum(
+                1 for n in parasitics["nets"] if n.get("rc_model") == "distributed"
+            )
+            print(f"distributed_rc: {distributed_count} net(s)")
         # Additive (issue #798): only printed when --mom-net was given.
         mom_crosscheck = parasitics.get("mom_crosscheck")
         if mom_crosscheck is not None:

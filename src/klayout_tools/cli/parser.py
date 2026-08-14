@@ -826,6 +826,25 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--distributed-rc",
+        dest="distributed_rc",
+        action="store_true",
+        help=(
+            "model every --critical-net-named net's parasitic R/C as a "
+            "distributed, multi-segment ladder instead of a single lumped "
+            "star (issue #977, Epic #709 Phase 2b): terminals are ordered "
+            "along their approximate physical spread, the net's total "
+            "resistance is split into series segments between adjacent "
+            "terminals, and its total capacitance into per-terminal ground "
+            "capacitors. Requires --critical-net (reuses that flag's own "
+            "net set rather than a second net classification mechanism). A "
+            "named net with fewer than 2 device terminals keeps the star "
+            "model (nothing to chain) -- reported in `warnings`, not an "
+            "error. Off by default -- byte-identical to today's behavior. "
+            "See docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--def-net-names",
         dest="def_net_names",
         action="store_true",
@@ -1684,6 +1703,19 @@ def create_parser() -> argparse.ArgumentParser:
             "through to `klt extract --critical-net`; repeatable. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--critical-net' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--distributed-rc",
+        dest="distributed_rc",
+        action="store_true",
+        help=(
+            "model every --critical-net-named net's parasitic R/C as a "
+            "distributed, multi-segment ladder instead of a single lumped "
+            "star (issue #977, Epic #709 Phase 2b), passed through to `klt "
+            "extract --distributed-rc`; requires --critical-net. Off by "
+            "default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--distributed-rc' section."
         ),
     )
     _add_format_arg(pex_parser)

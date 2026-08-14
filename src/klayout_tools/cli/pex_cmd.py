@@ -45,6 +45,11 @@ def run(args: argparse.Namespace) -> int:
             # flag was never given, unchanged from every call site that
             # predates it.
             critical_nets=args.critical_nets,
+            # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
+            # the star/Gamma-shunt R/C model with a distributed ladder for
+            # every `--critical-net`-named net. `False` when the flag was
+            # never given, unchanged from every call site that predates it.
+            distributed_rc=args.distributed_rc,
         )
     except PexError as exc:
         return emit_error("pex", str(exc), args.format)
@@ -80,6 +85,9 @@ def _print_text(report: dict) -> None:
     critical_nets = extraction.get("critical_nets")
     if critical_nets:
         print(f"critical_nets: {', '.join(critical_nets)}")
+    # Additive (issue #977): only printed when --distributed-rc was given.
+    if extraction.get("distributed_rc"):
+        print("distributed_rc: on")
 
     testbenches = report["testbenches"]
     if testbenches:

@@ -86,9 +86,14 @@ that discrepancy -- see the issue's PR description for the full note.
 RC -- one series R per net terminal plus one ground C per net, from the
 deck's curated sheet-resistance/capacitance table; see
 ``extract.py``'s ``PARASITIC_MODEL_SCOPE``). It inherits that model's scope
-and limits unchanged -- no distributed RC, no lateral/sidewall coupling,
-quasi-static only (issue #760's vertical-overlap coupling is the one
-exception, already included). ``result["extraction"]["model"]`` echoes
+and limits unchanged: quasi-static only, and by default a single lumped
+element per net (issue #760's vertical-overlap coupling is always included;
+issue #976's ``--critical-net`` lateral coupling and issue #977's
+``--distributed-rc`` multi-segment ladder are both opt-in, forwarded
+straight through to ``klt extract`` -- see this function's own
+``critical_nets``/``distributed_rc`` docstring paragraphs). Neither opt-in
+is on by default, so an unmodified caller sees the exact same model as
+before either existed. ``result["extraction"]["model"]`` echoes
 ``PARASITIC_MODEL_SCOPE`` verbatim so a reader of the delta report does not
 have to cross-reference ``extract.py`` to know what the "extracted" side of
 each row's comparison does and does not account for.
@@ -340,6 +345,7 @@ def run_pex(
     artifacts_dir: str | None = None,
     backend: str | None = None,
     critical_nets: Sequence[str] | None = None,
+    distributed_rc: bool = False,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -357,6 +363,14 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
+    before this feature existed. ``distributed_rc`` (``klt pex
+    --distributed-rc``, issue #977, Epic #709 Phase 2b) is also passed
+    straight through to :func:`~klayout_tools.extract.run_extract` --
+    replaces the single-lumped-element star model with a distributed,
+    multi-segment RC ladder for every ``critical_nets``-named net (requires
+    ``critical_nets`` to be non-empty), so the re-simulated extracted-side
+    testbench (and the resulting `delta[]` rows) reflect the finer-grained
+    model. ``False`` (the default) skips it entirely -- byte-identical to
     before this feature existed. ``backend`` is passed
     through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
     extracted side, every testbench) -- see ``docs/cli/sim.md``'s
@@ -407,6 +421,7 @@ def run_pex(
             pdk_root=pdk_root,
             parasitics=True,
             critical_nets=critical_nets,
+            distributed_rc=distributed_rc,
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -556,6 +571,10 @@ def run_pex(
             # `[]` when the flag was never given, byte-identical to before
             # this feature existed.
             "critical_nets": parasitics.get("critical_nets") or [],
+            # Additive field (issue #977): echoes `--distributed-rc` back --
+            # `False` when the flag was never given, byte-identical to
+            # before this feature existed.
+            "distributed_rc": bool(parasitics.get("distributed_rc")),
         },
         "testbenches": testbenches_summary,
         "corner_count": corner_count,

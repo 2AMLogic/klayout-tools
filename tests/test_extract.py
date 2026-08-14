@@ -6057,6 +6057,7 @@ def test_parasitics_summary_block_shape(tmp_path):
         "metals_without_coefficient",
         "overlap_pairs_without_coefficient",
         "critical_nets",
+        "distributed_rc",
         "model",
         "mom_crosscheck",
     }
@@ -6084,6 +6085,9 @@ def test_parasitics_summary_block_shape(tmp_path):
     # fields present and empty/zero.
     assert para["cc_count"] == 0
     assert para["total_coupling_capacitance_ff"] == 0.0
+    # `distributed_rc` (issue #977) is `False` unless `--distributed-rc` was
+    # given -- additive, unset here.
+    assert para["distributed_rc"] is False
 
     names = [n["net"] for n in para["nets"]]
     assert names == sorted(names)  # deterministic, sorted by net name
@@ -6094,9 +6098,15 @@ def test_parasitics_summary_block_shape(tmp_path):
             "resistance_ohm",
             "capacitance_ff",
             "hub_net",
+            "rc_model",
             "terminals",
+            "segments",
             "coupled",
         }
+        # `rc_model`/`segments` (issue #977): `"lumped"`/`[]` unless
+        # `--distributed-rc` named this net -- additive, unset here.
+        assert entry["rc_model"] == "lumped"
+        assert entry["segments"] == []
         assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
@@ -7747,6 +7757,197 @@ def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(
     netlist_text = Path(report["netlist_path"]).read_text()
     r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
     assert len(r_lines) == report["parasitics"]["r_count"]
+
+
+# --------------------------------------------------------------------------- #
+# Distributed (multi-segment) RC ladder for --critical-net (--distributed-rc,
+# issue #977, Epic #709 Phase 2b)
+# --------------------------------------------------------------------------- #
+
+
+def _distributed_rc_internal_net_name(report: dict) -> str:
+    """The auto-generated name of :func:`_make_series_nmos_layout`'s one
+    genuinely internal, two-terminal net (T1's drain / T2's source) -- the
+    same lookup :func:`test_parasitics_star_topology_puts_resistance_in_
+    series_between_terminals` above already performs, factored out so the
+    distributed-RC tests below can re-derive the identical name across two
+    separate `run_extract` calls on the identical layout (deterministic
+    since the input geometry and processing order are identical)."""
+    internal_nets = [
+        n for n in report["nets"] if not n["pin"] and n["device_count"] == 2
+    ]
+    assert len(internal_nets) == 1
+    return internal_nets[0]["name"]
+
+
+def test_distributed_rc_replaces_star_with_two_segment_ladder(tmp_path):
+    """Acceptance bar (issue #977): `--distributed-rc` on a `--critical-net`
+    with exactly 2 device terminals (:func:`_make_series_nmos_layout`'s
+    internal net -- T1's drain, T2's source) replaces the star (one hub
+    capacitor, two leg resistors) with a 2-node chain: a single series
+    resistor between the two terminal legs, and one ground capacitor at
+    *each* leg -- the standard "half the capacitance at each end" (Pi model)
+    discretization of a single-segment distributed RC line, distinct from
+    the star's "all the capacitance at the shared hub" (T model)."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    baseline_entry = next(
+        n for n in baseline["parasitics"]["nets"] if n["net"] == net_name
+    )
+    assert baseline_entry["rc_model"] == "lumped"
+    assert baseline_entry["segments"] == []
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_distributed.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    para = report["parasitics"]
+    assert para["distributed_rc"] is True
+    assert report["warnings"] == baseline["warnings"]  # no unmatched/fallback names
+
+    entry = next(n for n in para["nets"] if n["net"] == net_name)
+    assert entry["rc_model"] == "distributed"
+
+    # Net-level totals are unaffected by which model represents them --
+    # `--distributed-rc` redistributes the *same* total R/C, it does not
+    # change how much of either exists.
+    assert entry["resistance_ohm"] == pytest.approx(baseline_entry["resistance_ohm"])
+    assert entry["capacitance_ff"] == pytest.approx(baseline_entry["capacitance_ff"])
+
+    # Exactly one segment (2 terminals -> 1 segment) carrying the net's full
+    # resistance, and two per-terminal capacitors summing back to the net's
+    # full capacitance, each getting half (the two terminals are the only
+    # two points on this fixture's net, so the single segment's length is
+    # shared equally between both ends -- see `_distributed_rc_segments`'s
+    # docstring).
+    (segment,) = entry["segments"]
+    assert segment["resistance_ohm"] == pytest.approx(entry["resistance_ohm"], rel=1e-6)
+    assert {segment["net_a"], segment["net_b"]} == {
+        t["leg_net"] for t in entry["terminals"]
+    }
+
+    assert len(entry["terminals"]) == 2
+    node_caps = [t["capacitance_ff"] for t in entry["terminals"]]
+    assert node_caps[0] == pytest.approx(node_caps[1])
+    assert sum(node_caps) == pytest.approx(entry["capacitance_ff"], rel=1e-6)
+
+    # Conservation holds for the *net-level* JSON totals too (unaffected by
+    # topology, star or ladder).
+    assert para["total_resistance_ohm"] == pytest.approx(
+        baseline["parasitics"]["total_resistance_ohm"]
+    )
+    assert para["total_capacitance_ff"] == pytest.approx(
+        baseline["parasitics"]["total_capacitance_ff"]
+    )
+
+    # `c_count`/`r_count` are the *actual device* counts (issue #977's own
+    # redefinition, see `_inject_parasitics`'s new `total_c_count`): this
+    # net now contributes 2 capacitor devices instead of 1 (+1 net-wide),
+    # and 1 segment resistor instead of 2 star legs (-1 net-wide) -- every
+    # other net's contribution is unaffected. The written SPICE netlist's
+    # own card counts must match exactly either way.
+    assert para["c_count"] == baseline["parasitics"]["c_count"] + 1
+    assert para["r_count"] == baseline["parasitics"]["r_count"] - 1
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    r_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("R")]
+    c_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("C")]
+    assert len(r_lines) == para["r_count"]
+    assert len(c_lines) == para["c_count"]
+
+
+def test_distributed_rc_falls_back_to_star_below_two_terminals(tmp_path):
+    """A `--critical-net`/`--distributed-rc` name matching a net with fewer
+    than 2 device terminals (here: `VGND`, a single-terminal pin net on
+    :func:`_make_series_nmos_layout`) keeps the star/Gamma-shunt model --
+    reported in `warnings`, not raised, mirroring `--critical-net`'s own
+    "declared but not fully applicable" tolerance (issue #976)."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series.spice"),
+        parasitics=True,
+        critical_nets=["VGND"],
+        distributed_rc=True,
+    )
+    para = report["parasitics"]
+    entry = next(n for n in para["nets"] if n["net"] == "VGND")
+    assert entry["rc_model"] == "lumped"
+    assert entry["segments"] == []
+    assert any(
+        "VGND" in w and "fewer than 2 device terminals" in w for w in report["warnings"]
+    )
+
+
+def test_distributed_rc_requires_critical_net(tmp_path):
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    with pytest.raises(ExtractError, match="--distributed-rc requires --critical-net"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "series.spice"),
+            parasitics=True,
+            distributed_rc=True,
+        )
+
+
+def test_distributed_rc_order_and_segments_three_point_conservation():
+    """Unit test for :func:`_distributed_rc_order`/
+    :func:`_distributed_rc_segments` directly (issue #977): 3 terminals,
+    given out of physical order, are re-ordered along their dominant spread
+    axis, and the resulting segment resistances/node capacitances sum back
+    to the given totals exactly."""
+    from klayout_tools.extract import _distributed_rc_order, _distributed_rc_segments
+
+    # (10, 0), (0, 0), (5, 0): the greatest-distance pair is index 0<->1
+    # (10.0 apart), so the projection axis runs from index 0 (10, 0) towards
+    # index 1 (0, 0) -- i.e. *decreasing* x. Projected order along that axis
+    # is therefore index 0 (x=10), index 2 (x=5), index 1 (x=0): physically
+    # still the correct spatial chain (10 -> 5 -> 0), just walked from the
+    # opposite end than a "sort by increasing x" reader might first guess --
+    # the ladder's own R/C split is direction-agnostic (see the conservation
+    # checks below), so this is not a correctness issue, only a documented
+    # convention.
+    positions = [(10.0, 0.0), (0.0, 0.0), (5.0, 0.0)]
+    assert _distributed_rc_order(positions) == [0, 2, 1]
+
+    order, segment_r_ohm, node_c_ff = _distributed_rc_segments(
+        positions, r_total_ohm=300.0, c_total_ff=90.0
+    )
+    assert order == [0, 2, 1]
+    assert len(segment_r_ohm) == 2
+    assert sum(segment_r_ohm) == pytest.approx(300.0)
+    assert len(node_c_ff) == 3
+    assert sum(node_c_ff) == pytest.approx(90.0)
+    # Two equal-length segments (10->5, 5->0) split the total evenly.
+    assert segment_r_ohm[0] == pytest.approx(segment_r_ohm[1])
+    # The middle node (order index 1, physical position (5, 0), i.e. original
+    # index 2) touches both segments, so it gets twice the share of either
+    # end node.
+    assert node_c_ff[1] == pytest.approx(2.0 * node_c_ff[0])
+    assert node_c_ff[0] == pytest.approx(node_c_ff[2])
+
+
+def test_distributed_rc_order_degenerate_coincident_positions():
+    """Every terminal at the identical position (no spatial signal) falls
+    back to an equal split -- still conserving both totals exactly, and
+    never raising a division-by-zero."""
+    from klayout_tools.extract import _distributed_rc_segments
+
+    positions = [(3.0, 3.0), (3.0, 3.0), (3.0, 3.0)]
+    order, segment_r_ohm, node_c_ff = _distributed_rc_segments(
+        positions, r_total_ohm=300.0, c_total_ff=90.0
+    )
+    assert segment_r_ohm == [pytest.approx(150.0), pytest.approx(150.0)]
+    assert node_c_ff == [pytest.approx(30.0)] * 3
 
 
 # --------------------------------------------------------------------------- #

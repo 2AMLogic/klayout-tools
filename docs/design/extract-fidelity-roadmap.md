@@ -515,6 +515,25 @@ onto a specific lower plane rather than the substrate.
 
 ### Stage 3 — distributed RC
 
+**Partial progress, issue #977 (Epic #709 Phase 2b, 2026-08-14):** a scoped
+first increment shipped, deliberately narrowed from what this section
+describes in the same shape #976 narrowed Stage 2b: `klt extract
+--distributed-rc` (requires `--critical-net`) replaces the star with a
+multi-segment ladder only for a caller-declared `--critical-net` net (not
+every net in the layout unconditionally), and only using each net's already-
+computed total R/C plus its existing device-terminal positions as the
+segment-ordering signal — not the conductor-decomposition-into-rectangles/
+trapezoids-plus-via-nodes segment graph this section describes below. That
+keeps the increment's cost down to "redistribute an existing lumped total
+along an existing terminal-position proxy" rather than the "high — the
+largest single increment in this roadmap" full geometry decomposition, at
+the cost of a coarser segment boundary (terminal position, not real routed-
+path geometry) than a true per-segment ladder would use. A full geometry-
+decomposed Stage 3 (the version this section describes) is still open
+follow-on work; #977's own canary (`tests/test_pex.py::
+test_run_pex_distributed_rc_canary`) demonstrates the topology correction's
+real, measurable effect on a genuinely high-impedance routed net regardless.
+
 #592's deferred "Option 2" **[REPO]**: decompose each net's conductor into
 segments, build the RC ladder, and reduce it (§2.5) rather than collapsing to
 one lumped R and one lumped C.
