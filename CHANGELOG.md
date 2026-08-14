@@ -38,9 +38,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   because device-terminal (`*I <inst>:<pin>`) connectivity is still not
   emitted at all and the `*CAP`/`*RES` node names still resolve to no pin in
   the linked design, so `worst_slack` remains bit-identical across
-  `read_spef`; that remainder (plus coupling-`*CAP` node naming) is tracked
-  as issue #966. See `docs/cli/place-and-route.md`'s "`*PORTS` lists only
-  real design ports" subsection.
+  `read_spef`; that remainder (plus coupling-`*CAP` node naming) stays
+  tracked by #961 itself, which this entry only partially closes. See
+  `docs/cli/place-and-route.md`'s "`*PORTS` lists only real design ports"
+  subsection.
 
 - 2026-08-12 — `klt synthesize` now maps constant drivers onto real
   tie-high/tie-low standard cells, unblocking `klt place-and-route` for

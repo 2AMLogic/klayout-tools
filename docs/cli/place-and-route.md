@@ -515,10 +515,10 @@ Closing *that* gap needs an instance/pin-name correlation between the
 extracted layout view and the DEF's `COMPONENTS`/`NETS` (or a cell-level
 extraction pass with its own DEF instance-name correlation), which is a
 materially harder problem than net names (the DEF instance names are not
-carried into the merged GDS at all) and is tracked as issue #966 (a
-follow-on to #961, which this fix only partially closes). A related, still
-open, smaller defect: coupling `*CAP` entries name the coupled *net* where
-SPEF may expect a qualified *node* reference — also tracked by #966.
+carried into the merged GDS at all) and stays tracked by issue #961 itself,
+which this fix only partially closes. A related, still open, smaller defect:
+coupling `*CAP` entries name the coupled *net* where SPEF may expect a
+qualified *node* reference — also part of #961's remaining scope.
 
 Off by default: this adds real wall-clock cost on top of every existing
 `"route"`-stage caller (one more `klt extract --parasitics` pass over the
