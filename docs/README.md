@@ -62,6 +62,7 @@ docs/
     gen-bjt-array-spike.md
     gen-canary-bringup-phase3.md
     gen-composition-spike.md
+    geode-fem-wasm-webgpu-spike.md
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
