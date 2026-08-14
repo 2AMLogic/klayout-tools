@@ -269,6 +269,79 @@ citations and findings.
   many times, unconditionally (no Tcl-level early exit on a zero-violation
   `check_antennas` result).
 
+## Multi-corner setup/hold sweep (`worst_setup_slack_ns`, `worst_hold_slack_ns`)
+
+Issue #949 (Epic #700 Phase 3's post-route-STA survey, `docs/design/
+post-route-sta-survey.md` §4.2) closed two gaps `docs/design/
+post-route-sta-survey.md` §1.2 documented: the `"route"` stage's OpenSTA
+session resolved exactly one PDK corner (the nominal, typical-process/
+room-temperature pick), and the response had no hold-slack **value** at
+all (only `hold_violation_count`, a count).
+
+Once the `"route"` stage's own script (single-corner, unchanged) has
+written its checkpoint, a **second** OpenROAD invocation reads that
+checkpoint back, `define_corners`s every `.lib` timing corner the resolved
+`cell_library` ships (`klayout_tools.pdk.list_lib_corners`, an additive
+enumeration alongside the existing single-corner `_nominal_supply` pick),
+`read_liberty -corner`s each, and re-estimates parasitics
+(`estimate_parasitics -global_routing`, the same estimate the single-corner
+`worst_slack_ns` is already based on) before calling
+`report_worst_slack_metric -setup`/`-hold`. OpenSTA reports the worst value
+across every **loaded** corner — confirmed live (against a real
+`openroad/orfs:latest` container over a real volare-fetched `sky130A`
+install, 2026-08-13) that this automatically worst-cases setup at the
+slowest loaded corner and hold at the fastest, the standard "setup at slow
+PVT, hold at fast PVT" sign-off convention — no manual slow/fast corner
+classification is needed on the Python side.
+
+- **A separate session, not more Tcl in the route stage's own script.**
+  `define_corners` must run before any `read_liberty` in a session
+  (OpenSTA's own `STA-482` ordering rule) — but more importantly,
+  `report_worst_slack_metric` has no way to scope its result back to one
+  corner once more than one is loaded (live-verified), so folding the sweep
+  into the route stage's own session would silently turn the existing
+  `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/
+  `hold_violation_count` fields from nominal-corner-only into swept-worst-
+  case — breaking the backward-compatibility `docs/json-contract.md`'s
+  additive posture requires. A wholly separate OpenROAD process avoids that
+  risk, at the cost of a second engine invocation per `"route"`-stage run.
+- **A `_ccsnoise`-suffixed `.lib` view is excluded from the sweep.** sky130
+  ships a CCS-noise-model view alongside some corners' regular timing view
+  (e.g. `sky130_fd_sc_hd__ff_n40C_1v95_ccsnoise.lib`) that shares its
+  sibling's exact PVT point — loading both raises `[WARNING STA-1140] ...
+  library <name> already exists` (live-verified) rather than adding a real
+  second corner, so `list_lib_corners` skips it.
+- **Wall-clock cost, measured.** The sweep is a second, full OpenROAD
+  subprocess launch (parasitics re-estimation plus one `read_liberty` per
+  shipped corner) on top of the four stage invocations `target_stage:
+  "route"` already runs — a real, non-zero addition to total run time, not
+  assumed free. Measured against a real `openroad/orfs:latest` container +
+  volare `sky130A` install (`sky130_fd_sc_hd`, all 16 non-`_ccsnoise`
+  corners) on the `gcd`/`modexp`/`mult8` corpus (issue #949): the sweep
+  itself adds **~5–6 seconds** per run (the gap between the `"route"`
+  stage's own `-metrics` write and the sweep's own), a small, roughly
+  design-size-independent fixed cost relative to the `"route"` stage's own
+  100+ second detailed-routing time in this corpus.
+- **Corner-to-corner spread, measured.** On the same corpus, the sweep's
+  worst-case setup slack is substantially worse than the single nominal
+  corner's own `worst_slack_ns` — `gcd`: `-1.94402` ns (nominal) vs.
+  `-22.2093` ns (swept); `modexp`: `2.42586` ns (nominal, timing-clean at
+  the nominal corner) vs. `-36.479` ns (swept, timing-**failing** once the
+  slowest process corner is considered) — exactly the false-positive T1
+  item 5 exists to catch. Hold slack stays positive (no hold violations) at
+  both nominal and swept worst-case on this corpus (`gcd`: `0.28443` ns
+  swept; `modexp`: `0.22504` ns swept). `mult8`'s clock port is an
+  unconstrained output pin (`tests/corpus/place_and_route/regenerate.sh`'s
+  own documented fixture choice) — `worst_slack_ns`,
+  `worst_setup_slack_ns`, and `worst_hold_slack_ns` all correctly report
+  OpenSTA's own unconstrained-design sentinel (`1e+39`) identically, a real
+  regression check that the sweep does not fabricate a number where none
+  exists.
+- **Only runs for the `"route"` stage.** A `target_stage` before `"route"`
+  never reaches the sweep — `worst_setup_slack_ns`/`worst_hold_slack_ns`
+  are `null`, the same convention `route_drc_violation_count` already
+  follows for a route-stage-only metric.
+
 ## Request
 
 ```json
@@ -337,6 +410,8 @@ citations and findings.
   "hold_violation_count": 1,
   "antenna_violation_count": 0,
   "route_drc_violation_count": 0,
+  "worst_setup_slack_ns": -4.02163,
+  "worst_hold_slack_ns": 0.08421,
   "estimated_power_mw": 11.6,
   "clock_skew_ns": 0.0421,
   "stages": [
@@ -375,6 +450,7 @@ citations and findings.
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), parsed from the report's per-violation `"violation type: ..."` header lines. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
+| `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |

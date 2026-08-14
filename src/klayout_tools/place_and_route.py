@@ -316,7 +316,13 @@ from typing import Any
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
-from .pdk import PdkNotFoundError, find_pdk, lef_files, list_cell_libraries
+from .pdk import (
+    PdkNotFoundError,
+    find_pdk,
+    lef_files,
+    list_cell_libraries,
+    list_lib_corners,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -539,6 +545,13 @@ _TOP_LEVEL_METRIC_KEYS = (
     # Additive (issue #783, P&R survey #735 section 3.4) -- never replaces an
     # existing field; `null` on any stage that hasn't run CTS yet.
     "clock_skew_ns",
+    # Additive (issue #949, post-route-sta-survey #944/#945 section 4.2) --
+    # never replaces `worst_slack_ns` (which stays the nominal-corner-only
+    # value); `null` on any stage before `"route"` -- the corner sweep runs
+    # once, after the route stage's own checkpoint is written (see
+    # `_run_corner_sweep`).
+    "worst_setup_slack_ns",
+    "worst_hold_slack_ns",
 )
 
 
@@ -757,6 +770,8 @@ def run_place_and_route(
             )
         antenna_count = None
         route_drc_count = None
+        worst_setup_slack_ns = None
+        worst_hold_slack_ns = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
             # Same deterministic path `_stage_script_lines`'s own `route`
@@ -768,9 +783,33 @@ def run_place_and_route(
             drc_report_path = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
             route_drc_count = _count_route_drc_violations(drc_report_path)
 
+            # Issue #949: sweep every corner `cell_library` ships for
+            # setup/hold slack, as a second OpenROAD invocation over the
+            # checkpoint this stage's own script just wrote -- see
+            # `_run_corner_sweep`/`_corner_sweep_script_lines` for why this
+            # is a separate session rather than more Tcl appended above.
+            assert io_spec is not None  # required to reach "route" (validated above)
+            corners = list_lib_corners(cell_library, pdk_info)
+            worst_setup_slack_ns, worst_hold_slack_ns = _run_corner_sweep(
+                checkpoint_in=next_checkpoint,
+                corners=corners,
+                io_spec=io_spec,
+                clock_port=clock_port,
+                clock_period_ns=clock_period_ns,
+                output_dir=output_dir,
+                hdl_toplevel=hdl_toplevel,
+            )
+
         stages.append(
             _extract_stage_metrics(
-                stage, metrics, setup_count, hold_count, antenna_count, route_drc_count
+                stage,
+                metrics,
+                setup_count,
+                hold_count,
+                antenna_count,
+                route_drc_count,
+                worst_setup_slack_ns=worst_setup_slack_ns,
+                worst_hold_slack_ns=worst_hold_slack_ns,
             )
         )
         checkpoint_path = next_checkpoint
@@ -1656,6 +1695,79 @@ def _stage_script_lines(
     return lines
 
 
+def _corner_sweep_script_lines(
+    *,
+    checkpoint_in: str,
+    corners: list[dict[str, str]],
+    io_spec: dict[str, str],
+    clock_port: str | None,
+    clock_period_ns: float | None,
+) -> list[str]:
+    """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
+    ``docs/design/post-route-sta-survey.md`` section 4.2) -- a **second**,
+    lightweight OpenROAD invocation run *after* the ``"route"`` stage's own
+    script (:func:`_stage_script_lines`) has already written its checkpoint,
+    deliberately never folded into that script's own OpenSTA session.
+
+    Why a separate session, not more Tcl appended to the route stage's own
+    script: OpenSTA's ``define_corners`` must run before *any*
+    ``read_liberty`` in a session (``STA-482``), and the route stage's own
+    script already runs one bare (un-corner-tagged) ``read_liberty`` for its
+    existing single-corner report calls. Loading additional corners into
+    *that* session would not just be disallowed by that ordering rule -- it
+    would silently change ``report_worst_slack_metric``'s own result even if
+    the ordering were reworked around it: that proc (and the ``worst_slack``
+    primitive it calls) reports the worst value across **every corner
+    currently loaded** with no way to scope it back to one corner, live-
+    verified against a real ``openroad/orfs:latest`` container over a real
+    volare-fetched ``sky130A`` install (2026-08-13, issue #949) -- loading a
+    second corner into the main script's session would silently turn the
+    existing ``worst_slack_ns``/``total_negative_slack_ns``/
+    ``setup_violation_count``/``hold_violation_count`` fields from
+    nominal-corner-only into swept-worst-case, breaking the
+    backward-compatibility this change must preserve
+    (``docs/json-contract.md``'s additive posture). A wholly separate
+    session sidesteps that risk entirely, at the cost of a second OpenROAD
+    process launch per ``"route"``-stage run.
+
+    Reads the checkpoint the route stage's own ``write_db`` already
+    produced -- no ``read_lef``/``read_verilog``/``link_design`` needed,
+    matching every other non-floorplan stage's own
+    ``read_db``-restores-the-linked-network convention
+    (:func:`_stage_script_lines`'s own docstring/comments). Parasitics are
+    re-estimated (``estimate_parasitics -global_routing``) since
+    ``write_db``/``read_db`` does not carry Sta's own parasitics state
+    across the process boundary any more than it carries SDC/linked-library
+    state (same docstring) -- this reproduces the *same* global-routing RC
+    estimate the route stage's own existing ``worst_slack_ns`` is already
+    based on, not a fidelity regression or a second, differently-sourced
+    number.
+
+    ``report_worst_slack_metric -setup``/``-hold`` (run here for the first
+    and only time in this session, so no scoping concern applies) writes
+    this invocation's own ``-metrics`` dump's ``timing__setup__ws``/
+    ``timing__hold__ws`` keys -- automatically the worst value across every
+    corner :func:`klayout_tools.pdk.list_lib_corners` enumerated (confirmed
+    live: setup slack worst-cases at the slowest loaded corner, hold slack
+    at the fastest, exactly the industrial "setup at slow PVT, hold at fast
+    PVT" convention this survey's section 3.3 describes -- no manual
+    slow/fast corner classification needed in Python).
+    """
+    lines = [f"read_db {checkpoint_in}"]
+    lines += ["define_corners " + " ".join(corner["name"] for corner in corners)]
+    lines += [
+        f"read_liberty -corner {corner['name']} {corner['path']}" for corner in corners
+    ]
+    lines += _clock_lines(clock_port, clock_period_ns)
+    lines += [
+        f"set_wire_rc -layer {io_spec['layer_v']}",
+        "estimate_parasitics -global_routing",
+        "report_worst_slack_metric -setup",
+        "report_worst_slack_metric -hold",
+    ]
+    return lines
+
+
 # --------------------------------------------------------------------------- #
 # OpenROAD subprocess invocation
 # --------------------------------------------------------------------------- #
@@ -1670,6 +1782,69 @@ def _run_openroad(script_path: str, metrics_path: str) -> subprocess.CompletedPr
         )
     except OSError as exc:
         raise PlaceAndRouteError(f"could not launch openroad: {exc}") from exc
+
+
+def _run_corner_sweep(
+    *,
+    checkpoint_in: str,
+    corners: list[dict[str, str]],
+    io_spec: dict[str, str],
+    clock_port: str | None,
+    clock_period_ns: float | None,
+    output_dir: str,
+    hdl_toplevel: str,
+) -> tuple[float | None, float | None]:
+    """Run the post-route multi-corner setup/hold sweep (issue #949) as a
+    second OpenROAD invocation, after the ``"route"`` stage's own script has
+    already written ``checkpoint_in`` -- see :func:`_corner_sweep_script_lines`
+    for why this cannot be folded into that script's own session.
+
+    Returns ``(worst_setup_slack_ns, worst_hold_slack_ns)``, each rounded to
+    5 decimal places (matching :func:`_extract_stage_metrics`'s own
+    ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
+    ``-metrics`` dump didn't populate the corresponding key. ``(None, None)``
+    when ``corners`` is empty -- should not happen in practice (the resolved
+    ``liberty_path`` a run already reached ``"route"`` with implies at least
+    that one corner's own ``.lib`` file exists under the same ``lib/``
+    directory :func:`~klayout_tools.pdk.list_lib_corners` walks), but
+    degrading to ``null`` rather than raising on an empty sweep target list
+    keeps this helper total.
+
+    Raises :class:`PlaceAndRouteError` on an OpenROAD engine failure, exactly
+    like every other stage invocation in this module -- silently degrading
+    these fields to ``null`` on a broken sweep would undermine the very
+    multi-corner evidence claim they exist to support (T1 checklist item 5,
+    ``docs/design-evidence-tiers.md``).
+    """
+    if not corners:
+        return None, None
+
+    script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
+    metrics_path = os.path.join(
+        output_dir, f"{hdl_toplevel}_route_corners_metrics.json"
+    )
+    lines = _corner_sweep_script_lines(
+        checkpoint_in=checkpoint_in,
+        corners=corners,
+        io_spec=io_spec,
+        clock_port=clock_port,
+        clock_period_ns=clock_period_ns,
+    )
+    _write_script(script_path, lines)
+
+    completed = _run_openroad(script_path, metrics_path)
+    if completed.returncode != 0:
+        raise PlaceAndRouteError(
+            _engine_error_message("route (corner sweep)", completed)
+        )
+
+    metrics = _read_metrics(metrics_path, "route (corner sweep)")
+    worst_setup = metrics.get("timing__setup__ws")
+    worst_hold = metrics.get("timing__hold__ws")
+    return (
+        round(worst_setup, 5) if worst_setup is not None else None,
+        round(worst_hold, 5) if worst_hold is not None else None,
+    )
 
 
 def _engine_error_message(stage: str, completed: subprocess.CompletedProcess) -> str:
@@ -1868,6 +2043,8 @@ def _extract_stage_metrics(
     hold_violation_count: int | None,
     antenna_violation_count: int | None = None,
     route_drc_violation_count: int | None = None,
+    worst_setup_slack_ns: float | None = None,
+    worst_hold_slack_ns: float | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -1922,6 +2099,15 @@ def _extract_stage_metrics(
             entry["antenna_violation_count"] = antenna_violation_count
         if route_drc_violation_count is not None:
             entry["route_drc_violation_count"] = route_drc_violation_count
+        # Issue #949: the corner-swept worst-case setup/hold slack, from the
+        # post-route corner sweep (`_run_corner_sweep`) -- absent (never
+        # present-but-null) on every stage but `"route"`, the same
+        # `.get`-degrades-to-absent convention every other route-only field
+        # above follows.
+        if worst_setup_slack_ns is not None:
+            entry["worst_setup_slack_ns"] = worst_setup_slack_ns
+        if worst_hold_slack_ns is not None:
+            entry["worst_hold_slack_ns"] = worst_hold_slack_ns
 
     return entry
 

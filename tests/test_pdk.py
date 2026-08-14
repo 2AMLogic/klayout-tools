@@ -806,6 +806,118 @@ def test_lef_files_no_install_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# list_lib_corners (issue #949 -- every shipped `.lib` timing corner for a
+# resolved cell library, not only the nominal pick -- feeds
+# `place_and_route.py`'s post-route setup/hold corner sweep).
+# --------------------------------------------------------------------------- #
+
+
+def test_list_lib_corners_enumerates_every_shipped_file(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(
+            ("tt_025C_1v80", 1.0, 25.0, 1.8),
+            ("ss_100C_1v60", 1.0, 100.0, 1.6),
+            ("ff_n40C_1v95", 1.0, -40.0, 1.95),
+        ),
+    )
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    corners = pdk.list_lib_corners("sky130_fd_sc_hd", pdk_info)
+
+    # Sorted by filename, not insertion order.
+    assert [c["name"] for c in corners] == [
+        "ff_n40C_1v95",
+        "ss_100C_1v60",
+        "tt_025C_1v80",
+    ]
+    lib_dir = variant_dir / "libs.ref" / "sky130_fd_sc_hd" / "lib"
+    for entry in corners:
+        assert entry["path"] == str(lib_dir / f"sky130_fd_sc_hd__{entry['name']}.lib")
+
+
+def test_list_lib_corners_excludes_ccsnoise_variant(tmp_path):
+    """A `_ccsnoise` `.lib` view shares its non-suffixed sibling's exact
+    `default_operating_conditions` PVT point (sky130's own noise-model-
+    augmented view convention) -- loading both into the same OpenSTA session
+    raises `[WARNING STA-1140] ... library <name> already exists` (live-
+    verified against a real `openroad/orfs:latest` container, issue #949),
+    so `list_lib_corners` excludes it rather than enumerating it as a second,
+    colliding corner."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(("ff_n40C_1v95", 1.0, -40.0, 1.95),),
+    )
+    lib_views_dir = variant_dir / "libs.ref" / "sky130_fd_sc_hd" / "lib"
+    (lib_views_dir / "sky130_fd_sc_hd__ff_n40C_1v95_ccsnoise.lib").write_text(
+        '    default_operating_conditions : "ff_n40C_1v95";\n'
+        "    nom_process : 1.0;\n"
+        "    nom_temperature : -40.0;\n"
+        "    nom_voltage : 1.95;\n",
+        encoding="utf-8",
+    )
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    corners = pdk.list_lib_corners("sky130_fd_sc_hd", pdk_info)
+
+    assert [c["name"] for c in corners] == ["ff_n40C_1v95"]
+
+
+def test_list_lib_corners_name_from_filename_not_operating_conditions(tmp_path):
+    """`name` is always derived from the file's own filename, never the
+    `default_operating_conditions` Liberty attribute -- gf180mcu's own
+    doubled-prefix convention (issue #820, `prefixed_operating_conditions`)
+    must not leak into the returned tag."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "gf180mcu_fd_sc_mcu9t5v0",
+        corners=(("tt_025C_5v00", 1.0, 25.0, 5.0),),
+        prefixed_operating_conditions=True,
+    )
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    corners = pdk.list_lib_corners("gf180mcu_fd_sc_mcu9t5v0", pdk_info)
+
+    assert corners == [
+        {
+            "name": "tt_025C_5v00",
+            "path": str(
+                variant_dir
+                / "libs.ref"
+                / "gf180mcu_fd_sc_mcu9t5v0"
+                / "lib"
+                / "gf180mcu_fd_sc_mcu9t5v0__tt_025C_5v00.lib"
+            ),
+        }
+    ]
+
+
+def test_list_lib_corners_empty_when_no_lib_dir(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(variant_dir, "sky130_fd_sc_hd", with_lib=False)
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    assert pdk.list_lib_corners("sky130_fd_sc_hd", pdk_info) == []
+
+
+def test_list_lib_corners_empty_when_no_libs_ref(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A", assets=("ngspice",))  # no libs_ref at all
+    pdk_info = pdk.find_pdk(root=str(root))
+
+    assert pdk.list_lib_corners("sky130_fd_sc_hd", pdk_info) == []
+
+
+# --------------------------------------------------------------------------- #
 # list_pdks
 # --------------------------------------------------------------------------- #
 

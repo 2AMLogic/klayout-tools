@@ -440,6 +440,37 @@ not `klt --version`, if you need to detect this kind of drift.
 
 ### Added since release
 
+- 2026-08-13 — `klt place-and-route`'s `"route"` stage gains two new
+  additive response fields, `worst_setup_slack_ns`/`worst_hold_slack_ns`
+  (issue #949, Epic #700 Phase 3, `docs/design/post-route-sta-survey.md`
+  §4.2), closing two gaps that survey's §1.2 documented: the `"route"`
+  stage's OpenSTA session resolved exactly one PDK corner, and there was no
+  hold-slack **value** anywhere (only `hold_violation_count`, a count). A
+  new `klayout_tools.pdk.list_lib_corners()` helper enumerates every `.lib`
+  timing corner a resolved `cell_library` ships (a small additive
+  generalisation of the existing `_nominal_supply` per-file walk, excluding
+  sky130's `_ccsnoise`-suffixed views — a same-PVT-point noise-model
+  sibling, not a distinct corner, confirmed live against a real
+  `openroad/orfs:latest` container to collide with `[WARNING STA-1140]` if
+  loaded alongside its non-suffixed sibling). After the `"route"` stage's
+  own single-corner script writes its checkpoint, a **second** OpenROAD
+  invocation reads it back, `define_corners`s every enumerated corner,
+  `read_liberty -corner`s each, and reports
+  `report_worst_slack_metric -setup`/`-hold` — live-verified that OpenSTA
+  automatically worst-cases setup at the slowest loaded corner and hold at
+  the fastest (the standard sign-off convention), with no manual slow/fast
+  classification needed. Deliberately a separate OpenROAD session, not more
+  Tcl folded into the route stage's own: `report_worst_slack_metric` cannot
+  scope its result back to one corner once more than one is loaded, so
+  folding the sweep in would have silently turned the existing
+  `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/
+  `hold_violation_count` fields from nominal-corner-only into swept-worst-
+  case — the existing fields are confirmed unchanged (a strict
+  backward-compatibility regression test). `null` before the `"route"`
+  stage. The sweep is a real, non-zero wall-clock addition (a second full
+  OpenROAD subprocess launch), not assumed free. No `schema_version` bump.
+  See `docs/cli/place-and-route.md`.
+
 - 2026-08-13 — `klt place-and-route`'s `"route"` stage gains a new additive
   `route_drc_violation_count` response field (issue #938, Epic #700 Phase 2,
   `docs/design/native-routing-survey.md` §4.5), mirroring the existing
