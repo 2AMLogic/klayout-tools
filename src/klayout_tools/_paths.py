@@ -24,6 +24,14 @@ dispatch) -- differing only in the exception class and the tuple of
 required fields. ``validate_request_shape`` and ``load_request_arg`` below
 factor those out; each caller still owns its own exception class and
 required-field tuple.
+
+``erc.py``, ``power.py``, and ``mom.py`` each defined their own near-
+identical ``_load_spec(spec_path)`` (read a JSON spec file, same missing/
+directory/unreadable/not-an-object checks as ``_load_request_json`` above,
+just with ``"spec"`` wording) and ``_parse_layer_datatype(raw, spec_path,
+field)`` (parse a ``"<layer>/<datatype>"`` string) -- again differing only
+in which ``*Error`` class each module raises. ``_load_spec_json`` and
+``_parse_layer_datatype`` below factor those out the same way.
 """
 
 from __future__ import annotations
@@ -67,6 +75,51 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
         raise error_cls(f"could not read request file: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise error_cls(f"request file is not valid JSON: {exc}") from exc
+
+
+def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:
+    """Read ``spec_path`` and decode it as a JSON object, raising
+    ``error_cls`` for every failure mode ``erc.py``/``power.py``/``mom.py``'s
+    ``run_*`` entry points need to report: missing file, a directory instead
+    of a file, an unreadable/undecodable file, or a JSON value that isn't an
+    object.
+
+    Unlike :func:`_load_request_json`, this also enforces "is this a JSON
+    object" itself -- all three ``_load_spec`` callers needed that exact
+    check, so it is folded in here rather than left to each caller.
+    """
+    if not os.path.exists(spec_path):
+        raise error_cls(f"spec file not found: {spec_path}")
+    if os.path.isdir(spec_path):
+        raise error_cls(f"not a file: {spec_path}")
+    try:
+        with open(spec_path) as f:
+            spec = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
+    if not isinstance(spec, dict):
+        raise error_cls(f"spec '{spec_path}' must be a JSON object")
+    return spec
+
+
+def _parse_layer_datatype(
+    raw: str, spec_path: str, field: str, error_cls: type[Exception]
+) -> tuple[int, int]:
+    """Parse a ``"<layer>/<datatype>"`` string into an ``(layer, datatype)``
+    int pair, raising ``error_cls`` with ``field`` named in the message for
+    anything malformed (wrong shape, non-integer parts).
+    """
+    parts = raw.split("/")
+    malformed = error_cls(
+        f"spec '{spec_path}': {field} must be '<layer>/<datatype>' with "
+        f"integer layer/datatype (got {raw!r})"
+    )
+    if len(parts) != 2:
+        raise malformed
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError as exc:
+        raise malformed from exc
 
 
 def validate_request_shape(

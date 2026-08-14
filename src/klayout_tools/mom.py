@@ -22,10 +22,10 @@ JSON contract, and build instructions.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from ._layout import load_layout, select_top_cells
+from ._paths import _load_spec_json, _parse_layer_datatype
 
 #: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_PANEL_SIZE_UM`` -- kept
 #: in sync manually (no shared source of truth across the Rust/Python
@@ -89,35 +89,6 @@ def _load_native() -> Any:
     return klt_mom_native
 
 
-def _load_spec(spec_path: str) -> dict[str, Any]:
-    if not os.path.exists(spec_path):
-        raise MomError(f"spec file not found: {spec_path}")
-    if os.path.isdir(spec_path):
-        raise MomError(f"not a file: {spec_path}")
-    try:
-        with open(spec_path) as f:
-            spec = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MomError(f"could not read spec '{spec_path}': {exc}") from exc
-    if not isinstance(spec, dict):
-        raise MomError(f"spec '{spec_path}' must be a JSON object")
-    return spec
-
-
-def _parse_layer_datatype(raw: str, spec_path: str) -> tuple[int, int]:
-    parts = raw.split("/")
-    malformed = MomError(
-        f"spec '{spec_path}': stackup entry 'layer' must be '<layer>/<datatype>' "
-        f"with integer layer/datatype (got {raw!r})"
-    )
-    if len(parts) != 2:
-        raise malformed
-    try:
-        return int(parts[0]), int(parts[1])
-    except ValueError as exc:
-        raise malformed from exc
-
-
 def _stackup_boxes(
     layout: Any, top_cell: Any, spec: dict[str, Any], spec_path: str
 ) -> tuple[list[str], dict[str, list[dict[str, float]]], dict[str, float | None]]:
@@ -144,7 +115,9 @@ def _stackup_boxes(
                 raise MomError(
                     f"spec '{spec_path}': stackup entry missing {key!r}: {entry!r}"
                 )
-        layer_datatype = _parse_layer_datatype(str(entry["layer"]), spec_path)
+        layer_datatype = _parse_layer_datatype(
+            str(entry["layer"]), spec_path, "stackup entry 'layer'", MomError
+        )
         name = str(entry["conductor"])
         if name not in boxes:
             boxes[name] = []
@@ -340,7 +313,7 @@ def run_mom(
     ``docs/cli/mom.md``), including ``schema_version``.
     """
     native = _load_native()
-    spec = _load_spec(spec_path)
+    spec = _load_spec_json(spec_path, MomError)
 
     if (
         "stackup" not in spec
