@@ -1343,6 +1343,8 @@ def _stub_openroad_success_with_post_route_spef(
     hold_violation_count: int = 0,
     nets_annotated: int = 3,
     nets_total: int = 3,
+    design_nets_annotated: int | None = None,
+    design_nets_total: int | None = None,
     worst_slack_ns: float = -0.5,
     total_negative_slack_ns: float = -1.0,
 ) -> None:
@@ -1369,9 +1371,18 @@ def _stub_openroad_success_with_post_route_spef(
                 },
                 handle,
             )
+        # Two lines since issue #951: the SPEF-side pair, then the
+        # design-side pair `annotation_complete` is actually keyed on.
+        # `design_nets_*` default to mirroring the SPEF-side pair so every
+        # pre-#951 call site keeps its original meaning.
+        design_annotated = (
+            nets_annotated if design_nets_annotated is None else design_nets_annotated
+        )
+        design_total = nets_total if design_nets_total is None else design_nets_total
         stdout_lines = [
             place_and_route._SPEF_NET_CHECK_BEGIN,
             f"{nets_annotated} {nets_total}",
+            f"{design_annotated} {design_total}",
             place_and_route._SPEF_NET_CHECK_END,
             place_and_route._SETUP_VIOLATIONS_BEGIN,
         ]
@@ -1456,7 +1467,7 @@ def test_post_route_spef_reports_spef_sta_block(tmp_path, monkeypatch):
 def test_post_route_spef_flags_unmatched_nets(tmp_path, monkeypatch):
     """Net-name correlation is explicitly checked and reported, not assumed
     (issue #948 scope item 3) -- a partial match still returns a usable
-    `spef_sta` block, with `nets_annotated < nets_total` stated plainly."""
+    `spef_sta` block, with the design-side shortfall stated plainly."""
     request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
     _stub_openroad_success_with_post_route_spef(
         monkeypatch, nets_annotated=1, nets_total=3
@@ -1477,6 +1488,54 @@ def test_post_route_spef_flags_unmatched_nets(tmp_path, monkeypatch):
     assert "1 of 3" in warning
 
 
+def test_post_route_spef_annotation_complete_keys_on_the_design_side_ratio(
+    tmp_path, monkeypatch
+):
+    """Issue #951: a run whose SPEF names every net the design has is a real
+    -parasitics measurement even though the SPEF *also* carries hundreds of
+    intra-standard-cell nodes the gate-level design never had -- so
+    `annotation_complete` is keyed on `design_nets_annotated ==
+    design_nets_total`, not on the SPEF-side ratio, which cannot reach 1 by
+    construction."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(
+        monkeypatch,
+        nets_annotated=458,
+        nets_total=1199,
+        design_nets_annotated=458,
+        design_nets_total=458,
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    spef_sta = run_place_and_route(request_path)["spef_sta"]
+
+    assert (spef_sta["nets_annotated"], spef_sta["nets_total"]) == (458, 1199)
+    assert (spef_sta["design_nets_annotated"], spef_sta["design_nets_total"]) == (
+        458,
+        458,
+    )
+    assert spef_sta["annotation_complete"] is True
+    assert spef_sta["annotation_warning"] is None
+
+
+def test_post_route_spef_extracts_with_def_derived_net_names(tmp_path, monkeypatch):
+    """Issue #951's actual fix: the `klt extract` pass behind `spef_sta`
+    names routed nets from the DEF net name the DEF->GDS merge left on their
+    geometry (`def_net_names=True`), not from GDS text labels -- which the
+    merge only emits for top-level pins, leaving every internal net under a
+    synthesized name no OpenSTA net is called (measured `0` annotated on all
+    three corpus designs when #948 shipped)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    extract_calls = _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    assert extract_calls[0]["def_net_names"] is True
+
+
 def test_post_route_spef_zero_annotation_is_reported_not_hidden(tmp_path, monkeypatch):
     """The measured reality on the routed `gcd` corpus fixture today (`0 of
     981`, verified live against `openroad/orfs:latest` while implementing
@@ -1487,7 +1546,11 @@ def test_post_route_spef_zero_annotation_is_reported_not_hidden(tmp_path, monkey
     reads like a real-parasitics measurement."""
     request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
     _stub_openroad_success_with_post_route_spef(
-        monkeypatch, nets_annotated=0, nets_total=981
+        monkeypatch,
+        nets_annotated=0,
+        nets_total=981,
+        design_nets_annotated=0,
+        design_nets_total=458,
     )
     _stub_merge_def_to_gds(monkeypatch)
     _stub_run_extract_for_post_route_spef(monkeypatch)
@@ -1497,8 +1560,9 @@ def test_post_route_spef_zero_annotation_is_reported_not_hidden(tmp_path, monkey
     spef_sta = report["spef_sta"]
     assert spef_sta["nets_annotated"] == 0
     assert spef_sta["nets_total"] == 981
+    assert spef_sta["design_nets_annotated"] == 0
     assert spef_sta["annotation_complete"] is False
-    assert "0 of 981" in spef_sta["annotation_warning"]
+    assert "0 of 458" in spef_sta["annotation_warning"]
 
 
 def test_post_route_spef_full_annotation_sets_no_warning(tmp_path, monkeypatch):
@@ -1553,20 +1617,16 @@ def test_tcl_net_list_brace_quotes_each_name():
     assert place_and_route._tcl_net_list(["A", "B|C", "clk"]) == "{A} {B|C} {clk}"
 
 
-def test_sta_pattern_escape_neutralises_glob_metacharacters():
-    """`get_nets` matches its argument as a *pattern*, so a bussed net's own
-    `[13]` suffix would otherwise be a one-of-`1`-or-`3` character class --
-    an accidental match (or non-match) that would corrupt the
-    `nets_annotated` count issue #948 exists to report honestly."""
-    assert place_and_route._sta_pattern_escape("a_in[13]") == r"a_in\[13\]"
-    assert place_and_route._sta_pattern_escape("net*x?y") == r"net\*x\?y"
-    # A plain name is passed through untouched.
-    assert place_and_route._sta_pattern_escape("_019_") == "_019_"
-
-
-def test_spef_sta_script_escapes_net_patterns_in_the_generated_tcl():
-    """The escape actually reaches the generated script -- the check is only
-    honest if `get_nets` sees the literal name."""
+def test_spef_sta_script_embeds_net_names_unescaped_in_the_generated_tcl():
+    """The generated Tcl carries each name exactly as given (issue #951) --
+    the check is only honest if `get_nets` sees the real net's own name, not
+    a backslash-mangled one that matches nothing. A prior version of this
+    code backslash-escaped `get_nets`'s glob metacharacters; because
+    `_tcl_net_list` brace-quotes each name and Tcl brace-quoting performs no
+    backslash substitution, that escaping reached `get_nets` as literal
+    backslash characters and matched nothing -- invisible while #948's
+    baseline correlation was 0%, and a live-reproduced bug the moment real
+    names started matching."""
     lines = place_and_route._spef_sta_script_lines(
         checkpoint_in="/tmp/x.odb",
         liberty_path="/tmp/x.lib",
@@ -1576,13 +1636,34 @@ def test_spef_sta_script_escapes_net_patterns_in_the_generated_tcl():
         net_names=["a_in[13]", "_019_"],
     )
     net_list_line = next(line for line in lines if line.startswith("set klt_spef_nets"))
-    assert r"{a_in\[13\]}" in net_list_line
+    assert "{a_in[13]}" in net_list_line
     assert "{_019_}" in net_list_line
+    assert "\\" not in net_list_line
     # The correlation check runs *before* `read_spef`, so a `read_spef`
     # failure can never also swallow the check.
     assert lines.index(f'puts "{place_and_route._SPEF_NET_CHECK_END}"') < lines.index(
         "read_spef /tmp/x.spef"
     )
+
+
+def test_spef_sta_script_also_counts_coverage_of_the_designs_own_nets():
+    """Issue #951: the SPEF-side ratio alone cannot reach 1 -- flat
+    extraction yields each standard cell's internal nodes, which a
+    gate-level linked design has no counterpart for -- so the script also
+    walks the *design's* nets and counts how many the SPEF names, which is
+    the ratio `annotation_complete` is keyed on."""
+    lines = place_and_route._spef_sta_script_lines(
+        checkpoint_in="/tmp/x.odb",
+        liberty_path="/tmp/x.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+        spef_path="/tmp/x.spef",
+        net_names=["_019_"],
+    )
+    script = "\n".join(lines)
+    assert "foreach klt_design_net [get_nets -quiet *]" in script
+    assert "get_full_name $klt_design_net" in script
+    assert 'puts "$klt_design_annotated $klt_design_total"' in script
 
 
 def test_count_spef_nets_annotated_parses_marker_block():
@@ -1591,11 +1672,12 @@ def test_count_spef_nets_annotated_parses_marker_block():
             "some preamble",
             place_and_route._SPEF_NET_CHECK_BEGIN,
             "7 10",
+            "4 4",
             place_and_route._SPEF_NET_CHECK_END,
             "trailer",
         ]
     )
-    assert place_and_route._count_spef_nets_annotated(stdout) == (7, 10)
+    assert place_and_route._count_spef_nets_annotated(stdout) == (7, 10, 4, 4)
 
 
 def test_count_spef_nets_annotated_defensive_when_markers_missing():

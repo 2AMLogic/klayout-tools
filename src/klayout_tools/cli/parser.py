@@ -805,6 +805,27 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--def-net-names",
+        dest="def_net_names",
+        action="store_true",
+        help=(
+            "name routed nets from the DEF net name KLayout's LEF/DEF reader "
+            "recorded on their geometry as a GDS shape property (property 1, "
+            "`LEFDEFReaderConfiguration.net_property_name`'s default) instead "
+            "of from GDS text labels (issue #951, Epic #700 Phase 3). On a "
+            "routed GDS from `klt place-and-route` this recovers the design's "
+            "own net names (`_019_`, `req_msg[3]`) in place of KLayout's "
+            "synthesized `$<id>` placeholders and pin-label-joined `A,X` "
+            "names, which is what lets the emitted SPICE/SPEF line up with "
+            "the netlist an STA tool has linked. Off by default -- property 1 "
+            "carries no guaranteed meaning in a GDS that did not come from a "
+            "LEF/DEF merge, so this is opt-in, and every other layout's "
+            "output is byte-identical to today's. A run that opts in and "
+            "finds no such property says so in `warnings`. See "
+            "docs/cli/extract.md's '--def-net-names' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--top-cell-pins",
         dest="top_cell_pins",
         action="store_true",

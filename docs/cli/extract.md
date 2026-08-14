@@ -2012,6 +2012,57 @@ Additive field: `spef_path` (top-level, alongside `netlist_path`) — the
 resolved SPEF path, or `null` when `--spef` was omitted (byte-identical to
 before this feature existed).
 
+### DEF-derived net names (`--def-net-names`, issue #951, Epic #700 Phase 3)
+
+`--def-net-names` names each routed net from the **DEF net name** rather
+than from GDS text labels.
+
+**Why it exists.** Extraction's default naming source is text labels
+(see "Coverage" above). On a routed GDS produced by
+[`klt place-and-route`](place-and-route.md), the DEF→GDS merge emits label
+texts for **top-level pins only** — 52 of them on the `gcd` corpus fixture —
+so every *internal* routed net is named either by KLayout's synthesized
+`$<id>` placeholder or by joining whatever standard-cell pin labels happen to
+touch it (`A,X`). Neither is what the design calls that net (`_019_`,
+`req_msg[3]`, …), so the `--spef` file above named nothing an STA tool could
+resolve: correlation measured **0 of 981 / 1904 / 449** nets on
+`gcd`/`modexp`/`mult8` when `--spef` shipped.
+
+**Where the real names come from.** KLayout's LEF/DEF reader records each
+routed-net shape's DEF net name as a **GDS shape property** —
+`LEFDEFReaderConfiguration.net_property_name`, whose default is property
+`1` — and GDS `PROPATTR`/`PROPVALUE` round-trips it. A routed GDS therefore
+already carries the design's own net names; nothing about the artifact
+needed to change to recover them. (The committed
+`tests/corpus/place_and_route/gcd.gds.gz` fixture carries all **458** of
+that design's DEF net names on its routed metal — which is why closing this
+gap required no fixture regeneration.) This flag reads that property off the
+routed-metal shapes, resolves each name to its extracted net, and renames
+it, overriding the label-derived name.
+
+```
+klt extract routed.gds --deck sky130 --def-net-names \
+  --parasitics --spef routed.spef --format json
+```
+
+**Opt-in, deliberately.** Property `1` carries no guaranteed meaning in a
+GDS that did *not* come from a LEF/DEF merge, so this is never inferred:
+without the flag, every layout's output is byte-identical to before the flag
+existed. `klt place-and-route`'s own `post_route_spef` path passes it
+internally, since it knows its GDS came from its own DEF→GDS merge.
+
+**Never a silent no-op.** A run that opts in and finds no such property on
+any routed-metal shape says so in `warnings` ("`--def-net-names` found no DEF
+net-name shape property (1) …"), rather than quietly returning
+default-named output that a caller might read as DEF-named. A run where some
+DEF names resolve to no extracted net (geometry the deck's connectivity
+graph does not join) reports those names too.
+
+**One net per name.** A DEF net that extraction splits into several
+electrically disconnected islands names one island and leaves the rest
+alone, rather than minting duplicate net names into the SPICE/SPEF output —
+the same posture as the duplicate-net-name limitation noted above.
+
 ### What it does *not* do
 
 - **Lateral (same-layer, sidewall) coupling capacitance and fringe

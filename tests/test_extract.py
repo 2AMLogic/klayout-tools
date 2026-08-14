@@ -9368,3 +9368,185 @@ def test_spef_cli_json_and_text(tmp_path, capsys):
     assert exit_code == 0
     text_out = capsys.readouterr().out
     assert f"spef_path: {tmp_path / 'cli2.spef'}" in text_out
+
+
+# --------------------------------------------------------------------------- #
+# `--def-net-names` (issue #951, Epic #700 Phase 3): name routed nets from the
+# DEF net name KLayout's LEF/DEF reader recorded on their geometry as GDS shape
+# property 1, instead of from GDS text labels.
+# --------------------------------------------------------------------------- #
+
+
+def _inverter_with_def_net_property(
+    tmp_path: Path, *, net_name: str = "_019_", property_id: int = 1
+) -> str:
+    """The standard synthetic inverter, with one extra li1 (`metals[0]`)
+    shape drawn on the `Y` drain pad carrying `net_name` under
+    `property_id` -- exactly the shape shape+property pairing KLayout's own
+    DEF reader produces for a routed net (`net_property_name`, default `1`),
+    and which `klt place-and-route`'s DEF->GDS merge therefore ships in its
+    routed GDS."""
+    layout = _make_inverter_layout()
+    top = layout.cell("TOP")
+    li1 = layout.layer(67, 20)
+    shape = top.shapes(li1).insert(kdb.Box(1600, 200, 2000, 800))
+    shape.set_property(property_id, net_name)
+    return _write_gds(layout, tmp_path / "def_net_names.gds")
+
+
+def test_def_net_names_off_by_default_keeps_label_derived_names(tmp_path):
+    """The flag is opt-in: property 1 carries no guaranteed meaning in a GDS
+    that did not come from a LEF/DEF merge, so a default run names the drain
+    net from its `Y` text label exactly as before this flag existed."""
+    layout_path = _inverter_with_def_net_property(tmp_path)
+
+    report = run_extract(layout_path, "sky130", output=str(tmp_path / "default.spice"))
+
+    names = {net["name"] for net in report["nets"]}
+    assert "Y" in names
+    assert "_019_" not in names
+
+
+def test_def_net_names_renames_the_net_carrying_the_def_property(tmp_path):
+    """Opting in renames that same net to its DEF name, overriding the text
+    label -- the whole point of issue #951: on a routed GDS the label is a
+    standard cell's own pin name (or absent entirely), while the property
+    carries what OpenSTA calls the net."""
+    layout_path = _inverter_with_def_net_property(tmp_path)
+
+    default_report = run_extract(
+        layout_path, "sky130", output=str(tmp_path / "default.spice")
+    )
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "def_names.spice"),
+        def_net_names=True,
+    )
+
+    names = {net["name"] for net in report["nets"]}
+    assert "_019_" in names
+
+    # Exactly the one net whose geometry carries the property is renamed:
+    # this fixture's two drain pads are separate nets that merely share the
+    # `Y` label, and only the labelled-*and*-propertied one moves.
+    def _count(report_, name):
+        return len([net for net in report_["nets"] if net["name"] == name])
+
+    assert _count(default_report, "Y") == _count(report, "Y") + 1
+    # The rename is not a blanket relabelling: every *other* net keeps the
+    # name its own label gave it.
+    assert {"A", "VGND", "VPWR"} <= names
+
+
+def test_def_net_names_warns_when_no_such_property_exists(tmp_path):
+    """A layout with no DEF net-name property at all is not silently
+    unchanged -- opting in and finding nothing says so, so a caller never
+    reads default-named output as DEF-named output."""
+    layout_path = _write_gds(_make_inverter_layout(), tmp_path / "no_property.gds")
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "no_property.spice"),
+        def_net_names=True,
+    )
+
+    assert any(
+        "--def-net-names found no DEF net-name shape property" in warning
+        for warning in report["warnings"]
+    )
+    assert "Y" in {net["name"] for net in report["nets"]}
+
+
+def test_def_net_names_ignores_other_property_ids(tmp_path):
+    """Only property `_DEF_NET_NAME_PROPERTY_ID` is read. A GDS annotating
+    its shapes under some other id is left completely alone (and still gets
+    the "found nothing" warning), so this flag cannot quietly consume an
+    unrelated annotation convention."""
+    layout_path = _inverter_with_def_net_property(tmp_path, property_id=42)
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "other_property.spice"),
+        def_net_names=True,
+    )
+
+    names = {net["name"] for net in report["nets"]}
+    assert "Y" in names
+    assert "_019_" not in names
+    assert any(
+        "found no DEF net-name shape property" in warning
+        for warning in report["warnings"]
+    )
+
+
+def test_def_net_names_cli_flag_is_wired(tmp_path, capsys):
+    """The CLI surface reaches `run_extract`'s kwarg (issue #951)."""
+    layout_path = _inverter_with_def_net_property(tmp_path)
+
+    exit_code = main(
+        [
+            "extract",
+            layout_path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "cli_def_names.spice"),
+            "--def-net-names",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert "_019_" in {net["name"] for net in report["nets"]}
+
+
+def test_def_net_names_recovers_the_routed_corpus_designs_own_net_names(
+    tmp_path_factory,
+):
+    """Acceptance measurement for issue #951, on the real routed artifact:
+    `tests/corpus/place_and_route/gcd.gds.gz` is a `klt place-and-route`
+    `"route"`-stage output, and it *already* carries all 458 of that
+    design's DEF net names on its routed metal (GDS `PROPATTR`/`PROPVALUE`
+    round-trips KLayout's `net_property_name`) -- which is why closing this
+    gap needed no fixture regeneration. Default extraction cannot see them;
+    `--def-net-names` recovers every one.
+    """
+    tmp_path = tmp_path_factory.mktemp("gcd_def_net_names")
+    layout_path = str(CORPUS_DIR / "place_and_route" / "gcd.gds.gz")
+
+    default_report = run_extract(
+        layout_path, "sky130", output=str(tmp_path / "default.spice")
+    )
+    def_names_report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "def_names.spice"),
+        def_net_names=True,
+    )
+
+    default_names = {net["name"] for net in default_report["nets"]}
+    def_names = {net["name"] for net in def_names_report["nets"]}
+
+    # A representative internal net, a bussed top-level net, and a
+    # synthesis-generated name -- none of which the label-derived default
+    # can produce.
+    for design_net in ("_019_", "_000_", "a_in[10]"):
+        assert design_net in def_names
+    assert not {"_019_", "_000_"} & default_names
+
+    # All 334 `_NNN_` synthesis nets plus all 80 bus bits reach the netlist.
+    assert len([name for name in def_names if re.fullmatch(r"_\d+_", name)]) == 334
+    assert len([name for name in def_names if "[" in name]) == 80
+
+    # Nothing was left behind: no DEF name failed to resolve to an extracted
+    # net (which would have been reported, loudly, as a warning).
+    assert not [
+        warning
+        for warning in def_names_report["warnings"]
+        if "--def-net-names" in warning
+    ]
