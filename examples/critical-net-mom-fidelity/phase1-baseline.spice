@@ -1,0 +1,25 @@
+* extracted by klt extract --deck sky130
+* parasitic model (--parasitics):
+* - capacitance: net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net
+* - coupling: vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled
+* - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star
+* - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
+
+* cell TOP
+* pin AGR
+* pin VIC
+* pin FAR
+.SUBCKT TOP AGR VIC FAR
+* device instance AGR r0 *1 0,0 
+RAGR AGR AGR__par 0.25
+* device instance AGR r0 *1 0,0 
+CAGR AGR__par vsubs 2.9498e-16
+* device instance FAR r0 *1 0,0 
+RFAR FAR FAR__par 0.25
+* device instance FAR r0 *1 0,0 
+CFAR FAR__par vsubs 2.9498e-16
+* device instance VIC r0 *1 0,0 
+RVIC VIC VIC__par 0.25
+* device instance VIC r0 *1 0,0 
+CVIC VIC__par vsubs 2.9498e-16
+.ENDS TOP
