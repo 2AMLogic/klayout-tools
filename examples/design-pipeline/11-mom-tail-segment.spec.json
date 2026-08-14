@@ -1,0 +1,15 @@
+{
+  "background_permittivity": 3.9,
+  "compute_inductance": true,
+  "filament_size_um": 0.1,
+  "panel_size_um": 0.1,
+  "stackup": [
+    {
+      "conductivity_S_per_m": 781249.9999999999,
+      "conductor": "tail_li1_segment",
+      "layer": "67/20",
+      "z0_um": 0.0,
+      "z1_um": 0.1
+    }
+  ]
+}

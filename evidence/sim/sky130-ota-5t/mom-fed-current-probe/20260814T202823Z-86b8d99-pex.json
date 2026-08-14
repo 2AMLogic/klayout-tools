@@ -1,0 +1,213 @@
+{
+  "block": "sky130-ota-5t",
+  "extraction_pin": {
+    "deck": "sky130",
+    "deck_content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+    "method": "lumped-RC"
+  },
+  "note": "Phase 3b (issue #989) -- the current-carrying companion to post-extraction-bias-probe/'s Phase 1c record: same block/canary, a new bias network (TAIL_A|TAIL_B driven negative) so current genuinely flows and delta_pct is nonzero. See mom-fed-current-probe/'s own -mom-comparison.json record for the MoM-fed half of this scope's comparison.",
+  "pdk_pin": null,
+  "recorded_at": "2026-08-14T20:28:23Z",
+  "request_path": "examples/design-pipeline/11-pex-mom.request.json",
+  "request_sha256": "593e1d6a3fa9b24c7a972de0003bf79a2176c61a95caf54666276c0bde78177d",
+  "result": {
+    "corner_count": 6,
+    "delta": [
+      {
+        "corner_id": "default/-0.450V/-40C",
+        "delta_pct": 6.397,
+        "extracted_value": -3.24081e-05,
+        "schematic_value": -3.46231e-05,
+        "spec_row": "in1_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/-40C",
+        "delta_pct": -8.201,
+        "extracted_value": 6.35679e-05,
+        "schematic_value": 6.92466e-05,
+        "spec_row": "itail_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/-40C",
+        "delta_pct": 10.004,
+        "extracted_value": -3.11595e-05,
+        "schematic_value": -3.46231e-05,
+        "spec_row": "ivout_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/27C",
+        "delta_pct": 5.238,
+        "extracted_value": -3.07029e-05,
+        "schematic_value": -3.24e-05,
+        "spec_row": "in1_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/27C",
+        "delta_pct": -7.093,
+        "extracted_value": 6.14979e-05,
+        "schematic_value": 6.61931e-05,
+        "spec_row": "itail_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/27C",
+        "delta_pct": 8.249,
+        "extracted_value": -2.97272e-05,
+        "schematic_value": -3.24e-05,
+        "spec_row": "ivout_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/125C",
+        "delta_pct": 17.726,
+        "extracted_value": -2.5937e-05,
+        "schematic_value": -3.1525e-05,
+        "spec_row": "in1_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/125C",
+        "delta_pct": -75.189,
+        "extracted_value": 0.000367022,
+        "schematic_value": 0.00147929,
+        "spec_row": "itail_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.450V/125C",
+        "delta_pct": 21.658,
+        "extracted_value": -2.46972e-05,
+        "schematic_value": -3.1525e-05,
+        "spec_row": "ivout_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/-40C",
+        "delta_pct": 7.899,
+        "extracted_value": -5.06101e-05,
+        "schematic_value": -5.49509e-05,
+        "spec_row": "in1_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/-40C",
+        "delta_pct": -10.073,
+        "extracted_value": 9.88833e-05,
+        "schematic_value": 0.000109959,
+        "spec_row": "itail_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/-40C",
+        "delta_pct": 12.219,
+        "extracted_value": -4.82364e-05,
+        "schematic_value": -5.49509e-05,
+        "spec_row": "ivout_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/27C",
+        "delta_pct": 7.264,
+        "extracted_value": -4.48841e-05,
+        "schematic_value": -4.84e-05,
+        "spec_row": "in1_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/27C",
+        "delta_pct": -22.196,
+        "extracted_value": 0.000118524,
+        "schematic_value": 0.000152337,
+        "spec_row": "itail_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/27C",
+        "delta_pct": 10.848,
+        "extracted_value": -4.31496e-05,
+        "schematic_value": -4.84e-05,
+        "spec_row": "ivout_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/125C",
+        "delta_pct": 33.11,
+        "extracted_value": -2.94741e-05,
+        "schematic_value": -4.40635e-05,
+        "spec_row": "in1_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/125C",
+        "delta_pct": -96.71,
+        "extracted_value": 0.000857401,
+        "schematic_value": 0.0260625,
+        "spec_row": "itail_meas",
+        "status": "pass"
+      },
+      {
+        "corner_id": "default/-0.550V/125C",
+        "delta_pct": 36.712,
+        "extracted_value": -2.78868e-05,
+        "schematic_value": -4.40635e-05,
+        "spec_row": "ivout_meas",
+        "status": "pass"
+      }
+    ],
+    "errored": 0,
+    "extraction": {
+      "critical_nets": [],
+      "deck": "sky130",
+      "device_count": 5,
+      "distributed_rc": false,
+      "model": {
+        "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
+        "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
+        "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior",
+        "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star"
+      },
+      "mom_rlc_override": null,
+      "net_count": 12,
+      "netlist_sha256": "4cb8eefba323cc92f9147088476195d6a065ecea77a761a4ed0d5c64994d64c9"
+    },
+    "failed": 0,
+    "layout": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/06-layout.gds",
+    "netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/11-pex-mom-extracted.spice",
+    "passed": 18,
+    "provenance": {
+      "deck": {
+        "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+        "name": "sky130"
+      },
+      "input": {
+        "content_hash": "sha256:c7e9145fb8def74b60c69d65a17f3a37c251ec4abbcadde7fc9ad3a31041ebf6"
+      },
+      "klayout_version": "0.30.10",
+      "klt_version": "0.2.0",
+      "pdk": null
+    },
+    "reference_netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/07-reference.spice",
+    "schema_version": 1,
+    "status": "pass",
+    "testbenches": [
+      {
+        "corner_count": 6,
+        "measurement_names": [
+          "in1_meas",
+          "itail_meas",
+          "ivout_meas"
+        ],
+        "request": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/11-pex-mom.request.json",
+        "schematic_netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-989/examples/design-pipeline/07-reference.spice"
+      }
+    ]
+  },
+  "schema": "evidence-record/1",
+  "scope": "mom-fed-current-probe",
+  "subset_reason": null,
+  "supersedes": []
+}

@@ -43,6 +43,11 @@ blocks/*/output/renders/center_crop/*
 # examples/ in place must not stage generated build dirs/logs/results.
 .klt/
 
+# Scratch netlists the example probe scripts write beside their inputs for
+# sensitivity/invisibility cross-checks (examples/design-pipeline/
+# mom_current_carrying_probe.py) — intermediate, never evidence.
+.klt-*.spice
+
 # Cargo build output for the Rust engines under native/ (issue #718's
 # native/mom/ is the first). Cargo.lock IS tracked -- these crates build a
 # shipped extension module, so a reproducible dependency set is wanted.

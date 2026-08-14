@@ -36,6 +36,7 @@ they are hand-authored stage records per the skills' own framing.
 | S10 simulation across corners (operating point / supply current) | [`sim-op.request.json`](sim-op.request.json) / [`sim-op.result.json`](sim-op.result.json) | `klt sim` (shipped) |
 | S10 **post-extraction** corner sweep | [`09-sim.testbench.spice`](09-sim.testbench.spice), [`09-sim.request.json`](09-sim.request.json) → [`09-sim.result.json`](09-sim.result.json) | `klt sim`, `.include`ing [`07-extract.spice`](07-extract.spice) unmodified |
 | S10 **pex** schematic-vs-extracted delta (Epic #709 Phase 1c, [#803](https://github.com/2AMLogic/klayout-tools/issues/803)) | [`10-pex.testbench.spice`](10-pex.testbench.spice), [`10-pex.request.json`](10-pex.request.json) → [`10-pex.result.json`](10-pex.result.json) (+ [`10-pex-extracted.spice`](10-pex-extracted.spice), companion schematic-side [`10-pex.schematic.result.json`](10-pex.schematic.result.json)) | `klt pex` (shipped, `docs/cli/pex.md`) against `06-layout.gds`, stored via the append-only `sim/` evidence convention under [`../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/`](../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/) |
+| S10 **mom-fed pex** current-carrying delta (Epic #709 Phase 3b, [#989](https://github.com/2AMLogic/klayout-tools/issues/989)) | [`11-pex-mom.testbench.spice`](11-pex-mom.testbench.spice), [`11-pex-mom.request.json`](11-pex-mom.request.json) → [`11-pex-mom.result.json`](11-pex-mom.result.json) (+ [`11-pex-mom-extracted.spice`](11-pex-mom-extracted.spice), companion schematic-side [`11-pex-mom.schematic.result.json`](11-pex-mom.schematic.result.json), the `TAIL_A\|TAIL_B` segment geometry/`klt mom` result [`11-mom-tail-segment.gds`](11-mom-tail-segment.gds)/[`.spec.json`](11-mom-tail-segment.spec.json)/[`.result.json`](11-mom-tail-segment.result.json)) | [`mom_current_carrying_probe.py`](mom_current_carrying_probe.py), driving `klt pex`/`klt sim`/`klt mom` (shipped) against `06-layout.gds`, stored via the append-only `sim/` evidence convention under [`../../evidence/sim/sky130-ota-5t/mom-fed-current-probe/`](../../evidence/sim/sky130-ota-5t/mom-fed-current-probe/) |
 
 Regenerate the schematic-level netlist and request JSON with:
 
@@ -92,6 +93,14 @@ uv run klt pex 06-layout.gds 10-pex.request.json --deck sky130 \
 # klt sim, stored alongside per the sim/ evidence convention -- see
 # "S10 pex delta proof" below).
 uv run klt sim 10-pex.request.json --format json > 10-pex.schematic.result.json
+
+# S10 (mom-fed pex, Epic #709 Phase 3b, #989): a second, current-carrying
+# bias network reruns klt pex, isolates a real TAIL_A|TAIL_B li1 segment
+# straight out of 06-layout.gds, solves its real R/L/C via klt mom, and
+# compares -- see "S10 mom-fed pex delta proof" below for what it finds.
+# Requires the `mom` dependency group (uv sync --extra dev --group mom,
+# docs/cli/mom.md's "Building the native extension").
+uv run python3 mom_current_carrying_probe.py
 ```
 
 ## Stage-by-stage status
@@ -107,7 +116,7 @@ uv run klt sim 10-pex.request.json --format json > 10-pex.schematic.result.json
 | S7 layout generation | **done** (Epic #153 phase 4, #164) | [`06-gen-tail.json`](06-gen-tail.json)/[`06-gen-diffpair.json`](06-gen-diffpair.json)/[`06-gen-mirror.json`](06-gen-mirror.json) (`klt gen`) placed and routed into [`06-layout.gds`](06-layout.gds) by `klt gen-compose` ([`06-layout.json`](06-layout.json)); every net (`TAIL_A`/`TAIL_B`/`N1`/`VOUT`) routed, `unrouted_nets: []`. `05-sizing.json`'s M5b (on-block tail bias replica) is **not** composed as its own instance — the post-extraction testbench biases the tail node directly from outside the `.SUBCKT` (same pattern `docs/cli/gen-compose.md`'s worked example uses), so no on-die bias generator is needed to close this loop; see "Friction" below. |
 | S8 DRC/LVS | **done** (#164) | DRC: `klt drc --deck sky130` against `06-layout.gds` reports `status: "clean"`, `violation_count: 0` ([`06-drc.result.json`](06-drc.result.json)) — geometry is DRC-clean, not just "routed" (`klt gen-compose`'s `routed: true` is advisory only). LVS: `klt lvs` against a hand-written reference netlist ([`07-reference.spice`](07-reference.spice)) reports `status: "match"`, `pins 4/4/4` ([`08-lvs.result.json`](08-lvs.result.json)); `mismatch_count: 1` is the known unused-device-class `severity: "warning"` quirk (#201), not a real mismatch. |
 | S9 extraction | **done** (#164) | `klt extract --deck sky130` against `06-layout.gds` reports `device_count: 5`, `pin_count: 4`, `status: "extracted"` ([`07-extract.json`](07-extract.json)); the written [`07-extract.spice`](07-extract.spice) is what S10's post-extraction sweep below `.include`s unmodified. |
-| S10 simulation across corners | done — **schematic-level, post-extraction, and pex delta** | Schematic-level: AC and operating-point corner sweeps pass 20/20 corners (full 5-process x 2-supply x 2-temperature matrix) — Loop A's fast pre-layout convergence. Post-extraction (**#164**): a 6-corner supply/temperature sweep against `07-extract.spice` passes 6/6 ([`09-sim.result.json`](09-sim.result.json)) — the vision sentence's "simulation-verified" post-extraction pass this pipeline previously could not reach. **pex delta (new, Epic #709 Phase 1c, #803)**: `klt pex` reruns that same check as an explicit schematic-vs-extracted diff, 18/18 rows pass with a measured (not assumed) `delta_pct: 0.0`, stored via the append-only `sim/` evidence convention ([`10-pex.result.json`](10-pex.result.json)). See all three results sections below. |
+| S10 simulation across corners | done — **schematic-level, post-extraction, and pex delta** | Schematic-level: AC and operating-point corner sweeps pass 20/20 corners (full 5-process x 2-supply x 2-temperature matrix) — Loop A's fast pre-layout convergence. Post-extraction (**#164**): a 6-corner supply/temperature sweep against `07-extract.spice` passes 6/6 ([`09-sim.result.json`](09-sim.result.json)) — the vision sentence's "simulation-verified" post-extraction pass this pipeline previously could not reach. **pex delta (new, Epic #709 Phase 1c, #803)**: `klt pex` reruns that same check as an explicit schematic-vs-extracted diff, 18/18 rows pass with a measured (not assumed) `delta_pct: 0.0`, stored via the append-only `sim/` evidence convention ([`10-pex.result.json`](10-pex.result.json)). **mom-fed pex delta (new, Epic #709 Phase 3b, #989)**: a second, current-carrying bias network reruns `klt pex` with a genuinely nonzero baseline `delta_pct` (5.238%-96.71%), then attempts a real `klt mom`-fed `--mom-rlc-net` comparison against it — no fidelity gain is measurable for this net (two independent, mechanistically-verified reasons, not a repeat of the null above), stored as a new sibling evidence scope ([`11-pex-mom.result.json`](11-pex-mom.result.json)). See all four results sections below. |
 | S11 signoff report | **skipped — blocked** | No aggregation tool and no `klt.pipeline.signoff/1` contract exists. A provisional, explicitly-labeled pre-layout comparison against the S3 spec is given below instead of a real signoff artifact, per the `design-signoff` skill's "what an agent can do today" guidance. S8/S9/S10 now all close (see above), so this is the pipeline's only remaining blocked stage. |
 
 ## S10 results (schematic-level, both corner sweeps pass 20/20)
@@ -303,6 +312,160 @@ stored alongside as its own `klt sim`-flavored record, per the convention's
 "a `klt pex` record sits alongside the schematic-only `klt sim` record for
 the same `<block>/<scope>`" framing — see that directory's `HEAD` and
 `full_matrix_size.txt` for the rest of the convention's worked pieces (A, D).
+
+## S10 mom-fed pex delta proof (Epic #709 Phase 3b, #989)
+
+[Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709) Phase 3b's
+closing acceptance criterion is "extraction is graded against MoM (#701) on
+at least one net; the improvement over lumped-RC is measured, not asserted"
+— at the re-sim/spec-row level Phase 3a's `--mom-rlc-net` substitution
+(`docs/cli/pex.md`) makes possible, not just the standalone-capacitance
+level Phase 2c (#978) already measured. This section runs that comparison
+end to end against this same canary and reports what it actually finds —
+`examples/design-pipeline/mom_current_carrying_probe.py` is the
+reproducible script behind every number below.
+
+**Why S10's own testbench can't be reused verbatim.** `10-pex.testbench.spice`
+measures three nodes each directly forced by an ideal DC voltage source at
+that net's own star hub — `delta_pct: 0.0` there is `0.0` **independent of
+the resistor/capacitor value substituted**, so re-running that exact scope
+with a MoM-fed override would trivially reproduce `0.0` vs `0.0` again. This
+canary's own `docs/cli/pex.md` states plainly that it "has no current/
+charge-carrying, high-impedance node ... by construction" — true for S10's
+default bias (`Vn1=1.0V`/`Vtail=+0.5V`/`Vvout=1.0V`), but not for every
+bias point this same composed layout can reach.
+
+**A genuinely current-carrying bias point does exist.** The generic `nfet`
+model both `07-reference.spice` and `10-pex-extracted.spice` use is SPICE
+level=1 with no `VTO` given (defaults to exactly `0V`), and every device
+gate is floating (`klt gen-compose` never routes a generator's gate through
+`connectivity[]`) — `.options rshunt=1e12` is the *only* DC path any gate
+has, so every gate settles at exactly `0V` regardless of bias (confirmed
+directly: a manual `ngspice` op-point probe against `10-pex-extracted.spice`
+with the default bias reads `v(xota.$7)` through `v(xota.$11)` — every
+composed device's gate — as exactly `0.0`). Two of the five composed
+devices (the M2-equivalent instance, `s=TAIL_A|TAIL_B, g=$8, d=N1`, and the
+M5-equivalent instance, `s=TAIL_A|TAIL_B, g=$11, d=VOUT`) have their
+*source* terminal on `TAIL_A|TAIL_B` — biasing that net **negative** instead
+of positive makes `Vgs = 0 - V(TAIL) > 0 = VTO` for both, turning them on.
+Because their *drain* terminals sit on the two other actively-driven pin
+nets (`N1`, `VOUT`), this completes a genuine external-source-to-external-
+source DC current loop through `TAIL_A|TAIL_B`'s own star-arm resistors —
+unlike the internal-only `$2`/`$3`/`$6` star nodes (natural-looking
+`--mom-rlc-net` candidates at first glance, since they sit "between two
+active devices" rather than at a directly-forced hub), which are each a
+single-device dead end (one series R then one ground C, no other element)
+that carries **zero current in DC steady state regardless of bias** — a
+capacitor blocks all DC current, and there is no other path off that node
+(confirmed the same way: `v(xota.$2)`/`v(xota.$3)`/`v(xota.$6)` stay at
+`~1e-8`-scale leakage even while the TAIL loop below carries tens of
+microamps).
+
+[`11-pex-mom.testbench.spice`](11-pex-mom.testbench.spice) /
+[`11-pex-mom.request.json`](11-pex-mom.request.json) bias `TAIL_A|TAIL_B` at
+-0.45V/-0.55V (`corners.supply_v`, sibling values to S10's own +0.5V) across
+the same 3-temperature axis, keep `N1`/`VOUT` at S10's own +1.0V, and
+measure each bias source's own branch current (`i(vn1)`/`i(vtail)`/
+`i(vvout)`) — a schematic-vs-extracted-comparable quantity that is not
+pinned to a fixed value by construction the way a driven hub's own node
+voltage is, on either side of the diff. Per the append-only convention (do
+not modify `post-extraction-bias-probe/`), this is a **new sibling
+scope**, `mom-fed-current-probe/`, not an edit to S10's own request.
+
+**Baseline (Phase 1 lumped-RC) result:** `status: "pass"`, `corner_count: 6`,
+`passed: 18`, `failed: 0`, `errored: 0` — but unlike S10's own 18/18 rows,
+**every row here reads a genuinely nonzero `delta_pct`** (5.238%-96.71% in
+magnitude across the 6-corner sweep, from the added series resistance
+reducing the current this loop can drive relative to the ideal schematic).
+This is the first non-null `klt pex` result recorded for this canary — real
+forward progress refining S10's own 0.0/0.0 finding, which only proved that
+*specific* measurement scheme's insensitivity, never that this canary is
+inherently DC-dead.
+
+**The MoM-fed half of the comparison, and what it actually found.**
+`--mom-rlc-net`'s substitution (`docs/cli/extract.md`) replaces a *whole
+net's* total lumped resistance — the value `_terminal_star_weights`
+proportionally redistributes across every one of that net's star-arm
+resistors. `klt mom`'s own PEEC resistance solve (`docs/cli/mom.md`, "PEEC
+inductance/resistance") requires every conductor to reduce to a *single*
+bar-shaped box. `TAIL_A|TAIL_B`'s real li1 routing on `06-layout.gds` is
+**not** a single box: `klt components` (and this script's own
+`_isolate_tail_net_li1_shapes()`) finds 5 disjoint li1 polygons for this net
+(a routed trunk plus jogs/branches reaching three device terminals spread
+across the composed layout) — a literal net-wide PEEC solve is not
+available through the existing CLI without extending it to a multi-box PEEC
+formulation (`docs/cli/mom.md`'s own named follow-up, "Multi-box PEEC
+(Ruehli's general mesh)"); a live attempt against the 5-polygon whole-net
+conductor ([`11-mom-tail-net-whole.gds`](11-mom-tail-net-whole.gds)) did not
+complete within a practical time budget rather than returning the
+documented clean rejection promptly — noted as an observation, not resolved
+by this issue.
+
+This script instead solves the real PEEC resistance of **one** representative
+bar-shaped segment of `TAIL_A|TAIL_B`'s own real routed geometry — the
+0.42um x 10um trunk run cut directly out of `06-layout.gds`
+([`11-mom-tail-segment.gds`](11-mom-tail-segment.gds),
+[`11-mom-tail-segment.spec.json`](11-mom-tail-segment.spec.json) →
+[`11-mom-tail-segment.result.json`](11-mom-tail-segment.result.json)) — a
+real, `klt mom`-derived number, not hand-picked, but explicitly **not** a
+valid stand-in for the whole net's total (a segment and a 3-terminal net
+total are different physical quantities). Two findings fall out of running
+it:
+
+1. **DC resistance of a uniform rectangular conductor is mathematically
+   identical in both models.** `klt mom`'s PEEC solve reports
+   `304.76190476190465` ohms for this segment; sky130's own curated li1
+   sheet resistance (`sheet_res_ohm_sq=12.8`, `src/klayout_tools/decks/
+   sky130.py`) predicts `12.8 * 10um / 0.42um = 304.7619` ohms for the same
+   segment — matching to floating-point precision. `R = rho_sheet * length
+   / width` (the lumped model) and `R = length / (conductivity *
+   cross_sectional_area)` (PEEC, once `conductivity` is derived from that
+   same sheet resistance) are the *same formula*. There is no fidelity gap
+   for MoM to close on a straight bar's DC resistance, by construction of
+   the physics — a genuinely measured null result, not an unexamined
+   assumption.
+2. **A capacitance-only override is structurally invisible here regardless
+   of net choice**, for a different, independent reason: every net's ground
+   capacitor sits either at a hub an ideal voltage source directly forces
+   (`N1`/`TAIL_A|TAIL_B`/`VOUT`, S10's own finding, still true here), or at
+   an internal dead-end node with zero possible signal path in (this
+   generic device model's gate-overlap capacitances are unset, i.e. zero).
+   Confirmed empirically, not just analytically: `--mom-rlc-capacitance-ff
+   1000` on `TAIL_A|TAIL_B` (roughly 290x this net's own baseline 3.456fF)
+   produces a **byte-identical** `delta[]` to the unmodified baseline.
+
+To confirm this is a property of *this net's geometry and this canary's
+extraction model*, not of the `klt pex` machinery being insensitive to
+resistance in general, the script also re-runs the comparison with the
+representative segment's own real PEEC value (`304.7619` ohms) substituted
+as `TAIL_A|TAIL_B`'s new *total* — explicitly **not** a valid whole-net
+substitute, included only as a sensitivity check. Every one of the 18
+`delta[]` rows moves substantially (e.g. `itail_meas` at
+`default/-0.450V/-40C`: `-8.201%` baseline → `-2.022%`) — the same class of
+proof `tests/test_pex.py`'s own
+`test_run_pex_mom_rlc_net_threaded_through_to_extraction` established on a
+synthetic fixture's real load net, now reproduced against this canary's own
+current-carrying loop.
+
+**Conclusion.** No `--mom-rlc-net`-fed fidelity *gain* is measurable for
+`TAIL_A|TAIL_B` in this canary — not because no current-carrying spec row
+exists (one genuinely does, and its lumped-RC baseline delta is real,
+nonzero, first-of-its-kind evidence for this canary), but because (1) `klt
+mom` cannot solve a fair, whole-net-total resistance for this net's actual
+branchy routing, and even on a fair like-for-like single segment, DC
+resistance is mathematically identical between the PEEC and sheet-resistance
+models; and (2) capacitance is structurally invisible to every measurement
+in this scope regardless of net choice. Closing this gap for real would need
+either a different canary whose critical net happens to route as a single
+bar, or `klt mom`'s own documented multi-box PEEC follow-up — both out of
+this issue's scope. Every number above, and the full evidence record, is
+stored under
+[`../../evidence/sim/sky130-ota-5t/mom-fed-current-probe/`](../../evidence/sim/sky130-ota-5t/mom-fed-current-probe/)
+(`HEAD` points at all three records: the baseline `klt pex` result, its
+schematic-only `klt sim` companion, and the MoM-comparison record above),
+pinning `extraction_pin.method` and the deck's content hash exactly like
+`post-extraction-bias-probe/` does — a **new sibling scope**, per the
+append-only convention (S10's own record is untouched).
 
 ## Provisional pre-layout signoff comparison (not S11's real artifact)
 

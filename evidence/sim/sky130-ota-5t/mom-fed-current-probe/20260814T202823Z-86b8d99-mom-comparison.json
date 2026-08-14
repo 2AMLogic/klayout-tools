@@ -1,0 +1,81 @@
+{
+  "block": "sky130-ota-5t",
+  "extraction_pin": {
+    "deck": "sky130",
+    "deck_content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+    "method": "MoM-fed R/L/C (Phase 3a, issue #988) vs lumped-RC (Phase 1) -- attempted on TAIL_A|TAIL_B"
+  },
+  "note": "Not a klt pex/klt sim record on its own -- the MoM-fed half of this scope's comparison, request_path/request_sha256 pin the same 11-pex-mom.request.json baseline both other records in this scope pin (this record additionally depends on this directory's mom_current_carrying_probe.py, the script that produced every number in 'result', for full reproducibility). See examples/design-pipeline/README.md's 'S10 mom-fed pex delta proof' section for the full write-up.",
+  "pdk_pin": null,
+  "recorded_at": "2026-08-14T20:28:23Z",
+  "request_path": "examples/design-pipeline/11-pex-mom.request.json",
+  "request_sha256": "593e1d6a3fa9b24c7a972de0003bf79a2176c61a95caf54666276c0bde78177d",
+  "result": {
+    "baseline_lumped_rc": {
+      "conclusion": "every delta[] row is genuinely nonzero (a real schematic-vs-extracted current reduction from the added series R, 5.238%-96.71% in magnitude across the 6-corner sweep) -- the first non-null klt pex result recorded for this canary, refining Phase 1c's own 0.0/0.0 finding (which only proved this measurement scheme's own insensitivity, not that this canary is inherently DC-dead)",
+      "corner_count": 6,
+      "delta_pct_range": [
+        -96.71,
+        36.712
+      ],
+      "errored": 0,
+      "failed": 0,
+      "passed": 18,
+      "status": "pass"
+    },
+    "capacitance_override_check": {
+      "baseline_capacitance_ff": 3.456005,
+      "conclusion": "confirmed empirically -- a 1000fF override (roughly 290x this net's own baseline 3.456fF) produces a byte-identical delta[] to the unmodified lumped-RC baseline; capacitance is structurally invisible to every measurement in this scope, not just numerically close",
+      "delta_identical_to_baseline": true,
+      "demo_capacitance_ff": 1000.0
+    },
+    "epic": 709,
+    "issue": 989,
+    "kind": "mom-fed-pex-delta-comparison",
+    "mom_solve": {
+      "finding_1": "DC resistance of a uniform rectangular conductor is mathematically identical in both models (R = rho_sheet * length / width) -- klt mom's PEEC solve reproduces the plain sheet-resistance prediction for the same segment to floating-point precision (see peec_resistance_ohm vs. sheet_resistance_prediction_ohm above). There is no fidelity gap for MoM to close on a straight bar's DC resistance by construction of the physics -- a genuinely measured null result, not an unexamined assumption",
+      "method": "klt mom PEEC (compute_inductance=true), against one real bar-shaped segment of TAIL_A|TAIL_B's own li1 routing cut directly out of 06-layout.gds (not a synthetic fixture) -- see this script's own _isolate_tail_net_li1_shapes()",
+      "peec_matches_sheet_resistance_formula": true,
+      "peec_resistance_ohm": 304.76190476190465,
+      "peec_self_capacitance_ff": 0.562988158986506,
+      "segment_gds": "11-mom-tail-segment.gds",
+      "segment_length_um": 10.0,
+      "segment_width_um": 0.42,
+      "sheet_resistance_prediction_ohm": 304.7619,
+      "whole_net_peec_attempted": "yes -- TAIL_A|TAIL_B's own real li1 routing is 5 disjoint polygons (11-mom-tail-net-whole.gds), which klt mom's PEEC MVP restriction ('exactly one box per conductor', docs/cli/mom.md) cannot solve directly; a live attempt against the 5-polygon whole-net conductor did not complete within a practical time budget rather than returning the documented clean rejection promptly -- noted here as an observation, not resolved by this issue (multi-box PEEC is docs/cli/mom.md's own named follow-up)"
+    },
+    "overall_conclusion": "No `--mom-rlc-net`-fed fidelity GAIN is measurable for TAIL_A|TAIL_B in this canary, for two independent, mechanistically-verified reasons rather than one repeated null result: (1) klt mom cannot solve a real, fair, whole-net-total resistance for this net's actual branchy (5-polygon) routing -- --mom-rlc-net's substitution semantics need one whole-net total, klt mom's PEEC solve needs exactly one box per conductor, and even where a single representative segment CAN be PEEC-solved, DC resistance of a uniform rectangular bar is mathematically identical between the PEEC and sheet-resistance models -- there is no gap to measure even on a fair like-for-like segment; and (2) a capacitance-only override is structurally invisible to every measurement in this scope regardless of net choice, empirically confirmed with a 290x-baseline demo value. This canary's own current-carrying baseline result above (finding 1c refinement) is genuine forward progress on the epic's 'measured, not asserted' bar even where the MoM-fed half of the comparison specifically could not be completed -- see examples/design-pipeline/README.md's 'S10 mom-fed pex delta proof' section for the full writeup and what would need to change (a different canary's critical net routed as a single bar, or klt mom's own multi-box PEEC follow-up) to close this gap for real.",
+    "resistance_override_sensitivity_demo": {
+      "baseline_resistance_ohm_total": 1346.4054,
+      "caveat": "NOT a valid whole-net MoM substitute -- this is one representative segment's own real PEEC resistance used as a stand-in for TAIL_A|TAIL_B's 3-terminal star total (see module docstring finding 1/2); included only to demonstrate the pex machinery genuinely is sensitive to this net's resistance value in this current-carrying scope, mirroring tests/test_pex.py's own test_run_pex_mom_rlc_net_threaded_through_to_extraction precedent (a synthetic fixture's real load net, not a whole net solved as one segment)",
+      "demo_resistance_ohm": 304.76190476190465,
+      "example_moves": [
+        {
+          "baseline_delta_pct": 6.397,
+          "corner_id": "default/-0.450V/-40C",
+          "demo_delta_pct": 1.542,
+          "spec_row": "in1_meas"
+        },
+        {
+          "baseline_delta_pct": -8.201,
+          "corner_id": "default/-0.450V/-40C",
+          "demo_delta_pct": -2.022,
+          "spec_row": "itail_meas"
+        },
+        {
+          "baseline_delta_pct": 10.004,
+          "corner_id": "default/-0.450V/-40C",
+          "demo_delta_pct": 2.502,
+          "spec_row": "ivout_meas"
+        }
+      ],
+      "rows_moved": 18,
+      "rows_total": 18
+    },
+    "scope": "TAIL_A|TAIL_B biased negative (-0.45V/-0.55V) instead of Phase 1c's +0.5V, turning on the two composed devices whose source terminal sits on this net and whose drain terminal sits on an actively-driven pin net (N1, VOUT) -- see module docstring for the full derivation"
+  },
+  "schema": "evidence-record/1",
+  "scope": "mom-fed-current-probe",
+  "subset_reason": null,
+  "supersedes": []
+}

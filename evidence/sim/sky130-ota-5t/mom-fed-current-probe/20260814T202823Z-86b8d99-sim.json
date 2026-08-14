@@ -1,0 +1,327 @@
+{
+  "block": "sky130-ota-5t",
+  "note": "The schematic-side leg of the same scope -- a direct `klt sim` run of 11-pex-mom.request.json against its testbench's unmodified `.include` target (07-reference.spice), stored alongside per the convention's own framing, mirroring post-extraction-bias-probe/'s own -sim.json companion.",
+  "pdk_pin": null,
+  "recorded_at": "2026-08-14T20:28:23Z",
+  "request_path": "examples/design-pipeline/11-pex-mom.request.json",
+  "request_sha256": "593e1d6a3fa9b24c7a972de0003bf79a2176c61a95caf54666276c0bde78177d",
+  "result": {
+    "corner_count": 6,
+    "corners": [
+      {
+        "artifacts": {
+          "deck": null,
+          "log": null,
+          "raw": null,
+          "waveform": null
+        },
+        "corner_id": "default/-0.450V/-40C",
+        "diagnostics": [],
+        "measurements": [
+          {
+            "margin": 3.46231e-05,
+            "name": "in1_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -3.46231e-05
+          },
+          {
+            "margin": 6.92466e-05,
+            "name": "itail_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": 6.92466e-05
+          },
+          {
+            "margin": 3.46231e-05,
+            "name": "ivout_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -3.46231e-05
+          }
+        ],
+        "monte_carlo": null,
+        "process": null,
+        "runtime_s": 0.084,
+        "status": "pass",
+        "supply_v": {
+          "vtail": -0.45
+        },
+        "temperature_c": -40
+      },
+      {
+        "artifacts": {
+          "deck": null,
+          "log": null,
+          "raw": null,
+          "waveform": null
+        },
+        "corner_id": "default/-0.450V/27C",
+        "diagnostics": [],
+        "measurements": [
+          {
+            "margin": 3.24e-05,
+            "name": "in1_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -3.24e-05
+          },
+          {
+            "margin": 6.61931e-05,
+            "name": "itail_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": 6.61931e-05
+          },
+          {
+            "margin": 3.24e-05,
+            "name": "ivout_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -3.24e-05
+          }
+        ],
+        "monte_carlo": null,
+        "process": null,
+        "runtime_s": 0.093,
+        "status": "pass",
+        "supply_v": {
+          "vtail": -0.45
+        },
+        "temperature_c": 27
+      },
+      {
+        "artifacts": {
+          "deck": null,
+          "log": null,
+          "raw": null,
+          "waveform": null
+        },
+        "corner_id": "default/-0.450V/125C",
+        "diagnostics": [],
+        "measurements": [
+          {
+            "margin": 3.1525e-05,
+            "name": "in1_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -3.1525e-05
+          },
+          {
+            "margin": 0.00147929,
+            "name": "itail_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": 0.00147929
+          },
+          {
+            "margin": 3.1525e-05,
+            "name": "ivout_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -3.1525e-05
+          }
+        ],
+        "monte_carlo": null,
+        "process": null,
+        "runtime_s": 0.125,
+        "status": "pass",
+        "supply_v": {
+          "vtail": -0.45
+        },
+        "temperature_c": 125
+      },
+      {
+        "artifacts": {
+          "deck": null,
+          "log": null,
+          "raw": null,
+          "waveform": null
+        },
+        "corner_id": "default/-0.550V/-40C",
+        "diagnostics": [],
+        "measurements": [
+          {
+            "margin": 5.49509e-05,
+            "name": "in1_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -5.49509e-05
+          },
+          {
+            "margin": 0.000109959,
+            "name": "itail_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": 0.000109959
+          },
+          {
+            "margin": 5.49509e-05,
+            "name": "ivout_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -5.49509e-05
+          }
+        ],
+        "monte_carlo": null,
+        "process": null,
+        "runtime_s": 0.104,
+        "status": "pass",
+        "supply_v": {
+          "vtail": -0.55
+        },
+        "temperature_c": -40
+      },
+      {
+        "artifacts": {
+          "deck": null,
+          "log": null,
+          "raw": null,
+          "waveform": null
+        },
+        "corner_id": "default/-0.550V/27C",
+        "diagnostics": [],
+        "measurements": [
+          {
+            "margin": 4.84e-05,
+            "name": "in1_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -4.84e-05
+          },
+          {
+            "margin": 0.000152337,
+            "name": "itail_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": 0.000152337
+          },
+          {
+            "margin": 4.84e-05,
+            "name": "ivout_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -4.84e-05
+          }
+        ],
+        "monte_carlo": null,
+        "process": null,
+        "runtime_s": 0.119,
+        "status": "pass",
+        "supply_v": {
+          "vtail": -0.55
+        },
+        "temperature_c": 27
+      },
+      {
+        "artifacts": {
+          "deck": null,
+          "log": null,
+          "raw": null,
+          "waveform": null
+        },
+        "corner_id": "default/-0.550V/125C",
+        "diagnostics": [],
+        "measurements": [
+          {
+            "margin": 4.40635e-05,
+            "name": "in1_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -4.40635e-05
+          },
+          {
+            "margin": 0.0260625,
+            "name": "itail_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": 0.0260625
+          },
+          {
+            "margin": 4.40635e-05,
+            "name": "ivout_meas",
+            "status": "pass",
+            "unit": "A",
+            "value": -4.40635e-05
+          }
+        ],
+        "monte_carlo": null,
+        "process": null,
+        "runtime_s": 0.116,
+        "status": "pass",
+        "supply_v": {
+          "vtail": -0.55
+        },
+        "temperature_c": 125
+      }
+    ],
+    "environment": {
+      "engine": "ngspice",
+      "engine_version": "47",
+      "models_lib": null,
+      "models_lib_sha256": null,
+      "netlist_sha256": "7f2c214ed063f30ccea2b7cf3f9a1e118359b3de8a25702a6120d4d293f19429"
+    },
+    "errored": 0,
+    "failed": 0,
+    "measurements": [
+      {
+        "limits": {
+          "max": 0,
+          "min": -1
+        },
+        "name": "in1_meas",
+        "status": "pass",
+        "unit": "A",
+        "worst_case": {
+          "corner_id": "default/-0.450V/125C",
+          "margin": 3.1525e-05,
+          "value": -3.1525e-05
+        }
+      },
+      {
+        "limits": {
+          "max": 1,
+          "min": 0
+        },
+        "name": "itail_meas",
+        "status": "pass",
+        "unit": "A",
+        "worst_case": {
+          "corner_id": "default/-0.450V/27C",
+          "margin": 6.61931e-05,
+          "value": 6.61931e-05
+        }
+      },
+      {
+        "limits": {
+          "max": 0,
+          "min": -1
+        },
+        "name": "ivout_meas",
+        "status": "pass",
+        "unit": "A",
+        "worst_case": {
+          "corner_id": "default/-0.450V/125C",
+          "margin": 3.1525e-05,
+          "value": -3.1525e-05
+        }
+      }
+    ],
+    "netlist": "11-pex-mom.testbench.spice",
+    "passed": 6,
+    "provenance": {
+      "deck": null,
+      "input": null,
+      "klayout_version": "0.30.10",
+      "klt_version": "0.2.0",
+      "pdk": null
+    },
+    "schema_version": 1,
+    "status": "pass"
+  },
+  "schema": "evidence-record/1",
+  "scope": "mom-fed-current-probe",
+  "subset_reason": null,
+  "supersedes": []
+}
