@@ -8,6 +8,49 @@ PyPI via trusted publishing.
 > `vX.Y.Z` on the merged commit → push the tag. Pushing the tag is what
 > triggers the publish workflow.
 
+## Release cadence
+
+Without a stated trigger, the gap between the latest PyPI tag and `main`
+grows silently until someone pins the release and hits stale behavior — this
+has already happened twice (#342, #953). The rule below exists so "is a
+release due right now?" has a checkable answer instead of "when it seems
+warranted."
+
+**Cut a release when either condition is true:**
+
+1. **Event-based (primary)** — a merged fix that was requested to be
+   pinned-and-installable (i.e. someone asked "is this fixed in what I can
+   install?" or a downstream consumer is blocked on it) has landed on `main`
+   and is not yet in a tagged release.
+2. **Commit-count backstop** — `main` is more than **25 commits** ahead of
+   the latest tag, so the gap never grows unbounded even if condition 1 goes
+   unnoticed. Check with:
+
+   ```bash
+   git rev-list --count "$(git tag --sort=-creatordate | head -1)"..origin/main
+   ```
+
+   A result over 25 means a release is due; cut one via the sequence below
+   (`/repo:release` if using the Repo Skills wrapper) even if nothing has
+   explicitly been requested as installable.
+
+25 is deliberately closer to the low end of the 18–200+ commit range that
+#342 and #953 both surfaced friction within — cutting a release is cheap
+(one version bump PR + one tag push, see the sequence below), so the backstop
+favors staying ahead of drift over minimizing release count.
+
+This policy does **not** mean cutting a release on every merge to
+`pyproject.toml`/`VERSION`, and does not require anything beyond the
+one-time trusted-publisher registration below — it only states *when* to run
+the mechanical sequence that section and the rest of this doc already
+describe.
+
+**Interim answer, between releases**: `CHANGELOG.md`'s `## Unreleased` →
+`### Fixed since release` section is the source of truth for "is fix X
+installable yet" — every dated, issue-numbered entry there has landed on
+`main` but not yet shipped to PyPI. Check it before assuming a closed issue
+is installable.
+
 ## One-time prerequisite (human-only — completed before v0.1.0; kept for reference)
 
 `publish.yml` publishes using [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)
