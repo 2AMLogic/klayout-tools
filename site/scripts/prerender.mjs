@@ -52,7 +52,7 @@ async function main() {
 
   const ssrEntry = join(SSR_OUT_DIR, "entry-server.js");
   const mod = await import(pathToFileURL(ssrEntry).href);
-  const { getLayouts, getFooterProps, renderPage, INDEX_META, detailMeta } = mod;
+  const { getLayouts, getEmExport, getFooterProps, renderPage, INDEX_META, detailMeta } = mod;
 
   const layouts = getLayouts();
   const template = readFileSync(join(DIST_DIR, "index.html"), "utf-8");
@@ -69,7 +69,7 @@ async function main() {
   // One /<slug>/index.html per block, matching the old Astro
   // getStaticPaths() route shape exactly.
   for (const layout of layouts) {
-    const detailData = { page: "detail", layout };
+    const detailData = { page: "detail", layout, emExport: getEmExport(layout.slug) };
     const html = injectPage(template, {
       appHtml: renderPage(detailData),
       ...detailMeta(layout),

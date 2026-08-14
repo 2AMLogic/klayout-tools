@@ -1,8 +1,11 @@
 import { renderToString } from "react-dom/server";
+import { join } from "node:path";
 import { App, type PageData } from "./App";
-import { loadLayouts } from "./data/loadLayouts";
+import { blocksDir, loadLayouts } from "./data/loadLayouts";
+import { loadEmExport } from "./data/loadEmExport";
 import { getBuildSha, commitUrl } from "./data/buildInfo";
 import type { Layout } from "./data/types";
+import type { EmSiteExport } from "./components/em/types";
 import type { FooterProps } from "./components/Footer";
 
 /**
@@ -23,6 +26,17 @@ const REPO_URL = "https://github.com/2AMLogic/klayout-tools";
 
 export function getLayouts(): Layout[] {
   return loadLayouts();
+}
+
+/**
+ * Build-time field-data lookup for one block's detail page (Epic #840 Phase
+ * 3b, issue #959) — `blocks/<slug>/output/<slug>.em-export.json`, when
+ * present and parsable, else `null` (no panel). See `data/loadEmExport.ts`
+ * for the full resilience contract (missing/malformed/unknown-version ->
+ * `null`, never throws).
+ */
+export function getEmExport(slug: string): EmSiteExport | null {
+  return loadEmExport(join(blocksDir(), slug));
 }
 
 export function getFooterProps(): FooterProps {
