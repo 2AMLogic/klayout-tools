@@ -570,10 +570,12 @@ only `-D` is omitted, leaving ABC's mapper and sizers to optimize
 untargeted exactly as they did before this field was consumed.
 `timing.delay_target_ps` is `null` in that case, so a caller can always tell
 a targeted run from an untargeted one. Measured effect of the target on
-`gcd` (Yosys 0.68+48, sky130, issue #807): untargeted maps to 3238.11 µm² at
-2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
-relaxed target buys area back at the cost of delay, so the value is a real
-caller decision rather than something this command should pick.
+`gcd` (sky130, issue #807; re-verified on this repo's pinned, from-source
+Yosys 0.67+post build — `scripts/install-yosys.sh` — per issue #967):
+untargeted maps to 3126.75 µm² at 2485.44 ps; `clock_period_ns: 10` maps to
+3001.63 µm² at 3072.40 ps — a relaxed target buys area back at the cost of
+delay, so the value is a real caller decision rather than something this
+command should pick.
 
 ## Response
 
@@ -581,11 +583,11 @@ caller decision rather than something this command should pick.
 {
   "schema_version": 1,
   "engine": "yosys",
-  "engine_version": "0.68+48",
+  "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
   "status": "ok",
   "instance_count": 347,
-  "area_um2": 3238.1056,
+  "area_um2": 3126.7488,
   "sequential_area_um2": 1251.2,
   "instance_counts_by_type": {
     "sky130_fd_sc_hd__a211o_1": 1,
@@ -594,7 +596,7 @@ caller decision rather than something this command should pick.
   "timing": {
     "source": "abc_stime",
     "wire_load": null,
-    "critical_path_ps": 2485.93,
+    "critical_path_ps": 2485.44,
     "delay_target_ps": null
   },
   "sta": {
@@ -664,39 +666,40 @@ $ klt synthesize request.json --format json
 {
   "schema_version": 1,
   "engine": "yosys",
-  "engine_version": "0.68+48",
+  "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
   "status": "ok",
   "instance_count": 347,
-  "area_um2": 3238.1056,
+  "area_um2": 3126.7488,
   "sequential_area_um2": 1251.2,
   "timing": {
     "source": "abc_stime",
     "wire_load": null,
-    "critical_path_ps": 2485.93,
+    "critical_path_ps": 2485.44,
     "delay_target_ps": null
   },
   ...
 }
 ```
 
-347 standard-cell instances, 3238.1056 µm² total (1251.2 µm² sequential),
-2485.93 ps ABC-estimated critical path, and **zero** `lpflow_*`/`probe*`
-cells — measured live on Yosys 0.68+48 against a volare `sky130A` install.
+347 standard-cell instances, 3126.7488 µm² total (1251.2 µm² sequential),
+2485.44 ps ABC-estimated critical path, and **zero** `lpflow_*`/`probe*`
+cells — measured live on Yosys 0.67+post (this repo's pinned, from-source
+build — `scripts/install-yosys.sh`) against a volare `sky130A` install.
 Note this particular design is **sequential** (it has a clocked `always`
 block) — see "Equivalence gate" above, `--verify-equivalence` is not usable
 on it.
 
 Before the ABC constraint/exclusion flags landed (issue #807), the same
-request on the same toolchain mapped to **335 instances / 2951.5808 µm²**
-with no delay number at all and 19 `lpflow_*` power-isolation instances in
-the netlist. The ~10% area difference is the cost of ABC's
-`buffer`/`upsize`/`dnsize` sizing plus the exclusion list; supplying
-`constraints.clock_period_ns` gives the caller the knob to trade it back
-(see the request table above). Yosys's own mapping result also moves between
-releases — the same pre-#807 flow maps this design to 326 instances on
-Ubuntu 24.04's Yosys 0.33 — so treat these figures as anchored to the build
-named here, not as invariants.
+request — issue #807's own pre-change measurement — mapped to
+**335 instances / 2951.5808 µm²** with no delay number at all and 19
+`lpflow_*` power-isolation instances in the netlist. The ~10% area
+difference is the cost of ABC's `buffer`/`upsize`/`dnsize` sizing plus the
+exclusion list; supplying `constraints.clock_period_ns` gives the caller
+the knob to trade it back (see the request table above). Yosys's own
+mapping result also moves between releases — the same pre-#807 flow maps
+this design to 326 instances on Ubuntu 24.04's Yosys 0.33 — so treat these
+figures as anchored to the build named here, not as invariants.
 
 With the optional `klt_statime_native` extension built (`uv sync --group
 statime`), the same run additionally reports the native critical path.

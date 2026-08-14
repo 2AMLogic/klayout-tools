@@ -43,6 +43,7 @@ import os
 import re
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
@@ -1908,10 +1909,21 @@ def test_cli_verify_equivalence_not_given_defaults_false(tmp_path, monkeypatch, 
 HAVE_YOSYS = shutil.which("yosys") is not None
 
 #: The Yosys build `docs/cli/synthesize.md`'s worked-example numbers were
-#: measured on (0.68+48, issue #807). Only that build's exact
-#: instance/area figures are asserted below -- see the integration test's
-#: own docstring.
-_WORKED_EXAMPLE_YOSYS = "0.68"
+#: measured on. Issue #967: originally pinned to "0.68" (matching the
+#: prebuilt oss-cad-suite `0.68+48` build issue #822 measured on), but CI's
+#: own `scripts/install-yosys.sh` pins Yosys **0.67** (an exact, checksum-
+#: verified upstream release tag) -- a mismatch that meant this gate's
+#: exact-number branch never actually ran in CI (silently skipped every
+#: run since #822). A real bisect (issue #967) found `synthesize.py` was
+#: never the cause of the drift: even the exact commit that introduced the
+#: `3238.1056` golden reproduces `3126.7488` today against *any* real,
+#: from-source Yosys build (0.67 built via `scripts/install-yosys.sh`, and
+#: 0.68+post via Homebrew both agree) -- only the original oss-cad-suite
+#: prebuilt binary distribution produced the stale `3238.1056` figure.
+#: Re-pinned to "0.67" (CI's own reproducible, checksum-verified build) so
+#: this exact-number check actually runs in CI on every push, instead of
+#: to an arbitrary contributor's local Yosys major version.
+_WORKED_EXAMPLE_YOSYS = "0.67"
 
 
 def _find_real_sky130_variant() -> tuple[str, str] | None:
@@ -1989,8 +2001,28 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
 
     if (report["engine_version"] or "").startswith(_WORKED_EXAMPLE_YOSYS):
         assert report["instance_count"] == 347
-        assert report["area_um2"] == pytest.approx(3238.1056)
+        assert report["area_um2"] == pytest.approx(3126.7488)
         assert report["sequential_area_um2"] == pytest.approx(1251.2)
+    else:
+        # Issue #967: this golden previously drifted silently -- CI pinned
+        # Yosys 0.67 while the gate checked "0.68", so the exact-number
+        # branch above never ran in CI from the day it was introduced
+        # (#822) until this fix. Now that the gate matches CI's own pinned,
+        # from-source build (see the constant's docstring), this branch
+        # should be unreachable in CI; warn loudly (pytest always surfaces
+        # warnings in its summary, unlike a bare `print`) rather than
+        # silently skip if it ever is again -- e.g. after a future Yosys
+        # version bump this test's gate is not updated for.
+        warnings.warn(
+            "test_integration_real_yosys_gcd_worked_example: resolved "
+            f"engine_version={report['engine_version']!r} does not match "
+            f"_WORKED_EXAMPLE_YOSYS={_WORKED_EXAMPLE_YOSYS!r} -- the "
+            "instance_count/area_um2/sequential_area_um2 golden assertions "
+            "were skipped. If this is CI, the pinned Yosys build "
+            "(scripts/install-yosys.sh) or this gate has drifted out of "
+            "sync -- see issue #967.",
+            stacklevel=1,
+        )
 
     assert os.path.isfile(report["netlist_path"])
     assert os.path.isfile(report["script_path"])
