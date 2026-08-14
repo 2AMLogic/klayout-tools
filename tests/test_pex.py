@@ -492,6 +492,45 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
     assert report["status"] == "pass"
 
 
+@_SKIP_NO_NGSPICE
+def test_run_pex_distributed_rc_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--distributed-rc` (issue #977, Epic #709 Phase 2b) is forwarded from
+    `run_pex` to `run_extract`, and echoed back in
+    `extraction.distributed_rc` -- a fully wired unit-of-work test, distinct
+    from `tests/test_extract.py`'s own exact-value distributed-RC geometry
+    tests and `test_run_pex_distributed_rc_canary` below's own fidelity
+    proof. `RB` (this fixture's one labelled met1/li1 net) has exactly 1
+    device terminal (its own resistor's `RB` pin) -- fewer than 2, so this
+    also exercises the "named but nothing to chain, falls back to the star"
+    path end to end without raising."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        critical_nets=["RB"],
+        distributed_rc=True,
+    )
+
+    assert report["extraction"]["critical_nets"] == ["RB"]
+    assert report["extraction"]["distributed_rc"] is True
+    assert report["status"] == "pass"
+
+
+def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="--distributed-rc requires --critical-net"):
+        run_pex(resistor_layout, [str(request)], "sky130", distributed_rc=True)
+
+
 def _make_pex_lateral_coupling_layout(top_name: str = "TOP") -> kdb.Layout:
     """Two same-layer (met1) nets, ``AGR`` ("aggressor") and ``VIC``
     ("victim"), 0.1 um apart -- well within sky130 met1's own lateral-
@@ -642,6 +681,210 @@ def test_run_pex_critical_net_lateral_coupling_canary(tmp_path):
     # `--critical-net` was given, and it visibly moves the extracted-side
     # measurement from "no coupling" to a real, nonzero coupling kick.
     assert coupled_row["extracted_value"] - baseline_row["extracted_value"] > 0.1
+
+
+def _make_pex_distributed_rc_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Two sky130 poly resistors joined head-to-tail by a long (500 um) li1
+    run -- ``SRC --R1(289.2 ohm)--> MID --R2(289.2 ohm)--> LOAD``, where
+    ``MID`` is a genuinely internal net with real, substantial interconnect
+    geometry of its own (2 device terminals: `R1`'s ``RB``, `R2`'s ``RA``),
+    purpose-built as the Phase 2b (issue #977) canary fixture: a long, high-
+    impedance routed net -- the exact shape Epic #709 Phase 2's own text
+    names ("high-impedance nodes" / "a PLL loop filter"), and the shape
+    `--distributed-rc` targets (2+ device terminals to chain into a ladder,
+    unlike the Phase 2a canary's zero-device-terminal high-Z probe above).
+
+    li1's own curated sheet resistance/capacitance (``ParasiticsDeck.metals[0]``,
+    12.8 ohm/sq, 0.037 fF/um^2 area + 0.0407 fF/um perimeter) over a 500 um x
+    0.6 um run gives ``MID`` roughly 11 kohm of series resistance and 53 fF
+    of ground capacitance -- large enough that a fast (10 ps rise) step on
+    ``SRC`` takes real, measurable time to reach ``MID``, which is exactly
+    what distinguishes the star (all of `MID`'s capacitance at one hub, one
+    resistor hop away) from the distributed ladder (`MID`'s capacitance
+    split across its own node and its neighbour's, two resistor hops away
+    from `SRC`) at an early sample point."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    poly = (66, 20)  # poly.drawing
+    marker = (66, 13)  # poly.res
+    contact = (66, 44)  # licon1.drawing
+    li1 = (67, 20)  # li1.drawing
+    li1_pin = (67, 5)  # li1.pin
+
+    wire_len = 500_000  # 500 um, in database units (dbu = 0.001 um)
+
+    # Resistor "R1": SRC -> MID (near end of the long li1 run).
+    draw(*poly, kdb.Box(0, 0, 12000, 1000))
+    draw(*marker, kdb.Box(3000, 0, 9000, 1000))
+    draw(*contact, kdb.Box(1400, 400, 1600, 600))
+    draw(*li1, kdb.Box(1100, 200, 1900, 800))
+    label(*li1_pin, "SRC", 1500, 500)
+    draw(*contact, kdb.Box(10400, 400, 10600, 600))
+    draw(*li1, kdb.Box(10100, 200, 10100 + wire_len, 800))
+    label(*li1_pin, "MID", 10500, 500)
+
+    # Resistor "R2": MID (far end of the long li1 run) -> LOAD. Offset so
+    # its own RA landing pad overlaps the wire's far edge (and nothing
+    # else this resistor draws reaches back towards R1 or the wire).
+    ox = (10100 + wire_len) - 800 - 1100
+    draw(*poly, kdb.Box(0 + ox, 0, 12000 + ox, 1000))
+    draw(*marker, kdb.Box(3000 + ox, 0, 9000 + ox, 1000))
+    draw(*contact, kdb.Box(1400 + ox, 400, 1600 + ox, 600))
+    draw(*li1, kdb.Box(1100 + ox, 200, 1900 + ox, 800))
+    draw(*contact, kdb.Box(10400 + ox, 400, 10600 + ox, 600))
+    draw(*li1, kdb.Box(10100 + ox, 200, 10900 + ox, 800))
+    label(*li1_pin, "LOAD", 10500 + ox, 500)
+
+    return layout
+
+
+def _write_distributed_rc_schematic_dut(path: Path) -> Path:
+    """The Phase 1 schematic-level ideal for the canary below: two 289.2 ohm
+    resistors (:data:`_SHEET_RHO_RES_GENERIC_PO`'s own value, matching each
+    drawn poly resistor's own body) in series through `MID` -- no
+    interconnect R/C of any kind, so `V(MID)` tracks `V(SRC)` with zero
+    delay (`Rload` below draws negligible current, so there is no resistive
+    divider drop either)."""
+    path.write_text(
+        ".SUBCKT TOP LOAD MID SRC\nR1 SRC MID 289.2\nR2 MID LOAD 289.2\n.ENDS TOP\n"
+    )
+    return path
+
+
+def _write_distributed_rc_testbench(path: Path, dut_path: Path) -> Path:
+    """A fast (10 ps rise) 1 V step on `SRC`; `LOAD` is a genuine high-
+    impedance node (a 1 Gohm pull to ground, no active driver), so the
+    extracted-side `MID` node's own interconnect R/C is what determines how
+    much of that step has reached `MID` at an early sample point --
+    `.global vsubs`/`Vsubs` ties the extraction's synthesized substrate net
+    to a real 0 V reference, the same convergence requirement
+    `_write_lateral_coupling_testbench` above already documents (issue
+    #205's floating-node workaround) -- without it every parasitic ground
+    capacitor's `B` terminal floats, and `V(MID)` would track `V(SRC)`
+    instantly regardless of any resistor in between (no real capacitive
+    loading without a fixed reference)."""
+    path.write_text(
+        f'.include "{dut_path}"\n'
+        ".model res_generic_po r\n"
+        ".options rshunt=1e12\n"
+        ".global vsubs\n"
+        "Vsubs vsubs 0 DC 0\n"
+        "Vsrc SRC 0 PULSE(0 1 0 10p 10p 2n 4n)\n"
+        "Rload LOAD 0 1e9\n"
+        "Xdut LOAD MID SRC TOP\n"
+    )
+    return path
+
+
+def _write_distributed_rc_request(path: Path, testbench_path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "netlist": str(testbench_path),
+                "analysis": {"kind": "tran", "args": "1p 60p"},
+                "measurements": [
+                    {
+                        "name": "mid_50p",
+                        "spice": ".meas tran mid_50p FIND V(MID) AT=50p",
+                    }
+                ],
+            }
+        )
+    )
+    return path
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_distributed_rc_canary(tmp_path):
+    """**Phase 2b canary (issue #977, Epic #709)**: a real, ngspice-driven
+    `klt pex` run demonstrating a measurable, explainable delta between the
+    single-lumped-star model (Phase 2a's own baseline -- `--critical-net`
+    given, `--distributed-rc` not) and the distributed multi-segment ladder
+    (this issue -- both flags given) on the identical layout, testbench, and
+    schematic reference -- the acceptance criterion this test exists to
+    prove, not merely a unit test of the CLI/library wiring or the JSON
+    shape (that is `tests/test_extract.py`'s own exact-value distributed-RC
+    tests).
+
+    `MID` (:func:`_make_pex_distributed_rc_layout`) is a genuine internal,
+    2-device-terminal, high-impedance routed net (~11 kohm / ~53 fF of its
+    own li1 interconnect) -- the exact net class Epic #709 Phase 2's own
+    text names ("high-impedance nodes", "a PLL loop filter"). A fast (10 ps
+    rise) step on `SRC` reaches `MID` through either 1 resistor hop (the
+    star: `SRC -> MID__t0 -> MID` with `MID`'s *entire* capacitance sitting
+    at the hub) or 2 (the ladder: `SRC -> MID__t0` first charges its own
+    *local* capacitance, *then* the ~11 kohm segment resistor feeds `MID`'s
+    own remaining capacitance) -- an extra pole the star topology cannot
+    represent, since it always attaches a net's full capacitance directly
+    to its own hub.
+
+    **`--critical-net MID`, no `--distributed-rc`** (Phase 2a's own model,
+    unchanged by this issue): at `t=50 ps`, `V(MID)` has already risen to
+    roughly 13% of the step -- the star's one-hop-to-the-full-capacitance
+    path responds faster than the physical two-hop ladder below.
+
+    **`--critical-net MID --distributed-rc`** (this issue): the identical
+    step, geometry, and measurement instant now reads a measurably smaller
+    `V(MID)` -- the ladder's extra pole genuinely delays how much charge has
+    reached `MID` by this early sample point, a real second-order effect a
+    single lumped hub cannot represent by construction. Both models are
+    computed from the *exact same* underlying `resistance_ohm`/
+    `capacitance_ff` totals (conservation verified directly in
+    `tests/test_extract.py`), so this is a difference in **where** that R/C
+    sits along the net, not in how much of it there is -- and the extracted-
+    side JSON's own `parasitics.nets[].segments`/`terminals` entries
+    (`extraction` is not itself part of this command's `delta[]` output, but
+    is available from the same `klt extract`/`klt pex` run, see
+    `docs/cli/extract.md`) let a reader attribute the delta to the exact
+    segment/node responsible -- something the star topology's single opaque
+    hub capacitor cannot offer. That is this issue's own "more explainable"
+    fidelity improvement over Phase 2a's baseline, distinct from (and not
+    contingent on) which model's delta happens to have the smaller
+    magnitude at any one arbitrarily-chosen sample instant on a transient
+    that both models converge to the identical final value on."""
+    layout = _make_pex_distributed_rc_layout()
+    gds_path = _write_gds(layout, tmp_path / "distributed.gds")
+
+    dut = _write_distributed_rc_schematic_dut(tmp_path / "distributed_dut.spice")
+    tb = _write_distributed_rc_testbench(tmp_path / "distributed_tb.spice", dut)
+    request = _write_distributed_rc_request(tmp_path / "distributed.request.json", tb)
+
+    baseline = run_pex(gds_path, [str(request)], "sky130", critical_nets=["MID"])
+    assert baseline["extraction"]["critical_nets"] == ["MID"]
+    assert baseline["extraction"]["distributed_rc"] is False
+    baseline_row = baseline["delta"][0]
+    assert baseline_row["extracted_value"] == pytest.approx(0.1294, abs=2e-3)
+
+    distributed = run_pex(
+        gds_path,
+        [str(request)],
+        "sky130",
+        critical_nets=["MID"],
+        distributed_rc=True,
+    )
+    assert distributed["extraction"]["critical_nets"] == ["MID"]
+    assert distributed["extraction"]["distributed_rc"] is True
+    distributed_row = distributed["delta"][0]
+    assert distributed_row["extracted_value"] == pytest.approx(0.0999, abs=2e-3)
+
+    # The measurable, explainable delta itself: same testbench, same
+    # geometry, same schematic reference, same net-level R/C totals -- the
+    # *only* variable is whether `--distributed-rc` was given, and it
+    # visibly moves the extracted-side measurement, reflecting the ladder's
+    # genuine extra propagation pole.
+    assert baseline_row["extracted_value"] - distributed_row["extracted_value"] > 0.02
+    assert baseline_row["schematic_value"] == pytest.approx(
+        distributed_row["schematic_value"]
+    )
 
 
 @_SKIP_NO_NGSPICE

@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--critical-net <net>]... [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--critical-net <net>]... [--distributed-rc] [--format text|json]
 ```
 
 - `<layout>` — path to a GDSII (`.gds`) or OASIS (`.oas`) routed layout
@@ -45,6 +45,14 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   rows) reflect it. Off by default -- byte-identical to before this feature
   existed. See [`extract.md`](extract.md)'s "Lateral (same-layer, sidewall)
   coupling capacitance for critical nets" section.
+- `--distributed-rc` — passed through to `klt extract --distributed-rc`
+  (issue #977, Epic #709 Phase 2b); requires `--critical-net`. Replaces the
+  single-lumped-star R/C model with a distributed, multi-segment ladder for
+  every `--critical-net`-named net that has 2 or more device terminals -- so
+  the re-simulated extracted-side testbench (and the resulting `delta[]`
+  rows) reflect the finer-grained model. Off by default -- byte-identical to
+  before this feature existed. See [`extract.md`](extract.md)'s "Distributed
+  (multi-segment) RC ladder for critical nets" section.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -148,7 +156,8 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
       "resistance": "single lumped series resistance per net ...",
       "frequency": "quasi-static -- one frequency-independent R and C per net ..."
     },
-    "critical_nets": []
+    "critical_nets": [],
+    "distributed_rc": false
   },
   "testbenches": [
     {
@@ -191,7 +200,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | `layout`             | string            | Echo of `<layout>`, exactly as provided.                                                |
 | `netlist`            | string            | Path to the extracted (parasitic-annotated) netlist `klt extract` wrote.                |
 | `reference_netlist`  | string            | Absolute path of the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above). |
-| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), and `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), and `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (the file path as given), `schematic_netlist` (the resolved DUT path it `.include`d), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
@@ -243,8 +252,11 @@ beyond issue #760's vertical-overlap case is Phase 2a scope
 ([#976](https://github.com/2AMLogic/klayout-tools/issues/976)) — landed as
 the `--critical-net` flag above, opt-in and scoped to a caller-declared net
 set (not run unconditionally across the whole layout, the way vertical
-coupling is). Distributed and MoM-grade extraction remain later-phase scope
-(not this command) — see Epic #709.
+coupling is). Distributed RC is Phase 2b scope
+([#977](https://github.com/2AMLogic/klayout-tools/issues/977)) — landed as
+the `--distributed-rc` flag above, opt-in and scoped to the same
+`--critical-net` set. MoM-grade extraction remains later-phase scope (not
+this command) — see Epic #709.
 
 **Phase 2a's own measurable-delta proof.** The `sky130-ota-5t` canary above
 is DC-only by construction (every measurement point is an ideal-voltage-
@@ -261,6 +273,24 @@ unchanged by this issue); `--critical-net VIC` on the identical layout and
 testbench reports a real, nonzero, reproducible coupling voltage — a
 measurable, explainable delta re-derived from a real simulation on every CI
 run, rather than a one-off hand-captured evidence blob.
+
+**Phase 2b's own measurable-delta proof
+([#977](https://github.com/2AMLogic/klayout-tools/issues/977)).**
+`tests/test_pex.py`'s `test_run_pex_distributed_rc_canary` is a real,
+ngspice-driven `klt pex` run on a purpose-built fixture: two sky130 poly
+resistors joined head-to-tail by a long (500 um) li1 run, so the internal
+node between them (`MID`) is a genuine high-impedance routed net with real
+interconnect R/C of its own (~11 kohm / ~53 fF) — exactly the net class
+Epic #709 Phase 2's own text names ("high-impedance nodes", "a PLL loop
+filter"). A fast (10 ps rise) step reaches `MID` through either 1 resistor
+hop (`--critical-net MID` alone, Phase 2a's own baseline model: `MID`'s
+entire capacitance sits at one star hub) or 2 (`--critical-net MID
+--distributed-rc`: `MID`'s capacitance splits across its own ladder node and
+its neighbour's, an extra pole the star cannot represent). Same testbench,
+geometry, and schematic reference, same net-level R/C totals either way —
+the identical early-sample-point measurement moves by a real, reproducible
+amount purely because `--distributed-rc` changes *where* that R/C sits
+along the net, not *how much* of it exists.
 
 ## Evidence discipline: records, supersession, and pinning are repo-owned
 

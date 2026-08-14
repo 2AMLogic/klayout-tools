@@ -1869,6 +1869,79 @@ every metal level today; a deck that does not populates neither, so
 net (flagged in `warnings`, mirroring `overlap_pairs_without_coefficient`'s
 gap-reporting discipline rather than silently zeroing).
 
+### Distributed (multi-segment) RC ladder for critical nets (`--distributed-rc`, issue #977)
+
+Every net's parasitic resistance/capacitance above (including a
+`--critical-net`-named one) is still a single **lumped** element: one star
+hub, all of the net's capacitance at that one node, one resistor leg per
+device terminal — a topology that overstates a net's own Elmore delay by
+roughly 2x versus a genuinely distributed line (`docs/design/
+extract-fidelity-roadmap.md`'s Stage 3, citing Elmore 1948 and Rubinstein/
+Penfield/Horowitz 1983). `--distributed-rc` (requires `--critical-net`;
+reuses that flag's own net set rather than a second net-classification
+mechanism) replaces the star with a multi-segment ladder for the same
+"nets that matter" Epic #709's Phase 2 names — high-impedance nodes, a SAR
+ADC's CDAC top plate, a PLL loop filter:
+
+```
+klt extract cell.gds --deck sky130 --parasitics --critical-net MID --distributed-rc --format json
+```
+
+- **Scope: exactly the `--critical-net` set, and only where there is
+  something to chain.** A named net with 2 or more device terminals gets
+  the ladder; a named net with fewer than 2 (nothing to chain — the star
+  and the ladder coincide at 0 or 1 terminal) silently keeps the star model
+  and is reported in `warnings`, not an error — the same "declared but not
+  fully applicable" tolerance `--critical-net` itself already has for a
+  name matching no net.
+- **Terminal ordering is a physical-spread proxy, not routed geometry.**
+  Terminal positions (the same device-placement centroids the star topology
+  already reads) are ordered along the axis between the two most distant
+  terminals, giving a deterministic node sequence for the chain — still an
+  approximation (terminal position is a device-placement proxy, not true
+  per-segment routing geometry) but a strictly finer-grained one than a
+  single hub.
+- **Conservation.** The ladder redistributes the *same* `resistance_ohm`/
+  `capacitance_ff` totals `--parasitics` already computes for that net — it
+  changes **where** the R/C sits, not **how much** exists. `N` terminals
+  become `N - 1` series segment resistors (summing back to the net's total
+  resistance, split proportional to each segment's inter-terminal distance)
+  and `N` per-terminal ground capacitors (summing back to the net's total
+  capacitance; an interior node gets the average of its two adjacent
+  segments' length share, an end node half of its one segment's — the
+  standard "half the capacitance of each adjoining segment" lumped-element
+  discretization of a distributed RC line).
+- **The coupling-attachment point is the ladder's middle leg**, a
+  coarse choice flagged rather than silently assumed — coupling geometry
+  (vertical or `--critical-net`-scoped lateral) is not in general localized
+  to one exact point on a real routed net. A net with both `--distributed-rc`
+  and an inter-net coupling capacitor still gets exactly one coupling `C`
+  card, attached to that middle node instead of the star's single hub.
+
+Output, additive:
+
+| Field | Meaning |
+|---|---|
+| `parasitics.distributed_rc` | `true` only when `--distributed-rc` was given. `false` for a plain `--critical-net`-only run (Phase 2a's own baseline) and whenever the flag was never given. |
+| `parasitics.nets[].rc_model` | `"lumped"` (the star/Gamma-shunt model, every net unless this feature applies) or `"distributed"` (the ladder above). |
+| `parasitics.nets[].segments[]` | The ladder's per-segment resistors, in node order: `{"net_a", "net_b", "resistance_ohm"}`. `[]` unless `rc_model == "distributed"`. |
+| `parasitics.nets[].terminals[]` (distributed) | Same array as the star's, but each entry's shape differs for a distributed net: `{"device", "terminal", "leg_net", "order", "capacitance_ff"}` — `order` is the terminal's 0-based position in the ladder's node sequence, `capacitance_ff` its own per-node ground capacitance (there is no per-leg `resistance_ohm` here; resistance lives on `segments[]` instead, between adjacent nodes, not per terminal). |
+
+`c_count`/`r_count` reflect actual emitted device counts either way: a
+distributed net contributes `N` capacitor devices (one per terminal) instead
+of the star's 1, and `N - 1` segment resistors instead of the star's `N` leg
+resistors — `total_resistance_ohm`/`total_capacitance_ff` are unaffected,
+since both models redistribute the identical per-net totals.
+
+A `--distributed-rc` name matching a net with fewer than 2 device terminals
+is reported in `warnings` (`"... matched a net with fewer than 2 device
+terminals -- kept the star/Gamma-shunt model for them instead of a
+distributed ladder"`), not an error — see "A name matching no net is a
+warning, not an error" above for the same tolerance on `--critical-net`
+itself. `--distributed-rc` given without `--critical-net` is a clean
+`ExtractError` (`"--distributed-rc requires --critical-net"`) — there is no
+net set to scope this onto otherwise.
+
 ### `klt mom` cross-check for one net (`--mom-net`, issue #798)
 
 `--parasitics` (above) is a fast, curated-coefficient model — the same
@@ -2449,6 +2522,21 @@ changes again (it now also describes the `--critical-net`-scoped lateral
 case), the same "additive behavior change, recorded in `CHANGELOG.md`"
 treatment issue #760's own `model.coupling` change got.
 
+**Additive fields, no `schema_version` bump (issue #977):**
+`distributed_rc` and `nets[].rc_model`/`nets[].segments[]` are new; no
+documented field is renamed or retyped. `--distributed-rc` omitted (the
+default) leaves every field byte-identical to before this feature existed —
+`distributed_rc` is simply `false`, every `rc_model` is `"lumped"`, and
+every `segments` is `[]`. **Given**, a distributed net's own
+`nets[].terminals[]` entry *shape* changes (see "Distributed (multi-segment)
+RC ladder for critical nets" above) — a per-net, per-flag shape difference
+rather than a global rename, so `nets[].terminals[]`'s documented meaning is
+otherwise unchanged for every non-distributed net (still the overwhelming
+majority of any run). The `model.resistance` *value* changes (it now also
+describes the `--distributed-rc` ladder case), the same "additive behavior
+change, recorded in `CHANGELOG.md`" treatment `model.coupling`'s own changes
+got.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -2491,10 +2579,11 @@ treatment issue #760's own `model.coupling` change got.
   "metals_without_coefficient": [],
   "overlap_pairs_without_coefficient": [],
   "critical_nets": [],
+  "distributed_rc": false,
   "model": {
     "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
     "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
-    "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder",
+    "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star",
     "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"
   }
 }
@@ -2512,6 +2601,7 @@ treatment issue #760's own `model.coupling` change got.
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 | `overlap_pairs_without_coefficient` | array\<object\> | Adjacent metal-level pairs the deck declares but its `PARASITICS.metal_overlaps` table has no vertical-overlap coefficient for (issue #760). See below. Empty for both shipped decks. |
 | `critical_nets`        | array\<string\> | The `--critical-net` request, echoed back verbatim (issue #976). `[]` when the flag was never given. |
+| `distributed_rc`       | boolean         | `true` only when `--distributed-rc` was given (issue #977). `false` otherwise, `--critical-net`-only runs included. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
 
@@ -2540,8 +2630,10 @@ Each `nets[]` entry:
 | `net_id`         | integer         | Additive field (issue #765). A stable identifier, unique across every entry in this response, that disambiguates same-named entries — the net object's own KLayout cluster id. Build `{entry["net_id"]: entry}` instead of `{entry["net"]: entry}` if the layout may have same-labelled distinct nets (real layouts routinely do — 105 out of 908 distinct `VGND`/`VPWR`/... labels on the `gcd` corpus). |
 | `resistance_ohm` | number          | The net's total computed series resistance (ohms) — the star's total "budget", distributed across `terminals[]`. |
 | `capacitance_ff` | number          | The net's total lumped **ground** capacitance (femtofarads), hung off `hub_net` — with any area coupled to another net on an adjacent metal level already removed (issue #760, see `coupled[]`). Can be `0.0` for a net whose whole area term moved to coupling; the entry (and its hub) still exists. |
-| `hub_net`        | string          | The star's hub node name. Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |
-| `terminals`      | array\<object\> | One entry per device terminal moved onto its own leg net, `{"device", "terminal", "leg_net", "resistance_ohm"}` — `device` is the owning device's `expanded_name()`, `terminal` its terminal name (e.g. `"D"`, `"G"`, `"A"`), `leg_net` the fresh internal node that terminal now connects to (`<net>__t<i>`, or a collision-suffixed variant), and `resistance_ohm` that leg's own series resistance back to `hub_net`. **Empty** for the no-device-terminal fallback case above. |
+| `hub_net`        | string          | The star's hub node name (or, for a distributed net, the ladder's middle leg — see "Distributed (multi-segment) RC ladder for critical nets" above). Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |
+| `rc_model`       | string          | Additive field (issue #977). `"lumped"` (the star/Gamma-shunt model above, every net unless the next field applies) or `"distributed"` (the `--distributed-rc` ladder — see "Distributed (multi-segment) RC ladder for critical nets" above). |
+| `segments`       | array\<object\> | Additive field (issue #977). The ladder's per-segment resistors, in node order: `{"net_a", "net_b", "resistance_ohm"}`. `[]` unless `rc_model == "distributed"`. |
+| `terminals`      | array\<object\> | One entry per device terminal moved onto its own leg net. For `rc_model == "lumped"`: `{"device", "terminal", "leg_net", "resistance_ohm"}` — `device` is the owning device's `expanded_name()`, `terminal` its terminal name (e.g. `"D"`, `"G"`, `"A"`), `leg_net` the fresh internal node that terminal now connects to (`<net>__t<i>`, or a collision-suffixed variant), and `resistance_ohm` that leg's own series resistance back to `hub_net`. For `rc_model == "distributed"` the shape differs (issue #977): `{"device", "terminal", "leg_net", "order", "capacitance_ff"}` — `order` is the terminal's 0-based position in the ladder's node sequence and `capacitance_ff` its own per-node ground capacitance; resistance lives on `segments[]` instead (between adjacent nodes), not per terminal. **Empty** for the no-device-terminal fallback case above. |
 | `coupled`        | array\<object\> | This net's vertical-overlap coupling counterparts (issue #760), `{"net", "capacitance_ff", "levels"}`, sorted by counterpart `net`. `capacitance_ff` is the pair's total coupling capacitance summed over every contributing level pair; `levels` lists the contributing `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs. **Empty** when the net has no inter-net crossover. Each pair appears on both endpoints' lists — see `total_coupling_capacitance_ff`. |
 
 Two device terminals on the same net now sit in series through their two
@@ -2617,7 +2709,7 @@ all-zero case, when no net had eligible interconnect geometry to parasitize):
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `capacitance` | `"net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net"` |
 | `coupling`    | `"vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled"` |
-| `resistance`  | `"single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder"` |
+| `resistance`  | `"single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star"` |
 | `frequency`   | `"quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"`                                       |
 
 The text is static — identical across every deck, cell, and run — so a
@@ -2638,7 +2730,7 @@ given, immediately after the existing `* extracted by klt extract --deck
 * parasitic model (--parasitics):
 * - capacitance: net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net
 * - coupling: vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared --critical-net nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, additively (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named --critical-net, and fringe shielding in general, are still not modelled
-* - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder
+* - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* --distributed-rc names this net via --critical-net (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star
 * - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
 ```
 

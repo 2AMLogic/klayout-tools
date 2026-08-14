@@ -294,7 +294,16 @@ PARASITIC_MODEL_SCOPE: dict[str, str] = {
     "resistance": (
         "single lumped series resistance per net, distributed as a star "
         "across that net's device terminals (issue #592) -- not a "
-        "per-segment, distributed RC ladder"
+        "per-segment, distributed RC ladder, *unless* `--distributed-rc` "
+        "names this net via `--critical-net` (issue #977, Epic #709 Phase "
+        "2b): then the net's terminals are ordered along their approximate "
+        "physical spread and its total R/C is broken into a chain of "
+        "per-segment resistors (segment length proportional to inter-"
+        "terminal distance) with a ground capacitor at each terminal node "
+        "(proportional to its adjacent segment length/2), instead of one "
+        "star hub -- still an approximation (terminal position is a "
+        "device-placement proxy, not true per-segment routing geometry), "
+        "but a strictly finer-grained one than the single-hub star"
     ),
     "frequency": (
         "quasi-static -- one frequency-independent R and C per net; no "
@@ -1153,6 +1162,7 @@ def run_extract(
     spef_output: str | None = None,
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
+    distributed_rc: bool = False,
     def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
@@ -1325,6 +1335,27 @@ def run_extract(
     since a caller may legitimately name several candidate nets across
     several blocks/runs. ``None``/empty (the default) skips this entirely --
     byte-identical to before this feature existed.
+
+    ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
+    #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
+    model (see :func:`_inject_parasitics`) with a distributed, multi-segment
+    RC ladder for every net named in ``critical_nets`` -- the same
+    caller-declared "nets that matter" set ``critical_nets`` already scopes
+    lateral coupling onto, reused rather than inventing a second net
+    classification mechanism (Epic #709 Phase 2's own framing: high-
+    impedance nodes, a SAR ADC's CDAC top plate, a PLL loop filter). See
+    :func:`_inject_parasitics`'s and :func:`_distributed_rc_segments`'s
+    docstrings for the exact per-segment/per-node derivation. Requires
+    ``critical_nets`` to be non-empty (there is no net set to scope this
+    onto otherwise); given without it, this is an :class:`ExtractError`, the
+    same "a flag naming something invalid is an error" convention
+    ``mom_net``/``spef_output``/``critical_nets`` above already follow. A
+    named net with fewer than 2 device terminals (nothing to chain into a
+    ladder) silently keeps the star/Gamma-shunt model -- not an error, since
+    a caller may legitimately name several candidate nets, only some of
+    which end up with 2+ terminals in a given layout. ``False`` (the
+    default) skips this entirely -- byte-identical to before this feature
+    existed.
 
     ``def_net_connections`` (issue #961, Epic #700 Phase 3) is
     :func:`def_net_instance_pins`'s own ``{net_name: ((inst, pin), ...)}``
@@ -1788,6 +1819,13 @@ def run_extract(
     if critical_nets_set is not None and not parasitics:
         raise ExtractError("--critical-net requires --parasitics")
 
+    # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
+    # that flag's own net set as the "which nets get the ladder" scope
+    # rather than inventing a second net classification mechanism -- with
+    # nothing named there is nothing to scope this onto.
+    if distributed_rc and not critical_nets_set:
+        raise ExtractError("--distributed-rc requires --critical-net")
+
     (
         netlist,
         top_cell_name,
@@ -2140,7 +2178,12 @@ def run_extract(
         if circuit is not None and (ground_nets or coupled_pairs):
             ground_net = deck.substrate_net
             parasitics_report = _inject_parasitics(
-                kdb, circuit, ground_nets, coupled_pairs, ground_net
+                kdb,
+                circuit,
+                ground_nets,
+                coupled_pairs,
+                ground_net,
+                distributed_rc_nets=(critical_nets_set if distributed_rc else None),
             )
         else:
             parasitics_report = {
@@ -2215,6 +2258,32 @@ def run_extract(
                     "metal level -- --critical-net reports zero lateral "
                     "coupling capacitance for every requested net. See "
                     "docs/cli/extract.md's '--critical-net' section."
+                )
+        # Additive field (issue #977): `True` only when `--distributed-rc`
+        # was given (always `False` otherwise, `--critical-net`-only runs
+        # included) -- distinguishes "lateral coupling only" (Phase 2a) runs
+        # from "lateral coupling plus distributed RC" (Phase 2b) runs
+        # without a caller having to inspect individual `nets[].rc_model`
+        # entries.
+        parasitics_report["distributed_rc"] = bool(distributed_rc)
+        if distributed_rc:
+            assert critical_nets_set is not None  # validated above
+            distributed_net_names = {
+                entry["net"]
+                for entry in parasitics_report["nets"]
+                if entry.get("rc_model") == "distributed"
+            }
+            fell_back = sorted(
+                (critical_nets_set & matched_net_names) - distributed_net_names
+            )
+            if fell_back:
+                warnings.append(
+                    "--distributed-rc name(s) "
+                    f"{', '.join(repr(name) for name in fell_back)} matched "
+                    "a net with fewer than 2 device terminals -- kept the "
+                    "star/Gamma-shunt model for them instead of a "
+                    "distributed ladder (nothing to chain). See "
+                    "docs/cli/extract.md's '--distributed-rc' section."
                 )
         # Additive field (issue #728, updated by #760, #976): declares the
         # parasitic model's own scope machine-readably (net-to-ground
@@ -6459,37 +6528,181 @@ def _terminal_star_weights(positions: list[tuple[float, float]]) -> list[float]:
     return [d / total for d in distances]
 
 
+def _distributed_rc_order(positions: list[tuple[float, float]]) -> list[int]:
+    """An index permutation of ``positions`` approximating a physical tap
+    order along a net's dominant spread axis (``--distributed-rc``, issue
+    #977, Epic #709 Phase 2b): a ladder needs a linear chain, not an
+    unordered set, so terminals must be placed in *some* sequence before
+    :func:`_distributed_rc_segments` can derive adjacent-pair segment R/C.
+
+    Finds the pair of positions with the greatest pairwise Euclidean
+    distance (the same coarse "how spread out is this net" signal
+    :func:`_terminal_star_weights` already leans on), projects every
+    position onto the axis between that pair, and sorts by the projection
+    -- a deterministic, position-only proxy for "which end is which" that
+    needs no routing/skeleton geometry (:func:`_terminal_star_positions_um`'s
+    own docstring: terminal position is a device-placement proxy, not true
+    routed geometry).
+
+    Degenerates to the input order (``[0, 1, ..., n - 1]``) for ``n <= 2``
+    (nothing to order between two points) and whenever every position
+    coincides (the projection axis is undefined) -- harmless, since every
+    segment length is then ``0.0`` too and :func:`_distributed_rc_segments`'s
+    equal-split fallback takes over regardless of order.
+    """
+    n = len(positions)
+    if n <= 2:
+        return list(range(n))
+
+    best_pair = (0, 1)
+    best_dist = -1.0
+    for i in range(n):
+        xi, yi = positions[i]
+        for j in range(i + 1, n):
+            xj, yj = positions[j]
+            dist = math.hypot(xj - xi, yj - yi)
+            if dist > best_dist:
+                best_dist = dist
+                best_pair = (i, j)
+    if best_dist <= 0.0:
+        return list(range(n))
+
+    ai, aj = best_pair
+    ax, ay = positions[ai]
+    bx, by = positions[aj]
+    ux, uy = bx - ax, by - ay
+    norm = math.hypot(ux, uy)
+    ux, uy = ux / norm, uy / norm
+    projections = [
+        ((x - ax) * ux + (y - ay) * uy, idx) for idx, (x, y) in enumerate(positions)
+    ]
+    projections.sort(key=lambda item: (item[0], item[1]))
+    return [idx for _, idx in projections]
+
+
+def _distributed_rc_segments(
+    positions: list[tuple[float, float]],
+    r_total_ohm: float,
+    c_total_ff: float,
+) -> tuple[list[int], list[float], list[float]]:
+    """Break one net's total lumped resistance/capacitance into a chain
+    ("ladder") along ``positions``' approximate physical order, for
+    ``--distributed-rc`` (issue #977, Epic #709 Phase 2b) -- the multi-
+    segment alternative to :func:`_inject_parasitics`'s star topology.
+
+    Returns ``(order, segment_r_ohm, node_c_ff)``, all keyed to
+    ``positions``' own indices:
+
+    - ``order``: :func:`_distributed_rc_order`'s index permutation (length
+      ``N``, one entry per terminal) -- the ladder's node sequence.
+    - ``segment_r_ohm``: ``N - 1`` per-segment series resistances, one
+      between each adjacent pair in ``order``. Each segment's share of
+      ``r_total_ohm`` is proportional to that pair's Euclidean distance
+      (its approximate physical length), so the segments always sum back
+      to exactly ``r_total_ohm`` -- the same "legs sum back to the net's
+      total" invariant :func:`_terminal_star_weights` already guarantees
+      for the star topology.
+    - ``node_c_ff``: ``N`` per-terminal ground capacitances, in ``order``'s
+      sequence. Each terminal's share of ``c_total_ff`` is the *average* of
+      its one or two adjacent segments' length share (an interior node
+      touches two segments, an end node touches one) -- the standard "half
+      the capacitance of each adjoining segment" lumped-element
+      discretization of a distributed RC line. Node capacitances also sum
+      back to exactly ``c_total_ff``.
+
+    Degenerates to an equal split (``r_total_ohm / (N - 1)`` per segment,
+    ``c_total_ff / N`` per node) when every position coincides -- the same
+    "no spatial signal available" fallback :func:`_terminal_star_weights`
+    already uses, and still conserves both totals.
+
+    ``positions`` must have at least 2 entries -- a distributed ladder needs
+    at least one segment; a net with 0 or 1 terminal has nothing to chain
+    and stays on the star/Gamma-shunt path in :func:`_inject_parasitics`.
+    """
+    order = _distributed_rc_order(positions)
+    n = len(order)
+    ordered = [positions[i] for i in order]
+    seg_lengths = [
+        math.hypot(ordered[i + 1][0] - ordered[i][0], ordered[i + 1][1] - ordered[i][1])
+        for i in range(n - 1)
+    ]
+    total_length = sum(seg_lengths)
+
+    if total_length <= 0.0:
+        segment_r_ohm = [r_total_ohm / (n - 1)] * (n - 1)
+        node_c_ff = [c_total_ff / n] * n
+        return order, segment_r_ohm, node_c_ff
+
+    segment_r_ohm = [r_total_ohm * (length / total_length) for length in seg_lengths]
+    node_c_ff = []
+    for i in range(n):
+        adjacent_lengths = seg_lengths[max(i - 1, 0) : min(i + 1, n - 1)]
+        share = sum(adjacent_lengths) / (2.0 * total_length)
+        node_c_ff.append(c_total_ff * share)
+    return order, segment_r_ohm, node_c_ff
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
     parasitic_nets: list[dict[str, Any]],
     coupled_pairs: list[dict[str, Any]],
     ground_net_name: str,
+    distributed_rc_nets: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """Inject a star-topology parasitic RC per net, plus one two-terminal
-    coupling capacitor per net pair with non-zero vertical-overlap and/or
-    (``--critical-net``-scoped) lateral coupling capacitance, into
-    ``circuit`` and return the JSON ``parasitics`` summary block (issue
-    #592, extended by issues #760 and #976).
+    """Inject a star-topology parasitic RC per net (or a distributed
+    multi-segment ladder for a caller-declared subset, see below), plus one
+    two-terminal coupling capacitor per net pair with non-zero
+    vertical-overlap and/or (``--critical-net``-scoped) lateral coupling
+    capacitance, into ``circuit`` and return the JSON ``parasitics`` summary
+    block (issue #592, extended by issues #760, #976, and #977).
 
-    For each ``parasitic_nets`` entry, the net itself becomes the star's
-    **hub**. Every device terminal that was connected directly to the net is
-    moved onto a fresh per-terminal "leg" net, and a series resistor bridges
-    each leg back to the hub -- so two terminals on the same net now sit in
-    series through two resistors (``leg_a --R--> hub --R--> leg_b``), instead
-    of sharing one node with no resistance between them (the pre-#592
-    topology this replaces). A single capacitor still hangs the net's total
-    lumped ground capacitance off the hub (``hub --C--> <substrate_net>``),
-    created if absent -- even when that capacitance rounds to ``0.0`` because
-    every bit of it moved to coupling (issue #760: the hub still needs to
-    exist for a coupling ``C`` card to attach to). Each leg's resistance is
-    the net's total computed resistance distributed across its terminals by
-    :func:`_terminal_star_weights` -- a terminal farther from the net's
-    other connections gets more of the total, and the weights always sum to
-    ``1.0`` so a net's leg resistances sum back to its total. A net with no
-    device terminal at all (real geometry with nothing electrically
-    attached) falls back to exactly the pre-#592 Gamma-shunt: one resistor
-    from the net to a fresh internal node, with the capacitor on that node.
+    For each ``parasitic_nets`` entry **not** named in ``distributed_rc_nets``
+    (the overwhelmingly common case, and the only one before issue #977), the
+    net itself becomes the star's **hub**. Every device terminal that was
+    connected directly to the net is moved onto a fresh per-terminal "leg"
+    net, and a series resistor bridges each leg back to the hub -- so two
+    terminals on the same net now sit in series through two resistors
+    (``leg_a --R--> hub --R--> leg_b``), instead of sharing one node with no
+    resistance between them (the pre-#592 topology this replaces). A single
+    capacitor still hangs the net's total lumped ground capacitance off the
+    hub (``hub --C--> <substrate_net>``), created if absent -- even when that
+    capacitance rounds to ``0.0`` because every bit of it moved to coupling
+    (issue #760: the hub still needs to exist for a coupling ``C`` card to
+    attach to). Each leg's resistance is the net's total computed resistance
+    distributed across its terminals by :func:`_terminal_star_weights` -- a
+    terminal farther from the net's other connections gets more of the
+    total, and the weights always sum to ``1.0`` so a net's leg resistances
+    sum back to its total. A net with no device terminal at all (real
+    geometry with nothing electrically attached) falls back to exactly the
+    pre-#592 Gamma-shunt: one resistor from the net to a fresh internal
+    node, with the capacitor on that node.
+
+    **Distributed (multi-segment) RC ladder (``--distributed-rc``, issue
+    #977, Epic #709 Phase 2b):** for a ``parasitic_nets`` entry named in
+    ``distributed_rc_nets`` *and* carrying 2 or more device terminals, the
+    star above is replaced by a chain: :func:`_distributed_rc_segments`
+    orders the terminals along their approximate physical spread and splits
+    the net's total R into ``N - 1`` series segment resistors (one between
+    each adjacent ordered pair of per-terminal leg nets) and its total C into
+    ``N`` per-leg ground capacitors (each leg gets its own capacitor to
+    ``ground_net_name``, instead of one shared hub capacitor) -- see that
+    function's docstring for the exact per-segment/per-node split. A net
+    named in ``distributed_rc_nets`` with fewer than 2 device terminals (no
+    chain to build) falls back to the star/Gamma-shunt path above unchanged.
+    The ladder's own **hub** (the node the coupled-pair pass below attaches
+    a coupling capacitor to, if this net has one) is its *middle* leg -- a
+    coarse choice, since coupling geometry is not in general localized to
+    one exact point on a real routed net; flagged here rather than silently
+    assumed away, the same "known simplification" spirit as the lateral
+    pass's own not-deducted-from-ground-fringe note in
+    :func:`_compute_parasitics`'s docstring. That middle position reuses the
+    original net object itself (not a fresh leg net) -- the same reason the
+    star topology reuses ``net`` as its own hub: ``net`` can be a promoted
+    top-level pin (or otherwise referenced by identity from outside this
+    function), and every ladder position moving its terminal onto a brand
+    new leg would leave ``net`` with nothing attached to it at all, silently
+    orphaning that pin inside the written ``.SUBCKT`` body.
 
     After every ``parasitic_nets`` entry has its hub established, one
     two-terminal ``C`` card is created per ``coupled_pairs`` entry, directly
@@ -6596,6 +6809,12 @@ def _inject_parasitics(
     total_r = 0.0
     total_c_ff = 0.0
     total_r_count = 0
+    # Actual capacitor *device* count (issue #977): 1 per lumped
+    # (star/Gamma-shunt) net, `N` per distributed net's `N` per-leg
+    # capacitors -- unlike `len(report_nets)` (one *entry* per net
+    # regardless of model), this always equals the number of `C` cards the
+    # written SPICE netlist actually carries.
+    total_c_count = 0
     for entry in parasitic_nets:
         net = nets_by_id.get(entry["net_id"])
         if net is None:
@@ -6617,7 +6836,105 @@ def _inject_parasitics(
         terminal_refs = list(net.each_terminal())
 
         terminal_reports: list[dict[str, Any]] = []
-        if terminal_refs:
+        segment_reports: list[dict[str, Any]] = []
+        rc_model = "lumped"
+        net_c_count = 0
+        if (
+            distributed_rc_nets is not None
+            and entry["net"] in distributed_rc_nets
+            and len(terminal_refs) >= 2
+        ):
+            # Distributed (multi-segment) RC ladder (issue #977, Epic #709
+            # Phase 2b) -- see this function's docstring and
+            # `_distributed_rc_segments`'s own docstring for the exact
+            # per-segment/per-node derivation.
+            rc_model = "distributed"
+            positions = _terminal_star_positions_um(terminal_refs)
+            order, segment_r_ohm, node_c_ff = _distributed_rc_segments(
+                positions, r_total_ohm, entry["capacitance_ff"]
+            )
+
+            # The *middle* ladder position reuses the original `net` object
+            # itself, exactly like the star topology's own `hub = net` above
+            # -- not a fresh net. `net` may be a promoted top-level pin (or
+            # otherwise referenced by identity from outside this function);
+            # every *other* position already moves its terminal onto a fresh
+            # leg net the same way the star topology does, but if *every*
+            # position did that here, `net` itself would end this function
+            # with no device, resistor, or capacitor attached to it at all --
+            # silently orphaning that pin inside the written `.SUBCKT` body.
+            # Reusing `net` at exactly one position (this function's own
+            # coupling-attachment point, "the middle leg" per this function's
+            # docstring) keeps that position's identity intact for free,
+            # mirroring the star's own reuse.
+            mid_index = len(order) // 2
+
+            legs: list[kdb.Net] = [net] * len(order)
+            leg_names: list[str] = [entry["net"]] * len(order)
+            for position_in_order, terminal_index in enumerate(order):
+                term_ref = terminal_refs[terminal_index]
+                device = term_ref.device()
+                terminal_def = term_ref.terminal_def()
+
+                if position_in_order == mid_index:
+                    leg = net
+                    leg_name = entry["net"]
+                    # Already connected to `net` -- nothing to move.
+                else:
+                    leg_name = _unique_net_name(
+                        entry["net"], existing_names, suffix=f"__t{terminal_index}"
+                    )
+                    existing_names.add(leg_name)
+                    leg = circuit.create_net(leg_name)
+                    device.disconnect_terminal(terminal_def.id())
+                    device.connect_terminal(terminal_def.id(), leg)
+
+                legs[position_in_order] = leg
+                leg_names[position_in_order] = leg_name
+
+                node_c_farad = node_c_ff[position_in_order] * 1e-15
+                node_cap = circuit.create_device(
+                    cap_class, f"{instance_name}_n{position_in_order}"
+                )
+                node_cap.connect_terminal("A", leg)
+                node_cap.connect_terminal("B", ground)
+                node_cap.set_parameter("C", node_c_farad)
+                net_c_count += 1
+
+                terminal_reports.append(
+                    {
+                        "device": device.expanded_name(),
+                        "terminal": terminal_def.name,
+                        "leg_net": leg_name,
+                        "order": position_in_order,
+                        "capacitance_ff": round(node_c_ff[position_in_order], 6),
+                    }
+                )
+
+            for seg_index, seg_r_ohm in enumerate(segment_r_ohm):
+                seg_r_ohm_clamped = max(seg_r_ohm, _MIN_PARASITIC_R_OHM)
+                r_dev = circuit.create_device(
+                    res_class, f"{instance_name}_seg{seg_index}"
+                )
+                r_dev.connect_terminal("A", legs[seg_index])
+                r_dev.connect_terminal("B", legs[seg_index + 1])
+                r_dev.set_parameter("R", seg_r_ohm_clamped)
+                total_r_count += 1
+                segment_reports.append(
+                    {
+                        "net_a": leg_names[seg_index],
+                        "net_b": leg_names[seg_index + 1],
+                        "resistance_ohm": round(seg_r_ohm_clamped, 4),
+                    }
+                )
+
+            # The coupled-pair pass below attaches to the ladder's *middle*
+            # leg -- see this function's docstring's "known simplification"
+            # note. It is `net` itself (see above), so `hub_name` here is
+            # `entry["net"]`, exactly the star topology's own convention.
+            hub = legs[mid_index]
+            hub_name = leg_names[mid_index]
+        elif terminal_refs:
             hub = net
             hub_name = entry["net"]
             positions = _terminal_star_positions_um(terminal_refs)
@@ -6666,14 +6983,22 @@ def _inject_parasitics(
             r_dev.set_parameter("R", r_total_ohm)
             total_r_count += 1
 
-        c_dev = circuit.create_device(cap_class, instance_name)
-        c_dev.connect_terminal("A", hub)
-        c_dev.connect_terminal("B", ground)
-        c_dev.set_parameter("C", c_farad)
+        if rc_model == "lumped":
+            # The distributed ladder above already created one capacitor per
+            # leg (summing back to the net's total, see
+            # `_distributed_rc_segments`'s docstring) -- creating a second,
+            # hub-level capacitor here would double-count the net's
+            # capacitance.
+            c_dev = circuit.create_device(cap_class, instance_name)
+            c_dev.connect_terminal("A", hub)
+            c_dev.connect_terminal("B", ground)
+            c_dev.set_parameter("C", c_farad)
+            net_c_count = 1
 
         hub_by_net[entry["net"]] = hub
         total_r += r_total_ohm
         total_c_ff += entry["capacitance_ff"]
+        total_c_count += net_c_count
         report_nets.append(
             {
                 "net": entry["net"],
@@ -6686,7 +7011,16 @@ def _inject_parasitics(
                 "resistance_ohm": entry["resistance_ohm"],
                 "capacitance_ff": entry["capacitance_ff"],
                 "hub_net": hub_name,
+                # Additive field (issue #977): `"lumped"` (the pre-#977
+                # star/Gamma-shunt model, always this value unless
+                # `--distributed-rc` named this net) or `"distributed"` (the
+                # multi-segment ladder above).
+                "rc_model": rc_model,
                 "terminals": terminal_reports,
+                # Additive field (issue #977): the ladder's per-segment
+                # resistors, in `order` sequence -- `[]` unless
+                # `rc_model == "distributed"`.
+                "segments": segment_reports,
                 "coupled": coupled_by_net.get(entry["net"], []),
             }
         )
@@ -6716,7 +7050,7 @@ def _inject_parasitics(
 
     return {
         "r_count": total_r_count,
-        "c_count": len(report_nets),
+        "c_count": total_c_count,
         "cc_count": cc_count,
         "total_resistance_ohm": round(total_r, 4),
         "total_capacitance_ff": round(total_c_ff, 6),

@@ -510,6 +510,44 @@ not `klt --version`, if you need to detect this kind of drift. See
   nonzero, reproducible coupling voltage — re-derived from a real simulation
   on every CI run, not a one-off hand-captured evidence blob.
 
+- 2026-08-14 — `klt extract --parasitics` (and `klt pex`) gain
+  **`--distributed-rc`** (requires `--critical-net`) — replaces the
+  single-lumped-element star R/C model with a distributed, multi-segment RC
+  ladder for the same caller-declared "nets that matter" `--critical-net`
+  already scopes lateral coupling onto (issue #977, Epic #709 Phase 2b,
+  building on Phase 2a's #976). A single lumped hub overstates a net's own
+  Elmore delay by roughly 2x versus a genuinely distributed line
+  (`docs/design/extract-fidelity-roadmap.md`'s Stage 3); for a
+  `--critical-net`-named net with 2 or more device terminals, its terminals
+  are ordered along their approximate physical spread and its total
+  resistance/capacitance is broken into `N - 1` series segment resistors
+  (proportional to inter-terminal distance) and `N` per-terminal ground
+  capacitors (the standard "half the capacitance of each adjoining segment"
+  discretization) — both conserving the net's own totals exactly, so this
+  changes *where* the R/C sits, not *how much* exists. A named net with
+  fewer than 2 device terminals (nothing to chain) keeps the star model,
+  reported in `warnings`, not an error. New fields: `parasitics.
+  distributed_rc` (the flag, echoed back), `parasitics.nets[].rc_model`
+  (`"lumped"` or `"distributed"`), and `parasitics.nets[].segments[]` (the
+  ladder's per-segment resistors); a distributed net's own `nets[].
+  terminals[]` entries carry `order`/`capacitance_ff` instead of the star's
+  `resistance_ohm`. `parasitics.model.resistance`'s text changes again (same
+  "additive behavior change" treatment issue #976's own `model.coupling`
+  change got). `--distributed-rc` omitted (the default) leaves every field
+  byte-identical to before this feature existed. See
+  `docs/cli/extract.md`'s "Distributed (multi-segment) RC ladder for
+  critical nets" section. `klt pex` proof (issue #977's own "measurable,
+  more-explainable delta vs. Phase 2a's baseline" acceptance bar):
+  `tests/test_pex.py`'s `test_run_pex_distributed_rc_canary` is a real,
+  ngspice-driven `klt pex` run on a purpose-built high-impedance-node
+  fixture (two poly resistors joined by a long li1 run) — with
+  `--critical-net` alone (Phase 2a's own baseline model), a fast step
+  reaches the internal node in one resistor hop with its full capacitance at
+  the hub; with `--distributed-rc` added, the identical step now reads a
+  measurably smaller early-sample-point voltage, reflecting the ladder's
+  genuine extra propagation pole — re-derived from a real simulation on
+  every CI run.
+
 - 2026-08-14 — `klt power` gains the **static (DC) IR-drop solve** — issue
   #845, Phase 1b of the power/IR-drop + EM signoff epic #712. The spec file
   takes two new optional inputs: `pads` (where each net's supply is
