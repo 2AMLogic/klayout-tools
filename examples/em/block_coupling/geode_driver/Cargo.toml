@@ -1,0 +1,20 @@
+[package]
+name = "block_coupling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "klayout-tools reproducibility-seam driver (not part of geode-fem upstream -- see examples/em/block_coupling/generate.py in the klayout-tools repo): N-conductor electrostatic coupling extraction on a stackup-aware cross-section mesh whose conductor widths/spacings and run length all come from a real gallery block's committed GDS (klayout-tools issue #958)."
+
+[[bin]]
+name = "block_coupling"
+path = "src/main.rs"
+
+[dependencies]
+geode-core = { path = "../../crates/geode-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

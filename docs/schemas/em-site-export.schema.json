@@ -21,6 +21,11 @@
       "minLength": 1,
       "description": "Which geode-fem benchmark family this export was generated from, e.g. `\"patch_antenna\"`."
     },
+    "block": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The gallery block slug (`blocks/<slug>/`) this export's geometry was derived from, for an export that belongs to a real gallery project rather than to a standalone benchmark (issue #958, Epic #840 Phase 3a -- `examples/em/block_coupling/generate.py`, which writes `blocks/<slug>/output/<slug>.em-export.json`). Distinct from `benchmark`, which names the *solver-side* geometry family: two exports can share a `benchmark` and belong to different blocks. Omitted by the standalone benchmark exports under `examples/em/`, which are not attached to any block."
+    },
     "mesh": {
       "type": "object",
       "additionalProperties": false,
