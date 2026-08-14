@@ -61,7 +61,8 @@ shapes), and combines them into one verdict in two steps:
    #251, [`../json-contract.md`](../json-contract.md#shared-provenance-block))
    is compared: all checks that resolved a PDK must name the same
    `pdk.name`/`pdk.version`; all checks that populate `provenance.input`
-   (`klt drc`/`klt extract`, and `klt pex` per its provisional shape) must
+   (`klt drc`/`klt extract`, and `klt pex`, which pins its own extracted
+   layout the same way — see [`pex.md`](pex.md)) must
    agree on `input.content_hash`; any two
    checks naming the *same* deck must agree on that deck's
    `content_hash`. If any of these disagree, `klt signoff` **refuses** to
@@ -76,8 +77,8 @@ shapes), and combines them into one verdict in two steps:
    (no measurement declared a `target_yield`, so nothing could fail —
    [`yield.md`](yield.md#exit-codes)), `klt pex` on `status: "pass"` (every
    graded schematic-vs-extracted delta row met its tolerance — see "Item 7
-   is kind-restricted: `klt pex`" below for this envelope shape's current,
-   provisional status). `klt extract` has no independent pass/fail — a
+   is kind-restricted: `klt pex`" below and [`pex.md`](pex.md) for this
+   envelope shape's full, ratified contract). `klt extract` has no independent pass/fail — a
    present extract envelope is definitionally a successful extraction (`klt
    extract` either produces one or raises, which surfaces here as an
    `error`-kind check instead) — so it always counts as passed, but is
@@ -110,7 +111,7 @@ klt signoff drc.json lvs.json extract.json sim.json --format json
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt pex` (per its provisional shape — see "Item 7 is kind-restricted: `klt pex`" below) | All checks that populate it, together |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)) | All checks that populate it, together |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 A check with no `provenance` block (an `error`-kind entry, or a `klt yield`
@@ -162,9 +163,9 @@ against a caller-supplied **block manifest**:
       "content_hash": "sha256:<expected samples-document hash>"
     },
     "7": {
-      "command": ["klt", "pex", "extracted.spice", "schematic.spice", "--format", "json"],
+      "command": ["klt", "pex", "top.gds", "gain-tb.json", "--deck", "sky130", "--format", "json"],
       "cwd": "pex/",
-      "content_hash": "sha256:<expected extracted-netlist hash>"
+      "content_hash": "sha256:<expected layout hash>"
     }
   }
 }
@@ -251,19 +252,20 @@ to issue #871, a manifest could render item 7 `"met"` by citing, say, a
 clean `klt drc` report, with nothing enforcing that the cited evidence
 actually proved a post-layout re-simulation happened.
 
-**`klt pex`'s envelope shape is provisional.** `klt pex` (Epic #709) does
-not exist in this codebase as of issue #871 — its defining issue, **#801**
-("Define `klt pex`"), is stalled with an empty body pending an operator
-decision, so there is no ratified JSON shape to bind against yet. `klt
-signoff` instead recognises a **Curator-proposed, provisional** shape (issue
-#871's own proposal, not #801's): a top-level `delta` array (per-corner,
-per-spec-row schematic-vs-extracted comparisons) plus a `reference_netlist`
-field (the schematic netlist compared against) — mirroring how `klt sim`'s
-shape is detected by `measurements`/`corner_count` and `klt extract`'s by
-`device_count`/`nets`. This recognition rule is deliberately narrow, so that
-#801's eventual real shape is very likely additive to it (new fields), not a
-breaking rewrite — but it **is not** #801's ratified shape, and should be
-reconciled against it once #801 lands.
+**`klt pex`'s envelope shape.** At the time issue #871 wired this
+restriction, `klt pex` (Epic #709) did not exist yet, so `klt signoff`
+recognised a **Curator-proposed, provisional** shape ahead of the real
+command: a top-level `delta` array (per-corner, per-spec-row
+schematic-vs-extracted comparisons) plus a `reference_netlist` field (the
+schematic netlist compared against) — mirroring how `klt sim`'s shape is
+detected by `measurements`/`corner_count` and `klt extract`'s by
+`device_count`/`nets`. Issue #801 ("Define `klt pex`") has since shipped the
+real command (see [`pex.md`](pex.md) for its full, ratified contract)
+matching this shape exactly, so `klt signoff`'s recognition rule needed no
+change. `klt pex` takes a **routed layout plus a testbench set** as input
+(not the two-netlist form the example below might suggest) — see
+[`pex.md`](pex.md#scope-mismatch-note-resolved-by-this-issue-801) for that
+resolved discrepancy.
 
 ```json
 {
@@ -833,7 +835,8 @@ like every other item this checklist grades.
 
 Issue #871 (Phase 2b of epic #706): item 7 ("Post-layout verification")
 binds to a `klt pex` report (see "Item 7 is kind-restricted: `klt pex`"
-above for its provisional envelope shape, pending #801):
+above, and [`pex.md`](pex.md) for its full, ratified contract — issue
+#801):
 
 ```
 $ cat manifest.json
@@ -842,7 +845,7 @@ $ cat manifest.json
   "kind": "analog",
   "evidence": {
     "7": {
-      "command": ["klt", "pex", "extracted.spice", "schematic.spice", "--format", "json"]
+      "command": ["klt", "pex", "top.gds", "gain-tb.json", "--deck", "sky130", "--format", "json"]
     }
   }
 }
@@ -852,7 +855,7 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
   "reason": null,
   "citation": {
     "file": null,
-    "command": "klt pex extracted.spice schematic.spice --format json",
+    "command": "klt pex top.gds gain-tb.json --deck sky130 --format json",
     "kind": "pex",
     "check_status": "pass",
     "content_hash": "sha256:...",

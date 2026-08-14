@@ -93,6 +93,7 @@ klt kb search bandgap                    # query the circuit-design knowledge ba
 klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)
 klt draw --params shapes.json -o out.gds # write a primitive stream (no rule checking)
 klt extract design.gds --deck sky130     # layout -> schematic-equivalent netlist
+klt pex design.gds request.json --deck sky130  # extracted (parasitic-annotated) netlist + schematic-vs-extracted delta report
 klt mom design.gds stackup.json          # quasi-static capacitance matrix (Method of Moments, Rust core)
 klt lvs request.json                     # compare extracted vs reference netlist
 klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JSON out
