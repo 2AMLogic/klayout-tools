@@ -308,6 +308,36 @@ def _spef_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y")
 
 
+#: Every character SPEF's own identifier grammar (IEEE 1481-1999) does *not*
+#: admit bare -- anything outside ``[A-Za-z0-9_]``. Matched one character at a
+#: time by :func:`_spef_name`, which backslash-escapes each hit.
+_SPEF_ESCAPE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _spef_name(name: str) -> str:
+    """``name`` rendered as a SPEF identifier: every character outside
+    ``[A-Za-z0-9_]`` backslash-escaped, which is exactly what SPEF's own
+    (IEEE 1481-1999) identifier grammar requires of a *special character*.
+
+    **Not cosmetic -- verified live, and a hard parse error without it.**
+    KLayout's extracted net names routinely contain characters SPEF reserves:
+    an unlabelled net is named ``$<n>`` by KLayout itself, a net carrying
+    several layout labels is named by joining them with ``|``, and a bussed
+    pin label keeps its ``[``/``]``. Feeding those through unescaped makes a
+    real OpenSTA ``read_spef`` abort on the *first* ``*D_NET`` line
+    (``[ERROR STA-1670] ... syntax error``, reproduced on the routed `gcd`
+    corpus fixture against ``openroad/orfs:latest`` while implementing issue
+    #948); escaping them makes the identical file parse cleanly.
+
+    The escape is applied to every identifier position the file has -- the
+    ``*PORTS`` list, each ``*D_NET`` name, each ``*CONN``/``*P`` entry, and
+    every ``*CAP``/``*RES`` node -- so a name and its references always agree
+    on spelling. Reading tools strip the backslashes back off, so the name an
+    STA session matches against its own netlist is the unescaped one.
+    """
+    return _SPEF_ESCAPE_RE.sub(lambda m: "\\" + m.group(0), name)
+
+
 def _write_spef(
     path: str,
     *,
@@ -374,6 +404,13 @@ def _write_spef(
     documents, expressed as SPEF resistor cards instead of SPICE ``R``
     device cards.
 
+    Every identifier written -- ``*PORTS`` entries, ``*D_NET``/``*P`` names,
+    and every ``*CAP``/``*RES`` node -- is rendered through
+    :func:`_spef_name`, which backslash-escapes the characters SPEF's own
+    grammar reserves. This is load-bearing, not cosmetic: KLayout's
+    extracted names carry ``$``/``|``/``[``/``]`` routinely, and a real
+    OpenSTA ``read_spef`` aborts on the first such line unescaped.
+
     Units are declared, not converted: ``*C_UNIT 1 FF``/``*R_UNIT 1 OHM``
     match ``parasitics_report``'s own units exactly, so every numeric value
     below is copied through unchanged -- no femtofarad/ohm rescaling, and
@@ -427,7 +464,7 @@ def _write_spef(
             # GDS text label carries no I/O-direction metadata) -- declared
             # `B` (bidirectional/unspecified, a real SPEF direction token),
             # never guessed as `I`/`O`.
-            lines.append(f"{name} B")
+            lines.append(f"{_spef_name(name)} B")
 
     for entry in parasitics_report["nets"]:
         net = entry["net"]
@@ -437,31 +474,39 @@ def _write_spef(
         total_cap_ff = entry["capacitance_ff"] + sum(
             coupled["capacitance_ff"] for coupled in own_coupling
         )
+        # Every identifier below goes through `_spef_name` -- SPEF's own
+        # grammar rejects the bare `$`/`|`/`[`/`]` characters KLayout's
+        # extracted net names routinely carry (see that helper's docstring
+        # for the live `read_spef` parse error this prevents).
+        spef_net = _spef_name(net)
+        spef_hub = _spef_name(hub)
 
         lines.append("")
-        lines.append(f"*D_NET {net} {total_cap_ff:.6f}")
+        lines.append(f"*D_NET {spef_net} {total_cap_ff:.6f}")
         if net in port_name_set:
             lines.append("*CONN")
-            lines.append(f"*P {net} B")
+            lines.append(f"*P {spef_net} B")
 
-        cap_lines: list[str] = [f"1 {hub} {entry['capacitance_ff']:.6f}"]
+        cap_lines: list[str] = [f"1 {spef_hub} {entry['capacitance_ff']:.6f}"]
         for i, coupled in enumerate(own_coupling, start=2):
             cap_lines.append(
-                f"{i} {hub} {coupled['net']} {coupled['capacitance_ff']:.6f}"
+                f"{i} {spef_hub} {_spef_name(coupled['net'])} "
+                f"{coupled['capacitance_ff']:.6f}"
             )
 
         res_lines: list[str] = []
         if terminals:
             for i, terminal in enumerate(terminals, start=1):
                 res_lines.append(
-                    f"{i} {net} {terminal['leg_net']} {terminal['resistance_ohm']:.6f}"
+                    f"{i} {spef_net} {_spef_name(terminal['leg_net'])} "
+                    f"{terminal['resistance_ohm']:.6f}"
                 )
         elif hub != net:
             # No-device-terminal Gamma-shunt fallback (docs/cli/extract.md's
             # "The model: a star topology" section): a single resistor from
             # the net to its own synthesized hub node -- the only case where
             # `hub_net` differs from `net` itself.
-            res_lines.append(f"1 {net} {hub} {entry['resistance_ohm']:.6f}")
+            res_lines.append(f"1 {spef_net} {spef_hub} {entry['resistance_ohm']:.6f}")
 
         lines.append("*CAP")
         lines += cap_lines

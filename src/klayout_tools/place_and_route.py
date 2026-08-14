@@ -1893,6 +1893,24 @@ def _tcl_net_list(names: Iterable[str]) -> str:
     return " ".join("{" + name + "}" for name in names)
 
 
+#: Characters OpenSTA's own object-finder pattern grammar (``get_nets``,
+#: ``get_ports``, ...) treats as glob metacharacters. Escaped by
+#: :func:`_sta_pattern_escape` so a net whose *literal* name contains one --
+#: e.g. the bussed ``a_in[13]``, whose ``[13]`` would otherwise be a
+#: one-of-``1``-or-``3`` character class -- is matched exactly rather than as
+#: a pattern that could match some unrelated net (or nothing at all).
+_STA_PATTERN_METACHARS = re.compile(r"([\\*?\[\]])")
+
+
+def _sta_pattern_escape(name: str) -> str:
+    """``name`` with every OpenSTA glob metacharacter backslash-escaped, so
+    :func:`_spef_sta_script_lines`'s own net-name-correlation check asks
+    "does a net named *exactly* this exist?" rather than "does any net match
+    this pattern?" -- the difference between an honest ``nets_annotated``
+    count and one inflated (or deflated) by accidental glob semantics."""
+    return _STA_PATTERN_METACHARS.sub(r"\\\1", name)
+
+
 def _spef_sta_script_lines(
     *,
     checkpoint_in: str,
@@ -1919,11 +1937,16 @@ def _spef_sta_script_lines(
     that call cannot also silently skip this check. ``-quiet`` suppresses
     OpenSTA's own "not found" error, so a mismatched name degrades to "not
     annotated" rather than aborting the whole script.
+
+    Each name is additionally run through :func:`_sta_pattern_escape` before
+    being embedded, so ``get_nets`` matches it literally instead of treating
+    a bussed ``[13]`` suffix as a glob character class.
     """
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += [
-        f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
+        "set klt_spef_nets [list "
+        f"{_tcl_net_list(_sta_pattern_escape(name) for name in net_names)}]",
         "set klt_spef_annotated 0",
         "foreach klt_spef_net $klt_spef_nets {",
         "    if {[llength [get_nets -quiet $klt_spef_net]] > 0} {",
@@ -1988,7 +2011,23 @@ def _post_route_spef_metrics(
             "hold_violation_count": int,
             "nets_annotated": int,
             "nets_total": int,
+            "annotation_complete": bool,
+            "annotation_warning": str | None,
         }
+
+    ``annotation_complete``/``annotation_warning`` are the *loud* half of the
+    "do not silently drop annotation on unmatched nets" requirement issue
+    #948's own scope states: whenever ``nets_annotated < nets_total``, the
+    warning string spells the ratio out in the response itself, so a caller
+    diffing ``worst_slack_ns`` against the top-level (estimate-derived) value
+    cannot mistake an un-annotated re-report for a real-parasitics
+    measurement. **Measured today, this is the normal outcome, not an edge
+    case**: on the routed `gcd` corpus fixture the ratio is `0 of 981` --
+    `klt extract` names nets from GDS text labels, and the DEF->GDS merge
+    emits labels for top-level pins only, so every internal routed net
+    reaches SPEF under a KLayout-synthesized ``$<n>`` name that no OpenSTA
+    net is called. See ``docs/cli/place-and-route.md``'s "Net-name
+    correlation" subsection for the full finding and its follow-on.
 
     Raises :class:`PlaceAndRouteError` for an unsupported ``cell_library``
     (no known `klt extract --deck`, see
@@ -2060,6 +2099,25 @@ def _post_route_spef_metrics(
         nets_check if nets_check is not None else (0, len(net_names))
     )
 
+    # The loud half of issue #948's "do not silently drop annotation on
+    # unmatched nets": an incomplete correlation is stated in the response
+    # itself, in words, rather than left for a caller to notice by comparing
+    # two integers -- because the numbers next to it (`worst_slack_ns` &c.)
+    # look exactly like a real measurement whether or not any net was
+    # actually annotated.
+    annotation_complete = nets_total > 0 and nets_annotated == nets_total
+    annotation_warning: str | None = None
+    if not annotation_complete:
+        annotation_warning = (
+            f"only {nets_annotated} of {nets_total} SPEF net names resolve to a "
+            "net in the linked design -- the slack/violation values in this "
+            "block are NOT a real-parasitics measurement to the extent "
+            "annotation is missing, and should not be compared against the "
+            "top-level estimate_parasitics-derived fields as if they were. "
+            "See docs/cli/place-and-route.md's 'Net-name correlation' "
+            "subsection."
+        )
+
     worst_slack = metrics.get("timing__setup__ws")
     tns = metrics.get("timing__setup__tns")
 
@@ -2071,6 +2129,8 @@ def _post_route_spef_metrics(
         "hold_violation_count": hold_violation_count,
         "nets_annotated": nets_annotated,
         "nets_total": nets_total,
+        "annotation_complete": annotation_complete,
+        "annotation_warning": annotation_warning,
     }
 
 

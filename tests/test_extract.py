@@ -9257,6 +9257,75 @@ def test_spef_gamma_shunt_fallback_uses_hub_net_node(tmp_path):
     assert f"1 DANGLE {entry['hub_net']} {entry['resistance_ohm']:.6f}" in block
 
 
+def test_spef_name_escapes_every_reserved_character():
+    """SPEF's own (IEEE 1481-1999) identifier grammar admits only
+    `[A-Za-z0-9_]` bare; every other character is a *special character* that
+    must be backslash-escaped."""
+    from klayout_tools.extract import _spef_name
+
+    assert _spef_name("$1009") == r"\$1009"
+    assert _spef_name("A|A2|Y") == r"A\|A2\|Y"
+    assert _spef_name("a_in[13]") == r"a_in\[13\]"
+    assert _spef_name("$1009__t0") == r"\$1009__t0"
+    # A name already inside the bare grammar is passed through untouched.
+    assert _spef_name("_019_") == "_019_"
+
+
+def test_spef_escapes_reserved_characters_in_every_identifier_position(tmp_path):
+    """Regression for a real, live-reproduced `read_spef` failure (issue
+    #948): KLayout names an unlabelled net `$<n>` and a multiply-labelled
+    net `A|B`, and emitting those bare made a real OpenSTA abort with
+    `[ERROR STA-1670] ... syntax error` on the very first `*D_NET` line of
+    the routed `gcd` corpus fixture. Every identifier position -- `*PORTS`,
+    `*D_NET`, `*CONN`/`*P`, and each `*CAP`/`*RES` node -- must be escaped,
+    and consistently, so a name and its references agree on spelling."""
+    from klayout_tools.extract import _write_spef
+
+    report = {
+        "nets": [
+            {
+                "net": "$1009",
+                "hub_net": "$1009",
+                "capacitance_ff": 0.206207,
+                "resistance_ohm": 62.626,
+                "terminals": [{"leg_net": "$1009__t0", "resistance_ohm": 62.626}],
+                "coupled": [{"net": "a_in[13]", "capacitance_ff": 0.011843}],
+            },
+            {
+                "net": "a_in[13]",
+                "hub_net": "a_in[13]",
+                "capacitance_ff": 0.5,
+                "resistance_ohm": 1.0,
+                "terminals": [],
+                "coupled": [],
+            },
+        ]
+    }
+    out = tmp_path / "escaped.spef"
+    _write_spef(
+        str(out),
+        design_name="gcd",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=["a_in[13]"],
+    )
+    text = out.read_text()
+
+    assert r"*D_NET \$1009 " in text
+    assert r"*D_NET a_in\[13\] " in text
+    assert r"a_in\[13\] B" in text  # *PORTS entry and *CONN *P entry
+    assert r"*P a_in\[13\] B" in text
+    assert r"1 \$1009 0.206207" in text  # ground *CAP card on the hub node
+    assert r"\$1009 a_in\[13\] 0.011843" in text  # coupling *CAP card
+    assert r"1 \$1009 \$1009__t0 62.626000" in text  # *RES leg card
+    # No bare reserved character survives anywhere in the body.
+    for line in text.splitlines():
+        if line.startswith("*") and not line.startswith("*D_NET"):
+            continue  # header/section keywords are not identifiers
+        assert "$" not in line.replace(r"\$", ""), line
+        assert "[" not in line.replace(r"\[", ""), line
+
+
 def test_spef_cli_json_and_text(tmp_path, capsys):
     """`--spef` is wired all the way through the CLI, both `--format json`
     (the `spef_path` field) and the default text formatter."""

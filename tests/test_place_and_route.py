@@ -1468,6 +1468,54 @@ def test_post_route_spef_flags_unmatched_nets(tmp_path, monkeypatch):
 
     assert report["spef_sta"]["nets_annotated"] == 1
     assert report["spef_sta"]["nets_total"] == 3
+    # ...and stated *in words*, not left as two integers a caller has to
+    # notice on their own -- the "do not silently drop annotation on
+    # unmatched nets" half of issue #948's own scope item 3.
+    assert report["spef_sta"]["annotation_complete"] is False
+    warning = report["spef_sta"]["annotation_warning"]
+    assert warning is not None
+    assert "1 of 3" in warning
+
+
+def test_post_route_spef_zero_annotation_is_reported_not_hidden(tmp_path, monkeypatch):
+    """The measured reality on the routed `gcd` corpus fixture today (`0 of
+    981`, verified live against `openroad/orfs:latest` while implementing
+    issue #948): `klt extract` names nets from GDS text labels, and the
+    DEF->GDS merge labels top-level pins only, so no internal routed net's
+    SPEF name resolves in the linked design. That case must still return a
+    `spef_sta` block whose own fields say so plainly -- never a block that
+    reads like a real-parasitics measurement."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(
+        monkeypatch, nets_annotated=0, nets_total=981
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    spef_sta = report["spef_sta"]
+    assert spef_sta["nets_annotated"] == 0
+    assert spef_sta["nets_total"] == 981
+    assert spef_sta["annotation_complete"] is False
+    assert "0 of 981" in spef_sta["annotation_warning"]
+
+
+def test_post_route_spef_full_annotation_sets_no_warning(tmp_path, monkeypatch):
+    """The converse: a 100%-correlated run carries `annotation_complete:
+    true` and a `null` warning, so the warning field is a real signal rather
+    than boilerplate present on every response."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(
+        monkeypatch, nets_annotated=3, nets_total=3
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["spef_sta"]["annotation_complete"] is True
+    assert report["spef_sta"]["annotation_warning"] is None
 
 
 def test_post_route_spef_not_run_before_route_stage(tmp_path, monkeypatch):
@@ -1503,6 +1551,38 @@ def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
 
 def test_tcl_net_list_brace_quotes_each_name():
     assert place_and_route._tcl_net_list(["A", "B|C", "clk"]) == "{A} {B|C} {clk}"
+
+
+def test_sta_pattern_escape_neutralises_glob_metacharacters():
+    """`get_nets` matches its argument as a *pattern*, so a bussed net's own
+    `[13]` suffix would otherwise be a one-of-`1`-or-`3` character class --
+    an accidental match (or non-match) that would corrupt the
+    `nets_annotated` count issue #948 exists to report honestly."""
+    assert place_and_route._sta_pattern_escape("a_in[13]") == r"a_in\[13\]"
+    assert place_and_route._sta_pattern_escape("net*x?y") == r"net\*x\?y"
+    # A plain name is passed through untouched.
+    assert place_and_route._sta_pattern_escape("_019_") == "_019_"
+
+
+def test_spef_sta_script_escapes_net_patterns_in_the_generated_tcl():
+    """The escape actually reaches the generated script -- the check is only
+    honest if `get_nets` sees the literal name."""
+    lines = place_and_route._spef_sta_script_lines(
+        checkpoint_in="/tmp/x.odb",
+        liberty_path="/tmp/x.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+        spef_path="/tmp/x.spef",
+        net_names=["a_in[13]", "_019_"],
+    )
+    net_list_line = next(line for line in lines if line.startswith("set klt_spef_nets"))
+    assert r"{a_in\[13\]}" in net_list_line
+    assert "{_019_}" in net_list_line
+    # The correlation check runs *before* `read_spef`, so a `read_spef`
+    # failure can never also swallow the check.
+    assert lines.index(f'puts "{place_and_route._SPEF_NET_CHECK_END}"') < lines.index(
+        "read_spef /tmp/x.spef"
+    )
 
 
 def test_count_spef_nets_annotated_parses_marker_block():

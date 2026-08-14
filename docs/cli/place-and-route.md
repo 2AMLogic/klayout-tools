@@ -375,11 +375,52 @@ a replacement of it:
    `read_spef` runs, every net name the SPEF declares is looked up via
    `get_nets -quiet` against the design already loaded from the checkpoint,
    and the resulting `"<annotated> of <total> nets annotated"` count is
-   reported as `spef_sta.nets_annotated`/`spef_sta.nets_total`. A caller
-   comparing `spef_sta`'s timing numbers against the top-level ones should
-   check this pair first — a low `nets_annotated`/`nets_total` ratio means
-   the SPEF's numbers are not meaningfully wired into that OpenSTA session,
-   whatever `worst_slack_ns` value it reports.
+   reported as `spef_sta.nets_annotated`/`spef_sta.nets_total`, and — when
+   the two differ — spelled out in words in `spef_sta.annotation_warning`
+   (`null`, with `annotation_complete: true`, only on a 100% match). A
+   caller comparing `spef_sta`'s timing numbers against the top-level ones
+   **must** check this pair first: a low `nets_annotated`/`nets_total` ratio
+   means the SPEF's numbers are not meaningfully wired into that OpenSTA
+   session, whatever `worst_slack_ns` value it reports.
+
+### Net-name correlation: measured, and today it is 0%
+
+The survey's flagged risk **materialised**, and this section states the
+measured result rather than the hoped-for one. Measured live against
+`openroad/orfs:latest` (OpenROAD `26Q3-1080-gab6fd26351`), sky130A,
+`seed: 1`, on all three of the corpus proxy designs:
+
+| design | `nets_annotated` | `nets_total` |
+|---|---|---|
+| `gcd` | 0 | 981 |
+| `modexp` | 0 | 1904 |
+| `mult8` | 0 | 449 |
+
+**Why**: `klt extract` derives every net name from GDS *text labels*
+([`docs/cli/extract.md`](extract.md)'s "Coverage"), and the `"route"`
+stage's DEF→GDS merge emits labels for **top-level pins only** (52 texts on
+`met2.LABEL` for `gcd`). Every internal routed net therefore reaches the
+SPEF under a name KLayout synthesised for an unlabelled net (`$1009`, …) or
+built by joining the standard-cell pin labels that happen to touch it
+(`A|A2|Y`) — neither of which is what OpenSTA calls that net in the linked
+design (`_019_`, `req_msg[3]`, …).
+
+**Consequence for the numbers**: on a run with `nets_annotated: 0`, the
+`spef_sta` slack/violation values are what OpenSTA reports for the design
+*after* `read_spef` matched nothing — a wire-parasitic-free re-report, not
+a real-parasitics measurement. They are still emitted (the A/B protocol the
+survey §5 describes wants both sides of every run recorded, and the SPEF
+artifact itself is real and reusable), but `annotation_warning` says
+plainly that they must not be read as the real-parasitics half of the
+comparison.
+
+**What is genuinely delivered here**: a syntactically valid SPEF of real
+routed per-net R/C that a real `read_spef` accepts without error, plus a
+correlation check that reports the gap instead of hiding it. Closing the
+gap itself needs the routed net names to reach the GDS in the first place
+(net-name labels emitted by the DEF→GDS merge, or a DEF-driven name map
+applied to the SPEF) — separate follow-on work, deliberately not bundled
+into this format-writer issue.
 
 Off by default: this adds real wall-clock cost on top of every existing
 `"route"`-stage caller (one more `klt extract --parasitics` pass over the
@@ -406,6 +447,38 @@ resolved `pdk.corner`. A `"route"`-stage run reports both axes independently
 separate OpenROAD invocations that share neither script nor `-metrics` file.
 SDF write-back and OCV derating (survey §4.3–§4.4) remain separate, larger
 follow-on issues this field's own SPEF artifact is meant to feed.
+
+### Measured fidelity ladder (`gcd` / `modexp` / `mult8`, sky130A, `seed: 1`)
+
+Run live against `openroad/orfs:latest` (OpenROAD `26Q3-1080-gab6fd26351`),
+sky130A, `utilization_pct: 38`, `target_stage: "route"`. Each rung is one
+JSON field from one of the two commands, diffed by hand rather than by a
+field this contract fabricates:
+
+| Rung | Source | `gcd` (1.1 ns) | `modexp` (5.0 ns) | `mult8` (6.0 ns) |
+|---|---|---|---|---|
+| 1 — pre-route, wire-free | `klt synthesize` → `sta.worst_path.delay_ns` (`klt-statime-native`) | 2.86419 ns | 5.30719 ns | 4.57003 ns |
+| 2 — post-route, global-routing RC estimate | `klt place-and-route` → top-level `worst_slack_ns` / `total_negative_slack_ns` | −1.94402 / −72.6797 ns (50 setup viol.) | −0.30908 / −4.11997 ns (16 setup viol.) | 1e+39 / 0 (unconstrained) |
+| 3 — post-route, `read_spef` of real extracted RC | `klt place-and-route` → `spef_sta.worst_slack_ns` / `.total_negative_slack_ns` | −1.72532 / −63.8855 ns (50 setup viol.) | +0.17986 / 0 ns (0 setup viol.) | 1e+39 / 0 (unconstrained) |
+| — net-name correlation | `spef_sta.nets_annotated` / `.nets_total` | **0 / 981** | **0 / 1904** | **0 / 449** |
+
+`read_spef` accepted the written SPEF **without error on all three
+designs** — the writer's own syntactic validity against a real OpenSTA is
+what this table establishes.
+
+Rung 3's *timing* values, however, are reported for completeness of the
+survey §5 A/B protocol, not as evidence of higher fidelity: with zero nets
+annotated they reflect the *absence* of wire parasitics in that session.
+That is why rung 3 reads **optimistically** relative to rung 2 (most
+starkly on `modexp`: +0.17986 ns vs. −0.30908 ns, 0 vs. 16 setup
+violations) rather than pessimistically, as real routed RC would. `mult8`
+is purely combinational with an output port named as its clock, so both
+post-route rungs correctly report OpenSTA's own unconstrained `1e+39`
+sentinel.
+
+`klt drc`/`klt lvs` are unchanged on the corpus — this feature adds an
+artifact and a second, read-only STA session and touches no geometry or
+connectivity — and `route_drc_violation_count` stayed `0` on all three.
 
 ## Request
 
@@ -493,12 +566,14 @@ follow-on issues this field's own SPEF artifact is meant to feed.
   "gds_path": "/abs/path/.klt/place-and-route/gcd.gds",
   "spef_sta": {
     "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
-    "worst_slack_ns": -2.31456,
-    "total_negative_slack_ns": -88.9014,
-    "setup_violation_count": 3,
-    "hold_violation_count": 1,
-    "nets_annotated": 2133,
-    "nets_total": 2133
+    "worst_slack_ns": -1.72532,
+    "total_negative_slack_ns": -63.8855,
+    "setup_violation_count": 50,
+    "hold_violation_count": 0,
+    "nets_annotated": 0,
+    "nets_total": 981,
+    "annotation_complete": false,
+    "annotation_warning": "only 0 of 981 SPEF net names resolve to a net in the linked design -- ..."
   },
   "provenance": {
     "klt_version": "0.1.0",
@@ -532,7 +607,7 @@ follow-on issues this field's own SPEF artifact is meant to feed.
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
-| `spef_sta` | object \| null | Additive field (issue #948). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — the net-name-correlation sanity check (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); check this pair before trusting the timing numbers. See "Post-route SPEF STA" above. |
+| `spef_sta` | object \| null | Additive field (issue #948). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — the net-name-correlation sanity check (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); check this pair before trusting the timing numbers. `annotation_complete` — `true` only when the two are equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the ratio and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. **Measured today this is `0` of `981` on `gcd`** — see "Net-name correlation" above before comparing anything. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 
 ## Partial completion (`target_stage`)

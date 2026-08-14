@@ -1985,6 +1985,21 @@ Direction on every declared `*PORTS` entry is always `B`
 (bidirectional/unspecified) — a GDS text label carries no I/O-direction
 metadata, so this is a declared "unknown," never a guessed `I`/`O`.
 
+**Identifiers are escaped, and that is load-bearing.** SPEF's own
+(IEEE 1481-1999) identifier grammar admits only `[A-Za-z0-9_]` bare; every
+other character is a *special character* that must carry a leading
+backslash. KLayout's extracted names hit that constantly — an unlabelled
+net is named `$<n>`, a net carrying several layout labels is named by
+joining them with `|`, and a bussed pin label keeps its `[`/`]` — so every
+identifier this writer emits (`*PORTS` entries, `*D_NET` names,
+`*CONN`/`*P` entries, and each `*CAP`/`*RES` node) is escaped:
+`$1009` → `\$1009`, `A|A2|Y` → `A\|A2\|Y`, `a_in[13]` → `a_in\[13\]`.
+Without it a real OpenSTA `read_spef` aborts on the *first* `*D_NET` line
+(`[ERROR STA-1670] … syntax error`, reproduced on the routed `gcd` corpus
+fixture against `openroad/orfs:latest`); with it the identical file parses
+cleanly. Reading tools strip the backslashes back off, so the name matched
+against a netlist is the unescaped one.
+
 **Duplicate net names are a known, inherited limitation**, not something
 this writer resolves: a layout label shared by several distinct, un-strapped
 net islands (e.g. the `gcd` corpus's 105 separate `VGND` islands, see
