@@ -1,0 +1,164 @@
+{
+  "block": "sky130-critical-net-fixture",
+  "extraction_pin": {
+    "deck": "sky130",
+    "deck_content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+    "method": "coupling-C (Phase 2a, issue #976) vs lumped-RC (Phase 1)"
+  },
+  "note": "not a klt sim/klt pex record -- this is a klt extract + klt mom comparison (issue #978, Epic #709 Phase 2c), so request_path/request_sha256 pin this generation script (which fully determines the fixture and every number in 'result') rather than a klt sim request file; pdk_pin is null because this fixture's geometry is authored directly (no --pdk resolution), matching examples/design-pipeline's own precedent for a run with no PDK variant selected.",
+  "pdk_pin": null,
+  "recorded_at": "2026-08-14T16:54:31Z",
+  "request_path": "examples/critical-net-mom-fidelity/generate_and_measure.py",
+  "request_sha256": "a2ca642848e03912d1a597583273058cfc0055f065a18c3d0123bca7d6e44c82",
+  "result": {
+    "comparison": {
+      "AGR_VIC": {
+        "gap_um": 0.1,
+        "mom_coupling_ff": 0.09795,
+        "phase1_delta_pct_vs_mom": -100.0,
+        "phase1_lumped_rc_coupling_ff": 0.0,
+        "phase2a_critical_net_coupling_ff": 0.044,
+        "phase2a_delta_pct_vs_mom": -55.079,
+        "within_lookback": true
+      },
+      "VIC_FAR": {
+        "gap_um": 0.35,
+        "mom_coupling_ff": 0.070502,
+        "phase1_delta_pct_vs_mom": -100.0,
+        "phase1_lumped_rc_coupling_ff": 0.0,
+        "phase2a_critical_net_coupling_ff": 0.0,
+        "phase2a_delta_pct_vs_mom": -100.0,
+        "within_lookback": false
+      }
+    },
+    "distributed_rc_capacitance_invariance": {
+      "conclusion": "identical -- --distributed-rc changes how a net's own R/C is spatially distributed across its terminals, never the total capacitance (ground or coupling) reported for it, so there is no separate capacitance number Phase 2b changes for `klt mom` to grade against; its fidelity contribution is topological (delay distribution along a routed net), outside the scope of a capacitance-only field solve",
+      "critical_nets": [
+        "$2",
+        "$4",
+        "$5",
+        "$7",
+        "$8",
+        "D"
+      ],
+      "distributed_total_capacitance_ff": 10.860575,
+      "distributed_total_coupling_capacitance_ff": 1.054535,
+      "fixture": "tests/corpus/sky130/sky130_fd_sc_hd__dfxtp_2.gds",
+      "lumped_total_capacitance_ff": 10.860575,
+      "lumped_total_coupling_capacitance_ff": 1.054535
+    },
+    "epic": 709,
+    "extraction": {
+      "phase1_baseline": {
+        "critical_nets": [],
+        "provenance": {
+          "deck": {
+            "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+            "name": "sky130"
+          },
+          "input": {
+            "content_hash": "sha256:cf0c6e72c5861f48a9bcd3f06367f90a861c15e232f5c03778b4d8be751d3dbe"
+          },
+          "klayout_version": "0.30.10",
+          "klt_version": "0.2.0",
+          "pdk": null
+        },
+        "total_coupling_capacitance_ff": 0.0
+      },
+      "phase2a_critical_net": {
+        "critical_nets": [
+          "VIC"
+        ],
+        "provenance": {
+          "deck": {
+            "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+            "name": "sky130"
+          },
+          "input": {
+            "content_hash": "sha256:cf0c6e72c5861f48a9bcd3f06367f90a861c15e232f5c03778b4d8be751d3dbe"
+          },
+          "klayout_version": "0.30.10",
+          "klt_version": "0.2.0",
+          "pdk": null
+        },
+        "total_coupling_capacitance_ff": 0.044
+      },
+      "phase2b_distributed_rc": {
+        "critical_nets": [
+          "VIC"
+        ],
+        "distributed_rc": true,
+        "note": "this fixture has zero device terminals on any net, so --distributed-rc falls back to the star/lumped model here (fewer than 2 terminals) -- see distributed_rc_capacitance_invariance below for the same claim checked on a fixture that does have real device terminals",
+        "total_coupling_capacitance_ff": 0.044
+      }
+    },
+    "fixture": {
+      "description": "three same-layer (met1) 2x1 um bars -- AGR/VIC 0.1 um apart (within sky130's met1 lateral-coupling lookback), VIC/FAR 0.35 um apart (outside it) -- identical geometry to tests/test_extract.py's _make_lateral_coupling_layout(), issue #976's own acceptance-test fixture",
+      "layout": "lateral-coupling.gds",
+      "layout_sha256": "cf0c6e72c5861f48a9bcd3f06367f90a861c15e232f5c03778b4d8be751d3dbe"
+    },
+    "issue": 978,
+    "kind": "critical-net-mom-fidelity-comparison",
+    "mom_crosscheck": {
+      "AGR_VIC_mesh_refinement": [
+        {
+          "coupling_ff": 0.091238,
+          "panel_count": 400,
+          "panel_size_um": 0.1,
+          "warnings": []
+        },
+        {
+          "coupling_ff": 0.095536,
+          "panel_count": 1600,
+          "panel_size_um": 0.05,
+          "warnings": []
+        },
+        {
+          "coupling_ff": 0.097734,
+          "panel_count": 6400,
+          "panel_size_um": 0.025,
+          "warnings": []
+        },
+        {
+          "coupling_ff": 0.09795,
+          "panel_count": 7832,
+          "panel_size_um": 0.0225,
+          "warnings": []
+        }
+      ],
+      "VIC_FAR_mesh_refinement": [
+        {
+          "coupling_ff": 0.067751,
+          "panel_count": 400,
+          "panel_size_um": 0.1,
+          "warnings": []
+        },
+        {
+          "coupling_ff": 0.068177,
+          "panel_count": 506,
+          "panel_size_um": 0.0875,
+          "warnings": []
+        },
+        {
+          "coupling_ff": 0.069847,
+          "panel_count": 2116,
+          "panel_size_um": 0.04375,
+          "warnings": []
+        },
+        {
+          "coupling_ff": 0.070502,
+          "panel_count": 6400,
+          "panel_size_um": 0.025,
+          "warnings": []
+        }
+      ],
+      "background_permittivity": 3.9,
+      "method": "klt mom (Method of Moments), direct in-memory two-conductor solve (klayout_tools.mom.solve_capacitance_matrix, no GDS/spec-file round trip) -- both bars as zero-thickness plates in the same z=0 plane, background_permittivity=3.9 (SiO2), no synthesized ground plate (see this script's own docstring, 'Scope, stated plainly', for why)"
+    },
+    "schema_version": 1
+  },
+  "schema": "evidence-record/1",
+  "scope": "mom-coupling-fidelity",
+  "subset_reason": null,
+  "supersedes": []
+}

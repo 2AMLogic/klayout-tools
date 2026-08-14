@@ -1,0 +1,120 @@
+{
+  "abstracted_cells": [],
+  "black_box_regions": [],
+  "dbu_um": 0.001,
+  "dead_metal": [],
+  "deck": "sky130",
+  "device_classes": [
+    "nfet",
+    "pfet",
+    "pnp",
+    "sky130_fd_pr__model__cap_mim",
+    "sky130_fd_pr__model__cap_mim_m4",
+    "resistor"
+  ],
+  "device_count": 0,
+  "device_counts": {},
+  "device_recognition_only_layers": [],
+  "devices": [],
+  "dummy_devices_dropped": 0,
+  "file": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-978/examples/critical-net-mom-fidelity/lateral-coupling.gds",
+  "ignored_layers": [],
+  "merged_net_labels": [],
+  "net_count": 3,
+  "netlist_path": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-978/examples/critical-net-mom-fidelity/phase1-baseline.spice",
+  "netlist_sha256": "0eac629d8061bb660a788da4dc5b33dc0f192c655ba70ba1da4033944a553fdf",
+  "nets": [
+    {
+      "device_count": 0,
+      "name": "AGR",
+      "pin": true
+    },
+    {
+      "device_count": 0,
+      "name": "FAR",
+      "pin": true
+    },
+    {
+      "device_count": 0,
+      "name": "VIC",
+      "pin": true
+    }
+  ],
+  "parasitics": {
+    "c_count": 3,
+    "cc_count": 0,
+    "critical_nets": [],
+    "distributed_rc": false,
+    "metals_without_coefficient": [],
+    "model": {
+      "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
+      "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
+      "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior",
+      "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star"
+    },
+    "mom_crosscheck": null,
+    "nets": [
+      {
+        "capacitance_ff": 0.29498,
+        "coupled": [],
+        "hub_net": "AGR__par",
+        "net": "AGR",
+        "net_id": 1,
+        "rc_model": "lumped",
+        "resistance_ohm": 0.25,
+        "segments": [],
+        "terminals": []
+      },
+      {
+        "capacitance_ff": 0.29498,
+        "coupled": [],
+        "hub_net": "FAR__par",
+        "net": "FAR",
+        "net_id": 3,
+        "rc_model": "lumped",
+        "resistance_ohm": 0.25,
+        "segments": [],
+        "terminals": []
+      },
+      {
+        "capacitance_ff": 0.29498,
+        "coupled": [],
+        "hub_net": "VIC__par",
+        "net": "VIC",
+        "net_id": 2,
+        "rc_model": "lumped",
+        "resistance_ohm": 0.25,
+        "segments": [],
+        "terminals": []
+      }
+    ],
+    "overlap_pairs_without_coefficient": [],
+    "r_count": 3,
+    "total_capacitance_ff": 0.88494,
+    "total_coupling_capacitance_ff": 0.0,
+    "total_resistance_ohm": 0.75
+  },
+  "pdk": null,
+  "pin_count": 3,
+  "provenance": {
+    "deck": {
+      "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
+      "name": "sky130"
+    },
+    "input": {
+      "content_hash": "sha256:cf0c6e72c5861f48a9bcd3f06367f90a861c15e232f5c03778b4d8be751d3dbe"
+    },
+    "klayout_version": "0.30.10",
+    "klt_version": "0.2.0",
+    "pdk": null
+  },
+  "schema_version": 2,
+  "single_terminal_nets": [],
+  "spef_path": null,
+  "status": "extracted",
+  "top": "TOP",
+  "unbiased_pmos_body_nets": [],
+  "unmodelled_poly": [],
+  "voltage_domain_warnings": [],
+  "warnings": []
+}

@@ -53,6 +53,7 @@ docs/
   design/                # design notes, spikes, and upstream surveys
     co-simulation-approach-survey.md
     cocotb-verification-spike.md
+    critical-net-mom-fidelity-phase2c.md
     design-pipeline.md
     digital-flow-contracts-spike.md
     digital-fleet-unit-abstraction-decision.md
