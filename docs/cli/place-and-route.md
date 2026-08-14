@@ -482,12 +482,12 @@ so the 537 / 537 net-name annotation ratio above is untouched.
 `tests/test_extract.py::test_declared_pins_restricts_spef_ports_on_the_routed_corpus`
 asserts both columns.
 
-### Still missing for real routed-RC timing: `*CONN` pin correlation
+### `*CONN` device-terminal pin correlation (issue #961, structurally implemented; live re-measurement pending)
 
 Correct net *names* and a correct `*PORTS` list are necessary but not
-sufficient, and this section states what was measured rather than what was
-hoped for. With 537 of 537 `gcd` nets matched, `read_spef` finds every
-net — and then rejects every node inside them:
+sufficient, and the finding below was the last **live-measured** state
+before this section's own fix landed. With 537 of 537 `gcd` nets matched,
+`read_spef` found every net — and then rejected every node inside them:
 
 ```
 [WARNING STA-1656] gcd_route.spef line 108313, pin _031___t0 not found.
@@ -497,28 +497,48 @@ report_parasitic_annotation
   Found 537 partially unannotated drivers.
 ```
 
-`klt extract`'s SPEF omits device-terminal (`*I <instance>:<pin>`)
-connectivity by design (issue #948's own documented scope — see
+`klt extract`'s SPEF omitted device-terminal (`*I <instance>:<pin>`)
+connectivity by design (issue #948's own original scope — see
 [`docs/cli/extract.md`](extract.md)'s "SPEF export"), because the terminals
 it *does* know are **transistor** terminals under this repo's own
 layout-driven device naming (`$1517:G`), not the standard-cell instance pins
-the linked design is built from. The `*CAP`/`*RES` node names it emits
-(`_031___t0`, …) therefore resolve to no pin in the design, so OpenSTA has
-nowhere to attach the RC network: the parasitics are read, matched by name,
-and then not used. Confirmed directly — `worst_slack` is bit-identical
+the linked design is built from. The `*CAP`/`*RES` node names it emitted
+(`_031___t0`, …) therefore resolved to no pin in the design, so OpenSTA had
+nowhere to attach the RC network: the parasitics were read, matched by name,
+and then not used. Confirmed directly — `worst_slack` was bit-identical
 before and after `read_spef` in the same session
-(`-1.7253174444675778e-9` both times on `gcd`). **The `*PORTS` fix above
-does not change this** — it corrects which nets are declared ports, not
-whether OpenSTA can attach an RC network to the nodes inside any of them.
+(`-1.7253174444675778e-9` both times on `gcd`). The `*PORTS` fix above did
+not change this — it corrects which nets are declared ports, not whether
+OpenSTA can attach an RC network to the nodes inside any of them.
 
-Closing *that* gap needs an instance/pin-name correlation between the
-extracted layout view and the DEF's `COMPONENTS`/`NETS` (or a cell-level
-extraction pass with its own DEF instance-name correlation), which is a
-materially harder problem than net names (the DEF instance names are not
-carried into the merged GDS at all) and stays tracked by issue #961 itself,
-which this fix only partially closes. A related, still open, smaller defect:
-coupling `*CAP` entries name the coupled *net* where SPEF may expect a
-qualified *node* reference — also part of #961's remaining scope.
+**What issue #961 added**: `_post_route_spef_metrics` now parses the routed
+DEF's own `NETS` section (`extract.def_net_instance_pins`) for each net's
+real `(instance, pin)` connections — the same instance/pin spelling the
+linked gate-level design already uses, since DEF preserves the flow's
+original names verbatim — and passes that mapping to `klt extract` as
+`def_net_connections`. The SPEF writer emits one `*I <inst>:<pin> B` `*CONN`
+entry per connection and wires it into the RC network with a zero-ohm
+`*RES` leg from the net's own primary node; see
+[`docs/cli/extract.md`](extract.md)'s "SPEF export" section for the exact
+shape and the duplicate-net-name guard (a name shared by several un-strapped
+islands, e.g. `gcd`'s 105 `VGND` islands, is skipped rather than asserting
+connectivity no single island actually has). This does not model resistance
+*between* DEF-level pins — this repo's own extracted parasitics have no
+notion of which pin drives a net or the physical wire path to each load —
+only that each real design pin sits at the net's own lumped potential, which
+is what should let OpenSTA actually attach a net's capacitance to a real
+driver/load pin instead of discarding the `*D_NET` block outright.
+
+**This has been verified structurally, not live.** `tests/test_extract.py`
+asserts the exact written `*CONN`/`*RES` text for both a plain case and the
+duplicate-net-name skip, and defect 2 (coupling `*CAP` entries referencing
+the coupled net's own hub node rather than its bare name) is fixed and
+tested the same way — but no running Docker daemon was available while
+implementing this, so the `report_parasitic_annotation`/`worst_slack`
+before/after measurement above has **not** been re-run against a real
+OpenSTA session. Re-running it against `openroad/orfs:latest` is the
+concrete next step before rung 3 of the fidelity ladder below can be called
+a genuine higher-fidelity measurement.
 
 Off by default: this adds real wall-clock cost on top of every existing
 `"route"`-stage caller (one more `klt extract --parasitics` pass over the
@@ -570,19 +590,31 @@ from one live run of the current tree — none are carried over from the
 designs**, and — since issue #951 — resolves essentially every net name in
 it against the linked design.
 
-**Rung 3 still reads optimistically relative to rung 2, and that is now a
-fully explained result rather than an open question.** `read_spef` matches
-the nets but discards their RC networks, because the `*CAP`/`*RES` node
-names correlate to no pin in the design — see "Still missing for real
-routed-RC timing" above, including the direct before/after `worst_slack`
-measurement showing `read_spef` changes nothing. So rung 3 is still a
-wire-parasitic-free re-report of the identical routed design; what issue
-#951 changed is that the *name* half of the correlation is now complete and
-the remaining half is precisely located. Until `*CONN` pin correlation
-lands, rung 3's timing values remain a completeness record for the survey §5
-A/B protocol, not evidence of higher fidelity. `mult8` is purely
-combinational with an output port named as its clock, so both post-route
-rungs correctly report OpenSTA's own unconstrained `1e+39` sentinel.
+**The table above predates issue #961's own `*CONN` device-terminal pin
+correlation and has not yet been re-measured live against it.** As
+re-measured on 2026-08-14 (issue #951), rung 3 still reads optimistically
+relative to rung 2: `read_spef` matched the nets but discarded their RC
+networks, because the `*CAP`/`*RES` node names correlated to no pin in the
+design — see "`*CONN` device-terminal pin correlation" above, including the
+direct before/after `worst_slack` measurement showing `read_spef` changed
+nothing. Issue #961 (this doc's own remaining scope at that point) has since
+landed `def_net_connections`/`--def-net-connections`: `_post_route_spef_metrics`
+now parses the routed DEF's own `NETS` section and passes real
+`(instance, pin)` connectivity through to `klt extract --spef`, which emits
+`*I <inst>:<pin>` `*CONN` entries wired into each net's RC network — see
+[`docs/cli/extract.md`](extract.md)'s "SPEF export" section for the exact
+shape. **This was verified structurally (unit tests assert the written
+SPEF's exact `*CONN`/`*RES` text) but not against a live OpenSTA session —
+no running Docker daemon was available while implementing it.** The table
+above, and the "still reads optimistically" conclusion, therefore remain
+the last live-measured state; re-running the survey §5 A/B protocol
+(`report_parasitic_annotation` for unannotated-driver count,
+`worst_slack_ns` before/after `read_spef` in the same session) against a
+real `openroad/orfs:latest` container is the natural next step before this
+rung can be called a genuine higher-fidelity measurement rather than a
+completeness record. `mult8` is purely combinational with an output port
+named as its clock, so both post-route rungs correctly report OpenSTA's own
+unconstrained `1e+39` sentinel regardless.
 
 `klt drc`/`klt lvs` are unchanged on the corpus — `--def-net-names` is
 opt-in and neither command passes it, and this feature adds an artifact and

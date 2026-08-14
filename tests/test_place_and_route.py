@@ -1599,6 +1599,32 @@ def test_post_route_spef_declares_pins_from_def_pins_section(tmp_path, monkeypat
     )
 
 
+def test_post_route_spef_passes_def_net_connections_from_nets_section(
+    tmp_path, monkeypatch
+):
+    """Issue #961's own remaining scope (device-terminal `*CONN` pin
+    correlation): the routed DEF's own `NETS` section is parsed via
+    `extract.def_net_instance_pins` and threaded through to `run_extract`'s
+    `def_net_connections` kwarg, so the written SPEF can wire real
+    `*I <inst>:<pin>` connectivity into its RC network."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _overlay_real_def_pins(
+        monkeypatch,
+        def_pins_text=(
+            "NETS 1 ;\n    - net1 ( u1 A ) ( u2 Y ) + USE SIGNAL ;\nEND NETS\n"
+        ),
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    extract_calls = _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    assert extract_calls[0]["def_net_connections"] == {
+        "net1": (("u1", "A"), ("u2", "Y"))
+    }
+
+
 def test_post_route_spef_zero_annotation_is_reported_not_hidden(tmp_path, monkeypatch):
     """The measured reality on the routed `gcd` corpus fixture today (`0 of
     981`, verified live against `openroad/orfs:latest` while implementing

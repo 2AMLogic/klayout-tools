@@ -2023,22 +2023,45 @@ cards. Units are declared (`*C_UNIT 1 FF`, `*R_UNIT 1 OHM`) to match
 `parasitics`'s own units exactly, so no femtofarad/ohm conversion — and no
 conversion error — is introduced.
 
-**Net-name correlation only — not device/pin-name correlation (issue #948
-scope).** Each `*D_NET` block is keyed by `parasitics.nets[].net` — the same
-layout-label-derived name the survey's §2.1 flags as the one identifier a
-downstream STA tool needs to resolve against its own (Verilog-derived) flat
-net list. `*CONN` entries name only a net's own **port** membership (`*P
-<name> B`, when the schematic-equivalent extraction's `nets[].pin` marks it
-a top-level pin); device-terminal (`*I <inst>:<pin>`) connectivity is
-deliberately **not** emitted, because the per-device names inside
-`parasitics.nets[].terminals[]` are this repo's own layout-driven `Device`
-naming (`$1`, `$2`, …) — never asserted to correlate with a digital flow's
-own linked-design instance names, a materially harder and explicitly
-out-of-scope correlation question. `*CONN` is optional per the SPEF grammar,
-so this narrower, net-name-only form is still a syntactically valid file.
+**Net-name correlation by default; optional device-terminal correlation via
+`--def-net-connections` (issue #948, extended by #961).** Each `*D_NET`
+block is keyed by `parasitics.nets[].net` — the same layout-label-derived
+name the survey's §2.1 flags as the one identifier a downstream STA tool
+needs to resolve against its own (Verilog-derived) flat net list. `*CONN`
+entries always name a net's own **port** membership (`*P <name> B`, when
+the schematic-equivalent extraction's `nets[].pin` marks it a top-level
+pin); device-terminal (`*I <inst>:<pin>`) connectivity is **not** emitted by
+default, because the per-device names inside `parasitics.nets[].terminals[]`
+are this repo's own layout-driven `Device` naming (`$1`, `$2`, …) — never
+asserted to correlate with a digital flow's own linked-design instance
+names. `*CONN` is optional per the SPEF grammar, so this narrower,
+net-name-only form is still a syntactically valid file.
 `docs/cli/place-and-route.md`'s `spef_sta` field is where that net-name
 correlation is actually *checked* (an explicit "N of M nets annotated"
 count against the linked design), not merely assumed here.
+
+**`--def-net-connections <def_path>` (issue #961)** parses a routed DEF's
+own `NETS` section for each net's real `(instance, pin)` connections — in
+the same instance/pin spelling the linked gate-level design already uses,
+since DEF preserves the flow's original names verbatim (unlike this repo's
+own `Device` naming). For every net whose name appears exactly once in this
+extraction (see the duplicate-name caveat below), this emits one additional
+`*I <inst>:<pin> B` `*CONN` entry per connection and wires it into the RC
+network with a zero-ohm `*RES` leg from the net's own primary node — this
+does **not** model resistance *between* DEF-level pins (this repo's
+extracted parasitics have no notion of which pin drives a net or the
+physical wire path to each load), only that each real design pin sits at
+the net's own lumped potential. This is what lets a real OpenSTA
+`read_spef` session actually attach a net's total capacitance to a
+driver/load pin instead of discarding the whole `*D_NET` block as
+unconnected. Requires `--spef`; a net name that appears more than once in
+the extraction (e.g. several un-strapped `VGND` islands sharing one label)
+is skipped rather than asserting connectivity no single island actually
+has — the DEF's own `NETS` section declares each logical net name once,
+with every one of its real connections, so attaching that full list to
+every same-named `*D_NET` block would overclaim. `klt place-and-route`'s
+own `post_route_spef` pass does this automatically, sourcing the DEF path
+from the same routed DEF `declared_pins` already reads.
 
 Direction on every declared `*PORTS` entry is always `B`
 (bidirectional/unspecified) — a GDS text label carries no I/O-direction

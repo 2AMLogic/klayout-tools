@@ -2190,13 +2190,36 @@ def _post_route_spef_metrics(
     untouched. Asserted by
     ``tests/test_extract.py::test_declared_pins_restricts_spef_ports_on_the_routed_corpus``.
 
-    **Does not, on its own, fix `read_spef` discarding every RC network**
-    (the issue's root defect: device-terminal ``*I <inst>:<pin>``
-    connectivity is still not emitted at all, so every ``*D_NET``'s internal
-    ``*CAP``/``*RES`` node still resolves to nothing OpenSTA can attach a
-    network to) -- see issue #961's own comments for why that fuller
-    DEF-driven or cell-level-extraction correlation is tracked as separate,
-    larger follow-on work.
+    ``def_net_connections`` (issue #961's own root defect: device-terminal
+    ``*I <inst>:<pin>`` connectivity): :func:`~klayout_tools.extract.
+    def_net_instance_pins` reads ``def_path``'s own ``NETS`` section for
+    each net's real cell-instance connections, in the same instance/pin
+    spelling the linked gate-level design already uses (DEF preserves the
+    flow's original names verbatim). Passed through as ``run_extract``'s
+    ``def_net_connections``, this makes every real design pin on an
+    unambiguously-named net a genuine, resolvable node in the written
+    SPEF's RC network -- see :func:`~klayout_tools.extract._write_spef`'s
+    docstring for the exact ``*CONN``/``*RES`` shape and the duplicate-net-
+    name guard (a net name shared by several un-strapped islands, e.g.
+    `gcd`'s 105 ``VGND`` islands, is skipped rather than asserting
+    connectivity no single island actually has). This is what lets a real
+    OpenSTA `read_spef` session actually attach a net's total capacitance
+    to a driver/load pin instead of discarding the whole ``*D_NET`` block
+    as unconnected -- it does **not** model resistance *between* DEF-level
+    pins (this repo's own extracted parasitics have no notion of which pin
+    drives a net or the physical wire path to each load), only that they
+    are the same net at its own lumped potential.
+
+    **Live OpenSTA re-verification of this increment's own acceptance
+    criteria (zero "partially unannotated drivers", `worst_slack_ns`
+    changing across `read_spef`) was not possible while implementing this
+    -- no running Docker daemon was available in this session** (the same
+    constraint issue #961's own PR #974 comment recorded). The `*CONN`/
+    `*RES` shape above was verified structurally (unit tests assert the
+    written SPEF's exact text), not against a real OpenSTA session; a
+    follow-up pass with container access should re-run the
+    `report_parasitic_annotation`/`worst_slack` measurement issue #961's
+    acceptance criteria describe before this is treated as fully closed.
 
     Raises :class:`PlaceAndRouteError` for an unsupported ``cell_library``
     (no known `klt extract --deck`, see
@@ -2218,7 +2241,7 @@ def _post_route_spef_metrics(
     # Local import (mirrors `_merge_def_to_gds`'s own local `klayout.db`
     # import): keeps `extract.py`'s own (heavier) import cost out of every
     # `place_and_route.py` import that never exercises this opt-in path.
-    from .extract import ExtractError, run_extract
+    from .extract import ExtractError, def_net_instance_pins, run_extract
 
     spice_path = os.path.join(output_dir, f"{hdl_toplevel}_route_parasitics.spice")
     spef_path = os.path.join(output_dir, f"{hdl_toplevel}_route.spef")
@@ -2230,6 +2253,15 @@ def _post_route_spef_metrics(
     # DEF) falls back to not passing `declared_pins` at all, never to
     # declaring zero ports.
     declared_pins = _def_pin_net_names(def_path)
+    # Issue #961's own remaining scope (device-terminal `*CONN` pin
+    # correlation): the DEF's own `NETS` section names each net's real
+    # `(instance, pin)` connections, in the same instance/pin spelling the
+    # linked gate-level design uses -- see `def_net_instance_pins`'s own
+    # docstring for the exact `*I`/`*RES` shape this produces and the
+    # duplicate-net-name guard that skips it. `{}` (never `None`, matching
+    # `def_net_instance_pins`'s own "absence is not proof of zero" posture)
+    # for a DEF with no parseable `NETS` section.
+    net_instance_pins = def_net_instance_pins(def_path)
     try:
         extraction = run_extract(
             gds_path,
@@ -2252,6 +2284,9 @@ def _post_route_spef_metrics(
             # `None` is `run_extract`'s own "no restriction" default, i.e.
             # exactly the pre-#961 behaviour.
             declared_pins=declared_pins,
+            # Issue #961: real cell-instance `*CONN`/`*RES` correlation --
+            # see this function's docstring, "def_net_connections" paragraph.
+            def_net_connections=net_instance_pins,
         )
     except ExtractError as exc:
         raise PlaceAndRouteError(

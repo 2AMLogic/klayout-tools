@@ -46,6 +46,7 @@ from klayout_tools.extract import (
     _promote_orphan_named_nets,
     _purge_preserving_named_nets,
     _region,
+    def_net_instance_pins,
     run_extract,
 )
 from klayout_tools.pdk_models import (
@@ -9353,8 +9354,10 @@ def test_spef_d_net_ports_declared_and_connected(tmp_path):
     y_block = text[y_block_start:y_block_end]
     assert "*CONN" in y_block
     assert "*P Y B" in y_block
-    # No device/pin-level `*I` connectivity is ever emitted -- this writer's
-    # documented net-name-only correlation scope (issue #948).
+    # No device/pin-level `*I` connectivity is emitted when `net_instance_pins`
+    # is not given (the default) -- byte-identical to the pre-#961 behavior.
+    # See `test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs` for
+    # the opt-in `net_instance_pins` shape.
     assert "*I " not in text
 
 
@@ -9453,6 +9456,314 @@ def test_spef_gamma_shunt_fallback_uses_hub_net_node(tmp_path):
     block_end = text.index("*END", block_start)
     block = text[block_start:block_end]
     assert f"1 DANGLE {entry['hub_net']} {entry['resistance_ohm']:.6f}" in block
+
+
+# --------------------------------------------------------------------------- #
+# `def_net_instance_pins` (issue #961's own remaining scope): the routed
+# DEF's own `NETS` section, parsed for each net's real `(instance, pin)`
+# connections -- fed to `_write_spef`'s `net_instance_pins` so a real
+# OpenSTA `read_spef` session can actually attach a net's RC network to a
+# real design pin instead of discarding the whole `*D_NET` block.
+# --------------------------------------------------------------------------- #
+
+
+def test_def_net_instance_pins_parses_single_and_multiline_records(tmp_path):
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "    - net1 ( u1 A ) ( u2 Y ) + USE SIGNAL ;\n"
+        "    - bignet ( u3 A ) ( u4 B )\n"
+        "      ( u5 C )\n"
+        "      + USE SIGNAL ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {
+        "net1": (("u1", "A"), ("u2", "Y")),
+        "bignet": (("u3", "A"), ("u4", "B"), ("u5", "C")),
+    }
+
+
+def test_def_net_instance_pins_excludes_pin_connections(tmp_path):
+    """A `( PIN <name> )` connection is a top-level design-port connection
+    -- already covered by `place_and_route._def_pin_net_names`'s
+    `declared_pins`/`*P` handling, so it must not also become a (spurious)
+    `*I PIN:<name>` entry."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 1 ;\n    - clk ( PIN clk ) ( u1 CLK ) + USE SIGNAL ;\nEND NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {"clk": (("u1", "CLK"),)}
+
+
+def test_def_net_instance_pins_ignores_specialnets_section(tmp_path):
+    """A `SPECIALNETS <n> ;`/`END SPECIALNETS` section must never be mistaken
+    for `NETS`/`END NETS` -- both share the same trailing shape."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "SPECIALNETS 1 ;\n"
+        "    - VDD ( u1 VPWR ) + USE POWER ;\n"
+        "END SPECIALNETS\n"
+        "NETS 1 ;\n"
+        "    - a ( u1 A ) + USE SIGNAL ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {"a": (("u1", "A"),)}
+
+
+def test_def_net_instance_pins_ignores_routed_wire_geometry(tmp_path):
+    """A real routed DEF's net record continues with `+ ROUTED <layer> ( x y )
+    ... NEW <layer> ( x y ) <via>` (LEF/DEF 5.8 section 6.9), whose coordinate
+    and via tuples have the identical `( <a> <b> )` shape as a `( <inst> <pin> )`
+    connection. Only the connection-list prefix (everything before the record's
+    first `+` clause) may be scanned -- otherwise every routed signal net
+    contributes fake `*I 27300:60900 B` `*CONN` entries and matching zero-ohm
+    `*RES` legs to the emitted SPEF."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- net1 ( I1 A ) ( I2 Z )\n"
+        "  + ROUTED metal1 ( 27300 60900 ) ( * 63500 )\n"
+        "    NEW metal2 ( 27300 63500 ) ( 29700 * ) via1_2\n"
+        "  ;\n"
+        "- net2 ( PIN OUT ) ( I3 A )\n"
+        "  + ROUTED metal3 ( 100 200 ) ( 300 400 )\n"
+        "  ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {
+        "net1": (("I1", "A"), ("I2", "Z")),
+        "net2": (("I3", "A"),),
+    }
+
+
+def test_def_net_instance_pins_ignores_single_line_routed_geometry(tmp_path):
+    """Same restriction when the whole record (connections plus `+ ROUTED`
+    geometry) is emitted on one line."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 1 ;\n"
+        "    - n1 ( u1 Y ) ( u2 A ) + USE SIGNAL "
+        "+ ROUTED met1 ( 500 500 ) ( 900 * ) ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {"n1": (("u1", "Y"), ("u2", "A"))}
+
+
+def test_def_net_instance_pins_empty_when_no_nets_section(tmp_path):
+    def_path = tmp_path / "top.def"
+    def_path.write_text("DESIGN top ;\nEND DESIGN\n")
+    assert def_net_instance_pins(str(def_path)) == {}
+
+
+def test_def_net_instance_pins_empty_when_file_missing(tmp_path):
+    assert def_net_instance_pins(str(tmp_path / "missing.def")) == {}
+
+
+# --------------------------------------------------------------------------- #
+# `_write_spef`'s `net_instance_pins` parameter (issue #961's own remaining
+# scope): real `*I <inst>:<pin>` `*CONN` entries plus zero-ohm connectivity
+# `*RES` legs, and defect 2's coupling `*CAP` hub-node fix.
+# --------------------------------------------------------------------------- #
+
+
+def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
+    """`net_instance_pins` adds one `*I <inst>:<pin> B` `*CONN` entry per
+    connection (alongside any `*P` port entry) and wires each into the RC
+    network with a zero-ohm `*RES` leg from the net's own primary node --
+    the fix for issue #961's own root defect (every internal net's `*CONN`
+    section was empty, so OpenSTA had nothing to attach the RC network to)."""
+    from klayout_tools.extract import _write_spef
+
+    report = {
+        "nets": [
+            {
+                "net": "net1",
+                "hub_net": "net1",
+                "capacitance_ff": 1.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "net1_$1_G", "resistance_ohm": 5.0}],
+                "coupled": [],
+            },
+        ]
+    }
+    out = tmp_path / "conn.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins={"net1": (("u1", "A"), ("u2", "Y"))},
+    )
+    text = out.read_text()
+
+    block_start = text.index("*D_NET net1 ")
+    block_end = text.index("*END", block_start)
+    block = text[block_start:block_end]
+
+    assert "*CONN" in block
+    assert "*I u1:A B" in block
+    assert "*I u2:Y B" in block
+    # The device-terminal leg keeps its own (non-zero) resistance; the two
+    # new connectivity legs are zero-ohm, appended after it, indices
+    # continuing rather than restarting.
+    assert "1 net1 net1_\\$1_G 5.000000" in block
+    assert "2 net1 u1:A 0.000000" in block
+    assert "3 net1 u2:Y 0.000000" in block
+
+
+def test_spef_conn_skips_duplicate_named_nets(tmp_path):
+    """A net name shared by several distinct, un-strapped islands (e.g.
+    `gcd`'s 105 `VGND` islands) must not have the DEF's *full* connection
+    list attached to *every* same-named `*D_NET` block -- each island only
+    has a subset of those connections in reality. `net_instance_pins`
+    correlation is skipped entirely for a duplicated name; a single-island
+    name is unaffected."""
+    from klayout_tools.extract import _write_spef
+
+    report = {
+        "nets": [
+            {
+                "net": "VGND",
+                "hub_net": "VGND",
+                "capacitance_ff": 1.0,
+                "resistance_ohm": 0.0,
+                "terminals": [],
+                "coupled": [],
+            },
+            {
+                "net": "VGND",
+                "hub_net": "VGND__hub2",
+                "capacitance_ff": 1.0,
+                "resistance_ohm": 3.0,
+                "terminals": [],
+                "coupled": [],
+            },
+            {
+                "net": "sig",
+                "hub_net": "sig",
+                "capacitance_ff": 0.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "sig_leg", "resistance_ohm": 1.0}],
+                "coupled": [],
+            },
+        ]
+    }
+    out = tmp_path / "dup.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins={"VGND": (("u1", "VPWR"),), "sig": (("u2", "A"),)},
+    )
+    text = out.read_text()
+
+    assert "*I " not in text.split("*D_NET sig ")[0]  # neither VGND block
+    assert "*I u2:A B" in text  # the unambiguous `sig` net is unaffected
+
+
+def test_spef_coupling_cap_references_coupled_net_hub_not_bare_name(tmp_path):
+    """Issue #961 defect 2: a Gamma-shunt-fallback coupling partner's actual
+    self-capacitance node is its synthesized `hub_net`, not its bare `net`
+    name -- referencing the bare name from a *different* `*D_NET` block's
+    coupling `*CAP` line would name a node that block never declares."""
+    from klayout_tools.extract import _write_spef
+
+    report = {
+        "nets": [
+            {
+                "net": "noterm",
+                "hub_net": "noterm__hub",
+                "capacitance_ff": 2.0,
+                "resistance_ohm": 4.0,
+                "terminals": [],
+                "coupled": [],
+            },
+            {
+                "net": "sig",
+                "hub_net": "sig",
+                "capacitance_ff": 0.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "sig_leg", "resistance_ohm": 1.0}],
+                "coupled": [
+                    {"net": "noterm", "capacitance_ff": 0.1, "levels": [[0, 1]]}
+                ],
+            },
+        ]
+    }
+    out = tmp_path / "coupling_hub.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+    )
+    text = out.read_text()
+
+    sig_block_start = text.index("*D_NET sig ")
+    sig_block_end = text.index("*END", sig_block_start)
+    sig_block = text[sig_block_start:sig_block_end]
+    assert "sig noterm__hub 0.100000" in sig_block
+    assert "sig noterm 0.100000" not in sig_block
+
+
+def test_def_net_connections_cli_flag_requires_spef(tmp_path):
+    """`--def-net-connections` without `--spef` is a clean, immediate
+    error -- the data it recovers is only ever consumed by the SPEF
+    writer."""
+    layout_path = str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds")
+    def_path = tmp_path / "top.def"
+    def_path.write_text("NETS 0 ;\nEND NETS\n")
+
+    exit_code = main(
+        [
+            "extract",
+            layout_path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "cli_conn.spice"),
+            "--parasitics",
+            "--def-net-connections",
+            str(def_path),
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code != 0
+
+
+def test_def_net_connections_cli_flag_is_wired(tmp_path, capsys):
+    """The CLI surface reaches `run_extract`'s `def_net_connections` kwarg
+    and produces `*I`/`*RES` entries in the written SPEF."""
+    layout_path = str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds")
+    def_path = tmp_path / "top.def"
+    def_path.write_text("NETS 1 ;\n    - Y ( u1 X ) + USE SIGNAL ;\nEND NETS\n")
+    spef_path = tmp_path / "cli_conn.spef"
+
+    exit_code = main(
+        [
+            "extract",
+            layout_path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "cli_conn.spice"),
+            "--parasitics",
+            "--spef",
+            str(spef_path),
+            "--def-net-connections",
+            str(def_path),
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    text = spef_path.read_text()
+    assert "*I u1:X B" in text
 
 
 def test_spef_name_escapes_every_reserved_character():
