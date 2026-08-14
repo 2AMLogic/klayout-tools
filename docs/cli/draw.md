@@ -57,6 +57,9 @@ in CI.
   error; `klt draw` will not write an empty layout.
 - `labels` (array, optional) — text labels.
 
+Unrecognised keys are **rejected**, with one reserved escape hatch for
+annotations — see ["Unrecognised keys"](#unrecognised-keys) below.
+
 ### Shape entry
 
 - `layer` (**required**) — a `[layer, datatype]` pair of non-negative integers.
@@ -103,6 +106,61 @@ in CI.
 - `text` (string, **required**) — the label string.
 - `at_um` (**required**) — an `[x, y]` anchor point in microns.
 
+## Unrecognised keys
+
+**A key that is not documented above is an application error (exit 1) naming the
+offending key — except a key beginning with an underscore (`_`), which is
+reserved for caller annotations and is always accepted and ignored.**
+
+This is a promise in both directions, at *every* level of the request — the
+top-level request object, `params`, `options`, each `shapes[]` entry, each
+`labels[]` entry, and a shape's `array` object all enforce their own key list:
+
+| Key | Behavior |
+| --- | -------- |
+| A documented key | Read as documented. |
+| `_`-prefixed (`_purpose`, `_rule`, `_expected_rules`, …) | Accepted and **ignored**. Reserved forever — no future version of `klt draw` will give an underscore-prefixed key meaning, so an annotation can never collide with a real key. |
+| Anything else | **Rejected**: exit 1 with an error naming the unknown key(s) and listing the allowed set for that object. Nothing is written. |
+
+Rejecting is what makes a typo in a *real* key visible. `{"rect_nm": [...]}`
+(or `count` misspelled `counts` inside `array`) is far more likely to be a
+mistake than an intentional annotation, and silently dropping it would produce a
+successfully-written stream missing the geometry the caller asked for. The same
+posture is already applied to [`klt gen-compose`](gen-compose.md)'s
+`request.pdk`.
+
+The `_` prefix exists because JSON has no comment syntax, and the fixtures
+`klt draw` is built to produce are exactly the ones that most need a comment: a
+known-bad DRC negative control whose dimensions are *deliberately* illegal. A
+reviewer opening such a file must be able to tell which rule each shape is meant
+to trip, and that "cleaning up" a dimension would silently turn the fixture legal
+and the negative control into a no-op. Annotate it in place:
+
+```json
+{
+  "_purpose": "negative control: must come back flagged by sky130 poly.width.1",
+  "_expected_rules": ["poly.width.1"],
+  "shapes": [
+    {
+      "layer": [66, 20],
+      "name": "poly.drawing",
+      "rect_um": [0, 0, 0.1, 2.0],
+      "_rule": "poly.width.1 — 0.1 um is below the 0.15 um minimum, on purpose"
+    }
+  ]
+}
+```
+
+Errors are reported per object, e.g.:
+
+```
+shape[0] has unknown key(s): rect_nm -- allowed: array, layer, name, polygon_um, rect_um (keys beginning with '_' are reserved for caller annotations and ignored)
+```
+
+This policy applies to `klt draw` only. Other request-JSON verbs document (or
+do not yet document) their own; do not infer this one from them, or theirs from
+this one.
+
 ## Response
 
 `--format json` emits the documented envelope
@@ -144,7 +202,7 @@ in CI.
 | Code | Meaning |
 | ---- | ------- |
 | `0`  | The stream was written; the success payload is on stdout. |
-| `1`  | Application error: invalid/missing `--params`, a malformed shape/label, empty `shapes`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
+| `1`  | Application error: invalid/missing `--params`, a malformed shape/label, an [unrecognised key](#unrecognised-keys), empty `shapes`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
 | `2`  | Usage error (bad `--format` value) — from argparse. |
 
 ## Example: a DRC negative fixture

@@ -1931,6 +1931,33 @@ not `klt --version`, if you need to detect this kind of drift.
   within-row gap between interleaved splits) is unchanged. See
   `docs/cli/gen.md`.
 
+### Changed since release
+
+- 2026-08-13 — `klt draw` now has a **written** unknown-key policy for its
+  request JSON, and enforces it (issue #950): an unrecognised key is an
+  application error (exit 1) naming the offending key and listing the allowed
+  set, **except** a key beginning with `_`, which is reserved for caller
+  annotations and is accepted and ignored. Enforced at every level of the
+  request — the top-level object, `params`, `options`, each `shapes[]` entry,
+  each `labels[]` entry, and a shape's `array`. Previously every unrecognised
+  key at every level was silently dropped, but only incidentally: no code
+  anywhere diffed the request's key set against an allow-list, so the tolerance
+  was undeclared behavior that `docs/cli/draw.md` never promised, and a caller
+  carrying `_purpose`/`_rule` sidecar keys to document a known-bad DRC fixture
+  was relying on an accident. Rejecting is what makes a typo in a *real* key
+  visible (`rect_nm` for `rect_um`, `counts` for `array.count`) instead of
+  yielding a successfully-written stream missing the geometry that was asked
+  for; the `_` prefix keeps the motivating self-documenting-fixture use case
+  working, and is guaranteed never to be given meaning by a future version.
+  Same posture as `klt gen-compose`'s `request.pdk`
+  (`gen_compose._ALLOWED_PDK_KEYS`). **Potentially breaking** for a request
+  that carried a non-`_`-prefixed extra key: rename it to `_<key>`. No
+  response-shape change; `schema_version` is unaffected, and the existing
+  `shape[N] must have exactly one geometry key` path is unchanged for a shape
+  whose keys are all recognised. This policy is scoped to `klt draw` — the
+  other request-JSON verbs are unchanged and still document their own. See
+  `docs/cli/draw.md` -> "Unrecognised keys".
+
 ## 0.2.0 (2026-08-04)
 
 The first release since `0.1.0`. `klt` grew from **5 verbs to 24**; the 19
