@@ -329,6 +329,19 @@ def _fake_openroad_run(cmd, **kwargs) -> _FakeCompleted:
     assert cmd[0] == "openroad"
     metrics_path = cmd[4]
     script_path = cmd[5]
+    if script_path.endswith("_route_corners.tcl"):
+        # The post-route corner-sweep invocation (issue #949,
+        # `place_and_route._corner_sweep_script_lines`) -- a second,
+        # standalone OpenROAD call that never reaches `STAGE_ORDER`'s own
+        # `_stage_from_script_path` lookup below; see
+        # `tests/test_place_and_route.py`'s own identically-shaped stub
+        # branch for the canonical version of this fixture.
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"timing__setup__ws": -2.18828, "timing__hold__ws": 0.05},
+                handle,
+            )
+        return _FakeCompleted(returncode=0, stdout="")
     stage = _stage_from_script_path(script_path)
 
     Path(_script_write_db_path(script_path)).write_text("fake odb checkpoint\n")

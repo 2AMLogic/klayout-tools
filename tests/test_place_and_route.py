@@ -1050,6 +1050,17 @@ _STAGE_METRICS = {
 }
 
 
+#: The post-route corner-sweep invocation's own `-metrics` dump shape
+#: (issue #949) -- deliberately distinct from `_STAGE_METRICS["route"]`'s
+#: own `timing__setup__ws`/`timing__hold__ws` values, so a test asserting
+#: `worst_setup_slack_ns`/`worst_hold_slack_ns` catches an accidental alias
+#: onto the existing nominal-corner-only `worst_slack_ns` field.
+_CORNER_SWEEP_METRICS = {
+    "timing__setup__ws": -4.02163,
+    "timing__hold__ws": 0.08421,
+}
+
+
 def _stub_openroad_success(
     monkeypatch,
     *,
@@ -1058,11 +1069,15 @@ def _stub_openroad_success(
     hold_violations: dict[str, int] | None = None,
     antenna_violations: dict[str, int] | None = None,
     route_drc_violations: int = 0,
+    corner_sweep_metrics: dict[str, float] | None = None,
     version: str = "26Q3-771-gdeadbeef",
 ) -> None:
     setup_violations = setup_violations or {}
     hold_violations = hold_violations or {}
     antenna_violations = antenna_violations or {}
+    corner_sweep_metrics = (
+        _CORNER_SWEEP_METRICS if corner_sweep_metrics is None else corner_sweep_metrics
+    )
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
@@ -1075,6 +1090,16 @@ def _stub_openroad_success(
         assert cmd[0] == "openroad"
         metrics_path = cmd[4]
         script_path = cmd[5]
+        if script_path.endswith("_route_corners.tcl"):
+            # The post-route corner-sweep script (issue #949,
+            # `_corner_sweep_script_lines`) -- a second, standalone OpenROAD
+            # invocation, never one of `STAGE_ORDER`'s own four stages, so it
+            # never reaches `_stage_from_script_path` below. It writes only
+            # its own `-metrics` dump -- no `write_db`/`write_def` line to
+            # fake, no violation-marker stdout to emit.
+            with open(metrics_path, "w", encoding="utf-8") as handle:
+                json.dump(corner_sweep_metrics, handle)
+            return _FakeCompleted(returncode=0, stdout="")
         stage = _stage_from_script_path(script_path)
         assert stage in stages
 
@@ -1185,6 +1210,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # own value, restated at top level -- same convention as every other
     # top-level metric field.
     assert report["clock_skew_ns"] == pytest.approx(0.0389)
+    # Issue #949: the corner-swept worst-case setup/hold slack -- from the
+    # post-route corner sweep's own `-metrics` dump (`_CORNER_SWEEP_METRICS`
+    # above), deliberately distinct from `worst_slack_ns`'s nominal-
+    # corner-only value above (-2.18828) -- proves the new fields are not an
+    # accidental alias of the existing one.
+    assert report["worst_setup_slack_ns"] == pytest.approx(-4.02163)
+    assert report["worst_hold_slack_ns"] == pytest.approx(0.08421)
 
     assert [stage["name"] for stage in report["stages"]] == list(
         place_and_route.STAGE_ORDER
@@ -1194,16 +1226,25 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert "setup_violation_count" not in report["stages"][0]
     assert "antenna_violation_count" not in report["stages"][0]
     assert "route_drc_violation_count" not in report["stages"][0]
+    assert "worst_setup_slack_ns" not in report["stages"][0]
+    assert "worst_hold_slack_ns" not in report["stages"][0]
     # place/cts stages report setup/hold but not antenna (route-only check).
     assert "antenna_violation_count" not in report["stages"][1]
     assert "antenna_violation_count" not in report["stages"][2]
-    # ... nor the route-only `detailed_route` DRC-violation count (#938).
+    # ... nor the route-only `detailed_route` DRC-violation count (#938)
+    # ... nor the route-only corner sweep (#949).
     assert "route_drc_violation_count" not in report["stages"][1]
     assert "route_drc_violation_count" not in report["stages"][2]
+    assert "worst_setup_slack_ns" not in report["stages"][1]
+    assert "worst_setup_slack_ns" not in report["stages"][2]
+    assert "worst_hold_slack_ns" not in report["stages"][1]
+    assert "worst_hold_slack_ns" not in report["stages"][2]
     # place stage onward does.
     assert "wirelength_um" in report["stages"][1]
     assert report["stages"][3]["setup_violation_count"] == 3
     assert report["stages"][3]["route_drc_violation_count"] == 0
+    assert report["stages"][3]["worst_setup_slack_ns"] == pytest.approx(-4.02163)
+    assert report["stages"][3]["worst_hold_slack_ns"] == pytest.approx(0.08421)
 
     # `clock_skew_ns` only exists from `"cts"` onward -- no clock tree yet
     # at floorplan/place (issue #783).
@@ -1914,6 +1955,143 @@ def test_max_antenna_repair_iterations_rejects_invalid_values(
 
     with pytest.raises(PlaceAndRouteError, match="max_antenna_repair_iterations"):
         run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# Post-route multi-corner setup/hold sweep (issue #949,
+# `docs/design/post-route-sta-survey.md` section 4.2) --
+# `worst_setup_slack_ns`/`worst_hold_slack_ns`.
+# --------------------------------------------------------------------------- #
+
+
+def _corner_sweep_script(request_path: str, hdl_toplevel: str = "gcd") -> str:
+    return os.path.join(
+        os.path.dirname(request_path),
+        ".klt",
+        "place-and-route",
+        f"pnr_{hdl_toplevel}_route_corners.tcl",
+    )
+
+
+def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch):
+    """The generated sweep script `define_corners`s every `.lib` file the
+    resolved cell library ships (not only the request's own nominal
+    `pdk.corner`), then `read_liberty -corner <name>`s each -- confirmed
+    live against a real `openroad/orfs:latest` container that
+    `report_worst_slack_metric -setup`/`-hold` then automatically reports
+    the worst value across every *loaded* corner (issue #949)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A", corner="ss_100C_1v60")
+    _make_pdk_install(install_root, "sky130A", corner="ff_n40C_1v95")
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    sweep_lines = _script_lines(_corner_sweep_script(request_path))
+    define_corners_line = next(
+        line for line in sweep_lines if line.startswith("define_corners")
+    )
+    tags = define_corners_line.split()[1:]
+    assert sorted(tags) == ["ff_n40C_1v95", "ss_100C_1v60", "tt_025C_1v80"]
+    for tag in tags:
+        assert f"read_liberty -corner {tag} " in "\n".join(sweep_lines)
+
+    # `define_corners` must precede every `read_liberty` in the session
+    # (OpenSTA's own `STA-482` ordering rule).
+    define_index = sweep_lines.index(define_corners_line)
+    read_liberty_indices = [
+        i for i, line in enumerate(sweep_lines) if line.startswith("read_liberty")
+    ]
+    assert all(define_index < i for i in read_liberty_indices)
+
+    assert f"read_db {os.path.dirname(request_path)}" in "".join(
+        line for line in sweep_lines if line.startswith("read_db")
+    )
+    assert sweep_lines[-2:] == [
+        "report_worst_slack_metric -setup",
+        "report_worst_slack_metric -hold",
+    ]
+    # No `write_db`/`write_def`/`read_verilog`/`link_design` -- this session
+    # only re-derives timing over the route stage's own already-written
+    # checkpoint.
+    assert not any(line.startswith("write_db") for line in sweep_lines)
+    assert not any(line.startswith("write_def") for line in sweep_lines)
+    assert not any(line.startswith("read_verilog") for line in sweep_lines)
+    assert not any(line.startswith("link_design") for line in sweep_lines)
+
+
+def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
+    """A `_ccsnoise` `.lib` view must not reach `define_corners`/
+    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    live-verified `STA-1140` collision this avoids (issue #949)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    install_root = tmp_path / "install"
+    lib_views_dir = install_root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "lib"
+    (lib_views_dir / "sky130_fd_sc_hd__tt_025C_1v80_ccsnoise.lib").write_text(
+        '    default_operating_conditions : "tt_025C_1v80";\n'
+        "    nom_process : 1.0;\n"
+        "    nom_temperature : 25.0;\n"
+        "    nom_voltage : 1.8;\n",
+        encoding="utf-8",
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    sweep_lines = _script_lines(_corner_sweep_script(request_path))
+    define_corners_line = next(
+        line for line in sweep_lines if line.startswith("define_corners")
+    )
+    assert define_corners_line == "define_corners tt_025C_1v80"
+    assert not any("ccsnoise" in line for line in sweep_lines)
+
+
+def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
+    tmp_path, monkeypatch
+):
+    """End-to-end: the sweep's own `-metrics` dump populates
+    `worst_setup_slack_ns`/`worst_hold_slack_ns` at both top level and the
+    `"route"` stage entry, leaving the existing nominal-corner-only
+    `worst_slack_ns` field untouched (issue #949's own backward-
+    compatibility acceptance criterion)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(
+        monkeypatch,
+        corner_sweep_metrics={
+            "timing__setup__ws": -7.5,
+            "timing__hold__ws": 0.25,
+        },
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["worst_setup_slack_ns"] == pytest.approx(-7.5)
+    assert report["worst_hold_slack_ns"] == pytest.approx(0.25)
+    assert report["worst_slack_ns"] == pytest.approx(-2.18828)  # unchanged
+    route_stage = report["stages"][-1]
+    assert route_stage["name"] == "route"
+    assert route_stage["worst_setup_slack_ns"] == pytest.approx(-7.5)
+    assert route_stage["worst_hold_slack_ns"] == pytest.approx(0.25)
+
+
+def test_corner_sweep_skipped_when_target_stage_before_route(tmp_path, monkeypatch):
+    """A `target_stage: "place"` run never reaches `"route"`, so the corner
+    sweep never runs -- `worst_setup_slack_ns`/`worst_hold_slack_ns` are
+    `null`, mirroring `route_drc_violation_count`'s own pre-`"route"`
+    convention (issue #949)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "place"
+    assert report["worst_setup_slack_ns"] is None
+    assert report["worst_hold_slack_ns"] is None
+    assert not os.path.isfile(_corner_sweep_script(request_path))
 
 
 def test_place_stage_enables_routability_and_timing_driven_global_placement(

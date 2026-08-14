@@ -921,6 +921,84 @@ def _parse_lib_corner(path: str, library_name: str | None = None) -> dict[str, A
     }
 
 
+#: Filename-embedded marker for a `.lib` view carrying Composite Current
+#: Source (CCS) *noise* models for the identical PVT operating point as its
+#: non-suffixed sibling (sky130's own convention, e.g.
+#: ``sky130_fd_sc_hd__ff_n40C_1v95_ccsnoise.lib`` alongside
+#: ``sky130_fd_sc_hd__ff_n40C_1v95.lib``) -- not a distinct timing corner, an
+#: alternate view of an already-enumerated one. Loading both into the same
+#: OpenSTA session raises ``[WARNING STA-1140] ... library <name> already
+#: exists`` (live-verified against a real ``openroad/orfs:latest`` container
+#: over a real volare-fetched ``sky130A`` install, 2026-08-13, issue #949):
+#: the file's own internal Liberty ``library (...)`` declaration name
+#: collides with its non-noise sibling's, so a second ``read_liberty`` for
+#: the same PVT point is a near-no-op, not a second corner.
+#: :func:`list_lib_corners` excludes any ``.lib`` file whose stem ends with
+#: this marker.
+_CCSNOISE_LIB_SUFFIX = "_ccsnoise"
+
+
+def list_lib_corners(
+    cell_library: str, pdk_info: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Enumerate every distinct ``.lib`` timing corner ``cell_library`` ships
+    under the resolved PDK install ``pdk_info`` (as returned by
+    :func:`find_pdk`) -- one entry per shipped ``.lib`` file, not only the
+    single nominal (typical-process, room-temperature) pick
+    :func:`_nominal_supply` reports (issue #949, closing the "single corner,
+    always" gap ``docs/design/post-route-sta-survey.md`` section 1.2 names).
+
+    A small, additive generalisation of the same per-file walk
+    :func:`_nominal_supply`/:func:`_parse_lib_corner` already perform.
+    Callers pass an already-resolved ``pdk_info`` (never re-resolves via
+    :func:`find_pdk` itself) -- the same ``(cell_library, pdk_info)`` calling
+    convention :func:`_resolve_lef` in ``place_and_route.py`` already uses,
+    so a caller that already resolved a PDK install (e.g. via
+    :func:`klayout_tools.place_and_route._resolve_liberty`) never re-walks
+    the filesystem to find it again.
+
+    Returns a list of ``{"name": str, "path": str}`` dicts, sorted by
+    filename for determinism:
+
+    - ``name`` -- a unique, Tcl-safe corner tag for OpenSTA's own
+      ``define_corners``/``read_liberty -corner`` pair, derived from the
+      ``.lib`` file's own **filename** (stripping the leading
+      ``f"{cell_library}__"`` prefix and the ``.lib`` suffix) -- deliberately
+      **never** the file's own ``default_operating_conditions`` Liberty
+      attribute :func:`_parse_lib_corner` reads for ``nominal_corner``: that
+      attribute is not guaranteed unique across a library's own shipped
+      files (see :data:`_CCSNOISE_LIB_SUFFIX`), while every PDK's own
+      filenames are unique by construction.
+    - ``path`` -- the ``.lib`` file's absolute path.
+
+    Excludes any ``.lib`` file whose stem ends with
+    :data:`_CCSNOISE_LIB_SUFFIX` -- see that constant's own docstring for the
+    live-verified collision this avoids.
+
+    Returns ``[]`` when ``cell_library`` ships no ``lib/`` directory (or the
+    resolved install has no ``libs_ref`` asset at all) -- not an error,
+    matching :func:`_nominal_supply`'s own empty-result convention.
+    """
+    libs_ref = pdk_info["assets"]["libs_ref"]
+    if libs_ref is None:
+        return []
+    lib_views_dir = os.path.join(libs_ref, cell_library, "lib")
+    if not os.path.isdir(lib_views_dir):
+        return []
+
+    prefix = f"{cell_library}__"
+    corners: list[dict[str, str]] = []
+    for filename in sorted(os.listdir(lib_views_dir)):
+        if not filename.endswith(".lib"):
+            continue
+        stem = filename[: -len(".lib")]
+        if stem.endswith(_CCSNOISE_LIB_SUFFIX):
+            continue
+        name = stem[len(prefix) :] if stem.startswith(prefix) else stem
+        corners.append({"name": name, "path": os.path.join(lib_views_dir, filename)})
+    return corners
+
+
 def _voltage_class(voltage: float | None) -> str | None:
     """``"core"``/``"io"`` classification from ``voltage`` (see
     :data:`_CORE_VOLTAGE_MAX_V`); ``None`` when ``voltage`` is ``None``."""
