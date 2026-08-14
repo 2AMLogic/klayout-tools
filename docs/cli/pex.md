@@ -232,3 +232,23 @@ without re-deriving provenance, and so
 cite it as the T1 improvement proof on one canary. Coupling capacitance
 beyond issue #760's vertical-overlap case, and distributed/MoM-grade
 extraction, are Phase 2+ scope (not this command) — see Epic #709.
+
+## Evidence discipline: records, supersession, and pinning are repo-owned
+
+Like `klt sim`, `klt pex` is a stateless, single-invocation command:
+`provenance` and `extraction` pin the inputs and method a *given* run used
+(layout content hash, extraction deck + content hash, the R/C model scope
+note) but nothing persists across runs, chains one run to the next, or
+enforces a policy from a previous run's result. That scope decision — and
+how a caller should fold a `klt pex` delta report into the same append-only
+`sim/` evidence convention `klt sim` already uses (record wrapper,
+supersession chains, pinning, subset-reason, spread checks) — is decided in
+[`docs/design/sim-evidence-discipline-spike.md`](../design/sim-evidence-discipline-spike.md).
+Short version: a `klt pex` record sits alongside the schematic-only `klt
+sim` record for the same `<block>/<corner-scope-slug>`, distinguished
+structurally by the presence of `result.delta` rather than a new
+wrapper-level field, and pins `extraction.model` +
+`provenance.deck` as its extraction-method/deck-version pin
+(`extraction_pin` in the wrapper) — so a later extraction-method change
+(e.g. a Phase 2 lumped-RC → coupling-C upgrade) mints a new record via the
+convention's existing `supersedes` chain rather than overwriting history.
