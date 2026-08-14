@@ -342,6 +342,144 @@ classification is needed on the Python side.
   are `null`, the same convention `route_drc_violation_count` already
   follows for a route-stage-only metric.
 
+## Post-route SPEF STA (`post_route_spef`, issue #948)
+
+Issue #948 (Epic #700 Phase 3's
+[post-route STA survey](../design/post-route-sta-survey.md) §4.1) closes the
+gap that section's own §1.2 documents: today's `"route"`-stage timing
+(`worst_slack_ns`/`total_negative_slack_ns`/violation counts, the top-level
+fields below) is computed from `estimate_parasitics -global_routing` — a
+coarse Elmore-style RC estimate over the global-routing Steiner topology, not
+parasitics extracted from the actual detailed-routed geometry `write_def`
+commits to disk.
+
+The optional boolean `post_route_spef` request field (default `false`) opts
+in to a real-parasitics **A/B** pass on top of that existing behaviour, never
+a replacement of it:
+
+1. Once the `"route"` stage's DEF→GDS merge completes, `klt extract
+   --parasitics` runs against the merged routed GDS (the same first-order
+   lumped-RC engine [`docs/cli/extract.md`](extract.md) documents), and its
+   per-net R/C model is written as SPEF via `--spef`.
+2. A **second** `openroad` invocation, seeded from the `"route"` stage's own
+   ODB checkpoint (`read_db`), loads that SPEF via `read_spef` and re-runs
+   the identical `report_worst_slack_metric`/`report_tns_metric`/
+   `report_check_types` calls the primary `"route"`-stage script itself
+   uses — so `spef_sta`'s own `worst_slack_ns`/`total_negative_slack_ns`/
+   `setup_violation_count`/`hold_violation_count` are directly comparable to
+   the top-level fields on the identical routed design, differing only in
+   parasitics source.
+3. **Net-name correlation is explicitly checked, not assumed** (the survey's
+   own flagged open risk: does `klt extract`'s GDS-label-derived net naming
+   correlate with OpenSTA's own flat linked-design net list?) — before
+   `read_spef` runs, every net name the SPEF declares is looked up via
+   `get_nets -quiet` against the design already loaded from the checkpoint,
+   and the resulting `"<annotated> of <total> nets annotated"` count is
+   reported as `spef_sta.nets_annotated`/`spef_sta.nets_total`, and — when
+   the two differ — spelled out in words in `spef_sta.annotation_warning`
+   (`null`, with `annotation_complete: true`, only on a 100% match). A
+   caller comparing `spef_sta`'s timing numbers against the top-level ones
+   **must** check this pair first: a low `nets_annotated`/`nets_total` ratio
+   means the SPEF's numbers are not meaningfully wired into that OpenSTA
+   session, whatever `worst_slack_ns` value it reports.
+
+### Net-name correlation: measured, and today it is 0%
+
+The survey's flagged risk **materialised**, and this section states the
+measured result rather than the hoped-for one. Measured live against
+`openroad/orfs:latest` (OpenROAD `26Q3-1080-gab6fd26351`), sky130A,
+`seed: 1`, on all three of the corpus proxy designs:
+
+| design | `nets_annotated` | `nets_total` |
+|---|---|---|
+| `gcd` | 0 | 981 |
+| `modexp` | 0 | 1904 |
+| `mult8` | 0 | 449 |
+
+**Why**: `klt extract` derives every net name from GDS *text labels*
+([`docs/cli/extract.md`](extract.md)'s "Coverage"), and the `"route"`
+stage's DEF→GDS merge emits labels for **top-level pins only** (52 texts on
+`met2.LABEL` for `gcd`). Every internal routed net therefore reaches the
+SPEF under a name KLayout synthesised for an unlabelled net (`$1009`, …) or
+built by joining the standard-cell pin labels that happen to touch it
+(`A|A2|Y`) — neither of which is what OpenSTA calls that net in the linked
+design (`_019_`, `req_msg[3]`, …).
+
+**Consequence for the numbers**: on a run with `nets_annotated: 0`, the
+`spef_sta` slack/violation values are what OpenSTA reports for the design
+*after* `read_spef` matched nothing — a wire-parasitic-free re-report, not
+a real-parasitics measurement. They are still emitted (the A/B protocol the
+survey §5 describes wants both sides of every run recorded, and the SPEF
+artifact itself is real and reusable), but `annotation_warning` says
+plainly that they must not be read as the real-parasitics half of the
+comparison.
+
+**What is genuinely delivered here**: a syntactically valid SPEF of real
+routed per-net R/C that a real `read_spef` accepts without error, plus a
+correlation check that reports the gap instead of hiding it. Closing the
+gap itself needs the routed net names to reach the GDS in the first place
+(net-name labels emitted by the DEF→GDS merge, or a DEF-driven name map
+applied to the SPEF) — separate follow-on work, deliberately not bundled
+into this format-writer issue.
+
+Off by default: this adds real wall-clock cost on top of every existing
+`"route"`-stage caller (one more `klt extract --parasitics` pass over the
+merged GDS, plus one more `openroad` subprocess invocation), matching this
+command's own convention for every other flag whose added cost a survey
+flagged rather than assumed free (`route_critical_nets_percentage`,
+`max_antenna_repair_iterations` above). Has no effect for a request whose
+`target_stage` does not reach `"route"` — `spef_sta` stays `null`, mirroring
+`def_path`/`gds_path`'s own pre-`"route"` `null`.
+
+**Not (yet) in this contract**: a combined "three-point fidelity ladder"
+comparing this field against `klt-statime-native`'s own pre-route wire-free
+`sta` value (`klt synthesize`'s response, a separate command entirely) — a
+caller building that comparison runs both commands and diffs the two JSON
+responses directly; nothing here fabricates a cross-command field.
+
+**Relationship to the multi-corner sweep above.** Survey §4.2's corner sweep
+has since shipped (issue #949) and is *orthogonal* to this field rather than
+layered on it: it re-estimates parasitics per corner (`estimate_parasitics
+-global_routing`) across every `.lib` corner the resolved `cell_library`
+ships, while `spef_sta` reads real extracted parasitics at the single
+resolved `pdk.corner`. A `"route"`-stage run reports both axes independently
+— the sweep always, `spef_sta` only under `post_route_spef: true` — in
+separate OpenROAD invocations that share neither script nor `-metrics` file.
+SDF write-back and OCV derating (survey §4.3–§4.4) remain separate, larger
+follow-on issues this field's own SPEF artifact is meant to feed.
+
+### Measured fidelity ladder (`gcd` / `modexp` / `mult8`, sky130A, `seed: 1`)
+
+Run live against `openroad/orfs:latest` (OpenROAD `26Q3-1080-gab6fd26351`),
+sky130A, `utilization_pct: 38`, `target_stage: "route"`. Each rung is one
+JSON field from one of the two commands, diffed by hand rather than by a
+field this contract fabricates:
+
+| Rung | Source | `gcd` (1.1 ns) | `modexp` (5.0 ns) | `mult8` (6.0 ns) |
+|---|---|---|---|---|
+| 1 — pre-route, wire-free | `klt synthesize` → `sta.worst_path.delay_ns` (`klt-statime-native`) | 2.86419 ns | 5.30719 ns | 4.57003 ns |
+| 2 — post-route, global-routing RC estimate | `klt place-and-route` → top-level `worst_slack_ns` / `total_negative_slack_ns` | −1.94402 / −72.6797 ns (50 setup viol.) | −0.30908 / −4.11997 ns (16 setup viol.) | 1e+39 / 0 (unconstrained) |
+| 3 — post-route, `read_spef` of real extracted RC | `klt place-and-route` → `spef_sta.worst_slack_ns` / `.total_negative_slack_ns` | −1.72532 / −63.8855 ns (50 setup viol.) | +0.17986 / 0 ns (0 setup viol.) | 1e+39 / 0 (unconstrained) |
+| — net-name correlation | `spef_sta.nets_annotated` / `.nets_total` | **0 / 981** | **0 / 1904** | **0 / 449** |
+
+`read_spef` accepted the written SPEF **without error on all three
+designs** — the writer's own syntactic validity against a real OpenSTA is
+what this table establishes.
+
+Rung 3's *timing* values, however, are reported for completeness of the
+survey §5 A/B protocol, not as evidence of higher fidelity: with zero nets
+annotated they reflect the *absence* of wire parasitics in that session.
+That is why rung 3 reads **optimistically** relative to rung 2 (most
+starkly on `modexp`: +0.17986 ns vs. −0.30908 ns, 0 vs. 16 setup
+violations) rather than pessimistically, as real routed RC would. `mult8`
+is purely combinational with an output port named as its clock, so both
+post-route rungs correctly report OpenSTA's own unconstrained `1e+39`
+sentinel.
+
+`klt drc`/`klt lvs` are unchanged on the corpus — this feature adds an
+artifact and a second, read-only STA session and touches no geometry or
+connectivity — and `route_drc_violation_count` stayed `0` on all three.
+
 ## Request
 
 ```json
@@ -387,6 +525,7 @@ classification is needed on the Python side.
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
 | `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see `place_and_route.py`'s module docstring for the audit methodology and its limitations. |
 | `max_antenna_repair_iterations` | integer \| omitted | 1–8, default `1` (today's exact single-pass behaviour). Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
+| `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
 
 ## Response
 
@@ -425,6 +564,17 @@ classification is needed on the Python side.
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
   "gds_path": "/abs/path/.klt/place-and-route/gcd.gds",
+  "spef_sta": {
+    "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
+    "worst_slack_ns": -1.72532,
+    "total_negative_slack_ns": -63.8855,
+    "setup_violation_count": 50,
+    "hold_violation_count": 0,
+    "nets_annotated": 0,
+    "nets_total": 981,
+    "annotation_complete": false,
+    "annotation_warning": "only 0 of 981 SPEF net names resolve to a net in the linked design -- ..."
+  },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -457,6 +607,7 @@ classification is needed on the Python side.
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
+| `spef_sta` | object \| null | Additive field (issue #948). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — the net-name-correlation sanity check (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); check this pair before trusting the timing numbers. `annotation_complete` — `true` only when the two are equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the ratio and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. **Measured today this is `0` of `981` on `gcd`** — see "Net-name correlation" above before comparing anything. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 
 ## Partial completion (`target_stage`)

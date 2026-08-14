@@ -787,6 +787,23 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--spef",
+        dest="spef",
+        default=None,
+        metavar="PATH",
+        help=(
+            "additionally write --parasitics's per-net R/C model as a "
+            "Standard Parasitic Exchange Format (SPEF) file at this path "
+            "(issue #948, Epic #700 Phase 3) -- a format translation of the "
+            "same per-net R/C model reported in the JSON `parasitics` block "
+            "and injected into the written SPICE, for `read_spef`-style STA "
+            "consumption (e.g. `klt place-and-route`'s `route` stage). "
+            "Requires --parasitics. Off by default -- byte-identical to "
+            "today's behavior. See docs/cli/extract.md's 'SPEF export' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
         "--top-cell-pins",
         dest="top_cell_pins",
         action="store_true",

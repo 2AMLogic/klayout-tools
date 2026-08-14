@@ -100,6 +100,10 @@ def run(args: argparse.Namespace) -> int:
             # `None` when the flag was never given, unchanged from every
             # call site that predates it.
             mom_net=args.mom_net,
+            # `--spef` (issue #948): writes --parasitics's per-net R/C model
+            # as a SPEF file at this path. `None` when the flag was never
+            # given, unchanged from every call site that predates it.
+            spef_output=args.spef,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -162,6 +166,11 @@ def _print_text(report: dict) -> None:
                 f"delta={mom_crosscheck['delta_ff']} fF "
                 f"({mom_crosscheck['delta_pct']}%)"
             )
+
+    # Additive (issue #948): only printed when --spef was given.
+    spef_path = report.get("spef_path")
+    if spef_path is not None:
+        print(f"spef_path: {spef_path}")
 
     device_counts = report["device_counts"]
     if device_counts:

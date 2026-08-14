@@ -140,13 +140,14 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
 from ._layout import load_layout
 from ._layout import region as _region
 from ._layout import texts as _texts
-from ._provenance import build_provenance, sha256_file
+from ._provenance import _klt_version, build_provenance, sha256_file
 from .decks import (
     BipolarDevice,
     CapacitorDevice,
@@ -290,6 +291,237 @@ def _parasitic_model_header_comment() -> str:
     for key, value in PARASITIC_MODEL_SCOPE.items():
         lines.append(f"* - {key}: {value}")
     return "\n".join(lines)
+
+
+#: Standard Parasitic Exchange Format version this writer declares in its
+#: ``*SPEF`` header line (``klt extract --spef``, issue #948, Epic #700
+#: Phase 3). IEEE 1481-1999 is the SPEF grammar version this writer's
+#: ``*D_NET``/``*CONN``/``*CAP``/``*RES`` block shapes follow -- see "SPEF
+#: export (`--spef`)" in docs/cli/extract.md.
+SPEF_STANDARD = "IEEE 1481-1999"
+
+
+def _spef_timestamp() -> str:
+    """An ISO-8601 UTC timestamp for the SPEF ``*DATE`` header line --
+    informational only (no downstream field parses it back), matching every
+    other timestamp this repo's writers emit."""
+    return datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y")
+
+
+#: Every character SPEF's own identifier grammar (IEEE 1481-1999) does *not*
+#: admit bare -- anything outside ``[A-Za-z0-9_]``. Matched one character at a
+#: time by :func:`_spef_name`, which backslash-escapes each hit.
+_SPEF_ESCAPE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _spef_name(name: str) -> str:
+    """``name`` rendered as a SPEF identifier: every character outside
+    ``[A-Za-z0-9_]`` backslash-escaped, which is exactly what SPEF's own
+    (IEEE 1481-1999) identifier grammar requires of a *special character*.
+
+    **Not cosmetic -- verified live, and a hard parse error without it.**
+    KLayout's extracted net names routinely contain characters SPEF reserves:
+    an unlabelled net is named ``$<n>`` by KLayout itself, a net carrying
+    several layout labels is named by joining them with ``|``, and a bussed
+    pin label keeps its ``[``/``]``. Feeding those through unescaped makes a
+    real OpenSTA ``read_spef`` abort on the *first* ``*D_NET`` line
+    (``[ERROR STA-1670] ... syntax error``, reproduced on the routed `gcd`
+    corpus fixture against ``openroad/orfs:latest`` while implementing issue
+    #948); escaping them makes the identical file parse cleanly.
+
+    The escape is applied to every identifier position the file has -- the
+    ``*PORTS`` list, each ``*D_NET`` name, each ``*CONN``/``*P`` entry, and
+    every ``*CAP``/``*RES`` node -- so a name and its references always agree
+    on spelling. Reading tools strip the backslashes back off, so the name an
+    STA session matches against its own netlist is the unescaped one.
+    """
+    return _SPEF_ESCAPE_RE.sub(lambda m: "\\" + m.group(0), name)
+
+
+def _write_spef(
+    path: str,
+    *,
+    design_name: str,
+    klt_version: str | None,
+    parasitics_report: Mapping[str, Any],
+    port_names: Iterable[str],
+) -> None:
+    """Write ``parasitics_report`` (an already-computed :func:`_inject_parasitics`
+    summary -- see ``run_extract``'s ``spef_output``/``klt extract --spef``
+    flag) as a Standard Parasitic Exchange Format file (SPEF,
+    :data:`SPEF_STANDARD`), for ``read_spef``-style STA consumption (issue
+    #948, Epic #700 Phase 3; survey doc: ``docs/design/
+    post-route-sta-survey.md`` sections 3.1/4.1).
+
+    **A format translation of already-computed data, not a new extraction
+    pass** (the survey's own §4.1 scoping): every R/C value written here
+    comes straight from ``parasitics_report["nets"]`` -- the exact
+    star-topology model ``docs/cli/extract.md``'s "Parasitic (RC)
+    extraction" section documents for the written SPICE ``R``/``C`` device
+    cards -- re-expressed as SPEF's ``*D_NET``/``*CAP``/``*RES`` block
+    syntax instead. Nothing here re-derives or re-measures a single R or C
+    value.
+
+    **Net-name correlation only, by design (issue #948 scope).** Each
+    ``*D_NET`` block is keyed by ``entry["net"]`` -- the same layout-label-
+    derived name ``docs/design/post-route-sta-survey.md`` §2.1 flags as the
+    one identifier an STA tool reading this file needs to resolve against
+    its own (Verilog-derived) flat net list; ``docs/cli/place-and-route.md``'s
+    ``read_spef`` wiring checks exactly that correlation (an explicit "N of M
+    nets annotated" count) after loading this file. ``*CONN`` entries name
+    only this net's own **port** membership (``*P <name> B``, when
+    ``port_names`` marks it a top-level pin) -- device-terminal (``*I
+    <inst>:<pin>``) connectivity is deliberately **not** emitted, because the
+    per-device names inside ``parasitics_report`` are this repo's own
+    layout-driven ``Device`` naming (``$1``, ``$2``, ...), never asserted
+    anywhere to correlate with a digital flow's own linked-design instance
+    names -- a materially harder, and explicitly out-of-scope, correlation
+    question (the survey's own §4.1 "Risk" paragraph). ``*CONN`` is optional
+    per the SPEF grammar (IEEE 1481-1999), so this narrower, net-name-only
+    form is still a syntactically valid file; nothing downstream reads an
+    ``*I`` entry this writer never asserted.
+
+    **Duplicate net names are a known, inherited limitation.** A layout
+    label shared by several distinct, un-strapped net islands (e.g. the
+    `gcd` corpus's 105 separate ``VGND`` islands, see docs/cli/extract.md's
+    "Coverage" section) emits one independent ``*D_NET`` block per island
+    under the identical name -- SPEF's own net-name-keyed grammar has no
+    per-island qualifier to disambiguate them the way this response's own
+    ``net_id`` field does, so a reader that folds same-named ``*D_NET``
+    blocks together (rather than accumulating them) will not see every
+    island's own contribution. Immaterial for genuine signal nets (which
+    are not un-strapped, so never collide this way in practice); inherited
+    from the underlying per-net model, not solved by this format
+    translation.
+
+    Internal (non-port) nodes reuse the model's own naming verbatim: the
+    star's hub is either ``entry["net"]`` itself (the common case, when the
+    net has at least one device terminal) or ``entry["hub_net"]`` (the
+    Gamma-shunt fallback's synthesized node, when it has none); each
+    terminal's own ``leg_net`` becomes one further internal node bridged to
+    the hub by one ``*RES`` card -- the identical star topology
+    ``docs/cli/extract.md``'s "The model: a star topology" section
+    documents, expressed as SPEF resistor cards instead of SPICE ``R``
+    device cards.
+
+    Every identifier written -- ``*PORTS`` entries, ``*D_NET``/``*P`` names,
+    and every ``*CAP``/``*RES`` node -- is rendered through
+    :func:`_spef_name`, which backslash-escapes the characters SPEF's own
+    grammar reserves. This is load-bearing, not cosmetic: KLayout's
+    extracted names carry ``$``/``|``/``[``/``]`` routinely, and a real
+    OpenSTA ``read_spef`` aborts on the first such line unescaped.
+
+    Units are declared, not converted: ``*C_UNIT 1 FF``/``*R_UNIT 1 OHM``
+    match ``parasitics_report``'s own units exactly, so every numeric value
+    below is copied through unchanged -- no femtofarad/ohm rescaling, and
+    therefore no unit-conversion error to introduce.
+
+    Raises :class:`ExtractError` if ``path`` cannot be written.
+    """
+    port_name_set = frozenset(port_names)
+
+    # One two-terminal coupling `*CAP` card per distinct coupled net pair
+    # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
+    # every pair from *both* endpoints (docs/cli/extract.md's "Vertical-
+    # overlap coupling capacitance" section), so this dedupes by an
+    # order-independent key before attaching each pair's card to whichever
+    # net's own `*D_NET` block is written first (in `nets[]`'s existing
+    # sort-by-name order).
+    coupling_by_net: dict[str, list[dict[str, Any]]] = {}
+    seen_pairs: set[tuple[str, str]] = set()
+    for entry in parasitics_report["nets"]:
+        this_net = entry["net"]
+        for coupled in entry.get("coupled", []):
+            pair_key = tuple(sorted((this_net, coupled["net"])))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            coupling_by_net.setdefault(this_net, []).append(coupled)
+
+    lines: list[str] = [
+        f'*SPEF "{SPEF_STANDARD}"',
+        f'*DESIGN "{design_name}"',
+        f'*DATE "{_spef_timestamp()}"',
+        '*VENDOR "2AM Logic"',
+        '*PROGRAM "klt extract"',
+        f'*VERSION "{klt_version or "unknown"}"',
+        '*DESIGN_FLOW "NAME_SCOPE LOCAL" "PIN_CAP NONE"',
+        "*DIVIDER /",
+        "*DELIMITER :",
+        "*BUS_DELIMITER [ ]",
+        "*T_UNIT 1 PS",
+        "*C_UNIT 1 FF",
+        "*R_UNIT 1 OHM",
+        "*L_UNIT 1 HENRY",
+    ]
+
+    sorted_ports = sorted(port_name_set)
+    if sorted_ports:
+        lines.append("")
+        lines.append("*PORTS")
+        for name in sorted_ports:
+            # Direction is unknown from layout-derived extraction alone (a
+            # GDS text label carries no I/O-direction metadata) -- declared
+            # `B` (bidirectional/unspecified, a real SPEF direction token),
+            # never guessed as `I`/`O`.
+            lines.append(f"{_spef_name(name)} B")
+
+    for entry in parasitics_report["nets"]:
+        net = entry["net"]
+        hub = entry["hub_net"]
+        terminals = entry.get("terminals", [])
+        own_coupling = coupling_by_net.get(net, [])
+        total_cap_ff = entry["capacitance_ff"] + sum(
+            coupled["capacitance_ff"] for coupled in own_coupling
+        )
+        # Every identifier below goes through `_spef_name` -- SPEF's own
+        # grammar rejects the bare `$`/`|`/`[`/`]` characters KLayout's
+        # extracted net names routinely carry (see that helper's docstring
+        # for the live `read_spef` parse error this prevents).
+        spef_net = _spef_name(net)
+        spef_hub = _spef_name(hub)
+
+        lines.append("")
+        lines.append(f"*D_NET {spef_net} {total_cap_ff:.6f}")
+        if net in port_name_set:
+            lines.append("*CONN")
+            lines.append(f"*P {spef_net} B")
+
+        cap_lines: list[str] = [f"1 {spef_hub} {entry['capacitance_ff']:.6f}"]
+        for i, coupled in enumerate(own_coupling, start=2):
+            cap_lines.append(
+                f"{i} {spef_hub} {_spef_name(coupled['net'])} "
+                f"{coupled['capacitance_ff']:.6f}"
+            )
+
+        res_lines: list[str] = []
+        if terminals:
+            for i, terminal in enumerate(terminals, start=1):
+                res_lines.append(
+                    f"{i} {spef_net} {_spef_name(terminal['leg_net'])} "
+                    f"{terminal['resistance_ohm']:.6f}"
+                )
+        elif hub != net:
+            # No-device-terminal Gamma-shunt fallback (docs/cli/extract.md's
+            # "The model: a star topology" section): a single resistor from
+            # the net to its own synthesized hub node -- the only case where
+            # `hub_net` differs from `net` itself.
+            res_lines.append(f"1 {spef_net} {spef_hub} {entry['resistance_ohm']:.6f}")
+
+        lines.append("*CAP")
+        lines += cap_lines
+        if res_lines:
+            lines.append("*RES")
+            lines += res_lines
+        lines.append("*END")
+
+    lines.append("")
+
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        raise ExtractError(f"could not write SPEF '{path}': {exc}") from exc
 
 
 #: Relative permittivity assumed for the `klt mom` cross-check
@@ -568,6 +800,7 @@ def run_extract(
     abstract_cell_lef_paths: tuple[str, ...] = (),
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
+    spef_output: str | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -693,6 +926,19 @@ def run_extract(
     omitted (the default) skips this entirely -- byte-identical to before
     this feature existed.
 
+    ``spef_output`` (``klt extract --spef <path>``, issue #948, Epic #700
+    Phase 3) additionally writes ``parasitics``'s per-net R/C model as a
+    Standard Parasitic Exchange Format file at the given path -- see
+    :func:`_write_spef` for the exact translation and its documented
+    net-name-only correlation scope, and ``docs/cli/extract.md``'s "SPEF
+    export" section for the CLI contract. Requires ``parasitics=True``
+    (there is nothing to translate otherwise); given without it, this is an
+    :class:`ExtractError`, the same "a flag naming something invalid is an
+    error, not a silent no-op" convention ``mom_net`` above already follows.
+    ``None`` (the default) skips this entirely -- byte-identical to before
+    this feature existed. The resolved path is echoed back as the response's
+    ``spef_path`` field (``null`` when omitted).
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
     section 2a)::
@@ -787,6 +1033,7 @@ def run_extract(
             ],
             "pdk": {"variant": str, "root": str, "version": str | None} | None,
             "parasitics": {...} | None,
+            "spef_path": <str | None>,  # populated only when `spef_output` was given
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
                 "klayout_version": <str | None>,
@@ -1130,6 +1377,12 @@ def run_extract(
     # `--abstract-cell-lef` without `--abstract-cells` above).
     if mom_net is not None and not parasitics:
         raise ExtractError("--mom-net requires --parasitics")
+
+    # `--spef` (issue #948) requires `--parasitics`, same reasoning as
+    # `--mom-net` above: there is no per-net R/C model to translate into SPEF
+    # without the lumped-RC pass this flag reuses (see :func:`_write_spef`).
+    if spef_output is not None and not parasitics:
+        raise ExtractError("--spef requires --parasitics")
 
     (
         netlist,
@@ -1541,6 +1794,31 @@ def run_extract(
         # `docs/cli/extract.md`'s `--mom-net` section.
         parasitics_report["mom_crosscheck"] = mom_crosscheck_report
 
+    # `--spef` (issue #948): translate the just-built `parasitics_report`
+    # into a SPEF file at `spef_output` -- see `_write_spef`'s docstring for
+    # the exact shape and its net-name-only correlation scope. Only reached
+    # when `parasitics_report is not None` (guaranteed above: `spef_output`
+    # given requires `parasitics=True`, which is exactly when
+    # `parasitic_nets is not None`).
+    spef_path: str | None = None
+    if spef_output is not None:
+        assert parasitics_report is not None
+        spef_path = spef_output
+        spef_out_dir = os.path.dirname(os.path.abspath(spef_path))
+        try:
+            os.makedirs(spef_out_dir, exist_ok=True)
+        except OSError as exc:
+            raise ExtractError(
+                f"cannot create output directory {spef_out_dir}: {exc}"
+            ) from exc
+        _write_spef(
+            spef_path,
+            design_name=top_cell_name,
+            klt_version=_klt_version(),
+            parasitics_report=parasitics_report,
+            port_names=(entry["name"] for entry in nets if entry["pin"]),
+        )
+
     writer = (
         kdb.NetlistSpiceWriter(create_model_binding_delegate(model_bindings))
         if model_bindings is not None
@@ -1642,6 +1920,11 @@ def run_extract(
     # Additive, independently-optional field (issue #216 addendum): `null`
     # unless `--parasitics` was given, a `parasitics` summary block otherwise.
     result["parasitics"] = parasitics_report
+
+    # Additive field (issue #948): `null` unless `--spef` was given, the
+    # resolved SPEF path otherwise -- see `run_extract`'s `spef_output`
+    # docstring paragraph and `docs/cli/extract.md`'s "SPEF export" section.
+    result["spef_path"] = spef_path
 
     return result
 
