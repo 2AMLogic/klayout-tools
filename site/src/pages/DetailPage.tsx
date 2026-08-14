@@ -295,6 +295,11 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
           <div className="flex flex-col gap-4">
             <FieldViewer data={{ mesh: emExport.mesh, frames: emExport.frames }} />
             <ProvenancePanel provenance={emExport.provenance} />
+            <p className="text-[0.8rem] text-fog-dim">
+              This field result is produced by geode-fem, validated against known
+              answers in the gallery&rsquo;s{" "}
+              <a href="/#solver-validation">solver validation</a> strip.
+            </p>
           </div>
         </section>
       )}

@@ -3,11 +3,25 @@ import { PatchAntennaGalleryEntry } from "./PatchAntennaGalleryEntry";
 import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
 
 /**
- * "Electromagnetics" gallery section (Epic #840 "real E&M results in the
- * browser", Phase 1c, issue #851) — wires Phase 1a's export format (#849)
- * and Phase 1b's `FieldViewer`/`WaveformViewer` integration (#850) into a
- * dedicated section of the landing page, one entry per validated geode-fem
- * benchmark, each carrying its own `ProvenancePanel`.
+ * "Solver Validation" strip (Epic #840 "real E&M results in the browser",
+ * originally the headline "Electromagnetics" gallery from Phase 1c/#851,
+ * demoted to a compact validation strip in Phase 3c/#960) — wires Phase 1a's
+ * export format (#849) and Phase 1b's `FieldViewer`/`WaveformViewer`
+ * integration (#850) into a subordinate section of the landing page, one
+ * entry per validated geode-fem benchmark, each carrying its own
+ * `ProvenancePanel`.
+ *
+ * **Demotion note (Phase 3c, issue #960):** since Phase 3b (#959) shipped a
+ * per-project Field Data panel on `DetailPage.tsx`, that panel — not this
+ * section — carries the headline "real E&M results" story. This section now
+ * presents itself as evidence that the solver behind those panels
+ * (geode-fem) matches known answers, not as the site's EM showcase: it is
+ * visually subordinate to the project gallery above it (h3 vs. the
+ * gallery's h2, muted/compact styling, reduced spacing) and every entry and
+ * its provenance panel is unchanged from before the demotion — nothing was
+ * removed, only the framing and visual weight. `DetailPage.tsx`'s Field
+ * Data section links back here (`#solver-validation`) as the validation
+ * trail for the field result it renders.
  *
  * **Benchmark count note (as of issue #877, 2026-08-12):** the epic phase
  * description names "2-3 benchmarks (patch antenna, spiral inductor L/Q,
@@ -35,16 +49,25 @@ import { SpiralInductorGalleryEntry } from "./SpiralInductorGalleryEntry";
  */
 export function EmGallerySection() {
   return (
-    <section aria-label="Electromagnetics" className="mt-14" data-testid="em-gallery-section">
-      <h2 className="mb-2 font-mono text-[1.3rem] text-cyan">Electromagnetics</h2>
-      <p className="mb-5 max-w-[44rem] leading-[1.7] text-fog-dim">
-        Real geode-fem field solves, browsable the same way as the layout gallery
-        above. Every mesh, field overlay, and S-parameter/capacitance result here
-        traces to a committed solver run — see each entry&rsquo;s provenance panel for
-        the exact solver version, geometry, and solve parameters behind it.
+    <section
+      id="solver-validation"
+      aria-label="Solver Validation"
+      className="mt-10 border-t border-border pt-6"
+      data-testid="em-gallery-section"
+    >
+      <h3 className="mb-1 font-mono text-[0.95rem] tracking-[0.05em] text-fog-dim uppercase">
+        Solver Validation
+      </h3>
+      <p className="mb-4 max-w-[44rem] text-[0.85rem] leading-[1.6] text-fog-dim">
+        geode-fem, the solver behind each project&rsquo;s Field Data panel, checked
+        against known answers: a patch antenna and a spiral inductor against
+        closed-form references, plus a real gallery block&rsquo;s interconnect
+        coupling against its extracted capacitance. Every result below traces to a
+        committed solver run — see each entry&rsquo;s provenance panel for the exact
+        solver version, geometry, and solve parameters behind it.
       </p>
 
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-4">
         <PatchAntennaGalleryEntry />
         <SpiralInductorGalleryEntry />
         <InterconnectCouplingGalleryEntry />
