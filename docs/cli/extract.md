@@ -1790,8 +1790,8 @@ Output is additive:
 
 | Field | Meaning |
 |---|---|
-| `parasitics.nets[].coupled[]` | Per net, its coupling counterparts: `{"net", "capacitance_ff", "levels"}`, sorted by counterpart name. `levels` is the list of `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs that contributed. Each pair appears from **both** sides, so summing `coupled[].capacitance_ff` across `nets[]` double-counts — use `total_coupling_capacitance_ff`. |
-| `parasitics.cc_count` | Number of coupled net **pairs** (equivalently, coupling `C` cards emitted). |
+| `parasitics.nets[].coupled[]` | Per net, its coupling counterparts: `{"net", "capacitance_ff", "levels", "lateral_levels"}`, sorted by counterpart name. `levels` is the list of `[lower_metal_index, upper_metal_index]` deck-`metals` index pairs that contributed vertical coupling; `lateral_levels` (issue #976, see below) is the list of same-`metal_index` levels that contributed lateral coupling — `capacitance_ff` is their sum when a pair has both. Each pair appears from **both** sides, so summing `coupled[].capacitance_ff` across `nets[]` double-counts — use `total_coupling_capacitance_ff`. |
+| `parasitics.cc_count` | Number of coupled net **pairs** (equivalently, coupling `C` cards emitted) — vertical and lateral combined; a pair with both kinds still gets exactly one card. |
 | `parasitics.total_coupling_capacitance_ff` | Sum over distinct pairs, each counted once. |
 | `parasitics.overlap_pairs_without_coefficient[]` | Gap report — adjacent metal-level pairs the deck declares with no curated overlap coefficient. See below. |
 
@@ -1809,6 +1809,65 @@ i.e. the first extracted netlist that can show crosstalk in `klt sim` at all.
 **Still a fixed, quasi-static, uncalibrated model.** Adding this term makes
 the crossover charge better *attributed* and better *sized*; it does not make
 `--parasitics` a PEX tool. See "What it does *not* do" below.
+
+### Lateral (same-layer, sidewall) coupling capacitance for critical nets (`--critical-net`, issue #976)
+
+Vertical-overlap coupling above only ever fires when one net's conductor
+sits directly over another's on an *adjacent level* — it says nothing about
+two nets routed side by side on the *same* level, which is the dominant
+same-layer crosstalk path on a crowded bus (`docs/design/
+extract-fidelity-roadmap.md`'s Stage 2b: "the largest [fidelity gain] of any
+stage in this roadmap"). `--critical-net <net>` (repeatable; requires
+`--parasitics`) closes part of that gap, for the nets Epic #709's Phase 2
+names as the ones that matter — a design's high-impedance nodes, a SAR
+ADC's CDAC top plate, a PLL loop filter — **without** running a full-layout
+lateral search, which the roadmap flags as real, unbounded cost on a routed
+block:
+
+```
+klt extract cell.gds --deck sky130 --parasitics --critical-net VOUT --critical-net VCTRL --format json
+```
+
+- **Scope: a caller-declared net set, not the whole layout.** A same-layer
+  net pair only gets lateral coupling computed when **at least one side** is
+  named `--critical-net` — geometry between two nets neither of which was
+  named is untouched, same as before this flag existed. This is a
+  deliberate scope decision (see the roadmap's own Stage 2b cost estimate),
+  not an accuracy compromise on the nets a caller actually names.
+- **Geometry.** For each named net's shapes on a metal level, KLayout's own
+  `Region.separation_check` (the same primitive `klt drc`'s `check:
+  "separation"` rules already use) finds every same-layer neighbour within
+  that level's own minimum-spacing DRC rule — the tightest legal routing
+  configuration, and thus the dominant real same-layer coupling case. The
+  summed facing-edge length becomes the coupling term.
+- **Coefficient.** `facing_length_um × PARASITICS.metal_sidewalls[i]`, the
+  PDK's own `defaultsidewall` value for that level (fF/µm), transcribed the
+  same way `metal_overlaps` was. `metal_sidewalls`/its lookback distance are
+  index-aligned with `metals` directly (one entry per level), unlike
+  `metal_overlaps`' adjacent-*pair* indexing.
+- **Additive, not deducted.** Unlike the vertical case, this charge is
+  **not** subtracted from either net's substrate fringe term — a documented
+  simplification, not an oversight: magic's own fringe-shielding model needs
+  its `defaultsidewall` *second* parameter's semantics resolved first (an
+  explicitly open question, see the roadmap doc), so this increment adds the
+  coupling term without also attempting that deduction.
+- **A name matching no net is a warning, not an error.** Unlike `--mom-net`,
+  a `--critical-net` name that matches nothing in this particular layout is
+  reported in `warnings` rather than raised — a caller may legitimately name
+  several candidate nets across several blocks/runs.
+
+Output, additive:
+
+| Field | Meaning |
+|---|---|
+| `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. |
+| `parasitics.nets[].coupled[].lateral_levels` | Per coupling counterpart, the sorted list of same-`metal_index` levels that contributed lateral coupling to that pair — `[]` unless one side was named `--critical-net`. |
+
+Both `sky130`'s deck curates `metal_sidewalls`/its lookback distance for
+every metal level today; a deck that does not populates neither, so
+`--critical-net` on it reports zero lateral coupling for every requested
+net (flagged in `warnings`, mirroring `overlap_pairs_without_coefficient`'s
+gap-reporting discipline rather than silently zeroing).
 
 ### `klt mom` cross-check for one net (`--mom-net`, issue #798)
 
@@ -2321,6 +2380,15 @@ longer ambiguous in the report. No documented field is renamed or retyped,
 and single-island nets (every `--mom-net` value with one match) report
 exactly the same numbers as before.
 
+**Additive fields, no `schema_version` bump (issue #976):** `critical_nets`
+and `nets[].coupled[].lateral_levels` are new; no documented field is
+renamed or retyped. `--critical-net` omitted (the default) leaves every
+field byte-identical to before this feature existed — `critical_nets` is
+simply `[]` and every `lateral_levels` is `[]`. The `model.coupling` *value*
+changes again (it now also describes the `--critical-net`-scoped lateral
+case), the same "additive behavior change, recorded in `CHANGELOG.md`"
+treatment issue #760's own `model.coupling` change got.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -2354,16 +2422,18 @@ exactly the same numbers as before.
         {
           "net": "A",
           "capacitance_ff": 0.171301,
-          "levels": [[0, 1]]
+          "levels": [[0, 1]],
+          "lateral_levels": []
         }
       ]
     }
   ],
   "metals_without_coefficient": [],
   "overlap_pairs_without_coefficient": [],
+  "critical_nets": [],
   "model": {
     "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
-    "coupling": "vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels",
+    "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
     "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder",
     "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"
   }
@@ -2381,6 +2451,7 @@ exactly the same numbers as before.
 | `nets`                 | array\<object\> | One entry per net carrying parasitics, sorted by `net` for deterministic output. See below.       |
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 | `overlap_pairs_without_coefficient` | array\<object\> | Adjacent metal-level pairs the deck declares but its `PARASITICS.metal_overlaps` table has no vertical-overlap coefficient for (issue #760). See below. Empty for both shipped decks. |
+| `critical_nets`        | array\<string\> | The `--critical-net` request, echoed back verbatim (issue #976). `[]` when the flag was never given. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
 
@@ -2485,7 +2556,7 @@ all-zero case, when no net had eligible interconnect geometry to parasitize):
 | Key           | Value (verbatim)                                                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `capacitance` | `"net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net"` |
-| `coupling`    | `"vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels"` |
+| `coupling`    | `"vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled"` |
 | `resistance`  | `"single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder"` |
 | `frequency`   | `"quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"`                                       |
 
@@ -2506,7 +2577,7 @@ given, immediately after the existing `* extracted by klt extract --deck
 * extracted by klt extract --deck sky130
 * parasitic model (--parasitics):
 * - capacitance: net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net
-* - coupling: vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels
+* - coupling: vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared --critical-net nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, additively (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named --critical-net, and fringe shielding in general, are still not modelled
 * - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder
 * - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
 ```

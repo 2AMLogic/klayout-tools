@@ -139,7 +139,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -278,14 +278,18 @@ PARASITIC_MODEL_SCOPE: dict[str, str] = {
         "ground/substrate net"
     ),
     "coupling": (
-        "vertical overlap (crossover) only -- where one net's conductor on "
-        "an adjacent metal level sits directly over another *distinct* "
-        "net's conductor, that overlap area is charged between the two "
-        "nets instead of to ground (issue #760); lateral (same-layer, "
-        "sidewall) coupling and fringe shielding are still not modelled, "
-        "so a neighboring net's displacement current still contributes "
-        "exactly zero unless the two nets' conductors vertically overlap "
-        "on adjacent levels"
+        "vertical overlap (crossover) unconditionally -- where one net's "
+        "conductor on an adjacent metal level sits directly over another "
+        "*distinct* net's conductor, that overlap area is charged between "
+        "the two nets instead of to ground (issue #760) -- plus lateral "
+        "(same-layer, sidewall) coupling, but only for a net pair naming "
+        "one of the caller's declared `--critical-net` nets (issue #976): "
+        "facing-edge length within that layer's own minimum-spacing "
+        "lookback is charged between the two nets, *additively* (not "
+        "deducted from either net's substrate fringe term, unlike the "
+        "vertical case -- a known simplification). Any same-layer pair "
+        "with neither side named `--critical-net`, and fringe shielding in "
+        "general, are still not modelled"
     ),
     "resistance": (
         "single lumped series resistance per net, distributed as a star "
@@ -827,6 +831,7 @@ def run_extract(
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     spef_output: str | None = None,
     def_net_names: bool = False,
+    critical_nets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -980,6 +985,24 @@ def run_extract(
     other layout's output is byte-identical to before this flag existed. A
     run that opts in and finds no such property says so in ``warnings``
     rather than silently changing nothing.
+
+    ``critical_nets`` (``klt extract --critical-net <net>``, repeatable,
+    issue #976, Epic #709 Phase 2a) additionally computes lateral
+    (same-layer, sidewall) coupling capacitance for any same-layer net pair
+    naming one of these nets -- the increment beyond issue #760's
+    vertical-overlap-only coupling that ``docs/cli/pex.md``'s "Relationship
+    to Epic #709's later phases" section named as Phase 2+ scope. See
+    :func:`~klayout_tools.extract._compute_parasitics`'s docstring for the
+    exact geometry and why it is scoped to a caller-declared net set rather
+    than computed unconditionally like the vertical case. Requires
+    ``parasitics=True`` (there is no lumped-RC pass to layer coupling onto
+    otherwise); given without it, this is an :class:`ExtractError`, the same
+    convention ``mom_net``/``spef_output`` above already follow. A name
+    matching no net with ground-eligible parasitics geometry is not an
+    error (unlike ``mom_net``) -- it is reported in ``warnings`` instead,
+    since a caller may legitimately name several candidate nets across
+    several blocks/runs. ``None``/empty (the default) skips this entirely --
+    byte-identical to before this feature existed.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
@@ -1426,6 +1449,13 @@ def run_extract(
     if spef_output is not None and not parasitics:
         raise ExtractError("--spef requires --parasitics")
 
+    # `--critical-net` (issue #976) requires `--parasitics`: it scopes the
+    # lateral-coupling pass onto the same lumped-RC extraction this flag
+    # piggybacks on, same reasoning as `--mom-net`/`--spef` above.
+    critical_nets_set = frozenset(critical_nets) if critical_nets else None
+    if critical_nets_set is not None and not parasitics:
+        raise ExtractError("--critical-net requires --parasitics")
+
     (
         netlist,
         top_cell_name,
@@ -1453,6 +1483,7 @@ def run_extract(
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
+        critical_nets=critical_nets_set,
     )
 
     if mom_net is not None:
@@ -1823,13 +1854,44 @@ def run_extract(
                 "unlike a pair with a curated coefficient). See "
                 "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
             )
-        # Additive field (issue #728, updated by #760): declares the
+        # Additive field (issue #976): echoes the `--critical-net` request
+        # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
+        # flag was never given. A name matching no net with ground-eligible
+        # parasitics geometry is not an error (a caller may name several
+        # candidate nets across several blocks/runs) -- flagged in
+        # `warnings` instead, mirroring `--pins`' "declared name matched no
+        # promoted net" convention.
+        parasitics_report["critical_nets"] = (
+            list(critical_nets) if critical_nets else []
+        )
+        if critical_nets_set:
+            matched_net_names = {entry["net"] for entry in ground_nets}
+            unmatched = sorted(critical_nets_set - matched_net_names)
+            if unmatched:
+                warnings.append(
+                    "--critical-net name(s) "
+                    f"{', '.join(repr(name) for name in unmatched)} match no "
+                    "net with ground-eligible parasitics geometry in this "
+                    "layout -- lateral coupling was not computed for "
+                    "them. See docs/cli/extract.md's '--critical-net' "
+                    "section."
+                )
+            if not any(parasitics_deck.metal_sidewalls):
+                warnings.append(
+                    f"'{deck_name}' deck's PARASITICS.metal_sidewalls curates "
+                    "no lateral (same-layer) coupling coefficient for any "
+                    "metal level -- --critical-net reports zero lateral "
+                    "coupling capacitance for every requested net. See "
+                    "docs/cli/extract.md's '--critical-net' section."
+                )
+        # Additive field (issue #728, updated by #760, #976): declares the
         # parasitic model's own scope machine-readably (net-to-ground
-        # capacitance plus vertical-overlap net-to-net coupling; single
-        # lumped series resistance per net; quasi-static) -- present on
-        # every `parasitics` block regardless of whether any net actually
-        # carried non-zero parasitics, since the model's scope does not
-        # depend on what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
+        # capacitance plus vertical-overlap net-to-net coupling, plus
+        # `--critical-net`-scoped lateral coupling; single lumped series
+        # resistance per net; quasi-static) -- present on every
+        # `parasitics` block regardless of whether any net actually carried
+        # non-zero parasitics, since the model's scope does not depend on
+        # what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
         parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
         # Additive field (issue #798): `None` unless `--mom-net` was given,
         # in which case it is the swap-and-measure report built above -- see
@@ -1986,6 +2048,7 @@ def extract_netlist_from_layout(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    critical_nets: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -2073,12 +2136,21 @@ def extract_netlist_from_layout(
     returns: ``ground_nets`` a list of ``{"net", "resistance_ohm",
     "capacitance_ff"}`` dicts (one per net carrying ground-eligible
     geometry), ``coupled_pairs`` a list of ``{"net_a", "net_b",
-    "capacitance_ff", "levels"}`` dicts (one per distinct net pair with
-    non-zero vertical-overlap coupling capacitance, issue #760) -- both
-    computed from ``LayoutToNetlist.polygons_of_net`` per-net/per-layer
-    geometry. The caller (:func:`run_extract`) injects them into the netlist
-    as ``R``/``C`` devices before writing. The netlist itself is unchanged by
-    this computation (the parasitics are returned as data, not yet injected).
+    "capacitance_ff", "levels", "lateral_levels"}`` dicts (one per distinct
+    net pair with non-zero vertical-overlap coupling capacitance, issue
+    #760, and/or -- when ``critical_nets`` names one side of the pair --
+    lateral coupling capacitance, issue #976) -- both computed from
+    ``LayoutToNetlist.polygons_of_net`` per-net/per-layer geometry. The
+    caller (:func:`run_extract`) injects them into the netlist as ``R``/``C``
+    devices before writing. The netlist itself is unchanged by this
+    computation (the parasitics are returned as data, not yet injected).
+
+    ``critical_nets`` (``klt extract --critical-net``, repeatable, issue
+    #976): forwarded to :func:`_extract_netlist`/:func:`_compute_parasitics`
+    -- a same-layer net pair only gets lateral coupling computed when at
+    least one side's name is in this set. ``None``/empty (the default)
+    skips the lateral pass entirely, byte-identical to before this feature
+    existed.
 
     ``mom_net``/``mom_background_permittivity`` (``klt extract --mom-net
     <net>``, issue #798) forward straight to :func:`_extract_netlist`, which
@@ -2173,6 +2245,7 @@ def extract_netlist_from_layout(
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
+        critical_nets=critical_nets,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -4076,6 +4149,7 @@ def _extract_netlist(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    critical_nets: frozenset[str] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -4127,7 +4201,8 @@ def _extract_netlist(
     returns, computed from ``LayoutToNetlist.polygons_of_net`` while ``l2n``
     is still alive (issue #760: ``coupled_pairs`` carries the vertical-overlap
     net-to-net coupling capacitance alongside the pre-existing per-net
-    ground-RC list). ``mom_crosscheck`` (issue #798, ``klt extract
+    ground-RC list; issue #976: also lateral coupling, for any pair naming a
+    ``critical_nets`` entry). ``mom_crosscheck`` (issue #798, ``klt extract
     --mom-net <net>``) is ``None`` unless ``mom_net`` is given, in which case
     it is :func:`_mom_ground_capacitance_for_net`'s result for the net named
     ``mom_net`` -- computed here, alongside ``parasitic_nets``, for the same
@@ -5077,6 +5152,7 @@ def _extract_netlist(
             parasitics_deck,
             layer_index,
             metal_index,
+            critical_nets=critical_nets,
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
@@ -5413,6 +5489,7 @@ def _compute_parasitics(
     parasitics_deck: ParasiticsDeck,
     layer_index: dict[str, int],
     metal_index: list[int],
+    critical_nets: frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -5461,8 +5538,40 @@ def _compute_parasitics(
     ever computed between two *distinct* nets, so a net's own via stack
     contributes nothing
     here (it is ordinary connectivity, already merged into one net upstream).
-    Lateral (same-layer, sidewall) coupling remains **not** modelled (Stage
-    2b, a named follow-on -- see the roadmap doc).
+    **Lateral (same-layer, sidewall) coupling, for critical nets only (issue
+    #976, Epic #709 Phase 2a):** unlike vertical-overlap coupling above,
+    which is unconditional across the whole layout, this pass only ever
+    considers a same-layer net pair where at least one side's name is in
+    ``critical_nets`` -- ``None``/empty (the default) skips it entirely,
+    byte-identical to this function's pre-#976 behaviour. This restriction
+    is deliberate, not a shortcut of convenience: a full-layout lateral pass
+    is the roadmap's own "medium cost" Stage 2b (a real neighbour-search
+    cost across every same-layer pair on a routed block, not the cheap
+    bounding-box-prefiltered ``Region & Region`` boolean vertical overlap
+    uses -- see ``docs/design/extract-fidelity-roadmap.md``'s Stage 2b cost
+    estimate). Scoping the search to a caller-declared "nets that matter"
+    set (Epic #709 Phase 2's own framing: high-impedance nodes, a SAR ADC's
+    CDAC top plate, a PLL loop filter) keeps this increment's cost bounded
+    to exactly the nets a caller cares about while still closing the gap
+    ``PARASITIC_MODEL_SCOPE["coupling"]`` names.
+
+    For each metal level ``i`` with a curated
+    ``parasitics_deck.metal_sidewalls[i]`` coefficient and
+    ``parasitics_deck.metal_sidewall_lookback_um[i]`` lookback distance, and
+    each qualifying pair of *distinct* nets with geometry on that level,
+    ``net_a``'s region and ``net_b``'s region are checked with KLayout's own
+    ``Region.separation_check`` (the same primitive ``drc.py`` already uses
+    for ``check="separation"`` DRC rules) at that lookback distance; the
+    summed length of the facing edge pairs it reports
+    (``EdgePairs.first_edges().length()``) becomes a coupling capacitance
+    between the two nets (``facing_length_um * metal_sidewalls[i]``). Unlike
+    the vertical pass, **this charge is not deducted from either net's
+    substrate fringe term** -- a known simplification (magic's own
+    fringe-shielding model needs its ``defaultsidewall`` second parameter's
+    semantics resolved first, an explicitly open question -- see
+    ``metal_sidewall_lookback_um``'s docstring), flagged here rather than
+    silently assumed away. Same-net and same-*name* pairs are skipped for
+    the identical reasons the vertical pass skips them (see above).
 
     Returns a 2-tuple:
 
@@ -5476,14 +5585,24 @@ def _compute_parasitics(
       somewhere to attach). A net with no eligible interconnect geometry at
       all is omitted, exactly as before this feature existed.
     - Coupled-pair list (sorted by ``(net_a, net_b)`` for deterministic
-      output): ``{"net_a", "net_b", "capacitance_ff", "levels"}`` for every
-      distinct net pair with non-zero vertical-overlap coupling.
-      ``capacitance_ff`` is the pair's total coupling capacitance, summed
-      across every contributing adjacent-level pair; ``levels`` is the
-      sorted list of ``[lower_metal_index, upper_metal_index]`` pairs that
-      contributed. Empty when ``parasitics_deck.metal_overlaps`` curates no
-      coefficient, or the layout has no vertical overlap between distinct
-      nets.
+      output): ``{"net_a", "net_b", "capacitance_ff", "levels",
+      "lateral_levels"}`` for every distinct net pair with non-zero
+      vertical-overlap and/or (critical-net-scoped) lateral coupling --
+      **one entry per pair**, even when both kinds contribute, so
+      :func:`_inject_parasitics`'s "one two-terminal `C` card per pair"
+      invariant holds regardless of how many geometry passes fed it.
+      ``capacitance_ff`` is the pair's total coupling capacitance (vertical
+      plus lateral, summed across every contributing level/level-pair);
+      ``levels`` is the sorted list of ``[lower_metal_index,
+      upper_metal_index]`` adjacent-level pairs that contributed vertical
+      coupling (issue #760, empty if none); ``lateral_levels`` (issue #976)
+      is the sorted list of same-``metal_index`` levels that contributed
+      lateral coupling (empty if none, and always empty when
+      ``critical_nets`` is not given -- byte-identical to this field's
+      pre-#976 absence). Empty when neither ``parasitics_deck.metal_overlaps``
+      nor (``critical_nets``-scoped) ``parasitics_deck.metal_sidewalls``
+      curate a coefficient, or the layout has no qualifying coupling
+      geometry between distinct nets.
 
     ``net_id`` is ``net.cluster_id`` -- the id ``LayoutToNetlist`` already
     uses internally to key a net to its layout cluster (see the
@@ -5715,6 +5834,66 @@ def _compute_parasitics(
                 coupling_ff[key] = coupling_ff.get(key, 0.0) + overlap_area_um2 * coef
                 coupling_levels.setdefault(key, set()).add((i, i + 1))
 
+    # Pass 2b: lateral (same-layer sidewall) coupling, for a caller-declared
+    # "critical nets" set only (issue #976, Epic #709 Phase 2a) -- see this
+    # function's docstring for why this pass is scoped down rather than
+    # running unconditionally like the vertical pass above.
+    lateral_coupling_ff: dict[tuple[str, str], float] = {}
+    lateral_coupling_levels: dict[tuple[str, str], set[int]] = {}
+
+    if critical_nets:
+        for i in range(num_metals):
+            coef = (
+                parasitics_deck.metal_sidewalls[i]
+                if i < len(parasitics_deck.metal_sidewalls)
+                else None
+            )
+            lookback_um = (
+                parasitics_deck.metal_sidewall_lookback_um[i]
+                if i < len(parasitics_deck.metal_sidewall_lookback_um)
+                else None
+            )
+            if coef is None or not lookback_um or lookback_um <= 0.0:
+                continue
+            level_nets = metal_regions[i]
+            if len(level_nets) < 2:
+                continue
+            lookback_dbu = max(1, round(lookback_um / dbu))
+            items = [
+                (net, spice_safe_net_name(net.expanded_name()), region)
+                for net, region in level_nets.items()
+            ]
+            for a_index, (net_a, name_a, region_a) in enumerate(items):
+                a_is_critical = name_a in critical_nets
+                halo_bbox = region_a.bbox().enlarged(
+                    kdb.Point(lookback_dbu, lookback_dbu)
+                )
+                for net_b, name_b, region_b in items[a_index + 1 :]:
+                    if not (a_is_critical or name_b in critical_nets):
+                        continue
+                    if net_a is net_b:
+                        # Same edge case the vertical pass excludes (a via
+                        # stack tying one net's own geometry together is
+                        # ordinary connectivity, not coupling).
+                        continue
+                    if name_a == name_b:
+                        # Same collision-name edge case the vertical pass
+                        # skips -- see its comment above.
+                        continue
+                    if not halo_bbox.overlaps(region_b.bbox()):
+                        continue
+                    edge_pairs = region_a.separation_check(region_b, lookback_dbu)
+                    if edge_pairs.is_empty():
+                        continue
+                    facing_length_um = edge_pairs.first_edges().length() * dbu
+                    if facing_length_um <= 0.0:
+                        continue
+                    key = _net_pair_key(name_a, name_b)
+                    lateral_coupling_ff[key] = (
+                        lateral_coupling_ff.get(key, 0.0) + facing_length_um * coef
+                    )
+                    lateral_coupling_levels.setdefault(key, set()).add(i)
+
     # Collapse each (net, level) accumulator to a single non-overlapping area,
     # once, now that every contributing partner has been folded in.
     deduction_um2: dict[tuple[kdb.Net, int], float] = {
@@ -5774,17 +5953,28 @@ def _compute_parasitics(
 
     results.sort(key=lambda entry: (entry["net"], entry["net_id"]))
 
+    # One entry per pair, vertical and lateral contributions merged (issue
+    # #976) -- `_inject_parasitics`'s "one two-terminal `C` card per pair"
+    # invariant (its own docstring) must hold regardless of how many
+    # geometry passes fed a given pair, so a pair present in both
+    # `coupling_ff` (vertical) and `lateral_coupling_ff` (lateral) gets one
+    # combined entry, not two entries that would mint two devices under the
+    # same instance name.
     coupled_pairs: list[dict[str, Any]] = []
-    for (name_a, name_b), cap_ff in coupling_ff.items():
-        if cap_ff <= 0.0:
+    for key in set(coupling_ff) | set(lateral_coupling_ff):
+        name_a, name_b = key
+        total_ff = coupling_ff.get(key, 0.0) + lateral_coupling_ff.get(key, 0.0)
+        if total_ff <= 0.0:
             continue
-        levels_sorted = sorted(coupling_levels[(name_a, name_b)])
+        levels_sorted = sorted(coupling_levels.get(key, ()))
+        lateral_levels_sorted = sorted(lateral_coupling_levels.get(key, ()))
         coupled_pairs.append(
             {
                 "net_a": name_a,
                 "net_b": name_b,
-                "capacitance_ff": round(cap_ff, 6),
+                "capacitance_ff": round(total_ff, 6),
                 "levels": [[lo, hi] for lo, hi in levels_sorted],
+                "lateral_levels": list(lateral_levels_sorted),
             }
         )
     coupled_pairs.sort(key=lambda entry: (entry["net_a"], entry["net_b"]))
@@ -5941,9 +6131,10 @@ def _inject_parasitics(
     ground_net_name: str,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net, plus one two-terminal
-    coupling capacitor per net pair with non-zero vertical-overlap coupling
-    capacitance, into ``circuit`` and return the JSON ``parasitics`` summary
-    block (issue #592, extended by issue #760).
+    coupling capacitor per net pair with non-zero vertical-overlap and/or
+    (``--critical-net``-scoped) lateral coupling capacitance, into
+    ``circuit`` and return the JSON ``parasitics`` summary block (issue
+    #592, extended by issues #760 and #976).
 
     For each ``parasitic_nets`` entry, the net itself becomes the star's
     **hub**. Every device terminal that was connected directly to the net is
@@ -6054,6 +6245,11 @@ def _inject_parasitics(
                     "net": other_net,
                     "capacitance_ff": pair["capacitance_ff"],
                     "levels": pair["levels"],
+                    # Additive field (issue #976): same-layer levels that
+                    # contributed lateral coupling to this pair -- see
+                    # `_compute_parasitics`'s docstring. Always `[]` unless
+                    # `--critical-net` named one side of this pair.
+                    "lateral_levels": pair["lateral_levels"],
                 }
             )
     for entries in coupled_by_net.values():

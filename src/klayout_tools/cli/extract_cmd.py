@@ -109,6 +109,11 @@ def run(args: argparse.Namespace) -> int:
             # of from text labels. `False` when the flag was never given,
             # unchanged from every call site that predates it.
             def_net_names=args.def_net_names,
+            # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
+            # lateral (same-layer sidewall) coupling pass onto these net
+            # names. `None` when the flag was never given, unchanged from
+            # every call site that predates it.
+            critical_nets=args.critical_nets,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -161,6 +166,10 @@ def _print_text(report: dict) -> None:
                 f"parasitics_coupling: CC={parasitics['cc_count']}  "
                 f"total_CC={parasitics['total_coupling_capacitance_ff']} fF"
             )
+        # Additive (issue #976): only printed when --critical-net was given.
+        critical_nets = parasitics.get("critical_nets")
+        if critical_nets:
+            print(f"critical_nets: {', '.join(critical_nets)}")
         # Additive (issue #798): only printed when --mom-net was given.
         mom_crosscheck = parasitics.get("mom_crosscheck")
         if mom_crosscheck is not None:

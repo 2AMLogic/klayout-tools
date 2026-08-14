@@ -456,6 +456,20 @@ between A and B, and **remove** it from both nets' substrate-area term.
 
 #### Stage 2b — lateral sidewall coupling + fringe shielding
 
+**Partial progress, issue #976 (Epic #709 Phase 2a, 2026-08-14):** the
+geometry/coefficient half of this stage shipped, deliberately scoped down
+from what this section describes in two ways this update flags rather than
+silently narrows: (1) the pass only ever runs for a same-layer net pair
+naming one of the caller's declared `klt extract --critical-net` nets, not
+the whole layout unconditionally (the "medium cost" below is exactly why —
+see that flag's docs for the "nets that matter" framing this scoping
+borrows from Epic #709's own Phase 2 text); (2) it does **not** implement
+the fringe-shielding deduction this section names — the coupling charge is
+additive only, still not removed from the substrate perimeter term, because
+the `defaultsidewall` second parameter's semantics (§1.4's flagged caution)
+remain unresolved. A full-layout, fringe-shielded Stage 2b (the version this
+section describes) is still open follow-on work.
+
 Facing-edge length between neighbouring nets on the same level within a
 lookback distance, charged `defaultsidewall`, with the corresponding fringe
 charge **removed** from the substrate perimeter term (magic's fringe-shielding

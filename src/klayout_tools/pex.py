@@ -339,6 +339,7 @@ def run_pex(
     pdk_root: str | None = None,
     artifacts_dir: str | None = None,
     backend: str | None = None,
+    critical_nets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -348,7 +349,15 @@ def run_pex(
     ``deck_name``/``top``/``pdk_variant``/``pdk_root``/``output`` are passed
     through to :func:`~klayout_tools.extract.run_extract` (``parasitics``
     is always ``True`` here -- ``klt pex`` has no schematic-equivalent-only
-    mode; use `klt extract` directly for that). ``backend`` is passed
+    mode; use `klt extract` directly for that). ``critical_nets`` (``klt
+    pex --critical-net``, repeatable, issue #976, Epic #709 Phase 2a) is
+    also passed straight through to :func:`~klayout_tools.extract.run_extract`
+    -- extracts lateral (same-layer, sidewall) coupling capacitance for any
+    same-layer net pair naming one of these nets, in addition to Phase 1's
+    always-on vertical-overlap coupling (issue #760), so the re-simulated
+    extracted-side testbench (and the resulting `delta[]` rows) reflect it.
+    ``None``/empty (the default) skips it entirely -- byte-identical to
+    before this feature existed. ``backend`` is passed
     through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
     extracted side, every testbench) -- see ``docs/cli/sim.md``'s
     "Execution backends". ``artifacts_dir`` overrides where this command
@@ -397,6 +406,7 @@ def run_pex(
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
             parasitics=True,
+            critical_nets=critical_nets,
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -542,6 +552,10 @@ def run_pex(
             "net_count": extract_report["net_count"],
             "netlist_sha256": extract_report["netlist_sha256"],
             "model": parasitics.get("model"),
+            # Additive field (issue #976): echoes `--critical-net` back --
+            # `[]` when the flag was never given, byte-identical to before
+            # this feature existed.
+            "critical_nets": parasitics.get("critical_nets") or [],
         },
         "testbenches": testbenches_summary,
         "corner_count": corner_count,

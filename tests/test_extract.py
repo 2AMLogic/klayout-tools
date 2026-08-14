@@ -6055,6 +6055,7 @@ def test_parasitics_summary_block_shape(tmp_path):
         "nets",
         "metals_without_coefficient",
         "overlap_pairs_without_coefficient",
+        "critical_nets",
         "model",
         "mom_crosscheck",
     }
@@ -6208,6 +6209,32 @@ def test_cli_parasitics_text_reports_counts(tmp_path, capsys):
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "parasitics:" in out
+
+
+def test_cli_critical_net_flag_json(tmp_path, capsys):
+    """`klt extract --critical-net` (issue #976, Epic #709 Phase 2a),
+    repeated, is parsed into a list and drives the lateral-coupling pass --
+    CLI-level counterpart to `test_lateral_coupling_exact_value_and_
+    lookback_cutoff`'s direct `run_extract` call."""
+    path = str(_write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds"))
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--critical-net",
+            "VIC",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["critical_nets"] == ["VIC"]
+    assert out["parasitics"]["cc_count"] == 1
+    assert out["parasitics"]["total_coupling_capacitance_ff"] == pytest.approx(0.044)
 
 
 @pytest.mark.parametrize(
@@ -6496,11 +6523,21 @@ def test_parasitics_vertical_overlap_coupling_exact_values(tmp_path):
 
     assert by_net["A"]["capacitance_ff"] == pytest.approx(0.4366)
     assert by_net["A"]["coupled"] == [
-        {"net": "B", "capacitance_ff": 0.1142, "levels": [[0, 1]]}
+        {
+            "net": "B",
+            "capacitance_ff": 0.1142,
+            "levels": [[0, 1]],
+            "lateral_levels": [],
+        }
     ]
     assert by_net["B"]["capacitance_ff"] == pytest.approx(0.16228)
     assert by_net["B"]["coupled"] == [
-        {"net": "A", "capacitance_ff": 0.1142, "levels": [[0, 1]]}
+        {
+            "net": "A",
+            "capacitance_ff": 0.1142,
+            "levels": [[0, 1]],
+            "lateral_levels": [],
+        }
     ]
 
     # Net C: a real li1/met1 via stack (one physical net) overlapping
@@ -6614,8 +6651,18 @@ def test_parasitics_via_stack_deduction_is_unioned_not_summed(tmp_path, monkeypa
     assert para["cc_count"] == 2
     assert para["total_coupling_capacitance_ff"] == pytest.approx(0.1142 + 0.13386)
     assert by_net["B"]["coupled"] == [
-        {"net": "A", "capacitance_ff": 0.1142, "levels": [[0, 1]]},
-        {"net": "C", "capacitance_ff": 0.13386, "levels": [[1, 2]]},
+        {
+            "net": "A",
+            "capacitance_ff": 0.1142,
+            "levels": [[0, 1]],
+            "lateral_levels": [],
+        },
+        {
+            "net": "C",
+            "capacitance_ff": 0.13386,
+            "levels": [[1, 2]],
+            "lateral_levels": [],
+        },
     ]
 
     # The middle net: deduct the union (1 um^2), not the sum (2 um^2).
@@ -6648,6 +6695,157 @@ def test_parasitics_via_stack_deduction_is_unioned_not_summed(tmp_path, monkeypa
     # Union: 0.037 (A/li1) + 0.02578 (B/met1, once) + 0.0175 (C/met2).
     # The pre-fix scalar sum charged B's patch twice, giving 0.10606.
     assert ground_delta == pytest.approx(0.037 + 0.02578 + 0.0175)
+
+
+def _make_lateral_coupling_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Three same-layer (met1) nets purpose-built for the lateral (same-
+    layer sidewall) coupling pass (issue #976, Epic #709 Phase 2a):
+
+    - Net ``AGR`` ("aggressor"): a 2x1 um met1 bar.
+    - Net ``VIC`` ("victim"): a 2x1 um met1 bar, 0.1 um to the right of
+      ``AGR`` -- inside sky130's met1 lookback
+      (`metal_sidewall_lookback_um[1]` = 2x `met1.space.1` = 0.28 um), with
+      a fully-facing 1 um edge. At sky130's met1 `defaultsidewall`
+      coefficient (0.044 fF/um), the expected lateral coupling capacitance
+      is exactly ``0.044`` fF.
+    - Net ``FAR``: a 2x1 um met1 bar, 0.35 um to the right of ``VIC`` --
+      *outside* the same lookback, so it must contribute zero lateral
+      coupling to ``VIC`` even though both are on met1.
+
+    None of the three has any vertical-overlap (li1) geometry, so this
+    fixture's `coupled_pairs`/`nets[].coupled` entries are lateral-only --
+    isolating issue #976's own pass from issue #760's.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(68, 20, kdb.Box(0, 0, 2000, 1000))  # met1, net AGR
+    label(68, 5, "AGR", 1000, 500)
+    draw(68, 20, kdb.Box(2100, 0, 4100, 1000))  # met1, net VIC -- 0.1 um gap
+    label(68, 5, "VIC", 3100, 500)
+    draw(68, 20, kdb.Box(4450, 0, 6450, 1000))  # met1, net FAR -- 0.35 um gap
+    label(68, 5, "FAR", 5450, 500)
+
+    return layout
+
+
+def test_lateral_coupling_requires_critical_nets(tmp_path):
+    """Byte-identical baseline (issue #976): `AGR`/`VIC` sit well within
+    met1's own lookback distance, but with no `critical_nets` given at all
+    the lateral pass never runs -- zero coupling, exactly this function's
+    pre-#976 behaviour, even on a layout whose geometry alone would
+    otherwise qualify."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "lateral.spice"), parasitics=True
+    )
+    para = report["parasitics"]
+    assert para["cc_count"] == 0
+    assert para["total_coupling_capacitance_ff"] == 0.0
+    assert para["critical_nets"] == []
+
+
+def test_lateral_coupling_exact_value_and_lookback_cutoff(tmp_path):
+    """Exact-value acceptance test for issue #976's core geometry/
+    coefficient math, on :func:`_make_lateral_coupling_layout`'s
+    deterministic fixture, with ``VIC`` declared critical."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        critical_nets=["VIC"],
+    )
+    para = report["parasitics"]
+    assert para["critical_nets"] == ["VIC"]
+
+    # Only the AGR<->VIC pair couples (within lookback); FAR<->VIC does not
+    # (outside lookback) even though VIC is critical, and AGR<->FAR does not
+    # either (neither side is critical).
+    assert para["cc_count"] == 1
+    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.044)
+
+    by_net = {entry["net"]: entry for entry in para["nets"]}
+    assert set(by_net) == {"AGR", "VIC", "FAR"}
+    assert by_net["VIC"]["coupled"] == [
+        {
+            "net": "AGR",
+            "capacitance_ff": pytest.approx(0.044),
+            "levels": [],
+            "lateral_levels": [1],  # met1 is metals[1] (li1, met1, ...)
+        }
+    ]
+    assert by_net["AGR"]["coupled"] == [
+        {
+            "net": "VIC",
+            "capacitance_ff": pytest.approx(0.044),
+            "levels": [],
+            "lateral_levels": [1],
+        }
+    ]
+    assert by_net["FAR"]["coupled"] == []
+
+    # Ground capacitance is *not* deducted for lateral coupling (a
+    # documented simplification, unlike the vertical pass) -- each net's
+    # ground C is its full raw area/perimeter term.
+    assert by_net["VIC"]["capacitance_ff"] == pytest.approx(
+        2.0 * 0.02578 + 6.0 * 0.04057
+    )
+
+    # The written SPICE carries one two-terminal `C` card directly between
+    # AGR's and VIC's hub nodes.
+    netlist_text = (tmp_path / "lateral.spice").read_text()
+    cc_lines = [ln for ln in netlist_text.splitlines() if ln.startswith("Ccc_")]
+    assert len(cc_lines) == 1
+    fields = cc_lines[0].split()
+    assert float(fields[3]) == pytest.approx(0.044e-15)
+
+
+def test_lateral_coupling_matches_when_only_one_side_critical(tmp_path):
+    """The lateral pass qualifies a pair when *either* side is named --
+    naming the non-victim side (`AGR`) finds the identical pair."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        critical_nets=["AGR"],
+    )
+    para = report["parasitics"]
+    assert para["cc_count"] == 1
+    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.044)
+
+
+def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
+    """A `--critical-net` name matching no net in the layout is reported in
+    `warnings`, not raised as an :class:`ExtractError` (unlike `--mom-net`'s
+    stricter contract) -- a caller may legitimately name several candidate
+    nets across several blocks/runs (issue #976)."""
+    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        critical_nets=["NOT_A_REAL_NET"],
+    )
+    assert report["parasitics"]["cc_count"] == 0
+    assert any("NOT_A_REAL_NET" in w for w in report["warnings"])
+
+
+def test_critical_net_requires_parasitics():
+    with pytest.raises(ExtractError, match="--critical-net requires --parasitics"):
+        run_extract("/nonexistent.gds", "sky130", critical_nets=["VIC"])
 
 
 def test_describe_parasitics_overlap_gaps_reports_truncation_and_none_entries():

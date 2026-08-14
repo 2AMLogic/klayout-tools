@@ -40,6 +40,11 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             artifacts_dir=args.outdir,
             backend=args.backend,
+            # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
+            # lateral coupling pass onto these net names. `None` when the
+            # flag was never given, unchanged from every call site that
+            # predates it.
+            critical_nets=args.critical_nets,
         )
     except PexError as exc:
         return emit_error("pex", str(exc), args.format)
@@ -71,6 +76,10 @@ def _print_text(report: dict) -> None:
         f"extraction: deck={extraction['deck']}  "
         f"devices={extraction['device_count']}  nets={extraction['net_count']}"
     )
+    # Additive (issue #976): only printed when --critical-net was given.
+    critical_nets = extraction.get("critical_nets")
+    if critical_nets:
+        print(f"critical_nets: {', '.join(critical_nets)}")
 
     testbenches = report["testbenches"]
     if testbenches:

@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--critical-net <net>]... [--format text|json]
 ```
 
 - `<layout>` — path to a GDSII (`.gds`) or OASIS (`.oas`) routed layout
@@ -37,6 +37,14 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   (schematic and extracted side, every testbench). See
   [`sim.md`](sim.md#execution-backends). Defaults to `local`, or each
   testbench's own `backend` field.
+- `--critical-net` — repeatable, passed through to `klt extract
+  --critical-net` (issue #976, Epic #709 Phase 2a). Scopes the lateral
+  (same-layer, sidewall) coupling-capacitance pass onto these net names, on
+  top of Phase 1's always-on vertical-overlap coupling (issue #760) -- so
+  the re-simulated extracted-side testbench (and the resulting `delta[]`
+  rows) reflect it. Off by default -- byte-identical to before this feature
+  existed. See [`extract.md`](extract.md)'s "Lateral (same-layer, sidewall)
+  coupling capacitance for critical nets" section.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -136,10 +144,11 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
     "netlist_sha256": "71d273ab...",
     "model": {
       "capacitance": "net-to-ground for every net's own ...",
-      "coupling": "vertical overlap (crossover) only ...",
+      "coupling": "vertical overlap (crossover) unconditionally, plus lateral (same-layer, sidewall) coupling for `--critical-net`-named nets ...",
       "resistance": "single lumped series resistance per net ...",
       "frequency": "quasi-static -- one frequency-independent R and C per net ..."
-    }
+    },
+    "critical_nets": []
   },
   "testbenches": [
     {
@@ -182,7 +191,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | `layout`             | string            | Echo of `<layout>`, exactly as provided.                                                |
 | `netlist`            | string            | Path to the extracted (parasitic-annotated) netlist `klt extract` wrote.                |
 | `reference_netlist`  | string            | Absolute path of the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above). |
-| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), and `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), and `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (the file path as given), `schematic_netlist` (the resolved DUT path it `.include`d), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
@@ -230,8 +239,28 @@ deck version (`provenance.deck`) so [#802](https://github.com/2AMLogic/klayout-t
 without re-deriving provenance, and so
 [#803](https://github.com/2AMLogic/klayout-tools/issues/803) (Phase 1c) can
 cite it as the T1 improvement proof on one canary. Coupling capacitance
-beyond issue #760's vertical-overlap case, and distributed/MoM-grade
-extraction, are Phase 2+ scope (not this command) — see Epic #709.
+beyond issue #760's vertical-overlap case is Phase 2a scope
+([#976](https://github.com/2AMLogic/klayout-tools/issues/976)) — landed as
+the `--critical-net` flag above, opt-in and scoped to a caller-declared net
+set (not run unconditionally across the whole layout, the way vertical
+coupling is). Distributed and MoM-grade extraction remain later-phase scope
+(not this command) — see Epic #709.
+
+**Phase 2a's own measurable-delta proof.** The `sky130-ota-5t` canary above
+is DC-only by construction (every measurement point is an ideal-voltage-
+source-driven net hub, `delta_pct: 0.0` "measured, not assumed" per its own
+[README](../../examples/design-pipeline/README.md#s10-pex-delta-proof-epic-709-phase-1c-803)),
+so it has no current/charge-carrying, high-impedance node for a coupling-
+capacitance delta to show up on — extending it is not this issue's proof
+vehicle. Instead, `tests/test_pex.py`'s
+`test_run_pex_critical_net_lateral_coupling_canary` is a real, ngspice-driven
+`klt pex` run on a purpose-built two-net high-impedance-node fixture (the
+exact net class Epic #709 Phase 2's own text names): `--critical-net` off
+reports `extracted_value: 0.0` on the victim net (Phase 1's baseline,
+unchanged by this issue); `--critical-net VIC` on the identical layout and
+testbench reports a real, nonzero, reproducible coupling voltage — a
+measurable, explainable delta re-derived from a real simulation on every CI
+run, rather than a one-off hand-captured evidence blob.
 
 ## Evidence discipline: records, supersession, and pinning are repo-owned
 
