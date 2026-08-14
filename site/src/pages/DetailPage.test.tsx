@@ -160,6 +160,11 @@ describe("DetailPage Field Data section (Epic #840 Phase 3b, issue #959)", () =>
     expect(screen.getByRole("heading", { name: "Field Data" })).toBeInTheDocument();
     expect(screen.getByTestId("field-viewer")).toBeInTheDocument();
     expect(screen.getByTestId("em-provenance-panel")).toBeInTheDocument();
+    // Provenance-trail link back to the index page's solver-validation strip (#960).
+    expect(screen.getByRole("link", { name: "solver validation" })).toHaveAttribute(
+      "href",
+      "/#solver-validation",
+    );
   });
 
   it("omits the Field Data section entirely when emExport is null (no artifact / malformed artifact)", () => {

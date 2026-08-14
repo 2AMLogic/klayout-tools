@@ -12,10 +12,15 @@ import { EmGallerySection } from "@/components/em";
  * #63). Each card links to its `/<slug>/` detail page (issue #64).
  *
  * Below the layout gallery, `EmGallerySection` (Epic #840 Phase 1c, issue
- * #851) renders the "Electromagnetics" section: real geode-fem solver
- * results (mesh/field overlay + S-parameter sweep, each with a provenance
- * panel), independent of `layouts` — its data comes from the staged
- * `examples/em/*.em-export.json` exports, not the block-metrics pipeline.
+ * #851; demoted to a compact "Solver Validation" strip in Phase 3c, issue
+ * #960) renders geode-fem solver-validation results — mesh/field overlay +
+ * S-parameter/capacitance results, each with a provenance panel — as
+ * evidence that the solver behind each project's Field Data panel
+ * (`DetailPage.tsx`, Phase 3b/#959) matches known answers. It is
+ * independent of `layouts` — its data comes from the staged
+ * `examples/em/*.em-export.json` exports, not the block-metrics pipeline —
+ * and is visually subordinate to the project gallery above it (h3 heading,
+ * compact spacing, muted styling).
  */
 export interface IndexPageProps {
   layouts: Layout[];
