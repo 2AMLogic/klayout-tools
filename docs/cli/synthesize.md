@@ -570,7 +570,9 @@ only `-D` is omitted, leaving ABC's mapper and sizers to optimize
 untargeted exactly as they did before this field was consumed.
 `timing.delay_target_ps` is `null` in that case, so a caller can always tell
 a targeted run from an untargeted one. Measured effect of the target on
-`gcd` (Yosys 0.68+48, sky130, issue #807): untargeted maps to 3238.11 µm² at
+`gcd` (sky130, issue #807; re-verified against CI's own pinned, from-source
+Yosys 0.67+post build — `scripts/install-yosys.sh` — per issue #967, see the
+note below on build-platform sensitivity): untargeted maps to 3238.11 µm² at
 2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
 relaxed target buys area back at the cost of delay, so the value is a real
 caller decision rather than something this command should pick.
@@ -581,7 +583,7 @@ caller decision rather than something this command should pick.
 {
   "schema_version": 1,
   "engine": "yosys",
-  "engine_version": "0.68+48",
+  "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
   "status": "ok",
   "instance_count": 347,
@@ -664,7 +666,7 @@ $ klt synthesize request.json --format json
 {
   "schema_version": 1,
   "engine": "yosys",
-  "engine_version": "0.68+48",
+  "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
   "status": "ok",
   "instance_count": 347,
@@ -682,21 +684,31 @@ $ klt synthesize request.json --format json
 
 347 standard-cell instances, 3238.1056 µm² total (1251.2 µm² sequential),
 2485.93 ps ABC-estimated critical path, and **zero** `lpflow_*`/`probe*`
-cells — measured live on Yosys 0.68+48 against a volare `sky130A` install.
-Note this particular design is **sequential** (it has a clocked `always`
-block) — see "Equivalence gate" above, `--verify-equivalence` is not usable
-on it.
+cells — measured live on Yosys 0.67+post, CI's own pinned, from-source
+build (`scripts/install-yosys.sh`, run in CI's Linux/x86_64/gcc
+environment), against a volare `sky130A` install. Note this particular
+design is **sequential** (it has a clocked `always` block) — see
+"Equivalence gate" above, `--verify-equivalence` is not usable on it.
+
+**Build-platform sensitivity (issue #967):** ABC's greedy sizing
+heuristics are sensitive to the compiler/OS a given Yosys build was
+compiled with, not just its version — the identical Yosys 0.67 source tag,
+built locally on macOS ARM64/AppleClang, maps this same design to
+`area_um2=3126.7488` at `2485.44 ps` instead. The numbers above are CI's
+own measurement and are what `tests/test_synthesize.py`'s exact-number
+golden asserts; treat them as anchored to CI's specific build platform, not
+as a general "Yosys 0.67" invariant reproducible from any machine.
 
 Before the ABC constraint/exclusion flags landed (issue #807), the same
-request on the same toolchain mapped to **335 instances / 2951.5808 µm²**
-with no delay number at all and 19 `lpflow_*` power-isolation instances in
-the netlist. The ~10% area difference is the cost of ABC's
-`buffer`/`upsize`/`dnsize` sizing plus the exclusion list; supplying
-`constraints.clock_period_ns` gives the caller the knob to trade it back
-(see the request table above). Yosys's own mapping result also moves between
-releases — the same pre-#807 flow maps this design to 326 instances on
-Ubuntu 24.04's Yosys 0.33 — so treat these figures as anchored to the build
-named here, not as invariants.
+request — issue #807's own pre-change measurement — mapped to
+**335 instances / 2951.5808 µm²** with no delay number at all and 19
+`lpflow_*` power-isolation instances in the netlist. The ~10% area
+difference is the cost of ABC's `buffer`/`upsize`/`dnsize` sizing plus the
+exclusion list; supplying `constraints.clock_period_ns` gives the caller
+the knob to trade it back (see the request table above). Yosys's own
+mapping result also moves between releases — the same pre-#807 flow maps
+this design to 326 instances on Ubuntu 24.04's Yosys 0.33 — so treat these
+figures as anchored to the build named here, not as invariants.
 
 With the optional `klt_statime_native` extension built (`uv sync --group
 statime`), the same run additionally reports the native critical path.
