@@ -44,6 +44,58 @@ NOT_DESIGN_LEGAL_WARNING = (
     "were applied; this cell is not guaranteed to be design-legal"
 )
 
+#: Prefix reserved for caller annotations. JSON has no comment syntax, so a
+#: request file checked into a repository (the motivating case: a known-bad DRC
+#: fixture whose dimensions must stay "wrong") has nowhere to record *why* it is
+#: shaped the way it is. Any key beginning with this prefix -- ``_purpose``,
+#: ``_expected_rules``, a per-shape ``_rule`` note -- is accepted and ignored
+#: everywhere in the request, at every nesting level, and is guaranteed never to
+#: be given meaning by a future version. Every *other* unrecognised key is an
+#: application error (issue #950), so a typo in a real key (``rect_nm`` for
+#: ``rect_um``) is caught instead of silently dropped. Same posture as
+#: ``klt gen-compose``'s ``request.pdk`` (``gen_compose._ALLOWED_PDK_KEYS``).
+ANNOTATION_KEY_PREFIX = "_"
+
+#: Allowed keys per request object, enforced by :func:`_reject_unknown_keys`.
+#: See ``docs/cli/draw.md`` -> "Unrecognised keys".
+_ALLOWED_REQUEST_KEYS = frozenset({"schema", "params", "options"})
+_ALLOWED_PARAMS_KEYS = frozenset({"dbu_um", "shapes", "labels"})
+_ALLOWED_OPTIONS_KEYS = frozenset({"cell_name", "output"})
+_ALLOWED_SHAPE_KEYS = frozenset({"layer", "name", "rect_um", "polygon_um", "array"})
+_ALLOWED_ARRAY_KEYS = frozenset({"pitch_um", "count"})
+_ALLOWED_LABEL_KEYS = frozenset({"layer", "text", "at_um"})
+
+#: Allow-list per ``_shape_layer``/``draw`` entry kind, so shapes and labels are
+#: each held to their own key set rather than a permissive union.
+_ALLOWED_ENTRY_KEYS: dict[str, frozenset[str]] = {
+    "shape": _ALLOWED_SHAPE_KEYS,
+    "label": _ALLOWED_LABEL_KEYS,
+}
+
+
+def _is_annotation_key(key: Any) -> bool:
+    """True for a reserved caller-annotation key (see :data:`ANNOTATION_KEY_PREFIX`)."""
+    return isinstance(key, str) and key.startswith(ANNOTATION_KEY_PREFIX)
+
+
+def _reject_unknown_keys(
+    mapping: dict[Any, Any], allowed: frozenset[str], context: str
+) -> None:
+    """Raise :class:`DrawError` if ``mapping`` carries an unrecognised key.
+
+    Keys beginning with :data:`ANNOTATION_KEY_PREFIX` are the documented escape
+    hatch and are always accepted. Everything else must be in ``allowed``.
+    """
+    unknown = [k for k in mapping if k not in allowed and not _is_annotation_key(k)]
+    if not unknown:
+        return
+    raise DrawError(
+        f"{context} has unknown key(s): {', '.join(sorted(str(k) for k in unknown))}"
+        f" -- allowed: {', '.join(sorted(allowed))}"
+        f" (keys beginning with '{ANNOTATION_KEY_PREFIX}' are reserved for "
+        "caller annotations and ignored)"
+    )
+
 
 def _is_number(value: Any) -> bool:
     """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
@@ -70,7 +122,9 @@ def load_params_arg(value: str | None) -> dict[str, Any]:
 
     Raises :class:`DrawError` if the value is missing, is neither a readable
     JSON file nor valid inline JSON, or decodes to something other than an
-    object.
+    object. Key-level validation (including the unknown-key policy of issue
+    #950) is :func:`draw`'s job, so a library caller that never goes through
+    the CLI gets exactly the same checks.
     """
     if value is None:
         raise DrawError(
@@ -128,17 +182,26 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
     required and must be non-empty. Returns a dict matching the documented
     response schema (see ``docs/cli/draw.md``). Raises :class:`DrawError` for a
     malformed request or a write failure.
+
+    Unrecognised keys are **rejected** at every level of the request, so a typo
+    in an optional key is an error rather than a silently-dropped value. Keys
+    beginning with :data:`ANNOTATION_KEY_PREFIX` (``_``) are the documented
+    escape hatch: accepted and ignored anywhere, so a request file can carry its
+    own rationale (issue #950).
     """
     if not isinstance(request, dict):
         raise DrawError("request must be a JSON object")
+    _reject_unknown_keys(request, _ALLOWED_REQUEST_KEYS, "request")
 
     params = request.get("params") or {}
     if not isinstance(params, dict):
         raise DrawError("request.params must be a JSON object")
+    _reject_unknown_keys(params, _ALLOWED_PARAMS_KEYS, "params")
 
     options = request.get("options") or {}
     if not isinstance(options, dict):
         raise DrawError("request.options must be a JSON object")
+    _reject_unknown_keys(options, _ALLOWED_OPTIONS_KEYS, "options")
 
     dbu_um = _resolve_dbu(params.get("dbu_um"))
 
@@ -269,9 +332,14 @@ def _resolve_dbu(value: Any) -> float:
 def _shape_layer(
     entry: Any, index: int, kind: str = "shape"
 ) -> tuple[tuple[int, int], str | None]:
-    """Validate and extract ``(layer, datatype)`` and optional ``name``."""
+    """Validate and extract ``(layer, datatype)`` and optional ``name``.
+
+    Also enforces the entry's own key allow-list, so an unrecognised key inside
+    a ``shapes[]``/``labels[]`` entry is reported by name (issue #950).
+    """
     if not isinstance(entry, dict):
         raise DrawError(f"{kind}[{index}] must be a JSON object")
+    _reject_unknown_keys(entry, _ALLOWED_ENTRY_KEYS[kind], f"{kind}[{index}]")
 
     layer = entry.get("layer")
     if (
@@ -356,6 +424,7 @@ def _parse_array(
         return None
     if not isinstance(array, dict):
         raise DrawError(f"shape[{index}].array must be a JSON object when present")
+    _reject_unknown_keys(array, _ALLOWED_ARRAY_KEYS, f"shape[{index}].array")
 
     pitch = array.get("pitch_um")
     if (

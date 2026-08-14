@@ -526,6 +526,215 @@ def test_output_dir_missing_is_an_error(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Unknown-key policy (#950): reject, with a reserved `_` annotation prefix
+# --------------------------------------------------------------------------- #
+
+
+def test_unknown_top_level_request_key_is_an_error(tmp_path):
+    request = {
+        "schema": REQUEST_SCHEMA,
+        "params": {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]},
+        "options": {"output": str(tmp_path / "out.gds")},
+        "purpose": "poly.width.1 negative fixture",
+    }
+    with pytest.raises(DrawError, match=r"request has unknown key\(s\): purpose"):
+        draw(request)
+
+
+def test_unknown_params_key_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"params has unknown key\(s\): dbu_nm"):
+        _draw(
+            tmp_path,
+            {"dbu_nm": 1, "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]},
+        )
+
+
+def test_unknown_options_key_is_an_error(tmp_path):
+    request = {
+        "schema": REQUEST_SCHEMA,
+        "params": {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]},
+        "options": {"output": str(tmp_path / "out.gds"), "cellname": "TOP"},
+    }
+    with pytest.raises(DrawError, match=r"options has unknown key\(s\): cellname"):
+        draw(request)
+
+
+def test_unknown_shape_key_is_an_error(tmp_path):
+    """A typo in a real shape key is caught by name, not silently dropped."""
+    with pytest.raises(DrawError, match=r"shape\[0\] has unknown key\(s\): rect_nm"):
+        _draw(
+            tmp_path,
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "rect_nm": []}]},
+        )
+
+
+def test_unknown_label_key_is_an_error(tmp_path):
+    with pytest.raises(DrawError, match=r"label\[0\] has unknown key\(s\): at_nm"):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}],
+                "labels": [
+                    {"layer": [1, 0], "text": "IN", "at_um": [0, 0], "at_nm": [0, 0]}
+                ],
+            },
+        )
+
+
+def test_unknown_array_key_is_an_error(tmp_path):
+    with pytest.raises(
+        DrawError, match=r"shape\[0\]\.array has unknown key\(s\): counts"
+    ):
+        _draw(
+            tmp_path,
+            {
+                "shapes": [
+                    {
+                        "layer": [1, 0],
+                        "rect_um": [0, 0, 1, 1],
+                        "array": {"pitch_um": [2, 2], "counts": [2, 2]},
+                    }
+                ]
+            },
+        )
+
+
+def test_unknown_key_error_names_the_allowed_keys_and_escape_hatch(tmp_path):
+    """The error is actionable: it lists what *is* allowed and points at the
+    documented `_`-prefixed annotation escape hatch (docs/cli/draw.md)."""
+    with pytest.raises(DrawError) as excinfo:
+        _draw(
+            tmp_path,
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "rule": 1}]},
+        )
+    message = str(excinfo.value)
+    assert "allowed: array, layer, name, polygon_um, rect_um" in message
+    assert "keys beginning with '_' are reserved" in message
+
+
+def test_annotation_keys_are_accepted_everywhere(tmp_path):
+    """The motivating case (issue #950): a self-documenting known-bad DRC
+    fixture carries its rationale inline via `_`-prefixed keys, at every
+    nesting level, and still draws."""
+    output = str(tmp_path / "annotated.gds")
+    request = {
+        "schema": REQUEST_SCHEMA,
+        "_purpose": "negative control for sky130 poly.width.1",
+        "_expected_rules": ["poly.width.1"],
+        "params": {
+            "_note": "dimensions are deliberately illegal -- do not 'fix' them",
+            "shapes": [
+                {
+                    "layer": [66, 20],
+                    "rect_um": [0, 0, 0.1, 2.0],
+                    "_rule": "poly.width.1 (0.1 um < 0.15 um minimum)",
+                },
+                {
+                    "layer": [41, 0],
+                    "rect_um": [0, 0, 0.26, 0.26],
+                    "array": {
+                        "pitch_um": [0.86, 0.86],
+                        "count": [2, 2],
+                        "_rule": "via farm, on-pitch",
+                    },
+                },
+            ],
+            "labels": [
+                {"layer": [66, 20], "text": "IN", "at_um": [0, 0], "_rule": "port"}
+            ],
+        },
+        "options": {"output": output, "_rule": "written by the fixture generator"},
+    }
+    report = draw(request)
+    assert report["shape_count"] == 5  # 1 rect + a 2x2 array
+    assert report["label_count"] == 1
+
+
+def test_annotation_keys_do_not_change_the_written_stream(tmp_path):
+    """Annotations are inert: stripping them produces the same geometry."""
+    shapes = [{"layer": [66, 20], "rect_um": [0, 0, 0.1, 2.0]}]
+    plain, plain_path = _draw(tmp_path, {"shapes": shapes}, name="plain.gds")
+    annotated, annotated_path = _draw(
+        tmp_path,
+        {
+            "_purpose": "why this fixture exists",
+            "shapes": [dict(shapes[0], _rule="poly.width.1")],
+        },
+        name="annotated.gds",
+    )
+
+    assert annotated["shape_count"] == plain["shape_count"]
+    assert annotated["layers"] == plain["layers"]
+    assert annotated["bbox_um"] == plain["bbox_um"]
+
+    layout_plain = kdb.Layout()
+    layout_plain.read(plain_path)
+    layout_annotated = kdb.Layout()
+    layout_annotated.read(annotated_path)
+    assert (
+        layout_annotated.top_cell().bbox().to_s()
+        == layout_plain.top_cell().bbox().to_s()
+    )
+
+
+def test_unknown_key_is_rejected_before_anything_is_written(tmp_path):
+    output = tmp_path / "out.gds"
+    with pytest.raises(DrawError, match="unknown key"):
+        _draw(
+            tmp_path,
+            {"shapes": [{"layer": [1, 0], "rect_um": [0, 0, 1, 1], "oops": True}]},
+            name="out.gds",
+        )
+    assert not output.exists()
+
+
+def test_cli_rejects_unknown_key_with_error_envelope(tmp_path, capsys):
+    code = main(
+        [
+            "draw",
+            "--params",
+            '{"shapes": [{"layer": [66, 20], "rect_nm": [0, 0, 100, 2000]}]}',
+            "-o",
+            str(tmp_path / "out.gds"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)
+    assert "shape[0] has unknown key(s): rect_nm" in error["error"]["message"]
+
+
+def test_cli_accepts_annotation_keys(tmp_path, capsys):
+    output = str(tmp_path / "out.gds")
+    code = main(
+        [
+            "draw",
+            "--params",
+            json.dumps(
+                {
+                    "_purpose": "poly.width.1 negative control",
+                    "shapes": [
+                        {
+                            "layer": [66, 20],
+                            "rect_um": [0, 0, 0.1, 2.0],
+                            "_rule": "poly.width.1",
+                        }
+                    ],
+                }
+            ),
+            "-o",
+            output,
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["shape_count"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # load_params_arg
 # --------------------------------------------------------------------------- #
 
