@@ -303,6 +303,27 @@ exact behaviour if this risk ever manifests as a real mismatch.
   real engine run. Both new fields are additive, off-by-default, and
   covered by unit tests asserting the exact generated Tcl (mirroring this
   module's own existing per-flag test style) instead.
+
+Post-route SPEF STA (``request.post_route_spef``, issue #948, Epic #700
+Phase 3, ``docs/design/post-route-sta-survey.md`` section 4.1): the
+``"route"`` stage's own top-level timing fields are computed from
+``estimate_parasitics -global_routing`` -- a coarse global-routing Steiner
+estimate, not parasitics extracted from the detailed-routed geometry
+``write_def`` actually commits. The optional ``post_route_spef`` boolean
+(default ``false``) opts in to a real-parasitics **A/B** pass, never a
+replacement: once the DEF->GDS merge completes, ``klt extract --parasitics``
+runs against the merged routed GDS and writes its per-net R/C model as SPEF
+(:func:`_post_route_spef_metrics`); a second ``openroad`` invocation, seeded
+from the ``"route"`` stage's own ODB checkpoint, loads that SPEF via
+``read_spef`` and re-reports the identical slack/violation-count metrics
+(:func:`_spef_sta_script_lines`) into the additive ``spef_sta`` response
+field. Net-name correlation between ``klt extract``'s GDS-label-derived
+names and OpenSTA's own linked-design net list -- the survey's own flagged
+open risk -- is checked explicitly via ``get_nets -quiet`` *before*
+``read_spef`` runs, reported as ``spef_sta.nets_annotated``/``nets_total``
+(:func:`_count_spef_nets_annotated`), never assumed. See
+``docs/cli/place-and-route.md``'s "Post-route SPEF STA" section for the full
+contract.
 """
 
 from __future__ import annotations
@@ -311,6 +332,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from typing import Any
 
 from ._paths import _load_request_json, validate_request_shape
@@ -474,6 +496,22 @@ _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__antenna", "I"),
 }
 
+#: Per-cell-library ``klt extract --deck`` name (issue #948, Epic #700
+#: Phase 3) -- used only by the optional ``request.post_route_spef`` path
+#: (see :func:`_post_route_spef_metrics`) to resolve which curated
+#: ``klayout_tools.decks`` extraction deck matches this run's PDK family.
+#: Same "not derivable from the resolved PDK install itself" posture as
+#: :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above -- a standard
+#: cell library name (LEF/liberty naming) and an extraction deck name
+#: (``klayout_tools.decks``' own family key) are two independent naming
+#: conventions this module has to bridge explicitly. Matches
+#: :func:`klayout_tools.decks.get_extraction_deck`'s/``get_parasitics_deck``'s
+#: own accepted names exactly (``"sky130"``/``"gf180mcu"``).
+_EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
+    "sky130_fd_sc_hd": "sky130",
+    "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu",
+}
+
 #: Fixed internal `global_placement -density` target -- not an exposed
 #: request field (the contract's `floorplan` block sizes the die/core, not
 #: placement density); verified live at this value against the worked
@@ -521,6 +559,14 @@ _ANTENNA_VIOLATIONS_END = "===KLT_ANTENNA_VIOLATIONS_END==="
 #: (`"\\s*violation type: (.*)"`) -- not guessed from documentation. See
 #: :func:`_count_route_drc_violations`.
 _ROUTE_DRC_VIOLATION_TYPE_LINE = "violation type: "
+
+#: Same marker convention as the setup/hold/antenna pairs above, isolating
+#: the ``request.post_route_spef`` net-name-correlation check's own one-line
+#: "<annotated> <total>" report (issue #948) -- see
+#: :func:`_spef_sta_script_lines`/:func:`_count_spef_nets_annotated`.
+_SPEF_NET_CHECK_BEGIN = "===KLT_SPEF_NET_CHECK_BEGIN==="
+_SPEF_NET_CHECK_END = "===KLT_SPEF_NET_CHECK_END==="
+_SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)")
 
 #: Response fields whose value is always "the last completed stage's own
 #: value, restated at top level" -- see the contract spike section 5's
@@ -664,6 +710,7 @@ def run_place_and_route(
     max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
         request.get("max_antenna_repair_iterations")
     )
+    post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -815,6 +862,7 @@ def run_place_and_route(
         checkpoint_path = next_checkpoint
 
     gds_path: str | None = None
+    spef_sta: dict[str, Any] | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
@@ -828,6 +876,31 @@ def run_place_and_route(
             macros=macros,
             out_path=gds_path,
         )
+        # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
+        # routed-geometry parasitics, via `klt extract --parasitics` against
+        # the GDS just merged above, fed back into a fresh OpenSTA session
+        # (`read_spef`) seeded from the `"route"` stage's own checkpoint --
+        # after the DEF->GDS merge, before this function's own final
+        # response is assembled, exactly the "after write_def/the DEF->GDS
+        # merge... before the report calls" ordering the issue's own scope
+        # names (the report calls in question are this helper's own
+        # internal `_metrics_report_lines`/`_violation_count_lines`, run
+        # inside the second `openroad` invocation it launches -- the merge
+        # itself runs in-process Python, so no *Tcl* command can sit
+        # "between" it and `write_def`; the ordering constraint is honored
+        # at the pipeline-step level instead). Off by default -- see
+        # `_validate_post_route_spef`'s own docstring for why.
+        if post_route_spef:
+            spef_sta = _post_route_spef_metrics(
+                output_dir=output_dir,
+                hdl_toplevel=hdl_toplevel,
+                gds_path=gds_path,
+                cell_library=cell_library,
+                liberty_path=liberty_path,
+                clock_port=clock_port,
+                clock_period_ns=clock_period_ns,
+                checkpoint_in=checkpoint_path,
+            )
     else:
         def_path = None
 
@@ -872,6 +945,12 @@ def run_place_and_route(
         ],
         "def_path": def_path,
         "gds_path": gds_path,
+        # Additive field (issue #948): `null` unless `request.post_route_spef`
+        # was `true` *and* `stage_reached` is `"route"` -- the real-parasitics
+        # A/B counterpart to the top-level (`estimate_parasitics
+        # -global_routing`-derived) `worst_slack_ns`/etc. fields above. See
+        # `_post_route_spef_metrics`'s docstring for the field list.
+        "spef_sta": spef_sta,
         "provenance": provenance,
     }
 
@@ -1269,6 +1348,33 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
             "request.max_antenna_repair_iterations must be between 1 and "
             f"{_MAX_ANTENNA_REPAIR_ITERATIONS_CAP}"
         )
+    return value
+
+
+def _validate_post_route_spef(value: Any) -> bool:
+    """Optional ``request.post_route_spef`` (issue #948, Epic #700 Phase 3,
+    ``docs/design/post-route-sta-survey.md`` §4.1) -- opts in to a real
+    post-route parasitic-extraction A/B pass on the ``"route"`` stage:
+    ``klt extract --parasitics`` runs against the merged routed GDS, its
+    output is written as SPEF, and a fresh OpenSTA session seeded from the
+    ``"route"`` stage's own checkpoint re-reports slack/violation counts via
+    ``read_spef`` -- *alongside*, never replacing, that stage's existing
+    ``estimate_parasitics -global_routing``-derived top-level fields (see
+    this module's own docstring and :func:`_post_route_spef_metrics`).
+
+    Omitted/``None`` defaults to ``False`` -- this feature adds real
+    wall-clock cost on top of every existing ``"route"``-stage caller (a
+    `klt extract --parasitics` pass over the merged GDS, plus a second
+    `openroad` subprocess invocation), so it is opt-in, matching this
+    module's own convention for every other flag whose added cost a survey
+    flagged rather than assumed free (`route_critical_nets_percentage`,
+    `max_antenna_repair_iterations`) -- the explicit A/B disable path this
+    module's other flags already established.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PlaceAndRouteError("request.post_route_spef must be a boolean")
     return value
 
 
@@ -1766,6 +1872,206 @@ def _corner_sweep_script_lines(
         "report_worst_slack_metric -hold",
     ]
     return lines
+
+
+# --------------------------------------------------------------------------- #
+# Post-route SPEF STA (`request.post_route_spef`, issue #948)
+# --------------------------------------------------------------------------- #
+
+
+def _tcl_net_list(names: Iterable[str]) -> str:
+    """Render ``names`` as a brace-quoted Tcl list body (each name wrapped
+    ``{...}``, whitespace-joined) -- the standard Tcl idiom for embedding
+    arbitrary literal strings in a generated script without word-splitting
+    or ``$``/``[...]`` substitution inside each token. Net names this module
+    ever embeds this way come from ``klt extract``'s own SPICE-safe naming
+    (:func:`klayout_tools.extract.spice_safe_net_name`), which does not
+    introduce a literal ``}`` -- an unbalanced brace in a caller-supplied
+    name is a known, unguarded edge case, consistent with this module's
+    existing "not independently verified live" posture for newly-added Tcl
+    surface (see this module's own docstring)."""
+    return " ".join("{" + name + "}" for name in names)
+
+
+def _spef_sta_script_lines(
+    *,
+    checkpoint_in: str,
+    liberty_path: str,
+    clock_port: str | None,
+    clock_period_ns: float | None,
+    spef_path: str,
+    net_names: list[str],
+) -> list[str]:
+    """Build the Tcl script for the second, ``post_route_spef``-only
+    ``openroad`` invocation (issue #948, Epic #700 Phase 3) -- a fresh
+    OpenSTA session seeded from the ``"route"`` stage's own checkpoint
+    (``read_db``), with ``klt extract --parasitics``'s SPEF output
+    (``spef_path``) fed in via ``read_spef`` instead of that stage's own
+    ``estimate_parasitics -global_routing`` estimate, so the two can be
+    diffed on the identical routed design (the A/B measurement plan
+    ``docs/design/post-route-sta-survey.md`` §4.1/§5 describes).
+
+    The net-name-correlation sanity check (survey §4.1's flagged open risk:
+    do `klt extract`'s GDS-label-derived net names correlate with OpenSTA's
+    own flat netlist net names?) runs via ``get_nets -quiet`` **before**
+    ``read_spef`` -- deliberately independent of whatever `read_spef` itself
+    does with an unmatched name, so an uncaught Tcl error partway through
+    that call cannot also silently skip this check. ``-quiet`` suppresses
+    OpenSTA's own "not found" error, so a mismatched name degrades to "not
+    annotated" rather than aborting the whole script.
+    """
+    lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines += _clock_lines(clock_port, clock_period_ns)
+    lines += [
+        f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
+        "set klt_spef_annotated 0",
+        "foreach klt_spef_net $klt_spef_nets {",
+        "    if {[llength [get_nets -quiet $klt_spef_net]] > 0} {",
+        "        incr klt_spef_annotated",
+        "    }",
+        "}",
+        f'puts "{_SPEF_NET_CHECK_BEGIN}"',
+        'puts "$klt_spef_annotated [llength $klt_spef_nets]"',
+        f'puts "{_SPEF_NET_CHECK_END}"',
+        f"read_spef {spef_path}",
+    ]
+    lines += _metrics_report_lines(include_fmax=False, include_power=False)
+    lines += _violation_count_lines()
+    return lines
+
+
+def _count_spef_nets_annotated(stdout: str) -> tuple[int, int] | None:
+    """``(nets_annotated, nets_total)`` parsed from
+    :func:`_spef_sta_script_lines`'s own ``===KLT_SPEF_NET_CHECK_BEGIN===``/
+    ``===END===``-delimited stdout block, or ``None`` when the markers
+    aren't found (defensive; should not happen for a successful run) --
+    same marker-scrape convention as :func:`_count_antenna_violations`."""
+    try:
+        start_idx = stdout.index(_SPEF_NET_CHECK_BEGIN) + len(_SPEF_NET_CHECK_BEGIN)
+        stop_idx = stdout.index(_SPEF_NET_CHECK_END, start_idx)
+    except ValueError:
+        return None
+    match = _SPEF_NET_CHECK_RE.search(stdout[start_idx:stop_idx])
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _post_route_spef_metrics(
+    *,
+    output_dir: str,
+    hdl_toplevel: str,
+    gds_path: str,
+    cell_library: str,
+    liberty_path: str,
+    clock_port: str | None,
+    clock_period_ns: float | None,
+    checkpoint_in: str,
+) -> dict[str, Any]:
+    """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
+    Phase 3): extract real per-net R/C from the just-merged routed GDS via
+    `klt extract --parasitics`, write it as SPEF, and feed that SPEF into a
+    fresh OpenSTA session (seeded from the ``"route"`` stage's own
+    checkpoint) via ``read_spef`` -- the real-parasitics A/B counterpart to
+    that stage's own ``estimate_parasitics -global_routing``-derived
+    top-level fields. See ``docs/design/post-route-sta-survey.md`` §4.1 and
+    ``docs/cli/place-and-route.md``'s ``spef_sta`` field for the full
+    contract.
+
+    Returns::
+
+        {
+            "spef_path": str,
+            "worst_slack_ns": float | None,
+            "total_negative_slack_ns": float | None,
+            "setup_violation_count": int,
+            "hold_violation_count": int,
+            "nets_annotated": int,
+            "nets_total": int,
+        }
+
+    Raises :class:`PlaceAndRouteError` for an unsupported ``cell_library``
+    (no known `klt extract --deck`, see
+    :data:`_EXTRACT_DECK_FOR_CELL_LIBRARY`), a `klt extract --parasitics`
+    failure on the merged GDS, or a failed second `openroad` invocation --
+    the same "fail loud, never silently skip" posture this module's other
+    per-cell-library reference tables already follow (see
+    :data:`_CTS_BUFFER_CELLS` and its call sites).
+    """
+    extract_deck = _EXTRACT_DECK_FOR_CELL_LIBRARY.get(cell_library)
+    if extract_deck is None:
+        raise PlaceAndRouteError(
+            "request.post_route_spef requires a known klt extract deck for "
+            f"cell_library '{cell_library}' (supported: "
+            + ", ".join(sorted(_EXTRACT_DECK_FOR_CELL_LIBRARY))
+            + ")"
+        )
+
+    # Local import (mirrors `_merge_def_to_gds`'s own local `klayout.db`
+    # import): keeps `extract.py`'s own (heavier) import cost out of every
+    # `place_and_route.py` import that never exercises this opt-in path.
+    from .extract import ExtractError, run_extract
+
+    spice_path = os.path.join(output_dir, f"{hdl_toplevel}_route_parasitics.spice")
+    spef_path = os.path.join(output_dir, f"{hdl_toplevel}_route.spef")
+    try:
+        extraction = run_extract(
+            gds_path,
+            extract_deck,
+            output=spice_path,
+            top=hdl_toplevel,
+            parasitics=True,
+            spef_output=spef_path,
+        )
+    except ExtractError as exc:
+        raise PlaceAndRouteError(
+            f"request.post_route_spef: klt extract --parasitics failed on "
+            f"the routed GDS '{gds_path}': {exc}"
+        ) from exc
+
+    parasitics = extraction["parasitics"]
+    net_names = sorted({entry["net"] for entry in parasitics["nets"]})
+
+    script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_spef.tcl")
+    metrics_path = os.path.join(output_dir, f"{hdl_toplevel}_route_spef_metrics.json")
+    lines = _spef_sta_script_lines(
+        checkpoint_in=checkpoint_in,
+        liberty_path=liberty_path,
+        clock_port=clock_port,
+        clock_period_ns=clock_period_ns,
+        spef_path=spef_path,
+        net_names=net_names,
+    )
+    _write_script(script_path, lines)
+
+    completed = _run_openroad(script_path, metrics_path)
+    if completed.returncode != 0:
+        raise PlaceAndRouteError(_engine_error_message("route_spef_sta", completed))
+
+    metrics = _read_metrics(metrics_path, "route_spef_sta")
+    setup_violation_count = _count_violations(
+        completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
+    )
+    hold_violation_count = _count_violations(
+        completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
+    )
+    nets_check = _count_spef_nets_annotated(completed.stdout)
+    nets_annotated, nets_total = (
+        nets_check if nets_check is not None else (0, len(net_names))
+    )
+
+    worst_slack = metrics.get("timing__setup__ws")
+    tns = metrics.get("timing__setup__tns")
+
+    return {
+        "spef_path": spef_path,
+        "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
+        "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
+        "setup_violation_count": setup_violation_count,
+        "hold_violation_count": hold_violation_count,
+        "nets_annotated": nets_annotated,
+        "nets_total": nets_total,
+    }
 
 
 # --------------------------------------------------------------------------- #

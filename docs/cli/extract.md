@@ -1940,6 +1940,63 @@ this much on this net," not as a verdict that either number is the "true"
 capacitance (silicon or a full non-idealised field solve would be needed for
 that).
 
+### SPEF export (`--spef`, issue #948, Epic #700 Phase 3)
+
+`--spef <path>` writes `--parasitics`'s existing per-net R/C model as a
+Standard Parasitic Exchange Format file (SPEF, `*SPEF "IEEE 1481-1999"`) at
+`<path>`, alongside the existing JSON/SPICE outputs — for `read_spef`-style
+STA consumption (e.g. [`klt place-and-route`](place-and-route.md)'s `route`
+stage, via its own `post_route_spef` request field). Requires
+`--parasitics`; given without it, `--spef` is a clean `ExtractError`, the
+same "a flag naming something invalid is an error, not a silent no-op"
+convention `--mom-net` above already follows.
+
+```
+klt extract routed.gds --deck sky130 --parasitics --spef routed.spef --format json
+```
+
+**A format translation of already-computed data, not a new extraction
+pass** (`docs/design/post-route-sta-survey.md` §3.1/§4.1): every SPEF `*CAP`/
+`*RES` value is copied verbatim from `parasitics.nets[]` — the same
+star-topology model documented above, re-expressed as SPEF's `*D_NET`/
+`*CONN`/`*CAP`/`*RES` block syntax instead of KLayout SPICE `R`/`C` device
+cards. Units are declared (`*C_UNIT 1 FF`, `*R_UNIT 1 OHM`) to match
+`parasitics`'s own units exactly, so no femtofarad/ohm conversion — and no
+conversion error — is introduced.
+
+**Net-name correlation only — not device/pin-name correlation (issue #948
+scope).** Each `*D_NET` block is keyed by `parasitics.nets[].net` — the same
+layout-label-derived name the survey's §2.1 flags as the one identifier a
+downstream STA tool needs to resolve against its own (Verilog-derived) flat
+net list. `*CONN` entries name only a net's own **port** membership (`*P
+<name> B`, when the schematic-equivalent extraction's `nets[].pin` marks it
+a top-level pin); device-terminal (`*I <inst>:<pin>`) connectivity is
+deliberately **not** emitted, because the per-device names inside
+`parasitics.nets[].terminals[]` are this repo's own layout-driven `Device`
+naming (`$1`, `$2`, …) — never asserted to correlate with a digital flow's
+own linked-design instance names, a materially harder and explicitly
+out-of-scope correlation question. `*CONN` is optional per the SPEF grammar,
+so this narrower, net-name-only form is still a syntactically valid file.
+`docs/cli/place-and-route.md`'s `spef_sta` field is where that net-name
+correlation is actually *checked* (an explicit "N of M nets annotated"
+count against the linked design), not merely assumed here.
+
+Direction on every declared `*PORTS` entry is always `B`
+(bidirectional/unspecified) — a GDS text label carries no I/O-direction
+metadata, so this is a declared "unknown," never a guessed `I`/`O`.
+
+**Duplicate net names are a known, inherited limitation**, not something
+this writer resolves: a layout label shared by several distinct, un-strapped
+net islands (e.g. the `gcd` corpus's 105 separate `VGND` islands, see
+"Coverage" above) emits one independent `*D_NET` block per island under the
+identical name — SPEF's own net-name-keyed grammar has no per-island
+qualifier the way this response's own `net_id` field does. Immaterial for
+genuine signal nets (never un-strapped this way in practice).
+
+Additive field: `spef_path` (top-level, alongside `netlist_path`) — the
+resolved SPEF path, or `null` when `--spef` was omitted (byte-identical to
+before this feature existed).
+
 ### What it does *not* do
 
 - **Lateral (same-layer, sidewall) coupling capacitance and fringe
@@ -2556,6 +2613,7 @@ exit codes).
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise.   |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
+| `spef_path`        | string \| `null`           | Additive field (issue #948). Resolved path of the written SPEF file when `--spef` was given; `null` otherwise. See "SPEF export".                       |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want

@@ -54,6 +54,7 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
 from klayout_tools.cli import main
@@ -1303,6 +1304,222 @@ def test_stubbed_full_route_reports_nonzero_route_drc_violation_count(
 
     assert report["route_drc_violation_count"] == 5
     assert report["stages"][3]["route_drc_violation_count"] == 5
+
+
+# --------------------------------------------------------------------------- #
+# `request.post_route_spef` (issue #948, Epic #700 Phase 3): real routed-
+# geometry parasitics via `klt extract --parasitics`, fed back into a fresh
+# OpenSTA session via `read_spef`, alongside (never replacing) the `"route"`
+# stage's own `estimate_parasitics -global_routing`-derived top-level fields.
+# --------------------------------------------------------------------------- #
+
+
+def _stub_run_extract_for_post_route_spef(
+    monkeypatch, *, net_names: tuple[str, ...] = ("A", "B", "CLK")
+) -> list[dict]:
+    """Replace `klayout_tools.extract.run_extract` (the function
+    `_post_route_spef_metrics` imports lazily) with a fake that writes a
+    placeholder SPEF file and returns a minimal `parasitics` block -- this
+    module's own `_post_route_spef_metrics` only reads `parasitics.nets[]`'s
+    `net` field and the `spef_output` path it was given, so nothing here
+    needs a real GDS/deck. Covered on its own merits by
+    `tests/test_extract.py`'s SPEF-writer tests."""
+    calls: list[dict] = []
+
+    def fake_run_extract(path, deck_name, **kwargs):
+        calls.append({"path": path, "deck_name": deck_name, **kwargs})
+        spef_output = kwargs["spef_output"]
+        Path(spef_output).write_text("fake spef\n")
+        return {"parasitics": {"nets": [{"net": name} for name in net_names]}}
+
+    monkeypatch.setattr(extract_module, "run_extract", fake_run_extract)
+    return calls
+
+
+def _stub_openroad_success_with_post_route_spef(
+    monkeypatch,
+    *,
+    setup_violation_count: int = 0,
+    hold_violation_count: int = 0,
+    nets_annotated: int = 3,
+    nets_total: int = 3,
+    worst_slack_ns: float = -0.5,
+    total_negative_slack_ns: float = -1.0,
+) -> None:
+    """Layer the second, `_route_spef.tcl`-only `openroad` invocation on top
+    of `_stub_openroad_success`'s existing per-stage fake -- that helper's
+    own `_stage_from_script_path` cannot classify this new script name (it
+    is not one of `STAGE_ORDER`'s own `_<stage>.tcl` suffixes), so this
+    wraps it rather than editing its shared behaviour."""
+    _stub_openroad_success(monkeypatch)
+    base_fake_run = place_and_route.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(
+            "_route_spef.tcl"
+        ):
+            return base_fake_run(cmd, **kwargs)
+
+        metrics_path = cmd[4]
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "timing__setup__ws": worst_slack_ns,
+                    "timing__setup__tns": total_negative_slack_ns,
+                },
+                handle,
+            )
+        stdout_lines = [
+            place_and_route._SPEF_NET_CHECK_BEGIN,
+            f"{nets_annotated} {nets_total}",
+            place_and_route._SPEF_NET_CHECK_END,
+            place_and_route._SETUP_VIOLATIONS_BEGIN,
+        ]
+        stdout_lines += [f"pin_{i} (VIOLATED)" for i in range(setup_violation_count)]
+        stdout_lines.append(place_and_route._SETUP_VIOLATIONS_END)
+        stdout_lines.append(place_and_route._HOLD_VIOLATIONS_BEGIN)
+        stdout_lines += [f"pin_{i} (VIOLATED)" for i in range(hold_violation_count)]
+        stdout_lines.append(place_and_route._HOLD_VIOLATIONS_END)
+        return _FakeCompleted(returncode=0, stdout="\n".join(stdout_lines))
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+
+def test_post_route_spef_omitted_defaults_false_and_leaves_spef_sta_null(
+    tmp_path, monkeypatch
+):
+    """`request.post_route_spef` omitted (the default) is byte-identical to
+    before this feature existed: no second `openroad` invocation, no `klt
+    extract` call, and the additive `spef_sta` field is `null`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["spef_sta"] is None
+
+
+def test_post_route_spef_must_be_boolean(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef="yes")
+    with pytest.raises(PlaceAndRouteError, match="post_route_spef must be a boolean"):
+        run_place_and_route(request_path)
+
+
+def test_post_route_spef_reports_spef_sta_block(tmp_path, monkeypatch):
+    """The acceptance-criteria shape (issue #948): opting in produces a
+    `spef_sta` block with the `read_spef`-fed slack/violation counts and the
+    net-name-correlation sanity check ("N of M nets annotated"), without
+    disturbing the existing top-level (`estimate_parasitics -global_routing`)
+    fields -- an A/B report, not a replacement."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(
+        monkeypatch,
+        setup_violation_count=2,
+        hold_violation_count=1,
+        nets_annotated=3,
+        nets_total=3,
+        worst_slack_ns=-0.123,
+        total_negative_slack_ns=-0.456,
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    extract_calls = _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    # The existing `estimate_parasitics -global_routing`-derived top-level
+    # fields are untouched -- this is an A/B addition, never a replacement
+    # (`_STAGE_METRICS["route"]`'s own values, unchanged from every other
+    # stubbed-success test above).
+    assert report["worst_slack_ns"] == pytest.approx(-2.18828)
+
+    spef_sta = report["spef_sta"]
+    assert spef_sta is not None
+    assert spef_sta["worst_slack_ns"] == pytest.approx(-0.123)
+    assert spef_sta["total_negative_slack_ns"] == pytest.approx(-0.456)
+    assert spef_sta["setup_violation_count"] == 2
+    assert spef_sta["hold_violation_count"] == 1
+    assert spef_sta["nets_annotated"] == 3
+    assert spef_sta["nets_total"] == 3
+    assert spef_sta["spef_path"].endswith(".spef")
+    assert os.path.isfile(spef_sta["spef_path"])
+
+    # `klt extract --parasitics` ran against the merged routed GDS (never a
+    # separate/second extraction target), with `--spef` wired to the same
+    # path `spef_sta.spef_path` reports.
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["path"] == report["gds_path"]
+    assert extract_calls[0]["parasitics"] is True
+    assert extract_calls[0]["spef_output"] == spef_sta["spef_path"]
+
+
+def test_post_route_spef_flags_unmatched_nets(tmp_path, monkeypatch):
+    """Net-name correlation is explicitly checked and reported, not assumed
+    (issue #948 scope item 3) -- a partial match still returns a usable
+    `spef_sta` block, with `nets_annotated < nets_total` stated plainly."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(
+        monkeypatch, nets_annotated=1, nets_total=3
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["spef_sta"]["nets_annotated"] == 1
+    assert report["spef_sta"]["nets_total"] == 3
+
+
+def test_post_route_spef_not_run_before_route_stage(tmp_path, monkeypatch):
+    """`post_route_spef: true` has no effect on a run that never reaches the
+    `"route"` stage -- there is no routed GDS to extract parasitics from
+    yet, mirroring `gds_path`/`def_path`'s own pre-`"route"` `null`."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="place", post_route_spef=True
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
+
+    report = run_place_and_route(request_path)
+
+    assert report["stage_reached"] == "place"
+    assert report["spef_sta"] is None
+
+
+def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
+    """An unrecognised `cell_library` (no `_EXTRACT_DECK_FOR_CELL_LIBRARY`
+    entry) fails loudly -- never a silent skip of the requested A/B pass."""
+    monkeypatch.delitem(
+        place_and_route._EXTRACT_DECK_FOR_CELL_LIBRARY, "sky130_fd_sc_hd"
+    )
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    with pytest.raises(
+        PlaceAndRouteError, match="post_route_spef requires a known klt extract deck"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_tcl_net_list_brace_quotes_each_name():
+    assert place_and_route._tcl_net_list(["A", "B|C", "clk"]) == "{A} {B|C} {clk}"
+
+
+def test_count_spef_nets_annotated_parses_marker_block():
+    stdout = "\n".join(
+        [
+            "some preamble",
+            place_and_route._SPEF_NET_CHECK_BEGIN,
+            "7 10",
+            place_and_route._SPEF_NET_CHECK_END,
+            "trailer",
+        ]
+    )
+    assert place_and_route._count_spef_nets_annotated(stdout) == (7, 10)
+
+
+def test_count_spef_nets_annotated_defensive_when_markers_missing():
+    assert place_and_route._count_spef_nets_annotated("no markers here") is None
 
 
 def test_stubbed_target_stage_place_reports_null_route_drc_violation_count(

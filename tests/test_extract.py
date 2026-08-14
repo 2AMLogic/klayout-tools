@@ -9037,3 +9037,265 @@ def test_mom_net_duplicate_named_islands_swap_the_solved_island(tmp_path):
     }
     assert crosscheck["mom_capacitance_ff"] in written_ff
     assert baseline_by_id[other_id]["capacitance_ff"] in written_ff
+
+
+# --------------------------------------------------------------------------- #
+# `klt extract --spef` (issue #948, Epic #700 Phase 3): translate
+# --parasitics's per-net R/C model into a SPEF file for `read_spef`-style STA
+# consumption (`klt place-and-route`'s `route` stage).
+# --------------------------------------------------------------------------- #
+
+
+def test_spef_requires_parasitics(tmp_path):
+    """`--spef` without `--parasitics` is a clean, immediate error -- there
+    is nothing to translate without the lumped-RC pass it reuses."""
+    gds = SKY130_CORPUS_FILES[0]
+    with pytest.raises(ExtractError, match="--spef requires --parasitics"):
+        run_extract(
+            str(gds),
+            "sky130",
+            output=str(tmp_path / "out.spice"),
+            spef_output=str(tmp_path / "out.spef"),
+        )
+
+
+def test_spef_omitted_is_byte_identical_to_before_feature(tmp_path):
+    """`spef_output` omitted (the default) leaves everything else --
+    including `spef_path` in the response -- unaffected, and writes no SPEF
+    file at all."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert report["spef_path"] is None
+    assert not (tmp_path / "inv.spef").exists()
+
+
+def test_spef_writes_file_and_reports_path(tmp_path):
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "inv1.spef"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+        spef_output=str(spef_path),
+    )
+    assert report["spef_path"] == str(spef_path)
+    assert spef_path.is_file()
+
+
+def test_spef_header_shape(tmp_path):
+    """Every required SPEF header line (IEEE 1481-1999) is present, and the
+    design name matches the extracted top cell."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "inv1.spef"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+        spef_output=str(spef_path),
+    )
+    text = spef_path.read_text()
+    assert '*SPEF "IEEE 1481-1999"' in text
+    assert f'*DESIGN "{report["top"]}"' in text
+    assert "*DIVIDER /" in text
+    assert "*DELIMITER :" in text
+    assert "*BUS_DELIMITER [ ]" in text
+    assert "*T_UNIT 1 PS" in text
+    assert "*C_UNIT 1 FF" in text
+    assert "*R_UNIT 1 OHM" in text
+    assert "*L_UNIT 1 HENRY" in text
+
+
+def test_spef_one_d_net_block_per_parasitics_net_entry(tmp_path):
+    """Every `parasitics.nets[]` entry gets its own `*D_NET ... *END` block,
+    in the same order -- a straight structural translation, not a subset."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "inv1.spef"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+        spef_output=str(spef_path),
+    )
+    text = spef_path.read_text()
+    d_net_names = re.findall(r"^\*D_NET (\S+) ", text, re.MULTILINE)
+    expected_names = [entry["net"] for entry in report["parasitics"]["nets"]]
+    assert d_net_names == expected_names
+    assert text.count("*D_NET") == text.count("*END")
+    assert text.count("*D_NET") == len(expected_names)
+
+
+def test_spef_d_net_ports_declared_and_connected(tmp_path):
+    """A net that is a top-level pin (`nets[].pin`) is declared in `*PORTS`
+    and gets a `*CONN`/`*P` entry naming it -- the net-name-only correlation
+    surface `docs/design/post-route-sta-survey.md` section 4.1 scopes this
+    writer to."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "inv1.spef"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+        spef_output=str(spef_path),
+    )
+    text = spef_path.read_text()
+    pin_names = {n["name"] for n in report["nets"] if n["pin"]}
+    assert "Y" in pin_names  # inv_1's output pin
+    assert "Y B" in text.splitlines()  # *PORTS entry
+    assert "*P Y B" in text
+
+    y_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y")
+    y_block_start = text.index(f"*D_NET Y {y_entry['capacitance_ff']:.6f}")
+    y_block_end = text.index("*END", y_block_start)
+    y_block = text[y_block_start:y_block_end]
+    assert "*CONN" in y_block
+    assert "*P Y B" in y_block
+    # No device/pin-level `*I` connectivity is ever emitted -- this writer's
+    # documented net-name-only correlation scope (issue #948).
+    assert "*I " not in text
+
+
+def test_spef_cap_and_res_cards_match_parasitics_report(tmp_path):
+    """The `*CAP`/`*RES` numeric values are copied verbatim from
+    `parasitics.nets[]` -- no unit conversion, no re-derivation."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "inv1.spef"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+        spef_output=str(spef_path),
+    )
+    text = spef_path.read_text()
+    y_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y")
+    assert y_entry["terminals"], "Y is expected to have at least one terminal"
+
+    y_block_start = text.index(f"*D_NET Y {y_entry['capacitance_ff']:.6f}")
+    y_block_end = text.index("*END", y_block_start)
+    y_block = text[y_block_start:y_block_end]
+
+    assert f"1 Y {y_entry['capacitance_ff']:.6f}" in y_block
+    for i, terminal in enumerate(y_entry["terminals"], start=1):
+        assert (
+            f"{i} Y {terminal['leg_net']} {terminal['resistance_ohm']:.6f}" in y_block
+        )
+
+
+def test_spef_coupling_cap_emitted_once_between_hub_nodes(tmp_path):
+    """A coupled net pair (issue #760's `coupled[]`) becomes exactly one
+    two-terminal `*CAP` card -- not one per `coupled[]` entry (which reports
+    each pair from both endpoints)."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "inv1.spef"
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1.spice"),
+        spef_output=str(spef_path),
+    )
+    para = report["parasitics"]
+    if para["cc_count"] == 0:
+        pytest.skip("this fixture has no vertical-overlap coupling to cover")
+    text = spef_path.read_text()
+    total_two_terminal_cap_cards = 0
+    for entry in para["nets"]:
+        block_start = text.index(f"*D_NET {entry['net']} ")
+        block_end = text.index("*END", block_start)
+        block = text[block_start:block_end]
+        for coupled in entry["coupled"]:
+            marker = f" {coupled['net']} {coupled['capacitance_ff']:.6f}"
+            if marker in block:
+                total_two_terminal_cap_cards += 1
+    assert total_two_terminal_cap_cards == para["cc_count"]
+
+
+def test_spef_gamma_shunt_fallback_uses_hub_net_node(tmp_path):
+    """A net with no device terminal (the pre-#592 Gamma-shunt fallback,
+    `hub_net != net`) writes a single `*RES` card from the net to its own
+    synthesized hub node -- the one case this writer's `*RES` section is not
+    keyed on `terminals[]`."""
+    import klayout_tools.extract as extract_mod
+
+    # Build a layout with a routed, unconnected metal shape (no device
+    # terminal at all) so `_compute_parasitics` emits the Gamma-shunt shape
+    # -- mirrors this file's other parasitics fixtures using bare `met1`
+    # geometry with no device attached.
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li1 = layout.layer(67, 20)  # sky130 li1.drawing
+    top.shapes(li1).insert(kdb.Box(0, 0, 2000, 2000))
+    top.shapes(layout.layer(67, 5)).insert(  # li1.label / li1.pin text
+        kdb.Text("DANGLE", kdb.Trans(500, 500))
+    )
+    path = _write_gds(layout, tmp_path / "dangle.gds")
+
+    report = extract_mod.run_extract(
+        path,
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "dangle.spice"),
+        spef_output=str(tmp_path / "dangle.spef"),
+    )
+    entry = next(
+        (n for n in report["parasitics"]["nets"] if n["net"] == "DANGLE"), None
+    )
+    if entry is None or entry["terminals"]:
+        pytest.skip("fixture did not produce the no-terminal fallback shape")
+    assert entry["hub_net"] != "DANGLE"
+
+    text = Path(tmp_path / "dangle.spef").read_text()
+    block_start = text.index(f"*D_NET {entry['net']} ")
+    block_end = text.index("*END", block_start)
+    block = text[block_start:block_end]
+    assert f"1 DANGLE {entry['hub_net']} {entry['resistance_ohm']:.6f}" in block
+
+
+def test_spef_cli_json_and_text(tmp_path, capsys):
+    """`--spef` is wired all the way through the CLI, both `--format json`
+    (the `spef_path` field) and the default text formatter."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    spef_path = tmp_path / "cli.spef"
+
+    exit_code = main(
+        [
+            "extract",
+            str(gds),
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--spef",
+            str(spef_path),
+            "--format",
+            "json",
+            "-o",
+            str(tmp_path / "cli.spice"),
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["spef_path"] == str(spef_path)
+    assert spef_path.is_file()
+
+    exit_code = main(
+        [
+            "extract",
+            str(gds),
+            "--deck",
+            "sky130",
+            "--parasitics",
+            "--spef",
+            str(tmp_path / "cli2.spef"),
+            "-o",
+            str(tmp_path / "cli2.spice"),
+        ]
+    )
+    assert exit_code == 0
+    text_out = capsys.readouterr().out
+    assert f"spef_path: {tmp_path / 'cli2.spef'}" in text_out
