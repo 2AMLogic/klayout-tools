@@ -2136,42 +2136,67 @@ every same-named `*D_NET` block would overclaim. `klt place-and-route`'s
 own `post_route_spef` pass does this automatically, sourcing the DEF path
 from the same routed DEF `declared_pins` already reads.
 
-**Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped,
-properly-internal-node-numbered identifier — never a bare net or port name
-(issue #961's root-cause topology fix, live-verified 2026-08-14).**
-OpenSTA's SPEF reader only accepts a bare net name as a **single-node**
+**Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped
+internal node, a `*CONN`-declared instance-pin identifier, or (for an
+unambiguously-named port net) the port's own bare name — never a bare
+*non-port* net name (PR #984's root-cause topology fix, plus issue #961's
+own residual fix, both live-verified 2026-08-14).** OpenSTA's SPEF reader
+only accepts a bare *non-port* net name as a **single-node**
 self-capacitance-to-ground reference — never as one of the two endpoints of
-a `*RES` or coupling `*CAP` entry, and (live-verified, contradicting an
-earlier assumption here) **not even a `*CONN`-declared `*P <port>` bare
-name referenced from within that same block**. Only a colon-scoped,
-two-part identifier resolves there: `*I <inst>:<pin>` (a real DEF-derived
+a `*RES` or coupling `*CAP` entry. Only a colon-scoped, two-part identifier
+resolves there for a non-port net: `*I <inst>:<pin>` (a real DEF-derived
 instance pin) or `<net>:<N>` (a properly-scoped internal SPEF node, IEEE
 1481-1999's own convention for a net's non-pin internal nodes — and,
 live-verified, resolvable even when referenced *across* `*D_NET` blocks by
 a coupling `*CAP` entry, contrary to what a purely-per-block reading of the
-grammar might suggest). Every `*D_NET` block therefore plans its own
-`net_node` (`<net>:1`, unconditionally — where every device-terminal leg,
+grammar might suggest).
+
+**A `*CONN`-declared port name is a different story, live-verified against
+OpenSTA's own shipped `examples/gcd_sky130hd.spef` test fixture and against
+a fresh `gcd` SPEF built by this repo:** a bare port name *does* resolve as
+a two-node `*RES`/`*CAP` endpoint — through OpenSTA's own pin lookup
+(`findParasiticNode`'s bare-token branch calls `findPortPinRelative`, a
+`Network::findPin` lookup on the design's own top-level pin), not through
+any net-name lookup, so the earlier PR #984 finding that "even a
+`*P`-declared bare port name never resolves" was correct for the general
+bare-*net*-name defect it fixed but incomplete for *ports* specifically. A
+**bus-indexed** port (`a_in[0]`) needs one more adjustment on top: its
+brackets must stay **un-escaped** (`a_in[0]`, not `a_in\[0\]`) — an escaped
+bracket tells the reader "this is a literal backslash-bracket character,
+not a bus index" per this file's own `*BUS_DELIMITER [ ]` declaration, so
+`findPin` looks for a pin that does not exist and warns `pin a_in\[0\] not
+found`, live-reproduced isolating this exact mechanism. This is the *one*
+identifier position this writer does not run through the general escaping
+helper (see "Identifiers are escaped" below).
+
+Given that, every `*D_NET` block plans its own `net_node` — a unique
+port's own bare name (brackets un-escaped) when it qualifies, else the
+internal `<net>:1` node PR #984 planned, where every device-terminal leg,
 `*I <inst>:<pin>` connectivity leg, and the no-device-terminal Gamma-shunt
-resistor originate) and `hub_node` (`<net>:2` only in that Gamma-shunt
-case, otherwise the same as `net_node` — where the self- and every coupling
-`*CAP` attach); a `*P <port> B` `*CONN` entry is still emitted for a
-declared port, but is a pure block-level "this net is also a port"
-association needing no resistor tying it into the internal RC network
-(live-verified: attempting one is what produces a `pin <port> not found`
-warning). `report_parasitic_annotation` against a live `gcd` run now
-reports **52** of 537 drivers as partially annotated — down from 533
-before this topology rework (a better than 90% reduction) — and
-`spef_sta.worst_slack_ns` now genuinely differs, and reads more
-pessimistically, across `read_spef` for the first time. The residual 52 is
-narrowly isolated to connections directly adjacent to a top-level design
-port pin (an input port's fanout, or an internal driver feeding a top-level
-output port) — see
+resistor all originate — and `hub_node` (a further internal `<net>:2` node
+only in that Gamma-shunt case, otherwise the same as `net_node` — where the
+self- and every coupling `*CAP` attach). `*P <port> B` is still emitted for
+a declared port as pure block-level "this net is also a port" metadata
+(OpenSTA's own SPEF grammar, `*P`, is a documentation-only production with
+no connectivity effect of its own — the electrical tie-in comes entirely
+from `net_node`/`hub_node` being the port's own bare name, not from the
+`*P` line).
+
+**Measured live end to end on the routed `gcd` corpus fixture (2026-08-14,
+`openroad/orfs:latest`):** `report_parasitic_annotation` went from **533**
+partially-unannotated drivers (the pre-#984 net-name-only baseline) to
+**52** after PR #984's topology rework, to **0** after this residual fix —
+and `spef_sta.worst_slack_ns` reads more pessimistically than the top-level
+(rung 2) value across `read_spef` for the first time, unaffected by this
+residual fix (it was already correctly wired for the paths it changed; the
+residual only affected `report_parasitic_annotation`'s own completeness
+bookkeeping for port-adjacent connections, not the delay values already
+attached through the rest of the RC network). See
 [`docs/cli/place-and-route.md`](place-and-route.md)'s "`*CONN`
 device-terminal pin correlation" subsection for the full live-verification
-log (six isolated OpenSTA reproductions), the exact node-planning rule,
-and the residual's own isolated repro, whose root mechanism inside
-`report_parasitic_annotation` was not found despite several further live
-experiments.
+log, including the isolated single-net reproductions (against OpenSTA's own
+`gcd_sky130hd.spef` example and against this repo's `gcd` SPEF) that pinned
+down the pin-lookup-vs-net-lookup and bracket-escaping mechanisms.
 
 Direction on every declared `*PORTS` entry is always `B`
 (bidirectional/unspecified) — a GDS text label carries no I/O-direction
@@ -2192,20 +2217,32 @@ the routed DEF's `PINS` section — see
 [`docs/cli/place-and-route.md`](place-and-route.md)'s "`*PORTS` lists only
 real design ports" subsection.
 
-**Identifiers are escaped, and that is load-bearing.** SPEF's own
-(IEEE 1481-1999) identifier grammar admits only `[A-Za-z0-9_]` bare; every
-other character is a *special character* that must carry a leading
-backslash. KLayout's extracted names hit that constantly — an unlabelled
-net is named `$<n>`, a net carrying several layout labels is named by
-joining them with `|`, and a bussed pin label keeps its `[`/`]` — so every
-identifier this writer emits (`*PORTS` entries, `*D_NET` names,
-`*CONN`/`*P` entries, and each `*CAP`/`*RES` node) is escaped:
-`$1009` → `\$1009`, `A|A2|Y` → `A\|A2\|Y`, `a_in[13]` → `a_in\[13\]`.
-Without it a real OpenSTA `read_spef` aborts on the *first* `*D_NET` line
+**Identifiers are escaped, and that is load-bearing — with one deliberate
+exception.** SPEF's own (IEEE 1481-1999) identifier grammar admits only
+`[A-Za-z0-9_]` bare; every other character is a *special character* that
+must carry a leading backslash. KLayout's extracted names hit that
+constantly — an unlabelled net is named `$<n>`, a net carrying several
+layout labels is named by joining them with `|`, and a bussed pin label
+keeps its `[`/`]` — so every identifier this writer emits (`*PORTS`
+entries, `*D_NET` names, `*CONN`/`*P` entries, and each non-port
+`*CAP`/`*RES` node) is escaped: `$1009` → `\$1009`, `A|A2|Y` → `A\|A2\|Y`,
+`a_in[13]` (as a `*D_NET`/`*PORTS`/`*P` name) → `a_in\[13\]`. Without it a
+real OpenSTA `read_spef` aborts on the *first* `*D_NET` line
 (`[ERROR STA-1670] … syntax error`, reproduced on the routed `gcd` corpus
 fixture against `openroad/orfs:latest`); with it the identical file parses
-cleanly. Reading tools strip the backslashes back off, so the name matched
-against a netlist is the unescaped one.
+cleanly. Reading tools strip the backslashes back off for *net*-name
+matching, so the name matched against a netlist's own nets is the unescaped
+one either way.
+
+**The one exception: a unique-named port's own bare-name `*RES`/`*CAP` node
+reference leaves `[`/`]` un-escaped** (see "Every two-terminal `*RES`/
+coupling `*CAP` endpoint" above) — `a_in[13]` as that specific node, not
+`a_in\[13\]`, live-verified as the one shape OpenSTA's *pin*-lookup path
+(as opposed to the net-name-matching path the previous paragraph covers)
+actually resolves for a bus-indexed port. Every other identifier position
+for that same net (`*D_NET a_in\[13\] …`, `*PORTS`/`*P a_in\[13\] B`) still
+escapes it — the exception is narrowly scoped to the specific `*RES`/`*CAP`
+node text, not the net's identity everywhere else in the file.
 
 **Duplicate net names are a known, inherited limitation**, not something
 this writer resolves: a layout label shared by several distinct, un-strapped
