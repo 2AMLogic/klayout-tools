@@ -471,6 +471,40 @@ not `klt --version`, if you need to detect this kind of drift.
   OpenROAD subprocess launch), not assumed free. No `schema_version` bump.
   See `docs/cli/place-and-route.md`.
 
+- 2026-08-13 — `klt extract --parasitics` can now additionally write its
+  per-net R/C model as a Standard Parasitic Exchange Format file (`--spef
+  PATH`, issue #948, Epic #700 Phase 3, `docs/design/post-route-sta-survey.md`
+  §4.1) — a pure format translation of the same data already reported in the
+  JSON `parasitics` block and injected into the written SPICE, for
+  `read_spef`-style STA consumption. Requires `--parasitics`. Every SPEF
+  identifier is backslash-escaped for the characters SPEF's own (IEEE
+  1481-1999) grammar reserves (`$`, `|`, `[`, `]`) — load-bearing, not
+  cosmetic: KLayout's extracted net names routinely carry them, and a real
+  OpenSTA `read_spef` aborts on the first unescaped occurrence
+  (`[ERROR STA-1670]`), reproduced live and fixed here. New additive
+  response field `spef_path` (`null` unless `--spef` was given). `klt
+  place-and-route`'s `"route"` stage wires this in behind an opt-in
+  `post_route_spef` request boolean (default `false`): after the DEF→GDS
+  merge, `klt extract --parasitics --spef` runs against the merged routed
+  GDS, and a second OpenSTA session (seeded from the `"route"` stage's own
+  checkpoint) loads that SPEF via `read_spef`, reporting slack/violation
+  metrics into the new additive `spef_sta` response field alongside — never
+  replacing — the existing `estimate_parasitics -global_routing`-derived
+  top-level fields. Net-name correlation between `klt extract`'s
+  GDS-label-derived names and OpenSTA's own linked-design net list is
+  checked explicitly (`get_nets -quiet`, before `read_spef` runs) and
+  reported as `spef_sta.nets_annotated`/`nets_total` plus a plain-language
+  `spef_sta.annotation_warning` when incomplete — measured live at 0%
+  correlation on the `gcd`/`modexp`/`mult8` corpus (internal routed nets
+  reach the GDS under KLayout-synthesized names, not OpenSTA's own; see
+  `docs/cli/place-and-route.md`'s "Net-name correlation" subsection and
+  follow-on issue #951), so `spef_sta`'s numbers must not be read as a
+  real-parasitics measurement until that gap closes. Off by default — a
+  real wall-clock addition (one more `klt extract --parasitics` pass plus
+  one more `openroad` invocation), not assumed free. `null` before the
+  `"route"` stage. No `schema_version` bump. See `docs/cli/extract.md` and
+  `docs/cli/place-and-route.md`.
+
 - 2026-08-13 — `klt place-and-route`'s `"route"` stage gains a new additive
   `route_drc_violation_count` response field (issue #938, Epic #700 Phase 2,
   `docs/design/native-routing-survey.md` §4.5), mirroring the existing
