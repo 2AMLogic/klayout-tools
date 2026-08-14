@@ -9510,6 +9510,45 @@ def test_def_net_instance_pins_ignores_specialnets_section(tmp_path):
     assert def_net_instance_pins(str(def_path)) == {"a": (("u1", "A"),)}
 
 
+def test_def_net_instance_pins_ignores_routed_wire_geometry(tmp_path):
+    """A real routed DEF's net record continues with `+ ROUTED <layer> ( x y )
+    ... NEW <layer> ( x y ) <via>` (LEF/DEF 5.8 section 6.9), whose coordinate
+    and via tuples have the identical `( <a> <b> )` shape as a `( <inst> <pin> )`
+    connection. Only the connection-list prefix (everything before the record's
+    first `+` clause) may be scanned -- otherwise every routed signal net
+    contributes fake `*I 27300:60900 B` `*CONN` entries and matching zero-ohm
+    `*RES` legs to the emitted SPEF."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- net1 ( I1 A ) ( I2 Z )\n"
+        "  + ROUTED metal1 ( 27300 60900 ) ( * 63500 )\n"
+        "    NEW metal2 ( 27300 63500 ) ( 29700 * ) via1_2\n"
+        "  ;\n"
+        "- net2 ( PIN OUT ) ( I3 A )\n"
+        "  + ROUTED metal3 ( 100 200 ) ( 300 400 )\n"
+        "  ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {
+        "net1": (("I1", "A"), ("I2", "Z")),
+        "net2": (("I3", "A"),),
+    }
+
+
+def test_def_net_instance_pins_ignores_single_line_routed_geometry(tmp_path):
+    """Same restriction when the whole record (connections plus `+ ROUTED`
+    geometry) is emitted on one line."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "NETS 1 ;\n"
+        "    - n1 ( u1 Y ) ( u2 A ) + USE SIGNAL "
+        "+ ROUTED met1 ( 500 500 ) ( 900 * ) ;\n"
+        "END NETS\n"
+    )
+    assert def_net_instance_pins(str(def_path)) == {"n1": (("u1", "Y"), ("u2", "A"))}
+
+
 def test_def_net_instance_pins_empty_when_no_nets_section(tmp_path):
     def_path = tmp_path / "top.def"
     def_path.write_text("DESIGN top ;\nEND DESIGN\n")

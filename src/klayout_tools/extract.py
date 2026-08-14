@@ -386,6 +386,19 @@ _DEF_NET_START_RE = re.compile(r"^\s*-\s+(\S+)")
 #: by ``place_and_route.py``'s ``_def_pin_net_names``/``declared_pins`` and
 #: excluded by :func:`def_net_instance_pins` below).
 _DEF_NET_CONN_RE = re.compile(r"\(\s*(\S+)\s+(\S+)\s*\)")
+#: Matches the first whitespace-delimited ``+`` token in a net record's body
+#: -- the start of the record's first ``+``-prefixed clause (``+ ROUTED``,
+#: ``+ USE SIGNAL``, ``+ NONDEFAULTRULE ...``, LEF/DEF 5.8 section 6.9). The
+#: DEF grammar puts the whole ``( <ref> <pin> )`` connection list *before*
+#: any such clause, so everything from this token onward is routing/attribute
+#: syntax, not connectivity. Splitting there is what keeps ``+ ROUTED
+#: metal1 ( 27300 60900 ) ( * 63500 ) NEW metal2 ( 27300 63500 ) <via>``'s
+#: coordinate and via tuples -- which have the identical ``( <a> <b> )``
+#: shape as a connection -- from being scanned as fake ``(instance, pin)``
+#: pairs. Anchored on whitespace (or line start) on the left and whitespace
+#: (or line end) on the right so a ``+`` inside an escaped DEF identifier
+#: (``\+foo``) or a coordinate never triggers the split.
+_DEF_NET_CLAUSE_RE = re.compile(r"(?:^|\s)\+(?=\s|$)")
 
 
 def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...]]:
@@ -405,6 +418,16 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
     lines (a high-fanout net wraps in a real routed DEF), so this
     accumulates a record's own text across lines until the terminating
     ``;``, matching ``_def_pin_net_names``'s own multi-line handling.
+
+    Only the record's *connection-list prefix* is scanned: DEF's grammar
+    puts the whole ``( <ref> <pin> )`` list before any ``+``-prefixed
+    clause, and a real routed net continues with ``+ ROUTED <layer> ( x y )
+    ( * y ) NEW <layer> ( x y ) <via> ...`` whose coordinate and via tuples
+    have the identical ``( <a> <b> )`` shape as a connection. Scanning the
+    full record body would therefore turn wire points into fake
+    ``(instance, pin)`` pairs on essentially every routed signal net, so
+    the body is split at its first ``+`` token (:data:`_DEF_NET_CLAUSE_RE`)
+    and only the part before it is matched.
 
     These are exactly the ``<inst>``/``<pin>`` identifiers OpenSTA's own
     linked gate-level design already uses (DEF preserves the flow's
@@ -438,9 +461,16 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
     def _flush() -> None:
         nonlocal current_net, current_body
         if current_net is not None and current_body:
+            # Only the record's connection-list prefix -- everything before
+            # its first `+`-prefixed clause -- holds `( <ref> <pin> )`
+            # connections. A routed net's `+ ROUTED`/`NEW` geometry uses the
+            # identical `( <a> <b> )` shape for coordinates and vias, so
+            # scanning the whole body would invent connections out of wire
+            # points (see `_DEF_NET_CLAUSE_RE`).
+            body = _DEF_NET_CLAUSE_RE.split(" ".join(current_body), maxsplit=1)[0]
             pairs = [
                 (ref, pin)
-                for ref, pin in _DEF_NET_CONN_RE.findall(" ".join(current_body))
+                for ref, pin in _DEF_NET_CONN_RE.findall(body)
                 if ref != "PIN"
             ]
             if pairs:
