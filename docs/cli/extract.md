@@ -2072,6 +2072,76 @@ this much on this net," not as a verdict that either number is the "true"
 capacitance (silicon or a full non-idealised field solve would be needed for
 that).
 
+### Substitute a caller-supplied `klt mom` R/L/C for a critical net (`--mom-rlc-net`, issue #988, Epic #709 Phase 3a)
+
+`--mom-net` above drives its *own* MoM solve (an idealised, synthesized
+ground plate) and reports the comparison. `--mom-rlc-net <net>
+--mom-rlc-resistance-ohm <r> --mom-rlc-capacitance-ff <c>
+[--mom-rlc-inductance-nh <l>]` is the mechanical complement: it substitutes a
+caller-supplied R/L/C — e.g. the output of a *separate*, real [`klt
+mom`](mom.md) run against that net's actual geometry (arbitrary stackup, not
+an idealised infinite-plane assumption) — for that one named net's Phase 1/2
+lumped-RC/coupling-C value, so the net a caller has singled out as critical
+carries a MoM-grade parasitic in the extracted netlist a later
+[`klt sim`](sim.md)/[`klt pex`](pex.md) re-simulation actually uses.
+
+```
+klt extract cell.gds --deck sky130 --parasitics \
+    --mom-rlc-net CRIT --mom-rlc-resistance-ohm 42.5 \
+    --mom-rlc-capacitance-ff 3.1 --mom-rlc-inductance-nh 0.8 \
+    --format json
+```
+
+- **This command never calls `klt mom` itself.** Unlike `--mom-net`, the
+  three numeric values are opaque caller input — where they came from (a
+  `klt mom` spec-file run, hand computation, a third-party field solver) is
+  none of this flag's concern. Run `klt mom` separately (see
+  [`docs/cli/mom.md`](mom.md)) and pass its numbers through.
+- **Requires `--parasitics`** and at least one of
+  `--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`/
+  `--mom-rlc-inductance-nh` (and vice versa: any of the three given without
+  `--mom-rlc-net` is also an error). Each of the three is independently
+  optional — a caller trusting MoM for capacitance only, say, can omit
+  `--mom-rlc-resistance-ohm` and keep the lumped-RC value for that
+  component.
+- **A `<net>` matching no net with ground-eligible parasitics geometry is a
+  clean `ExtractError`** — the same "an explicit request for a specific
+  net's value should never silently fall back" convention `--mom-net`
+  follows, not `--critical-net`'s tolerant `warnings`-only convention (a
+  caller supplying a real measured value for a specific net expects it
+  applied).
+- **Mutually exclusive with `--distributed-rc` naming the same net** (via
+  `--critical-net`) — a caller-supplied lumped R/L/C total and a
+  multi-segment ladder derived from the deck's own coefficient table cannot
+  both describe one net's model at once; combining them for the same net is
+  an `ExtractError`.
+- **`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff` genuinely
+  replace**, not merely report alongside: the named net's series
+  resistance/ground capacitance in both the written SPICE `R`/`C` card(s)
+  and its `parasitics.nets[]` entry become the substituted values. Every
+  other net's parasitics — JSON and SPICE — are completely unaffected
+  (net-scoped).
+- **`--mom-rlc-inductance-nh` is purely additive**, not a substitution —
+  this command's default model (`PARASITIC_MODEL_SCOPE`) has no inductance
+  term for anything to replace. When given, one series inductor is spliced
+  into the named net's star/Gamma-shunt hub, in henries, in the written
+  SPICE `L` card: `hub --L--> <fresh node> --C--> ground` (the ground
+  capacitor moves from the hub to the inductor's far end, rather than
+  sitting in parallel with it).
+- **Resolved by net name**, not `net_id` (matching `--critical-net`'s own
+  convention, not `--mom-net`'s) — there is no single solved net object here
+  to key on, since the R/L/C values are opaque caller input rather than the
+  output of a solve this flag ran itself. Every distinct net object sharing
+  this net name (e.g. several un-strapped islands with the same layout
+  label) is substituted the same way.
+- **The substitution is also reported**, in a new
+  `parasitics.mom_rlc_override` object — see "JSON `parasitics` block"
+  below for the field list.
+- **`klt pex`** ([`docs/cli/pex.md`](pex.md)) forwards all four flags
+  straight through to its own extraction step, so the re-simulated
+  extracted-side testbench (and the resulting `delta[]` rows) reflect the
+  substituted net's MoM-grade parasitic.
+
 ### SPEF export (`--spef`, issue #948, Epic #700 Phase 3)
 
 `--spef <path>` writes `--parasitics`'s existing per-net R/C model as a
@@ -2574,20 +2644,37 @@ describes the `--distributed-rc` ladder case), the same "additive behavior
 change, recorded in `CHANGELOG.md`" treatment `model.coupling`'s own changes
 got.
 
+**Additive fields, no `schema_version` bump (issue #988):** `l_count`,
+`total_inductance_nh`, `nets[].inductance_nh`, and `mom_rlc_override` are
+new; no documented field is renamed or retyped. `--mom-rlc-net` omitted (the
+default) leaves every field byte-identical to before this feature existed —
+`l_count` is simply `0`, `total_inductance_nh` is `0.0`, every
+`nets[].inductance_nh` is `0.0`, and `mom_rlc_override` is `null`. **Given**
+`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`, the named net's
+`resistance_ohm`/`capacitance_ff` (in `nets[]`, the written SPICE, and
+therefore also `total_resistance_ohm`/`total_capacitance_ff`) become the
+substituted values instead of the lumped-RC ones — a material value change,
+but strictly opt-in and net-scoped, recorded in `CHANGELOG.md` per the same
+pre-1.0-caveat precedent issue #798's own `--mom-net` swap already
+established.
+
 ```json
 "parasitics": {
   "r_count": 6,
   "c_count": 4,
   "cc_count": 1,
+  "l_count": 0,
   "total_resistance_ohm": 3050.7818,
   "total_capacitance_ff": 5.400116,
   "total_coupling_capacitance_ff": 0.171301,
+  "total_inductance_nh": 0.0,
   "nets": [
     {
       "net": "Y",
       "net_id": 42,
       "resistance_ohm": 1169.7827,
       "capacitance_ff": 1.910204,
+      "inductance_nh": 0.0,
       "hub_net": "Y",
       "terminals": [
         {
@@ -2617,6 +2704,7 @@ got.
   "overlap_pairs_without_coefficient": [],
   "critical_nets": [],
   "distributed_rc": false,
+  "mom_rlc_override": null,
   "model": {
     "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
     "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
@@ -2631,9 +2719,11 @@ got.
 | `r_count`              | integer         | Total number of parasitic resistors emitted across every net — one per `terminals[]` entry (star topology, issue #592), or exactly one for a net with no device terminal (the pre-#592 Γ-shunt fallback). `>= c_count` whenever any net has more than one terminal. |
 | `c_count`              | integer         | Number of **ground** capacitors emitted — always one per `nets[]` entry, unchanged since issue #216. Coupling capacitors are *not* counted here; see `cc_count`. |
 | `cc_count`             | integer         | Number of **coupling** capacitors emitted (issue #760) — one per distinct coupled net pair. `0` when the layout has no inter-net vertical overlap, or the deck curates no overlap coefficients. |
+| `l_count`              | integer         | Additive field (issue #988). Number of series inductors emitted — `0` unless `--mom-rlc-net`/`--mom-rlc-inductance-nh` was given, in which case `1` (this feature adds at most one net's worth). |
 | `total_resistance_ohm` | number          | Sum of each net's *total* series resistance (ohms) — the same value as summing `nets[].resistance_ohm`, not `nets[].terminals[].resistance_ohm` (which sums back to the same per-net total, modulo the negligible per-leg minimum-resistance clamp). |
 | `total_capacitance_ff` | number          | Sum of the emitted ground capacitances (femtofarads).                                             |
 | `total_coupling_capacitance_ff` | number | Sum of the emitted coupling capacitances (femtofarads), each pair counted **once** (issue #760). Summing `nets[].coupled[].capacitance_ff` instead double-counts, since every pair is reported from both endpoints. |
+| `total_inductance_nh`  | number          | Additive field (issue #988). Sum of `nets[].inductance_nh` (nanohenries) — `0.0` unless `--mom-rlc-net`/`--mom-rlc-inductance-nh` was given. |
 | `nets`                 | array\<object\> | One entry per net carrying parasitics, sorted by `net` for deterministic output. See below.       |
 | `metals_without_coefficient` | array\<object\> | Metal stack levels the deck declares for connectivity but its `PARASITICS.metals` table has no coefficient for (issue #547). See below. Empty for both shipped decks. |
 | `overlap_pairs_without_coefficient` | array\<object\> | Adjacent metal-level pairs the deck declares but its `PARASITICS.metal_overlaps` table has no vertical-overlap coefficient for (issue #760). See below. Empty for both shipped decks. |
@@ -2641,6 +2731,7 @@ got.
 | `distributed_rc`       | boolean         | `true` only when `--distributed-rc` was given (issue #977). `false` otherwise, `--critical-net`-only runs included. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
+| `mom_rlc_override`     | object \| null  | Additive field (issue #988). `null` unless `--mom-rlc-net <net>` was given, in which case it is the substitution report for that one net — see "Substitute a caller-supplied `klt mom` R/L/C for a critical net" above and the field list below. |
 
 `mom_crosscheck` (present only when `--mom-net` was given):
 
@@ -2659,6 +2750,19 @@ got.
 | `method` | string | One-line prose description of the cross-check method, for a human reading the JSON without this doc open. |
 | `warnings` | array\<string\> | Cross-check-specific caveats (always includes the metals-only scope note above); also mirrored into the top-level `warnings[]`. |
 
+`mom_rlc_override` (present only when `--mom-rlc-net` was given):
+
+| Field | Type | Description |
+|---|---|---|
+| `net` | string | The `--mom-rlc-net` value, echoed back. |
+| `matched_net_count` | integer | How many net *objects* sharing this net name were substituted (usually `1`; `> 1` only for un-strapped same-labelled islands). |
+| `previous_resistance_ohm` | number | The sum of the matched net object(s)' series resistance **before** the swap — what `--parasitics` alone would have reported. |
+| `previous_capacitance_ff` | number | The sum of the matched net object(s)' ground capacitance **before** the swap. |
+| `resistance_ohm` | number \| null | The `--mom-rlc-resistance-ohm` value, echoed back — `null` when that flag was omitted (this component kept its lumped-RC value). |
+| `capacitance_ff` | number \| null | The `--mom-rlc-capacitance-ff` value, echoed back — `null` when that flag was omitted. |
+| `inductance_nh` | number \| null | The `--mom-rlc-inductance-nh` value, echoed back — `null` when that flag was omitted (no inductor was added). |
+| `method` | string | One-line prose description of the substitution, for a human reading the JSON without this doc open. |
+
 Each `nets[]` entry:
 
 | Field            | Type            | Description                                                                                          |
@@ -2667,6 +2771,7 @@ Each `nets[]` entry:
 | `net_id`         | integer         | Additive field (issue #765). A stable identifier, unique across every entry in this response, that disambiguates same-named entries — the net object's own KLayout cluster id. Build `{entry["net_id"]: entry}` instead of `{entry["net"]: entry}` if the layout may have same-labelled distinct nets (real layouts routinely do — 105 out of 908 distinct `VGND`/`VPWR`/... labels on the `gcd` corpus). |
 | `resistance_ohm` | number          | The net's total computed series resistance (ohms) — the star's total "budget", distributed across `terminals[]`. |
 | `capacitance_ff` | number          | The net's total lumped **ground** capacitance (femtofarads), hung off `hub_net` — with any area coupled to another net on an adjacent metal level already removed (issue #760, see `coupled[]`). Can be `0.0` for a net whose whole area term moved to coupling; the entry (and its hub) still exists. |
+| `inductance_nh`  | number          | Additive field (issue #988). This net's series inductor (nanohenries) — `0.0` unless `--mom-rlc-net`/`--mom-rlc-inductance-nh` named this net. |
 | `hub_net`        | string          | The star's hub node name (or, for a distributed net, the ladder's middle leg — see "Distributed (multi-segment) RC ladder for critical nets" above). Equal to `net` itself whenever the net has at least one device terminal (the common case — the pin/subcircuit connectivity that already lived on `net` stays there, at zero resistance from the hub). Only a fresh `<net>__par`-style node (or a collision-suffixed variant) when the net has **no** device terminal to fan a star out to. |
 | `rc_model`       | string          | Additive field (issue #977). `"lumped"` (the star/Gamma-shunt model above, every net unless the next field applies) or `"distributed"` (the `--distributed-rc` ladder — see "Distributed (multi-segment) RC ladder for critical nets" above). |
 | `segments`       | array\<object\> | Additive field (issue #977). The ladder's per-segment resistors, in node order: `{"net_a", "net_b", "resistance_ohm"}`. `[]` unless `rc_model == "distributed"`. |

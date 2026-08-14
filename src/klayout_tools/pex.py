@@ -346,6 +346,10 @@ def run_pex(
     backend: str | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
+    mom_rlc_net: str | None = None,
+    mom_rlc_resistance_ohm: float | None = None,
+    mom_rlc_capacitance_ff: float | None = None,
+    mom_rlc_inductance_nh: float | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -371,7 +375,21 @@ def run_pex(
     ``critical_nets`` to be non-empty), so the re-simulated extracted-side
     testbench (and the resulting `delta[]` rows) reflect the finer-grained
     model. ``False`` (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``backend`` is passed
+    before this feature existed. ``mom_rlc_net``/``mom_rlc_resistance_ohm``/
+    ``mom_rlc_capacitance_ff``/``mom_rlc_inductance_nh`` (``klt pex
+    --mom-rlc-net <net> --mom-rlc-resistance-ohm <r>
+    --mom-rlc-capacitance-ff <c> [--mom-rlc-inductance-nh <l>]``, issue
+    #988, Epic #709 Phase 3a) are also passed straight through to
+    :func:`~klayout_tools.extract.run_extract` -- substitutes a
+    caller-supplied, directly-solved R/L/C for one named net (e.g. from a
+    separate ``klt mom`` run against that net's real geometry) in place of
+    this extraction's own Phase 1/2 lumped-RC/coupling-C value for that net,
+    so the re-simulated extracted-side testbench (and the resulting
+    `delta[]` rows) reflect a MoM-grade parasitic on exactly the net a
+    caller has singled out as critical. See ``run_extract``'s own
+    ``mom_rlc_net`` docstring paragraph for the full substitution/validation
+    rules. ``None`` (the default) for all four skips this entirely --
+    byte-identical to before this feature existed. ``backend`` is passed
     through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
     extracted side, every testbench) -- see ``docs/cli/sim.md``'s
     "Execution backends". ``artifacts_dir`` overrides where this command
@@ -422,6 +440,10 @@ def run_pex(
             parasitics=True,
             critical_nets=critical_nets,
             distributed_rc=distributed_rc,
+            mom_rlc_net=mom_rlc_net,
+            mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
+            mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
+            mom_rlc_inductance_nh=mom_rlc_inductance_nh,
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -575,6 +597,12 @@ def run_pex(
             # `False` when the flag was never given, byte-identical to
             # before this feature existed.
             "distributed_rc": bool(parasitics.get("distributed_rc")),
+            # Additive field (issue #988, Epic #709 Phase 3a): `None`
+            # unless `--mom-rlc-net` was given, in which case it is `klt
+            # extract`'s own substitution report (see
+            # `run_extract`'s `mom_rlc_net` docstring paragraph) --
+            # byte-identical to before this feature existed otherwise.
+            "mom_rlc_override": parasitics.get("mom_rlc_override"),
         },
         "testbenches": testbenches_summary,
         "corner_count": corner_count,

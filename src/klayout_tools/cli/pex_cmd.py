@@ -50,6 +50,16 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/
+            # `--mom-rlc-capacitance-ff`/`--mom-rlc-inductance-nh` (issue
+            # #988, Epic #709 Phase 3a): substitutes a caller-supplied R/L/C
+            # for one named net's Phase 1/2 lumped-RC/coupling-C value.
+            # `None` for all four when the flags were never given,
+            # unchanged from every call site that predates them.
+            mom_rlc_net=args.mom_rlc_net,
+            mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
+            mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,
+            mom_rlc_inductance_nh=args.mom_rlc_inductance_nh,
         )
     except PexError as exc:
         return emit_error("pex", str(exc), args.format)
@@ -88,6 +98,15 @@ def _print_text(report: dict) -> None:
     # Additive (issue #977): only printed when --distributed-rc was given.
     if extraction.get("distributed_rc"):
         print("distributed_rc: on")
+    # Additive (issue #988): only printed when --mom-rlc-net was given.
+    mom_rlc_override = extraction.get("mom_rlc_override")
+    if mom_rlc_override is not None:
+        print(
+            f"mom_rlc_override: net={mom_rlc_override['net']}  "
+            f"r_ohm={mom_rlc_override['resistance_ohm']}  "
+            f"c_ff={mom_rlc_override['capacitance_ff']}  "
+            f"l_nh={mom_rlc_override['inductance_nh']}"
+        )
 
     testbenches = report["testbenches"]
     if testbenches:

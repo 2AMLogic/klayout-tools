@@ -531,6 +531,50 @@ def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout)
         run_pex(resistor_layout, [str(request)], "sky130", distributed_rc=True)
 
 
+@_SKIP_NO_NGSPICE
+def test_run_pex_mom_rlc_net_threaded_through_to_extraction(tmp_path, resistor_layout):
+    """`--mom-rlc-net`/`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`
+    (issue #988, Epic #709 Phase 3a) are forwarded from `run_pex` to
+    `run_extract`, and the substitution report is echoed back in
+    `extraction.mom_rlc_override` -- a fully wired unit-of-work test, distinct
+    from `tests/test_extract.py`'s own exact-value substitution tests. `RB`
+    (this fixture's one labelled met1/li1 net, also this resistor's own load
+    node) genuinely carries lumped-RC parasitics, so the override measurably
+    changes the extracted-side re-simulation's own value versus the
+    no-override baseline."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    baseline = run_pex(resistor_layout, [str(request)], "sky130")
+    assert baseline["extraction"]["mom_rlc_override"] is None
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        mom_rlc_net="RB",
+        mom_rlc_resistance_ohm=50_000.0,
+        mom_rlc_capacitance_ff=500.0,
+    )
+
+    override = report["extraction"]["mom_rlc_override"]
+    assert override is not None
+    assert override["net"] == "RB"
+    assert override["resistance_ohm"] == 50_000.0
+    assert override["capacitance_ff"] == 500.0
+    assert override["inductance_nh"] is None
+    assert report["status"] == "pass"
+
+    # A much larger series resistance on `RB` measurably moves the
+    # extracted-side re-simulation's own value versus the no-override
+    # baseline (both share the identical schematic-side value/testbench).
+    baseline_row = baseline["delta"][0]
+    override_row = report["delta"][0]
+    assert baseline_row["schematic_value"] == override_row["schematic_value"]
+    assert override_row["extracted_value"] != baseline_row["extracted_value"]
+
+
 def _make_pex_lateral_coupling_layout(top_name: str = "TOP") -> kdb.Layout:
     """Two same-layer (met1) nets, ``AGR`` ("aggressor") and ``VIC``
     ("victim"), 0.1 um apart -- well within sky130 met1's own lateral-

@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--critical-net <net>]... [--distributed-rc] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
 ```
 
 - `<layout>` — path to a GDSII (`.gds`) or OASIS (`.oas`) routed layout
@@ -53,6 +53,20 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   rows) reflect the finer-grained model. Off by default -- byte-identical to
   before this feature existed. See [`extract.md`](extract.md)'s "Distributed
   (multi-segment) RC ladder for critical nets" section.
+- `--mom-rlc-net` / `--mom-rlc-resistance-ohm` / `--mom-rlc-capacitance-ff` /
+  `--mom-rlc-inductance-nh` — passed through to `klt extract --mom-rlc-net`
+  (issue #988, Epic #709 Phase 3a). Substitutes a caller-supplied,
+  directly-solved R/L/C for one named net -- e.g. the output of a separate
+  [`klt mom`](mom.md) run against that net's real geometry -- in place of
+  this extraction's own Phase 1/2 lumped-RC/coupling-C value for that net,
+  so the re-simulated extracted-side testbench (and the resulting `delta[]`
+  rows) reflect a MoM-grade parasitic on exactly the net a caller has
+  singled out as critical. `--mom-rlc-net` requires at least one of the
+  other three; `--mom-rlc-inductance-nh` is purely additive (there is no
+  inductance term in the default model to replace). Off by default --
+  byte-identical to before this feature existed. See
+  [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C
+  for a critical net" section.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -157,7 +171,8 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
       "frequency": "quasi-static -- one frequency-independent R and C per net ..."
     },
     "critical_nets": [],
-    "distributed_rc": false
+    "distributed_rc": false,
+    "mom_rlc_override": null
   },
   "testbenches": [
     {
@@ -200,7 +215,7 @@ verb — see [`json-contract.md`](../json-contract.md) for the envelope
 | `layout`             | string            | Echo of `<layout>`, exactly as provided.                                                |
 | `netlist`            | string            | Path to the extracted (parasitic-annotated) netlist `klt extract` wrote.                |
 | `reference_netlist`  | string            | Absolute path of the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above). |
-| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), and `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), and `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (the file path as given), `schematic_netlist` (the resolved DUT path it `.include`d), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
@@ -255,8 +270,17 @@ set (not run unconditionally across the whole layout, the way vertical
 coupling is). Distributed RC is Phase 2b scope
 ([#977](https://github.com/2AMLogic/klayout-tools/issues/977)) — landed as
 the `--distributed-rc` flag above, opt-in and scoped to the same
-`--critical-net` set. MoM-grade extraction remains later-phase scope (not
-this command) — see Epic #709.
+`--critical-net` set. Feeding a real `klt mom` (Method-of-Moments, Epic
+#701) R/L/C for a chosen critical net into this command's own extracted
+netlist is Phase 3a scope
+([#988](https://github.com/2AMLogic/klayout-tools/issues/988)) — landed as
+the `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`/
+`--mom-rlc-inductance-nh` flags above, opt-in and scoped to one named net at
+a time, substituting into (rather than merely reporting alongside) that
+net's Phase 1/2 value — so the `delta[]` report can be produced against a
+MoM-grade parasitic for that net. See [`extract.md`](extract.md)'s
+"Substitute a caller-supplied `klt mom` R/L/C for a critical net" section
+for the full substitution mechanics.
 
 **Phase 2a's own measurable-delta proof.** The `sky130-ota-5t` canary above
 is DC-only by construction (every measurement point is an ideal-voltage-

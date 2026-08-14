@@ -470,6 +470,37 @@ not `klt --version`, if you need to detect this kind of drift. See
 ### Added since release
 
 - 2026-08-14 — `klt extract --parasitics` (and `klt pex`) gain
+  **`--mom-rlc-net`/`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`/
+  `--mom-rlc-inductance-nh`** — substitute a caller-supplied, directly-solved
+  R/L/C for one named net (e.g. the output of a separate `klt mom`
+  Method-of-Moments run against that net's real geometry, Epic #701) in
+  place of this extraction's own Phase 1/2 lumped-RC/coupling-C value for
+  that net (issue #988, Epic #709 Phase 3a — the mechanical half of closing
+  the loop between the MoM epic and the PEX epic). Unlike `--mom-net`
+  (issue #798), which drives its own internal, idealised-ground-plate MoM
+  solve and reports the comparison, this command never calls `klt mom`
+  itself — the three values are opaque caller input, applied verbatim.
+  `--mom-rlc-net` requires `--parasitics` and at least one of the other
+  three (each independently optional); a name matching no net with
+  ground-eligible parasitics geometry is a clean error, matching
+  `--mom-net`'s "an explicit request should never silently fall back"
+  convention. `--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`
+  genuinely replace the named net's series resistance/ground capacitance in
+  both the written SPICE `R`/`C` card(s) and its `parasitics.nets[]` entry
+  — net-scoped, every other net's parasitics (JSON and SPICE) untouched.
+  `--mom-rlc-inductance-nh` is purely additive (there is no inductance term
+  in the default RC-only model to replace): one series inductor
+  (`kdb.DeviceClassInductor`, henries) is spliced between the named net's
+  hub and its ground capacitor. Mutually exclusive with `--distributed-rc`
+  naming the same net. New fields: `parasitics.l_count`,
+  `parasitics.total_inductance_nh`, `parasitics.nets[].inductance_nh`, and
+  `parasitics.mom_rlc_override` (echoes the applied substitution); `klt
+  pex`'s `extraction.mom_rlc_override` mirrors the latter. Omitted (the
+  default) leaves every field byte-identical to before this feature
+  existed. See `docs/cli/extract.md`'s "Substitute a caller-supplied `klt
+  mom` R/L/C for a critical net" section.
+
+- 2026-08-14 — `klt extract --parasitics` (and `klt pex`) gain
   **`--critical-net`, repeatable** — lateral (same-layer, sidewall)
   coupling capacitance for caller-declared "nets that matter" (issue #976,
   Epic #709 Phase 2a: "high-impedance nodes, the SAR ADC's CDAC top plate,

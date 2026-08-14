@@ -17,6 +17,7 @@ Two tiers, mirroring `tests/test_drc.py`:
 from __future__ import annotations
 
 import dataclasses
+import difflib
 import json
 import re
 import shutil
@@ -6050,9 +6051,11 @@ def test_parasitics_summary_block_shape(tmp_path):
         "r_count",
         "c_count",
         "cc_count",
+        "l_count",
         "total_resistance_ohm",
         "total_capacitance_ff",
         "total_coupling_capacitance_ff",
+        "total_inductance_nh",
         "nets",
         "metals_without_coefficient",
         "overlap_pairs_without_coefficient",
@@ -6060,10 +6063,18 @@ def test_parasitics_summary_block_shape(tmp_path):
         "distributed_rc",
         "model",
         "mom_crosscheck",
+        "mom_rlc_override",
     }
     # `mom_crosscheck` (issue #798) is `None` unless `--mom-net` was given --
     # additive, present but empty here (this test does not pass `mom_net`).
     assert para["mom_crosscheck"] is None
+    # `mom_rlc_override` (issue #988) is `None` unless `--mom-rlc-net` was
+    # given -- additive, present but empty here (this test does not pass
+    # `mom_rlc_net`). `l_count`/`total_inductance_nh` default to `0`/`0.0`
+    # the same way, unless `--mom-rlc-inductance-nh` was also given.
+    assert para["mom_rlc_override"] is None
+    assert para["l_count"] == 0
+    assert para["total_inductance_nh"] == 0.0
     # `model` (issue #728) declares the parasitic model's own scope --
     # static across every extraction, so it must match the module constant
     # exactly, not just be present.
@@ -6097,6 +6108,7 @@ def test_parasitics_summary_block_shape(tmp_path):
             "net_id",
             "resistance_ohm",
             "capacitance_ff",
+            "inductance_nh",
             "hub_net",
             "rc_model",
             "terminals",
@@ -6107,6 +6119,9 @@ def test_parasitics_summary_block_shape(tmp_path):
         # `--distributed-rc` named this net -- additive, unset here.
         assert entry["rc_model"] == "lumped"
         assert entry["segments"] == []
+        # `inductance_nh` (issue #988): `0.0` unless `--mom-rlc-net`/
+        # `--mom-rlc-inductance-nh` named this net -- additive, unset here.
+        assert entry["inductance_nh"] == 0.0
         assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
@@ -9437,6 +9452,214 @@ def test_mom_net_duplicate_named_islands_swap_the_solved_island(tmp_path):
     }
     assert crosscheck["mom_capacitance_ff"] in written_ff
     assert baseline_by_id[other_id]["capacitance_ff"] in written_ff
+
+
+# --------------------------------------------------------------------------- #
+# `klt extract --mom-rlc-net` (issue #988, Epic #709 Phase 3a): substitute a
+# caller-supplied R/L/C (e.g. from a separate `klt mom` run) for one named
+# net's Phase 1/2 lumped-RC ground model. Unlike `--mom-net` above, this
+# needs no `klt_mom_native` extension at all -- the R/L/C values are opaque
+# caller-supplied floats, not the output of a solve this feature runs
+# itself.
+# --------------------------------------------------------------------------- #
+
+
+def test_mom_rlc_net_requires_parasitics(tmp_path):
+    gds = SKY130_CORPUS_FILES[0]
+    with pytest.raises(ExtractError, match="--mom-rlc-net requires --parasitics"):
+        run_extract(
+            str(gds),
+            "sky130",
+            mom_rlc_net="Y",
+            mom_rlc_resistance_ohm=100.0,
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_rlc_net_requires_at_least_one_value(tmp_path):
+    gds = SKY130_CORPUS_FILES[0]
+    with pytest.raises(ExtractError, match="requires at least one of"):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            mom_rlc_net="Y",
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_rlc_values_require_net(tmp_path):
+    gds = SKY130_CORPUS_FILES[0]
+    with pytest.raises(ExtractError, match="require --mom-rlc-net"):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            mom_rlc_resistance_ohm=100.0,
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_rlc_net_negative_value_raises(tmp_path):
+    gds = SKY130_CORPUS_FILES[0]
+    with pytest.raises(ExtractError, match=r"--mom-rlc-resistance-ohm must be >= 0"):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            mom_rlc_net="Y",
+            mom_rlc_resistance_ohm=-1.0,
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_rlc_net_unknown_net_raises_clean_error(tmp_path):
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    with pytest.raises(ExtractError, match="matches no net"):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            mom_rlc_net="DOES_NOT_EXIST",
+            mom_rlc_resistance_ohm=100.0,
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_rlc_net_conflicts_with_distributed_rc_on_same_net(tmp_path):
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    with pytest.raises(ExtractError, match="cannot both model"):
+        run_extract(
+            str(gds),
+            "sky130",
+            parasitics=True,
+            critical_nets=["Y"],
+            distributed_rc=True,
+            mom_rlc_net="Y",
+            mom_rlc_resistance_ohm=100.0,
+            output=str(tmp_path / "out.spice"),
+        )
+
+
+def test_mom_rlc_net_substitutes_r_c_l_net_scoped(tmp_path):
+    """The acceptance-criteria case (issue #988): a caller-supplied R/L/C for
+    net `Y` on `sky130_fd_sc_hd__inv_1` (the same canary net `--mom-net`'s
+    own tests use) replaces that net's Phase 1 lumped-RC model in both the
+    JSON `parasitics.nets[]` entry and the written SPICE -- and *only* that
+    net's. Demonstrates all three of issue #988's acceptance criteria: (1)
+    `klt extract` accepts and applies a caller-supplied R/L/C for a named
+    net, (2) every other net's parasitics -- JSON and SPICE -- are
+    byte-identical to the unmodified extraction, and (3) the two written
+    SPICE netlists, diffed line by line, differ *only* on lines naming net
+    `Y`."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    baseline_path = tmp_path / "inv1_baseline.spice"
+    override_path = tmp_path / "inv1_override.spice"
+
+    baseline = run_extract(
+        str(gds), "sky130", parasitics=True, output=str(baseline_path)
+    )
+
+    override_r_ohm = 999.0
+    override_c_ff = 12.3
+    override_l_nh = 4.5
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        mom_rlc_net="Y",
+        mom_rlc_resistance_ohm=override_r_ohm,
+        mom_rlc_capacitance_ff=override_c_ff,
+        mom_rlc_inductance_nh=override_l_nh,
+        output=str(override_path),
+    )
+
+    baseline_y = next(n for n in baseline["parasitics"]["nets"] if n["net"] == "Y")
+    override_y = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y")
+
+    # (1) accepted and applied -- the JSON entry carries the substituted
+    # values, genuinely different from the lumped-RC baseline.
+    assert override_y["resistance_ohm"] == override_r_ohm
+    assert override_y["capacitance_ff"] == override_c_ff
+    assert override_y["inductance_nh"] == override_l_nh
+    assert override_y["resistance_ohm"] != baseline_y["resistance_ohm"]
+    assert override_y["capacitance_ff"] != baseline_y["capacitance_ff"]
+    assert baseline_y["inductance_nh"] == 0.0
+
+    mom_rlc_override = report["parasitics"]["mom_rlc_override"]
+    assert mom_rlc_override is not None
+    assert mom_rlc_override["net"] == "Y"
+    assert mom_rlc_override["matched_net_count"] == 1
+    assert mom_rlc_override["previous_resistance_ohm"] == baseline_y["resistance_ohm"]
+    assert mom_rlc_override["previous_capacitance_ff"] == baseline_y["capacitance_ff"]
+    assert mom_rlc_override["resistance_ohm"] == override_r_ohm
+    assert mom_rlc_override["capacitance_ff"] == override_c_ff
+    assert mom_rlc_override["inductance_nh"] == override_l_nh
+    assert baseline["parasitics"]["mom_rlc_override"] is None
+
+    # (2) net-scoped -- every other net's JSON entry is byte-identical.
+    baseline_others = {
+        n["net"]: n for n in baseline["parasitics"]["nets"] if n["net"] != "Y"
+    }
+    override_others = {
+        n["net"]: n for n in report["parasitics"]["nets"] if n["net"] != "Y"
+    }
+    assert baseline_others == override_others
+    assert report["parasitics"]["l_count"] == 1
+    assert report["parasitics"]["total_inductance_nh"] == pytest.approx(override_l_nh)
+    assert baseline["parasitics"]["l_count"] == 0
+
+    # (3) the substituted netlist, diffed against the unmodified one, only
+    # touches lines naming net `Y` -- no other net's card was rewritten.
+    baseline_lines = baseline_path.read_text().splitlines()
+    override_lines = override_path.read_text().splitlines()
+    assert baseline_lines != override_lines  # something genuinely changed
+    diff_lines = [
+        line
+        for line in difflib.unified_diff(baseline_lines, override_lines, lineterm="")
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    ]
+    assert diff_lines  # the diff is non-empty
+    for line in diff_lines:
+        assert "Y" in line, f"unexpected non-net-Y diff line: {line!r}"
+
+    # The new series inductor's `L` card is present, in henries, and its
+    # fresh internal node keeps net `Y`'s own hub/ground topology intact
+    # (the capacitor now sits between the inductor and ground rather than
+    # directly on the hub).
+    l_lines = [line for line in override_lines if line.startswith("LY_l ")]
+    assert len(l_lines) == 1
+    written_henries = float(l_lines[0].split()[-1])
+    assert written_henries == pytest.approx(override_l_nh * 1e-9, rel=1e-9)
+
+
+def test_mom_rlc_net_partial_override_keeps_other_component(tmp_path):
+    """Each of R/C/L is independently optional -- a caller trusting `klt
+    mom` for capacitance only, say, can omit `mom_rlc_resistance_ohm` and
+    keep the lumped-RC value for that component (no inductor is added
+    unless `mom_rlc_inductance_nh` is explicitly given)."""
+    gds = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
+    baseline = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        output=str(tmp_path / "inv1_baseline.spice"),
+    )
+    baseline_y = next(n for n in baseline["parasitics"]["nets"] if n["net"] == "Y")
+
+    report = run_extract(
+        str(gds),
+        "sky130",
+        parasitics=True,
+        mom_rlc_net="Y",
+        mom_rlc_capacitance_ff=12.3,
+        output=str(tmp_path / "inv1_partial.spice"),
+    )
+    override_y = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y")
+    assert override_y["capacitance_ff"] == 12.3
+    assert override_y["resistance_ohm"] == baseline_y["resistance_ohm"]
+    assert override_y["inductance_nh"] == 0.0
+    assert report["parasitics"]["l_count"] == 0
 
 
 # --------------------------------------------------------------------------- #
