@@ -469,6 +469,47 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-14 — `klt extract --parasitics` (and `klt pex`) gain
+  **`--critical-net`, repeatable** — lateral (same-layer, sidewall)
+  coupling capacitance for caller-declared "nets that matter" (issue #976,
+  Epic #709 Phase 2a: "high-impedance nodes, the SAR ADC's CDAC top plate,
+  the PLL loop filter"). Issue #760 already models *vertical* (adjacent-
+  metal-level) coupling unconditionally across the whole layout; this
+  closes part of the remaining gap `PARASITIC_MODEL_SCOPE["coupling"]`
+  names -- same-layer neighbours -- but only for a net pair naming one of
+  the caller's declared `--critical-net` nets, not the whole layout: a
+  full-layout lateral search is `docs/design/extract-fidelity-roadmap.md`'s
+  own "medium cost" Stage 2b (real neighbour-search cost across every
+  same-layer pair on a routed block), so this increment scopes the search
+  instead of paying that cost unconditionally. Geometry via KLayout's own
+  `Region.separation_check` (the same primitive `klt drc`'s `separation`
+  checks use) within that metal level's own minimum-spacing DRC rule;
+  coefficient from the PDK's public `defaultsidewall` value (sky130 only,
+  citation-transcribed the same way `metal_overlaps` was). Additive, not
+  deducted from either net's substrate fringe term (a documented
+  simplification -- magic's own fringe-shielding model needs its
+  `defaultsidewall` second parameter's semantics resolved first, an
+  explicitly open roadmap question). New fields: `parasitics.critical_nets`
+  (the request, echoed back) and `parasitics.nets[].coupled[].
+  lateral_levels`; `parasitics.model.coupling`'s text changes again (same
+  "additive behavior change" treatment issue #760's own change got).
+  `--critical-net` omitted (the default) leaves every field byte-identical
+  to before this feature existed. See `docs/cli/extract.md`'s "Lateral
+  (same-layer, sidewall) coupling capacitance for critical nets" section.
+  `klt pex` proof (issue #976's own "measurable, explainable delta"
+  acceptance bar): `tests/test_pex.py`'s
+  `test_run_pex_critical_net_lateral_coupling_canary` is a real,
+  ngspice-driven `klt pex` run on a purpose-built two-net high-impedance-node
+  fixture — the same `06-layout.gds`/`sky130-ota-5t` worked example Phase 1
+  proved on (#973) has no current/charge-carrying high-impedance node for a
+  coupling-capacitance delta to show up on (every measurement there is an
+  ideal-voltage-source-driven hub, `delta_pct: 0.0` by construction), so
+  this canary supplies one instead: `--critical-net` off reports
+  `extracted_value: 0.0` on the victim net (Phase 1 baseline, unchanged);
+  `--critical-net VIC` on the identical layout/testbench reports a real,
+  nonzero, reproducible coupling voltage — re-derived from a real simulation
+  on every CI run, not a one-off hand-captured evidence blob.
+
 - 2026-08-14 — `klt power` gains the **static (DC) IR-drop solve** — issue
   #845, Phase 1b of the power/IR-drop + EM signoff epic #712. The spec file
   takes two new optional inputs: `pads` (where each net's supply is

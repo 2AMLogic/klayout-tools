@@ -1587,4 +1587,57 @@ PARASITICS = ParasiticsDeck(
         # metal4 68.33`.
         0.06833,
     ),
+    # `defaultsidewall` lateral (same-layer) coupling coefficients (issue
+    # #976, Epic #709 Phase 2a) -- entry `i` describes `metals[i]`'s own
+    # same-layer coupling (unlike `metal_overlaps`' adjacent-*pair*
+    # indexing), so this table has `len(metals)` = 6 entries for this
+    # li1..met5 stack. First parameter only (aF/um, divided by 1000 to
+    # fF/um to match `cap_perim_ff_um`'s convention) -- the second
+    # parameter's exact magic distance/scaling semantics are an open
+    # question (docs/design/extract-fidelity-roadmap.md's open question #1),
+    # deliberately not transcribed here (see `metal_sidewall_lookback_um`
+    # below for what this deck uses instead). Transcribed from the same
+    # nominal `variants (),(orig),(si)` block `metal_overlaps` above is
+    # sourced from.
+    metal_sidewalls=(
+        # li1 (idx0): `defaultsidewall allli locali 25.5 0.14`.
+        0.0255,
+        # met1 (idx1): `defaultsidewall allm1 metal1 44 0.25`.
+        0.044,
+        # met2 (idx2): `defaultsidewall allm2 metal2 50 0.3`.
+        0.050,
+        # met3 (idx3): `defaultsidewall allm3 metal3 74.0 0.40`.
+        0.074,
+        # met4 (idx4): `defaultsidewall allm4 metal4 94.0 0.57`.
+        0.094,
+        # met5 (idx5): `defaultsidewall allm5 metal5 155 0.5`.
+        0.155,
+    ),
+    # Lateral-coupling lookback distance per metal level (issue #976): **2x**
+    # this deck's own same-layer minimum-spacing DRC rule for that level (see
+    # `DECK` above), not magic's own `defaultsidewall` second parameter (see
+    # `metal_sidewalls`' comment above for why). Exactly the bare minimum
+    # spacing itself was tried first and rejected: a `separation_check(d)`
+    # only reports edges *closer than* `d`, so a lookback of exactly the
+    # legal minimum can only ever fire on a DRC-*illegal* layout (impossible
+    # on anything `klt drc`-clean) -- measured directly on the routed `gcd`
+    # corpus fixture (`tests/corpus/place_and_route/gcd.gds.gz`) via a raw
+    # `Region.space_check` self-scan per layer: **zero** same-layer facing
+    # pairs at 1x minimum spacing on every populated level (li1/met1/met2/
+    # met3/met4), vs. thousands at 2x (e.g. li1: 0 -> 17 668, met1: 0 -> 7
+    # 793) -- i.e. real detail-routed pitch on this design sits at roughly
+    # double the bare DRC minimum, not at it. 2x is a simple, round,
+    # empirically-grounded choice that captures genuinely near-neighbour
+    # routing on a DRC-clean layout; it is not a decode of magic's own
+    # second parameter (still an open question), and a narrower or
+    # differently-shaped lookback model is a named follow-on, not this
+    # issue's scope.
+    metal_sidewall_lookback_um=(
+        0.34,  # li1 (idx0): 2x `li1.space.1` (0.17).
+        0.28,  # met1 (idx1): 2x `met1.space.1` (0.14).
+        0.28,  # met2 (idx2): 2x `met2.space.1` (0.14).
+        0.6,  # met3 (idx3): 2x `met3.space.1` (0.3).
+        0.6,  # met4 (idx4): 2x `met4.space.1` (0.3).
+        3.2,  # met5 (idx5): 2x `met5.space.1` (1.6).
+    ),
 )

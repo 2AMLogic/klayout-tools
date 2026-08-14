@@ -470,6 +470,181 @@ def test_integration_run_pex_multiple_testbenches(tmp_path, resistor_layout):
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_critical_nets_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--critical-net` (issue #976, Epic #709 Phase 2a) is forwarded from
+    `run_pex` to `run_extract`, and echoed back in `extraction.critical_nets`
+    -- a fully wired unit-of-work test, distinct from
+    `tests/test_extract.py`'s own exact-value lateral-coupling geometry
+    tests. `RB` (this fixture's one labelled met1/li1 net) has no same-layer
+    neighbour, so this also exercises the "declared but geometrically
+    unmatched" path end to end without raising -- `run_pex` must still
+    complete and report the same result as the no-critical-nets baseline
+    (this fixture has no lateral-coupling geometry to add)."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130", critical_nets=["RB"])
+
+    assert report["extraction"]["critical_nets"] == ["RB"]
+    assert report["status"] == "pass"
+
+
+def _make_pex_lateral_coupling_layout(top_name: str = "TOP") -> kdb.Layout:
+    """Two same-layer (met1) nets, ``AGR`` ("aggressor") and ``VIC``
+    ("victim"), 0.1 um apart -- well within sky130 met1's own lateral-
+    coupling lookback (``metal_sidewall_lookback_um[1]`` = 0.28 um) --
+    purpose-built as the Phase 2a (issue #976) canary fixture below. Zero
+    active devices and zero vertical (adjacent-metal-level) relationship
+    between the two nets, so the *only* possible schematic-vs-extracted
+    coupling path is the one ``--critical-net`` adds -- issue #760's
+    already-shipped, unconditional vertical-overlap coupling contributes
+    nothing here. Mirrors `tests/test_extract.py`'s own
+    ``_make_lateral_coupling_layout`` geometry (kept self-contained here,
+    per this module's existing no-cross-module-fixture-imports
+    convention)."""
+    layout = kdb.Layout()
+    top = layout.create_cell(top_name)
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    draw(68, 20, kdb.Box(0, 0, 2000, 1000))  # met1, net AGR
+    label(68, 5, "AGR", 1000, 500)
+    draw(68, 20, kdb.Box(2100, 0, 4100, 1000))  # met1, net VIC -- 0.1 um gap
+    label(68, 5, "VIC", 3100, 500)
+
+    return layout
+
+
+def _write_isolated_schematic_dut(path: Path) -> Path:
+    """The Phase 1 schematic-level ideal for the canary below: ``AGR``/
+    ``VIC`` are two entirely separate pins with **zero** devices between
+    them -- no coupling of any kind, the textbook pre-#976 assumption
+    lateral coupling closes part of the gap on."""
+    path.write_text(".SUBCKT TOP AGR VIC\n.ENDS TOP\n")
+    return path
+
+
+def _write_lateral_coupling_testbench(path: Path, dut_path: Path) -> Path:
+    """A fast (100 ps) step on ``AGR``; ``VIC`` is a genuine high-impedance
+    node (Epic #709 Phase 2's own framing) -- a 1 Gohm pull to ground, no
+    active driver -- so any coupling capacitance onto it from ``AGR`` shows
+    up directly as a transient voltage kick. ``.global vsubs``/``Vsubs``
+    ties the extraction's synthesized substrate net (``ground_net_name``,
+    ``extract.py``) to a real 0 V reference -- required because this
+    fixture has no diffusion/well geometry of its own to tie it down
+    structurally, unlike a real chip's substrate contact network, so
+    without it ``vsubs`` would float as one shared *internal* node of this
+    single ``Xdut`` instance and create its own accidental AGR<->VIC
+    coupling path via ``CAGR``/``CVIC`` in series -- an artifact of this
+    minimal two-net fixture having no other substrate tie, not a real
+    finding. ``.options rshunt=1e12`` matches the same floating-node
+    convergence workaround ``examples/design-pipeline/09-sim.testbench.
+    spice`` already documents for this deck's own composed-layout canary
+    (issue #205)."""
+    path.write_text(
+        f'.include "{dut_path}"\n'
+        ".options rshunt=1e12\n"
+        ".global vsubs\n"
+        "Vsubs vsubs 0 DC 0\n"
+        "Vagr AGR 0 PULSE(0 1 0 100p 100p 100n 200n)\n"
+        "Rvic_hiz VIC 0 1e9\n"
+        "Xdut AGR VIC TOP\n"
+    )
+    return path
+
+
+def _write_lateral_coupling_request(path: Path, testbench_path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "netlist": str(testbench_path),
+                "analysis": {"kind": "tran", "args": "1p 5n"},
+                "measurements": [
+                    {
+                        "name": "vic_kick",
+                        "spice": ".meas tran vic_kick FIND V(VIC) AT=2n",
+                    }
+                ],
+            }
+        )
+    )
+    return path
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_critical_net_lateral_coupling_canary(tmp_path):
+    """**Phase 2a canary (issue #976, Epic #709)**: a real, ngspice-driven
+    `klt pex` run demonstrating a measurable, explainable delta from
+    coupling capacitance vs. Phase 1's lumped-RC-only baseline (issue
+    #801/#802/#803) -- the acceptance criterion this test exists to prove,
+    not merely a unit test of the CLI/library wiring (that is
+    `test_run_pex_critical_nets_threaded_through_to_extraction` above).
+
+    `AGR`/`VIC` (:func:`_make_pex_lateral_coupling_layout`) are two isolated
+    met1 nets with zero devices and zero vertical relationship between
+    them -- issue #760's already-shipped, unconditional vertical-overlap
+    coupling contributes exactly nothing here, isolating this canary to
+    issue #976's own lateral pass. `VIC` is a genuine high-impedance node
+    (a 1 Gohm pull to ground, no active driver) -- the exact net class
+    Epic #709 Phase 2's own text names as this phase's target ("high-
+    impedance nodes").
+
+    **Without `--critical-net`** (Phase 1's own `klt pex` baseline, issue
+    #801/#802/#803, unchanged by this issue): the extracted netlist has no
+    AGR<->VIC coupling path at all, so a 1 V step on `AGR` leaves `VIC`'s
+    high-impedance node exactly at its 0 V bias -- `extracted_value == 0.0`,
+    measured, not assumed.
+
+    **With `--critical-net VIC`** (this issue): the identical step now
+    visibly couples onto `VIC` through the lateral coupling capacitor the
+    deck's `metal_sidewalls[1]` (met1) coefficient adds between the two
+    nets' parasitic hub nodes -- `extracted_value` jumps to a real,
+    nonzero, reproducible voltage shortly after the step.
+
+    A worked-example (`examples/design-pipeline`'s `sky130-ota-5t` canary,
+    `docs/cli/pex.md`) is not a fit for this proof: every one of its
+    measurement points is an ideal-voltage-source-driven net hub (its own
+    "Every row reads `delta_pct: 0.0`" explanation, PR #973), so it has no
+    current/charge-carrying, high-impedance node for a coupling-capacitance
+    delta to show up on. This test's fixture is purpose-built with exactly
+    such a node instead, and is the reproducible, CI-verified canary this
+    issue's acceptance criteria cite -- re-derived on every run rather than
+    a one-off hand-captured evidence blob.
+    """
+    layout = _make_pex_lateral_coupling_layout()
+    gds_path = _write_gds(layout, tmp_path / "lateral.gds")
+
+    dut = _write_isolated_schematic_dut(tmp_path / "isolated_dut.spice")
+    tb = _write_lateral_coupling_testbench(tmp_path / "coupling_tb.spice", dut)
+    request = _write_lateral_coupling_request(tmp_path / "coupling.request.json", tb)
+
+    baseline = run_pex(gds_path, [str(request)], "sky130")
+    assert baseline["extraction"]["critical_nets"] == []
+    baseline_row = baseline["delta"][0]
+    assert baseline_row["extracted_value"] == pytest.approx(0.0, abs=1e-6)
+
+    with_coupling = run_pex(gds_path, [str(request)], "sky130", critical_nets=["VIC"])
+    assert with_coupling["extraction"]["critical_nets"] == ["VIC"]
+    coupled_row = with_coupling["delta"][0]
+    assert coupled_row["extracted_value"] == pytest.approx(0.129055, abs=1e-4)
+
+    # The measurable, explainable delta itself: same testbench, same
+    # geometry, same schematic reference -- the *only* variable is whether
+    # `--critical-net` was given, and it visibly moves the extracted-side
+    # measurement from "no coupling" to a real, nonzero coupling kick.
+    assert coupled_row["extracted_value"] - baseline_row["extracted_value"] > 0.1
+
+
+@_SKIP_NO_NGSPICE
 def test_cli_pex_json_matches_klt_signoff_pex_kind(tmp_path, resistor_layout, capsys):
     """`klt pex`'s real `--format json` output classifies as kind `"pex"` in
     `klt signoff` -- the compatibility bar the Curator enhancement on issue

@@ -805,6 +805,27 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--critical-net",
+        dest="critical_nets",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "scope the lateral (same-layer, sidewall) coupling-capacitance "
+            "pass onto this net (issue #976, Epic #709 Phase 2a); "
+            "repeatable. A same-layer net pair only gets lateral coupling "
+            "computed when at least one side is named this way -- see "
+            "docs/design/extract-fidelity-roadmap.md's Stage 2b cost "
+            "estimate for why this is scoped rather than run across the "
+            "whole layout unconditionally, the way vertical-overlap "
+            "coupling (issue #760) already is. Requires --parasitics. A "
+            "name matching no net in this layout is not an error -- it is "
+            "reported in `warnings` instead. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--critical-net' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--def-net-names",
         dest="def_net_names",
         action="store_true",
@@ -1628,6 +1649,20 @@ def create_parser() -> argparse.ArgumentParser:
             "(schematic and extracted side, every testbench) -- see "
             "docs/cli/sim.md's 'Execution backends'. Defaults to `local` "
             "(or each testbench request's own `backend` field)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net",
+        dest="critical_nets",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "scope the lateral (same-layer, sidewall) coupling-capacitance "
+            "pass onto this net (issue #976, Epic #709 Phase 2a), passed "
+            "through to `klt extract --critical-net`; repeatable. Off by "
+            "default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--critical-net' section."
         ),
     )
     _add_format_arg(pex_parser)

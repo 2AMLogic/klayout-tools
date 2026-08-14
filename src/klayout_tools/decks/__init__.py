@@ -1277,12 +1277,50 @@ class ParasiticsDeck:
     rather than silently zeroed. Empty by default so a deck that never
     populates this field behaves exactly as before this field existed
     (ground capacitance only, `--parasitics`'s pre-#760 behaviour).
+
+    ``metal_sidewalls``/``metal_sidewall_lookback_um`` (issue #976, Epic
+    #709 Phase 2a) curate the *lateral* (same-layer, sidewall) coupling
+    coefficient family -- magic's ``defaultsidewall`` -- the one named as
+    the still-absent follow-on to ``metal_overlaps`` in
+    ``docs/design/extract-fidelity-roadmap.md``'s "Stage 2b". Both are
+    index-aligned with ``metals`` (entry ``i`` describes ``metals[i]``'s own
+    same-layer coupling, unlike ``metal_overlaps``' adjacent-*pair*
+    indexing). ``metal_sidewalls[i]`` is femtofarads per micrometre of
+    facing-edge length between two *distinct* nets' conductors on level
+    ``i`` within ``metal_sidewall_lookback_um[i]`` micrometres of each other
+    -- the same aF/um -> fF/um transcription convention ``cap_perim_ff_um``
+    uses, from magic's own public tech file's ``defaultsidewall`` *first*
+    parameter (nominal process corner). ``metal_sidewall_lookback_um[i]`` is
+    deliberately **twice this deck's own same-layer minimum-spacing DRC
+    rule** for level ``i`` (e.g. sky130's ``met1.space.1``), not a
+    transcription of magic's own ``defaultsidewall`` *second* parameter --
+    that parameter's exact distance/scaling semantics are an open question
+    flagged in the roadmap doc (open question #1) rather than guessed at
+    here. Exactly the bare minimum spacing was tried first and rejected: a
+    ``separation_check(d)``-style query only reports edges *closer than*
+    ``d``, so a 1x lookback can only ever fire on a DRC-*illegal* layout,
+    making it a near-no-op on any real, DRC-clean design -- see
+    ``decks/sky130.py``'s own ``metal_sidewall_lookback_um`` comment for the
+    measured ``gcd`` corpus evidence behind the 2x choice. Unlike
+    ``metal_overlaps`` (unconditional across every net pair on the whole
+    layout, issue #760), lateral coupling is only ever computed for a net
+    pair where at least one side is named in a caller's ``critical_nets``
+    request (``klt extract --critical-net``) -- see
+    ``klayout_tools.extract._compute_parasitics``'s docstring for why a
+    full-layout lateral pass is deliberately out of this issue's scope.
+    Neither table deducts the matching charge from either net's substrate
+    fringe term (unlike ``metal_overlaps``' ground-charge deduction) -- see
+    that same docstring's "known simplification" note. Both empty by default,
+    so a deck that never populates them (or a run that never names a
+    ``critical_nets`` entry) behaves exactly as before this field existed.
     """
 
     diffusion: LayerRC | None = None
     poly: LayerRC | None = None
     metals: tuple[LayerRC | None, ...] = ()
     metal_overlaps: tuple[float | None, ...] = ()
+    metal_sidewalls: tuple[float | None, ...] = ()
+    metal_sidewall_lookback_um: tuple[float | None, ...] = ()
 
 
 class UnknownExtractionDeckError(Exception):
