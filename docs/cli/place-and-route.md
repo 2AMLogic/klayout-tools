@@ -757,7 +757,7 @@ from one live run of the current tree — none are carried over from the
 |---|---|---|---|---|
 | 1 — pre-route, wire-free | `klt synthesize` → `sta.worst_path.delay_ns` (`klt-statime-native`) | 2.86419 ns | 4.63728 ns | 3.74825 ns |
 | 2 — post-route, global-routing RC estimate | `klt place-and-route` → top-level `worst_slack_ns` / `total_negative_slack_ns` | −1.94402 / −72.6797 ns (50 setup viol.) | −0.03895 / −0.20145 ns (10 setup viol.) | 1e+39 / 0 (unconstrained) |
-| 3 — post-route, `read_spef` of real extracted RC | `klt place-and-route` → `spef_sta.worst_slack_ns` / `.total_negative_slack_ns` | −2.09926 / −79.5244 ns (50 setup viol.) | +0.26564 / 0 ns (0 setup viol.) | 1e+39 / 0 (unconstrained) |
+| 3 — post-route, `read_spef` of real extracted RC | `klt place-and-route` → `spef_sta.worst_slack_ns` / `.total_negative_slack_ns` | −2.09926 / −79.5244 ns (50 setup viol.) | −0.20604 / −2.20498 ns (16 setup viol.) | 1e+39 / 0 (unconstrained) |
 | — net-name correlation, design-side | `spef_sta.design_nets_annotated` / `.design_nets_total` | **537 / 537** | **760 / 764** | **276 / 276** |
 | — net-name correlation, SPEF-side | `spef_sta.nets_annotated` / `.nets_total` | 537 / 1356 | 760 / 2458 | 276 / 655 |
 
@@ -765,29 +765,28 @@ from one live run of the current tree — none are carried over from the
 designs**, and — since issue #951 — resolves essentially every net name in
 it against the linked design.
 
-**`gcd`'s rung 3 above reflects issue #961's reworked RC topology (PR #984's
-`<net>:<N>` two-node endpoints plus this issue's own residual fix, a
-unique port's own bare-name node, 2026-08-14) and now reads pessimistically
-relative to rung 2, as the acceptance criteria require** —
-`spef_sta.worst_slack_ns` / `.total_negative_slack_ns` moved from
+**Both `gcd`'s and `modexp`'s rung 3 above reflect issue #961's reworked RC
+topology (PR #984's `<net>:<N>` two-node endpoints plus this issue's own
+residual fix, a unique port's own bare-name node, 2026-08-14) and now read
+pessimistically relative to rung 2, as the acceptance criteria require** —
+`gcd`'s `spef_sta.worst_slack_ns` / `.total_negative_slack_ns` moved from
 `-1.72532` / `-63.8855` (the net-name-only, pre-topology-fix baseline this
 table carried since issue #951) to `-2.09926` / `-79.5244`, genuinely more
-negative than rung 2's `-1.94402` / `-72.6797` — unaffected by the residual
-fix itself (that fix only corrected `report_parasitic_annotation`'s own
-completeness bookkeeping, not the delay values already attached through the
-rest of the RC network). `report_parasitic_annotation` in the same live
-session reports **0** partially unannotated drivers (of 537), down from 52
-after PR #984's topology rework and 533 before it — see "`*CONN`
-device-terminal pin correlation" above for the full live-verification log
-and the exact fix. **Only `gcd` was re-measured with this topology fix in
-this session** — `modexp`'s and `mult8`'s rung-3 figures below are still
-carried over from the net-name-only, pre-topology-fix baseline (issue #951)
-and have not yet been re-confirmed against the reworked topology;
-`modexp` in particular is expected to show a similar "rung 3 now differs
-pessimistically from rung 2" shift once re-measured, but that is not yet a
-live-verified claim. `mult8` is unaffected regardless (purely
-combinational, both post-route rungs report OpenSTA's own unconstrained
-`1e+39` sentinel either way).
+negative than rung 2's `-1.94402` / `-72.6797`; `modexp`'s moved from
+`+0.26564` / `0` (the same pre-topology-fix baseline — genuinely
+*optimistic* relative to rung 2's `-0.03895` / `-0.20145`, the exact defect
+this issue tracks) to `-0.20604` / `-2.20498`, now likewise more negative
+than rung 2. Both designs' `report_parasitic_annotation` (run live in the
+same sessions) reports **0** partially unannotated drivers — `gcd`'s down
+from 52 after PR #984's topology rework alone (and 533 before any of this
+issue's fixes); `modexp`'s 23 *fully* unannotated drivers are the design's
+own 4 net-name-unmatched nets' fanout (`spef_sta.design_nets_annotated` /
+`.design_nets_total` = 760 / 764 above — a correct, pre-existing report,
+not a defect this issue tracks) — see "`*CONN` device-terminal pin
+correlation" above for the full live-verification log and the exact fix.
+`mult8` is unaffected regardless (purely combinational, both post-route
+rungs report OpenSTA's own unconstrained `1e+39` sentinel either way, so
+there is no rung-3-vs-rung-2 comparison to make there).
 
 Historical note, retained for context: as measured on 2026-08-14 (issue
 #951, pre-`*CONN`-correlation at all — before either #961 increment), rung 3
