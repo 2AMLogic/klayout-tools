@@ -1,0 +1,30 @@
+{
+  "netlist": "11-pex-mom.testbench.spice",
+  "engine": "ngspice",
+  "corners": {
+    "supply_v": { "vtail": [-0.45, -0.55] },
+    "temperature_c": [-40, 27, 125]
+  },
+  "analysis": { "kind": "tran", "args": "1n 1n" },
+  "measurements": [
+    {
+      "name": "in1_meas",
+      "spice": ".meas tran in1_meas find i(vn1) at=1n",
+      "unit": "A",
+      "limits": { "min": -1, "max": 0 }
+    },
+    {
+      "name": "itail_meas",
+      "spice": ".meas tran itail_meas find i(vtail) at=1n",
+      "unit": "A",
+      "limits": { "min": 0, "max": 1 }
+    },
+    {
+      "name": "ivout_meas",
+      "spice": ".meas tran ivout_meas find i(vvout) at=1n",
+      "unit": "A",
+      "limits": { "min": -1, "max": 0 }
+    }
+  ],
+  "options": { "timeout_s": 60, "keep_artifacts": false }
+}

@@ -1,0 +1,27 @@
+{
+  "background_permittivity": 3.9,
+  "capacitance_matrix_ff": [
+    [
+      0.562988158986506
+    ]
+  ],
+  "conductors": [
+    "tail_li1_segment"
+  ],
+  "filament_count": 4,
+  "filament_size_um": 0.1,
+  "file": "11-mom-tail-segment.gds",
+  "inductance_matrix_nh": [
+    [
+      0.008321199262627178
+    ]
+  ],
+  "panel_count": 1008,
+  "panel_size_um": 0.1,
+  "resistance_ohm": [
+    304.76190476190465
+  ],
+  "schema_version": 2,
+  "spec": "11-mom-tail-segment.spec.json",
+  "warnings": []
+}
