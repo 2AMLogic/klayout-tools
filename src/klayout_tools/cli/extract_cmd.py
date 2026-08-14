@@ -104,6 +104,11 @@ def run(args: argparse.Namespace) -> int:
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
+            # `--def-net-names` (issue #951): names routed nets from the DEF
+            # net name their geometry carries as a GDS shape property instead
+            # of from text labels. `False` when the flag was never given,
+            # unchanged from every call site that predates it.
+            def_net_names=args.def_net_names,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)

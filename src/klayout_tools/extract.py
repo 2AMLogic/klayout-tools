@@ -231,6 +231,31 @@ _PARAM_PRECISION_OHM = 6
 #: some readers reject) -- negligible against any real net's resistance.
 _MIN_PARASITIC_R_OHM = 1e-3
 
+#: The GDS shape-property id under which KLayout's own LEF/DEF reader records
+#: each routed-net (``NETS``/``SPECIALNETS``) shape's **DEF net name** --
+#: ``LEFDEFReaderConfiguration.net_property_name``, whose KLayout default is
+#: ``1``. ``klayout_tools.place_and_route._merge_def_to_gds`` never overrides
+#: it, and GDS ``PROPATTR``/``PROPVALUE`` round-trips it, so a GDS produced by
+#: ``klt place-and-route``'s ``"route"`` stage already carries the design's
+#: own (Verilog/DEF/OpenSTA) net names -- verified directly against the
+#: committed ``tests/corpus/place_and_route/gcd.gds.gz`` fixture, which
+#: carries all 458 of that design's DEF net names on its routed metal
+#: (issue #951, no fixture regeneration required).
+#:
+#: This is what ``--def-net-names`` (:func:`run_extract`'s ``def_net_names``)
+#: reads. It matters because extraction's *default* naming source -- GDS text
+#: labels -- cannot see those names: the DEF->GDS merge emits label texts for
+#: top-level pins only, so an internal routed net is named either by KLayout's
+#: synthesised ``$<id>`` placeholder or by joining whatever standard-cell pin
+#: labels happen to touch it (``A,X``), and neither is what OpenSTA calls that
+#: net (``_019_``, ``req_msg[3]``, ...).
+_DEF_NET_NAME_PROPERTY_ID = 1
+
+#: How many independent probe points :func:`_def_net_name_probes` keeps per
+#: DEF net name -- see :func:`_apply_def_net_name_overrides` for why more than
+#: one.
+_DEF_NET_NAME_PROBE_CANDIDATES = 4
+
 #: Machine-readable declaration of what `--parasitics` does and does not
 #: model (issue #728, updated by #760). Most `C` cards `_inject_parasitics`
 #: emits hang off the deck's ground/substrate net; since issue #760 a net
@@ -801,6 +826,7 @@ def run_extract(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     spef_output: str | None = None,
+    def_net_names: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -938,6 +964,22 @@ def run_extract(
     ``None`` (the default) skips this entirely -- byte-identical to before
     this feature existed. The resolved path is echoed back as the response's
     ``spef_path`` field (``null`` when omitted).
+
+    ``def_net_names`` (``klt extract --def-net-names``, issue #951, Epic #700
+    Phase 3) names each routed net from the **DEF net name** KLayout's LEF/DEF
+    reader stored on its geometry as GDS shape property
+    :data:`_DEF_NET_NAME_PROPERTY_ID`, instead of from GDS text labels, for
+    every net that carries one. On a routed GDS from ``klt place-and-route``
+    this replaces KLayout's synthesised ``$<id>`` placeholders and
+    pin-label-joined ``A,X`` names with the design's own ``_019_`` /
+    ``req_msg[3]`` names -- which is what makes the emitted SPICE/SPEF net
+    names line up with the netlist an STA tool has linked (see
+    ``klayout_tools.place_and_route``'s ``post_route_spef``). Off by default:
+    property ``1`` carries no guaranteed meaning in a GDS that did *not* come
+    from a LEF/DEF merge, so this is opt-in rather than inferred, and every
+    other layout's output is byte-identical to before this flag existed. A
+    run that opts in and finds no such property says so in ``warnings``
+    rather than silently changing nothing.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
@@ -1410,6 +1452,7 @@ def run_extract(
         abstract_cell_lef_paths=abstract_cell_lef_paths,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
+        def_net_names=def_net_names,
     )
 
     if mom_net is not None:
@@ -1942,6 +1985,7 @@ def extract_netlist_from_layout(
     abstract_cell_lef_paths: tuple[str, ...] = (),
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
+    def_net_names: bool = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -1984,6 +2028,13 @@ def extract_netlist_from_layout(
     caller-visible sheet-rho flavour for any resistor family whose
     ``flavour_option`` it names. ``None``/empty resolves the deck unchanged.
     See :func:`run_extract`'s docstring for the full contract.
+
+    ``def_net_names`` (issue #951): forwarded to ``_extract_netlist`` --
+    ``True`` names routed nets from the DEF net name KLayout's LEF/DEF reader
+    left on their geometry as GDS shape property
+    :data:`_DEF_NET_NAME_PROPERTY_ID`, rather than from text labels. Off by
+    default (unchanged behavior). See :func:`run_extract` for the full
+    rationale.
 
     ``apply_resistor_fixed_offset`` (issue #559): forwarded to
     ``_extract_netlist`` -- ``True`` (the default) applies each opted-in
@@ -2121,6 +2172,7 @@ def extract_netlist_from_layout(
         lef_macros=lef_macros,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
+        def_net_names=def_net_names,
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -3206,6 +3258,109 @@ def _resolve_abstract_cell_pins(
     return [], None, None, []
 
 
+def _def_net_name_probes(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    metal_layers: tuple[tuple[int, int] | None, ...],
+) -> dict[str, list[tuple[int, kdb.Point]]]:
+    """Per distinct DEF net name (:data:`_DEF_NET_NAME_PROPERTY_ID`), up to
+    :data:`_DEF_NET_NAME_PROBE_CANDIDATES` ``(metal_index, point)`` probe
+    candidates taken from ``top_cell``'s own routed-metal shapes carrying that
+    name (issue #951). ``metal_layers`` is ``deck.metals`` -- the same
+    ``(layer, datatype)`` list :func:`_extract_netlist` builds its flattened
+    ``metals[]`` regions from, so ``metal_index`` indexes straight into them.
+
+    Shape properties must be read off the raw ``kdb.Shape`` objects, not off
+    the flattened ``Region``s the deck builds from them (a ``Region`` merge
+    discards per-shape properties) -- hence the direct
+    ``top_cell.shapes(...)`` scan here. Only the top cell is scanned, not a
+    recursive flatten: a DEF->GDS merge draws the DEF's ``NETS``/
+    ``SPECIALNETS`` routed geometry directly in the top cell, and a *sub*-cell
+    shape carrying property 1 would be a standard cell's own internal
+    annotation, not a top-level net name.
+
+    Several candidates rather than one because
+    :func:`_apply_def_net_name_overrides` resolves each name through
+    ``LayoutToNetlist.probe_net``, which needs a point landing *inside* the
+    net's geometry: a bounding-box centre satisfies that for the boxes and
+    paths KLayout's DEF reader emits, but not necessarily for a non-convex
+    polygon. Trying a handful of independent shapes costs one extra
+    ``probe_net`` call in the rare failing case and avoids losing a whole
+    net's name to one awkward shape.
+    """
+    # Imported lazily, matching every other function in this module.
+    import klayout.db as kdb
+
+    probes: dict[str, list[tuple[int, kdb.Point]]] = {}
+    for metal_index, layer in enumerate(metal_layers):
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        for shape in top_cell.shapes(layer_index).each():
+            if shape.is_text():
+                continue
+            properties = shape.properties()
+            if not properties:
+                continue
+            net_name = properties.get(_DEF_NET_NAME_PROPERTY_ID)
+            if not isinstance(net_name, str) or not net_name:
+                continue
+            candidates = probes.setdefault(net_name, [])
+            if len(candidates) >= _DEF_NET_NAME_PROBE_CANDIDATES:
+                continue
+            box = shape.bbox()
+            candidates.append(
+                (
+                    metal_index,
+                    kdb.Point((box.left + box.right) // 2, (box.bottom + box.top) // 2),
+                )
+            )
+    return probes
+
+
+def _apply_def_net_name_overrides(
+    l2n: kdb.LayoutToNetlist,
+    metals: list[kdb.Region],
+    probes: dict[str, list[tuple[int, kdb.Point]]],
+) -> tuple[int, list[str]]:
+    """Rename each probed extracted net to its DEF net name, overriding
+    whatever ``extract_netlist()`` derived from text labels. Returns
+    ``(renamed_count, unresolved_names)`` -- ``unresolved_names`` being the
+    DEF names no probe candidate resolved to an extracted net (geometry that
+    joins nothing, e.g. an isolated fill-like fragment).
+
+    Ordering is load-bearing: this must run *after* ``l2n.extract_netlist()``
+    (``probe_net`` needs the live ``LayoutToNetlist``) and *before*
+    ``netlist.make_top_level_pins()`` and the ``purge`` passes, both of which
+    read net names to decide what to promote and what to keep.
+
+    A name is only ever written onto **one** extracted net -- the first
+    candidate that resolves. A DEF net that extraction splits into several
+    electrically disconnected islands (unstrapped power geometry, dead metal)
+    therefore names one island and leaves the rest as they were, rather than
+    minting duplicate net names into the SPICE/SPEF output.
+    """
+    renamed = 0
+    unresolved: list[str] = []
+    for def_name, candidates in probes.items():
+        net = None
+        for metal_index, point in candidates:
+            if metal_index >= len(metals):
+                continue
+            net = l2n.probe_net(metals[metal_index], point)
+            if net is not None:
+                break
+        if net is None:
+            unresolved.append(def_name)
+            continue
+        if net.name != def_name:
+            net.name = def_name
+            renamed += 1
+    return renamed, sorted(unresolved)
+
+
 def _probe_abstract_pin_net(
     l2n: kdb.LayoutToNetlist,
     point: kdb.Point,
@@ -3920,6 +4075,7 @@ def _extract_netlist(
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
+    def_net_names: bool = False,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -4002,6 +4158,15 @@ def _extract_netlist(
     one entry per routing-stack cluster that joins no surviving net, empty
     on a layout whose every metal/via shape is netted.
 
+    ``def_net_names`` (issue #951): when ``True``, each routed net is renamed
+    to the DEF net name its geometry carries as GDS shape property
+    :data:`_DEF_NET_NAME_PROPERTY_ID`, overriding the text-label-derived name
+    ``extract_netlist()`` assigned. Probe points are collected up front (they
+    must be read off raw shapes, before ``_resolve_black_box_regions`` can
+    mask the metal regions) and applied straight after ``extract_netlist()``,
+    before pin promotion and the purge passes read any net name -- see
+    :func:`_def_net_name_probes` / :func:`_apply_def_net_name_overrides`.
+
     ``abstract_cell_patterns``/``abstract_instances``/``lef_macros`` (issue
     #620): ``abstract_instances`` is the already-collected
     ``[(cell_index, transform), ...]`` list for every matched instance (see
@@ -4046,6 +4211,16 @@ def _extract_netlist(
     metals = [_region(layout, top_cell, layer) for layer in deck.metals]
     metal_labels = [_label_texts(layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
+
+    # `--def-net-names` (issue #951). Collected here, before
+    # `_resolve_black_box_regions` below can mask `metals[]`: this reads
+    # raw-shape properties straight off `layout`/`top_cell`, independently of
+    # any Region built from them, and is only *applied* (via
+    # `l2n.probe_net`) once extraction has run -- see the
+    # `_apply_def_net_name_overrides` call site further down.
+    def_net_name_probes = (
+        _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
+    )
 
     # Black-box/abstract regions (#293), resolved *before* everything else
     # below (including the resistor resolution that follows): geometry
@@ -4652,6 +4827,39 @@ def _extract_netlist(
             "device's other terminal(s)"
         ) from exc
     netlist = l2n.netlist()
+
+    # `--def-net-names` (issue #951): must run right after `l2n.netlist()` --
+    # `probe_net` needs the live `l2n` -- and before anything below reads or
+    # promotes net names (`_wire_abstract_cells`, `make_top_level_pins()`,
+    # the purge passes). Inert unless the caller opted in.
+    if def_net_names:
+        def_names_renamed, def_names_unresolved = _apply_def_net_name_overrides(
+            l2n, metals, def_net_name_probes
+        )
+        if not def_net_name_probes:
+            # Loud, not silent: the opt-in found nothing to rename at all,
+            # which almost always means this layout did not come from a
+            # DEF->GDS merge (no shape carries property
+            # `_DEF_NET_NAME_PROPERTY_ID`), so every net below is still named
+            # the default text-label way.
+            warnings.append(
+                "--def-net-names found no DEF net-name shape property "
+                f"({_DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
+                f"'{top_cell.name}' -- net names are unchanged (this flag "
+                "expects a layout produced by a LEF/DEF -> GDS merge, e.g. "
+                "`klt place-and-route`'s routed GDS)"
+            )
+        elif def_names_unresolved:
+            joined = ", ".join(def_names_unresolved[:10])
+            more = len(def_names_unresolved) - 10
+            warnings.append(
+                f"--def-net-names: renamed {def_names_renamed} net(s), but "
+                f"{len(def_names_unresolved)} DEF net name(s) resolved to no "
+                f"extracted net ({joined}"
+                + (f", +{more} more" if more > 0 else "")
+                + ") -- their geometry joins nothing the deck's connectivity "
+                "graph sees, so those nets keep their default names"
+            )
 
     # `--abstract-cells` (issue #620): wire every abstracted instance in as a
     # black-box `kdb.SubCircuit` while `l2n`/`netlist` are still the *live*

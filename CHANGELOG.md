@@ -476,6 +476,49 @@ not `klt --version`, if you need to detect this kind of drift. See
   runs extraction itself. Exit codes `0`/`3`/`4` mirror `klt sim`'s
   precedent. `schema_version` starts at `1`. See
   [`docs/cli/pex.md`](docs/cli/pex.md).
+- 2026-08-14 — `klt extract` gains `--def-net-names`, and `klt
+  place-and-route`'s `post_route_spef` path uses it to take post-route SPEF
+  annotation from **0% to 100%** of the design's nets (issue #951, Epic #700
+  Phase 3). Extraction names nets from GDS text labels, and the `"route"`
+  stage's DEF→GDS merge emits labels for top-level pins only, so every
+  internal routed net reached the SPEF under a KLayout-synthesized `$<id>`
+  name no OpenSTA net is called — measured live at `0` of `981`/`1904`/`449`
+  annotated on `gcd`/`modexp`/`mult8` when `--spef` shipped (#948). The real
+  names were in the routed GDS all along, as a **shape property** rather than
+  a label: KLayout's LEF/DEF reader records each routed-net shape's DEF net
+  name under `net_property_name` (default property `1`), and GDS
+  `PROPATTR`/`PROPVALUE` round-trips it. `--def-net-names` reads that
+  property and renames each extracted net accordingly; opt-in, because
+  property `1` carries no guaranteed meaning in a GDS that did not come from
+  a LEF/DEF merge, so every other layout's output is byte-identical to
+  before. A run that opts in and finds no such property (or finds names that
+  resolve to no extracted net) says so in `warnings` rather than silently
+  changing nothing. **No routed-GDS artifact change and no corpus fixture
+  regeneration were required** — the committed
+  `tests/corpus/place_and_route/gcd.gds.gz` already carried all 458 of that
+  design's DEF net names. Re-measured live against `openroad/orfs:latest`
+  (OpenROAD `26Q3-1080-gab6fd26351`), sky130A, `seed: 1`: `537/537` (`gcd`),
+  `760/764` (`modexp` — the 4 unmatched are tie-cell outputs with no routed
+  geometry at all, so no wire and no parasitics either), `276/276`
+  (`mult8`). Two additive `spef_sta` fields record the correlation from both
+  directions — `design_nets_annotated`/`design_nets_total` (of the design's
+  own nets, how many the SPEF names; the ratio `annotation_complete` is now
+  keyed on) alongside the existing SPEF-side
+  `nets_annotated`/`nets_total`, which cannot reach 1 by construction since
+  flat extraction also emits intra-standard-cell nodes a gate-level design
+  never had. Also fixes the `get_nets` net-name embedding, which
+  backslash-escaped glob metacharacters inside a Tcl brace-quoted word —
+  where no backslash substitution happens, so an escaped `a\[10\]` reached
+  OpenSTA still carrying its backslashes and matched nothing (invisible
+  while correlation was 0%). No `schema_version` bump. **Known remaining
+  gap, now measured rather than assumed**: `read_spef` matches every net but
+  still discards their RC networks, because `klt extract`'s SPEF omits
+  device-terminal (`*I <instance>:<pin>`) connectivity by design (#948) and
+  its `*CAP`/`*RES` node names therefore resolve to no pin in the linked
+  design — `worst_slack` is bit-identical before and after `read_spef`
+  (tracked as issue #961). See `docs/cli/place-and-route.md`'s "Still
+  missing for real routed-RC timing" and `docs/cli/extract.md`'s
+  `--def-net-names` section.
 
 - 2026-08-13 — `klt place-and-route`'s `"route"` stage gains two new
   additive response fields, `worst_setup_slack_ns`/`worst_hold_slack_ns`
