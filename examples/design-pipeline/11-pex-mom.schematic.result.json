@@ -35,7 +35,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.119,
+      "runtime_s": 0.084,
       "status": "pass",
       "supply_v": {
         "vtail": -0.45
@@ -76,7 +76,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.085,
+      "runtime_s": 0.093,
       "status": "pass",
       "supply_v": {
         "vtail": -0.45
@@ -117,7 +117,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.131,
+      "runtime_s": 0.125,
       "status": "pass",
       "supply_v": {
         "vtail": -0.45
@@ -158,7 +158,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.076,
+      "runtime_s": 0.104,
       "status": "pass",
       "supply_v": {
         "vtail": -0.55
@@ -199,7 +199,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.106,
+      "runtime_s": 0.119,
       "status": "pass",
       "supply_v": {
         "vtail": -0.55
@@ -240,7 +240,7 @@
       ],
       "monte_carlo": null,
       "process": null,
-      "runtime_s": 0.052,
+      "runtime_s": 0.116,
       "status": "pass",
       "supply_v": {
         "vtail": -0.55

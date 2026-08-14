@@ -7,7 +7,7 @@
   },
   "note": "Phase 3b (issue #989) -- the current-carrying companion to post-extraction-bias-probe/'s Phase 1c record: same block/canary, a new bias network (TAIL_A|TAIL_B driven negative) so current genuinely flows and delta_pct is nonzero. See mom-fed-current-probe/'s own -mom-comparison.json record for the MoM-fed half of this scope's comparison.",
   "pdk_pin": null,
-  "recorded_at": "2026-08-14T20:01:57Z",
+  "recorded_at": "2026-08-14T20:28:23Z",
   "request_path": "examples/design-pipeline/11-pex-mom.request.json",
   "request_sha256": "593e1d6a3fa9b24c7a972de0003bf79a2176c61a95caf54666276c0bde78177d",
   "result": {

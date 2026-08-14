@@ -7,12 +7,12 @@
   },
   "note": "Not a klt pex/klt sim record on its own -- the MoM-fed half of this scope's comparison, request_path/request_sha256 pin the same 11-pex-mom.request.json baseline both other records in this scope pin (this record additionally depends on this directory's mom_current_carrying_probe.py, the script that produced every number in 'result', for full reproducibility). See examples/design-pipeline/README.md's 'S10 mom-fed pex delta proof' section for the full write-up.",
   "pdk_pin": null,
-  "recorded_at": "2026-08-14T20:01:57Z",
+  "recorded_at": "2026-08-14T20:28:23Z",
   "request_path": "examples/design-pipeline/11-pex-mom.request.json",
   "request_sha256": "593e1d6a3fa9b24c7a972de0003bf79a2176c61a95caf54666276c0bde78177d",
   "result": {
     "baseline_lumped_rc": {
-      "conclusion": "every delta[] row is genuinely nonzero (a real schematic-vs-extracted current reduction from the added series R, 1.25%-96.71% in magnitude across the 6-corner sweep) -- the first non-null klt pex result recorded for this canary, refining Phase 1c's own 0.0/0.0 finding (which only proved this measurement scheme's own insensitivity, not that this canary is inherently DC-dead)",
+      "conclusion": "every delta[] row is genuinely nonzero (a real schematic-vs-extracted current reduction from the added series R, 5.238%-96.71% in magnitude across the 6-corner sweep) -- the first non-null klt pex result recorded for this canary, refining Phase 1c's own 0.0/0.0 finding (which only proved this measurement scheme's own insensitivity, not that this canary is inherently DC-dead)",
       "corner_count": 6,
       "delta_pct_range": [
         -96.71,

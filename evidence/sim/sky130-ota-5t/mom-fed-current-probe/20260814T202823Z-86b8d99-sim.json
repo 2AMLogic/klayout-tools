@@ -2,7 +2,7 @@
   "block": "sky130-ota-5t",
   "note": "The schematic-side leg of the same scope -- a direct `klt sim` run of 11-pex-mom.request.json against its testbench's unmodified `.include` target (07-reference.spice), stored alongside per the convention's own framing, mirroring post-extraction-bias-probe/'s own -sim.json companion.",
   "pdk_pin": null,
-  "recorded_at": "2026-08-14T20:01:57Z",
+  "recorded_at": "2026-08-14T20:28:23Z",
   "request_path": "examples/design-pipeline/11-pex-mom.request.json",
   "request_sha256": "593e1d6a3fa9b24c7a972de0003bf79a2176c61a95caf54666276c0bde78177d",
   "result": {
@@ -42,7 +42,7 @@
         ],
         "monte_carlo": null,
         "process": null,
-        "runtime_s": 0.119,
+        "runtime_s": 0.084,
         "status": "pass",
         "supply_v": {
           "vtail": -0.45
@@ -83,7 +83,7 @@
         ],
         "monte_carlo": null,
         "process": null,
-        "runtime_s": 0.085,
+        "runtime_s": 0.093,
         "status": "pass",
         "supply_v": {
           "vtail": -0.45
@@ -124,7 +124,7 @@
         ],
         "monte_carlo": null,
         "process": null,
-        "runtime_s": 0.131,
+        "runtime_s": 0.125,
         "status": "pass",
         "supply_v": {
           "vtail": -0.45
@@ -165,7 +165,7 @@
         ],
         "monte_carlo": null,
         "process": null,
-        "runtime_s": 0.076,
+        "runtime_s": 0.104,
         "status": "pass",
         "supply_v": {
           "vtail": -0.55
@@ -206,7 +206,7 @@
         ],
         "monte_carlo": null,
         "process": null,
-        "runtime_s": 0.106,
+        "runtime_s": 0.119,
         "status": "pass",
         "supply_v": {
           "vtail": -0.55
@@ -247,7 +247,7 @@
         ],
         "monte_carlo": null,
         "process": null,
-        "runtime_s": 0.052,
+        "runtime_s": 0.116,
         "status": "pass",
         "supply_v": {
           "vtail": -0.55

@@ -414,6 +414,14 @@ def main() -> None:
         layout_path, request_path, baseline["delta"], peec_resistance_ohm
     )
 
+    # Derive the headline magnitude range from the measured rows themselves
+    # rather than restating it in prose: the conclusion string below is part
+    # of an append-only evidence record, so a hardcoded range could silently
+    # contradict the very measurements it summarizes on a re-run.
+    baseline_delta_pcts = [r["delta_pct"] for r in baseline["delta"]]
+    baseline_magnitudes = [abs(v) for v in baseline_delta_pcts]
+    magnitude_range = f"{min(baseline_magnitudes):g}%-{max(baseline_magnitudes):g}%"
+
     comparison = {
         "kind": "mom-fed-pex-delta-comparison",
         "epic": 709,
@@ -432,16 +440,16 @@ def main() -> None:
             "failed": baseline["failed"],
             "errored": baseline["errored"],
             "delta_pct_range": [
-                min(r["delta_pct"] for r in baseline["delta"]),
-                max(r["delta_pct"] for r in baseline["delta"]),
+                min(baseline_delta_pcts),
+                max(baseline_delta_pcts),
             ],
             "conclusion": (
                 "every delta[] row is genuinely nonzero (a real "
                 "schematic-vs-extracted current reduction from the added "
-                "series R, 1.25%-96.71% in magnitude across the 6-corner "
-                "sweep) -- the first non-null klt pex result recorded for "
-                "this canary, refining Phase 1c's own 0.0/0.0 finding "
-                "(which only proved this measurement scheme's own "
+                f"series R, {magnitude_range} in magnitude across the "
+                "6-corner sweep) -- the first non-null klt pex result "
+                "recorded for this canary, refining Phase 1c's own 0.0/0.0 "
+                "finding (which only proved this measurement scheme's own "
                 "insensitivity, not that this canary is inherently DC-dead)"
             ),
         },
