@@ -845,6 +845,69 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     extract_parser.add_argument(
+        "--mom-rlc-net",
+        dest="mom_rlc_net",
+        default=None,
+        metavar="NET",
+        help=(
+            "substitute a caller-supplied R/L/C for this one net's "
+            "--parasitics Phase 1/2 lumped-RC ground model -- e.g. from a "
+            "separate `klt mom` (Method-of-Moments, Epic #701) run against "
+            "this net's real geometry (issue #988, Epic #709 Phase 3a). "
+            "Requires --parasitics and at least one of "
+            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
+            "--mom-rlc-inductance-nh. Unlike --mom-net (which drives its "
+            "own internal solve), this command never calls `klt mom` "
+            "itself -- the values are opaque caller input, applied "
+            "verbatim. Mutually exclusive with --distributed-rc naming the "
+            "same net. A name matching no net with ground-eligible "
+            "parasitics geometry is an error (unlike --critical-net's "
+            "tolerant `warnings` convention -- a caller-supplied measured "
+            "value is expected to land somewhere). Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--mom-rlc-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-resistance-ohm",
+        dest="mom_rlc_resistance_ohm",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "the --mom-rlc-net net's substituted total series resistance, "
+            "ohms; replaces its written SPICE `R` card(s)' total and its "
+            "`parasitics.nets[].resistance_ohm`. Requires --mom-rlc-net."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-capacitance-ff",
+        dest="mom_rlc_capacitance_ff",
+        type=float,
+        default=None,
+        metavar="FF",
+        help=(
+            "the --mom-rlc-net net's substituted total ground capacitance, "
+            "femtofarads; replaces its written SPICE `C` card's value and "
+            "its `parasitics.nets[].capacitance_ff`. Requires "
+            "--mom-rlc-net."
+        ),
+    )
+    extract_parser.add_argument(
+        "--mom-rlc-inductance-nh",
+        dest="mom_rlc_inductance_nh",
+        type=float,
+        default=None,
+        metavar="NH",
+        help=(
+            "add one series inductor (henries, in the written SPICE `L` "
+            "card) between the --mom-rlc-net net's hub and its ground "
+            "capacitor, nanohenries. Purely additive -- there is no "
+            "inductance term in this command's default RC-only model to "
+            "replace. Requires --mom-rlc-net."
+        ),
+    )
+    extract_parser.add_argument(
         "--def-net-names",
         dest="def_net_names",
         action="store_true",
@@ -1716,6 +1779,57 @@ def create_parser() -> argparse.ArgumentParser:
             "extract --distributed-rc`; requires --critical-net. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-net",
+        dest="mom_rlc_net",
+        default=None,
+        metavar="NET",
+        help=(
+            "substitute a caller-supplied R/L/C for this one net's Phase "
+            "1/2 lumped-RC ground model -- e.g. from a separate `klt mom` "
+            "(Method-of-Moments, Epic #701) run against this net's real "
+            "geometry (issue #988, Epic #709 Phase 3a), passed through to "
+            "`klt extract --mom-rlc-net`. Requires at least one of "
+            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
+            "--mom-rlc-inductance-nh. Off by default -- byte-identical to "
+            "today's behavior. See docs/cli/extract.md's '--mom-rlc-net' "
+            "section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-resistance-ohm",
+        dest="mom_rlc_resistance_ohm",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "the --mom-rlc-net net's substituted total series resistance, "
+            "ohms. Requires --mom-rlc-net."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-capacitance-ff",
+        dest="mom_rlc_capacitance_ff",
+        type=float,
+        default=None,
+        metavar="FF",
+        help=(
+            "the --mom-rlc-net net's substituted total ground capacitance, "
+            "femtofarads. Requires --mom-rlc-net."
+        ),
+    )
+    pex_parser.add_argument(
+        "--mom-rlc-inductance-nh",
+        dest="mom_rlc_inductance_nh",
+        type=float,
+        default=None,
+        metavar="NH",
+        help=(
+            "add one series inductor between the --mom-rlc-net net's hub "
+            "and its ground capacitor, nanohenries. Purely additive. "
+            "Requires --mom-rlc-net."
         ),
     )
     _add_format_arg(pex_parser)

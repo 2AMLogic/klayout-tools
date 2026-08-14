@@ -1268,6 +1268,10 @@ def run_extract(
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
     def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+    mom_rlc_net: str | None = None,
+    mom_rlc_resistance_ohm: float | None = None,
+    mom_rlc_capacitance_ff: float | None = None,
+    mom_rlc_inductance_nh: float | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1470,6 +1474,58 @@ def run_extract(
     ``*CONN``/``*RES`` shape it produces and the duplicate-net-name guard
     that skips it. ``None`` (the default) is byte-identical to the pre-#961
     port-only ``*CONN`` behavior.
+
+    ``mom_rlc_net``/``mom_rlc_resistance_ohm``/``mom_rlc_capacitance_ff``/
+    ``mom_rlc_inductance_nh`` (``klt extract --mom-rlc-net <net>
+    --mom-rlc-resistance-ohm <r> --mom-rlc-capacitance-ff <c>
+    [--mom-rlc-inductance-nh <l>]``, issue #988, Epic #709 Phase 3a)
+    substitute a caller-supplied, directly-solved R/L/C for one named net --
+    e.g. from a separate ``klt mom`` (Method-of-Moments, Epic #701) run
+    against that net's real geometry -- in place of this function's own
+    Phase 1/2 lumped-RC ground model for that net, so a later ``klt sim``/
+    ``klt pex`` re-simulation reflects a MoM-grade parasitic on exactly the
+    net a caller has singled out as critical. Unlike ``mom_net`` above
+    (which drives its own internal, idealised-ground-plate MoM solve and
+    reports the comparison), this is a pure value substitution: the three
+    numeric overrides are opaque to this function -- it does not call `klt
+    mom` itself, does not know or care how they were derived, and applies
+    exactly the ones given (each independently optional; a caller trusting
+    MoM for capacitance only, say, can omit ``mom_rlc_resistance_ohm`` and
+    keep the lumped-RC value for that component). Requires
+    ``mom_rlc_net`` whenever any of the three values is given (and vice
+    versa), and requires ``parasitics=True`` -- there is no per-net R/C
+    entry to substitute into otherwise; either violation is an
+    :class:`ExtractError`, the same "a flag naming something invalid is an
+    error" convention every other opt-in flag above follows. A
+    ``mom_rlc_net`` matching no net with ground-eligible parasitics geometry
+    in this layout is also an :class:`ExtractError` (unlike
+    ``critical_nets``' tolerant "reported in warnings" convention -- a
+    caller supplying a real measured value for a specific net expects it
+    applied, not silently skipped). Mutually exclusive with
+    ``distributed_rc`` naming the same net (via ``critical_nets``) -- a
+    caller-supplied lumped R/C total and a multi-segment ladder derived from
+    the deck's own coefficient table cannot both describe one net's model at
+    once; combining them for the same net is an :class:`ExtractError`.
+    ``mom_rlc_resistance_ohm``/``mom_rlc_capacitance_ff`` replace this net's
+    ``_compute_parasitics`` ground-list entry/entries (every net *object*
+    sharing this net *name* -- e.g. several un-strapped islands with the
+    same layout label -- gets the same override) before
+    :func:`_inject_parasitics` reads them, exactly where ``mom_net``'s own
+    swap happens, so both the written SPICE ``R``/``C`` cards and the
+    ``parasitics.nets[]`` entry/entries for this net carry the substituted
+    value. ``mom_rlc_inductance_nh``, when given, adds one series inductor
+    per matched net between that net's star/Gamma-shunt hub and its ground
+    capacitor (``hub --L--> <fresh node> --C--> ground``, in henries in the
+    written SPICE ``L`` card) -- there is no inductance term anywhere in
+    this module's default quasi-static RC-only model
+    (``PARASITIC_MODEL_SCOPE``) for this to replace, so it is purely
+    additive rather than a substitution. ``None`` (the default) for all four
+    parameters skips this feature entirely -- byte-identical to before this
+    feature existed. The applied override (and the pre-substitution lumped
+    value it replaced) is reported in the new
+    ``parasitics.mom_rlc_override`` block -- see
+    ``docs/cli/extract.md``'s ``--mom-rlc-net`` section for the full field
+    list.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/extract.md`` / ``docs/design/lvs-extraction-spike.md``
@@ -1930,6 +1986,48 @@ def run_extract(
     if distributed_rc and not critical_nets_set:
         raise ExtractError("--distributed-rc requires --critical-net")
 
+    # `--mom-rlc-net` (issue #988, Epic #709 Phase 3a): substitutes a
+    # caller-supplied R/L/C for one named net's Phase 1/2 lumped-RC model --
+    # see `run_extract`'s own `mom_rlc_net` docstring paragraph. Validated up
+    # front, same "a flag naming something invalid is an error, not a silent
+    # no-op" convention every other opt-in flag above follows.
+    mom_rlc_values_given = (
+        mom_rlc_resistance_ohm is not None
+        or mom_rlc_capacitance_ff is not None
+        or mom_rlc_inductance_nh is not None
+    )
+    if mom_rlc_net is not None and not mom_rlc_values_given:
+        raise ExtractError(
+            "--mom-rlc-net requires at least one of --mom-rlc-resistance-ohm/"
+            "--mom-rlc-capacitance-ff/--mom-rlc-inductance-nh"
+        )
+    if mom_rlc_net is None and mom_rlc_values_given:
+        raise ExtractError(
+            "--mom-rlc-resistance-ohm/--mom-rlc-capacitance-ff/"
+            "--mom-rlc-inductance-nh require --mom-rlc-net"
+        )
+    if mom_rlc_net is not None and not parasitics:
+        raise ExtractError("--mom-rlc-net requires --parasitics")
+    for label, value in (
+        ("--mom-rlc-resistance-ohm", mom_rlc_resistance_ohm),
+        ("--mom-rlc-capacitance-ff", mom_rlc_capacitance_ff),
+        ("--mom-rlc-inductance-nh", mom_rlc_inductance_nh),
+    ):
+        if value is not None and value < 0:
+            raise ExtractError(f"{label} must be >= 0 (got {value!r})")
+    if (
+        mom_rlc_net is not None
+        and distributed_rc
+        and critical_nets_set is not None
+        and mom_rlc_net in critical_nets_set
+    ):
+        raise ExtractError(
+            f"--mom-rlc-net {mom_rlc_net!r} also names a --distributed-rc "
+            "net -- a caller-supplied lumped R/L/C override and a "
+            "multi-segment distributed ladder cannot both model the same "
+            "net's parasitics at once"
+        )
+
     (
         netlist,
         top_cell_name,
@@ -2279,6 +2377,49 @@ def run_extract(
                 "warnings": list(mom_crosscheck["warnings"]),
             }
             warnings.extend(mom_crosscheck["warnings"])
+        # `--mom-rlc-net` (issue #988, Epic #709 Phase 3a): substitute a
+        # caller-supplied R/L/C for one named net's Phase 1/2 lumped-RC
+        # model *before* `_inject_parasitics` reads `ground_nets` below --
+        # see `run_extract`'s own `mom_rlc_net` docstring paragraph. Unlike
+        # `--mom-net` above, the entry to swap is resolved by *name*
+        # (matching `--critical-net`'s own convention, not `--mom-net`'s
+        # `net_id`-keyed one): there is no single solved net object here to
+        # key on, since the R/L/C values are opaque caller input, not the
+        # output of a solve this function itself ran against one specific
+        # net object. Every distinct net object sharing this net name (e.g.
+        # several un-strapped islands with the same layout label) is
+        # substituted the same way.
+        mom_rlc_override_report: dict[str, Any] | None = None
+        if mom_rlc_net is not None:
+            matched_entries = [e for e in ground_nets if e["net"] == mom_rlc_net]
+            if not matched_entries:
+                raise ExtractError(
+                    f"--mom-rlc-net {mom_rlc_net!r} matches no net with "
+                    "ground-eligible parasitics geometry in this layout"
+                )
+            previous_resistance_ohm = sum(e["resistance_ohm"] for e in matched_entries)
+            previous_capacitance_ff = sum(e["capacitance_ff"] for e in matched_entries)
+            for matched_entry in matched_entries:
+                if mom_rlc_resistance_ohm is not None:
+                    matched_entry["resistance_ohm"] = mom_rlc_resistance_ohm
+                if mom_rlc_capacitance_ff is not None:
+                    matched_entry["capacitance_ff"] = mom_rlc_capacitance_ff
+            mom_rlc_override_report = {
+                "net": mom_rlc_net,
+                "matched_net_count": len(matched_entries),
+                "previous_resistance_ohm": round(previous_resistance_ohm, 4),
+                "previous_capacitance_ff": round(previous_capacitance_ff, 6),
+                "resistance_ohm": mom_rlc_resistance_ohm,
+                "capacitance_ff": mom_rlc_capacitance_ff,
+                "inductance_nh": mom_rlc_inductance_nh,
+                "method": (
+                    "caller-supplied value (e.g. a separate `klt mom` "
+                    "Method-of-Moments solve against this net's real "
+                    "geometry, Epic #701) substituted verbatim for this "
+                    "net's Phase 1/2 lumped-RC ground model -- see "
+                    "docs/cli/extract.md's '--mom-rlc-net' section."
+                ),
+            }
         if circuit is not None and (ground_nets or coupled_pairs):
             ground_net = deck.substrate_net
             parasitics_report = _inject_parasitics(
@@ -2288,15 +2429,22 @@ def run_extract(
                 coupled_pairs,
                 ground_net,
                 distributed_rc_nets=(critical_nets_set if distributed_rc else None),
+                mom_rlc_inductor=(
+                    (mom_rlc_net, mom_rlc_inductance_nh)
+                    if mom_rlc_net is not None and mom_rlc_inductance_nh is not None
+                    else None
+                ),
             )
         else:
             parasitics_report = {
                 "r_count": 0,
                 "c_count": 0,
                 "cc_count": 0,
+                "l_count": 0,
                 "total_resistance_ohm": 0.0,
                 "total_capacitance_ff": 0.0,
                 "total_coupling_capacitance_ff": 0.0,
+                "total_inductance_nh": 0.0,
                 "nets": [],
             }
         # `parasitics_deck` is only non-None when `--parasitics` was given
@@ -2403,6 +2551,11 @@ def run_extract(
         # `run_extract`'s `mom_net` docstring paragraph and
         # `docs/cli/extract.md`'s `--mom-net` section.
         parasitics_report["mom_crosscheck"] = mom_crosscheck_report
+        # Additive field (issue #988, Epic #709 Phase 3a): `None` unless
+        # `--mom-rlc-net` was given, in which case it is the substitution
+        # report built above -- see `run_extract`'s `mom_rlc_net` docstring
+        # paragraph and `docs/cli/extract.md`'s `--mom-rlc-net` section.
+        parasitics_report["mom_rlc_override"] = mom_rlc_override_report
 
     # `--spef` (issue #948): translate the just-built `parasitics_report`
     # into a SPEF file at `spef_output` -- see `_write_spef`'s docstring for
@@ -6753,6 +6906,7 @@ def _inject_parasitics(
     coupled_pairs: list[dict[str, Any]],
     ground_net_name: str,
     distributed_rc_nets: frozenset[str] | None = None,
+    mom_rlc_inductor: tuple[str, float] | None = None,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -6760,6 +6914,21 @@ def _inject_parasitics(
     vertical-overlap and/or (``--critical-net``-scoped) lateral coupling
     capacitance, into ``circuit`` and return the JSON ``parasitics`` summary
     block (issue #592, extended by issues #760, #976, and #977).
+
+    ``mom_rlc_inductor`` (``(net_name, inductance_nh)``, issue #988, Epic
+    #709 Phase 3a) -- ``None`` unless ``--mom-rlc-net`` was given together
+    with ``--mom-rlc-inductance-nh``, in which case, for every net named
+    ``net_name`` here that ends up on the *lumped* (star/Gamma-shunt)
+    model path below, one series inductor (``kdb.DeviceClassInductor``,
+    henries) is spliced between that net's hub and its ground capacitor
+    (``hub --L--> <fresh node> --C--> ground``) instead of the capacitor
+    hanging directly off the hub. There is no inductance term anywhere in
+    this function's default RC-only model for this to *replace* -- it is
+    purely additive, unlike ``mom_rlc_net``'s own R/C values (substituted
+    into ``parasitic_nets`` entries by the caller, before this function
+    ever runs -- see ``run_extract``'s ``mom_rlc_net`` docstring paragraph).
+    Never reached for a net on the *distributed* ladder path (``run_extract``
+    rejects that combination up front as mutually exclusive).
 
     For each ``parasitic_nets`` entry **not** named in ``distributed_rc_nets``
     (the overwhelmingly common case, and the only one before issue #977), the
@@ -6852,9 +7021,11 @@ def _inject_parasitics(
     """
     res_class = kdb.DeviceClassResistor()
     cap_class = kdb.DeviceClassCapacitor()
+    ind_class = kdb.DeviceClassInductor()
     netlist = circuit.netlist()
     netlist.add(res_class)
     netlist.add(cap_class)
+    netlist.add(ind_class)
 
     ground = circuit.net_by_name(ground_net_name)
     if ground is None:
@@ -6919,6 +7090,12 @@ def _inject_parasitics(
     # regardless of model), this always equals the number of `C` cards the
     # written SPICE netlist actually carries.
     total_c_count = 0
+    # `mom_rlc_inductor` series-inductor device count/total (issue #988) --
+    # 0/0.0 unless `mom_rlc_inductor` was given, same "always present,
+    # 0-when-unused" convention `total_coupling_capacitance_ff` already
+    # follows.
+    total_l_count = 0
+    total_l_nh = 0.0
     for entry in parasitic_nets:
         net = nets_by_id.get(entry["net_id"])
         if net is None:
@@ -7087,14 +7264,37 @@ def _inject_parasitics(
             r_dev.set_parameter("R", r_total_ohm)
             total_r_count += 1
 
+        net_inductance_nh = 0.0
         if rc_model == "lumped":
+            # `--mom-rlc-net`/`--mom-rlc-inductance-nh` (issue #988, Epic
+            # #709 Phase 3a): splice one series inductor between the hub and
+            # the ground capacitor for exactly the net `mom_rlc_inductor`
+            # names -- see this function's own `mom_rlc_inductor` docstring
+            # paragraph. `c_ground_node` is the capacitor's own "A" terminal
+            # below: `hub` unless this splice applies, in which case it is
+            # the fresh node between the inductor and the capacitor.
+            c_ground_node = hub
+            if mom_rlc_inductor is not None and entry["net"] == mom_rlc_inductor[0]:
+                net_inductance_nh = mom_rlc_inductor[1]
+                l_node_name = _unique_net_name(
+                    entry["net"], existing_names, suffix="__l"
+                )
+                existing_names.add(l_node_name)
+                l_node = circuit.create_net(l_node_name)
+                l_dev = circuit.create_device(ind_class, f"{instance_name}_l")
+                l_dev.connect_terminal("A", hub)
+                l_dev.connect_terminal("B", l_node)
+                l_dev.set_parameter("L", net_inductance_nh * 1e-9)
+                c_ground_node = l_node
+                total_l_count += 1
+                total_l_nh += net_inductance_nh
             # The distributed ladder above already created one capacitor per
             # leg (summing back to the net's total, see
             # `_distributed_rc_segments`'s docstring) -- creating a second,
             # hub-level capacitor here would double-count the net's
             # capacitance.
             c_dev = circuit.create_device(cap_class, instance_name)
-            c_dev.connect_terminal("A", hub)
+            c_dev.connect_terminal("A", c_ground_node)
             c_dev.connect_terminal("B", ground)
             c_dev.set_parameter("C", c_farad)
             net_c_count = 1
@@ -7114,6 +7314,11 @@ def _inject_parasitics(
                 "net_id": entry["net_id"],
                 "resistance_ohm": entry["resistance_ohm"],
                 "capacitance_ff": entry["capacitance_ff"],
+                # Additive field (issue #988): the series inductor spliced in
+                # for this net by `mom_rlc_inductor` -- `0.0` (the default)
+                # for every net unless `--mom-rlc-net`/
+                # `--mom-rlc-inductance-nh` named this one.
+                "inductance_nh": net_inductance_nh,
                 "hub_net": hub_name,
                 # Additive field (issue #977): `"lumped"` (the pre-#977
                 # star/Gamma-shunt model, always this value unless
@@ -7156,9 +7361,14 @@ def _inject_parasitics(
         "r_count": total_r_count,
         "c_count": total_c_count,
         "cc_count": cc_count,
+        # Additive fields (issue #988): `mom_rlc_inductor`'s series-inductor
+        # device count/total -- `0`/`0.0` (the default) unless
+        # `--mom-rlc-net`/`--mom-rlc-inductance-nh` was given.
+        "l_count": total_l_count,
         "total_resistance_ohm": round(total_r, 4),
         "total_capacitance_ff": round(total_c_ff, 6),
         "total_coupling_capacitance_ff": round(total_cc_ff, 6),
+        "total_inductance_nh": round(total_l_nh, 6),
         "nets": report_nets,
     }
 
