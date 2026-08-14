@@ -367,6 +367,75 @@ def _spef_name(name: str) -> str:
     return _SPEF_ESCAPE_RE.sub(lambda m: "\\" + m.group(0), name)
 
 
+#: Same character class as :data:`_SPEF_ESCAPE_RE` *except* ``[``/``]`` --
+#: SPEF's own declared bus-delimiter characters (``*BUS_DELIMITER [ ]``, this
+#: writer's own header line). Matched by :func:`_spef_port_node_name`, used
+#: only for a *bare* (colon-free) port-pin ``*RES``/``*CAP`` node reference
+#: (issue #961's residual-annotation fix) -- see that function's docstring
+#: for why a bus-indexed port needs its brackets left *un*-escaped there,
+#: unlike every other identifier position this file writes.
+_SPEF_PORT_NODE_ESCAPE_RE = re.compile(r"[^A-Za-z0-9_\[\]]")
+
+
+def _spef_port_node_name(name: str) -> str:
+    """``name`` (a *declared-port* net's own name) rendered as a bare,
+    colon-free SPEF ``*RES``/``*CAP`` node identifier -- every character
+    :func:`_spef_name` would escape *except* ``[``/``]``, which are left as
+    literal, un-escaped bus-delimiter characters.
+
+    **Root cause, live-verified against a real OpenSTA session (issue #961's
+    residual, following PR #984's topology rework):** PR #984 gave every
+    net -- port or not -- an internal, colon-scoped primary node
+    (``<net>:1``, never the bare net/port name) after finding that a bare
+    identifier is never a valid two-node ``*RES``/``*CAP`` endpoint. That
+    finding was correct for *non-port* nets but incomplete for *port* nets:
+    OpenSTA's own SPEF reader (``SpefReader::findParasiticNode``, the
+    ``The-OpenROAD-Project/OpenSTA`` fork) resolves a colon-free ``*RES``/
+    ``*CAP`` node through ``findPortPinRelative`` -- ``Network::findPin`` on
+    the *design's own top-level pin*, not through any bare-net-name lookup.
+    A bare, un-escaped **non-bus** port name (``clk``, ``done``, ``start``)
+    resolves there cleanly (confirmed directly against OpenSTA's own shipped
+    ``examples/gcd_sky130hd.spef`` test fixture, whose ``*RES 1 clk *198:13
+    ...`` line is exactly this shape, and by giving this repo's own routed
+    `gcd`'s ``done``/``clk`` nets an un-escaped bare-name primary node and
+    confirming zero warnings and zero unannotated loads). A **bus-indexed**
+    port name (``a_in[0]``, ``result[13]``) only resolves the *same* way
+    when its brackets are left **un-escaped** -- this writer's own
+    :func:`_spef_name` (used everywhere else in this file) backslash-escapes
+    them, which tells the reader "this is a literal ``[``/``]`` character,
+    not a bus index" per ``*BUS_DELIMITER``'s own declared meaning, so
+    ``findPin`` looks for a pin literally named ``a_in\\[0\\]`` -- which does
+    not exist, only the real, bus-expanded ``a_in[0]`` pin does -- and warns
+    ``pin a_in\\[0\\] not found``, live-reproduced isolating this exact
+    mechanism on `gcd`'s own routed SPEF. Every *other* identifier this file
+    writes (the ``*D_NET``/``*PORTS``/``*P`` net-name text, ``*I
+    <inst>:<pin>`` device-pin references, and every non-port
+    ``<net>:<N>``-numbered internal node) is unaffected: those resolve
+    through :func:`findNet`/instance-pin lookup, which issue #951 already
+    live-verified tolerates (and correctly un-escapes) backslash-escaped
+    brackets -- only the specific ``findPortPinRelative`` bare-token path
+    this helper feeds does not.
+
+    **Measured live on the routed `gcd` corpus fixture (2026-08-14,
+    `openroad/orfs:latest`):** using this helper for every uniquely-named
+    port net's primary node dropped ``report_parasitic_annotation``'s
+    "partially unannotated drivers" count from 52 (PR #984's own residual)
+    to **0**, with zero new parse warnings (the pre-existing, unrelated
+    ``$``-prefixed intermediate-net-name warning count -- a `write_verilog`
+    round-trip artifact of this reproduction's own harness, not this
+    writer -- stayed exactly at its own baseline count).
+
+    Callers must restrict this to net names :func:`_write_spef` already
+    knows are unambiguous (``name_counts[net] == 1``) -- same guard as
+    ``net_instance_pins``' own duplicate-name skip, for the same reason: a
+    layout label shared by several un-strapped islands (e.g. `gcd`'s 105
+    separate ``VGND`` islands) has one real design pin object per name, so
+    collapsing every island onto that single shared node would assert
+    electrical continuity none of them individually has.
+    """
+    return _SPEF_PORT_NODE_ESCAPE_RE.sub(lambda m: "\\" + m.group(0), name)
+
+
 #: Matches a DEF ``NETS`` section's opening line (``NETS <numNets> ;``,
 #: LEF/DEF 5.8 Language Reference section 6.9) -- anchored at line start so a
 #: ``SPECIALNETS <n> ;`` line (a different section, same trailing shape)
@@ -499,7 +568,7 @@ def def_net_instance_pins(def_path: str) -> dict[str, tuple[tuple[str, str], ...
 
 
 def _spef_net_topology_nodes(
-    spef_net: str, *, hub_differs: bool
+    spef_net: str, *, hub_differs: bool, port_node_name: str | None = None
 ) -> tuple[str, str, int]:
     """Plan the two SPEF node identifiers one ``*D_NET`` block's own RC star
     needs -- ``net_node`` (where device-terminal legs, DEF-instance-pin legs,
@@ -508,40 +577,44 @@ def _spef_net_topology_nodes(
     plus the next free internal-node index a caller should continue numbering
     from for any additional per-block nodes (device-terminal legs).
 
-    **Issue #961's root-cause fix, live-verified against a real OpenSTA
-    session (six isolated reproductions built directly from a fresh
-    ``gcd_route.spef``, see ``docs/cli/place-and-route.md``'s "``*CONN``
-    device-terminal pin correlation" section for the full log):** OpenSTA's
-    SPEF reader only accepts a **colon-scoped, two-part identifier** --
-    ``*I <inst>:<pin>`` or a properly-scoped internal node ``<net>:<N>``
-    (IEEE 1481-1999's own convention for a net's non-pin internal nodes) --
-    as either endpoint of a two-node ``*RES``/coupling ``*CAP`` entry. A
-    *bare*, single-token identifier is **never** valid there, even when it
-    is the block's own ``*P``-declared port name and even within that same
-    block (live-reproduced: a zero-ohm ``*RES`` tying an internal hub node
-    to its own block's bare ``*P``-declared port name still warns ``pin
-    <port> not found``) -- contradicting this function's own earlier,
-    unverified assumption that a same-block ``*CONN``-declared bare name
-    would resolve. A bare net name remains valid only as a *single-node*
-    self-capacitance-to-ground reference (``*CAP 1 <net> <val>``, unrelated
-    to this function -- not exercised here since every hub below is always
-    colon-scoped too, for uniformity and because a coupling partner's hub
-    must be resolvable from a *different* block).
+    **PR #984's root-cause fix (issue #961), live-verified against a real
+    OpenSTA session:** for a *non-port* net, OpenSTA's SPEF reader only
+    accepts a **colon-scoped, two-part identifier** -- ``*I <inst>:<pin>``
+    or a properly-scoped internal node ``<net>:<N>`` (IEEE 1481-1999's own
+    convention for a net's non-pin internal nodes) -- as either endpoint of
+    a two-node ``*RES``/coupling ``*CAP`` entry. A *bare*, single-token
+    non-port net name is never valid there. Given that, ``net_node`` is a
+    fresh internal node ``<net>:1`` by default -- never the bare net name.
 
-    Given that, ``net_node`` is unconditionally a fresh internal node
-    ``<net>:1`` -- never the bare net name, regardless of port status.
+    **Issue #961's own residual, live-verified against a real OpenSTA
+    session (`docs/cli/place-and-route.md`'s "``*CONN`` device-terminal pin
+    correlation" section has the full log):** PR #984's own finding that a
+    bare identifier is *never* a valid endpoint turned out to be incomplete
+    for *port* nets specifically -- OpenSTA's ``findParasiticNode`` resolves
+    a colon-free node through ``Network::findPin`` on the design's own
+    top-level pin, not through any net-name lookup, so a bare **port** name
+    genuinely does resolve there (confirmed directly against OpenSTA's own
+    shipped ``examples/gcd_sky130hd.spef`` test fixture, whose ``*RES 1 clk
+    *198:13 ...`` line is exactly this shape) -- see
+    :func:`_spef_port_node_name`'s own docstring for the full mechanism,
+    including the separate bus-bracket-escaping wrinkle a bus-indexed port
+    (``a_in[0]``) needs on top of this. Pass ``port_node_name`` (that
+    function's own output, restricted to unambiguous port names -- see its
+    docstring) to use it as ``net_node`` instead of the ``<net>:1`` default.
+
     ``hub_node`` is a second, distinct internal node (``<net>:2``) only when
     the net's capacitance hub is not the net's own node (``hub_differs`` --
     the no-device-terminal Gamma-shunt fallback, ``docs/cli/extract.md``'s
     "The model: a star topology" section); when the hub *is* the net's own
     node (the common case, at least one device terminal), ``hub_node`` is
-    simply ``net_node``. A port net's bare name still appears exactly once,
-    in its own ``*P <net> B`` ``*CONN`` line -- SPEF's block-level
-    "this net is also a port" association, which needs no separate resistor
-    tying it to the internal RC network (live-verified: omitting any such
-    tie is what actually clears the ``pin <port> not found`` warning above).
+    simply ``net_node`` (the port's own bare name, when ``port_node_name``
+    is given). The Gamma-shunt ``<net>:2`` hub itself is unaffected by
+    ``port_node_name`` either way -- it is colon-scoped, resolved through
+    ``findNet`` rather than ``findPin``, and issue #951 already
+    live-verified that path tolerates a net's name regardless of port
+    status.
     """
-    net_node = f"{spef_net}:1"
+    net_node = port_node_name if port_node_name is not None else f"{spef_net}:1"
     if hub_differs:
         hub_node = f"{spef_net}:2"
         next_idx = 3
@@ -577,17 +650,19 @@ def _write_spef(
     value.
 
     **Every two-terminal ``*RES``/``*CAP`` endpoint is a colon-scoped,
-    ``*CONN``-declared instance-pin identifier or a properly-scoped internal
-    node -- never a bare net or port name (issue #961's root-cause fix, live-
-    verified against a real OpenSTA session).** See
-    :func:`_spef_net_topology_nodes`'s own docstring for the exact
-    node-planning rule and the live reproductions that pinned it down: a bare
-    (single-token, no ``:``) identifier is never a valid two-node endpoint,
-    even when it is a ``*P``-declared port name in that *same* block --
-    contradicting this function's own earlier, unverified assumption to the
-    contrary. A bare net name remains valid only as the *unrelated*
-    single-node self-capacitance-to-ground case (not used by this function,
-    for uniformity -- see that docstring).
+    ``*CONN``-declared instance-pin identifier, a properly-scoped internal
+    node, or (for an unambiguously-named port net) the port's own bare name
+    -- never a bare *non-port* net name (issue #961's root-cause fix and its
+    own residual, both live-verified against a real OpenSTA session).** See
+    :func:`_spef_net_topology_nodes`'s and :func:`_spef_port_node_name`'s own
+    docstrings for the exact node-planning rule and the live reproductions
+    that pinned it down: a bare (single-token, no ``:``) *non-port* net name
+    is never a valid two-node endpoint, but a bare *port* name is -- through
+    a different OpenSTA resolution path (pin lookup, not net lookup) that
+    PR #984 did not originally distinguish from the non-port case, and that
+    additionally requires a bus-indexed port's own brackets to stay
+    un-escaped (``a_in[0]``, not ``a_in\\[0\\]``) to resolve, unlike every
+    other identifier this function writes.
 
     **Net-name correlation, plus optional device-terminal ``*CONN``
     correlation (issue #948/#961 scope).** Each ``*D_NET`` block is keyed by
@@ -660,24 +735,38 @@ def _write_spef(
     the model's own (SPICE-legal, SPEF-illegal-as-a-two-node-endpoint)
     internal net names.
 
-    **Coupling ``*CAP`` entries reference the coupled net's own ``hub_node``,
-    not its bare name (issue #961 defect 2).** A Gamma-shunt-fallback net's
+    **Coupling ``*CAP`` entries reference the coupled net's own ``hub_node``
+    (issue #961 defect 2), which is the coupled port's own bare name when it
+    qualifies for :func:`_spef_port_node_name` (issue #961's residual fix) --
+    never a bare *non-port* net name.** A Gamma-shunt-fallback net's
     ``hub_node`` differs from its own ``net_node``; referencing the bare
-    ``net`` name (or even the bare ``hub_net`` name) from a *different*
-    ``*D_NET`` block's coupling ``*CAP`` line would both name an undeclared
-    two-node endpoint (defect 2) and repeat the general bare-name-as-two-node-
-    endpoint defect this function's fix addresses. A ``net -> hub_node``
+    ``net`` name (or even the bare ``hub_net`` name) of a *non-port* net from
+    a *different* ``*D_NET`` block's coupling ``*CAP`` line would both name
+    an undeclared two-node endpoint (defect 2) and repeat the general
+    bare-name-as-two-node-endpoint defect PR #984 fixed. A ``net -> hub_node``
     lookup built from every entry's own planned topology (first occurrence
     wins for a duplicated net name, the same tolerance this function's other
-    duplicate-name handling already applies) resolves each coupling partner
-    to its real, SPEF-legal hub node before it is written.
+    duplicate-name handling already applies, and the same reason a
+    duplicated *port* name never gets :func:`_spef_port_node_name`'s bare
+    form) resolves each coupling partner to its real, SPEF-legal hub node
+    before it is written -- live-verified this resolves correctly even when
+    the coupling partner's own ``*D_NET`` block has not been written yet
+    (SPEF pin/net lookups resolve against the already-fully-loaded design,
+    not file position).
 
     Every identifier written -- ``*PORTS`` entries, ``*D_NET``/``*P`` names,
-    and every ``*CAP``/``*RES`` node -- is rendered through
-    :func:`_spef_name`, which backslash-escapes the characters SPEF's own
-    grammar reserves. This is load-bearing, not cosmetic: KLayout's
-    extracted names carry ``$``/``|``/``[``/``]`` routinely, and a real
-    OpenSTA ``read_spef`` aborts on the first such line unescaped.
+    ``*I <inst>:<pin>`` device-pin references, and every non-port
+    ``*CAP``/``*RES`` node -- is rendered through :func:`_spef_name`, which
+    backslash-escapes the characters SPEF's own grammar reserves. This is
+    load-bearing, not cosmetic: KLayout's extracted names carry
+    ``$``/``|``/``[``/``]`` routinely, and a real OpenSTA ``read_spef``
+    aborts on the first such line unescaped. The one exception is a
+    unique-named port net's own bare-name ``*RES``/``*CAP`` node (this
+    function's ``net_node``/``hub_node`` when :func:`_spef_port_node_name`
+    applies), which is rendered through *that* function instead -- it
+    escapes the same reserved characters *except* ``[``/``]``, see its own
+    docstring for why a bus-indexed port specifically needs its brackets
+    left un-escaped there.
 
     Units are declared, not converted: ``*C_UNIT 1 FF``/``*R_UNIT 1 OHM``
     match ``parasitics_report``'s own units exactly, so every numeric value
@@ -691,6 +780,16 @@ def _write_spef(
         net_instance_pins or {}
     )
 
+    # Name-occurrence count, computed in its own pass *before* hub_by_net_name
+    # below -- issue #961's residual fix needs the *final* count for a name
+    # (is it unique across the whole file?) to decide whether that port
+    # qualifies for `_spef_port_node_name`'s bare form, which an
+    # incrementally-updated count (correct only after the *last* occurrence)
+    # cannot answer for a net's *first* occurrence.
+    name_counts: dict[str, int] = {}
+    for entry in parasitics_report["nets"]:
+        name_counts[entry["net"]] = name_counts.get(entry["net"], 0) + 1
+
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
     # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
     # every pair from *both* endpoints (docs/cli/extract.md's "Vertical-
@@ -701,24 +800,24 @@ def _write_spef(
     coupling_by_net: dict[str, list[dict[str, Any]]] = {}
     seen_pairs: set[tuple[str, str]] = set()
     # `net -> hub_node` lookup (first occurrence wins for a duplicated net
-    # name) and a name-occurrence count -- issue #961 defects 2 and (for
-    # `net_instance_pins`) the duplicate-name guard, see this function's
-    # docstring for both. `hub_node` is the SPEF-legal internal-node
-    # identifier `_spef_net_topology_nodes` would plan for that entry's own
-    # block (`<net>:<N>`) -- never the model's own bare internal net name
-    # (not a valid two-node `*RES`/`*CAP` endpoint) and never the bare port
-    # name either, even for a port net (also not a valid two-node endpoint,
-    # live-verified -- see that function's own docstring for both root-cause
-    # findings).
+    # name) -- issue #961 defect 2, see this function's docstring. `hub_node`
+    # is the SPEF-legal identifier `_spef_net_topology_nodes` would plan for
+    # that entry's own block: a unique-named port net's own bare name (issue
+    # #961's residual fix, via `_spef_port_node_name`), else the internal
+    # `<net>:<N>` node PR #984 planned (never a bare *non-port* net name,
+    # never a *duplicated* port's bare name either -- both remain invalid
+    # two-node `*RES`/`*CAP` endpoints, live-verified).
     hub_by_net_name: dict[str, str] = {}
-    name_counts: dict[str, int] = {}
     for entry in parasitics_report["nets"]:
         this_net = entry["net"]
-        name_counts[this_net] = name_counts.get(this_net, 0) + 1
         if this_net not in hub_by_net_name:
+            is_unique_port = this_net in port_name_set and name_counts[this_net] == 1
             _, this_hub_node, _ = _spef_net_topology_nodes(
                 _spef_name(this_net),
                 hub_differs=entry["hub_net"] != this_net,
+                port_node_name=(
+                    _spef_port_node_name(this_net) if is_unique_port else None
+                ),
             )
             hub_by_net_name[this_net] = this_hub_node
         for coupled in entry.get("coupled", []):
@@ -772,16 +871,21 @@ def _write_spef(
         is_port = net in port_name_set
         hub_differs = hub != net
 
-        # Issue #961's root-cause fix: `net_node`/`hub_node` are always
-        # SPEF-legal `<net>:<N>` internal-node two-node-entry endpoints --
-        # never the model's own bare internal net name, and never the bare
-        # port name either (even for a port net, and even within that same
-        # block -- live-verified, see this function's docstring and
-        # `_spef_net_topology_nodes`'s). `next_node_idx` is where any
-        # further per-block internal nodes (device-terminal legs, below)
-        # continue numbering from.
+        # Issue #961's root-cause fix (PR #984) plus its own residual fix:
+        # `net_node`/`hub_node` are SPEF-legal two-node-entry endpoints --
+        # the internal `<net>:<N>` node PR #984 planned for a *non-port* net
+        # (never the model's own bare internal net name), or -- for an
+        # unambiguously-named *port* net -- the port's own bare name
+        # (`_spef_port_node_name`, issue #961's residual fix; live-verified,
+        # see this function's docstring and `_spef_net_topology_nodes`'s /
+        # `_spef_port_node_name`'s). `next_node_idx` is where any further
+        # per-block internal nodes (device-terminal legs, below) continue
+        # numbering from.
+        is_unique_port = is_port and name_counts.get(net, 0) == 1
         net_node, hub_node, next_node_idx = _spef_net_topology_nodes(
-            spef_net, hub_differs=hub_differs
+            spef_net,
+            hub_differs=hub_differs,
+            port_node_name=_spef_port_node_name(net) if is_unique_port else None,
         )
 
         # Issue #961: real cell-instance connectivity from the routed DEF's

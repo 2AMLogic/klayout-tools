@@ -9381,16 +9381,17 @@ def test_spef_cap_and_res_cards_match_parasitics_report(tmp_path):
     y_block_end = text.index("*END", y_block_start)
     y_block = text[y_block_start:y_block_end]
 
-    # `Y`'s own primary node is always the internal `Y:1` node -- never the
-    # bare net/port name, even though `Y` is itself a declared port (issue
-    # #961's root-cause fix: a bare identifier, even a `*P`-declared one, is
-    # never a valid two-node `*RES`/`*CAP` endpoint for a real OpenSTA
-    # `read_spef` session, live-verified). Each device-terminal leg becomes
-    # a further internal `Y:<N>` node rather than being referenced by the
-    # model's own `leg_net` name. See `_spef_net_topology_nodes`.
-    assert f"1 Y:1 {y_entry['capacitance_ff']:.6f}" in y_block
+    # `Y` is itself a declared, unambiguously-named port, so its own primary
+    # node is its bare name (`_spef_port_node_name`, issue #961's residual
+    # fix, live-verified against a real OpenSTA `read_spef` session -- a bare
+    # *port* name resolves as a two-node `*RES`/`*CAP` endpoint through
+    # OpenSTA's own pin lookup, unlike a bare *non-port* net name). Each
+    # device-terminal leg still becomes an internal `Y:<N>` node rather than
+    # being referenced by the model's own `leg_net` name. See
+    # `_spef_net_topology_nodes`/`_spef_port_node_name`.
+    assert f"1 Y {y_entry['capacitance_ff']:.6f}" in y_block
     for i, terminal in enumerate(y_entry["terminals"], start=1):
-        assert f"{i} Y:1 Y:{i + 1} {terminal['resistance_ohm']:.6f}" in y_block
+        assert f"{i} Y Y:{i + 1} {terminal['resistance_ohm']:.6f}" in y_block
 
 
 def test_spef_coupling_cap_emitted_once_between_hub_nodes(tmp_path):
@@ -9470,15 +9471,17 @@ def test_spef_gamma_shunt_fallback_uses_hub_net_node(tmp_path):
     block_start = text.index(f"*D_NET {entry['net']} ")
     block_end = text.index("*END", block_start)
     block = text[block_start:block_end]
-    # `DANGLE`'s own primary node is always the internal `DANGLE:1` node --
-    # never the bare net/port name, even though `DANGLE` is itself a
-    # declared port (issue #961's root-cause fix, live-verified: a bare
-    # identifier, even a `*P`-declared one, is never a valid two-node
-    # `*RES`/`*CAP` endpoint for a real OpenSTA `read_spef` session). The
-    # synthesized Gamma-shunt hub becomes a second internal `DANGLE:2` node
-    # rather than being referenced by the model's own `hub_net` name. See
-    # `_spef_net_topology_nodes`.
-    assert f"1 DANGLE:1 DANGLE:2 {entry['resistance_ohm']:.6f}" in block
+    # `DANGLE` is itself a declared, unambiguously-named port, so its own
+    # primary node is its bare name (`_spef_port_node_name`, issue #961's
+    # residual fix, live-verified: a bare *port* name -- unlike a bare
+    # *non-port* net name -- resolves as a two-node `*RES`/`*CAP` endpoint
+    # through OpenSTA's own pin lookup). The synthesized Gamma-shunt hub is
+    # still a second, distinct internal `DANGLE:2` node rather than the bare
+    # name (only `hub_node == net_node`, the common non-Gamma-shunt case,
+    # ever gets the bare-name treatment) -- it is never referenced by the
+    # model's own `hub_net` name either. See
+    # `_spef_net_topology_nodes`/`_spef_port_node_name`.
+    assert f"1 DANGLE DANGLE:2 {entry['resistance_ohm']:.6f}" in block
 
 
 # --------------------------------------------------------------------------- #
@@ -9861,23 +9864,33 @@ def test_spef_escapes_reserved_characters_in_every_identifier_position(tmp_path)
     assert r"a_in\[13\] B" in text  # *PORTS entry and *CONN *P entry
     assert r"*P a_in\[13\] B" in text
     # `$1009`'s own primary node is always the internal `\$1009:1` node
-    # (issue #961's root-cause fix); the ground `*CAP` card and the coupling
-    # `*CAP` card both attach there. The coupling card references
-    # `a_in[13]`'s own internal `a_in\[13\]:1` node -- never its bare
-    # `*CONN`-declared port name, even though `a_in[13]` *is* a port
-    # (live-verified: a bare identifier is never a valid two-node endpoint,
-    # even a same-block `*P`-declared one). The device-terminal leg becomes
-    # a further internal `\$1009:2` node rather than being referenced by its
-    # own bare `leg_net` name.
+    # (non-port net, PR #984's root-cause fix); the ground `*CAP` card and
+    # the coupling `*CAP` card both attach there. The coupling card
+    # references `a_in[13]`'s own primary node -- and since `a_in[13]` is a
+    # unique-named *port*, that node is its own bare name with brackets left
+    # **un-escaped** (`_spef_port_node_name`, issue #961's residual fix,
+    # live-verified: a bare *port* name -- unlike a bare *non-port* net name
+    # -- resolves as a two-node `*RES`/`*CAP` endpoint through OpenSTA's own
+    # pin lookup, but only when a bus-indexed port's brackets stay
+    # un-escaped). The device-terminal leg becomes a further internal
+    # `\$1009:2` node rather than being referenced by its own bare
+    # `leg_net` name.
     assert r"1 \$1009:1 0.206207" in text  # ground *CAP card on the hub node
-    assert r"\$1009:1 a_in\[13\]:1 0.011843" in text  # coupling *CAP card
+    assert r"\$1009:1 a_in[13] 0.011843" in text  # coupling *CAP card
     assert r"1 \$1009:1 \$1009:2 62.626000" in text  # *RES leg card
-    # No bare reserved character survives anywhere in the body.
+    # `a_in[13]`'s own block: `*D_NET`/`*PORTS`/`*P` still escape the
+    # brackets (asserted above), but its own primary node -- where its own
+    # self-cap attaches -- is the bare, un-escaped port name.
+    assert "\n1 a_in[13] 0.500000" in text
+    # No bare reserved character survives anywhere in the body, except the
+    # one legitimate bare-bracket token above (`a_in[13]`, a unique port's
+    # own `*RES`/`*CAP` node reference).
     for line in text.splitlines():
         if line.startswith("*") and not line.startswith("*D_NET"):
             continue  # header/section keywords are not identifiers
-        assert "$" not in line.replace(r"\$", ""), line
-        assert "[" not in line.replace(r"\[", ""), line
+        stripped = line.replace("a_in[13]", "")
+        assert "$" not in stripped.replace(r"\$", ""), line
+        assert "[" not in stripped.replace(r"\[", ""), line
 
 
 def test_spef_cli_json_and_text(tmp_path, capsys):

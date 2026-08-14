@@ -482,7 +482,7 @@ so the 537 / 537 net-name annotation ratio above is untouched.
 `tests/test_extract.py::test_declared_pins_restricts_spef_ports_on_the_routed_corpus`
 asserts both columns.
 
-### `*CONN` device-terminal pin correlation (issue #961, root-cause topology fix landed and live-verified; a narrower residual remains)
+### `*CONN` device-terminal pin correlation (issue #961, root-cause topology fix and residual fix both landed and live-verified)
 
 Correct net *names* and a correct `*PORTS` list are necessary but not
 sufficient, and the finding below was the last **live-measured** state
@@ -640,28 +640,80 @@ design-side annotation check (`spef_sta.design_nets_annotated` /
 correlation, not RC-topology completeness, and was already saturated before
 this fix.
 
-**The residual 52 drivers are narrowly and precisely characterized, but
-their root mechanism was not found.** Every one of the 52
-`report_parasitic_annotation -report_unannotated` entries involves a
-connection directly adjacent to a **top-level design port pin** — either an
-input port (`a_in[0]`, `clk`, `rst_n`, …) whose fanout to a real
-`*I`-declared cell pin is flagged unannotated, or an internal driver pin
-(`_747_/Q`, …) whose connection to a top-level *output* port (`result[11]`)
-is flagged. Isolated to a minimal two-`*D_NET`-block reproduction
-(`_752_`/`place115`'s net coupling into `result[11]`, which is itself
-driven by `_747_/Q`), the following were each tried and **each still left
-that exact one driver "partially unannotated," with zero parse warnings**:
-using the reworked `<net>:<N>`-only topology above (no bare name anywhere);
-removing the `*P`/`*PORTS` declaration for that net entirely (ruling out
-the port declaration itself as the trigger); the `*<N>` positional and
-`PIN:<port>` pseudo-instance forms mentioned above; and giving the port's
-own internal node an explicit (nonzero) self-capacitance entry distinct
-from the net's main hub. None changed the outcome, so the actual mechanism
-inside OpenSTA's `report_parasitic_annotation` that still flags a
-port-adjacent driver remains unknown — this is the concrete next step,
-scoped narrowly to "top-level port pin electrical identity within the RC
-network," not the general bare-net-name defect this section's fix
-addresses.
+**The residual 52 drivers were narrowly characterized in the prior pass,
+and the root mechanism was found and fixed (issue #961's own residual,
+2026-08-14).** Every one of the 52 involved a connection directly adjacent
+to a **top-level design port pin** — either an input port (`a_in[0]`,
+`clk`, `rst_n`, …) whose fanout to a real `*I`-declared cell pin was
+flagged unannotated, or an internal driver pin (`_747_/Q`, …) whose
+connection to a top-level *output* port (`result[11]`) was flagged.
+
+**Root cause, found by cross-checking against OpenSTA's own shipped SPEF
+test fixture (`examples/gcd_sky130hd.spef` in
+`The-OpenROAD-Project/OpenSTA`) and by reading `SpefReader::findParasiticNode`
+directly.** OpenSTA's SPEF reader resolves a *bare* (colon-free) `*RES`/
+`*CAP` node through `findPortPinRelative` — a `Network::findPin` lookup on
+the design's own top-level pin — **not** through any net-name lookup. A
+bare port name genuinely *is* a valid two-node endpoint there (the prior
+pass's own live reproductions, which concluded otherwise, did not isolate a
+bus-indexed port from a non-bus one — see below for why that distinction
+turned out to matter): `examples/gcd_sky130hd.spef`'s own `*RES 1 clk
+*198:13 46.6763` line ties its `clk` port directly to an internal node with
+zero parse warnings and zero unannotated loads, confirmed by running that
+exact fixture's own OpenSTA regression test
+(`parasitics/test/parasitics_gcd_spef.tcl`) against a plain `sta` binary.
+Reproducing the identical shape for this repo's own routed `gcd`'s
+non-bus ports (`clk`, `done`) confirmed the same result live.
+
+**The remaining piece was bus-index bracket escaping.** A **bus-indexed**
+port (`a_in[0]`, `result[13]`) only resolves the *same* way when its
+brackets are left **un-escaped** (`a_in[0]`, not `a_in\[0\]`) — this
+writer's own general escaping helper (`_spef_name`, used everywhere else in
+the file) backslash-escapes `[`/`]`, which tells the reader "this is a
+literal backslash-bracket character, not a bus index" per this file's own
+`*BUS_DELIMITER [ ]` declaration, so `findPin` looks for a pin literally
+named `a_in\[0\]` — which does not exist, only the real, bus-expanded
+`a_in[0]` pin does — and warns `pin a_in\[0\] not found`. Isolated live by
+testing `a_in[0]` (escaped, fails), `clk`/`done` (no brackets, already
+worked), and `a_in[0]` un-escaped (works) as three separate single-net SPEF
+reproductions against this repo's own routed `gcd` design.
+
+**The fix (`_spef_port_node_name`, `src/klayout_tools/extract.py`):** for
+any net that is both a declared port *and* unambiguously named
+(`name_counts[net] == 1` — the same duplicate-name guard `--def-net-connections`
+already uses, so a shared label like `VGND`'s un-strapped islands keeps the
+pre-fix internal-node behavior), that net's own `net_node`/`hub_node` (see
+above) becomes the port's own bare name, brackets left un-escaped, instead
+of the internal `<net>:1` node. Every other identifier position — the
+`*D_NET`/`*PORTS`/`*P` text, `*I <inst>:<pin>` device-pin references, and
+every non-port net's internal `<net>:<N>` nodes — is unaffected and keeps
+escaping brackets as before; this is a narrowly-scoped exception to one
+specific identifier position for unambiguously-named port nets only.
+
+**Live-verified end to end (2026-08-14, `openroad/orfs:latest`, fresh `klt
+synthesize` → `klt place-and-route --post_route_spef` run, not the
+committed corpus fixture, real `read_db`/`read_liberty`/`create_clock`/
+`read_spef` session):**
+
+```
+Found 3 unannotated drivers.
+Found 0 partially unannotated drivers.
+```
+
+**Zero partially unannotated drivers** — down from 52 (this section's own
+prior residual) and 533 (the pre-topology-fix baseline) — satisfying the
+issue's own "no partially unannotated drivers" acceptance criterion in
+full. The 3 fully-unannotated drivers (`clkload0/Y`, `clkload1/Y`,
+`clkload2/Y`) are unused clock-load dummy buffers with genuinely no
+fanout — a correct, pre-existing report, not a defect. `spef_sta.worst_slack_ns`
+stays `-2.09926` (unchanged by this fix, as expected: it was already
+correctly wired for the paths it changed; the residual only affected
+`report_parasitic_annotation`'s own completeness bookkeeping for
+port-adjacent connections, never the delay values already attached through
+the rest of the RC network). The pre-existing, unrelated `net VPWR/VGND not
+found` warning count (1001, `gcd`'s 105 un-strapped power-net islands, "a
+known, inherited limitation" per `docs/cli/extract.md`'s "Duplicate net
+names" section) is unchanged by this fix.
 
 Off by default: this adds real wall-clock cost on top of every existing
 `"route"`-stage caller (one more `klt extract --parasitics` pass over the
@@ -713,27 +765,29 @@ from one live run of the current tree — none are carried over from the
 designs**, and — since issue #951 — resolves essentially every net name in
 it against the linked design.
 
-**`gcd`'s rung 3 above reflects issue #961's reworked RC topology
-(`<net>:<N>`-only two-node endpoints, 2026-08-14) and now reads
-pessimistically relative to rung 2, as the acceptance criteria require** —
+**`gcd`'s rung 3 above reflects issue #961's reworked RC topology (PR #984's
+`<net>:<N>` two-node endpoints plus this issue's own residual fix, a
+unique port's own bare-name node, 2026-08-14) and now reads pessimistically
+relative to rung 2, as the acceptance criteria require** —
 `spef_sta.worst_slack_ns` / `.total_negative_slack_ns` moved from
 `-1.72532` / `-63.8855` (the net-name-only, pre-topology-fix baseline this
 table carried since issue #951) to `-2.09926` / `-79.5244`, genuinely more
-negative than rung 2's `-1.94402` / `-72.6797`. `report_parasitic_annotation`
-in the same live session reports 52 (of 537) partially unannotated drivers,
-down from 533 before this fix — see "`*CONN` device-terminal pin
-correlation" above for the full live-verification log, the six isolated
-reproductions that pinned down the working node-naming rule, and the
-narrower residual (connections adjacent to a top-level port pin
-specifically) that rule did not resolve. **Only `gcd` was re-measured with
-this topology fix in this session** — `modexp`'s and `mult8`'s rung-3
-figures below are still carried over from the net-name-only, pre-topology-
-fix baseline (issue #951) and have not yet been re-confirmed against the
-reworked topology; `modexp` in particular is expected to show a similar
-"rung 3 now differs pessimistically from rung 2" shift once re-measured,
-but that is not yet a live-verified claim. `mult8` is unaffected regardless
-(purely combinational, both post-route rungs report OpenSTA's own
-unconstrained `1e+39` sentinel either way).
+negative than rung 2's `-1.94402` / `-72.6797` — unaffected by the residual
+fix itself (that fix only corrected `report_parasitic_annotation`'s own
+completeness bookkeeping, not the delay values already attached through the
+rest of the RC network). `report_parasitic_annotation` in the same live
+session reports **0** partially unannotated drivers (of 537), down from 52
+after PR #984's topology rework and 533 before it — see "`*CONN`
+device-terminal pin correlation" above for the full live-verification log
+and the exact fix. **Only `gcd` was re-measured with this topology fix in
+this session** — `modexp`'s and `mult8`'s rung-3 figures below are still
+carried over from the net-name-only, pre-topology-fix baseline (issue #951)
+and have not yet been re-confirmed against the reworked topology;
+`modexp` in particular is expected to show a similar "rung 3 now differs
+pessimistically from rung 2" shift once re-measured, but that is not yet a
+live-verified claim. `mult8` is unaffected regardless (purely
+combinational, both post-route rungs report OpenSTA's own unconstrained
+`1e+39` sentinel either way).
 
 Historical note, retained for context: as measured on 2026-08-14 (issue
 #951, pre-`*CONN`-correlation at all — before either #961 increment), rung 3
