@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "netlist": "10-pex.testbench.spice",
+  "status": "pass",
+  "corner_count": 6,
+  "passed": 6,
+  "failed": 0,
+  "errored": 0,
+  "environment": {
+    "engine": "ngspice",
+    "engine_version": "47",
+    "models_lib": null,
+    "models_lib_sha256": null,
+    "netlist_sha256": "3bd486492f9251ff58f89f6a746ef0ab8f3cb4ec4b2c906e26dea81a4dc41716"
+  },
+  "provenance": {
+    "klt_version": "0.2.0",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": null,
+    "input": null
+  },
+  "measurements": [
+    {
+      "name": "n1_meas",
+      "unit": "V",
+      "limits": {
+        "min": 0.85,
+        "max": 1.15
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/1.100V/-40C",
+        "value": 1.1,
+        "margin": 0.04999999999999982
+      }
+    },
+    {
+      "name": "tail_meas",
+      "unit": "V",
+      "limits": {
+        "min": 0.45,
+        "max": 0.55
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/0.900V/-40C",
+        "value": 0.5,
+        "margin": 0.04999999999999999
+      }
+    },
+    {
+      "name": "vout_meas",
+      "unit": "V",
+      "limits": {
+        "min": 0.95,
+        "max": 1.05
+      },
+      "status": "pass",
+      "worst_case": {
+        "corner_id": "default/0.900V/-40C",
+        "value": 1.0,
+        "margin": 0.050000000000000044
+      }
+    }
+  ],
+  "corners": [
+    {
+      "corner_id": "default/0.900V/-40C",
+      "process": null,
+      "supply_v": {
+        "vn1": 0.9
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 0.09,
+      "measurements": [
+        {
+          "name": "n1_meas",
+          "value": 0.9,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        },
+        {
+          "name": "tail_meas",
+          "value": 0.5,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999999
+        },
+        {
+          "name": "vout_meas",
+          "value": 1.0,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "default/0.900V/27C",
+      "process": null,
+      "supply_v": {
+        "vn1": 0.9
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 0.084,
+      "measurements": [
+        {
+          "name": "n1_meas",
+          "value": 0.9,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        },
+        {
+          "name": "tail_meas",
+          "value": 0.5,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999999
+        },
+        {
+          "name": "vout_meas",
+          "value": 1.0,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "default/0.900V/125C",
+      "process": null,
+      "supply_v": {
+        "vn1": 0.9
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 0.087,
+      "measurements": [
+        {
+          "name": "n1_meas",
+          "value": 0.9,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        },
+        {
+          "name": "tail_meas",
+          "value": 0.5,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999999
+        },
+        {
+          "name": "vout_meas",
+          "value": 1.0,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "default/1.100V/-40C",
+      "process": null,
+      "supply_v": {
+        "vn1": 1.1
+      },
+      "temperature_c": -40,
+      "status": "pass",
+      "runtime_s": 0.063,
+      "measurements": [
+        {
+          "name": "n1_meas",
+          "value": 1.1,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999982
+        },
+        {
+          "name": "tail_meas",
+          "value": 0.5,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999999
+        },
+        {
+          "name": "vout_meas",
+          "value": 1.0,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "default/1.100V/27C",
+      "process": null,
+      "supply_v": {
+        "vn1": 1.1
+      },
+      "temperature_c": 27,
+      "status": "pass",
+      "runtime_s": 0.089,
+      "measurements": [
+        {
+          "name": "n1_meas",
+          "value": 1.1,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999982
+        },
+        {
+          "name": "tail_meas",
+          "value": 0.5,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999999
+        },
+        {
+          "name": "vout_meas",
+          "value": 1.0,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    },
+    {
+      "corner_id": "default/1.100V/125C",
+      "process": null,
+      "supply_v": {
+        "vn1": 1.1
+      },
+      "temperature_c": 125,
+      "status": "pass",
+      "runtime_s": 0.158,
+      "measurements": [
+        {
+          "name": "n1_meas",
+          "value": 1.1,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999982
+        },
+        {
+          "name": "tail_meas",
+          "value": 0.5,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.04999999999999999
+        },
+        {
+          "name": "vout_meas",
+          "value": 1.0,
+          "unit": "V",
+          "status": "pass",
+          "margin": 0.050000000000000044
+        }
+      ],
+      "diagnostics": [],
+      "artifacts": {
+        "log": null,
+        "raw": null,
+        "waveform": null,
+        "deck": null
+      },
+      "monte_carlo": null
+    }
+  ]
+}

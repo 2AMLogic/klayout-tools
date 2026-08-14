@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "layout": "06-layout.gds",
+  "netlist": "10-pex-extracted.spice",
+  "reference_netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-803/examples/design-pipeline/07-reference.spice",
+  "extraction": {
+    "deck": "sky130",
+    "device_count": 5,
+    "net_count": 12,
+    "netlist_sha256": "670de4d2d38b5216208eb33b2b59e3314baf02b3e88887c8324b4a6de2d6029f",
+    "model": {
+      "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
+      "coupling": "vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels",
+      "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder",
+      "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior"
+    }
+  },
+  "testbenches": [
+    {
+      "request": "10-pex.request.json",
+      "schematic_netlist": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-803/examples/design-pipeline/07-reference.spice",
+      "corner_count": 6,
+      "measurement_names": [
+        "n1_meas",
+        "tail_meas",
+        "vout_meas"
+      ]
+    }
+  ],
+  "corner_count": 6,
+  "delta": [
+    {
+      "spec_row": "n1_meas",
+      "corner_id": "default/0.900V/-40C",
+      "schematic_value": 0.9,
+      "extracted_value": 0.9,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "tail_meas",
+      "corner_id": "default/0.900V/-40C",
+      "schematic_value": 0.5,
+      "extracted_value": 0.5,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "vout_meas",
+      "corner_id": "default/0.900V/-40C",
+      "schematic_value": 1.0,
+      "extracted_value": 1.0,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "n1_meas",
+      "corner_id": "default/0.900V/27C",
+      "schematic_value": 0.9,
+      "extracted_value": 0.9,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "tail_meas",
+      "corner_id": "default/0.900V/27C",
+      "schematic_value": 0.5,
+      "extracted_value": 0.5,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "vout_meas",
+      "corner_id": "default/0.900V/27C",
+      "schematic_value": 1.0,
+      "extracted_value": 1.0,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "n1_meas",
+      "corner_id": "default/0.900V/125C",
+      "schematic_value": 0.9,
+      "extracted_value": 0.9,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "tail_meas",
+      "corner_id": "default/0.900V/125C",
+      "schematic_value": 0.5,
+      "extracted_value": 0.5,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "vout_meas",
+      "corner_id": "default/0.900V/125C",
+      "schematic_value": 1.0,
+      "extracted_value": 1.0,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "n1_meas",
+      "corner_id": "default/1.100V/-40C",
+      "schematic_value": 1.1,
+      "extracted_value": 1.1,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "tail_meas",
+      "corner_id": "default/1.100V/-40C",
+      "schematic_value": 0.5,
+      "extracted_value": 0.5,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "vout_meas",
+      "corner_id": "default/1.100V/-40C",
+      "schematic_value": 1.0,
+      "extracted_value": 1.0,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "n1_meas",
+      "corner_id": "default/1.100V/27C",
+      "schematic_value": 1.1,
+      "extracted_value": 1.1,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "tail_meas",
+      "corner_id": "default/1.100V/27C",
+      "schematic_value": 0.5,
+      "extracted_value": 0.5,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "vout_meas",
+      "corner_id": "default/1.100V/27C",
+      "schematic_value": 1.0,
+      "extracted_value": 1.0,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "n1_meas",
+      "corner_id": "default/1.100V/125C",
+      "schematic_value": 1.1,
+      "extracted_value": 1.1,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "tail_meas",
+      "corner_id": "default/1.100V/125C",
+      "schematic_value": 0.5,
+      "extracted_value": 0.5,
+      "delta_pct": 0.0,
+      "status": "pass"
+    },
+    {
+      "spec_row": "vout_meas",
+      "corner_id": "default/1.100V/125C",
+      "schematic_value": 1.0,
+      "extracted_value": 1.0,
+      "delta_pct": 0.0,
+      "status": "pass"
+    }
+  ],
+  "passed": 18,
+  "failed": 0,
+  "errored": 0,
+  "provenance": {
+    "klt_version": "0.2.0",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": {
+      "name": "sky130",
+      "content_hash": "sha256:c940b5fbb52163ab15c98c80d74e29d32e3eb44dec8dede989d82f6aa7c47381"
+    },
+    "input": {
+      "content_hash": "sha256:c7e9145fb8def74b60c69d65a17f3a37c251ec4abbcadde7fc9ad3a31041ebf6"
+    }
+  }
+}

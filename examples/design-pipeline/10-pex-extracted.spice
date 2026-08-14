@@ -1,0 +1,61 @@
+* extracted by klt extract --deck sky130
+* parasitic model (--parasitics):
+* - capacitance: net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net
+* - coupling: vertical overlap (crossover) only -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760); lateral (same-layer, sidewall) coupling and fringe shielding are still not modelled, so a neighboring net's displacement current still contributes exactly zero unless the two nets' conductors vertically overlap on adjacent levels
+* - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder
+* - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
+
+* cell ota_5t_layout_0
+* pin N1
+* pin TAIL_A,TAIL_B
+* pin VOUT
+* pin vsubs
+.SUBCKT ota_5t_layout_0 N1 TAIL_A|TAIL_B VOUT vsubs
+* device instance $1 r0 *1 6.1,3 nfet
+M$1 \$2__t0 \$7 N1__t0 vsubs nfet L=1U W=6U AS=2.52P AD=2.52P PS=12.84U
++ PD=12.84U
+* device instance $2 r0 *1 3.51,4 nfet
+M$2 N1__t1 \$8 TAIL_A\x7cTAIL_B__t0 vsubs nfet L=0.5U W=8U AS=3.36P AD=3.36P
++ PS=16.84U PD=16.84U
+* device instance $3 r0 *1 0.92,5 nfet
+M$3 TAIL_A\x7cTAIL_B__t1 \$9 \$3__t0 vsubs nfet L=1U W=10U AS=4.2P AD=4.2P
++ PS=20.84U PD=20.84U
+* device instance $4 r0 *1 6.1,9.4 nfet
+M$4 \$6__t0 \$10 VOUT__t1 vsubs nfet L=1U W=6U AS=2.52P AD=2.52P PS=12.84U
++ PD=12.84U
+* device instance $5 r0 *1 3.51,12.4 nfet
+M$5 VOUT__t0 \$11 TAIL_A\x7cTAIL_B__t2 vsubs nfet L=0.5U W=8U AS=3.36P AD=3.36P
++ PS=16.84U PD=16.84U
+* device instance _2_t0 r0 *1 0,0 
+R_2_t0 \$2__t0 \$2 182.8571
+* device instance _2 r0 *1 0,0 
+C_2 \$2 vsubs 6.15828e-16
+* device instance _3_t0 r0 *1 0,0 
+R_3_t0 \$3__t0 \$3 304.7619
+* device instance _3 r0 *1 0,0 
+C_3 \$3 vsubs 1.003588e-15
+* device instance _6_t0 r0 *1 0,0 
+R_6_t0 \$6__t0 \$6 182.8571
+* device instance _6 r0 *1 0,0 
+C_6 \$6 vsubs 6.15828e-16
+* device instance N1_t0 r0 *1 0,0 
+RN1_t0 N1__t0 N1 272.98065
+* device instance N1_t1 r0 *1 0,0 
+RN1_t1 N1__t1 N1 272.98065
+* device instance N1 r0 *1 0,0 
+CN1 N1 vsubs 1.587078e-15
+* device instance TAIL_A_TAIL_B_t0 r0 *1 0,0 
+RTAIL_A_TAIL_B_t0 TAIL_A\x7cTAIL_B__t0 TAIL_A|TAIL_B 386.172259091
+* device instance TAIL_A_TAIL_B_t1 r0 *1 0,0 
+RTAIL_A_TAIL_B_t1 TAIL_A\x7cTAIL_B__t1 TAIL_A|TAIL_B 326.102531486
+* device instance TAIL_A_TAIL_B_t2 r0 *1 0,0 
+RTAIL_A_TAIL_B_t2 TAIL_A\x7cTAIL_B__t2 TAIL_A|TAIL_B 634.130609423
+* device instance TAIL_A_TAIL_B r0 *1 0,0 
+CTAIL_A_TAIL_B TAIL_A|TAIL_B vsubs 3.456005e-15
+* device instance VOUT_t0 r0 *1 0,0 
+RVOUT_t0 VOUT__t0 VOUT 327.142
+* device instance VOUT_t1 r0 *1 0,0 
+RVOUT_t1 VOUT__t1 VOUT 327.142
+* device instance VOUT r0 *1 0,0 
+CVOUT VOUT vsubs 1.762458e-15
+.ENDS ota_5t_layout_0

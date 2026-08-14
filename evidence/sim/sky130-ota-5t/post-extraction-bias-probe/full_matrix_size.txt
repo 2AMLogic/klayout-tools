@@ -1,0 +1,8 @@
+6
+# 2 supply points (vn1: 0.9V/1.1V) x 3 temperatures (-40C/27C/125C).
+# Not a PVT process-corner sweep: this scope's testbench drives a
+# generic (non-PDK-specific) nfet model (see 09-sim.testbench.spice's
+# own comments), so there is no process-corner axis to sweep. 6 is
+# this scope's full matrix by construction, matching the corner set
+# examples/design-pipeline/09-sim.request.json already established for
+# this same composed layout.
