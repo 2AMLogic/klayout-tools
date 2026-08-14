@@ -570,12 +570,12 @@ only `-D` is omitted, leaving ABC's mapper and sizers to optimize
 untargeted exactly as they did before this field was consumed.
 `timing.delay_target_ps` is `null` in that case, so a caller can always tell
 a targeted run from an untargeted one. Measured effect of the target on
-`gcd` (sky130, issue #807; re-verified on this repo's pinned, from-source
-Yosys 0.67+post build — `scripts/install-yosys.sh` — per issue #967):
-untargeted maps to 3126.75 µm² at 2485.44 ps; `clock_period_ns: 10` maps to
-3001.63 µm² at 3072.40 ps — a relaxed target buys area back at the cost of
-delay, so the value is a real caller decision rather than something this
-command should pick.
+`gcd` (sky130, issue #807; re-verified against CI's own pinned, from-source
+Yosys 0.67+post build — `scripts/install-yosys.sh` — per issue #967, see the
+note below on build-platform sensitivity): untargeted maps to 3238.11 µm² at
+2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
+relaxed target buys area back at the cost of delay, so the value is a real
+caller decision rather than something this command should pick.
 
 ## Response
 
@@ -587,7 +587,7 @@ command should pick.
   "hdl_toplevel": "gcd",
   "status": "ok",
   "instance_count": 347,
-  "area_um2": 3126.7488,
+  "area_um2": 3238.1056,
   "sequential_area_um2": 1251.2,
   "instance_counts_by_type": {
     "sky130_fd_sc_hd__a211o_1": 1,
@@ -596,7 +596,7 @@ command should pick.
   "timing": {
     "source": "abc_stime",
     "wire_load": null,
-    "critical_path_ps": 2485.44,
+    "critical_path_ps": 2485.93,
     "delay_target_ps": null
   },
   "sta": {
@@ -670,25 +670,34 @@ $ klt synthesize request.json --format json
   "hdl_toplevel": "gcd",
   "status": "ok",
   "instance_count": 347,
-  "area_um2": 3126.7488,
+  "area_um2": 3238.1056,
   "sequential_area_um2": 1251.2,
   "timing": {
     "source": "abc_stime",
     "wire_load": null,
-    "critical_path_ps": 2485.44,
+    "critical_path_ps": 2485.93,
     "delay_target_ps": null
   },
   ...
 }
 ```
 
-347 standard-cell instances, 3126.7488 µm² total (1251.2 µm² sequential),
-2485.44 ps ABC-estimated critical path, and **zero** `lpflow_*`/`probe*`
-cells — measured live on Yosys 0.67+post (this repo's pinned, from-source
-build — `scripts/install-yosys.sh`) against a volare `sky130A` install.
-Note this particular design is **sequential** (it has a clocked `always`
-block) — see "Equivalence gate" above, `--verify-equivalence` is not usable
-on it.
+347 standard-cell instances, 3238.1056 µm² total (1251.2 µm² sequential),
+2485.93 ps ABC-estimated critical path, and **zero** `lpflow_*`/`probe*`
+cells — measured live on Yosys 0.67+post, CI's own pinned, from-source
+build (`scripts/install-yosys.sh`, run in CI's Linux/x86_64/gcc
+environment), against a volare `sky130A` install. Note this particular
+design is **sequential** (it has a clocked `always` block) — see
+"Equivalence gate" above, `--verify-equivalence` is not usable on it.
+
+**Build-platform sensitivity (issue #967):** ABC's greedy sizing
+heuristics are sensitive to the compiler/OS a given Yosys build was
+compiled with, not just its version — the identical Yosys 0.67 source tag,
+built locally on macOS ARM64/AppleClang, maps this same design to
+`area_um2=3126.7488` at `2485.44 ps` instead. The numbers above are CI's
+own measurement and are what `tests/test_synthesize.py`'s exact-number
+golden asserts; treat them as anchored to CI's specific build platform, not
+as a general "Yosys 0.67" invariant reproducible from any machine.
 
 Before the ABC constraint/exclusion flags landed (issue #807), the same
 request — issue #807's own pre-change measurement — mapped to

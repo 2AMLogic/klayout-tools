@@ -1914,15 +1914,23 @@ HAVE_YOSYS = shutil.which("yosys") is not None
 #: own `scripts/install-yosys.sh` pins Yosys **0.67** (an exact, checksum-
 #: verified upstream release tag) -- a mismatch that meant this gate's
 #: exact-number branch never actually ran in CI (silently skipped every
-#: run since #822). A real bisect (issue #967) found `synthesize.py` was
-#: never the cause of the drift: even the exact commit that introduced the
-#: `3238.1056` golden reproduces `3126.7488` today against *any* real,
-#: from-source Yosys build (0.67 built via `scripts/install-yosys.sh`, and
-#: 0.68+post via Homebrew both agree) -- only the original oss-cad-suite
-#: prebuilt binary distribution produced the stale `3238.1056` figure.
-#: Re-pinned to "0.67" (CI's own reproducible, checksum-verified build) so
-#: this exact-number check actually runs in CI on every push, instead of
-#: to an arbitrary contributor's local Yosys major version.
+#: run since #822). Re-pinned to "0.67" (CI's own reproducible, checksum-
+#: verified build) so this exact-number check actually runs in CI on every
+#: push, instead of to an arbitrary contributor's local Yosys major version.
+#:
+#: A first attempt at this fix (issue #967) re-blessed the golden to
+#: `area_um2=3126.7488`, measured against a *locally* built Yosys 0.67
+#: (macOS ARM64/AppleClang). That number does not reproduce on CI: CI's own
+#: Linux x86_64/gcc build of the identical Yosys 0.67 source tag produces
+#: `area_um2=3238.1056` -- the original golden -- confirmed by reading the
+#: value straight out of a CI run's log
+#: (github.com/2AMLogic/klayout-tools/actions/runs/31798823669). Same Yosys
+#: source, same PDK, different build platform: ABC's greedy sizing
+#: heuristics are sensitive to exactly this (hash/iteration-order effects
+#: from the compiler/OS), so "any real, from-source Yosys 0.67 build"
+#: is not actually a safe invariant -- only "CI's own build" is. The golden
+#: below is restored to the original, CI-verified `3238.1056` /
+#: `2485.93 ps`.
 _WORKED_EXAMPLE_YOSYS = "0.67"
 
 
@@ -2000,18 +2008,9 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
     assert timing["delay_target_ps"] is None  # no `constraints` in this request
 
     if (report["engine_version"] or "").startswith(_WORKED_EXAMPLE_YOSYS):
-        # SCRATCH (issue #967 doctor pass): surface CI's actual measured
-        # values instead of hard-asserting a guessed golden, so the real
-        # numbers can be read from the CI log before re-blessing for real.
-        warnings.warn(
-            "SCRATCH gcd worked example on CI: "
-            f"instance_count={report['instance_count']!r} "
-            f"area_um2={report['area_um2']!r} "
-            f"sequential_area_um2={report['sequential_area_um2']!r} "
-            f"critical_path_ps={timing['critical_path_ps']!r} "
-            f"engine_version={report['engine_version']!r}",
-            stacklevel=1,
-        )
+        assert report["instance_count"] == 347
+        assert report["area_um2"] == pytest.approx(3238.1056)
+        assert report["sequential_area_um2"] == pytest.approx(1251.2)
     else:
         # Issue #967: this golden previously drifted silently -- CI pinned
         # Yosys 0.67 while the gate checked "0.68", so the exact-number
