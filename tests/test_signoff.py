@@ -301,12 +301,12 @@ YIELD_FAIL_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "fail"}
 YIELD_REPORTED_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "reported"}
 
 #: `klt pex` (Epic #709) JSON report shape -- hand-built here exactly like
-#: every other kind's fixture. `klt pex` does not exist in this codebase as
-#: of issue #871 (its defining issue, #801, is stalled with an empty body,
-#: no ratified shape) -- this is a **Curator-proposed, provisional** shape
-#: (issue #871's own proposal, not #801's), scoped narrowly enough that
-#: #801's eventual real shape is very likely additive to it. See
-#: signoff.py's "Post-layout binding" docstring section.
+#: every other kind's fixture. This is the **Curator-proposed, provisional**
+#: shape issue #871 introduced ahead of `klt pex` itself existing (its
+#: defining issue, #801, has since shipped the real command,
+#: `src/klayout_tools/pex.py`, matching this shape exactly -- see
+#: `tests/test_pex.py`). See signoff.py's "Post-layout binding" docstring
+#: section.
 PEX_PASS_ENVELOPE = {
     "schema_version": 1,
     "status": "pass",
@@ -1138,10 +1138,12 @@ def test_mixed_signal_manifest_shares_bare_item_6_yield_evidence_across_partitio
 
 # --------------------------------------------------------------------------- #
 # Post-layout binding: item 7 <- `klt pex` (issue #871, Phase 2b of epic
-# #706). `klt pex` (Epic #709) does not exist in this codebase yet -- these
-# tests exercise the Curator-proposed, provisional envelope shape
-# (PEX_PASS_ENVELOPE/PEX_FAIL_ENVELOPE above), not #801's eventual ratified
-# shape (still stalled with an empty body as of this writing).
+# #706). These tests exercise the Curator-proposed, provisional envelope
+# shape (PEX_PASS_ENVELOPE/PEX_FAIL_ENVELOPE above) that predates `klt pex`
+# itself -- issue #801 ("Define `klt pex`", `src/klayout_tools/pex.py`) has
+# since shipped the real command matching this shape exactly (see
+# `tests/test_pex.py` for coverage of the real command's own output, and its
+# compatibility with `_classify`/`_check_passed` here).
 # --------------------------------------------------------------------------- #
 
 

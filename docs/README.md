@@ -36,6 +36,7 @@ docs/
     lvs.md
     mom.md
     pdk.md
+    pex.md
     place-and-route.md
     precheck.md
     render.md

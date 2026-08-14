@@ -105,17 +105,17 @@ as kind ``"pex"`` -- a citation of any other recognised kind now renders
 and 8-10 are unaffected (``allowed_kinds=None`` there, preserving the
 original unrestricted behaviour).
 
-**Provisional envelope shape.** `klt pex` (Epic #709) does not exist in this
-codebase as of this writing, and its defining issue, **#801** ("Define `klt
-pex`"), is stalled with an empty body pending an operator decision -- there
-is no ratified JSON shape to build against yet. :func:`_classify` recognises
-a **Curator-proposed, provisional** `pex` shape instead (a top-level
-``delta`` list plus a ``reference_netlist`` field, mirroring how `klt sim`'s
-shape is detected by ``measurements``/``corner_count`` and `klt extract`'s by
-``device_count``/``nets``), scoped narrowly enough that #801 landing later is
-very likely additive to it, not a rewrite. **This is not #801's ratified
-shape** -- reconcile against #801's real report shape once it lands (re-check
-#801's state before relying on this note).
+**Envelope shape, now ratified by issue #801.** At the time this phase
+(#871) landed, `klt pex` (Epic #709) did not exist yet, so :func:`_classify`
+recognised a **Curator-proposed, provisional** `pex` shape ahead of the real
+command: a top-level ``delta`` list plus a ``reference_netlist`` field,
+mirroring how `klt sim`'s shape is detected by
+``measurements``/``corner_count`` and `klt extract`'s by
+``device_count``/``nets``. Issue #801 ("Define `klt pex`",
+``src/klayout_tools/pex.py``) shipped the real command matching that
+provisional shape exactly (`klt pex`'s own JSON schema is documented in
+``docs/cli/pex.md``), so this recognition rule needed no change -- it now
+recognises `klt pex`'s real, ratified output, not a stand-in for it.
 
 ## Fleet roll-up (issue #827, Phase 1c of epic #706)
 
@@ -473,16 +473,16 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if "device_count" in envelope and isinstance(envelope.get("nets"), list):
         return "extract"
 
-    # `klt pex` (issue #871, Phase 2b of epic #706): does not exist in this
-    # codebase yet -- this recognition rule matches a Curator-proposed,
-    # *provisional* envelope shape (issue #871's own proposal), not a shape
-    # ratified by #801 ("Define `klt pex`", still stalled with an empty body
-    # as of this writing). A top-level `delta` list (per-corner/per-spec-row
-    # schematic-vs-extracted comparisons) plus `reference_netlist` (the
-    # schematic netlist compared against) is unique to this shape -- it
-    # cannot collide with `sim` (detected by `measurements`+`corner_count`
-    # above, checked first) or `extract` (`device_count`+`nets`, checked
-    # just above). Reconcile with #801's real shape once it lands.
+    # `klt pex` (issue #871, Phase 2b of epic #706; shape ratified by #801,
+    # "Define `klt pex`", `src/klayout_tools/pex.py`): a top-level `delta`
+    # list (per-corner/per-spec-row schematic-vs-extracted comparisons) plus
+    # `reference_netlist` (the schematic netlist compared against) is unique
+    # to this shape -- it cannot collide with `sim` (detected by
+    # `measurements`+`corner_count` above, checked first) or `extract`
+    # (`device_count`+`nets`, checked just above). This recognition rule
+    # predates #801 (it recognised a Curator-proposed provisional shape
+    # ahead of the real command); #801's real output matches it exactly, so
+    # no change was needed here once the real command shipped.
     if isinstance(envelope.get("delta"), list) and "reference_netlist" in envelope:
         return "pex"
 
@@ -530,7 +530,7 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       always ``True``. It is still listed in ``checks[]`` (not dropped) so
       its ``provenance`` block participates in the consistency check below
       and its device/net counts are visible in the aggregated verdict.
-    - ``pex`` (issue #871, provisional shape pending #801) passes on
+    - ``pex`` (issue #871; shape ratified by #801, `klt pex`) passes on
       ``status == "pass"`` -- mirrors ``sim``: every graded delta row met
       its tolerance.
     - ``error`` never passes.
@@ -810,11 +810,12 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
     other T1 item accepts any recognised, passing envelope kind, but item 7
     ("Post-layout verification") only accepts a ``"pex"``-kind citation --
     the schematic-vs-extracted-netlist re-simulation delta a `klt pex`
-    (Epic #709) run would produce (see this module's "Post-layout binding"
-    docstring section for the provisional envelope shape and its
-    reconciliation status against #801). A ``drc``/``lvs``/``sim``/``extract``/
-    ``yield`` citation for item 7 -- even a genuinely passing one -- renders
-    ``"unmet"`` with ``reason: "wrong_kind"``, never a borrowed pass.
+    (Epic #709, issue #801, ``src/klayout_tools/pex.py``) run produces (see
+    this module's "Post-layout binding" docstring section, and
+    ``docs/cli/pex.md`` for `klt pex`'s own contract). A
+    ``drc``/``lvs``/``sim``/``extract``/``yield`` citation for item 7 -- even
+    a genuinely passing one -- renders ``"unmet"`` with
+    ``reason: "wrong_kind"``, never a borrowed pass.
 
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an

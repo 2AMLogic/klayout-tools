@@ -31,6 +31,7 @@ from . import (
     lvs_cmd,
     mom_cmd,
     pdk_cmd,
+    pex_cmd,
     place_and_route_cmd,
     power_cmd,
     precheck_cmd,
@@ -1522,6 +1523,94 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(sim_parser)
     sim_parser.set_defaults(func=sim_cmd.run)
+
+    pex_parser = subparsers.add_parser(
+        "pex",
+        help=(
+            "extract a parasitic-annotated netlist and re-sim the schematic "
+            "testbenches against it"
+        ),
+        description=(
+            "Extract a lumped-RC parasitic-annotated netlist from a routed "
+            "layout (`klt extract --parasitics`), re-run one or more `klt "
+            "sim` testbench requests against it per corner, and report a "
+            "per-corner, per-spec-row schematic-vs-extracted delta -- Phase "
+            "1a of Epic #709. Each testbench's `netlist` file must "
+            "`.include`/`.inc` its schematic DUT (the same convention "
+            "docs/cli/extract.md's 'Verified compatible with klt sim's "
+            "netlist convention' documents); the extracted-side run "
+            "re-points only that one line at the freshly-extracted "
+            "netlist, reusing `klt sim`'s existing `netlist_source` field. "
+            "See docs/cli/pex.md for the request/response contract."
+        ),
+    )
+    pex_parser.add_argument("layout", help="path to a GDSII or OASIS layout file")
+    pex_parser.add_argument(
+        "testbenches",
+        nargs="+",
+        help=(
+            "one or more `klt sim` request JSON files, each `.include`ing "
+            "the same schematic DUT netlist -- reused completely "
+            "unmodified for the schematic-side run, and with only their "
+            "`.include`/`.inc` DUT reference re-pointed for the "
+            "extracted-side run"
+        ),
+    )
+    pex_parser.add_argument(
+        "--deck",
+        required=True,
+        help=(
+            "extraction deck to run (currently: sky130, gf180mcu, sg13g2), "
+            "passed through to `klt extract --parasitics`"
+        ),
+    )
+    pex_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "path to write the extracted SPICE netlist "
+            "(default: <layout> with its extension replaced by .spice)"
+        ),
+    )
+    pex_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to extract when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
+    )
+    _add_pdk_args(
+        pex_parser,
+        pdk_help=(
+            "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
+            "Optional -- extraction runs from --deck alone when omitted."
+        ),
+    )
+    pex_parser.add_argument(
+        "--outdir",
+        default=None,
+        help=(
+            "override where this command writes its own generated "
+            "artifacts (the extracted-side testbench body/request copies, "
+            "and each `klt sim` call's own `options.keep_artifacts` "
+            "output, namespaced per testbench and per side) -- default: a "
+            "`.klt/pex/` directory next to <layout>"
+        ),
+    )
+    pex_parser.add_argument(
+        "--backend",
+        default=None,
+        help=(
+            "execution backend passed through to every `klt sim` call "
+            "(schematic and extracted side, every testbench) -- see "
+            "docs/cli/sim.md's 'Execution backends'. Defaults to `local` "
+            "(or each testbench request's own `backend` field)."
+        ),
+    )
+    _add_format_arg(pex_parser)
+    pex_parser.set_defaults(func=pex_cmd.run)
 
     size_parser = subparsers.add_parser(
         "size",

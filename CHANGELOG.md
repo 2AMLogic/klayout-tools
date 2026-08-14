@@ -442,6 +442,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-13 — **new verb `klt pex`** (issue #801, Epic #709 Phase 1a):
+  extract a lumped-RC parasitic-annotated netlist from a routed layout,
+  re-run one or more existing `klt sim` testbench requests against it per
+  corner, and report a **per-corner, per-spec-row schematic-vs-extracted
+  delta** — a measured, explainable degradation on every spec row, not a
+  bare "post-layout OK". It productizes the two-step manual workflow
+  `docs/cli/sim.md`'s "Post-layout verification" and
+  `.claude/skills/design-extraction/SKILL.md` already documented: it drives
+  `klt extract --parasitics` itself, re-runs each testbench **completely
+  unmodified** for the schematic leg, and for the extracted leg rewrites
+  *only* the testbench's `.include`/`.inc` DUT reference to point at the
+  freshly-extracted netlist (tagging `netlist_source: "extracted"`, reusing
+  `klt sim`'s existing field rather than inventing a parallel testbench
+  format). A testbench that inlines its DUT devices instead of `.include`ing
+  them has no single swap point and is refused up front, not partially run.
+  Each `delta[]` row's own `status` mirrors the **extracted-side**
+  measurement's `klt sim` verdict against the `measurements[].limits` the
+  caller already declared — never a second, undocumented delta-magnitude
+  tolerance. The report pins the extraction method (`extraction.model`,
+  `klt extract`'s `PARASITIC_MODEL_SCOPE` verbatim) and deck version
+  (`provenance.deck`'s `sha256:` content hash) so Epic #709's later phases
+  can store it as evidence without re-deriving provenance. The response
+  shape (`delta[]` + `reference_netlist`) matches the provisional envelope
+  issue #871 wired into `klt signoff`'s kind detector ahead of this command
+  existing, so `klt signoff`'s T1 item-7 ("Post-layout verification")
+  binding needed no change — the provisional-shape notes in
+  `docs/cli/signoff.md` / `docs/design-evidence-tiers.md` are updated to
+  point at the now-ratified contract. Note one deliberate divergence from
+  those pre-existing notes' worked examples, which showed `klt pex
+  extracted.spice schematic.spice` (two already-produced netlists): the
+  shipped command takes a **routed layout plus a testbench set**, since it
+  runs extraction itself. Exit codes `0`/`3`/`4` mirror `klt sim`'s
+  precedent. `schema_version` starts at `1`. See
+  [`docs/cli/pex.md`](docs/cli/pex.md).
+
 - 2026-08-13 — `klt place-and-route`'s `"route"` stage gains two new
   additive response fields, `worst_setup_slack_ns`/`worst_hold_slack_ns`
   (issue #949, Epic #700 Phase 3, `docs/design/post-route-sta-survey.md`

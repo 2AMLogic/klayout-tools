@@ -126,9 +126,9 @@ every block.
      tier-verdict mode accepts for it: unlike every other item, item 7
      rejects a passing citation of any other kind, since a clean DRC or a
      pre-layout schematic sim proves nothing about post-layout behaviour
-     (#871). `klt pex` itself is not implemented yet (Epic #709, shape
-     pending #801) — see `docs/cli/signoff.md`'s "Item 7 is
-     kind-restricted" section for the provisional envelope shape.
+     (#871). `klt pex` (Epic #709, issue #801) is implemented — see
+     `docs/cli/pex.md` for its full contract and `docs/cli/signoff.md`'s
+     "Item 7 is kind-restricted" section for how `klt signoff` binds to it.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
      pre-layout RTL/gate simulation.
