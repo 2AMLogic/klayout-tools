@@ -591,6 +591,28 @@ about this repo's own T1 (not T2 commercial-signoff) ceiling per
   convention, this item's own "no-go" outcome (parking it, documenting
   why) is a valid, reportable result per this repo's own evidence-tier
   discipline — not assumed to succeed here.
+- **Risk resolved — GO (issue #962, 2026-08-14).** That live check has now
+  been run and is written up in
+  [`docs/design/sdf-annotate-feasibility-spike.md`](sdf-annotate-feasibility-spike.md).
+  Icarus Verilog 13.0 back-annotates an SDF against this repo's existing
+  gate-level cocotb testbench convention **unmodified** — `hdl_toplevel`
+  stays the DUT, and the `$sdf_annotate` call rides in a second, generated
+  elaboration root (`iverilog -s <toplevel> -s klt_sdf_annotate`, the same
+  idiom cocotb's own waveform-dump module already uses). Verified on both
+  `gcd` and `modexp` gate-level corpus netlists: with a per-stage delay
+  that fits the testbench's 10 ns clock every verdict is unchanged, and at
+  0.900 ns/stage the *same* testbench flips to failing — exactly this
+  item's own coverage metric, demonstrated rather than assumed. Three
+  caveats the follow-on must carry, all captured live: `-gspecify` is
+  mandatory and its absence makes `$sdf_annotate` a **silent** no-op;
+  `-ginterconnect` is mandatory for the `INTERCONNECT` entries a real
+  `write_sdf` emits; and every SDF failure mode is non-fatal (`vvp` exits
+  `0`), so a transcript scan for `SDF WARNING`/`SDF ERROR` is a hard
+  requirement rather than a nicety. Icarus implements SDF *delays* but not
+  SDF *timing checks*, which costs violation **reporting** (OpenSTA's job
+  anyway, §4.1/§4.2) but not the functional signal this item is scoped
+  around. The `write_sdf` half of this item is unchanged and remains its
+  own follow-on.
 
 ### 4.4 On-chip variation (OCV) derating margin, a cheap realism increment once 4.1–4.2 land (Priority 4)
 
