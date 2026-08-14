@@ -43,7 +43,7 @@ function devSsrPlugin(): Plugin {
           } else {
             const layout = layouts.find((l: { slug: string }) => l.slug === slug);
             if (!layout) return next();
-            data = { page: "detail", layout };
+            data = { page: "detail", layout, emExport: mod.getEmExport(layout.slug) };
             meta = mod.detailMeta(layout);
           }
 

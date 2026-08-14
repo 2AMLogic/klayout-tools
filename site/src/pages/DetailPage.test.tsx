@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { DetailPage } from "./DetailPage";
 import type { Layout, LayoutSignals } from "@/data/types";
+import type { EmSiteExport } from "@/components/em/types";
 
 afterEach(cleanup);
 
@@ -130,6 +131,49 @@ describe("DetailPage Signals section (issue #653)", () => {
     render(<DetailPage layout={makeLayout({ signals: undefined })} />);
 
     expect(screen.queryByRole("heading", { name: "Signals" })).not.toBeInTheDocument();
+  });
+});
+
+describe("DetailPage Field Data section (Epic #840 Phase 3b, issue #959)", () => {
+  const emExport: EmSiteExport = {
+    schema_version: 1,
+    benchmark: "block_coupling",
+    mesh: { vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], cells: [[0, 1, 2]] },
+    frames: [{ label: "vref driven 1V", frequency_hz: null, scalar: [0, 0.5, 1] }],
+    capacitance: {
+      conductors: ["vgnd", "vpwr"],
+      matrix_farad: [
+        [1e-15, -2e-16],
+        [-2e-16, 1e-15],
+      ],
+    },
+    provenance: {
+      generator: { repo: "https://github.com/2AMLogic/geode-fem", commit: "a".repeat(40) },
+      geometry: { fixture: "gf180-bandgap" },
+      generated_at: "2026-08-14T00:00:00Z",
+    },
+  };
+
+  it("renders the field panel with a provenance panel when emExport is present", () => {
+    render(<DetailPage layout={makeLayout({ slug: "gf180-bandgap" })} emExport={emExport} />);
+
+    expect(screen.getByRole("heading", { name: "Field Data" })).toBeInTheDocument();
+    expect(screen.getByTestId("field-viewer")).toBeInTheDocument();
+    expect(screen.getByTestId("em-provenance-panel")).toBeInTheDocument();
+  });
+
+  it("omits the Field Data section entirely when emExport is null (no artifact / malformed artifact)", () => {
+    render(<DetailPage layout={makeLayout({ slug: "sky130_fd_sc_hd__buf_4" })} emExport={null} />);
+
+    expect(screen.queryByRole("heading", { name: "Field Data" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("field-viewer")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("em-provenance-panel")).not.toBeInTheDocument();
+  });
+
+  it("omits the Field Data section when emExport is undefined (default, matches every other block)", () => {
+    render(<DetailPage layout={makeLayout()} />);
+
+    expect(screen.queryByRole("heading", { name: "Field Data" })).not.toBeInTheDocument();
   });
 });
 
