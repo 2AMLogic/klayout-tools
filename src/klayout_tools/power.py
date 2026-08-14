@@ -70,13 +70,12 @@ Resistor-network model (MVP, stated plainly):
 
 from __future__ import annotations
 
-import json
-import os
 from typing import TYPE_CHECKING, Any
 
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
+from ._paths import _load_spec_json, _parse_layer_datatype
 from .ir_solver import solve_ir_drop
 
 if TYPE_CHECKING:
@@ -99,35 +98,6 @@ class PowerError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback -- see ``docs/json-contract.md``.
     """
-
-
-def _load_spec(spec_path: str) -> dict[str, Any]:
-    if not os.path.exists(spec_path):
-        raise PowerError(f"spec file not found: {spec_path}")
-    if os.path.isdir(spec_path):
-        raise PowerError(f"not a file: {spec_path}")
-    try:
-        with open(spec_path) as f:
-            spec = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PowerError(f"could not read spec '{spec_path}': {exc}") from exc
-    if not isinstance(spec, dict):
-        raise PowerError(f"spec '{spec_path}' must be a JSON object")
-    return spec
-
-
-def _parse_layer_datatype(raw: str, spec_path: str, field: str) -> tuple[int, int]:
-    parts = raw.split("/")
-    malformed = PowerError(
-        f"spec '{spec_path}': {field} must be '<layer>/<datatype>' with "
-        f"integer layer/datatype (got {raw!r})"
-    )
-    if len(parts) != 2:
-        raise malformed
-    try:
-        return int(parts[0]), int(parts[1])
-    except ValueError as exc:
-        raise malformed from exc
 
 
 def _validate_power_nets(spec: dict[str, Any], spec_path: str) -> list[str]:
@@ -165,12 +135,15 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
         names.append(name)
 
         layer = _parse_layer_datatype(
-            str(entry["layer"]), spec_path, f"stackup[{i}].layer"
+            str(entry["layer"]), spec_path, f"stackup[{i}].layer", PowerError
         )
         label_layer = None
         if entry.get("label_layer") is not None:
             label_layer = _parse_layer_datatype(
-                str(entry["label_layer"]), spec_path, f"stackup[{i}].label_layer"
+                str(entry["label_layer"]),
+                spec_path,
+                f"stackup[{i}].label_layer",
+                PowerError,
             )
 
         try:
@@ -223,7 +196,7 @@ def _validate_vias(
                 raise PowerError(f"spec '{spec_path}': vias[{i}] missing {key!r}")
 
         layer = _parse_layer_datatype(
-            str(entry["layer"]), spec_path, f"vias[{i}].layer"
+            str(entry["layer"]), spec_path, f"vias[{i}].layer", PowerError
         )
 
         between = entry["between"]
@@ -903,7 +876,7 @@ def run_power(
     ``warnings`` rather than raised, as long as at least one net resolved
     to at least one island).
     """
-    spec = _load_spec(spec_path)
+    spec = _load_spec_json(spec_path, PowerError)
     power_nets = _validate_power_nets(spec, spec_path)
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]

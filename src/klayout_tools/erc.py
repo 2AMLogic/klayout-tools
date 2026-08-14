@@ -84,13 +84,12 @@ See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
+from ._paths import _load_spec_json, _parse_layer_datatype
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), and Phase 3 (#908) all add fields additively -- no bump needed,
@@ -195,35 +194,6 @@ def _resolve_antenna_limits(pdk: str | None) -> dict[str, tuple[float, str]] | N
     return limits
 
 
-def _load_spec(spec_path: str) -> dict[str, Any]:
-    if not os.path.exists(spec_path):
-        raise ErcError(f"spec file not found: {spec_path}")
-    if os.path.isdir(spec_path):
-        raise ErcError(f"not a file: {spec_path}")
-    try:
-        with open(spec_path) as f:
-            spec = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ErcError(f"could not read spec '{spec_path}': {exc}") from exc
-    if not isinstance(spec, dict):
-        raise ErcError(f"spec '{spec_path}' must be a JSON object")
-    return spec
-
-
-def _parse_layer_datatype(raw: str, spec_path: str, field: str) -> tuple[int, int]:
-    parts = raw.split("/")
-    malformed = ErcError(
-        f"spec '{spec_path}': {field} must be '<layer>/<datatype>' with "
-        f"integer layer/datatype (got {raw!r})"
-    )
-    if len(parts) != 2:
-        raise malformed
-    try:
-        return int(parts[0]), int(parts[1])
-    except ValueError as exc:
-        raise malformed from exc
-
-
 def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]:
     """Validate the ``stackup`` array: fabrication order from the gate
     layer up through every metal role a gate's net may reach.
@@ -256,12 +226,15 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
         names.append(name)
 
         layer = _parse_layer_datatype(
-            str(entry["layer"]), spec_path, f"stackup[{i}].layer"
+            str(entry["layer"]), spec_path, f"stackup[{i}].layer", ErcError
         )
         label_layer = None
         if entry.get("label_layer") is not None:
             label_layer = _parse_layer_datatype(
-                str(entry["label_layer"]), spec_path, f"stackup[{i}].label_layer"
+                str(entry["label_layer"]),
+                spec_path,
+                f"stackup[{i}].label_layer",
+                ErcError,
             )
 
         role = entry.get("role")
@@ -312,7 +285,7 @@ def _validate_vias(
                 raise ErcError(f"spec '{spec_path}': vias[{i}] missing {key!r}")
 
         layer = _parse_layer_datatype(
-            str(entry["layer"]), spec_path, f"vias[{i}].layer"
+            str(entry["layer"]), spec_path, f"vias[{i}].layer", ErcError
         )
 
         between = entry["between"]
@@ -412,10 +385,10 @@ def _validate_ties(
         names.append(name)
 
         well_layer = _parse_layer_datatype(
-            str(entry["well_layer"]), spec_path, f"ties[{i}].well_layer"
+            str(entry["well_layer"]), spec_path, f"ties[{i}].well_layer", ErcError
         )
         tap_layer = _parse_layer_datatype(
-            str(entry["tap_layer"]), spec_path, f"ties[{i}].tap_layer"
+            str(entry["tap_layer"]), spec_path, f"ties[{i}].tap_layer", ErcError
         )
 
         connect_to = str(entry["connect_to"])
@@ -824,7 +797,7 @@ def run_erc(
     """
     antenna_limits = _resolve_antenna_limits(pdk)
 
-    spec = _load_spec(spec_path)
+    spec = _load_spec_json(spec_path, ErcError)
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
