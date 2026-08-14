@@ -1,0 +1,136 @@
+[
+  {
+    "design": "modexp",
+    "kind": "sequential",
+    "source": "examples/functional-verification/modexp.v (WIDTH=16 default)",
+    "synthesize": {
+      "status": "ok",
+      "instance_count": 717,
+      "area_um2": 7150.608,
+      "timing": {
+        "source": "abc_stime",
+        "wire_load": null,
+        "critical_path_ps": 4259.91,
+        "delay_target_ps": null
+      }
+    },
+    "equivalence": {
+      "yosys_equiv_induct": {
+        "proven": false,
+        "seq_depth": 16,
+        "note": "did not converge within the bounded induction depth -- inconclusive, not a counterexample; see README.md",
+        "log_tail": "  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5593: \\result_gold [3] \\_0623_.C2_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5594: \\result_gold [4] \\_0621_.C2_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5595: \\result_gold [5] \\_0619_.C2_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5596: \\result_gold [6] \\_0617_.C2_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5597: \\result_gold [7] \\_0613_.C2_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5598: \\result_gold [8] \\_0955_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5599: \\result_gold [9] \\_0954_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5600: \\result_gold [10] \\_0953_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5601: \\result_gold [11] \\_0952_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5602: \\result_gold [12] \\_0951_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5603: \\result_gold [13] \\_0950_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5604: \\result_gold [14] \\_0949_.A1_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5605: \\result_gold [15] \\_1040_.B_gate\nFound a total of 123 unproven $equiv cells.\nERROR: Found 123 unproven $equiv cells in 'equiv_status -assert'."
+      },
+      "gate_level_simulation": {
+        "method": "python pow(base, exp, mod) oracle, same reference test_modexp.py checks the RTL against",
+        "passed": true,
+        "cases": 27
+      }
+    }
+  },
+  {
+    "design": "tt_um_ALU",
+    "kind": "combinational",
+    "synthesize": {
+      "status": "ok",
+      "instance_count": 97,
+      "area_um2": 639.3632,
+      "timing": {
+        "source": "abc_stime",
+        "wire_load": null,
+        "critical_path_ps": 1247.69,
+        "delay_target_ps": null
+      }
+    },
+    "equivalence": {
+      "klt_equiv": {
+        "status": "equivalent",
+        "engine": "yosys",
+        "engine_version": "0.68+post",
+        "timeout_s": 60.0,
+        "elapsed_s": 0.529
+      }
+    }
+  },
+  {
+    "design": "tt_um_8bitALU",
+    "kind": "sequential",
+    "synthesize": {
+      "status": "ok",
+      "instance_count": 110,
+      "area_um2": 760.7296,
+      "timing": {
+        "source": "abc_stime",
+        "wire_load": null,
+        "critical_path_ps": 1501.22,
+        "delay_target_ps": null
+      }
+    },
+    "equivalence": {
+      "yosys_equiv_induct": {
+        "proven": true,
+        "seq_depth": 12,
+        "note": "converged",
+        "log_tail": " success!\nProved 8 previously unproven $equiv cells.\n\n15. Executing EQUIV_INDUCT pass.\nNo selected unproven $equiv cells found in equiv.\nProved 0 previously unproven $equiv cells.\n\n16. Executing EQUIV_STATUS pass.\nFound 24 $equiv cells in equiv:\n  Of those cells 24 are proven and 0 are unproven.\n  Equivalence successfully proven!\n\nEnd of script. Logfile hash: 7aff401779, time: 0.31s, user: 0.28s, system: 0.04s, MEM: 45.31 MB peak\nYosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)\nTime spent: 62% 2x read_liberty (0 sec), 19% 1x equiv_simple (0 sec), ..."
+      },
+      "gate_level_simulation": {
+        "method": "directed RTL-vs-gate dual-DUT co-simulation diff",
+        "passed": true
+      }
+    }
+  },
+  {
+    "design": "tt_um_LFSR_shivam",
+    "kind": "sequential",
+    "synthesize": {
+      "status": "ok",
+      "instance_count": 38,
+      "area_um2": 352.8384,
+      "timing": {
+        "source": "abc_stime",
+        "wire_load": null,
+        "critical_path_ps": 415.66,
+        "delay_target_ps": null
+      }
+    },
+    "equivalence": {
+      "yosys_equiv_induct": {
+        "proven": true,
+        "seq_depth": 12,
+        "note": "converged",
+        "log_tail": "  Proof for induction step failed. Extending to next time step.\n  Proving existence of base case for step 2. (1690 clauses over 680 variables)\n  Proving induction step 2. (2634 clauses over 1053 variables)\n  Proof for induction step holds. Entire workset of 2 cells proven!\nProved 2 previously unproven $equiv cells.\n\n16. Executing EQUIV_STATUS pass.\nFound 26 $equiv cells in equiv:\n  Of those cells 26 are proven and 0 are unproven.\n  Equivalence successfully proven!\n\nWarnings: 1 unique messages, 1 total\nEnd of script. Logfile hash: 570efbbea1, time: 0.22s, user: 0.21s, system: 0.03s, MEM: 41.12 MB peak\nYosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)\nTime spent: 84% 2x read_liberty (0 sec), 5% 1x equiv_induct (0 sec), ..."
+      },
+      "gate_level_simulation": {
+        "method": "directed RTL-vs-gate dual-DUT co-simulation diff",
+        "passed": true
+      }
+    }
+  },
+  {
+    "design": "tt_um_CKPope_top",
+    "kind": "sequential",
+    "synthesize": {
+      "status": "ok",
+      "instance_count": 169,
+      "area_um2": 1493.9328,
+      "timing": {
+        "source": "abc_stime",
+        "wire_load": null,
+        "critical_path_ps": 967.86,
+        "delay_target_ps": null
+      }
+    },
+    "equivalence": {
+      "yosys_equiv_induct": {
+        "proven": false,
+        "seq_depth": 16,
+        "note": "did not converge within the bounded induction depth -- inconclusive, not a counterexample; see README.md",
+        "log_tail": "  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$5137: \\x_comp.b_hex_gold [0] \\x_comp.Bit0_COMP._0_.A_gate\n  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$5138: \\x_comp.b_hex_gold [1] \\x_comp.Bit1_COMP._0_.A_gate\n  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$5126: \\y_comp.b_hex_gold [0] \\y_comp.Bit0_COMP._0_.A_gate\n  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$5127: \\y_comp.b_hex_gold [1] \\y_comp.Bit1_COMP._0_.A_gate\n  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$5128: \\y_comp.b_hex_gold [2] \\y_comp.Bit2_COMP._0_.A_gate\n  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$5129: \\y_comp.b_hex_gold [3] \\y_comp.Bit3_COMP._0_.A_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5227: \\x_comp.a_hex_gold [1] \\x_comp.Bit1_COMP._0_.B_N_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5226: \\x_comp.a_hex_gold [0] \\x_comp.Bit0_COMP._0_.B_N_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5225: \\y_comp.a_hex_gold [3] \\y_comp.Bit3_COMP._0_.B_N_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5224: \\y_comp.a_hex_gold [2] \\y_comp.Bit2_COMP._0_.B_N_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5223: \\y_comp.a_hex_gold [1] \\y_comp.Bit1_COMP._0_.B_N_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5222: \\y_comp.a_hex_gold [0] \\y_comp.Bit0_COMP._0_.B_N_gate\n  Unproven $equiv $auto$equiv_make.cc:258:find_same_wires$5228: \\x_comp.a_hex_gold [2] \\x_comp.Bit2_COMP._0_.B_N_gate\nFound a total of 16 unproven $equiv cells.\nERROR: Found 16 unproven $equiv cells in 'equiv_status -assert'."
+      },
+      "gate_level_simulation": {
+        "method": "directed RTL-vs-gate dual-DUT co-simulation diff",
+        "passed": true
+      }
+    }
+  }
+]
