@@ -1797,6 +1797,56 @@ def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
     assert citation["exit_status"] == 0
 
 
+@pytest.mark.skipif(
+    not (_DESIGN_PIPELINE_DIR / "06-layout.gds").exists(),
+    reason="examples/design-pipeline/06-layout.gds not present in this checkout",
+)
+def test_real_pex_gate_reproduces_the_canarys_post_layout_delta_pass(tmp_path):
+    # Epic #709 Phase 1c (#803): item 7 ("Post-layout verification") is
+    # kind-restricted to `pex`-kind evidence only (issue #871) -- this is
+    # that item's own real-subprocess gate-binding test, the same
+    # `klt <verb> ... --format json` real-subprocess convention as items
+    # 3/4/5/9 above, run against `10-pex.request.json` (Epic #709 Phase 1c,
+    # `examples/design-pipeline/README.md`'s "S10 pex delta proof" section).
+    # `-o` redirects the extracted netlist `klt pex` writes to tmp_path so
+    # this test never leaves a generated .spice file behind in the checked-
+    # in examples/design-pipeline/ directory.
+    output_netlist = tmp_path / "regenerated-pex-extracted.spice"
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "7": {
+                    "command": _klt_command(
+                        "pex",
+                        "06-layout.gds",
+                        "10-pex.request.json",
+                        "--deck",
+                        "sky130",
+                        "-o",
+                        str(output_netlist),
+                        "--format",
+                        "json",
+                    ),
+                    "cwd": str(_DESIGN_PIPELINE_DIR),
+                }
+            },
+        )
+    )
+
+    assert output_netlist.exists()
+
+    # See test_real_extract_gate_...'s comment: a plain "analog" manifest
+    # looks up the bare "7" key, not "7.analog".
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["partition"] is None
+    assert item_7["status"] == "met"
+    citation = item_7["citation"]
+    assert citation["kind"] == "pex"
+    assert citation["check_status"] == "pass"
+    assert citation["exit_status"] == 0
+
+
 def test_non_object_manifest_raises():
     with pytest.raises(SignoffError, match="must be a JSON object"):
         build_tier_report(["not", "a", "dict"])  # type: ignore[arg-type]

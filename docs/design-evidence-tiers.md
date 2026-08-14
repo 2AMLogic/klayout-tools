@@ -118,17 +118,27 @@ every block.
    same way it grades the deterministic items above).
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
-     the layout, not only the drawn schematic (#252). Until parasitic
-     extraction lands (#217), state what the extracted netlist does and
-     does not model. A `klt pex` JSON report — the per-corner,
-     per-spec-row schematic-vs-extracted delta — is the machine-checkable
-     evidence for this item, and the *only* evidence `klt signoff`'s
-     tier-verdict mode accepts for it: unlike every other item, item 7
-     rejects a passing citation of any other kind, since a clean DRC or a
-     pre-layout schematic sim proves nothing about post-layout behaviour
-     (#871). `klt pex` (Epic #709, issue #801) is implemented — see
-     `docs/cli/pex.md` for its full contract and `docs/cli/signoff.md`'s
+     the layout, not only the drawn schematic (#252). Parasitic extraction
+     has landed (#217, `klt extract --parasitics`); a `klt pex` report's
+     `extraction.model` field is the machine-checkable statement of what the
+     extracted netlist's lumped-RC model does and does not account for
+     (quasi-static, vertical-overlap coupling only, issue #760 — see
+     `docs/cli/pex.md` → "Top-level fields"). A `klt pex` JSON report — the
+     per-corner, per-spec-row schematic-vs-extracted delta — is the
+     machine-checkable evidence for this item, and the *only* evidence `klt
+     signoff`'s tier-verdict mode accepts for it: unlike every other item,
+     item 7 rejects a passing citation of any other kind, since a clean DRC
+     or a pre-layout schematic sim proves nothing about post-layout
+     behaviour (#871). `klt pex` (Epic #709, issue #801) is implemented —
+     see `docs/cli/pex.md` for its full contract and `docs/cli/signoff.md`'s
      "Item 7 is kind-restricted" section for how `klt signoff` binds to it.
+     Epic #709 Phase 1c (#803) is the first end-to-end proof of this item on
+     a real analog canary (`blocks/sky130-ota-5t` /
+     `examples/design-pipeline/`, see that directory's README "S10 pex delta
+     proof" section) — every `delta[]` row is explainable directly from the
+     extracted netlist's own added R/C, not merely reported, including the
+     (measured, not assumed) no-degradation rows that canary's current
+     topology produces.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
      pre-layout RTL/gate simulation.

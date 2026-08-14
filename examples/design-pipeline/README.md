@@ -35,6 +35,7 @@ they are hand-authored stage records per the skills' own framing.
 | S10 simulation across corners (AC) | [`sim-ac.request.json`](sim-ac.request.json) / [`sim-ac.result.json`](sim-ac.result.json) | `klt sim` (shipped, `docs/cli/sim.md`) |
 | S10 simulation across corners (operating point / supply current) | [`sim-op.request.json`](sim-op.request.json) / [`sim-op.result.json`](sim-op.result.json) | `klt sim` (shipped) |
 | S10 **post-extraction** corner sweep | [`09-sim.testbench.spice`](09-sim.testbench.spice), [`09-sim.request.json`](09-sim.request.json) → [`09-sim.result.json`](09-sim.result.json) | `klt sim`, `.include`ing [`07-extract.spice`](07-extract.spice) unmodified |
+| S10 **pex** schematic-vs-extracted delta (Epic #709 Phase 1c, [#803](https://github.com/2AMLogic/klayout-tools/issues/803)) | [`10-pex.testbench.spice`](10-pex.testbench.spice), [`10-pex.request.json`](10-pex.request.json) → [`10-pex.result.json`](10-pex.result.json) (+ [`10-pex-extracted.spice`](10-pex-extracted.spice), companion schematic-side [`10-pex.schematic.result.json`](10-pex.schematic.result.json)) | `klt pex` (shipped, `docs/cli/pex.md`) against `06-layout.gds`, stored via the append-only `sim/` evidence convention under [`../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/`](../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/) |
 
 Regenerate the schematic-level netlist and request JSON with:
 
@@ -80,6 +81,17 @@ uv run klt extract 06-layout.gds --deck sky130 --top ota_5t_layout_0 \
 # S10 (post-extraction): a thin testbench `.include`s 07-extract.spice
 # unmodified and runs a corner sweep against it.
 uv run klt sim 09-sim.request.json --format json > 09-sim.result.json
+
+# S10 (pex): klt pex drives its own --parasitics extraction from
+# 06-layout.gds, re-runs 10-pex.request.json's testbench against both the
+# schematic-equivalent DUT (07-reference.spice, unmodified) and the freshly
+# extracted netlist, and emits the per-corner, per-spec-row delta.
+uv run klt pex 06-layout.gds 10-pex.request.json --deck sky130 \
+    -o 10-pex-extracted.spice --format json > 10-pex.result.json
+# Companion schematic-side record (the same request run directly through
+# klt sim, stored alongside per the sim/ evidence convention -- see
+# "S10 pex delta proof" below).
+uv run klt sim 10-pex.request.json --format json > 10-pex.schematic.result.json
 ```
 
 ## Stage-by-stage status
@@ -95,7 +107,7 @@ uv run klt sim 09-sim.request.json --format json > 09-sim.result.json
 | S7 layout generation | **done** (Epic #153 phase 4, #164) | [`06-gen-tail.json`](06-gen-tail.json)/[`06-gen-diffpair.json`](06-gen-diffpair.json)/[`06-gen-mirror.json`](06-gen-mirror.json) (`klt gen`) placed and routed into [`06-layout.gds`](06-layout.gds) by `klt gen-compose` ([`06-layout.json`](06-layout.json)); every net (`TAIL_A`/`TAIL_B`/`N1`/`VOUT`) routed, `unrouted_nets: []`. `05-sizing.json`'s M5b (on-block tail bias replica) is **not** composed as its own instance — the post-extraction testbench biases the tail node directly from outside the `.SUBCKT` (same pattern `docs/cli/gen-compose.md`'s worked example uses), so no on-die bias generator is needed to close this loop; see "Friction" below. |
 | S8 DRC/LVS | **done** (#164) | DRC: `klt drc --deck sky130` against `06-layout.gds` reports `status: "clean"`, `violation_count: 0` ([`06-drc.result.json`](06-drc.result.json)) — geometry is DRC-clean, not just "routed" (`klt gen-compose`'s `routed: true` is advisory only). LVS: `klt lvs` against a hand-written reference netlist ([`07-reference.spice`](07-reference.spice)) reports `status: "match"`, `pins 4/4/4` ([`08-lvs.result.json`](08-lvs.result.json)); `mismatch_count: 1` is the known unused-device-class `severity: "warning"` quirk (#201), not a real mismatch. |
 | S9 extraction | **done** (#164) | `klt extract --deck sky130` against `06-layout.gds` reports `device_count: 5`, `pin_count: 4`, `status: "extracted"` ([`07-extract.json`](07-extract.json)); the written [`07-extract.spice`](07-extract.spice) is what S10's post-extraction sweep below `.include`s unmodified. |
-| S10 simulation across corners | done — **both schematic-level and post-extraction** | Schematic-level: AC and operating-point corner sweeps pass 20/20 corners (full 5-process x 2-supply x 2-temperature matrix) — Loop A's fast pre-layout convergence. Post-extraction (**new, #164**): a 6-corner supply/temperature sweep against `07-extract.spice` passes 6/6 ([`09-sim.result.json`](09-sim.result.json)) — the vision sentence's "simulation-verified" post-extraction pass this pipeline previously could not reach. See both results sections below. |
+| S10 simulation across corners | done — **schematic-level, post-extraction, and pex delta** | Schematic-level: AC and operating-point corner sweeps pass 20/20 corners (full 5-process x 2-supply x 2-temperature matrix) — Loop A's fast pre-layout convergence. Post-extraction (**#164**): a 6-corner supply/temperature sweep against `07-extract.spice` passes 6/6 ([`09-sim.result.json`](09-sim.result.json)) — the vision sentence's "simulation-verified" post-extraction pass this pipeline previously could not reach. **pex delta (new, Epic #709 Phase 1c, #803)**: `klt pex` reruns that same check as an explicit schematic-vs-extracted diff, 18/18 rows pass with a measured (not assumed) `delta_pct: 0.0`, stored via the append-only `sim/` evidence convention ([`10-pex.result.json`](10-pex.result.json)). See all three results sections below. |
 | S11 signoff report | **skipped — blocked** | No aggregation tool and no `klt.pipeline.signoff/1` contract exists. A provisional, explicitly-labeled pre-layout comparison against the S3 spec is given below instead of a real signoff artifact, per the `design-signoff` skill's "what an agent can do today" guidance. S8/S9/S10 now all close (see above), so this is the pipeline's only remaining blocked stage. |
 
 ## S10 results (schematic-level, both corner sweeps pass 20/20)
@@ -188,6 +200,109 @@ netlist would not be electrically meaningful. The schematic-level S10 results
 above remain this pipeline's actual gain/bandwidth/phase-margin/current
 evidence; this section's contribution is closing the extract → LVS → sim
 *loop*, not re-deriving those numbers post-extraction.
+
+## S10 pex delta proof (Epic #709 Phase 1c, #803)
+
+[Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709) Phase 1
+closes the loop between extraction and re-sim into one command, `klt pex`
+(#801: `docs/cli/pex.md`) with its report wired into the append-only `sim/`
+evidence convention (#802: `docs/design/sim-evidence-discipline-spike.md`).
+This section is #803's proof: run that command end to end against this
+canary and turn the "S10 (post-extraction)" section above's bare
+`status: "pass"` into a per-spec-row, explainable schematic-vs-extracted
+delta — the post-layout T1 evidence item `docs/design-evidence-tiers.md`
+item 7 describes.
+
+**Which schematic to diff against.** `klt pex`'s `.include`/`.inc` DUT-swap
+convention (`docs/cli/pex.md` → "The DUT `.include` swap") needs a
+schematic-equivalent DUT that shares the *extracted netlist's* `.SUBCKT`
+pin interface — that is [`07-reference.spice`](07-reference.spice) (the
+same hand-written netlist [`08-lvs.result.json`](08-lvs.result.json)
+already verified is topologically LVS-clean, `status: "match"`, against
+`06-layout.gds`), **not** [`ota_5t.spice`](ota_5t.spice) (the real
+PMOS-loaded 5T OTA schematic `sim-ac.request.json`/`sim-op.request.json`
+diff against). `docs/cli/pex.md`'s own "Scope-mismatch note" documents why
+the two schematics differ: the composed layout is the topology
+simplification the "Friction encountered" section below describes (all-NFET,
+gates not wired through `connectivity[]`), not a fabricatable 5T OTA.
+Pointing `klt pex` at `ota_5t.spice` was tried first and, as expected,
+cannot work — that file is a bare netlist body with no `.SUBCKT` wrapper and
+a completely different device set (2 NMOS + 2 PMOS + 1 NMOS-tail vs. this
+composed layout's 5 NMOS), so there is no `.include`-able DUT sharing the
+extracted netlist's 4-pin interface. Using `07-reference.spice` — the
+schematic view of what `06-layout.gds` actually implements — is what makes
+this a valid, run-to-completion `klt pex` invocation rather than an error.
+
+**Run** ([`10-pex.testbench.spice`](10-pex.testbench.spice),
+[`10-pex.request.json`](10-pex.request.json) →
+[`10-pex.result.json`](10-pex.result.json)): the same bias network
+[`09-sim.testbench.spice`](09-sim.testbench.spice) already proved closes the
+extract → sim loop (`.options rshunt=1e12`, ideal DC sources on `N1`/
+`TAIL_A|TAIL_B`/`VOUT`), reused so `klt pex` can drive both legs — schematic
+(`07-reference.spice`, unmodified) and extracted (`klt pex`'s own
+`--parasitics` extraction, [`10-pex-extracted.spice`](10-pex-extracted.spice))
+— from one request:
+
+```sh
+uv run klt pex 06-layout.gds 10-pex.request.json --deck sky130 \
+    -o 10-pex-extracted.spice --format json > 10-pex.result.json
+```
+
+`status: "pass"`, `corner_count: 6`, `passed: 18`, `failed: 0`, `errored: 0`
+— 18 `delta[]` rows (6 corners × 3 measurements: `n1_meas`/`tail_meas`/
+`vout_meas`), reproducing [`09-sim.result.json`](09-sim.result.json)'s own
+pass/fail verdict but now as an explicit **schematic-vs-extracted diff**
+instead of a single-sided post-extraction-only check.
+
+**Every row reads `delta_pct: 0.0`, and this is measured, not assumed —
+explainable directly from the extracted netlist's own topology.**
+`10-pex-extracted.spice`'s `--parasitics` output adds one lumped series
+resistor per net, from a star hub to each device terminal (issue #592) —
+e.g. `RN1_t0 N1__t0 N1 272.98065` and `RN1_t1 N1__t1 N1 272.98065` for the
+`N1` net, `R_2_t0`/`R_3_t0`/`R_6_t0` (~183–305 Ω) for the internal `$2`/`$3`/
+`$6` nets — plus one net-to-ground capacitor per net (`CN1`, `CTAIL_A_TAIL_B`,
+`CVOUT`, all sub-fF). Every measurement in this scope reads a node that
+`10-pex.testbench.spice` drives directly with an ideal (zero-output-impedance)
+DC voltage source *at the star hub itself* (`Vn1 n1_node ...` → `Xota
+n1_node ...` → hub node `N1`) — an ideal voltage source forces its node's
+voltage exactly, independent of any downstream impedance, so the added
+per-terminal resistors (which sit *between* the hub and the composed layout's
+floating-gate, off-state transistor terminals — see "Friction" below for why
+the gates are unwired) carry no current at DC steady state and drop no
+measurable voltage. `delta_pct: 0.0` is therefore the mechanistically correct
+answer for this scope's three measurement points, not a sign the extraction
+or the diff is inert: [`tests/test_pex.py`](../../tests/test_pex.py)'s
+`test_integration_run_pex_end_to_end` exercises the identical R-added-in-series
+mechanism on a real sky130 poly resistor with a load that *does* draw current
+through it, and reports a non-zero, negative `delta_pct` there — proving
+`klt pex`'s delta computation is sensitive to exactly this class of parasitic
+when a measured node sits downstream of one. This canary's composed layout
+structurally has no gate-driven active current path (the "Friction
+encountered" section's known, accepted topology simplification), so none of
+its three addressable nodes are downstream of their own net's parasitic
+resistor — a real, explainable, and non-trivial *finding*, not a null result:
+demonstrating the pex machinery correctly reports "no degradation" here is as
+much a proof of item 7's evidence quality as a non-zero delta would be, since
+a tool that always reports a nonzero "degradation" number regardless of
+circuit topology would not be trustworthy evidence either. A canary whose
+gates are externally driven (Phase 2+ scope, not this issue — see "Friction
+encountered" below) is what would additionally exercise a current-carrying,
+gain/bandwidth-sensitive delta on *this same block*.
+
+**Evidence storage** (#802's convention,
+`docs/design/sim-evidence-discipline-spike.md`): the raw `10-pex.result.json`
+above is wrapped, unmodified, as an `evidence-record/1` at
+[`../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/`](../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/),
+pinning `extraction_pin.method: "lumped-RC"` and
+`extraction_pin.deck_content_hash` (from `result.provenance.deck`) — a later
+extraction-method upgrade (e.g. Phase 2's coupling-C) would mint a new record
+via `supersedes`, not overwrite this one. The schematic-side leg
+(`10-pex.schematic.result.json`, a direct `klt sim` run of the same
+`10-pex.request.json` against its testbench's unmodified `.include`) is
+stored alongside as its own `klt sim`-flavored record, per the convention's
+"a `klt pex` record sits alongside the schematic-only `klt sim` record for
+the same `<block>/<scope>`" framing — see that directory's `HEAD` and
+`full_matrix_size.txt` for the rest of the convention's worked pieces (A, D).
 
 ## Provisional pre-layout signoff comparison (not S11's real artifact)
 

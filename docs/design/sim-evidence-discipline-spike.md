@@ -434,6 +434,15 @@ PDK metadata. Like limits, an un-declared measurement in `min_spread` is
 never checked — reported, not failed, by omission, the same
 opt-in-per-measurement shape `klt sim`'s own `limits` field already uses.
 
+## Worked example (Epic #709 Phase 1c, #803)
+
+`evidence/sim/sky130-ota-5t/post-extraction-bias-probe/` is this repository's
+own first real instance of the convention above, both `klt sim`- and `klt
+pex`-flavored records sitting side by side for the same `<block>/<scope>` —
+see `examples/design-pipeline/README.md`'s "S10 pex delta proof" section for
+the full run and how each delta row's value (including its
+no-degradation rows) is explained from the extraction's own added R/C.
+
 ## Follow-up issues filed
 
 - **B (netlist snapshot per record)** →
