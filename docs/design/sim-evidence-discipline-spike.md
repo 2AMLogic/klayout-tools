@@ -12,6 +12,19 @@ the same survey → decision → contract-or-convention shape as its
 predecessor spikes so the decision is auditable, not because a new engine
 or capability is being proposed.
 
+**Amendment (Epic #709 Phase 1b,
+[#802](https://github.com/2AMLogic/klayout-tools/issues/802)):** the same
+convention now also carries [`klt pex`](../cli/pex.md) extracted-re-sim
+records, not only schematic-level `klt sim` records. None of the guarantees
+below changed — a `klt pex` record uses the identical wrapper,
+directory layout, and append-only/supersession rules, and additionally pins
+*which extraction produced it* (`extraction_pin`, built from
+`klt pex`'s already-shipped `extraction.model` + `provenance.deck` fields)
+so an extraction-method change mints a new record rather than mutating one.
+The pex-specific parts are marked inline below; the survey and disposition
+sections above them are unchanged and remain `klt sim`-framed, since that is
+the decision they recorded.
+
 ## Scope
 
 #347 originally listed four things both `gf180-bandgap`'s
@@ -153,16 +166,19 @@ is required only for a breaking change"):
 ## Documented conventions (A, C, D, E)
 
 The convention below is a repo-level pattern layered **unmodified** on top
-of `klt sim`'s existing JSON output — no field of the existing contract is
-read or interpreted differently than documented. It is illustrative, not
-normative: a block repo may implement the same guarantees differently, as
-long as append-only-ness, supersession, PDK pinning, subset-reason, and
-spread checks all hold.
+of `klt sim`'s (and, per the amendment above, `klt pex`'s) existing JSON
+output — no field of either contract is read or interpreted differently
+than documented. It is illustrative, not normative: a block repo may
+implement the same guarantees differently, as long as append-only-ness,
+supersession, PDK pinning (plus the extraction-method/deck pin on `klt pex`
+records), subset-reason, and spread checks all hold.
 
 ### Storage shape: the evidence record wrapper
 
-Each `klt sim` run's raw JSON is wrapped, unmodified, inside a small
-per-run **evidence record** and committed to git:
+Each run's raw JSON — a `klt sim` schematic-level run, or a
+[`klt pex`](../cli/pex.md) extracted-re-sim run (Epic #709 Phase 1a, #801) —
+is wrapped, unmodified, inside a small per-run **evidence record** and
+committed to git:
 
 ```
 evidence/sim/<block>/<corner-scope-slug>/<recorded_at>-<request_sha>.json
@@ -171,25 +187,37 @@ evidence/sim/<block>/<corner-scope-slug>/<recorded_at>-<request_sha>.json
 - `<block>` — the design under test (e.g. `bandgap`).
 - `<corner-scope-slug>` — a stable name for *what* was run (e.g.
   `full-pvt`, `bjt-mismatch`), so unrelated evidence scopes don't share one
-  supersession chain.
+  supersession chain. A `klt pex` record for a given block reuses the
+  *same* `<corner-scope-slug>` as the schematic-only `klt sim` record it
+  sits beside — e.g. both a `klt sim` record and a `klt pex` record for
+  bandgap's full-PVT sweep live under `evidence/sim/bandgap/full-pvt/` — so
+  a reader can pair an extracted-re-sim record with the schematic record it
+  degrades from. The two kinds are told apart structurally, by which of
+  `result.delta` (pex-shaped) or `result.corners` (sim-shaped) is present,
+  not by a separate wrapper-level `kind` field — the same structural
+  classification `klt signoff`'s own envelope-kind detector already uses to
+  tell a `klt pex` response from a `klt sim` response
+  ([`signoff.md`](../cli/signoff.md#item-7-is-kind-restricted-klt-pex)).
 - `<recorded_at>` — UTC timestamp of when the record was written, e.g.
-  `20260802T193000Z`. `klt sim`'s own JSON carries no run timestamp (a
-  repo-wide grep of the schema confirms it: no `timestamp`/`generated_at`
-  field exists anywhere in `docs/json-contract.md` or `docs/cli/sim.md`) —
-  the wrapper, not `klt sim`, is the source of truth for *when* a record
-  was captured. This is a deliberate design choice, not an oversight: `klt
-  sim` is a stateless, single-invocation command by construction (see "What
-  already exists to build on" above), and a wall-clock stamp is
-  operator/CI metadata about the *recording* event, not the simulation
-  itself — the same reasoning that already keeps corner-matrix policy
-  (what's "full"?) and pass/fail thresholds for spread out of the tool.
+  `20260802T193000Z`. Neither `klt sim`'s nor `klt pex`'s own JSON carries a
+  run timestamp (a repo-wide grep of both schemas confirms it: no
+  `timestamp`/`generated_at` field exists anywhere in
+  `docs/json-contract.md`, `docs/cli/sim.md`, or `docs/cli/pex.md`) — the
+  wrapper, not the tool, is the source of truth for *when* a record was
+  captured. This is a deliberate design choice, not an oversight: both `klt
+  sim` and `klt pex` are stateless, single-invocation commands by
+  construction (see "What already exists to build on" above), and a
+  wall-clock stamp is operator/CI metadata about the *recording* event, not
+  the simulation itself — the same reasoning that already keeps
+  corner-matrix policy (what's "full"?) and pass/fail thresholds for spread
+  out of the tool.
 - `<request_sha>` — short SHA-256 of the exact request JSON that was run
-  (the file already passed to `klt sim <request.json>`), so two records for
-  the same scope with different inputs never collide, and a diff of two
-  request files explains why two evidence records for the same scope
-  differ.
+  (the file already passed to `klt sim <request.json>`, or the testbench
+  request(s) passed to `klt pex`), so two records for the same scope with
+  different inputs never collide, and a diff of two request files explains
+  why two evidence records for the same scope differ.
 
-Record wrapper shape:
+Record wrapper shape (`klt sim`-flavored):
 
 ```json
 {
@@ -206,10 +234,46 @@ Record wrapper shape:
 }
 ```
 
-`result` is the untouched `klt sim` output — the wrapper never edits,
-subsets, or reinterprets it, so a stored record can always be re-validated
-byte-for-byte against a fresh `klt sim` invocation using
-`request_sha256`/`environment.netlist_sha256`/`provenance.deck.content_hash`.
+Record wrapper shape (`klt pex`-flavored — same wrapper, `result` is the
+unmodified `klt pex` response instead):
+
+```json
+{
+  "schema": "evidence-record/1",
+  "recorded_at": "2026-08-05T14:05:00Z",
+  "block": "bandgap",
+  "scope": "full-pvt",
+  "request_path": "sim/bandgap/full-pvt-gain-tb.json",
+  "request_sha256": "5b71e04...",
+  "subset_reason": null,
+  "pdk_pin": { "name": "sky130A", "expected_deck_content_hash": "sha256:71ad0b2..." },
+  "extraction_pin": { "method": "lumped-RC", "deck": "sky130", "deck_content_hash": "sha256:71ad0b2..." },
+  "supersedes": [],
+  "result": { "...": "the unmodified klt pex JSON response" }
+}
+```
+
+`result` is the untouched `klt sim` (or `klt pex`) output — the wrapper
+never edits, subsets, or reinterprets it, so a stored record can always be
+re-validated byte-for-byte against a fresh invocation using
+`request_sha256` plus, for `klt sim`,
+`environment.netlist_sha256`/`provenance.deck.content_hash`, or for `klt
+pex`, `extraction.netlist_sha256`/`provenance.deck.content_hash`.
+
+For a `klt pex` record, `extraction_pin` names the two fields that pin
+"which extraction produced this result" — both already shipped by `klt
+pex`, no new field invented:
+
+- `extraction_pin.method` — a short label for the extraction method (e.g.
+  `"lumped-RC"` today; a later Phase 2 upgrade might add `"coupling-C"`),
+  sourced from (or kept in sync with the caller's understanding of)
+  `result.extraction.model` — the `PARASITIC_MODEL_SCOPE` scope-note object
+  `klt pex` already reports, describing exactly what the R/C model does and
+  does not account for ([`pex.md`](../cli/pex.md) → "Top-level fields",
+  `extraction`).
+- `extraction_pin.deck` / `extraction_pin.deck_content_hash` — the deck
+  name and content-hash version pin, copied verbatim from
+  `result.provenance.deck` ([`pex.md`](../cli/pex.md) → `provenance`).
 
 ### A — Append-only + supersession
 
@@ -232,6 +296,17 @@ byte-for-byte against a fresh `klt sim` invocation using
   existing record file's bytes) fails a pre-merge check —
   `git diff --name-status origin/main...HEAD -- evidence/sim/` rejects any
   `M` status under that path; only `A` (added) is allowed.
+- **A `klt pex` extraction-method change mints a new record, never an
+  edit**: e.g. a Phase 2 upgrade from lumped-RC to coupling-C extraction
+  changes `result.extraction.model` (and thus `extraction_pin.method`) on
+  the next `klt pex` run for the same `<block>/<scope>`. That run is
+  written as a brand-new `evidence/sim/<block>/<scope>/<recorded_at>-<request_sha>.json`
+  file whose `supersedes` names the prior (lumped-RC) record — the existing
+  append-only/supersession mechanism above already covers this; a method
+  change needs no new mechanism, only this worked case named explicitly so
+  "which extraction method produced the currently-cited record" stays
+  reconstructable from `extraction_pin` without re-deriving it from
+  `result`.
 
 ### C — PDK-pin (hash) enforcement
 
@@ -257,6 +332,32 @@ whose `pdk_pin.expected_deck_content_hash` doesn't match its own
 `result.provenance.deck.content_hash` never reaches `main` with a green
 check.
 
+**`klt pex` records: the extraction pin is checked the same way.** `klt
+pex`'s `provenance` block is the *extraction's* provenance (see
+[`pex.md`](../cli/pex.md) → "Top-level fields"), so the script above applies
+unchanged — `.result.provenance.deck.content_hash` is the extraction deck's
+hash. `extraction_pin` adds one more equality, so a record cannot claim an
+extraction method or deck version it did not actually run with:
+
+```bash
+# scripts/check-extraction-pin.sh <evidence-record.json>
+# Only meaningful for a pex-shaped record; skip cleanly otherwise.
+jq -e 'has("extraction_pin")' "$1" >/dev/null || exit 0
+[ "$(jq -r '.extraction_pin.deck' "$1")" = "$(jq -r '.result.extraction.deck' "$1")" ] \
+  && [ "$(jq -r '.extraction_pin.deck_content_hash' "$1")" = "$(jq -r '.result.provenance.deck.content_hash' "$1")" ] \
+  || { echo "extraction pin mismatch: extraction_pin does not match result" >&2; exit 1; }
+```
+
+`extraction_pin.method` is the one part with no single field to compare
+against — `result.extraction.model` is a four-key scope-note object, not a
+method label — so the convention's rule is: a repo commits its known method
+labels alongside the `result.extraction.model` object each one corresponds
+to (e.g. `evidence/sim/<block>/extraction_methods.json`), and the check
+fails if a record's `extraction_pin.method` maps to a `model` object that
+differs from the one in `result`. That is what makes a method change
+*detectable* rather than silent, and therefore what makes the
+mint-a-new-record rule in A enforceable.
+
 ### D — Subset-reason requirements
 
 `corner_count` in the response and the block's own committed
@@ -274,6 +375,13 @@ smaller by design, not a subset). The convention:
   and fails the merge on either violation (present-but-not-subset is
   disallowed too, so `subset_reason` can't be padded onto a full run and
   ignored later).
+
+This check needs no pex-specific variant: `klt pex` emits a top-level
+`corner_count` of its own (the number of distinct `corner_id` values across
+`delta[]` — [`pex.md`](../cli/pex.md) → "Top-level fields"), so
+`result.corner_count` resolves on both record shapes and the same committed
+`full_matrix_size.txt` governs the pex record and the `klt sim` record
+sharing its `<block>/<scope>`.
 
 ### E — Spread checks
 
@@ -311,6 +419,13 @@ if failures:
     raise SystemExit("\n".join(failures))
 ```
 
+On a `klt pex` record the same check reads `result.delta[]` instead —
+`(spec_row, corner_id, extracted_value)` is the per-corner matrix there, so
+the loop above becomes `by_name[row["spec_row"]].append(row["extracted_value"])`
+over rows whose `extracted_value` is not `null`. Grading the extracted side
+keeps the check measuring what the record is evidence *of*; the schematic
+side is already covered by the `klt sim` record sitting beside it.
+
 A spread below the declared threshold most often means a corner axis isn't
 actually reaching the measured node (e.g. a `.temp` card that a subcircuit
 ignores, or a supply `alter` targeting the wrong net) — the same class of
@@ -328,11 +443,18 @@ opt-in-per-measurement shape `klt sim`'s own `limits` field already uses.
 
 ## Non-goals
 
-- This document does not change `klt sim`'s JSON contract. B's
-  `artifacts.deck` field is a proposal for its own follow-up issue, not
-  implemented here.
+- This document does not change `klt sim`'s (or `klt pex`'s) JSON contract.
+  B's `artifacts.deck` field is a proposal for its own follow-up issue, not
+  implemented here; `klt pex`'s `extraction`/`provenance` fields the
+  `extraction_pin` mapping above uses are unmodified, already-shipped
+  fields (Epic #709 Phase 1a, #801).
 - The evidence-record wrapper shape above is illustrative, not a `klt`
-  subcommand or schema `klt sim` validates — no code in this repository
-  reads or writes `evidence-record/1` files. A block repo is free to name
-  fields differently as long as the four guarantees (append-only,
-  supersession, pin enforcement, subset-reason, spread) hold.
+  subcommand or schema `klt sim`/`klt pex` validates — no code in this
+  repository reads or writes `evidence-record/1` files. A block repo is
+  free to name fields differently as long as the guarantees (append-only,
+  supersession, pin enforcement including the extraction-method/deck pin on
+  `klt pex` records, subset-reason, spread) hold.
+- Nothing here touches `klt signoff`'s citation or envelope-kind detection.
+  A signoff manifest citation points at the **raw, unwrapped** `klt pex` /
+  `klt sim` JSON file, not at an `evidence-record/1` wrapper — the wrapper
+  is the block repo's record store, not a signoff input format.
