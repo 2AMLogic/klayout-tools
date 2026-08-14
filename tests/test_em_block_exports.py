@@ -21,6 +21,7 @@ recipe.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import sys
@@ -40,6 +41,32 @@ EXPORT_IDS = [p.parent.parent.name for p in EXPORTS]
 
 def _schema() -> dict:
     return json.loads(SCHEMA_PATH.read_text())
+
+
+def _load_generator():
+    """Import `examples/em/block_coupling/generate.py` under a *unique*
+    module name, loaded by explicit path.
+
+    Deliberately not `sys.path.insert(...); import generate`: several
+    `examples/em/*/` directories each ship a module literally named
+    `generate`, so a `sys.path` entry plus a bare import makes the first
+    test file to run win `sys.modules["generate"]` for the whole session --
+    which is exactly how this file's first draft broke
+    `tests/test_em_interconnect_coupling_export.py` (it got *this*
+    directory's `generate` and failed on a missing attribute).
+    """
+    name = "em_block_coupling_generate"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(name, GENERATOR_DIR / "generate.py")
+    module = importlib.util.module_from_spec(spec)
+    # Register before executing: `@dataclass` resolves its own annotations
+    # through `sys.modules[cls.__module__]`, which is absent for a module
+    # that was only ever `module_from_spec`'d.
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(params=EXPORTS, ids=EXPORT_IDS)
@@ -295,8 +322,7 @@ def test_recorded_search_re_derives_the_same_bundle_from_the_gds(export):
     one-off. (The FEM solve itself needs a geode-fem checkout and is out of
     scope for CI; this covers everything upstream of it.)"""
     pytest.importorskip("pya")
-    sys.path.insert(0, str(GENERATOR_DIR))
-    import generate as gen  # noqa: PLC0415
+    gen = _load_generator()
 
     geometry = export["provenance"]["geometry"]
     slug = geometry["source_block"]
