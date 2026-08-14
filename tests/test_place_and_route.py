@@ -1534,6 +1534,69 @@ def test_post_route_spef_extracts_with_def_derived_net_names(tmp_path, monkeypat
     run_place_and_route(request_path)
 
     assert extract_calls[0]["def_net_names"] is True
+    # This suite's own `_stub_openroad_success` writes a placeholder DEF with
+    # no `PINS` section (issue #961's own fixtures never need a real one) --
+    # `_def_pin_net_names` returns `None` for that, which is `run_extract`'s
+    # own "no restriction" default, rather than an empty set that would
+    # wrongly declare the design to have zero ports.
+    assert extract_calls[0]["declared_pins"] is None
+
+
+def _overlay_real_def_pins(monkeypatch, *, def_pins_text: str) -> None:
+    """Wraps whatever ``place_and_route.subprocess.run`` fake is *currently*
+    installed (call this *after* the other `_stub_openroad_success*` helpers
+    below, not before -- each of those calls `_stub_openroad_success`
+    internally and would otherwise reset this wrapper right back off):
+    after the wrapped fake handles a call, overwrite any DEF it just wrote
+    (the `"route"` stage's own placeholder `"fake def\\n"`) with
+    ``def_pins_text`` -- a real ``PINS`` section -- so
+    ``_post_route_spef_metrics``'s ``_def_pin_net_names`` parse (issue #961's
+    defect-1 fix) has real DEF port declarations to read."""
+    base_fake_run = place_and_route.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        result = base_fake_run(cmd, **kwargs)
+        if cmd[:2] != ["openroad", "-version"]:
+            script_path = cmd[5]
+            if not script_path.endswith("_route_corners.tcl"):
+                def_path = _script_write_def_path(script_path)
+                if def_path is not None:
+                    Path(def_path).write_text(def_pins_text)
+        return result
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+
+def test_post_route_spef_declares_pins_from_def_pins_section(tmp_path, monkeypatch):
+    """Issue #961 defect 1: with `def_net_names=True` every routed net now
+    carries a real name, so without this fix `Netlist.make_top_level_pins()`
+    would promote every one of them -- the written SPEF's `*PORTS`/`*P` list
+    would wrongly declare all 537 of `gcd`'s routed nets top-level ports
+    instead of just its actual I/O. The routed DEF's own `PINS` section is
+    the ground truth for which nets are real design ports; `run_extract`
+    must be called with exactly that set as `declared_pins`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _overlay_real_def_pins(
+        monkeypatch,
+        def_pins_text=(
+            "PINS 3 ;\n"
+            "- clk + NET clk + DIRECTION INPUT + USE SIGNAL\n"
+            "  + LAYER met3 ( -70 -70 ) ( 70 70 )\n"
+            "  + PLACED ( 1000 2000 ) N ;\n"
+            "- req_val + NET req_val + DIRECTION INPUT + USE SIGNAL ;\n"
+            "- resp_val + NET resp_val + DIRECTION OUTPUT + USE SIGNAL ;\n"
+            "END PINS\n"
+        ),
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    extract_calls = _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    assert extract_calls[0]["declared_pins"] == frozenset(
+        {"clk", "req_val", "resp_val"}
+    )
 
 
 def test_post_route_spef_zero_annotation_is_reported_not_hidden(tmp_path, monkeypatch):
@@ -1611,6 +1674,79 @@ def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
         PlaceAndRouteError, match="post_route_spef requires a known klt extract deck"
     ):
         run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# `_def_pin_net_names` (issue #961 defect 1): the routed DEF's own `PINS`
+# section, parsed for the design's genuine top-level port net names -- fed
+# to `_post_route_spef_metrics`'s `run_extract` call as `declared_pins` so
+# the written SPEF's `*PORTS`/`*P` list stops wrongly declaring every
+# `def_net_names`-renamed routed net a top-level port.
+# --------------------------------------------------------------------------- #
+
+
+def test_def_pin_net_names_parses_a_real_pins_section(tmp_path):
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "VERSION 5.8 ;\n"
+        "DESIGN gcd ;\n"
+        "PINS 3 ;\n"
+        "- clk + NET clk + DIRECTION INPUT + USE SIGNAL\n"
+        "  + LAYER met3 ( -70 -70 ) ( 70 70 )\n"
+        "  + PLACED ( 1000 2000 ) N ;\n"
+        "- req_val + NET req_val + DIRECTION INPUT + USE SIGNAL ;\n"
+        "- resp_val + NET resp_val + DIRECTION OUTPUT + USE SIGNAL ;\n"
+        "END PINS\n"
+        "END DESIGN\n"
+    )
+    assert place_and_route._def_pin_net_names(str(def_path)) == frozenset(
+        {"clk", "req_val", "resp_val"}
+    )
+
+
+def test_def_pin_net_names_uses_net_clause_when_pin_name_differs(tmp_path):
+    """A bus pin's own name can legitimately differ from the net it
+    connects to -- the `+ NET <netName>` clause, when present, is what
+    `klt extract`'s own net names will match, so it (not the pin name) is
+    what belongs in `declared_pins`."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text(
+        "PINS 1 ;\n- data_pin[0] + NET data_bus[0] + DIRECTION INPUT ;\nEND PINS\n"
+    )
+    assert place_and_route._def_pin_net_names(str(def_path)) == frozenset(
+        {"data_bus[0]"}
+    )
+
+
+def test_def_pin_net_names_falls_back_to_pin_name_without_net_clause(tmp_path):
+    def_path = tmp_path / "top.def"
+    def_path.write_text("PINS 1 ;\n- clk + DIRECTION INPUT ;\nEND PINS\n")
+    assert place_and_route._def_pin_net_names(str(def_path)) == frozenset({"clk"})
+
+
+def test_def_pin_net_names_none_when_no_pins_section(tmp_path):
+    """This suite's own placeholder DEF fixtures (`"fake def\\n"``) and any
+    genuinely malformed/non-DEF file alike -- `None`, never an empty set, so
+    the caller never mistakes "could not determine" for "this design
+    declares zero ports"."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text("fake def\n")
+    assert place_and_route._def_pin_net_names(str(def_path)) is None
+
+
+def test_def_pin_net_names_none_when_pins_section_is_empty(tmp_path):
+    """A present-but-empty (or unparseable) `PINS` section is a parse
+    failure, not a real design with no I/O -- anything that reached
+    `_post_route_spef_metrics` has at least the required
+    `constraints.clock_port`. `None` keeps `run_extract` unrestricted rather
+    than demoting every net."""
+    def_path = tmp_path / "top.def"
+    def_path.write_text("DESIGN gcd ;\nPINS 0 ;\nEND PINS\nEND DESIGN\n")
+    assert place_and_route._def_pin_net_names(str(def_path)) is None
+
+
+def test_def_pin_net_names_none_when_file_missing(tmp_path):
+    assert place_and_route._def_pin_net_names(str(tmp_path / "missing.def")) is None
 
 
 def test_tcl_net_list_brace_quotes_each_name():

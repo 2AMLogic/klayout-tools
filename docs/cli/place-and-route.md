@@ -444,12 +444,50 @@ all**. A net with no wire has no shape to carry a net-name property, and
 equally has no interconnect parasitics to report. `annotation_complete` is
 `false` for that run, correctly and conservatively.
 
+### `*PORTS` lists only real design ports (issue #961 defect 1, fixed)
+
+`--def-net-names` (previous section) gives *every* routed net a real name —
+not just top-level pins, unlike the text-label-only naming it replaces. `klt
+extract`'s own `Netlist.make_top_level_pins()` promotes *every* named net to
+a top-level circuit pin with no concept of "design port" beyond "has a
+name," so left unguarded, the written SPEF's `*PORTS`/`*P` list wrongly
+declared every routed net a top-level port instead of just the design's
+actual I/O (issue #961's own repro: `*P _019_ B` for an ordinary internal
+net).
+
+`_post_route_spef_metrics` now parses the routed DEF's own `PINS`
+section — the DEF's own declaration of which nets are genuine
+design-boundary ports, independent of the `--def-net-names` renaming above —
+and passes that set to `klt extract` as `declared_pins` (the pre-existing
+`--pins` mechanism, issue #514): every promoted pin *not* in the declared
+set is demoted back to an internal net, so `*PORTS`/`*P` lists only real
+top-level design ports. A DEF with no parseable `PINS` section (not expected
+for a real routed DEF) falls back to the pre-#961 behaviour rather than
+wrongly declaring zero ports — a routed design always has at least the
+required `constraints.clock_port`, so an empty parse result is a parse
+failure, never a real portless design.
+
+Measured on the committed routed corpus fixture
+(`tests/corpus/place_and_route/gcd.gds.gz`, extracted with `--def-net-names
+--parasitics --spef` exactly as `post_route_spef` does):
+
+| | `*PORTS` entries | `*D_NET` blocks |
+|---|---|---|
+| before (every named net promoted) | **463** | 1392 |
+| after (DEF `PINS`-derived `declared_pins`) | **54** — `gcd`'s 52 I/O + `VPWR`/`VGND` | 1392 |
+
+The `*D_NET` set is bit-for-bit unchanged, which is the point: the demotion
+changes which nets are *declared ports*, never which nets carry parasitics,
+so the 537 / 537 net-name annotation ratio above is untouched.
+`tests/test_extract.py::test_declared_pins_restricts_spef_ports_on_the_routed_corpus`
+asserts both columns.
+
 ### Still missing for real routed-RC timing: `*CONN` pin correlation
 
-Correct net *names* are necessary but not sufficient, and this section
-states what was measured rather than what was hoped for. With 537 of 537
-`gcd` nets matched, `read_spef` finds every net — and then rejects every
-node inside them:
+Correct net *names* and a correct `*PORTS` list are necessary but not
+sufficient, and this section states what was measured rather than what was
+hoped for. With 537 of 537 `gcd` nets matched, `read_spef` finds every
+net — and then rejects every node inside them:
 
 ```
 [WARNING STA-1656] gcd_route.spef line 108313, pin _031___t0 not found.
@@ -469,13 +507,18 @@ the linked design is built from. The `*CAP`/`*RES` node names it emits
 nowhere to attach the RC network: the parasitics are read, matched by name,
 and then not used. Confirmed directly — `worst_slack` is bit-identical
 before and after `read_spef` in the same session
-(`-1.7253174444675778e-9` both times on `gcd`).
+(`-1.7253174444675778e-9` both times on `gcd`). **The `*PORTS` fix above
+does not change this** — it corrects which nets are declared ports, not
+whether OpenSTA can attach an RC network to the nodes inside any of them.
 
 Closing *that* gap needs an instance/pin-name correlation between the
-extracted layout view and the DEF's `COMPONENTS`/`NETS`, which is a
+extracted layout view and the DEF's `COMPONENTS`/`NETS` (or a cell-level
+extraction pass with its own DEF instance-name correlation), which is a
 materially harder problem than net names (the DEF instance names are not
-carried into the merged GDS at all) and is tracked separately as issue
-#961.
+carried into the merged GDS at all) and is tracked as issue #966 (a
+follow-on to #961, which this fix only partially closes). A related, still
+open, smaller defect: coupling `*CAP` entries name the coupled *net* where
+SPEF may expect a qualified *node* reference — also tracked by #966.
 
 Off by default: this adds real wall-clock cost on top of every existing
 `"route"`-stage caller (one more `klt extract --parasitics` pass over the

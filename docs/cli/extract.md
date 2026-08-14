@@ -1985,6 +1985,21 @@ Direction on every declared `*PORTS` entry is always `B`
 (bidirectional/unspecified) — a GDS text label carries no I/O-direction
 metadata, so this is a declared "unknown," never a guessed `I`/`O`.
 
+**Pair `--spef` with `--pins` whenever you also pass `--def-net-names`
+(issue #961).** Flat extraction promotes *every named* net to a top-level
+pin, and `--def-net-names` names every routed net — so together they declare
+the design's ordinary internal nets (`_019_`, …) as `*PORTS`/`*P` entries, a
+claim a reading STA tool will try, and fail, to resolve against its own
+port list. `--pins` (issue #514) is the existing per-net declared-interface
+restriction: every promoted pin outside the set is demoted back to an
+internal net, and only real design ports survive into `*PORTS`. On the
+routed `gcd` corpus fixture this is 463 declared ports before, 54 after,
+with the `*D_NET` set unchanged. `klt place-and-route`'s own
+`post_route_spef` pass does this automatically, sourcing the port list from
+the routed DEF's `PINS` section — see
+[`docs/cli/place-and-route.md`](place-and-route.md)'s "`*PORTS` lists only
+real design ports" subsection.
+
 **Identifiers are escaped, and that is load-bearing.** SPEF's own
 (IEEE 1481-1999) identifier grammar admits only `[A-Za-z0-9_]` bare; every
 other character is a *special character* that must carry a leading

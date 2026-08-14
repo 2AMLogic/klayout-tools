@@ -16,6 +16,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-14 — `klt place-and-route`'s `post_route_spef` SPEF no longer
+  declares every routed net a top-level design port (issue #961 defect 1,
+  Epic #700 Phase 3). `--def-net-names` (#951) gives every routed net a real
+  name, and flat extraction's `Netlist.make_top_level_pins()` promotes every
+  *named* net to a top-level circuit pin — so the written SPEF's
+  `*PORTS`/`*P` list announced ordinary internal nets (`*P _019_ B`) to
+  `read_spef` as design-boundary ports. `_post_route_spef_metrics` now scans
+  the routed DEF's own `PINS` section — the DEF's own statement of which nets
+  are genuine design I/O, unaffected by the net-name renaming — and passes it
+  to `klt extract` as `declared_pins` (the pre-existing `--pins` mechanism,
+  issue #514), demoting every promoted pin outside that set. Measured on the
+  committed `tests/corpus/place_and_route/gcd.gds.gz`: `*PORTS` entries drop
+  from **463 to 54** (that design's 52 I/O plus `VPWR`/`VGND`) while the
+  `*D_NET` set stays bit-for-bit identical at 1392 blocks, so #951's
+  `537 / 537` net-name annotation ratio is untouched. A DEF whose `PINS`
+  section is absent or unparseable leaves `declared_pins` unset (`klt
+  extract`'s pre-#961 behaviour) rather than declaring the design portless.
+  No response-shape change; `schema_version` unaffected. **This does not
+  close the larger gap** — `read_spef` still discards every RC network,
+  because device-terminal (`*I <inst>:<pin>`) connectivity is still not
+  emitted at all and the `*CAP`/`*RES` node names still resolve to no pin in
+  the linked design, so `worst_slack` remains bit-identical across
+  `read_spef`; that remainder (plus coupling-`*CAP` node naming) is tracked
+  as issue #966. See `docs/cli/place-and-route.md`'s "`*PORTS` lists only
+  real design ports" subsection.
+
 - 2026-08-12 — `klt synthesize` now maps constant drivers onto real
   tie-high/tie-low standard cells, unblocking `klt place-and-route` for
   designs that need constant ties (issue #854). Yosys's `synth`/`abc` passes

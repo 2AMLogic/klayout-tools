@@ -903,6 +903,7 @@ def run_place_and_route(
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
                 gds_path=gds_path,
+                def_path=def_path,
                 cell_library=cell_library,
                 liberty_path=liberty_path,
                 clock_port=clock_port,
@@ -2002,11 +2003,101 @@ def _count_spef_nets_annotated(stdout: str) -> tuple[int, int, int, int] | None:
     )
 
 
+#: Matches a DEF ``PINS`` section's opening line (``PINS <numPins> ;``,
+#: LEF/DEF 5.8 Language Reference section 6.8) -- the *only* place a routed
+#: DEF declares which nets are genuine design-boundary I/O, independent of
+#: whatever internal net a later ``klt extract --def-net-names`` pass names
+#: from routed-metal geometry (see :func:`_def_pin_net_names`).
+_DEF_PINS_BEGIN_RE = re.compile(r"^\s*PINS\s+\d+\s*;\s*$")
+#: Matches the section's closing ``END PINS`` line.
+_DEF_PINS_END_RE = re.compile(r"^\s*END\s+PINS\s*$")
+#: Matches one pin record's opening line, ``- <pinName> ...`` -- a new
+#: record always starts a fresh line inside the section (LEF/DEF grammar).
+_DEF_PIN_START_RE = re.compile(r"^\s*-\s+(\S+)")
+#: Matches the ``+ NET <netName>`` clause a pin record carries when the
+#: pin's own name differs from the net it connects to (bus pins are the
+#: common case DEF allows this for) -- searched line-by-line across a
+#: record's own (possibly multi-line) body.
+_DEF_PIN_NET_RE = re.compile(r"\bNET\s+(\S+)")
+
+
+def _def_pin_net_names(def_path: str) -> frozenset[str] | None:
+    """Parse ``def_path``'s own ``PINS`` section for the design's genuine
+    top-level port *net* names (issue #961's defect 1: ``klt extract``'s
+    ``--def-net-names`` mode names every routed net from DEF geometry, which
+    ``Netlist.make_top_level_pins()`` then promotes to a circuit pin
+    indiscriminately -- so without this, the post-route SPEF's ``*PORTS``
+    list wrongly declares every routed net a top-level port instead of only
+    the design's actual I/O).
+
+    Each pin record is ``- <pinName> [+ NET <netName>] ... ;`` -- the net
+    name is reported when the ``+ NET`` clause is present (the case a bus
+    pin whose own name differs from its net needs), else the pin's own name
+    (the common case for a flat, one-bit-per-pin digital design, where the
+    two are identical). This is deliberately a small, targeted scan (not a
+    general DEF parser) -- this repo already reads DEF geometry through
+    ``klayout.db``'s LEF/DEF reader (:func:`_merge_def_to_gds`) for every
+    other purpose; a full parse here would duplicate that reader just to
+    recover text this section already states directly.
+
+    Returns ``None`` -- never an empty set -- when the scan recovers no pin
+    name at all: either the file carries no ``PINS`` section (a non-DEF or
+    malformed file, e.g. this repo's own test fixtures' placeholder DEF
+    text) or the section is present but empty/unparseable. Both are
+    "cannot determine the design's ports," which the caller must not
+    confuse with "the design declares zero ports" -- the latter would demote
+    *every* net back to internal and reproduce a different (equally wrong)
+    failure mode. A routed design that reached this function always has at
+    least a clock port (``constraints.clock_port`` is required from
+    ``target_stage: "place"`` on), so an empty result here is always a parse
+    failure, never a real design with no I/O.
+    """
+    try:
+        with open(def_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+
+    names: set[str] = set()
+    in_pins = False
+    current_pin: str | None = None
+    current_net: str | None = None
+
+    def _flush() -> None:
+        nonlocal current_pin, current_net
+        if current_pin is not None:
+            names.add(current_net if current_net is not None else current_pin)
+        current_pin = None
+        current_net = None
+
+    for line in text.splitlines():
+        if not in_pins:
+            if _DEF_PINS_BEGIN_RE.match(line):
+                in_pins = True
+            continue
+        if _DEF_PINS_END_RE.match(line):
+            _flush()
+            break
+        start_match = _DEF_PIN_START_RE.match(line)
+        if start_match:
+            _flush()
+            current_pin = start_match.group(1)
+        if current_pin is not None:
+            net_match = _DEF_PIN_NET_RE.search(line)
+            if net_match:
+                current_net = net_match.group(1)
+        if line.rstrip().endswith(";"):
+            _flush()
+
+    return frozenset(names) if names else None
+
+
 def _post_route_spef_metrics(
     *,
     output_dir: str,
     hdl_toplevel: str,
     gds_path: str,
+    def_path: str,
     cell_library: str,
     liberty_path: str,
     clock_port: str | None,
@@ -2070,6 +2161,43 @@ def _post_route_spef_metrics(
     shipped. See ``docs/cli/place-and-route.md``'s "Net-name correlation"
     subsection for the measurement.
 
+    ``declared_pins`` (issue #961's defect 1): every routed net now carries a
+    real DEF-derived name (the paragraph above), so ``klt extract``'s own
+    ``Netlist.make_top_level_pins()`` -- which promotes *every* named net to
+    a top-level circuit pin, with no concept of "design port" beyond "has a
+    name" -- promotes all of them, not just the design's actual I/O. Left
+    unfixed, the written SPEF's ``*PORTS``/``*P`` list wrongly declares every
+    one of those (537 of 537 on the routed `gcd` corpus fixture) a top-level
+    port. :func:`_def_pin_net_names` reads ``def_path``'s own ``PINS``
+    section -- the DEF's own declaration of which nets are genuine
+    design-boundary ports, unaffected by the net-name renaming above -- and
+    that set is passed through as ``declared_pins`` (the pre-existing
+    ``--pins`` mechanism, issue #514): every promoted pin *not* in the set is
+    demoted back to an internal net, so only real ports remain. A DEF with no
+    parseable ``PINS`` section (should not happen for a real routed DEF; only
+    exercised by this module's own placeholder-DEF test fixtures) makes
+    :func:`_def_pin_net_names` return ``None``, which is ``run_extract``'s own
+    "no restriction" default -- falls back to `klt extract`'s pre-#961
+    behavior rather than wrongly declaring zero ports.
+
+    Measured on the committed routed corpus fixture
+    (``tests/corpus/place_and_route/gcd.gds.gz``, extracted with
+    ``def_net_names=True`` exactly as below): ``*PORTS`` entries drop from
+    **463 to 54** (`gcd`'s 52 real I/O plus `VPWR`/`VGND`), while the written
+    SPEF's ``*D_NET`` set is **bit-for-bit the same 1392 blocks** -- the
+    demotion changes which nets are *declared ports*, never which nets carry
+    parasitics, so the net-name annotation ratio issue #951 closed is
+    untouched. Asserted by
+    ``tests/test_extract.py::test_declared_pins_restricts_spef_ports_on_the_routed_corpus``.
+
+    **Does not, on its own, fix `read_spef` discarding every RC network**
+    (the issue's root defect: device-terminal ``*I <inst>:<pin>``
+    connectivity is still not emitted at all, so every ``*D_NET``'s internal
+    ``*CAP``/``*RES`` node still resolves to nothing OpenSTA can attach a
+    network to) -- see issue #961's own comments for why that fuller
+    DEF-driven or cell-level-extraction correlation is tracked as separate,
+    larger follow-on work.
+
     Raises :class:`PlaceAndRouteError` for an unsupported ``cell_library``
     (no known `klt extract --deck`, see
     :data:`_EXTRACT_DECK_FOR_CELL_LIBRARY`), a `klt extract --parasitics`
@@ -2094,6 +2222,14 @@ def _post_route_spef_metrics(
 
     spice_path = os.path.join(output_dir, f"{hdl_toplevel}_route_parasitics.spice")
     spef_path = os.path.join(output_dir, f"{hdl_toplevel}_route.spef")
+    # Issue #961 defect 1: the DEF's own `PINS` section is the ground truth
+    # for which nets are genuine top-level design ports, independent of the
+    # `def_net_names=True` renaming below (which gives *every* routed net a
+    # real name, and would otherwise get all of them promoted to `*PORTS`).
+    # `None` (no parseable `PINS` section -- not expected for a real routed
+    # DEF) falls back to not passing `declared_pins` at all, never to
+    # declaring zero ports.
+    declared_pins = _def_pin_net_names(def_path)
     try:
         extraction = run_extract(
             gds_path,
@@ -2110,6 +2246,12 @@ def _post_route_spef_metrics(
             # the same strings the OpenSTA session below has linked, and so
             # what makes `read_spef` annotate anything at all.
             def_net_names=True,
+            # Issue #961: restrict the promoted-pin set (and so the written
+            # SPEF's `*PORTS`/`*P` entries) to the DEF's own declared ports --
+            # see this function's docstring, "declared_pins" paragraph.
+            # `None` is `run_extract`'s own "no restriction" default, i.e.
+            # exactly the pre-#961 behaviour.
+            declared_pins=declared_pins,
         )
     except ExtractError as exc:
         raise PlaceAndRouteError(
