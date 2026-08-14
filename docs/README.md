@@ -76,6 +76,7 @@ docs/
     remote-sim-backend-spike.md
     sc-leflib-evaluation.md
     scgallery-zerosoc-survey.md
+    sdf-annotate-feasibility-spike.md
     siliconcompiler-core-survey.md
     sim-evidence-discipline-spike.md
     spice-corner-runner-spike.md
