@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from klayout_tools import functional_verification as fv
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
@@ -640,61 +641,6 @@ def test_extract_random_seed_property_non_integer_value_is_none(tmp_path):
 # --------------------------------------------------------------------------- #
 # Stubbed cocotb runner: full `run_functional_verification` without cocotb
 # --------------------------------------------------------------------------- #
-
-
-class _FakeRunner:
-    """Stands in for a `cocotb_tools.runner.Runner`, recording the exact
-    kwargs the library passed and writing whatever `results.xml` the test
-    asked for."""
-
-    def __init__(
-        self,
-        results_xml_text,
-        *,
-        build_exc=None,
-        test_exc=None,
-        coverage_dat_text=None,
-        extra_build_log="",
-        extra_test_log="",
-    ):
-        self.results_xml_text = results_xml_text
-        self.build_exc = build_exc
-        self.test_exc = test_exc
-        # Appended to the respective transcript, so a test can stand in for
-        # simulator chatter the library itself scans (issue #1002's own
-        # `SDF WARNING`/`SDF ERROR` gate).
-        self.extra_build_log = extra_build_log
-        self.extra_test_log = extra_test_log
-        # When set, `test()` writes a fresh `coverage.dat` into `test_dir` --
-        # standing in for Verilator flushing coverage data as part of *this*
-        # run, the way `results_xml_text` stands in for `results.xml`.
-        self.coverage_dat_text = coverage_dat_text
-        self.build_kwargs = None
-        self.test_kwargs = None
-
-    def build(self, **kwargs):
-        self.build_kwargs = kwargs
-        Path(kwargs["build_dir"]).mkdir(parents=True, exist_ok=True)
-        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
-            handle.write("fake build log\nELABORATION DETAIL\n")
-            handle.write(self.extra_build_log)
-        if self.build_exc is not None:
-            raise self.build_exc
-
-    def test(self, **kwargs):
-        self.test_kwargs = kwargs
-        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
-            handle.write("fake test log\n")
-            handle.write(self.extra_test_log)
-        if self.results_xml_text is not None:
-            with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
-                handle.write(self.results_xml_text)
-        if self.coverage_dat_text is not None:
-            coverage_dat = os.path.join(kwargs["test_dir"], "coverage.dat")
-            with open(coverage_dat, "w", encoding="utf-8") as handle:
-                handle.write(self.coverage_dat_text)
-        if self.test_exc is not None:
-            raise self.test_exc
 
 
 def _stub_runner(monkeypatch, runner: _FakeRunner, *, engines=("icarus", "verilator")):
