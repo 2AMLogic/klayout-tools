@@ -488,6 +488,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-15 — `klt functional-verification` requests gain
+  **`options.defines`/`options.build_args`/`options.includes`** (issue
+  #1001), forwarded to cocotb's own `Runner.build(defines=..., includes=...)`
+  and the accumulated `build_args` list — the compile-time-defines mechanism
+  an `ifdef`-gated Verilog cell library (e.g. a standard-cell PDK's own
+  behavioural model, gated on `USE_POWER_PINS`/`FUNCTIONAL`) needs, and that
+  the request schema had no path for before. `options.build_args` **composes
+  with**, rather than replaces, the fixed `--coverage --trace` args a
+  `options.coverage: true` run already adds — the effective build args are
+  `["--coverage", "--trace"] + options.build_args` when both are given, so a
+  user-supplied flag is appended last and can still override a coverage
+  default. `options.includes` resolves each entry relative to the request
+  file's own directory, the same convention `sources`/`testbench.module`
+  already use. All three default to empty when omitted, so an existing
+  request with none of them produces a byte-identical `Runner.build()` call.
+  No `schema_version` bump — purely additive to `request.options`, same
+  precedent as `random_seed`. See `docs/cli/functional-verification.md`'s
+  "Compile-time defines, build args, and includes".
+
 - 2026-08-14 — `klt place-and-route`'s `"route"` stage now exports the
   **as-built gate-level netlist** and surfaces it as a new
   **`verilog_path`** response field (issue #996). The generated route-stage
