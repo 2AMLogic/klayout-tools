@@ -175,6 +175,31 @@ into the circuit.)
   lands, per the spike's own open questions) remains its own follow-up.
   Case **(2)** now also has a remedy that keeps the ring: see "Routing
   through a ring opening" below.
+- **The obstacle-overlap check above is `routing.width_um`-aware, not just a
+  zero-width centerline test (#999, fixed).** The bbox/margin heuristic
+  described above used to test only the backbone's zero-width *centerline*
+  against every placed block's `bbox_um` -- not the width of the metal
+  actually drawn. A same-facing port pair whose default backbone's
+  connecting jog clears a block's bbox edge by less than
+  `routing.width_um / 2` used to pass this check (`routed: true`, DRC-clean,
+  since a routed short leaves no gap for `klt drc` to measure -- the same
+  class of gap this document's "explicit placement" worked example describes
+  for flush-placed blocks, below) even though the conductor actually
+  drawn there -- which extends `routing.width_um / 2` past the centerline
+  on every side -- still overlapped that block's metal, silently merging
+  two nets that should stay independent (visible only via `klt extract`'s
+  net count, several steps downstream of where the short was introduced).
+  `route_two_pin()` now inflates every bbox this check tests against by
+  `routing.width_um / 2` on every side first, mirroring the inflation the
+  self-net pad-crossing check (#433, above) and the ring-opening check
+  (#434) already apply; each own-pin's edge-margin allowance is bumped by
+  the same amount so a normal approach into that pin's own block is not
+  penalized by the inflation. As with #199, this widens what the router
+  **detects** -- it still reports the net unroutable rather than routing
+  around the obstacle, so the same workarounds (an `add_guard_ring: false`
+  parameter, opposite-facing port pairs, or `waypoints_um` with several
+  microns of clearance from every block) still apply whenever a near-miss
+  like this is rejected.
 - **Routing same-facing port pairs with `waypoints_um` (#634, fixed).** Case
   **(1)** above has no remedy when the caller cannot choose which ports get
   wired — e.g. a hand-drawn cell that legitimately puts its input and output

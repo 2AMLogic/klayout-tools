@@ -1854,6 +1854,65 @@ def test_route_two_pin_routes_same_facing_pair_with_a_clearing_waypoint():
     assert result["route_length_um"] is not None
 
 
+def test_route_two_pin_rejects_width_inflated_near_miss_against_a_third_block():
+    # #999: the obstacle-overlap check used to test the backbone's
+    # zero-width *centerline* against every other placed block's bbox --
+    # ignoring routing.width_um, the width of the metal actually drawn. A
+    # centerline that clears a block's bbox edge by less than width_um / 2
+    # still draws metal on top of that block (the conductor extends
+    # width_um / 2 past the centerline on every side), a silent short
+    # neither this check nor `klt drc` caught (see issue body).
+    #
+    # Reuses the same-facing-pair fixture (both ports facing west, #199's
+    # own repro shape) with a caller-supplied waypoint path that clears both
+    # connected blocks' own bboxes cleanly (mirroring
+    # test_route_two_pin_routes_same_facing_pair_with_a_clearing_waypoint),
+    # plus one more placed block ("obstacle") sitting just 0.2um below the
+    # jog's y=11 crossing -- less than half of the 0.5um route width (0.25),
+    # so the drawn conductor (spanning y=10.75..11.25) clips 0.05um into
+    # the obstacle's true bbox (y0=11.2) even though the centerline itself
+    # never enters it.
+    blocks, offsets, bboxes, pin_a, pin_b = _same_facing_pair_fixture()
+    bboxes = {
+        **bboxes,
+        "obstacle": {"x0": 4.0, "y0": 11.2, "x1": 8.0, "y1": 20.0},
+    }
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.5,
+        waypoints_um=[(-0.5, 11.0), (11.5, 11.0)],
+    )
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "block 'obstacle'" in result["reason"]
+
+
+def test_route_two_pin_still_routes_the_same_waypoint_path_without_the_obstacle():
+    # Baseline for the regression above: the identical waypoint path, minus
+    # the "obstacle" block, still routes cleanly -- confirms the rejection
+    # above is caused specifically by the width-inflated near miss against
+    # "obstacle", not by blocks "a"/"b" (whose own approach margins are
+    # unaffected by the width_um / 2 bbox inflation -- see the allowances_um
+    # compensation in route_two_pin's obstacle-overlap check).
+    blocks, offsets, bboxes, pin_a, pin_b = _same_facing_pair_fixture()
+    result = gen_compose.route_two_pin(
+        pin_a,
+        pin_b,
+        blocks,
+        offsets,
+        bboxes,
+        0.5,
+        waypoints_um=[(-0.5, 11.0), (11.5, 11.0)],
+    )
+    assert result["routed"] is True
+    assert result["reason"] is None
+    assert result["route_length_um"] is not None
+
+
 def test_route_two_pin_still_rejects_a_waypoint_that_crosses_a_block():
     # The obstacle-overlap check (#199 case 1) is not bypassed just because
     # the caller supplied a waypoint -- one that plows straight through
