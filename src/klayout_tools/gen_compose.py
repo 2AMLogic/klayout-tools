@@ -1696,7 +1696,14 @@ def route_two_pin(
        through the destination block's full width to reach a port on its far
        side, e.g. crossing that block's own opposite-facing pin) and any
        third block's bbox the straight-line/single-jog backbone happens to
-       cross in a longer row.
+       cross in a longer row. Every bbox tested here is inflated by
+       ``width_um / 2`` on every side first (#999), so a centerline that
+       merely runs close enough alongside a block's edge -- closer than half
+       the route's own drawn width -- is caught too, not just one that
+       crosses the zero-width centerline through the block's true interior;
+       each own-pin's allowance is bumped by the same ``width_um / 2`` so a
+       normal approach into that pin's own block is not penalized by the
+       inflation.
     6. **Via-drop resolution** (#454): when ``route_layer`` and a pin's own
        reported layer differ, :func:`_resolve_via_drop_layer` looks up
        whether ``extraction_deck`` connects the two with a single via hop
@@ -1966,15 +1973,45 @@ def route_two_pin(
     # block it shouldn't have -- e.g. a same-facing port pair forcing the
     # route through the destination's full width to reach a pin on its far
     # side, crossing that block's own other pins on the way.
+    #
+    # width_um-aware inflation (#999): the check above treats the backbone as
+    # a zero-width centerline, but the wire actually drawn is `width_um` wide
+    # -- it extends `width_um / 2` past the centerline on every side, the
+    # same Minkowski-sum inflation the self-net pad-crossing check (#433,
+    # below) and the ring-opening check (`_ring_gap_route_conflict`) already
+    # apply. A centerline that clears a block's bbox edge by less than
+    # `width_um / 2` therefore still draws metal on top of that block even
+    # though the old zero-width test reports no crossing at all -- most
+    # commonly a same-facing port pair's connecting jog running parallel to,
+    # and just outside, its own origin block's edge. Every bbox this check
+    # tests against is inflated by `width_um / 2` on every side before the
+    # interior-overlap test runs (see `obstacle_bboxes_um` below); each own-
+    # pin's allowance is bumped by the same `width_um / 2` to compensate --
+    # without it, the inflated bbox would eat into the own-pin's normal
+    # approach margin and reject routes that were always fine (the approach
+    # stub's own dip into its own block, `_port_edge_margin_um`, is a
+    # statement about *insertion depth*, not about the wire's width).
     own_a, own_b = pin_a["block"], pin_b["block"]
     same_block_self_net = own_a == own_b
+    obstacle_half_um = width_um / 2.0
+    obstacle_bboxes_um = {
+        block_id: {
+            "x0": bbox["x0"] - obstacle_half_um,
+            "y0": bbox["y0"] - obstacle_half_um,
+            "x1": bbox["x1"] + obstacle_half_um,
+            "y1": bbox["y1"] + obstacle_half_um,
+        }
+        for block_id, bbox in placed_bboxes_um.items()
+    }
     allowances_um: dict[str, float] = {}
     if not same_block_self_net:
-        allowances_um[own_a] = max(
-            0.0, _port_edge_margin_um(a, dir_a, placed_bboxes_um[own_a])
+        allowances_um[own_a] = (
+            max(0.0, _port_edge_margin_um(a, dir_a, placed_bboxes_um[own_a]))
+            + obstacle_half_um
         )
-        allowances_um[own_b] = max(
-            0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b])
+        allowances_um[own_b] = (
+            max(0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b]))
+            + obstacle_half_um
         )
 
     # Self-net pad-crossing check (#433): the whole-block bbox check below
@@ -2176,7 +2213,7 @@ def route_two_pin(
 
     overlap_by_block_um: dict[str, float] = {}
     for seg_p0, seg_p1 in zip(points, points[1:], strict=False):
-        for other_id, other_bbox in placed_bboxes_um.items():
+        for other_id, other_bbox in obstacle_bboxes_um.items():
             if same_block_self_net and other_id == own_a:
                 continue  # a self-net is expected to cross its own block
             length = _segment_bbox_interior_overlap_um(seg_p0, seg_p1, other_bbox)
@@ -2191,18 +2228,24 @@ def route_two_pin(
             continue
         if other_id in (own_a, own_b):
             reason = (
-                f"backbone crosses {crossed_um:.4g}um through its own pin's "
-                f"block '{other_id}' -- more than that pin's own "
-                f"{allowed_um:.4g}um edge margin, so the route plows through "
-                "the block's interior (e.g. a same-facing port pair reaching "
-                "a pin on the block's far side, crossing another pin on the "
-                "way) rather than approaching the pin cleanly"
+                f"backbone's {width_um}um-wide drawn path crosses "
+                f"{crossed_um:.4g}um through its own pin's block '{other_id}' "
+                f"-- more than that pin's own {allowed_um:.4g}um edge margin "
+                f"(including {obstacle_half_um:.4g}um for the route's own "
+                "half-width), so the route plows through, or clips the edge "
+                "of, the block's interior (e.g. a same-facing port pair "
+                "reaching a pin on the block's far side, crossing another "
+                "pin on the way, or a connecting jog running close enough "
+                "alongside the block's own edge that the drawn wire's width "
+                "still overlaps it) rather than approaching the pin cleanly"
             )
         else:
             reason = (
-                f"backbone crosses {crossed_um:.4g}um through unrelated "
-                f"block '{other_id}''s bbox -- the route is not "
-                "point-to-point between only the two connected blocks"
+                f"backbone's {width_um}um-wide drawn path crosses "
+                f"{crossed_um:.4g}um through unrelated block '{other_id}''s "
+                "bbox (including its own edge, within half the route's "
+                "width) -- the route is not point-to-point between only the "
+                "two connected blocks"
             )
         return {
             "routed": False,
