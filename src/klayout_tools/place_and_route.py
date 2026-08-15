@@ -103,6 +103,26 @@ against the same real worked example above: a full floorplan->place->cts
 GDS view and the tech+cell LEF (for layer/pin geometry), through zero
 missing/orphan cells.
 
+As-built netlist export (issue #996)
+--------------------------------------
+
+The ``"route"`` stage writes an OpenROAD ``write_verilog`` netlist
+(``verilog_path``) alongside its ``write_def``/``def_path``: the design as
+this command's own ``clock_tree_synthesis``/``repair_design``/
+``repair_timing``/``repair_antennas`` calls actually left it, buffers,
+resizes, and diodes included. Without it, the only netlist available to
+build a golden-reference gate-level LVS from is ``klt synthesize``'s
+**pre-CTS** output, which is *guaranteed* to differ from the routed layout
+by however many cells P&R touched -- a divergence ``klt lvs`` has no way to
+attribute (one real run: 40 of ~720 instances). ``write_verilog`` is a
+top-level command of OpenROAD's always-loaded ``dbSta`` module
+(``src/dbSta/src/dbReadVerilog.tcl`` -> ``sta::write_verilog_cmd``,
+``src/dbSta/src/dbSta.i``), reading the OpenROAD network -- unrelated to
+Yosys's identically-named command that ``klt synthesize`` drives. See
+:func:`_stage_script_lines`'s own ``"route"`` branch for which flags are
+deliberately not passed, and why the artifact is written at ``"route"``
+only, never at ``"cts"``.
+
 Standard-cell PDK plumbing
 ----------------------------
 
@@ -870,10 +890,16 @@ def run_place_and_route(
         checkpoint_path = next_checkpoint
 
     gds_path: str | None = None
+    verilog_path: str | None = None
     spef_sta: dict[str, Any] | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
+        # Same deterministic path `_stage_script_lines`'s own `"route"`
+        # branch just handed `write_verilog` (issue #996) -- recomputed here
+        # rather than threaded back out, exactly as `def_path` above and the
+        # `-output_drc` report path earlier already are.
+        verilog_path = os.path.join(output_dir, f"{hdl_toplevel}.v")
         _merge_def_to_gds(
             def_path=def_path,
             tech_lef=tech_lef,
@@ -954,6 +980,15 @@ def run_place_and_route(
         ],
         "def_path": def_path,
         "gds_path": gds_path,
+        # Additive field (issue #996): the `write_verilog`-produced,
+        # *as-built* gate-level netlist -- the design as CTS/timing repair/
+        # antenna repair actually left it, i.e. the netlist the routed
+        # `def_path`/`gds_path` above genuinely implement. `null` unless
+        # `stage_reached` is `"route"`, mirroring those two fields. This is
+        # the artifact a golden-reference digital LVS run should build its
+        # reference from; `klt synthesize`'s own netlist is pre-CTS and is
+        # *expected* to diverge from the routed layout.
+        "verilog_path": verilog_path,
         # Additive field (issue #948): `null` unless `request.post_route_spef`
         # was `true` *and* `stage_reached` is `"route"` -- the real-parasitics
         # A/B counterpart to the top-level (`estimate_parasitics
@@ -1786,7 +1821,56 @@ def _stage_script_lines(
 
     if stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
-        lines += [f"write_def {def_path}"]
+        verilog_path = os.path.join(output_dir, f"{hdl_toplevel}.v")
+        # `write_verilog` (issue #996) -- the *as-built* gate-level netlist,
+        # written from the same linked design `write_def` above just dumped
+        # the geometry of, so the two artifacts describe one and the same
+        # design state. Without it the only netlist a caller can build an LVS
+        # reference from is `klt synthesize`'s own **pre-CTS** output, which
+        # is guaranteed to diverge from the routed layout by exactly the
+        # cells this command's own `clock_tree_synthesis`/`repair_timing`/
+        # `repair_design`/`repair_antennas` calls inserted or resized -- a
+        # divergence `klt lvs` has no way to attribute (one real run: 40 of
+        # ~720 instances, all ordinary CTS/resizer/diode output).
+        #
+        # `write_verilog` is a real, top-level OpenROAD Tcl command from the
+        # always-loaded `dbSta` module -- `src/dbSta/src/dbReadVerilog.tcl`
+        # declares `write_verilog {[-sort] [-include_pwr_gnd] [-remove_cells
+        # cells] filename}` and forwards to `sta::write_verilog_cmd`
+        # (`src/dbSta/src/dbSta.i`), reading the OpenROAD network rather than
+        # any Yosys state (verified against The-OpenROAD-Project/OpenROAD
+        # `master`, fetched 2026-08-14; ORFS calls the same command in its
+        # own `flow/scripts/final_outputs.tcl` to write `6_final.v`). It
+        # needs only a linked design, which every non-floorplan stage has via
+        # `read_db`. If a future OpenROAD build were to drop it, the run
+        # fails loudly (nonzero exit -> `PlaceAndRouteError`), never silently
+        # skipping the artifact.
+        #
+        # Flags deliberately **not** passed:
+        # - `-include_pwr_gnd`: omitted, matching ORFS's own `6_final.v` and
+        #   keeping this artifact directly diffable against `klt
+        #   synthesize`'s netlist (which likewise carries no VPWR/VGND
+        #   connections -- power comes from the LEF/DEF grid, not the
+        #   netlist). That diff is the issue's own motivating workflow.
+        # - `-remove_cells [find_physical_only_masters]`: ORFS strips
+        #   fill/tap/endcap cells there, but this flow never inserts any
+        #   (no `filler_placement`, no `tapcell` -- see the stage branches
+        #   above), so the flag would be a no-op that only risks dropping a
+        #   real cell. Antenna diodes (`repair_antennas`) are genuine
+        #   instances present in the routed GDS and are kept.
+        # - `-sort`: OpenROAD warns it is ignored (`utl::warn STA 2065`).
+        #
+        # Written only at `"route"`, not at `"cts"` (issue #996's own open
+        # design question, resolved here): the artifact exists to be the LVS
+        # reference for a *routed* GDS, and `"route"` is the only stage that
+        # produces one (`def_path`/`gds_path` are `null` before it). A
+        # cts-stage netlist would be a snapshot that no shippable layout
+        # corresponds to -- it predates `repair_antennas`'s own diode
+        # insertions -- and would need a second response field with no
+        # physical artifact to pair with. `verilog_path` therefore follows
+        # `def_path`/`gds_path` exactly: populated at `"route"`, `null`
+        # before it.
+        lines += [f"write_def {def_path}", f"write_verilog {verilog_path}"]
     elif stage == "place":
         # A placement-only DEF, written as a side artifact (never referenced
         # by `run_place_and_route`'s own return value) alongside the

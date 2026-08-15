@@ -68,3 +68,4 @@ def _print_text(report: dict) -> None:
     print()
     print(f"def_path: {report['def_path']}")
     print(f"gds_path: {report['gds_path']}")
+    print(f"verilog_path: {report['verilog_path']}")

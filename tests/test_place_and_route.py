@@ -950,6 +950,10 @@ def test_full_route_rejects_wired_port_less_macro_pin_before_openroad(
 
 _WRITE_DB_RE = re.compile(r"^write_db (\S+)$")
 _WRITE_DEF_RE = re.compile(r"^write_def (\S+)$")
+#: Issue #996 -- OpenROAD's own `write_verilog` (the `dbSta` command, not
+#: Yosys's identically-named one `klt synthesize` drives), mirroring
+#: `tests/test_synthesize.py`'s `_WRITE_VERILOG_RE` for that other engine.
+_WRITE_VERILOG_RE = re.compile(r"^write_verilog (\S+)$")
 _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 
@@ -976,6 +980,16 @@ def _script_write_db_path(script_path: str) -> str:
 def _script_write_def_path(script_path: str) -> str | None:
     for line in _script_lines(script_path):
         match = _WRITE_DEF_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _script_write_verilog_path(script_path: str) -> str | None:
+    """The `write_verilog <path>` path a `"route"`-stage script names (issue
+    #996), or `None` for a script that writes no netlist."""
+    for line in _script_lines(script_path):
+        match = _WRITE_VERILOG_RE.match(line)
         if match:
             return match.group(1)
     return None
@@ -1153,6 +1167,13 @@ def _stub_openroad_success(
         if def_path is not None:
             Path(def_path).write_text("fake def\n")
 
+        # Issue #996: the `"route"` stage's own `write_verilog` artifact --
+        # parsed out of the generated script exactly like the `write_def`
+        # path above, so this stub never hardcodes the naming scheme.
+        verilog_path = _script_write_verilog_path(script_path)
+        if verilog_path is not None:
+            Path(verilog_path).write_text("// fake as-built netlist\n")
+
         return _FakeCompleted(returncode=0, stdout="\n".join(stdout_lines))
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
@@ -1258,6 +1279,10 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert os.path.isfile(report["def_path"])
     assert report["gds_path"] is not None
     assert os.path.isfile(report["gds_path"])
+    # Issue #996: the as-built netlist `write_verilog` produced, alongside
+    # (never instead of) the DEF/GDS pair above.
+    assert report["verilog_path"] is not None
+    assert os.path.isfile(report["verilog_path"])
     assert len(merge_calls) == 1
     assert merge_calls[0]["hdl_toplevel"] == "gcd"
 
@@ -1984,8 +2009,9 @@ def test_stubbed_no_macros_field_emits_no_place_macro_lines(tmp_path, monkeypatc
 
 def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     """A `target_stage: "place"` request that completes placement is a
-    successful (exit 0) response with `def_path`/`gds_path` both `null` by
-    design -- contract spike section 5's "Partial-completion design"."""
+    successful (exit 0) response with `def_path`/`gds_path`/`verilog_path`
+    all `null` by design -- contract spike section 5's "Partial-completion
+    design"."""
     request_path = _setup_success_env(tmp_path, monkeypatch, target_stage="place")
     _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
     merge_calls = _stub_merge_def_to_gds(monkeypatch)
@@ -1996,6 +2022,7 @@ def test_stubbed_target_stage_place_partial_success(tmp_path, monkeypatch):
     assert report["stage_reached"] == "place"
     assert report["def_path"] is None
     assert report["gds_path"] is None
+    assert report["verilog_path"] is None
     assert len(merge_calls) == 0
     assert [stage["name"] for stage in report["stages"]] == ["floorplan", "place"]
     # place-stage metrics are present at top level (the last completed
@@ -2025,6 +2052,7 @@ def test_stubbed_target_stage_floorplan_only(tmp_path, monkeypatch):
     assert report["setup_violation_count"] is None
     assert report["def_path"] is None
     assert report["gds_path"] is None
+    assert report["verilog_path"] is None
 
 
 def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
@@ -2255,6 +2283,8 @@ def test_stubbed_full_route_success_gf180mcu(tmp_path, monkeypatch):
     assert os.path.isfile(report["def_path"])
     assert report["gds_path"] is not None
     assert os.path.isfile(report["gds_path"])
+    assert report["verilog_path"] is not None
+    assert os.path.isfile(report["verilog_path"])
     assert len(merge_calls) == 1
 
     provenance = report["provenance"]
@@ -2345,6 +2375,105 @@ def test_sky130hd_cts_and_route_scripts_carry_verified_reference_data(
     # itself flagged as an unverified [LIT]-tier recollection, now confirmed.
     assert "repair_antennas sky130_fd_sc_hd__diode_2" in route_lines
     assert not any("gf180mcu_fd_sc_mcu9t5v0__antenna" in line for line in route_lines)
+
+
+def test_route_stage_script_writes_the_as_built_verilog_netlist(tmp_path, monkeypatch):
+    """Issue #996: the `"route"` stage must emit OpenROAD's own
+    `write_verilog` (the `dbSta` command declared in
+    `src/dbSta/src/dbReadVerilog.tcl`, forwarding to
+    `sta::write_verilog_cmd` -- the same command ORFS calls in its
+    `flow/scripts/final_outputs.tcl` to write `6_final.v`) alongside its
+    existing `write_def`, so the netlist a golden-reference LVS run uses as
+    its reference reflects the CTS buffers / `repair_timing` resizes /
+    `repair_antennas` diodes this command itself inserted.
+
+    Mirrors `tests/test_synthesize.py`'s own `_WRITE_VERILOG_RE` check for
+    the Yosys-side `write_verilog` line in the generated `.ys` script."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    route_script = _stage_script(request_path, "route")
+    route_lines = _script_lines(route_script)
+
+    output_dir = os.path.join(os.path.dirname(request_path), ".klt", "place-and-route")
+    expected = os.path.join(output_dir, "gcd.v")
+    assert f"write_verilog {expected}" in route_lines
+    assert _script_write_verilog_path(route_script) == expected
+
+    # Additive, not a replacement: `write_def` still runs, and the netlist
+    # is written from the same design state immediately after it.
+    def_index = route_lines.index(f"write_def {os.path.join(output_dir, 'gcd.def')}")
+    verilog_index = route_lines.index(f"write_verilog {expected}")
+    assert verilog_index == def_index + 1
+
+    # Both artifacts must be written *after* every cell-inserting/resizing
+    # call -- a netlist snapshot taken before them would reproduce exactly
+    # the pre-CTS divergence this issue exists to remove.
+    last_mutating_index = max(
+        i
+        for i, line in enumerate(route_lines)
+        if line.startswith(("repair_antennas", "detailed_route", "global_route"))
+    )
+    assert verilog_index > last_mutating_index
+
+    # Flags deliberately not passed -- see `_stage_script_lines`'s own
+    # `"route"` branch for why each is omitted.
+    assert not any("-include_pwr_gnd" in line for line in route_lines)
+    assert not any("-remove_cells" in line for line in route_lines)
+    assert not any("write_verilog -sort" in line for line in route_lines)
+
+
+def test_only_the_route_stage_writes_the_as_built_verilog_netlist(
+    tmp_path, monkeypatch
+):
+    """Issue #996's own open design question, resolved explicitly: the
+    artifact is written at `"route"` only, never at `"cts"` (nor earlier).
+
+    It exists to be the netlist counterpart of a *routed* layout, and
+    `"route"` is the only stage that produces one -- a cts-stage snapshot
+    would describe a state no shippable layout corresponds to (it predates
+    `repair_antennas`'s diode insertions) and would need a second response
+    field with no `def_path`/`gds_path` to pair with."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    for stage in ("floorplan", "place", "cts"):
+        assert _script_write_verilog_path(_stage_script(request_path, stage)) is None
+    assert _script_write_verilog_path(_stage_script(request_path, "route")) is not None
+
+
+def test_verilog_path_response_field_names_the_script_written_artifact(
+    tmp_path, monkeypatch
+):
+    """Issue #996: the response's additive `verilog_path` must be exactly
+    the path the generated route-stage Tcl handed `write_verilog` -- the
+    same recomputed-not-threaded convention `def_path` already follows."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["verilog_path"] == _script_write_verilog_path(
+        _stage_script(request_path, "route")
+    )
+    assert os.path.isfile(report["verilog_path"])
+    # Additive only -- `schema_version` stays at 1 per `docs/json-contract.md`
+    # ("adding new fields does not [require a bump]"), and neither existing
+    # artifact field is displaced.
+    assert report["schema_version"] == 1
+    assert report["def_path"].endswith("gcd.def")
+    assert report["gds_path"].endswith("gcd.gds")
+    assert report["verilog_path"].endswith("gcd.v")
+    # Never collides with `klt synthesize`'s own `<top>_synth.v` netlist,
+    # which is the *input* to this run.
+    assert not report["verilog_path"].endswith("_synth.v")
 
 
 def test_route_stage_runs_post_route_antenna_repair(tmp_path, monkeypatch):
