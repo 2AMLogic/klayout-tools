@@ -456,6 +456,7 @@ def _resolve_options(
     build_args = _resolve_build_args(options.get("build_args"))
     includes = _resolve_includes(options.get("includes"), request_dir)
     sdf = _resolve_sdf_option(options.get("sdf"), engine, request_dir)
+    _reject_sdf_with_functional_models(sdf, defines)
 
     return (
         coverage,
@@ -541,6 +542,39 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
     return resolved
+
+
+def _reject_sdf_with_functional_models(
+    sdf: dict[str, str] | None, defines: dict[str, str | None]
+) -> None:
+    """``options.sdf`` together with a ``FUNCTIONAL`` define is
+    self-contradictory, and is rejected rather than run (issue #1004's second
+    finding, folded into #1002's own implementation).
+
+    A PDK's behavioural cell models put their zero-delay models and their
+    SDF-annotatable *timing* models in the two branches of the same
+    `` `ifdef FUNCTIONAL `` guard, and only the non-``FUNCTIONAL`` branch
+    carries the ``specify`` blocks an SDF's ``IOPATH`` entries annotate. So a
+    request that asks for real post-route delays *and* selects the zero-delay
+    models is asking for two incompatible things: at best the annotation
+    matches nothing, at worst (Icarus 12.0, observed in #1004) the run
+    silently mis-simulates and every flop samples ``x`` with no error raised.
+
+    Either failure lands as a *quietly wrong* verdict, which is the exact
+    class this feature's transcript gate exists to prevent -- so it is
+    checked at request-validation time, the same posture
+    ``options.coverage`` + ``engine: "icarus"`` already takes.
+    """
+    if sdf is None or "FUNCTIONAL" not in defines:
+        return
+    raise FunctionalVerificationError(
+        "options.sdf cannot be combined with a 'FUNCTIONAL' define -- a PDK's "
+        "FUNCTIONAL cell models are the zero-delay branch of the same `ifdef "
+        "that guards the timing models, so they carry none of the specify "
+        "blocks an SDF's IOPATH entries annotate. Drop the FUNCTIONAL define "
+        "to re-simulate with real delays, or drop options.sdf to keep the "
+        "zero-delay run"
+    )
 
 
 def _resolve_sdf_option(

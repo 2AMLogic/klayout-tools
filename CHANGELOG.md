@@ -528,8 +528,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   the build gains `-gspecify -ginterconnect -s klt_sdf_annotate -T <corner>`;
   and `options.sdf` on `engine: "verilator"` — or against an `iverilog`
   older than 13.0, which has no `-ginterconnect` flag at all and would fail
-  the build with a message naming neither SDF nor this request field
-  (issue #1004) — is exit 1, never a silent no-op.
+  the build with a message naming neither SDF nor this request field, or
+  alongside a `FUNCTIONAL` entry in `options.defines`, whose zero-delay cell
+  models carry none of the `specify` blocks an SDF annotates (both
+  issue #1004) — is exit 1, never a silent no-op.
   Because **every** Icarus SDF failure mode is non-fatal — an unopenable
   file, an unmatched instance, an unmatched `IOPATH` all leave `vvp` exiting
   `0` and cocotb reporting a clean zero-delay pass — both engine transcripts

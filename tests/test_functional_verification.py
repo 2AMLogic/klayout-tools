@@ -1476,6 +1476,53 @@ def test_sdf_option_corner_must_be_min_typ_or_max(tmp_path, corner):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize("functional_value", [None, "1", ""])
+def test_sdf_with_a_functional_define_is_a_request_error(
+    tmp_path, monkeypatch, functional_value
+):
+    """`options.sdf` + a `FUNCTIONAL` define asks for two incompatible things
+    (issue #1004): a PDK's FUNCTIONAL cell models are the zero-delay branch of
+    the same `ifdef that guards the timing models, so they carry none of the
+    `specify` blocks an SDF's IOPATH entries annotate. At best the annotation
+    matches nothing; on Icarus 12.0 the run silently mis-simulates. Either way
+    the verdict is quietly wrong, so it is rejected up front."""
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            options={
+                "sdf": {"file": "route.sdf"},
+                "defines": {"FUNCTIONAL": functional_value},
+            }
+        ),
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.sdf cannot be combined with a 'FUNCTIONAL' define",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_functional_define_without_sdf_is_untouched(tmp_path, monkeypatch):
+    """Regression guard: `FUNCTIONAL` on its own is a perfectly ordinary
+    zero-delay gate-level run and stays one -- the rejection is about the
+    *combination*, not about the define."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"defines": {"FUNCTIONAL": None}}),
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    assert report["environment"]["sdf"] is None
+    assert runner.build_kwargs["defines"] == {"FUNCTIONAL": None}
+
+
 @pytest.mark.parametrize("version", ["12.0", "11.0", "12.0 (stable)"])
 def test_sdf_on_a_pre_13_icarus_is_a_request_error(tmp_path, monkeypatch, version):
     """`-ginterconnect` does not exist before Icarus 13.0 (issue #1004, found
