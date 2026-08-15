@@ -738,8 +738,61 @@ ships, while `spef_sta` reads real extracted parasitics at the single
 resolved `pdk.corner`. A `"route"`-stage run reports both axes independently
 — the sweep always, `spef_sta` only under `post_route_spef: true` — in
 separate OpenROAD invocations that share neither script nor `-metrics` file.
-SDF write-back and OCV derating (survey §4.3–§4.4) remain separate, larger
-follow-on issues this field's own SPEF artifact is meant to feed.
+OCV derating (survey §4.4) remains a separate follow-on this field's own SPEF
+artifact is meant to feed; SDF write-back (survey §4.3) has since shipped as
+`post_route_sdf`, immediately below.
+
+### SDF export (`post_route_sdf`, issue #1002)
+
+Survey §4.3 names `write_sdf` the upstream half of an SDF-annotated
+gate-level re-simulation, and is explicit about where it belongs: *"after
+§4.1's `read_spef`, so the written SDF reflects real routed-parasitic delays,
+not the global-routing estimate."* The optional boolean `post_route_sdf`
+request field (default `false`) adds exactly that — one `write_sdf` call
+inside the **same** `post_route_spef` OpenSTA session, immediately after its
+`read_spef` and before any report command:
+
+```tcl
+read_spef  .../gcd_route.spef
+write_sdf -divider . -include_typ .../gcd_route.sdf
+```
+
+The written file is reported as **`spef_sta.sdf_path`** (`null` when not
+requested, mirroring `spef_path`'s own shape). Its delays are the ones that
+session computed from the design's own resolved liberty (`request.pdk.corner`)
+plus the extracted routed parasitics — never a synthetic or uniform delay
+model.
+
+- **`post_route_sdf: true` requires `post_route_spef: true`**, and says so
+  (exit 1) rather than quietly writing nothing. That is the whole point of
+  §4.3's sequencing: an SDF written from a session fed by `estimate_parasitics
+  -global_routing` would carry the coarse estimate's delays while *looking*
+  exactly like a post-route measurement to every downstream simulation that
+  annotates it.
+- **`-divider .`** — SDF hierarchy divider. OpenSTA's own default is `/`, but
+  the consumer is a Verilog simulator whose hierarchy separator is `.`;
+  emitting `/` would leave every `INSTANCE` name unmatchable.
+- **`-include_typ`** — populate the *typ* member of every `min:typ:max`
+  triplet. Icarus selects a triplet member at compile time (`iverilog -T
+  min|typ|max`, defaulting to `typ`), so a triplet with an empty typ member —
+  OpenSTA's default — would leave the default corner selecting nothing.
+- **A reported-but-missing file is an error**, not a silent success: a
+  `sdf_path` a downstream run cannot open surfaces there as a *silent*
+  zero-delay simulation, since Icarus treats an unopenable SDF as a non-fatal
+  `SDF WARNING` and `vvp` still exits `0`
+  ([`docs/design/sdf-annotate-feasibility-spike.md`](../design/sdf-annotate-feasibility-spike.md)
+  §3.3).
+
+The artifact's consumer is [`klt functional-verification`](functional-verification.md)'s
+own `options.sdf` block — hand it `spef_sta.sdf_path` and the design's
+existing gate-level testbench re-runs with real post-route delays applied.
+
+**Verification status**: the generated Tcl is asserted by unit tests
+(`tests/test_place_and_route.py`), **not** yet re-measured against a real
+`openroad`/OpenSTA session — no `openroad` binary or `openroad/orfs`
+container was available when this shipped, the same constraint recorded for
+issues #961/#996 above. The Icarus half *was* verified live against real
+`iverilog` 13.0 (see `functional-verification.md`'s "SDF back-annotation").
 
 ### Measured fidelity ladder (`gcd` / `modexp` / `mult8`, sky130A, `seed: 1`)
 
@@ -851,6 +904,7 @@ live re-measurement above.
 | `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see `place_and_route.py`'s module docstring for the audit methodology and its limitations. |
 | `max_antenna_repair_iterations` | integer \| omitted | 1–8, default `1` (today's exact single-pass behaviour). Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
+| `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
 
 ## Response
 
@@ -892,6 +946,7 @@ live re-measurement above.
   "verilog_path": "/abs/path/.klt/place-and-route/gcd.v",
   "spef_sta": {
     "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
+    "sdf_path": "/abs/path/.klt/place-and-route/gcd_route.sdf",
     "worst_slack_ns": -1.72532,
     "total_negative_slack_ns": -63.8855,
     "setup_violation_count": 50,
@@ -936,7 +991,7 @@ live re-measurement above.
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
-| `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
+| `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 
 ## As-built netlist (`verilog_path`, issue #996)

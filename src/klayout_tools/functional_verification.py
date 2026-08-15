@@ -54,6 +54,27 @@ implemented deliberately rather than rediscovered:
    bar ``klt sim``'s Monte Carlo seeding and ``klt lvs``'s ``environment``
    hashes already set.
 
+6. **SDF back-annotation is Icarus-only, and every one of its failure modes
+   is non-fatal to the simulator's own exit code** (issue #1002,
+   ``docs/design/sdf-annotate-feasibility-spike.md``, verified live on Icarus
+   13.0). ``request.options.sdf`` re-runs a gate-level regression with real
+   post-route delays back-annotated from an SDF file (the one
+   ``klt place-and-route``'s ``request.post_route_sdf`` writes). Four things
+   that spike established are implemented here rather than rediscovered:
+   the ``$sdf_annotate`` call rides in a *generated second elaboration root*
+   (:func:`_write_sdf_annotate_shim`) because a cocotb regression's
+   ``hdl_toplevel`` is the DUT itself and has nowhere to put an ``initial``
+   block; ``-gspecify`` and ``-ginterconnect`` are both mandatory and their
+   absence is a **silent** zero-delay run; min/typ/max corner selection is
+   the compile-time ``iverilog -T`` flag, not an ``$sdf_annotate`` argument;
+   and the SDF path must be **absolute**, since a relative one resolves
+   against ``vvp``'s own working directory. Above all, ``vvp`` exits ``0``
+   after skipping an annotation it could not apply -- so
+   :func:`_scan_sdf_diagnostics` treats an ``SDF WARNING``/``SDF ERROR`` line
+   in either transcript as a failed run. This is the same "never trust a raw
+   exit code, derive the verdict from the artifact" discipline as finding 1,
+   one level deeper.
+
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
 *optional* runtime dependency, deliberately not in ``pyproject.toml``'s
@@ -94,6 +115,73 @@ COVERAGE_BUILD_ARGS = ("--coverage", "--trace")
 
 #: ``[unit, precision]``, passed to *both* build and test (see gotcha 3).
 DEFAULT_TIMESCALE = ("1ns", "1ps")
+
+#: Only Icarus has an SDF back-annotation path through this flow: Verilator
+#: has no ``$sdf_annotate`` at all (spike §4.1). ``options.sdf`` on any other
+#: engine is a request error, mirroring ``options.coverage`` + ``icarus``.
+SDF_ENGINES = ("icarus",)
+
+#: The extra elaboration root that carries the ``$sdf_annotate`` call. A
+#: cocotb regression's ``hdl_toplevel`` *is* the DUT (driven from Python),
+#: so there is no Verilog testbench module to host an ``initial`` block --
+#: elaborating a second, otherwise-empty root alongside the DUT supplies one
+#: without touching the netlist, the testbench, or the DUT's own hierarchy.
+#: cocotb's own Icarus runner already uses this exact shape for its
+#: ``cocotb_iverilog_dump`` waveform module.
+SDF_ANNOTATE_MODULE = "klt_sdf_annotate"
+
+#: ``iverilog`` flags an SDF-annotated build requires, all three verified
+#: live (spike §3.1/§3.2/§2.1): without ``-gspecify`` Icarus omits every
+#: specify block *and* the ``$sdf_annotate`` call itself, then runs at zero
+#: delay and exits ``0``; without ``-ginterconnect`` every ``INTERCONNECT``
+#: entry -- which is exactly what a post-route SDF carries -- fails at run
+#: time; and ``-s <module>`` is what makes the generated shim a second
+#: elaboration root rather than dead code.
+SDF_BUILD_ARGS = ("-gspecify", "-ginterconnect", "-s", SDF_ANNOTATE_MODULE)
+
+#: ``options.sdf.corner`` values, mapping 1:1 onto ``iverilog -T``. Corner
+#: selection is a *compile-time* flag for Icarus, not an ``$sdf_annotate``
+#: argument: Icarus ignores every argument past the second ("$sdf_annotate
+#: currently only uses the first two argument", its own wording), so a
+#: request that named a corner there would be silently ignored (spike §3.5).
+SDF_CORNERS = ("min", "typ", "max")
+
+#: Icarus's own default when ``-T`` is not passed; named explicitly so the
+#: response's echo is never ambiguous about which corner was simulated.
+DEFAULT_SDF_CORNER = "typ"
+
+#: Every SDF problem Icarus hits -- an unopenable file, an instance it cannot
+#: find, an ``IOPATH`` the cell's ``specify`` block does not declare, an
+#: ``INTERCONNECT`` without ``-ginterconnect`` -- is reported with one of
+#: these prefixes and then **survived**: the annotation is dropped, `vvp`
+#: exits ``0``, and cocotb duly reports the zero-delay verdict as a pass.
+#: Scanning for them is the only thing standing between "re-verified with
+#: real post-route delays" and "re-ran at zero delay and nobody noticed"
+#: (spike §3.3, where a 50-flop netlist annotated 0 flops and still reported
+#: the expected verdicts).
+SDF_DIAGNOSTIC_MARKERS = ("SDF WARNING", "SDF ERROR")
+
+#: ...with two deliberate exemptions, both of which fire on *correct* input:
+#:
+#: - ``TIMINGCHECK not supported`` -- Icarus implements SDF delays but not
+#:   SDF timing checks (spike §3.4), and a real ``write_sdf`` emits
+#:   ``TIMINGCHECK`` sections alongside ``IOPATH``/``INTERCONNECT``. Failing
+#:   on this would reject every real post-route SDF; the delays it *does*
+#:   apply are unaffected. The consequence worth knowing (no setup/hold
+#:   violation reporting on this path -- that is OpenSTA's job) is documented
+#:   in ``docs/cli/functional-verification.md``.
+#: - ``NEGATIVE_CONSTRAINT``/``PATHPULSE`` &c. are **not** exempted: only the
+#:   timing-check family is, because only it is both benign and unavoidable.
+SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
+
+#: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
+#: line on this path (spike §3.1): with ``-gspecify`` missing, Icarus drops
+#: the annotation call as an ordinary compile-time ``warning:`` among
+#: hundreds of others and the run is otherwise indistinguishable from a
+#: successful annotation. This module always passes ``-gspecify``, so it must
+#: never appear -- and if it ever does (a cocotb backend that reorders or
+#: drops build args, say), that is a silent zero-delay run, caught here.
+SDF_OMITTED_ANNOTATION_MARKER = "Omitting $sdf_annotate"
 
 _ENGINE_VERSION_COMMANDS = {
     "icarus": (["iverilog", "-V"], re.compile(r"Icarus Verilog version (\S+)")),
@@ -290,14 +378,30 @@ def _resolve_testbench(
 def _resolve_options(
     options: Any, engine: str, request_dir: str
 ) -> tuple[
-    bool, tuple[str, str], int | None, dict[str, str | None], list[str], list[str]
+    bool,
+    tuple[str, str],
+    int | None,
+    dict[str, str | None],
+    list[str],
+    list[str],
+    dict[str, str] | None,
 ]:
     """Validate ``request.options`` and return
-    ``(coverage, timescale, random_seed, defines, build_args, includes)``.
+    ``(coverage, timescale, random_seed, defines, build_args, includes, sdf)``.
 
     Enforces the spike's hard constraint that coverage is a Verilator-only
     capability -- ``options.coverage: true`` with ``engine: "icarus"`` is a
-    request error (exit 1), never a silently-ignored flag.
+    request error (exit 1), never a silently-ignored flag -- and the exactly
+    symmetric constraint for SDF back-annotation, which only Icarus has a
+    path for (``options.sdf`` + ``engine: "verilator"`` is a request error,
+    never a silent no-op).
+
+    ``sdf`` is ``None`` when the block is absent, else
+    ``{"file": <abs path>, "corner": "min"|"typ"|"max"}``. ``file`` is
+    resolved relative to ``request_dir`` like every other path field, and is
+    returned **absolute** because the generated ``$sdf_annotate`` shim
+    embeds it verbatim and ``vvp`` resolves a relative path against its own
+    working directory rather than the request's (spike §4.2).
     """
     if options is None:
         options = {}
@@ -339,8 +443,17 @@ def _resolve_options(
     defines = _resolve_defines(options.get("defines"))
     build_args = _resolve_build_args(options.get("build_args"))
     includes = _resolve_includes(options.get("includes"), request_dir)
+    sdf = _resolve_sdf_option(options.get("sdf"), engine, request_dir)
 
-    return coverage, resolved_timescale, random_seed, defines, build_args, includes
+    return (
+        coverage,
+        resolved_timescale,
+        random_seed,
+        defines,
+        build_args,
+        includes,
+        sdf,
+    )
 
 
 def _resolve_defines(defines: Any) -> dict[str, str | None]:
@@ -416,6 +529,124 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
     return resolved
+
+
+def _resolve_sdf_option(
+    sdf: Any, engine: str, request_dir: str
+) -> dict[str, str] | None:
+    """Validate the optional ``request.options.sdf`` block (issue #1002) and
+    return ``{"file": <abs path>, "corner": ...}``, or ``None`` when absent.
+
+    Unknown keys are rejected rather than ignored. The block's whole surface
+    is two fields, and both of the plausible typos (``"corners"``,
+    ``"path"``) would otherwise degrade to a *silently different run* -- the
+    wrong timing corner, or no annotation at all -- which is precisely the
+    class of failure this feature's own transcript gate exists to prevent.
+    """
+    if sdf is None:
+        return None
+    if not isinstance(sdf, dict):
+        raise FunctionalVerificationError("request.options.sdf must be a JSON object")
+    if engine not in SDF_ENGINES:
+        raise FunctionalVerificationError(
+            f"options.sdf requires engine 'icarus' -- engine '{engine}' has no "
+            "SDF back-annotation path ($sdf_annotate is an Icarus-only entry "
+            "point through this flow)"
+        )
+
+    unknown = sorted(set(sdf) - {"file", "corner"})
+    if unknown:
+        raise FunctionalVerificationError(
+            "request.options.sdf has unknown field(s): "
+            + ", ".join(unknown)
+            + " (supported: file, corner)"
+        )
+
+    file_value = sdf.get("file")
+    if not isinstance(file_value, str) or not file_value:
+        raise FunctionalVerificationError(
+            "request.options.sdf.file must be a non-empty string"
+        )
+    path = (
+        file_value
+        if os.path.isabs(file_value)
+        else os.path.join(request_dir, file_value)
+    )
+    if not os.path.isfile(path):
+        raise FunctionalVerificationError(f"SDF file not found: {file_value}")
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as exc:
+        raise FunctionalVerificationError(
+            f"could not read SDF file '{file_value}': {exc}"
+        ) from exc
+
+    corner = sdf.get("corner", DEFAULT_SDF_CORNER)
+    if corner not in SDF_CORNERS:
+        raise FunctionalVerificationError(
+            "request.options.sdf.corner must be one of: " + ", ".join(SDF_CORNERS)
+        )
+
+    return {"file": os.path.abspath(path), "corner": corner}
+
+
+def _write_sdf_annotate_shim(path: str, *, sdf_path: str, hdl_toplevel: str) -> None:
+    """Write the extra elaboration root that carries the ``$sdf_annotate``
+    call (spike §2.1, verified live; the same shape cocotb's own Icarus
+    runner generates for waveform dumping).
+
+    ``sdf_path`` must already be absolute -- ``vvp`` runs with its own
+    working directory, so a relative path here is one ``SDF WARNING`` away
+    from a silent zero-delay run. Because a root module's instance name is
+    its module name, ``hdl_toplevel`` resolves to the DUT root and the DUT's
+    own hierarchy (the thing the Python testbench addresses as
+    ``dut.<port>``) is untouched.
+    """
+    escaped = sdf_path.replace("\\", "\\\\").replace('"', '\\"')
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "// Generated by klt functional-verification -- do not edit.\n"
+            "// Extra elaboration root carrying the $sdf_annotate call, since\n"
+            "// a cocotb regression's hdl_toplevel is the DUT itself and has\n"
+            "// nowhere to host an initial block (issue #1002).\n"
+            f"module {SDF_ANNOTATE_MODULE}();\n"
+            f'  initial $sdf_annotate("{escaped}", {hdl_toplevel});\n'
+            "endmodule\n"
+        )
+
+
+def _scan_sdf_diagnostics(*log_paths: str) -> list[str]:
+    """Every *actionable* SDF diagnostic Icarus emitted across ``log_paths``.
+
+    Non-empty means the annotation did not fully apply -- regardless of the
+    run's own pass/fail verdict, which is exactly the trap: `vvp` exits ``0``
+    in every SDF failure mode (spike §3.3). Benign lines
+    (:data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS`) are filtered out, since a real
+    ``write_sdf`` emits ``TIMINGCHECK`` sections Icarus does not implement
+    and a gate that rejected them would reject every real post-route SDF.
+
+    Never raises: a missing/unreadable transcript contributes nothing, the
+    same posture :func:`_log_tail` takes.
+    """
+    found: list[str] = []
+    for log_path in log_paths:
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            stripped = line.strip()
+            if SDF_OMITTED_ANNOTATION_MARKER in stripped:
+                found.append(stripped)
+                continue
+            if not any(marker in stripped for marker in SDF_DIAGNOSTIC_MARKERS):
+                continue
+            if any(benign in stripped for benign in SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS):
+                continue
+            found.append(stripped)
+    return found
 
 
 def _resolve_parameters(parameters: Any) -> dict[str, Any]:
@@ -898,8 +1129,9 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         timescale,
         random_seed,
         defines,
-        build_args,
+        user_build_args,
         includes,
+        sdf,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
     parameters = _resolve_parameters(request_doc.get("parameters"))
 
@@ -937,6 +1169,30 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             except OSError:
                 pass
 
+    # Build args are computed, not selected from a constant (spike §4.2's
+    # one structural change): coverage and SDF annotation each contribute
+    # their own flags, and they compose rather than overwrite -- even though
+    # the two are mutually exclusive by engine today (coverage is
+    # Verilator-only, SDF is Icarus-only), so is any later addition. The
+    # caller's own `options.build_args` composes last, after both (see
+    # :func:`_resolve_build_args`).
+    build_args: list[str] = []
+    if coverage_requested:
+        build_args += list(COVERAGE_BUILD_ARGS)
+    if sdf is not None:
+        # The generated second elaboration root, and the three flags that
+        # make it do anything at all -- plus `-T <corner>`, which is how
+        # Icarus selects a member of each SDF `min:typ:max` triplet (a
+        # compile-time flag, not an `$sdf_annotate` argument; see
+        # `SDF_CORNERS`).
+        shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
+        _write_sdf_annotate_shim(
+            shim_path, sdf_path=sdf["file"], hdl_toplevel=hdl_toplevel
+        )
+        sources = [*sources, shim_path]
+        build_args += [*SDF_BUILD_ARGS, "-T", sdf["corner"]]
+    build_args += user_build_args
+
     runner_module = _import_runner()
     engine_runner = _run_build(
         runner_module,
@@ -944,8 +1200,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         sources=sources,
         hdl_toplevel=hdl_toplevel,
         build_dir=build_dir,
-        build_args=(list(COVERAGE_BUILD_ARGS) if coverage_requested else [])
-        + build_args,
+        build_args=build_args,
         defines=defines,
         includes=includes,
         timescale=timescale,
@@ -967,6 +1222,27 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         parameters=parameters,
         log_path=test_log,
     )
+
+    if sdf is not None:
+        # The hard gate (spike §3.3): every SDF failure mode -- unopenable
+        # file, unmatched instance, unmatched IOPATH, INTERCONNECT without
+        # `-ginterconnect` -- is *non-fatal*. Icarus prints a line, drops
+        # that annotation, and `vvp` exits 0; the regression then reports a
+        # perfectly clean PASS derived from a zero-delay run. Scanning both
+        # transcripts is the only signal there is, and it runs before the
+        # verdict is parsed so an annotation failure is reported as one
+        # rather than as a (misleadingly green) result.
+        diagnostics = _scan_sdf_diagnostics(build_log, test_log)
+        if diagnostics:
+            shown = " | ".join(diagnostics[:5])
+            more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
+            raise FunctionalVerificationError(
+                f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
+                f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
+                f"-- {shown}{more}. The simulator exits 0 after skipping an "
+                "annotation it cannot apply, so this run's verdict would have "
+                "been a zero-delay one reported as if it were annotated."
+            )
 
     tests = parse_results_xml(results_xml)
     if not tests:
@@ -1010,5 +1286,17 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             "cocotb_version": _cocotb_version(),
             "results_xml": results_xml,
             "random_seed": _extract_random_seed_property(results_xml),
+            # Additive (issue #1002, spike §4.2 item 5): `null` on an
+            # ordinary run, an object on an SDF-annotated one -- so a caller
+            # can tell an annotated run from an unannotated one *from the
+            # JSON*, without reading a transcript. `annotated: true` is
+            # load-bearing rather than redundant: reaching this point at all
+            # means the diagnostic scan above found nothing, i.e. the
+            # annotation applied cleanly.
+            "sdf": (
+                None
+                if sdf is None
+                else {"file": sdf["file"], "corner": sdf["corner"], "annotated": True}
+            ),
         },
     }

@@ -83,3 +83,9 @@ def _print_text(report: dict) -> None:
     random_seed = environment.get("random_seed")
     if random_seed is not None:
         print(f"random_seed: {random_seed}")
+    # Printed only on an SDF-annotated run (issue #1002): a reader glancing
+    # at a gate-level report has no other way to tell a delay-annotated
+    # verdict from a zero-delay one, and the two mean very different things.
+    sdf = environment.get("sdf")
+    if sdf is not None:
+        print(f"sdf: {sdf['file']}  corner: {sdf['corner']}")

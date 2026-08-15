@@ -654,10 +654,17 @@ class _FakeRunner:
         build_exc=None,
         test_exc=None,
         coverage_dat_text=None,
+        extra_build_log="",
+        extra_test_log="",
     ):
         self.results_xml_text = results_xml_text
         self.build_exc = build_exc
         self.test_exc = test_exc
+        # Appended to the respective transcript, so a test can stand in for
+        # simulator chatter the library itself scans (issue #1002's own
+        # `SDF WARNING`/`SDF ERROR` gate).
+        self.extra_build_log = extra_build_log
+        self.extra_test_log = extra_test_log
         # When set, `test()` writes a fresh `coverage.dat` into `test_dir` --
         # standing in for Verilator flushing coverage data as part of *this*
         # run, the way `results_xml_text` stands in for `results.xml`.
@@ -670,6 +677,7 @@ class _FakeRunner:
         Path(kwargs["build_dir"]).mkdir(parents=True, exist_ok=True)
         with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
             handle.write("fake build log\nELABORATION DETAIL\n")
+            handle.write(self.extra_build_log)
         if self.build_exc is not None:
             raise self.build_exc
 
@@ -677,6 +685,7 @@ class _FakeRunner:
         self.test_kwargs = kwargs
         with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
             handle.write("fake test log\n")
+            handle.write(self.extra_test_log)
         if self.results_xml_text is not None:
             with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
                 handle.write(self.results_xml_text)
@@ -727,6 +736,9 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # the spike captured live (section 4) -- this is the authoritative
         # echo, read back from `results.xml` itself.
         "random_seed": 1785780800,
+        # Additive (issue #1002): `null` on any run without `options.sdf`,
+        # so an unannotated verdict is never mistakable for an annotated one.
+        "sdf": None,
     }
     results_xml = report["environment"]["results_xml"]
     assert os.path.isabs(results_xml)
@@ -1361,6 +1373,290 @@ def test_eval_surfaces_a_failed_to_run_verification_as_an_error(tmp_path, monkey
 
 
 # --------------------------------------------------------------------------- #
+# `options.sdf` (issue #1002): SDF back-annotation through Icarus's own
+# `$sdf_annotate`, per `docs/design/sdf-annotate-feasibility-spike.md`.
+# --------------------------------------------------------------------------- #
+
+_MINIMAL_SDF = """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "gcd")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+)
+"""
+
+
+def _sdf_request(tmp_path: Path, **sdf_fields) -> str:
+    """A `_base_request()` carrying an `options.sdf` block plus the SDF file
+    it names (request validation resolves and reads it)."""
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    sdf = {"file": "route.sdf"}
+    sdf.update(sdf_fields)
+    return _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"coverage": False, "sdf": sdf}),
+    )
+
+
+def test_sdf_option_must_be_an_object(tmp_path):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"sdf": "route.sdf"})
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="options.sdf must be a JSON object"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_sdf_option_on_verilator_is_a_request_error(tmp_path):
+    """`options.sdf` + `engine: "verilator"` is rejected up front, never a
+    silent no-op -- the exact posture `options.coverage` + `icarus` already
+    takes. Verilator has no `$sdf_annotate` path at all (spike section 4.1),
+    so silently ignoring the block would report a zero-delay verdict as if it
+    were an annotated one."""
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(engine="verilator", options={"sdf": {"file": "route.sdf"}}),
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="options.sdf requires engine 'icarus'"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_sdf_option_rejects_unknown_fields(tmp_path):
+    """A typo'd key would otherwise degrade to a silently different run (the
+    wrong corner, or no annotation)."""
+    _setup_inputs(tmp_path)
+    _write(tmp_path / "route.sdf", _MINIMAL_SDF)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"sdf": {"file": "route.sdf", "corners": "max"}}),
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="unknown field\\(s\\): corners"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_sdf_option_file_must_be_a_nonempty_string(tmp_path):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"sdf": {}})
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="options.sdf.file must be a non-empty string"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_sdf_option_missing_file_is_a_request_error(tmp_path):
+    """An unopenable SDF is `SDF WARNING: ... Skipping this annotation.` at
+    run time -- non-fatal to `vvp`, so it must be caught here instead."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"sdf": {"file": "nope.sdf"}}),
+    )
+    with pytest.raises(FunctionalVerificationError, match="SDF file not found"):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("corner", ["fast", "TYP", "", 1, None])
+def test_sdf_option_corner_must_be_min_typ_or_max(tmp_path, corner):
+    request_path = _sdf_request(tmp_path, corner=corner)
+    with pytest.raises(
+        FunctionalVerificationError, match="options.sdf.corner must be one of"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_sdf_generates_the_annotate_shim_with_an_absolute_path(
+    tmp_path, monkeypatch
+):
+    """The load-bearing trick (spike section 2.1): a cocotb regression's
+    `hdl_toplevel` *is* the DUT, so the `$sdf_annotate` call rides in a
+    generated second elaboration root. The embedded path must be **absolute**
+    -- `vvp` resolves a relative one against its own working directory, one
+    `SDF WARNING` away from a silent zero-delay run."""
+    request_path = _sdf_request(tmp_path)
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    shim = tmp_path / ".klt" / "functional-verification" / "klt_sdf_annotate.v"
+    assert shim.is_file()
+    text = shim.read_text()
+    assert "module klt_sdf_annotate();" in text
+    assert f'$sdf_annotate("{tmp_path / "route.sdf"}", gcd);' in text
+    # ...and the shim is elaborated alongside the design's own sources.
+    assert runner.build_kwargs["sources"][-1] == str(shim)
+    assert str(tmp_path / "gcd.v") in runner.build_kwargs["sources"]
+
+
+def test_stubbed_sdf_appends_the_required_build_args(tmp_path, monkeypatch):
+    """All four flags the spike found mandatory, plus the corner selection:
+    `-gspecify` (without it Icarus drops the annotation *silently*),
+    `-ginterconnect` (without it every INTERCONNECT entry fails), `-s
+    klt_sdf_annotate` (elaborate the shim as a second root), and `-T <corner>`
+    (Icarus's compile-time min/typ/max selection)."""
+    request_path = _sdf_request(tmp_path, corner="max")
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["build_args"] == [
+        "-gspecify",
+        "-ginterconnect",
+        "-s",
+        "klt_sdf_annotate",
+        "-T",
+        "max",
+    ]
+
+
+def test_stubbed_sdf_defaults_to_the_typ_corner(tmp_path, monkeypatch):
+    request_path = _sdf_request(tmp_path)
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    assert runner.build_kwargs["build_args"][-2:] == ["-T", "typ"]
+    assert report["environment"]["sdf"] == {
+        "file": str(tmp_path / "route.sdf"),
+        "corner": "typ",
+        "annotated": True,
+    }
+
+
+def test_stubbed_sdf_absolute_file_path_is_accepted_verbatim(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    sdf_path = _write(tmp_path / "elsewhere.sdf", _MINIMAL_SDF)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"sdf": {"file": sdf_path, "corner": "min"}}),
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    assert report["environment"]["sdf"]["file"] == sdf_path
+
+
+def test_stubbed_sdf_fails_loud_on_an_sdf_error_in_the_transcript(
+    tmp_path, monkeypatch
+):
+    """The single highest-value behaviour here (spike section 3.3): Icarus
+    reports every SDF failure mode and **carries on**, `vvp` exits 0, and
+    cocotb duly reports the zero-delay verdict as a pass. The run must fail
+    on the transcript, not be trusted because it produced a green
+    `results.xml` -- which this fixture deliberately does."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=(
+                "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q in "
+                "gcd._647_\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_sdf_scans_the_build_transcript_too(tmp_path, monkeypatch):
+    """`SDF WARNING` lines can land in either transcript -- an unopenable
+    file is reported at run time, but `$sdf_annotate` argument diagnostics
+    come out of elaboration."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_build_log=(
+                'SDF WARNING: shim.v:2: Unable to open SDF file "route.sdf". '
+                "Skipping this annotation.\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(FunctionalVerificationError, match="did not fully apply"):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_sdf_fails_on_the_omitted_annotation_warning(tmp_path, monkeypatch):
+    """Not an `SDF`-prefixed line at all, and the most dangerous one there is
+    (spike section 3.1): with `-gspecify` missing, Icarus drops the
+    annotation as an ordinary compile `warning:` and runs at zero delay."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_build_log=(
+                "shim.v:4: warning: Omitting $sdf_annotate() since specify "
+                "blocks and interconnects are being omitted.\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(FunctionalVerificationError, match="did not fully apply"):
+        run_functional_verification(request_path)
+
+
+def test_stubbed_sdf_tolerates_the_benign_timingcheck_warning(tmp_path, monkeypatch):
+    """Icarus implements SDF delays but not SDF timing checks (spike section
+    3.4), and a real `write_sdf` emits TIMINGCHECK sections -- so failing on
+    this class would reject every real post-route SDF. The delays it *does*
+    apply are unaffected."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log="SDF WARNING: route.sdf:7: TIMINGCHECK not supported.\n",
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    assert report["environment"]["sdf"]["annotated"] is True
+
+
+def test_sdf_diagnostics_are_only_scanned_on_annotated_runs(tmp_path, monkeypatch):
+    """Regression guard: a request with no `options.sdf` behaves exactly as
+    it did before this feature existed -- no shim, no build args, no
+    transcript gate (even against a transcript that would trip it)."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(
+        monkeypatch,
+        _FakeRunner(_RESULTS_XML_WITH_SKIP, extra_test_log="SDF ERROR: bogus\n"),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    assert report["environment"]["sdf"] is None
+    assert runner.build_kwargs["build_args"] == []
+    assert not (
+        tmp_path / ".klt" / "functional-verification" / "klt_sdf_annotate.v"
+    ).exists()
+
+
+# --------------------------------------------------------------------------- #
 # Integration: real cocotb + a real simulator (skipped when either is absent)
 # --------------------------------------------------------------------------- #
 
@@ -1564,6 +1860,171 @@ def test_integration_real_icarus_same_seed_reproduces_identical_results(tmp_path
     assert first["environment"]["random_seed"] == 13
     assert second["environment"]["random_seed"] == 13
     assert _strip_timing(first) == _strip_timing(second)
+
+
+# --------------------------------------------------------------------------- #
+# Integration: `options.sdf` against real cocotb + real Icarus (issue #1002)
+#
+# Deliberately PDK-free. The measurement `docs/design/post-route-sta-survey.md`
+# section 4.3 asks for -- "does the testbench's own pass/fail outcome change
+# once real delay is present?" -- needs a design with a `specify` block and an
+# SDF that annotates it, not a standard-cell library. A two-module inverter
+# plus a three-line SDF reproduces the whole signal in a tmp dir, so these run
+# on any machine with cocotb + `iverilog` (the same posture the worked-example
+# integration tests above take) instead of needing a volare PDK install.
+# --------------------------------------------------------------------------- #
+
+_SDF_DUT_V = """\
+module klt_inv (input wire a, output wire y);
+  assign y = ~a;
+  specify
+    (a => y) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module dly (input wire a, output wire y);
+  klt_inv u_inv (.a(a), .y(y));
+endmodule
+"""
+
+_SDF_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_output_settles_within_two_ns(dut):
+    """Passes at zero delay; fails once a >2 ns path delay is annotated."""
+    dut.a.value = 0
+    await Timer(10, unit="ns")
+    dut.a.value = 1
+    await Timer(2, unit="ns")
+    assert dut.y.value == 0, f"y={dut.y.value} 2 ns after a rose (expected 0)"
+'''
+
+
+def _sdf_text(iopath_source: str = "a") -> str:
+    """A minimal IEEE-1497 SDF annotating `u_inv`'s `a -> y` arc with a
+    `min:typ:max` triplet of 1/5/9 ns -- one member either side of the
+    testbench's own 2 ns sampling point, so the corner selection is
+    observable in the verdict. `iopath_source="nope"` names an arc the cell's
+    `specify` block does not declare, reproducing the spike's own `Unable to
+    match ModPath` failure mode."""
+    return f"""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "dly")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "klt_inv")
+    (INSTANCE u_inv)
+    (DELAY (ABSOLUTE
+      (IOPATH {iopath_source} y (1.000:5.000:9.000) (1.000:5.000:9.000))
+    ))
+  )
+)
+"""
+
+
+def _stage_sdf_design(tmp_path: Path, *, sdf_text: str | None = None) -> None:
+    _write(tmp_path / "dly.v", _SDF_DUT_V)
+    _write(tmp_path / "test_dly.py", _SDF_TESTBENCH_PY)
+    _write(tmp_path / "route.sdf", _sdf_text() if sdf_text is None else sdf_text)
+
+
+def _sdf_integration_request(tmp_path: Path, name: str, sdf: dict | None) -> str:
+    request = {
+        "sources": ["dly.v"],
+        "hdl_toplevel": "dly",
+        "testbench": {"module": "test_dly"},
+    }
+    if sdf is not None:
+        request["options"] = {"sdf": sdf}
+    return _write_request(tmp_path / name, request)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
+    """Survey section 4.3's own coverage metric, demonstrated end to end: the
+    *same* testbench passes at zero delay and fails once the SDF's real path
+    delay is back-annotated. A silently-skipped annotation would leave both
+    runs identical, which is exactly what makes this the load-bearing
+    assertion for the whole feature."""
+    _stage_sdf_design(tmp_path)
+    zero_delay = _sdf_integration_request(tmp_path, "request-plain.json", None)
+    annotated = _sdf_integration_request(
+        tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
+    )
+
+    plain_report = run_functional_verification(zero_delay)
+    annotated_report = run_functional_verification(annotated)
+
+    assert plain_report["status"] == "pass"
+    assert plain_report["environment"]["sdf"] is None
+    assert annotated_report["status"] == "fail"
+    assert annotated_report["environment"]["sdf"] == {
+        "file": str(tmp_path / "route.sdf"),
+        "corner": "typ",
+        "annotated": True,
+    }
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+@pytest.mark.parametrize(
+    ("corner", "expected_status"),
+    [("min", "pass"), ("max", "fail")],
+)
+def test_integration_real_icarus_sdf_corner_selects_a_triplet_member(
+    tmp_path, corner, expected_status
+):
+    """`options.sdf.corner` -> `iverilog -T` reaches the simulator, against
+    one SDF whose every delay is the triplet `(1.000:5.000:9.000)`: the
+    testbench samples 2 ns after the input edge, so `min` (1 ns) has settled
+    and `max` (9 ns) has not. This is the *compile-time* selection the spike
+    established -- passing a corner as an `$sdf_annotate` argument instead
+    would be silently ignored by Icarus and both rows would match."""
+    _stage_sdf_design(tmp_path)
+    request_path = _sdf_integration_request(
+        tmp_path, f"request-{corner}.json", {"file": "route.sdf", "corner": corner}
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == expected_status
+    assert report["environment"]["sdf"]["corner"] == corner
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_broken_sdf_fails_loud_not_silently(tmp_path):
+    """The trap, reproduced against the real toolchain: an SDF naming an arc
+    the cell does not declare makes Icarus drop that annotation, print `SDF
+    ERROR: ... Unable to match ModPath`, and **still exit 0** -- the run's own
+    `results.xml` reports a clean pass at zero delay. The transcript scan is
+    the only thing between that and a false green."""
+    _stage_sdf_design(tmp_path, sdf_text=_sdf_text(iopath_source="nope"))
+    request_path = _sdf_integration_request(
+        tmp_path, "request-broken.json", {"file": "route.sdf"}
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+    # The evidence the scan overrode: cocotb's own artifact says "passed".
+    results_xml = tmp_path / ".klt" / "functional-verification" / "results_icarus.xml"
+    assert "<failure" not in results_xml.read_text()
 
 
 # Sanity: `subprocess` really is the module this file's coverage stubs patch
