@@ -391,9 +391,11 @@ count).
 
 - **Technique:** given an already-completed OpenROAD `detailed_route`
   output (DEF + its own `-output_drc` report) with a small number of
-  residual violations (e.g. the sky130 corpus's own known, documented
-  baseline `diff.enclosing.licon.1` filler-gap violation cited in
-  `native/legalize/README.md`'s own results table), implement a narrow
+  residual violations (this survey originally cited the sky130 corpus's own
+  documented baseline `diff.enclosing.licon.1` "filler-gap" violations as
+  the worked example, but #995 showed those were a `klt drc` false positive
+  on touching-but-unmerged same-layer shapes — a real example has to come
+  from OpenROAD's own `-output_drc` report instead), implement a narrow
   Rust tool that reads the violation report, identifies the offending net/
   segment, and performs a bounded local repair (a jog, a spacing nudge, or
   a rip-up-and-local-reroute of just that segment) — never touching the

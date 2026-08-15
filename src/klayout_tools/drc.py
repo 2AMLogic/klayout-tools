@@ -679,6 +679,10 @@ def _run_check(
     the nearest whole dbu since ``Region.*_check()`` thresholds are integer
     database units.
 
+    Both regions are merged first (#995) -- see the comment on the
+    ``.merged()`` calls below for why KLayout's own merged semantics is not
+    enough for ``enclosing_check``/``enclosed_check``.
+
     Returns a ``(edge_pairs, outside_region)`` pair. ``edge_pairs`` is an
     ``EdgePairs`` collection, one entry per marginal violation, as returned
     by the underlying ``Region.*_check()`` primitive. ``outside_region`` is
@@ -717,6 +721,26 @@ def _run_check(
     """
     check = rule.check
     d = round(rule.threshold_dbu * dbu_scale)
+
+    # Merge each checked region before measuring anything (#995). A layer
+    # drawn as several abutting (touching, non-overlapping) shapes rather
+    # than one polygon is *one* physical region -- an ordinary GDS
+    # authoring/tiling choice, not a drawn defect -- but the raw shape
+    # iterator `run_drc` builds these regions from preserves the seams.
+    # KLayout's own "merged semantics" only papers over this for some of the
+    # primitives dispatched below (empirically: the single-layer checks and
+    # the `other` argument of a two-layer check); `enclosing_check`/
+    # `enclosed_check` still measure the *primary* region's raw polygon
+    # edges, so a cut sitting close to an internal seam is measured against
+    # that seam instead of the merged region's real outer edge -- a
+    # false-positive enclosure violation on geometry with hundreds of dbu of
+    # true margin. Merging is monotonic for these checks: the merged region
+    # covers exactly the same area with weakly fewer edges, so this only
+    # removes false positives, never masks a real shortfall (the
+    # `..._real_shortfall` regression tests pin that half).
+    region = region.merged()
+    if other_region is not None:
+        other_region = other_region.merged()
 
     if check in _SINGLE_LAYER_CHECKS:
         return getattr(region, f"{check}_check")(d), None

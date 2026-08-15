@@ -67,6 +67,18 @@ fixtures in `tests/corpus/legalize/` — none of it is asserted from memory.
 Connectivity invariance (`NETS`/`PINS` byte-diff, GP input vs. Rust output):
 **unchanged on both designs**.
 
+> **DRC-violation column, re-read after #995.** The
+> `diff.enclosing.licon.1` counts above were measured before #995 fixed a
+> `klt drc` false positive on touching-but-unmerged same-layer shapes (see
+> `docs/cli/drc.md` → "Macro-scale, machine-generated (standard-cell)
+> layout"). The same rule, on the same `sky130_fd_sc_hd` cell geometry, is
+> what the fully-routed `gcd` corpus fixture reported four of — every one a
+> false positive — so this column should be re-measured (it needs a local
+> sky130 PDK install) before it is cited as real geometry. The comparison
+> the column was there to make is unaffected either way: the two legalizers
+> agreed exactly, and that agreement is what the acceptance criterion
+> turned on.
+
 ## Reading the results against the acceptance criteria
 
 - **Legality (zero overlap on the site grid): met.** Both legalizers report

@@ -1016,22 +1016,18 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     # metal/via layers here).
     assert len(report["coverage"]["layers_checked"]) >= 5
 
-    # Regression pin against this specific, static, committed fixture (see
-    # docs/cli/drc.md's "Macro-scale, machine-generated (standard-cell)
-    # layout" section for why a handful of real diff.enclosing.licon.1
-    # violations at standard-cell row boundaries is an expected, understood
-    # property of this input -- not a `klt drc` defect).
-    assert report["violation_count"] == 4
-    assert report["rule_counts"] == {"diff.enclosing.licon.1": 4}
-
-    # Per-instance attribution (#451), verified against a *real* placed macro:
-    # each violation's flattened `cell` is the top cell, but `source_cell`
-    # names the originating standard cell -- here all four are inside a placed
-    # `sky130_fd_sc_hd__and3_1` instance, not merely "somewhere under gcd".
-    for entry in report["violations"]:
-        assert entry["cell"] == "gcd"
-        assert entry["source_cell"] == "sky130_fd_sc_hd__and3_1"
-        assert entry["source_path"] == ["sky130_fd_sc_hd__and3_1"]
+    # Regression pin against this specific, static, committed fixture. This
+    # pin was 4 `diff.enclosing.licon.1` violations until #995: all four were
+    # the same false positive -- `sky130_fd_sc_hd__and3_1` draws its own
+    # `diff` as two abutting, unmerged rectangles, and each flagged licon1
+    # cut sits 25 dbu from that internal seam while enclosed by ~925 dbu of
+    # the *merged* diff region. Every one of the four edge pairs was 25 dbu
+    # wide, inside a single cell instance -- not, as
+    # docs/cli/drc.md previously recorded, real geometry at a standard-cell
+    # row boundary that filler-cell insertion would absorb.
+    assert report["violation_count"] == 0
+    assert report["rule_counts"] == {}
+    assert report["status"] == "clean"
 
 
 def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
@@ -2342,6 +2338,123 @@ def test_run_drc_synthetic_enclosed_check_flags_zero_overlap(tmp_path, monkeypat
         "right": 20800,
         "top": 10000,
     }
+
+
+# --- #995: touching-but-unmerged same-layer shapes must not false-positive --
+
+
+def _sky130_diff_licon_stack(tmp_path, name, diff_boxes, licon_box):
+    """Write a two-layer diff-under-licon1 layout and return its path."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    diff = layout.layer(65, 20)
+    layout.set_info(diff, kdb.LayerInfo(65, 20, "diff.drawing"))
+    licon1 = layout.layer(66, 44)
+    layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
+    for box in diff_boxes:
+        top.shapes(diff).insert(box)
+    top.shapes(licon1).insert(licon_box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_sky130_diff_enclosing_licon_touching_shapes_clean(tmp_path):
+    """Issue #995's exact reproducer geometry: the enclosing layer is drawn
+    as two abutting (touching, non-overlapping) rectangles that share a
+    vertical edge at x=1035 rather than one merged polygon -- an ordinary
+    GDS authoring/tiling choice, not a drawn defect. The licon1 cut sits
+    close to that internal seam.
+
+    Measured against the *merged* diff region the cut is enclosed by 925 dbu
+    on its left side, far beyond `diff.enclosing.licon.1`'s 40 dbu margin.
+    Measured against the raw, unmerged polygons, the right-hand rectangle's
+    own left edge is only 25 dbu away, so `Region.enclosing_check` reported a
+    violation that the physical geometry does not have.
+    """
+    path = _sky130_diff_licon_stack(
+        tmp_path,
+        "diff_licon_touching_shapes",
+        [
+            kdb.Box(135, 1500, 1035, 1920),  # rect A
+            kdb.Box(1035, 1500, 1505, 1920),  # rect B, touches A at x=1035
+        ],
+        kdb.Box(1060, 1615, 1230, 1785),  # cut near the seam, 25 dbu right of it
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    # The rule really ran (both layers are in the stream) -- a "clean" verdict
+    # here must not be the vacuous kind that a skipped rule would produce.
+    assert "diff.enclosing.licon.1" not in report["coverage"]["rules_skipped"]
+    assert report["rule_counts"].get("diff.enclosing.licon.1", 0) == 0
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_diff_enclosing_licon_touching_shapes_real_shortfall(tmp_path):
+    """Control for the regression above: merging must only remove *false*
+    positives, never mask a genuine enclosure shortfall. The same two
+    touching rectangles, with the cut moved to within 25 dbu of the merged
+    region's own outer (right) edge, still trip `diff.enclosing.licon.1`."""
+    path = _sky130_diff_licon_stack(
+        tmp_path,
+        "diff_licon_touching_shapes_shortfall",
+        [
+            kdb.Box(135, 1500, 1035, 1920),  # rect A
+            kdb.Box(1035, 1500, 1505, 1920),  # rect B, touches A at x=1035
+        ],
+        kdb.Box(1310, 1615, 1480, 1785),  # 25 dbu inside the merged right edge
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["diff.enclosing.licon.1"] == 1
+    (violation,) = [
+        v for v in report["violations"] if v["rule"] == "diff.enclosing.licon.1"
+    ]
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "diff.drawing"
+
+
+def test_run_drc_synthetic_enclosed_check_touching_shapes_clean(tmp_path, monkeypatch):
+    """Symmetric coverage for `check="enclosed"` (#995): neither shipped deck
+    has an `"enclosed"` rule, so this exercises the dispatch against the same
+    minimal synthetic deck style used for #318 -- with the *enclosing* side
+    (`other_layer` here) drawn as two touching-but-unmerged rectangles."""
+    from klayout_tools.decks import DrcRule
+
+    synthetic_deck = [
+        DrcRule(
+            id="inner.enclosed.outer.1",
+            description="synthetic: inner must be enclosed by outer by >= 40 dbu",
+            layer=(10, 0),  # inner (the enclosed layer)
+            other_layer=(20, 0),  # outer (the enclosing layer)
+            check="enclosed",
+            threshold_dbu=40,
+        )
+    ]
+    monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: synthetic_deck)
+    monkeypatch.setattr("klayout_tools.drc.get_nominal_dbu", lambda name: 0.001)
+    monkeypatch.setattr("klayout_tools.drc.get_layer_names", lambda name: {})
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    outer = layout.layer(20, 0)
+    inner = layout.layer(10, 0)
+    top.shapes(outer).insert(kdb.Box(135, 1500, 1035, 1920))
+    top.shapes(outer).insert(kdb.Box(1035, 1500, 1505, 1920))
+    top.shapes(inner).insert(kdb.Box(1060, 1615, 1230, 1785))
+    path = tmp_path / "synthetic_enclosed_touching_shapes.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
 
 
 def test_run_drc_gf180mcu_reproducer_from_issue(tmp_path):
