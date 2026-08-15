@@ -1372,12 +1372,19 @@ def _stub_openroad_success_with_post_route_spef(
     design_nets_total: int | None = None,
     worst_slack_ns: float = -0.5,
     total_negative_slack_ns: float = -1.0,
+    writes_sdf: bool | None = None,
 ) -> None:
     """Layer the second, `_route_spef.tcl`-only `openroad` invocation on top
     of `_stub_openroad_success`'s existing per-stage fake -- that helper's
     own `_stage_from_script_path` cannot classify this new script name (it
     is not one of `STAGE_ORDER`'s own `_<stage>.tcl` suffixes), so this
-    wraps it rather than editing its shared behaviour."""
+    wraps it rather than editing its shared behaviour.
+
+    `writes_sdf` (issue #1002) stands in for the session's own `write_sdf`
+    call: `True` creates the file the generated script names, `False`
+    deliberately does not (OpenSTA reporting success while producing
+    nothing), and `None` -- the default -- asserts no `write_sdf` line was
+    generated at all."""
     _stub_openroad_success(monkeypatch)
     base_fake_run = place_and_route.subprocess.run
 
@@ -1386,6 +1393,19 @@ def _stub_openroad_success_with_post_route_spef(
             "_route_spef.tcl"
         ):
             return base_fake_run(cmd, **kwargs)
+
+        # Stand in for the script's own `write_sdf` call (issue #1002): read
+        # the generated Tcl back and honour (or deliberately ignore) it.
+        script_text = Path(cmd[5]).read_text()
+        write_sdf_lines = [
+            line for line in script_text.splitlines() if line.startswith("write_sdf")
+        ]
+        if writes_sdf is None:
+            assert not write_sdf_lines
+        else:
+            assert len(write_sdf_lines) == 1
+            if writes_sdf:
+                Path(write_sdf_lines[0].split()[-1]).write_text("(DELAYFILE)\n")
 
         metrics_path = cmd[4]
         with open(metrics_path, "w", encoding="utf-8") as handle:
@@ -1696,6 +1716,93 @@ def test_post_route_spef_full_annotation_sets_no_warning(tmp_path, monkeypatch):
     assert report["spef_sta"]["annotation_warning"] is None
 
 
+# --------------------------------------------------------------------------- #
+# `request.post_route_sdf` (issue #1002, survey section 4.3): `write_sdf`
+# inside the same post-`read_spef` OpenSTA session, so a downstream
+# `klt functional-verification --options.sdf` run re-simulates the design's
+# own testbench with real routed delays.
+# --------------------------------------------------------------------------- #
+
+
+def test_post_route_sdf_omitted_leaves_sdf_path_null(tmp_path, monkeypatch):
+    """The default is off, and the additive `sdf_path` member is `null` --
+    `post_route_spef`'s own behaviour is unchanged by this feature's
+    existence."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["spef_sta"]["sdf_path"] is None
+    script = (
+        tmp_path / ".klt" / "place-and-route" / "pnr_gcd_route_spef.tcl"
+    ).read_text()
+    assert "write_sdf" not in script
+
+
+def test_post_route_sdf_must_be_boolean(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, post_route_spef=True, post_route_sdf="yes"
+    )
+    with pytest.raises(PlaceAndRouteError, match="post_route_sdf must be a boolean"):
+        run_place_and_route(request_path)
+
+
+def test_post_route_sdf_requires_post_route_spef(tmp_path, monkeypatch):
+    """A request error, not a silent no-op: an SDF written from a session fed
+    by `estimate_parasitics -global_routing` would carry the coarse estimate's
+    delays while looking exactly like a post-route measurement to every
+    downstream simulation that annotates it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_sdf=True)
+    with pytest.raises(
+        PlaceAndRouteError, match="post_route_sdf requires request.post_route_spef"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_post_route_sdf_writes_and_reports_the_sdf(tmp_path, monkeypatch):
+    """Opting in emits the `write_sdf` Tcl line into the *same* session that
+    just ran `read_spef`, and reports the written path as `spef_sta.sdf_path`
+    -- the artifact `klt functional-verification`'s `options.sdf` consumes."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, post_route_spef=True, post_route_sdf=True
+    )
+    _stub_openroad_success_with_post_route_spef(monkeypatch, writes_sdf=True)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    sdf_path = report["spef_sta"]["sdf_path"]
+    assert sdf_path.endswith("gcd_route.sdf")
+    assert os.path.isfile(sdf_path)
+    script = (
+        tmp_path / ".klt" / "place-and-route" / "pnr_gcd_route_spef.tcl"
+    ).read_text()
+    assert f"write_sdf -divider . -include_typ {sdf_path}" in script
+    # The SPEF half is untouched -- this is one added line, not a new pass.
+    assert report["spef_sta"]["spef_path"].endswith(".spef")
+
+
+def test_post_route_sdf_missing_output_file_is_an_error(tmp_path, monkeypatch):
+    """Fail loud rather than promise an artifact that is not there: a
+    `sdf_path` a downstream run cannot open surfaces there as a *silent*
+    zero-delay simulation (Icarus treats an unopenable SDF as a non-fatal
+    `SDF WARNING` and `vvp` still exits 0)."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, post_route_spef=True, post_route_sdf=True
+    )
+    # `writes_sdf=False`: OpenSTA reports success but produces no file.
+    _stub_openroad_success_with_post_route_spef(monkeypatch, writes_sdf=False)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    with pytest.raises(PlaceAndRouteError, match="wrote no SDF file"):
+        run_place_and_route(request_path)
+
+
 def test_post_route_spef_not_run_before_route_stage(tmp_path, monkeypatch):
     """`post_route_spef: true` has no effect on a run that never reaches the
     `"route"` stage -- there is no routed GDS to extract parasitics from
@@ -1851,6 +1958,51 @@ def test_spef_sta_script_also_counts_coverage_of_the_designs_own_nets():
     assert "foreach klt_design_net [get_nets -quiet *]" in script
     assert "get_full_name $klt_design_net" in script
     assert 'puts "$klt_design_annotated $klt_design_total"' in script
+
+
+def test_spef_sta_script_omits_write_sdf_unless_requested():
+    """Byte-identical to the pre-#1002 script when `post_route_sdf` is off --
+    the whole feature is one conditional line."""
+    lines = place_and_route._spef_sta_script_lines(
+        checkpoint_in="/tmp/x.odb",
+        liberty_path="/tmp/x.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+        spef_path="/tmp/x.spef",
+        net_names=["_019_"],
+    )
+    assert not any(line.startswith("write_sdf") for line in lines)
+
+
+def test_spef_sta_script_writes_sdf_immediately_after_read_spef():
+    """Survey section 4.3's own sequencing: the SDF must be written *after*
+    section 4.1's `read_spef`, so its delays reflect the real extracted
+    routed parasitics rather than the `estimate_parasitics -global_routing`
+    estimate -- and before any report command, so nothing can sit between the
+    parasitics and the delays derived from them."""
+    lines = place_and_route._spef_sta_script_lines(
+        checkpoint_in="/tmp/x.odb",
+        liberty_path="/tmp/x.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+        spef_path="/tmp/x.spef",
+        net_names=["_019_"],
+        sdf_path="/tmp/gcd_route.sdf",
+    )
+    write_index = next(
+        index for index, line in enumerate(lines) if line.startswith("write_sdf")
+    )
+    assert lines[write_index - 1] == "read_spef /tmp/x.spef"
+    # `-divider .` (a Verilog simulator's hierarchy separator, not OpenSTA's
+    # own `/` default) and `-include_typ` (Icarus's default `-T typ` selects
+    # the triplet's typ member, which OpenSTA leaves empty by default) are
+    # both load-bearing for the SDF to be consumable at all.
+    assert lines[write_index] == "write_sdf -divider . -include_typ /tmp/gcd_route.sdf"
+    assert write_index < next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("report_worst_slack_metric")
+    )
 
 
 def test_count_spef_nets_annotated_parses_marker_block():

@@ -613,6 +613,26 @@ about this repo's own T1 (not T2 commercial-signoff) ceiling per
   anyway, §4.1/§4.2) but not the functional signal this item is scoped
   around. The `write_sdf` half of this item is unchanged and remains its
   own follow-on.
+- **Shipped — both halves (issue #1002, 2026-08-15).** The `write_sdf` half
+  landed as `klt place-and-route`'s optional `post_route_sdf` request field:
+  one `write_sdf -divider . -include_typ` call inside §4.1's own
+  post-`read_spef` OpenSTA session (so the written delays are the real
+  extracted-parasitic ones, exactly as this item's technique bullet
+  specifies), surfaced as `spef_sta.sdf_path`. The Icarus half landed as
+  `klt functional-verification`'s optional `options.sdf: {file, corner}`
+  block, implementing the spike's own recipe: a generated
+  `klt_sdf_annotate` elaboration root carrying an **absolute** SDF path,
+  `-gspecify -ginterconnect -s klt_sdf_annotate -T <corner>` on the build,
+  and a hard `SDF WARNING`/`SDF ERROR` transcript gate. The measurement
+  plan's own three-way comparison is exercised as a checked-in integration
+  test rather than a one-off: a delay well inside the sampling window leaves
+  the verdict unchanged, one outside it flips the *same* testbench to
+  failing. **The Icarus half was verified live against `iverilog` 13.0; the
+  OpenSTA half's generated Tcl is unit-asserted but not yet re-measured
+  against a real `openroad` session** (no binary or container available in
+  that task's environment, the same constraint #961/#996 recorded).
+  Contracts: `docs/cli/place-and-route.md` §"SDF export",
+  `docs/cli/functional-verification.md` §"SDF back-annotation".
 
 ### 4.4 On-chip variation (OCV) derating margin, a cheap realism increment once 4.1–4.2 land (Priority 4)
 

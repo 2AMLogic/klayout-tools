@@ -506,6 +506,50 @@ not `klt --version`, if you need to detect this kind of drift. See
   No `schema_version` bump — purely additive to `request.options`, same
   precedent as `random_seed`. See `docs/cli/functional-verification.md`'s
   "Compile-time defines, build args, and includes".
+- 2026-08-15 — **SDF-annotated gate-level re-simulation**, both halves
+  (issue #1002, Epic #700 Phase 3, `docs/design/post-route-sta-survey.md`
+  §4.3). `klt place-and-route` gains the optional boolean
+  **`post_route_sdf`** request field: one `write_sdf -divider .
+  -include_typ` call inside the existing `post_route_spef` OpenSTA session,
+  immediately after its `read_spef`, so the emitted IEEE-1497 delays are the
+  real ones computed from the resolved liberty plus the extracted routed
+  parasitics — never a synthetic or uniform model. The file is reported as
+  the additive **`spef_sta.sdf_path`** (`null` otherwise). It requires
+  `post_route_spef: true` (exit 1 otherwise): an SDF written from an
+  `estimate_parasitics -global_routing`-fed session would carry the coarse
+  estimate's delays while *looking* like a post-route measurement to
+  everything downstream. `klt functional-verification` gains the matching
+  optional **`options.sdf: {"file": ..., "corner": "min"|"typ"|"max"}`**
+  block, implementing the recipe
+  `docs/design/sdf-annotate-feasibility-spike.md` (#962) verified live: the
+  `$sdf_annotate` call rides in a generated `klt_sdf_annotate` elaboration
+  root (a cocotb regression's `hdl_toplevel` *is* the DUT, so there is
+  nowhere else to put an `initial` block) carrying an **absolute** SDF path;
+  the build gains `-gspecify -ginterconnect -s klt_sdf_annotate -T <corner>`;
+  and `options.sdf` on `engine: "verilator"` — or against an `iverilog`
+  older than 13.0, which has no `-ginterconnect` flag at all and would fail
+  the build with a message naming neither SDF nor this request field, or
+  alongside a `FUNCTIONAL` entry in `options.defines`, whose zero-delay cell
+  models carry none of the `specify` blocks an SDF annotates (both
+  issue #1004) — is exit 1, never a silent no-op.
+  Because **every** Icarus SDF failure mode is non-fatal — an unopenable
+  file, an unmatched instance, an unmatched `IOPATH` all leave `vvp` exiting
+  `0` and cocotb reporting a clean zero-delay pass — both engine transcripts
+  are scanned for `SDF WARNING`/`SDF ERROR` and any hit fails the run (exit
+  1), with the benign `TIMINGCHECK not supported` class exempted so a real
+  `write_sdf` output is not rejected wholesale. The response's
+  `environment.sdf` (`null`, or `{file, corner, annotated: true}`) makes an
+  annotated verdict distinguishable from a zero-delay one from the JSON
+  alone. Verification status: the Icarus half is exercised end to end
+  against real `iverilog` 13.0 by checked-in integration tests (the same
+  testbench passes at zero delay and fails once a >sampling-window delay is
+  annotated — survey §4.3's own coverage metric; a deliberately broken SDF
+  is proven to produce a green `results.xml` that only the transcript gate
+  catches); the OpenSTA half's generated Tcl is unit-asserted but **not**
+  re-measured against a real `openroad` session (none available). Purely
+  additive on both verbs — `schema_version` stays `1` per
+  `docs/json-contract.md`. See `docs/cli/place-and-route.md`'s "SDF export"
+  and `docs/cli/functional-verification.md`'s "SDF back-annotation".
 
 - 2026-08-14 — `klt place-and-route`'s `"route"` stage now exports the
   **as-built gate-level netlist** and surfaces it as a new

@@ -378,6 +378,21 @@ Nothing in this spike changes that split. Until it lands, the Icarus half is
 usable with any externally-produced SDF, which is a real capability on its
 own.
 
+> **Both halves have since shipped (issue #1002, 2026-08-15)**, following
+> this sketch: `klt place-and-route`'s `post_route_sdf` request field
+> (`spef_sta.sdf_path`) and `klt functional-verification`'s
+> `options.sdf: {file, corner}` block. §4.2's item 4 flagged one open
+> **[LIT]** question — whether OpenSTA's `write_sdf` emits `TIMINGCHECK`
+> sections, which would make Icarus's benign `TIMINGCHECK not supported`
+> warning fire once per cell on every real SDF. It was resolved by
+> *allowlisting the string* (that class, and only that class, is exempt from
+> the transcript gate) rather than by "count and report", precisely so the
+> gate cannot reject every real SDF; it remains **[LIT]** whether OpenSTA
+> actually emits those sections, since no `openroad`/OpenSTA binary was
+> available to the implementing task either. See
+> `docs/cli/functional-verification.md` §"SDF back-annotation" for the
+> shipped contract.
+
 ---
 
 ## 5. Reproducing this

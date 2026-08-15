@@ -349,6 +349,23 @@ list -- the survey's own flagged open risk -- is still checked explicitly
 :func:`_count_spef_nets_annotated`), never assumed. See
 ``docs/cli/place-and-route.md``'s "Post-route SPEF STA" section for the full
 contract.
+
+Post-route SDF export (``request.post_route_sdf``, issue #1002, Epic #700
+Phase 3, ``docs/design/post-route-sta-survey.md`` §4.3): the survey's §4.3
+names ``write_sdf`` as the *upstream* half of an SDF-annotated gate-level
+re-simulation, and is explicit about where it belongs -- "after §4.1's
+``read_spef``, so the written SDF reflects real routed-parasitic delays, not
+the global-routing estimate". The optional ``post_route_sdf`` boolean
+(default ``false``, and a request error unless ``post_route_spef`` is also
+``true``) adds exactly that: one ``write_sdf`` call inside the *same*
+``post_route_spef`` OpenSTA session, immediately after its ``read_spef``, so
+the emitted IEEE-1497 delays are computed from the design's own resolved
+liberty (``request.pdk.corner``) plus the extracted routed parasitics rather
+than from a synthetic or uniform delay model. The written file is reported as
+``spef_sta.sdf_path`` and is the artifact ``klt functional-verification``'s
+own ``options.sdf`` block consumes (see
+``docs/design/sdf-annotate-feasibility-spike.md`` for the Icarus half's own
+verified invocation recipe).
 """
 
 from __future__ import annotations
@@ -739,6 +756,9 @@ def run_place_and_route(
         request.get("max_antenna_repair_iterations")
     )
     post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
+    post_route_sdf = _validate_post_route_sdf(
+        request.get("post_route_sdf"), post_route_spef=post_route_spef
+    )
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -935,6 +955,9 @@ def run_place_and_route(
                 clock_port=clock_port,
                 clock_period_ns=clock_period_ns,
                 checkpoint_in=checkpoint_path,
+                # Issue #1002: `write_sdf` inside that same session, right
+                # after its `read_spef` -- see `_validate_post_route_sdf`.
+                write_sdf=post_route_sdf,
             )
     else:
         def_path = None
@@ -993,7 +1016,9 @@ def run_place_and_route(
         # was `true` *and* `stage_reached` is `"route"` -- the real-parasitics
         # A/B counterpart to the top-level (`estimate_parasitics
         # -global_routing`-derived) `worst_slack_ns`/etc. fields above. See
-        # `_post_route_spef_metrics`'s docstring for the field list.
+        # `_post_route_spef_metrics`'s docstring for the field list. Its own
+        # `sdf_path` member (issue #1002) is `null` in turn unless
+        # `request.post_route_sdf` was also `true`.
         "spef_sta": spef_sta,
         "provenance": provenance,
     }
@@ -1419,6 +1444,42 @@ def _validate_post_route_spef(value: Any) -> bool:
         return False
     if not isinstance(value, bool):
         raise PlaceAndRouteError("request.post_route_spef must be a boolean")
+    return value
+
+
+def _validate_post_route_sdf(value: Any, *, post_route_spef: bool) -> bool:
+    """Optional ``request.post_route_sdf`` (issue #1002, Epic #700 Phase 3,
+    ``docs/design/post-route-sta-survey.md`` §4.3) -- opts in to writing the
+    ``post_route_spef`` OpenSTA session's own delays out as an IEEE-1497 SDF
+    file (``write_sdf``, immediately after that session's ``read_spef``), for
+    ``klt functional-verification``'s ``options.sdf`` block to back-annotate
+    onto a gate-level re-run of the design's own testbench.
+
+    Omitted/``None`` defaults to ``False``: like every other flag in this
+    module whose cost a survey flagged rather than assumed free, it is
+    opt-in, and it has no meaning at all without the session that produces
+    it.
+
+    **Requires ``post_route_spef: true``**, and says so rather than silently
+    writing nothing. That is not an implementation convenience -- it is the
+    whole point of §4.3's own sequencing: an SDF written from a session whose
+    parasitics came from ``estimate_parasitics -global_routing`` would carry
+    the coarse global-routing estimate's delays while *looking* exactly like
+    a post-route measurement to every downstream simulation that annotates
+    it. The `write_sdf` call therefore rides inside the real-parasitics
+    session or not at all.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PlaceAndRouteError("request.post_route_sdf must be a boolean")
+    if value and not post_route_spef:
+        raise PlaceAndRouteError(
+            "request.post_route_sdf requires request.post_route_spef: true -- "
+            "the SDF is written from the post-route read_spef session, so an "
+            "SDF written without it would carry estimate_parasitics "
+            "-global_routing delays while looking like a post-route measurement"
+        )
     return value
 
 
@@ -1994,6 +2055,7 @@ def _spef_sta_script_lines(
     clock_period_ns: float | None,
     spef_path: str,
     net_names: list[str],
+    sdf_path: str | None = None,
 ) -> list[str]:
     """Build the Tcl script for the second, ``post_route_spef``-only
     ``openroad`` invocation (issue #948, Epic #700 Phase 3) -- a fresh
@@ -2033,6 +2095,26 @@ def _spef_sta_script_lines(
     OpenSTA, issue #951; the escaping this replaced was never exercised
     against a name that existed in the design, since #948's baseline
     correlation was 0%).
+
+    ``sdf_path`` (issue #1002, survey §4.3), when given, appends one
+    ``write_sdf`` call **immediately after ``read_spef``** and before any
+    report command -- the ordering §4.3 states explicitly ("after §4.1's
+    ``read_spef``, so the written SDF reflects real routed-parasitic
+    delays"), and the reason this rides in *this* session rather than the
+    primary ``"route"`` stage's own. Two flags are passed deliberately:
+
+    - ``-divider .`` -- SDF hierarchy divider. OpenSTA's own default is
+      ``/``, but the consumer of this file is a Verilog simulator whose
+      hierarchy separator is ``.`` (this repo's own consumer being
+      ``klt functional-verification``'s ``options.sdf`` block, whose
+      ``$sdf_annotate`` root-instance argument is a Verilog path). Emitting
+      ``/`` would leave every ``INSTANCE`` name unmatchable.
+    - ``-include_typ`` -- populate the *typ* member of every ``min:typ:max``
+      triplet. Icarus selects a corner from the triplet at compile time
+      (``iverilog -T min|typ|max``, its default being ``typ``; verified live
+      in ``docs/design/sdf-annotate-feasibility-spike.md`` §3.5), so a
+      triplet written with an empty typ member -- OpenSTA's default -- would
+      leave the *default* Icarus corner selecting nothing.
     """
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
     lines += _clock_lines(clock_port, clock_period_ns)
@@ -2059,6 +2141,8 @@ def _spef_sta_script_lines(
         f'puts "{_SPEF_NET_CHECK_END}"',
         f"read_spef {spef_path}",
     ]
+    if sdf_path is not None:
+        lines.append(f"write_sdf -divider . -include_typ {sdf_path}")
     lines += _metrics_report_lines(include_fmax=False, include_power=False)
     lines += _violation_count_lines()
     return lines
@@ -2187,6 +2271,7 @@ def _post_route_spef_metrics(
     clock_port: str | None,
     clock_period_ns: float | None,
     checkpoint_in: str,
+    write_sdf: bool = False,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -2202,6 +2287,7 @@ def _post_route_spef_metrics(
 
         {
             "spef_path": str,
+            "sdf_path": str | None,
             "worst_slack_ns": float | None,
             "total_negative_slack_ns": float | None,
             "setup_violation_count": int,
@@ -2213,6 +2299,17 @@ def _post_route_spef_metrics(
             "annotation_complete": bool,
             "annotation_warning": str | None,
         }
+
+    ``write_sdf`` (``request.post_route_sdf``, issue #1002, survey §4.3):
+    when true, the same OpenSTA session also writes its delays out as an
+    IEEE-1497 SDF file, immediately after ``read_spef`` -- so the emitted
+    cell and interconnect delays are the real ones this session computed
+    from the resolved liberty plus the extracted routed parasitics, never a
+    synthetic or uniform model. The path is reported as ``sdf_path``
+    (``None`` when not requested), mirroring ``spef_path``. It is the
+    artifact ``klt functional-verification``'s ``options.sdf`` block
+    consumes; see :func:`_spef_sta_script_lines` for the two ``write_sdf``
+    flags that make the output consumable by a Verilog simulator at all.
 
     Two independent coverage ratios are reported, because they answer
     different questions (see :func:`_spef_sta_script_lines`):
@@ -2383,6 +2480,9 @@ def _post_route_spef_metrics(
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_spef.tcl")
     metrics_path = os.path.join(output_dir, f"{hdl_toplevel}_route_spef_metrics.json")
+    sdf_path = (
+        os.path.join(output_dir, f"{hdl_toplevel}_route.sdf") if write_sdf else None
+    )
     lines = _spef_sta_script_lines(
         checkpoint_in=checkpoint_in,
         liberty_path=liberty_path,
@@ -2390,12 +2490,26 @@ def _post_route_spef_metrics(
         clock_period_ns=clock_period_ns,
         spef_path=spef_path,
         net_names=net_names,
+        sdf_path=sdf_path,
     )
     _write_script(script_path, lines)
 
     completed = _run_openroad(script_path, metrics_path)
     if completed.returncode != 0:
         raise PlaceAndRouteError(_engine_error_message("route_spef_sta", completed))
+
+    # Fail loud rather than reporting a path to a file that is not there
+    # (issue #1002): a `sdf_path` in the response is a promise a downstream
+    # `klt functional-verification --options.sdf` run will consume, and a
+    # missing-but-reported artifact would surface there as a *silent*
+    # zero-delay run (Icarus's `$sdf_annotate` treats an unopenable file as a
+    # non-fatal `SDF WARNING`, `vvp` still exits 0 -- see
+    # `docs/design/sdf-annotate-feasibility-spike.md` §3.3).
+    if sdf_path is not None and not os.path.isfile(sdf_path):
+        raise PlaceAndRouteError(
+            "request.post_route_sdf: the post-route OpenSTA session reported "
+            f"success but wrote no SDF file at '{sdf_path}'"
+        )
 
     metrics = _read_metrics(metrics_path, "route_spef_sta")
     setup_violation_count = _count_violations(
@@ -2438,6 +2552,9 @@ def _post_route_spef_metrics(
 
     return {
         "spef_path": spef_path,
+        # Additive (issue #1002): `None` unless `request.post_route_sdf` was
+        # `true`, mirroring `spef_path`'s own shape.
+        "sdf_path": sdf_path,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
         "setup_violation_count": setup_violation_count,

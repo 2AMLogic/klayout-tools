@@ -106,6 +106,7 @@ synthesize` already use — and kept, never deleted:
 | `sim_build_<engine>/` | cocotb's build directory (the compiled model / `.vvp`). |
 | `build_<engine>.log` / `test_<engine>.log` | The engine's own transcripts. These are captured to files rather than inherited, so simulator chatter can never corrupt `--format json`'s stdout. |
 | `coverage.info` | lcov-format coverage, on coverage runs only (see below). |
+| `klt_sdf_annotate.v` | The generated `$sdf_annotate` elaboration root, on `options.sdf` runs only — kept, so the exact annotation call a run used is inspectable after the fact. |
 
 ## Coverage
 
@@ -151,10 +152,11 @@ field.
 
 `options.build_args` **composes with**, rather than replaces, the fixed
 `--coverage --trace` args a `options.coverage: true` run already adds (see
-"Coverage" above): the effective build args are always
-`["--coverage", "--trace"] + options.build_args` when both are given, so a
-user-supplied flag is appended last and can still override a coverage
-default if the two conflict.
+"Coverage" above) and the SDF back-annotation args an `options.sdf` run
+already adds (see "SDF back-annotation" below): the effective build args are
+always `[<coverage args>] + [<sdf args>] + options.build_args`, in that
+order, so a user-supplied flag is appended last and can still override an
+earlier default if the two conflict.
 
 `options.includes` resolves each entry relative to the request file's own
 directory -- the same convention `sources` and `testbench.module` already
@@ -186,6 +188,114 @@ This is the same reproducibility bar `klt sim`'s Monte Carlo seeding and
 `klt lvs`'s `environment` hashes already set (issue #423) — a stored CI
 result's `environment.random_seed` is enough to reproduce it exactly.
 
+## SDF back-annotation: `options.sdf`
+
+`options.sdf` re-runs a **gate-level** regression with real post-route delays
+back-annotated from an SDF file — the delay-annotated leg of
+[`docs/design/post-route-sta-survey.md`](../design/post-route-sta-survey.md)
+§4.3. The natural producer of that file is [`klt
+place-and-route`](place-and-route.md)'s own `post_route_sdf` field
+(`spef_sta.sdf_path`), but any IEEE-1497 SDF works:
+
+```json
+{
+  "sources": ["gcd_route.v", "/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/primitives.v",
+              "/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v"],
+  "hdl_toplevel": "gcd",
+  "testbench": { "module": "test_gcd" },
+  "options": { "sdf": { "file": ".klt/place-and-route/gcd_route.sdf", "corner": "typ" } }
+}
+```
+
+The **same** testbench the zero-delay gate-level check already used runs
+unmodified — that is the point: the coverage signal §4.3 asks for is *"does
+the testbench's own pass/fail outcome change once real delay is present?"*.
+Everything below was verified live against Icarus Verilog 13.0
+([`docs/design/sdf-annotate-feasibility-spike.md`](../design/sdf-annotate-feasibility-spike.md),
+issue #962).
+
+**Icarus only.** `options.sdf` with `engine: "verilator"` is rejected with
+exit 1 — Verilator has no `$sdf_annotate` path at all, so silently ignoring
+the block would report a zero-delay verdict as if it were annotated. This is
+the mirror image of `options.coverage`'s Verilator-only rejection.
+
+**Icarus 13.0 or newer.** `-ginterconnect` — mandatory here, since a
+post-route SDF's net delays are entirely `INTERCONNECT` entries — does not
+exist before Icarus 13.0. On 12.0 (Ubuntu noble's distro package, for
+instance) `iverilog` rejects the flag outright with `Unknown/Unsupported
+Language generation interconnect` and exit 255. This verb probes the resolved
+`iverilog -V` version and rejects the request up front with that reason
+(issue #1004), rather than letting a raw compiler error surface from four
+layers down. A version string it cannot resolve or parse is *not* treated as
+a failure — the probe is a courtesy, and a real incompatibility still fails
+the build.
+
+**Not with `FUNCTIONAL` cell models.** `options.sdf` together with a
+`FUNCTIONAL` entry in `options.defines` is exit 1. A PDK puts its zero-delay
+behavioural models and its SDF-annotatable *timing* models in the two branches
+of the same `` `ifdef FUNCTIONAL `` guard, and only the non-`FUNCTIONAL`
+branch carries the `specify` blocks an SDF's `IOPATH` entries annotate — so
+the combination asks for two incompatible things. At best the annotation
+matches nothing; on Icarus 12.0 the run silently mis-simulates outright (every
+flop samples `x`, no error raised — issue #1004). Either way the verdict is
+quietly wrong, which is what this feature exists to prevent, so it is rejected
+at request-validation time rather than run. Drop `FUNCTIONAL` to re-simulate
+with real delays, or drop `options.sdf` to keep the zero-delay run.
+
+**How the annotation is wired.** `$sdf_annotate` is a Verilog system task and
+must be called from an `initial` block inside some elaborated module — and a
+cocotb regression has no such module, since `hdl_toplevel` *is* the DUT. So
+this verb generates a second, otherwise-empty **elaboration root** carrying
+the call (the same idiom cocotb's own Icarus runner uses for its waveform-dump
+module) and elaborates it alongside the DUT:
+
+```verilog
+module klt_sdf_annotate();
+  initial $sdf_annotate("/abs/path/gcd_route.sdf", gcd);
+endmodule
+```
+
+The DUT's own hierarchy is untouched, so every `dut.<port>` handle in the
+Python testbench keeps resolving exactly as before. The embedded path is
+always **absolute**: `vvp` runs with its own working directory, and a relative
+path there is one `SDF WARNING` away from a silent zero-delay run. The build
+gains `-gspecify -ginterconnect -s klt_sdf_annotate -T <corner>` — the first
+two are mandatory (without `-gspecify`, Icarus discards the annotation call
+itself and runs at zero delay; without `-ginterconnect`, every `INTERCONNECT`
+entry — which is exactly what a post-route SDF carries — fails at run time).
+
+**Corner selection is a compile-time flag.** `options.sdf.corner`
+(`"min"`/`"typ"`/`"max"`, default `"typ"`) maps to `iverilog -T`, which picks
+one member of each SDF `min:typ:max` triplet. It is *not* an `$sdf_annotate`
+argument: Icarus ignores every argument past the second ("`$sdf_annotate`
+currently only uses the first two argument", its own wording), so a corner
+passed there would be silently ignored.
+
+**Every SDF failure mode is non-fatal, so the transcript is scanned.** Icarus
+reports an unopenable file, an unmatched instance, an `IOPATH` the cell's
+`specify` block does not declare, or an `INTERCONNECT` without
+`-ginterconnect`, and then **carries on**: `vvp` exits `0`, and cocotb duly
+reports the zero-delay verdict as a clean pass. This verb therefore scans both
+engine transcripts for `SDF WARNING`/`SDF ERROR` and fails the run (exit 1) on
+any line found — the difference between "the design was re-verified with real
+delays" and "the design was re-run at zero delay and nobody noticed". One
+class is exempt: `TIMINGCHECK not supported`, which fires on *correct* input
+(a real `write_sdf` emits `TIMINGCHECK` sections and Icarus implements SDF
+delays but not SDF timing checks) and does not affect the delays it does
+apply.
+
+**Known limitation, inherited from Icarus**: no setup/hold violation
+*reporting* on this path — it models delays only, so `$setuphold`-driven `X`
+propagation on a violated flop does not happen and this path is *less*
+pessimistic than a commercial gate-level sim. Slack numbers remain OpenSTA's
+job ([`klt place-and-route`](place-and-route.md)'s `spef_sta`). A genuine
+timing failure still surfaces here as a *functional* failure the testbench
+catches, which is the signal this feature is scoped around.
+
+An annotated run is identifiable from the JSON alone: `environment.sdf` is
+`null` on an ordinary run and `{"file", "corner", "annotated": true}` on an
+annotated one.
+
 ## Request
 
 ```json
@@ -201,7 +311,8 @@ result's `environment.random_seed` is enough to reproduce it exactly.
     "random_seed": 1785780800,
     "defines": { "USE_POWER_PINS": null, "FUNCTIONAL": "1" },
     "build_args": ["-Wall"],
-    "includes": ["cells"]
+    "includes": ["cells"],
+    "sdf": { "file": "gcd_route.sdf", "corner": "typ" }
   }
 }
 ```
@@ -219,8 +330,10 @@ result's `environment.random_seed` is enough to reproduce it exactly.
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
 | `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
-| `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds (composed, not replaced — see "Coverage"). Defaults to `[]`. |
+| `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
+| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
+| `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. |
 
 ## Response
@@ -254,7 +367,8 @@ result's `environment.random_seed` is enough to reproduce it exactly.
     "engine_version": "13.0",
     "cocotb_version": "2.0.1",
     "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml",
-    "random_seed": 1785780800
+    "random_seed": 1785780800,
+    "sdf": null
   }
 }
 ```
@@ -268,7 +382,7 @@ result's `environment.random_seed` is enough to reproduce it exactly.
 | `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure. `test_count` includes skipped tests, so `passed + failed + skipped == test_count`. |
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"). |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, `{file, corner, annotated: true}` on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
@@ -279,7 +393,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | Every test passed (`status: "pass"`). |
-| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
+| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
