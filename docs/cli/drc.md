@@ -452,21 +452,29 @@ against this layout, confirming the whole-layout-flattened design (see
 "Limitation: whole-layout, flattened" below) scales to macro-scale,
 deep-instance-count input without a special case.
 
-The run did surface a handful of genuine `diff.enclosing.licon.1`
-violations, though — worth understanding as a property of the **input**,
-not a `klt drc` defect. They cluster at row boundaries between adjacent
-standard-cell instances (confirmed by inspecting the merged `diff` region
-around each violation: the flagged shape spans two neighboring cell
-instances, not one). `klt place-and-route` does not yet run a filler-cell
-insertion stage (its stage set is `floorplan` → `place` → `cts` → `route`
-only, per `docs/cli/place-and-route.md`) — a full ORFS-style flow inserts
-filler cells to close exactly these row gaps before signoff DRC, which
-would very likely absorb this class of violation. Until filler-cell
-insertion exists, a `klt drc` run against `klt place-and-route` output
-directly (skipping filler insertion) can legitimately show a small number
-of row-gap-adjacent enclosure violations — this is the curated `sky130`
-deck correctly reporting real, if flow-artifact-caused, geometry, not a
-false positive to suppress.
+The run did surface four `diff.enclosing.licon.1` violations, originally
+documented here as a genuine property of the **input** (row gaps between
+adjacent standard-cell instances that a filler-cell insertion stage, which
+`klt place-and-route` does not yet run, would close). Issue #995 showed
+that reading was wrong: **all four were false positives from `klt drc`
+itself**, and the fixture now reports `"status": "clean"`.
+
+The mechanism (fixed in `_run_check`): `run_drc` built each checked
+`Region` straight from the raw shape iterator, and `Region.enclosing_check`
+measures the *primary* region's raw polygon edges rather than its merged
+outline. `sky130_fd_sc_hd__and3_1` draws its own `diff` as two abutting,
+unmerged rectangles; each flagged `licon1` cut sits 25 dbu from that
+internal seam — every one of the four reported edge pairs was exactly 25
+dbu wide, entirely inside one cell instance — while the *merged* `diff`
+region encloses it by ~925 dbu on that side, far beyond the rule's 0.04 um
+margin. Both regions are now merged before any check runs, which only ever
+removes false positives: a merged region covers the same area with weakly
+fewer edges, so a genuine enclosure shortfall still reports (pinned by
+`test_run_drc_sky130_diff_enclosing_licon_touching_shapes_real_shortfall`).
+
+Splitting one layer's geometry into several touching shapes is an ordinary
+GDS authoring/tiling choice, not a drawn defect, so this class of report
+was never a real violation to fix in the layout.
 
 ## Mixed sky130_fd_sc_hd + analog-macro layout (Epic #393 Phase 3, #456)
 
@@ -483,10 +491,14 @@ scoped to "see" only one of the two domains — every rule already runs
 against every shape in the flattened `Region`, standard-cell or macro
 alike, by construction. This was confirmed two ways, not just asserted:
 
-1. **A real, pre-existing violation** (`diff.enclosing.licon.1`, the same
-   class documented above) was found in the standard-cell region of the
+1. **A pre-existing violation** (`diff.enclosing.licon.1`, the same class
+   documented above) was found in the standard-cell region of the
    unmodified layout — direct evidence the deck was already evaluating
-   that domain.
+   that domain. (#995 later showed this rule's reports on unmodified
+   `sky130_fd_sc_hd` geometry were the merge false positive described
+   above, so treat this as evidence the *rule ran* there, not that the
+   layout had a real defect; point 2 below is the load-bearing half of the
+   finding either way.)
 2. **A known violation (`poly.width.1`, an undersized `poly.drawing` shape)
    was injected at a caller-chosen location inside each region separately**
    — once inside the macro's own placed footprint, once inside the

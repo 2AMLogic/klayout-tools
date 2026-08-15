@@ -391,8 +391,13 @@ def test_openroad_gcd_fixture_report(tmp_path):
     assert report["layer_count"] == 31
     assert report["cell_count"] == 69
     assert report["instance_count"] == 3645
+    # This pin was 4 `diff.enclosing.licon.1` violations until #995: all four
+    # were the same false positive on `sky130_fd_sc_hd__and3_1`'s own
+    # touching-but-unmerged `diff` shapes (see
+    # `tests/test_drc.py::test_openroad_gcd_fixture_produces_well_formed_report`
+    # and `docs/cli/drc.md` for the mechanism), not real row-gap geometry.
     assert report["drc"] == {
         "deck": "sky130",
-        "status": "violations",
-        "violation_count": 4,
+        "status": "clean",
+        "violation_count": 0,
     }

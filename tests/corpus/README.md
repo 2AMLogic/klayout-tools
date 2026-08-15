@@ -116,10 +116,12 @@ Phase 5 of [Epic #391](https://github.com/2AMLogic/klayout-tools/issues/391);
   with every device matched on both sides (no silently-dropped devices at
   macro scale); a deliberately-corrupted variant (one standard-cell
   transistor's width changed) is caught as a `device.property` mismatch.
-  Not fully DRC-clean — `klt drc` reports 4 genuine row-gap
-  `diff.enclosing.licon.1` violations traced to `klt place-and-route`
-  lacking a filler-cell insertion stage (`docs/cli/drc.md` documents this as
-  an input property, not a verb defect).
+  DRC-clean as of #995 — `klt drc` previously reported 4
+  `diff.enclosing.licon.1` violations here, recorded as row-gap geometry
+  from `klt place-and-route` lacking a filler-cell insertion stage, but all
+  four were a `klt drc` false positive on `sky130_fd_sc_hd__and3_1`'s own
+  touching-but-unmerged `diff` shapes (`docs/cli/drc.md` → "Macro-scale,
+  machine-generated (standard-cell) layout" has the full mechanism).
 - **License note**: like the sky130/gf180mcu standard-cell corpus above,
   the merged GDS embeds real `sky130_fd_sc_hd` cell-view geometry from the
   SkyWater open PDK (Apache License 2.0) — the same license as
@@ -188,10 +190,10 @@ not through `klt place-and-route`'s own full floorplan→place→cts→route flo
   pins) and comparing the layout against it reports `status: "match"`, with
   every device matched on both sides and only the same deck-structural
   warnings (`device.body_unverified` + `topology`) `gcd`'s own self-compare
-  carries. Not fully DRC-clean, for the same documented, pre-existing
-  reason as `gcd`: `klt drc` reports 2 genuine row-gap
-  `diff.enclosing.licon.1` violations traced to `klt place-and-route`
-  lacking a filler-cell insertion stage — not a new defect.
+  carries. DRC-clean as of #995, for the same reason as `gcd`: the 2
+  `diff.enclosing.licon.1` violations recorded here were the same `klt drc`
+  false positive on touching-but-unmerged same-layer `diff` shapes, not
+  row-gap geometry from the missing filler-cell insertion stage.
 - **License note**: same as `gcd` above — the merged GDS embeds real
   `sky130_fd_sc_hd` cell-view geometry (Apache License 2.0); `klt`'s own
   generated synthesis/place-and-route logic remains MIT-licensed.

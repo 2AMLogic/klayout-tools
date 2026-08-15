@@ -16,6 +16,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-14 — `klt drc` no longer reports false-positive `"enclosing"` /
+  `"enclosed"` violations when a checked layer is drawn as several abutting
+  (touching, non-overlapping) shapes rather than one merged polygon (issue
+  #995). `run_drc` built each checked `Region` straight from the raw shape
+  iterator, and `Region.enclosing_check`/`enclosed_check` measure the
+  *primary* region's raw polygon edges — so a cut sitting close to an
+  internal seam between two touching shapes was measured against that seam
+  instead of the merged region's real outer edge. `_run_check` now merges
+  both regions before dispatching to any check primitive. This only removes
+  false positives: a merged region covers the same area with weakly fewer
+  edges, so a genuine shortfall still reports. Measured on the committed
+  `tests/corpus/place_and_route/gcd.gds.gz`, whose four
+  `diff.enclosing.licon.1` violations were previously documented as real
+  row-gap geometry: all four were this false positive (every reported edge
+  pair exactly 25 dbu wide, inside a single `sky130_fd_sc_hd__and3_1`
+  instance whose own `diff` is drawn as two abutting rectangles, enclosed by
+  ~925 dbu of the merged region), and both machine-generated corpus fixtures
+  (`gcd`, `mult8`) now report `"status": "clean"`. No response-shape change;
+  `schema_version` unaffected.
 - 2026-08-14 — `klt place-and-route`'s `post_route_spef` SPEF no longer
   declares every routed net a top-level design port (issue #961 defect 1,
   Epic #700 Phase 3). `--def-net-names` (#951) gives every routed net a real
