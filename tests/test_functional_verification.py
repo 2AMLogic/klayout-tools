@@ -1476,6 +1476,32 @@ def test_sdf_option_corner_must_be_min_typ_or_max(tmp_path, corner):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize("version", ["12.0", "11.0", "12.0 (stable)"])
+def test_sdf_on_a_pre_13_icarus_is_a_request_error(tmp_path, monkeypatch, version):
+    """`-ginterconnect` does not exist before Icarus 13.0 (issue #1004, found
+    live on Ubuntu noble's 12.0 package): `iverilog` fails the build with
+    "Unknown/Unsupported Language generation interconnect" and exit 255, four
+    layers below this API. Since a post-route SDF's net delays are entirely
+    INTERCONNECT entries, that host cannot serve the request at all -- so it
+    is rejected up front, naming the actual constraint."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    monkeypatch.setattr(fv, "_engine_version", lambda engine: version)
+
+    with pytest.raises(
+        FunctionalVerificationError, match="requires Icarus Verilog 13.0 or newer"
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("version", ["13.0", "13.0 (stable)", "14.0", None, "??"])
+def test_sdf_engine_capability_gate_admits_13_and_the_unknowable(version):
+    """The gate is a courtesy, not a lock: an unresolvable or unparsable
+    version string must not block a run the build itself would have served
+    fine (and whose real failures the transcript scan still catches)."""
+    fv._check_sdf_engine_capability(version)
+
+
 def test_stubbed_sdf_generates_the_annotate_shim_with_an_absolute_path(
     tmp_path, monkeypatch
 ):

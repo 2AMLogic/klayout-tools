@@ -183,6 +183,18 @@ SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
 #: drops build args, say), that is a silent zero-delay run, caught here.
 SDF_OMITTED_ANNOTATION_MARKER = "Omitting $sdf_annotate"
 
+#: Minimum Icarus *major* version that has ``-ginterconnect`` at all (issue
+#: #1004's live finding on Icarus 12.0, folded in here rather than deferred).
+#: The spike's GO verdict was captured on Icarus 13.0 -- this repo's own
+#: pinned build -- and on 12.0 (Ubuntu noble's distro package) ``iverilog``
+#: rejects the flag outright: ``Unknown/Unsupported Language generation
+#: interconnect``, exit 255. Since ``-ginterconnect`` is *mandatory* for a
+#: post-route SDF (every ``INTERCONNECT`` entry fails without it), an older
+#: Icarus cannot serve this request at all; probing the resolved version and
+#: saying so is strictly better than letting a raw compiler error surface
+#: from four layers down.
+SDF_MIN_ICARUS_MAJOR = 13
+
 _ENGINE_VERSION_COMMANDS = {
     "icarus": (["iverilog", "-V"], re.compile(r"Icarus Verilog version (\S+)")),
     "verilator": (["verilator", "--version"], re.compile(r"Verilator (\S+)")),
@@ -614,6 +626,41 @@ def _write_sdf_annotate_shim(path: str, *, sdf_path: str, hdl_toplevel: str) -> 
             f'  initial $sdf_annotate("{escaped}", {hdl_toplevel});\n'
             "endmodule\n"
         )
+
+
+def _check_sdf_engine_capability(version: str | None) -> None:
+    """Reject an ``options.sdf`` request the resolved Icarus cannot serve
+    (issue #1004's finding, folded into #1002's own implementation).
+
+    ``-ginterconnect`` -- mandatory for a post-route SDF, whose entire
+    net-delay content is ``INTERCONNECT`` entries -- does not exist before
+    Icarus 13.0. On 12.0 ``iverilog`` fails the *build* with ``Unknown/
+    Unsupported Language generation interconnect`` and exit 255, four layers
+    below this API, which reads as "the simulator is broken" rather than
+    "this host's Icarus is too old for SDF". Probing
+    :data:`SDF_MIN_ICARUS_MAJOR` up front converts that into a request error
+    naming the actual constraint.
+
+    An **unresolvable** version (``None`` -- ``iverilog -V`` missing or
+    unparsable) is deliberately *not* an error: the probe is a courtesy, not
+    a gate, and a failed build plus the transcript scan still catch a real
+    incompatibility. Refusing to run on an unreadable version string would
+    trade a clear downstream failure for a spurious upstream one.
+    """
+    if version is None:
+        return
+    match = re.match(r"(\d+)", version)
+    if match is None:
+        return
+    if int(match.group(1)) >= SDF_MIN_ICARUS_MAJOR:
+        return
+    raise FunctionalVerificationError(
+        f"options.sdf requires Icarus Verilog {SDF_MIN_ICARUS_MAJOR}.0 or "
+        f"newer -- the resolved iverilog is version {version}, which has no "
+        "'-ginterconnect' flag ('Unknown/Unsupported Language generation "
+        "interconnect'). A post-route SDF's net delays are INTERCONNECT "
+        "entries, so they cannot be annotated on this build at all"
+    )
 
 
 def _scan_sdf_diagnostics(*log_paths: str) -> list[str]:
@@ -1180,6 +1227,11 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
+        # Before generating anything: is this host's Icarus new enough to
+        # have `-ginterconnect` at all? (issue #1004 -- 12.0 does not, and
+        # fails the build with a message that names neither SDF nor this
+        # request field.)
+        _check_sdf_engine_capability(_engine_version(engine))
         # The generated second elaboration root, and the three flags that
         # make it do anything at all -- plus `-T <corner>`, which is how
         # Icarus selects a member of each SDF `min:typ:max` triplet (a

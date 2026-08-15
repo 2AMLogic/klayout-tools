@@ -219,6 +219,17 @@ exit 1 — Verilator has no `$sdf_annotate` path at all, so silently ignoring
 the block would report a zero-delay verdict as if it were annotated. This is
 the mirror image of `options.coverage`'s Verilator-only rejection.
 
+**Icarus 13.0 or newer.** `-ginterconnect` — mandatory here, since a
+post-route SDF's net delays are entirely `INTERCONNECT` entries — does not
+exist before Icarus 13.0. On 12.0 (Ubuntu noble's distro package, for
+instance) `iverilog` rejects the flag outright with `Unknown/Unsupported
+Language generation interconnect` and exit 255. This verb probes the resolved
+`iverilog -V` version and rejects the request up front with that reason
+(issue #1004), rather than letting a raw compiler error surface from four
+layers down. A version string it cannot resolve or parse is *not* treated as
+a failure — the probe is a courtesy, and a real incompatibility still fails
+the build.
+
 **How the annotation is wired.** `$sdf_annotate` is a Verilog system task and
 must be called from an `initial` block inside some elaborated module — and a
 cocotb regression has no such module, since `hdl_toplevel` *is* the DUT. So
@@ -309,7 +320,7 @@ annotated one.
 | `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
-| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` — `options.sdf` with `engine: "verilator"` is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
+| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, or against a pre-13.0 `iverilog` (no `-ginterconnect`), is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. |
 
@@ -370,7 +381,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | Every test passed (`status: "pass"`). |
-| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine that has no `$sdf_annotate` path, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
+| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
