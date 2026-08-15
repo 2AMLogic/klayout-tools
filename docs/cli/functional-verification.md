@@ -126,6 +126,41 @@ which would be indistinguishable from "not requested".
 Functional coverage (`cocotb-coverage`-style bins defined in the testbench)
 is out of scope for this contract; `coverage` is structural coverage only.
 
+## Compile-time defines, build args, and includes
+
+A PDK's own behavioural Verilog cell models commonly gate their content
+behind compile-time `` `ifdef ``s the caller is expected to define -- e.g.
+`USE_POWER_PINS` (whether cell modules carry supply pins at all) and
+`FUNCTIONAL` (zero-delay behavioural models vs. SDF-annotatable timing models
+under the same guard). `options.defines`, `options.build_args`, and
+`options.includes` forward straight through to cocotb's own
+`Runner.build(defines=..., includes=...)` (and the accumulated `build_args`
+list) -- exactly the knobs Icarus/Verilator's own compile-time invocation
+already exposes, with no translation in between.
+
+Without these fields, the only way to define such a macro was a tiny
+"defines" Verilog file listed *first* in `request.sources`, relying on the
+fact that a `` `define `` set while compiling one file in a multi-file
+`iverilog`/Verilator invocation stays in effect for every file compiled
+afterward (no per-file preprocessor scoping unless something calls
+`` `resetall ``). That still works, but it is a preprocessing-order
+accident -- the defines file must sort/list before anything that consumes
+the macro, and the requirement is invisible from the request schema itself.
+`options.defines` makes the same thing an explicit, order-independent request
+field.
+
+`options.build_args` **composes with**, rather than replaces, the fixed
+`--coverage --trace` args a `options.coverage: true` run already adds (see
+"Coverage" above): the effective build args are always
+`["--coverage", "--trace"] + options.build_args` when both are given, so a
+user-supplied flag is appended last and can still override a coverage
+default if the two conflict.
+
+`options.includes` resolves each entry relative to the request file's own
+directory -- the same convention `sources` and `testbench.module` already
+use -- for a cell library split across multiple files with `` `include ``
+directives.
+
 ## Reproducibility: `random_seed`
 
 cocotb's regression manager seeds its own `random` module per run and logs
@@ -163,7 +198,10 @@ result's `environment.random_seed` is enough to reproduce it exactly.
   "options": {
     "coverage": false,
     "timescale": ["1ns", "1ps"],
-    "random_seed": 1785780800
+    "random_seed": 1785780800,
+    "defines": { "USE_POWER_PINS": null, "FUNCTIONAL": "1" },
+    "build_args": ["-Wall"],
+    "includes": ["cells"]
   }
 }
 ```
@@ -180,6 +218,9 @@ result's `environment.random_seed` is enough to reproduce it exactly.
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
+| `options.defines` | object | Optional. String key -> string \| null value, forwarded unchanged to `Runner.build(defines=...)`. A `null` value defines the macro with no value (e.g. `` `define USE_POWER_PINS ``). Defaults to `{}` (see "Compile-time defines, build args, and includes"). |
+| `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds (composed, not replaced — see "Coverage"). Defaults to `[]`. |
+| `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. |
 
 ## Response

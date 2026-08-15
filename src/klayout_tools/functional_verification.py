@@ -288,10 +288,12 @@ def _resolve_testbench(
 
 
 def _resolve_options(
-    options: Any, engine: str
-) -> tuple[bool, tuple[str, str], int | None]:
+    options: Any, engine: str, request_dir: str
+) -> tuple[
+    bool, tuple[str, str], int | None, dict[str, str | None], list[str], list[str]
+]:
     """Validate ``request.options`` and return
-    ``(coverage, timescale, random_seed)``.
+    ``(coverage, timescale, random_seed, defines, build_args, includes)``.
 
     Enforces the spike's hard constraint that coverage is a Verilator-only
     capability -- ``options.coverage: true`` with ``engine: "icarus"`` is a
@@ -334,7 +336,86 @@ def _resolve_options(
             "request.options.random_seed must be an integer when given"
         )
 
-    return coverage, resolved_timescale, random_seed
+    defines = _resolve_defines(options.get("defines"))
+    build_args = _resolve_build_args(options.get("build_args"))
+    includes = _resolve_includes(options.get("includes"), request_dir)
+
+    return coverage, resolved_timescale, random_seed, defines, build_args, includes
+
+
+def _resolve_defines(defines: Any) -> dict[str, str | None]:
+    """Validate the optional ``request.options.defines`` object and return it
+    unchanged (or ``{}`` when omitted).
+
+    Forwarded to ``Runner.build(defines=...)`` -- cocotb's own ``Runner``
+    already accepts a ``Mapping[str, str | None]`` (a ``None`` value defines
+    the macro with no value, e.g. ``` `define USE_POWER_PINS ```), so this
+    module never needs to translate the mapping itself.
+    """
+    if defines is None:
+        return {}
+    if not isinstance(defines, dict):
+        raise FunctionalVerificationError(
+            "request.options.defines must be a JSON object of string -> string|null"
+        )
+    for key, value in defines.items():
+        if not isinstance(key, str) or not key:
+            raise FunctionalVerificationError(
+                "request.options.defines keys must be non-empty strings"
+            )
+        if value is not None and not isinstance(value, str):
+            raise FunctionalVerificationError(
+                f"request.options.defines[{key!r}] must be a string or null "
+                f"-- got a {type(value).__name__}"
+            )
+    return defines
+
+
+def _resolve_build_args(build_args: Any) -> list[str]:
+    """Validate the optional ``request.options.build_args`` array and return
+    it unchanged (or ``[]`` when omitted).
+
+    Composed with -- never replacing -- the fixed :data:`COVERAGE_BUILD_ARGS`
+    list when ``options.coverage: true``: the caller appends these *after*
+    the coverage args, so a user-supplied flag can still override a coverage
+    default if the two conflict (see :func:`run_functional_verification`).
+    """
+    if build_args is None:
+        return []
+    if not isinstance(build_args, list) or not all(
+        isinstance(entry, str) and entry for entry in build_args
+    ):
+        raise FunctionalVerificationError(
+            "request.options.build_args must be an array of non-empty strings"
+        )
+    return list(build_args)
+
+
+def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
+    """Validate the optional ``request.options.includes`` array and resolve
+    each entry to an absolute directory path (relative to ``request_dir`` --
+    the same convention :func:`_resolve_sources`/:func:`_resolve_testbench`
+    already use), or ``[]`` when omitted.
+
+    Forwarded to ``Runner.build(includes=...)`` for a cell library split
+    across multiple files with `` `include `` directives.
+    """
+    if includes is None:
+        return []
+    if not isinstance(includes, list) or not all(
+        isinstance(entry, str) and entry for entry in includes
+    ):
+        raise FunctionalVerificationError(
+            "request.options.includes must be an array of non-empty strings"
+        )
+
+    resolved: list[str] = []
+    for entry in includes:
+        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        if not os.path.isdir(path):
+            raise FunctionalVerificationError(f"include directory not found: {entry}")
+        resolved.append(os.path.abspath(path))
+    return resolved
 
 
 def _resolve_parameters(parameters: Any) -> dict[str, Any]:
@@ -516,6 +597,8 @@ def _run_build(
     hdl_toplevel: str,
     build_dir: str,
     build_args: list[str],
+    defines: dict[str, str | None],
+    includes: list[str],
     timescale: tuple[str, str],
     parameters: dict[str, Any],
     log_path: str,
@@ -526,6 +609,9 @@ def _run_build(
     here *and* in :func:`_run_test` -- see this module's docstring, gotcha 3.
     ``parameters``, when non-empty, overrides Verilog ``parameter``/VHDL
     ``generic`` values at elaboration time (see :func:`_resolve_parameters`).
+    ``defines`` and ``includes`` are forwarded verbatim to cocotb's own
+    ``Runner.build(defines=..., includes=...)`` (see :func:`_resolve_defines`/
+    :func:`_resolve_includes`).
     """
     try:
         # `get_runner` raises ValueError for an unknown name; an engine
@@ -543,6 +629,8 @@ def _run_build(
             hdl_toplevel=hdl_toplevel,
             build_dir=build_dir,
             build_args=build_args,
+            defines=defines,
+            includes=includes,
             always=True,
             timescale=timescale,
             parameters=parameters,
@@ -805,9 +893,14 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     module, module_dir, testcase = _resolve_testbench(
         request_doc["testbench"], request_dir
     )
-    coverage_requested, timescale, random_seed = _resolve_options(
-        request_doc.get("options"), engine
-    )
+    (
+        coverage_requested,
+        timescale,
+        random_seed,
+        defines,
+        build_args,
+        includes,
+    ) = _resolve_options(request_doc.get("options"), engine, request_dir)
     parameters = _resolve_parameters(request_doc.get("parameters"))
 
     output_dir = os.path.join(request_dir, ".klt", "functional-verification")
@@ -851,7 +944,10 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         sources=sources,
         hdl_toplevel=hdl_toplevel,
         build_dir=build_dir,
-        build_args=list(COVERAGE_BUILD_ARGS) if coverage_requested else [],
+        build_args=(list(COVERAGE_BUILD_ARGS) if coverage_requested else [])
+        + build_args,
+        defines=defines,
+        includes=includes,
         timescale=timescale,
         parameters=parameters,
         log_path=build_log,

@@ -439,6 +439,81 @@ def test_random_seed_must_be_an_integer(tmp_path, random_seed):
         run_functional_verification(request_path)
 
 
+@pytest.mark.parametrize("defines", ["USE_POWER_PINS", ["USE_POWER_PINS"], 7])
+def test_defines_must_be_object(tmp_path, defines):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"defines": defines})
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=r"options.defines must be a JSON object of string -> string\|null",
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("value", [7, 1.5, True, [], {}])
+def test_defines_values_must_be_string_or_null(tmp_path, value):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"defines": {"FUNCTIONAL": value}}),
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match=r"options.defines\['FUNCTIONAL'\]"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_defines_keys_must_be_nonempty_strings(tmp_path):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"defines": {"": None}})
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="options.defines keys must be"
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("build_args", ["--foo", [7], [""], {"a": 1}])
+def test_build_args_shape_validation(tmp_path, build_args):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"build_args": build_args})
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.build_args must be an array of non-empty strings",
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("includes", ["cells", [7], [""], {"a": 1}])
+def test_includes_shape_validation(tmp_path, includes):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"includes": includes})
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="options.includes must be an array of non-empty strings",
+    ):
+        run_functional_verification(request_path)
+
+
+def test_includes_directory_must_exist(tmp_path):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(options={"includes": ["no-such-dir"]})
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="include directory not found: no-such-dir",
+    ):
+        run_functional_verification(request_path)
+
+
 def test_parameters_must_be_object(tmp_path):
     """A list (or any non-object) `request.parameters` is a clear validation
     error -- not a raw exception surfacing from the cocotb runner."""
@@ -840,6 +915,83 @@ def test_stubbed_run_without_parameters_forwards_an_empty_mapping(
 
     assert runner.build_kwargs["parameters"] == {}
     assert runner.test_kwargs["parameters"] == {}
+
+
+def test_stubbed_run_forwards_defines_and_includes_to_build(tmp_path, monkeypatch):
+    """`options.defines`/`options.includes` reach `Runner.build()` verbatim --
+    the generic mechanism this issue adds in place of the "defines file
+    listed first in `sources`" preprocessing-order workaround."""
+    _setup_inputs(tmp_path)
+    include_dir = tmp_path / "cells"
+    include_dir.mkdir()
+    defines = {"USE_POWER_PINS": None, "FUNCTIONAL": "1"}
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"defines": defines, "includes": ["cells"]}),
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["defines"] == defines
+    assert runner.build_kwargs["includes"] == [str(include_dir.resolve())]
+
+
+def test_stubbed_run_without_defines_or_includes_forwards_empty(tmp_path, monkeypatch):
+    """No `options.defines`/`options.includes`/`options.build_args` in the
+    request -- `Runner.build()` receives empty defaults, byte-identical to
+    today's behavior for existing requests (regression guard)."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["defines"] == {}
+    assert runner.build_kwargs["includes"] == []
+    assert runner.build_kwargs["build_args"] == []
+
+
+def test_stubbed_run_forwards_build_args(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(options={"build_args": ["-Wall", "-Wno-timescale"]}),
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["build_args"] == ["-Wall", "-Wno-timescale"]
+
+
+def test_stubbed_coverage_run_composes_build_args_with_coverage_args(
+    tmp_path, monkeypatch
+):
+    """`options.coverage: true` + `options.build_args` -- the effective args
+    are `COVERAGE_BUILD_ARGS + options.build_args`, in that order, so a
+    user-supplied flag can still override a coverage default (see
+    `_resolve_build_args`'s docstring and this module's merge-order note)."""
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            engine="verilator",
+            options={"coverage": True, "build_args": ["--assert"]},
+        ),
+    )
+    runner = _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            coverage_dat_text="# fake verilator coverage\n",
+        ),
+    )
+    _stub_verilator_coverage(monkeypatch)
+
+    run_functional_verification(request_path)
+
+    assert runner.build_kwargs["build_args"] == ["--coverage", "--trace", "--assert"]
 
 
 def test_stubbed_run_swallows_the_simulators_exit_code(tmp_path, monkeypatch):
