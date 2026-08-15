@@ -469,6 +469,37 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-14 — `klt place-and-route`'s `"route"` stage now exports the
+  **as-built gate-level netlist** and surfaces it as a new
+  **`verilog_path`** response field (issue #996). The generated route-stage
+  Tcl calls OpenROAD's own `write_verilog` immediately after its existing
+  `write_def`, from the same linked design, writing
+  `<output_dir>/<hdl_toplevel>.v` — so the netlist reflects the clock-tree
+  buffers `clock_tree_synthesis` built, the gates `repair_design`/
+  `repair_timing` resized, and the diodes `repair_antennas` inserted, all of
+  which the routed `def_path`/`gds_path` contain but `klt synthesize`'s
+  (pre-CTS) netlist cannot. Before this, a gate-level LVS run against a
+  routed digital macro had no reference netlist that matched the layout: in
+  one real run 40 of ~720 instances diverged (35 CTS/timing-repair cells,
+  5 drive-strength resizes), every one an ordinary P&R optimization that
+  `klt lvs` had no way to attribute. `write_verilog` is a top-level command
+  of OpenROAD's always-loaded `dbSta` module
+  (`src/dbSta/src/dbReadVerilog.tcl` → `sta::write_verilog_cmd`, verified
+  against `The-OpenROAD-Project/OpenROAD@master` fetched 2026-08-14; ORFS
+  calls the same command in `flow/scripts/final_outputs.tcl`) — unrelated to
+  Yosys's identically-named command `klt synthesize` drives. Written at
+  `"route"` only, never `"cts"`: the artifact is the netlist counterpart of
+  a routed layout, so `verilog_path` is `null` before that stage exactly as
+  `def_path`/`gds_path` are. Flags deliberately not passed:
+  `-include_pwr_gnd` (matching ORFS's own `6_final.v`, and keeping the
+  artifact directly diffable against `klt synthesize`'s netlist),
+  `-remove_cells [find_physical_only_masters]` (this flow inserts no
+  fill/tap/endcap cells, so it would only risk dropping a real one), and
+  `-sort` (ignored by OpenROAD itself). Purely additive —
+  `schema_version` stays `1` per `docs/json-contract.md`, and
+  `def_path`/`gds_path` are unchanged. See `docs/cli/place-and-route.md`'s
+  "As-built netlist (`verilog_path`)".
+
 - 2026-08-14 — `klt extract --parasitics` (and `klt pex`) gain
   **`--mom-rlc-net`/`--mom-rlc-resistance-ohm`/`--mom-rlc-capacitance-ff`/
   `--mom-rlc-inductance-nh`** — substitute a caller-supplied, directly-solved

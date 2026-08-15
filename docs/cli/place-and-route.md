@@ -889,6 +889,7 @@ live re-measurement above.
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
   "gds_path": "/abs/path/.klt/place-and-route/gcd.gds",
+  "verilog_path": "/abs/path/.klt/place-and-route/gcd.v",
   "spef_sta": {
     "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
     "worst_slack_ns": -1.72532,
@@ -934,16 +935,71 @@ live re-measurement above.
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
+| `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
+
+## As-built netlist (`verilog_path`, issue #996)
+
+The `"route"` stage writes an OpenROAD `write_verilog` netlist to
+`<output_dir>/<hdl_toplevel>.v`, immediately after its `write_def`, from the
+same linked design. `verilog_path` names it.
+
+**Why it exists.** This command inserts and modifies cells: TritonCTS builds
+a clock tree (`clock_tree_synthesis`), `repair_design`/`repair_timing` insert
+buffers and swap gates for higher-drive-strength variants, and
+`repair_antennas` inserts diodes. None of that is visible in `klt
+synthesize`'s netlist, which is produced *before* place-and-route runs. So
+using the synthesis netlist as the reference for a gate-level LVS against the
+routed GDS produces mismatches that are not defects and that `klt lvs` cannot
+attribute — in one real run, 40 of ~720 instances (35 CTS/timing-repair cells
+plus 5 drive-strength resizes under unchanged instance names). `verilog_path`
+is the netlist that actually corresponds to `def_path`/`gds_path`, and is
+what a golden-reference LVS run should build its reference from.
+
+Typical use:
+
+```bash
+klt place-and-route pnr_request.json --format json   # -> verilog_path, gds_path
+klt extract "$gds_path" --deck sky130 --abstract-cells 'sky130_fd_sc_hd__*' \
+  -o layout.spice                                    # layout side
+# reference side: build from $verilog_path, not from klt synthesize's netlist
+klt lvs lvs_request.json
+```
+
+> **Note.** `klt lvs` compares SPICE netlists, and `klt extract
+> --abstract-cells` emits a hierarchical SPICE subcircuit netlist for the
+> layout side. Converting `verilog_path`'s gate-level Verilog into the
+> matching SPICE reference is a separate, still-deferred capability (see
+> `docs/cli/extract.md`'s "Gate-level Verilog output" limitation). This field
+> removes the *structural* blocker — an as-built netlist now exists at all —
+> it does not by itself complete the Verilog→SPICE reference path.
+
+**Flags.** The command is written plain: `write_verilog <path>`.
+`-include_pwr_gnd` is deliberately not passed, matching ORFS's own
+`6_final.v` and keeping the artifact directly diffable against `klt
+synthesize`'s netlist (which likewise carries no VPWR/VGND connections —
+power comes from the LEF/DEF grid, not the netlist). `-remove_cells
+[find_physical_only_masters]` is not passed either: this flow inserts no
+fill/tap/endcap cells, so it would be a no-op that only risks dropping a real
+cell. Antenna diodes are real instances present in the routed GDS and are
+kept. `-sort` is ignored by OpenROAD itself (`utl::warn STA 2065`).
+
+**`"route"` only, never `"cts"`.** The artifact exists to be the netlist
+counterpart of a routed layout, and `"route"` is the only stage that produces
+one. A `"cts"`-stage netlist would describe a state no shippable layout
+corresponds to (it predates `repair_antennas`'s diode insertions) and would
+need a second response field with no `def_path`/`gds_path` to pair with.
+`verilog_path` therefore follows those two fields exactly.
 
 ## Partial completion (`target_stage`)
 
 A request with `target_stage: "place"` asks only for floorplan through
 detailed placement — a successful (`exit 0`) run of that request has
-`stage_reached: "place"`, `def_path`/`gds_path` both `null` **by design**
-(never requested), and every metric field populated through placement. This
-is a normal, successful, partial-by-request outcome, not a degraded one.
+`stage_reached: "place"`, `def_path`/`gds_path`/`verilog_path` all `null`
+**by design** (never requested), and every metric field populated through
+placement. This is a normal, successful, partial-by-request outcome, not a
+degraded one.
 
 A request whose `target_stage` (default `"route"`) the engine fails to
 reach — an internal OpenROAD/CTS/routing error, or a validation failure —
