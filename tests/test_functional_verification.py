@@ -293,6 +293,75 @@ def test_testbench_module_file_must_exist(tmp_path):
         run_functional_verification(request_path)
 
 
+def test_testbench_search_path_must_be_a_nonempty_string(tmp_path):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(testbench={"module": "test_gcd", "search_path": ""}),
+    )
+    with pytest.raises(
+        FunctionalVerificationError, match="search_path must be a non-empty string"
+    ):
+        run_functional_verification(request_path)
+
+
+def test_testbench_search_path_relative_resolves_against_request_dir(tmp_path):
+    """`testbench.search_path` follows the same absolute-or-relative-to-the-
+    request convention `sources` entries already use (issue #1003) -- a
+    testbench that lives in a sibling directory is found without being
+    copied or symlinked next to the request."""
+    shared = tmp_path / "shared-testbenches"
+    shared.mkdir()
+    _write(shared / "test_gcd.py", _TESTBENCH)
+    module, module_dir, _testcase = fv._resolve_testbench(
+        {"module": "test_gcd", "search_path": "shared-testbenches"}, str(tmp_path)
+    )
+    assert module == "test_gcd"
+    assert module_dir == str(shared.resolve())
+
+
+def test_testbench_search_path_absolute(tmp_path):
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    shared = tmp_path / "elsewhere"
+    shared.mkdir()
+    _write(shared / "test_gcd.py", _TESTBENCH)
+    module, module_dir, _testcase = fv._resolve_testbench(
+        {"module": "test_gcd", "search_path": str(shared)}, str(tmp_path)
+    )
+    assert module == "test_gcd"
+    assert module_dir == str(shared.resolve())
+
+
+def test_testbench_search_path_missing_module_names_resolved_location(tmp_path):
+    """The error names the resolved `search_path` location, not always
+    `request_dir` (issue #1003's third acceptance criterion)."""
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    (tmp_path / "search-here").mkdir()
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(testbench={"module": "test_gcd", "search_path": "search-here"}),
+    )
+    with pytest.raises(
+        FunctionalVerificationError,
+        match=(
+            r"testbench module not found: expected '.*search-here.*test_gcd\.py'"
+            r".*request\.testbench\.search_path"
+        ),
+    ):
+        run_functional_verification(request_path)
+
+
+def test_testbench_search_path_omitted_resolves_next_to_request(tmp_path):
+    """Omitting `search_path` is fully additive -- behavior is byte-for-byte
+    unchanged from before this key existed."""
+    _setup_inputs(tmp_path)
+    module, module_dir, _testcase = fv._resolve_testbench(
+        {"module": "test_gcd"}, str(tmp_path)
+    )
+    assert module == "test_gcd"
+    assert module_dir == str(tmp_path.resolve())
+
+
 @pytest.mark.parametrize("testcase", [7, [], [""], ""])
 def test_testcase_shape_validation(tmp_path, testcase):
     _setup_inputs(tmp_path)
@@ -600,6 +669,60 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     # No `options.random_seed` in the request -- cocotb generates its own,
     # so `Runner.test()`'s `seed` kwarg is left unset (`None`).
     assert runner.test_kwargs["seed"] is None
+
+
+def test_stubbed_run_honors_testbench_search_path(tmp_path, monkeypatch):
+    """Two requests, in different directories, both reach the *same* shared
+    testbench file via `testbench.search_path` -- the motivating workflow
+    from issue #1003 (one unmodified testbench, several views of a design)."""
+    shared = tmp_path / "shared-testbenches"
+    shared.mkdir()
+    _write(shared / "test_gcd.py", _TESTBENCH)
+
+    rtl_dir = tmp_path / "rtl-check"
+    rtl_dir.mkdir()
+    _write(rtl_dir / "gcd.v", _GCD_RTL)
+    rtl_request_path = _write_request(
+        rtl_dir / "request.json",
+        _base_request(
+            testbench={"module": "test_gcd", "search_path": "../shared-testbenches"}
+        ),
+    )
+
+    netlist_dir = tmp_path / "netlist-check"
+    netlist_dir.mkdir()
+    _write(netlist_dir / "gcd.v", _GCD_RTL)
+    netlist_request_path = _write_request(
+        netlist_dir / "request.json",
+        _base_request(
+            testbench={"module": "test_gcd", "search_path": "../shared-testbenches"}
+        ),
+    )
+
+    for request_path in (rtl_request_path, netlist_request_path):
+        runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+        # `sys.path`/`PYTHONPATH` resolution is only in effect for the
+        # duration of `Runner.test()` (`_run_test`'s try/finally) -- capture
+        # it from inside the fake `test()` call, not after
+        # `run_functional_verification` has already returned.
+        captured_sys_path: list[str] = []
+        original_test = runner.test
+
+        def _capturing_test(
+            *, _original=original_test, _captured=captured_sys_path, **kwargs
+        ):
+            _captured.append(list(sys.path))
+            return _original(**kwargs)
+
+        monkeypatch.setattr(runner, "test", _capturing_test)
+
+        report = run_functional_verification(request_path)
+
+        assert report["testbench"] == "test_gcd"
+        assert runner.test_kwargs["test_module"] == "test_gcd"
+        # Both requests' testbench resolution used the one shared directory,
+        # not either request's own directory.
+        assert str(shared.resolve()) in captured_sys_path[0]
 
 
 def test_stubbed_run_counts_skipped_tests_separately(tmp_path, monkeypatch):

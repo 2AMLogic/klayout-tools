@@ -210,12 +210,19 @@ def _resolve_testbench(
     ``(module, module_dir, testcase)``.
 
     ``module`` is a Python *module name* (``"test_gcd"``), not a path -- it is
-    what cocotb's ``Runner.test(test_module=...)`` imports. The module's file
-    is located next to the request (``<request_dir>/<module>.py``) so a
-    missing testbench is a clear request-level error here rather than a
-    ``ModuleNotFoundError`` raised deep inside the simulator process (where,
-    verified live, cocotb still exits ``0`` and simply writes no
-    ``results.xml``).
+    what cocotb's ``Runner.test(test_module=...)`` imports. By default the
+    module's file is located next to the request
+    (``<request_dir>/<module>.py``) so a missing testbench is a clear
+    request-level error here rather than a ``ModuleNotFoundError`` raised deep
+    inside the simulator process (where, verified live, cocotb still exits
+    ``0`` and simply writes no ``results.xml``).
+
+    An optional ``testbench.search_path`` overrides *where* ``module`` is
+    looked up -- resolved absolute-or-relative-to-``request_dir`` the same way
+    ``_resolve_sources()`` resolves each ``request.sources`` entry -- so one
+    unmodified testbench module can be shared by several requests that live in
+    different directories. When omitted, behavior is unchanged: the module is
+    resolved next to the request.
     """
     if not isinstance(testbench, dict):
         raise FunctionalVerificationError("request.testbench must be a JSON object")
@@ -231,11 +238,30 @@ def _resolve_testbench(
             f"path: {module!r}"
         )
 
-    module_path = os.path.join(request_dir, f"{module}.py")
+    search_path = testbench.get("search_path")
+    if search_path is not None:
+        if not isinstance(search_path, str) or not search_path:
+            raise FunctionalVerificationError(
+                "request.testbench.search_path must be a non-empty string when given"
+            )
+        search_dir = (
+            search_path
+            if os.path.isabs(search_path)
+            else os.path.join(request_dir, search_path)
+        )
+    else:
+        search_dir = request_dir
+
+    module_path = os.path.join(search_dir, f"{module}.py")
     if not os.path.isfile(module_path):
+        location = (
+            "request.testbench.search_path"
+            if search_path is not None
+            else "next to the request"
+        )
         raise FunctionalVerificationError(
             f"testbench module not found: expected '{module_path}' "
-            f"(request.testbench.module names a Python module next to the request)"
+            f"(request.testbench.module names a Python module resolved via {location})"
         )
 
     testcase = testbench.get("testcase")

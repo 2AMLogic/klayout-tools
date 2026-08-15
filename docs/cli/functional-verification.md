@@ -33,9 +33,9 @@ args.
 - `<request>` — a path to a request JSON file, `-` to read the request from
   stdin, or an inline JSON object string (the same three forms `klt lvs`
   accepts). Relative paths inside the request (`sources`, and the
-  `testbench.module` file) resolve against the **request file's own
-  directory**; for the stdin/inline forms, against the current working
-  directory.
+  `testbench.module` file — or, if given, `testbench.search_path`) resolve
+  against the **request file's own directory**; for the stdin/inline forms,
+  against the current working directory.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engines
@@ -174,7 +174,8 @@ result's `environment.random_seed` is enough to reproduce it exactly.
 | `engine` | string | `"icarus"` (default) or `"verilator"`. An unsupported value is an application error (exit 1). |
 | `sources` | array\<string\> | RTL source file paths, resolved relative to the request. Required, non-empty. May point at original RTL **or** at `klt synthesize`'s `netlist_path` — a gate-level equivalence re-check against the same testbench needs no contract change, only a different `sources` value. |
 | `hdl_toplevel` | string | The DUT module name. Required. |
-| `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<request dir>/<module>.py`. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
+| `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<search dir>/<module>.py` where `<search dir>` is `testbench.search_path` if given, else the request's own directory. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
+| `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
 | `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Filtered-out tests still appear in the report as `skipped`. |
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
@@ -346,6 +347,50 @@ The companion testbench (`test_modexp_parameters.py`) asserts
 reached elaboration itself, not just the request/response envelope — then
 re-runs `test_modexp.py`'s own width-adaptive randomized cross-check against
 Python's `pow`.
+
+### `testbench.search_path`: one testbench, several views of the same design
+
+The natural way to show that an implementation still satisfies its spec is to
+run the **same, byte-for-byte unmodified testbench** against successively
+lower-level views of a design — behavioural RTL, then a synthesized netlist,
+then a netlist implied by layout extraction. Each view is a separate request
+(different `sources`, different scratch directory) that would otherwise need
+its own copy (or symlink) of the testbench. `testbench.search_path` lets both
+requests point at one shared testbench directory instead:
+
+```
+repo/
+  testbenches/
+    test_gcd.py
+  rtl-check/
+    request.json          # sources: ["../gcd.v"]
+  netlist-check/
+    request.json          # sources: ["../synth/gcd.netlist.v"]
+```
+
+```json
+// rtl-check/request.json
+{
+  "sources": ["../gcd.v"],
+  "hdl_toplevel": "gcd",
+  "testbench": { "module": "test_gcd", "search_path": "../testbenches" }
+}
+```
+
+```json
+// netlist-check/request.json
+{
+  "sources": ["../synth/gcd.netlist.v"],
+  "hdl_toplevel": "gcd",
+  "testbench": { "module": "test_gcd", "search_path": "../testbenches" }
+}
+```
+
+Both requests resolve `test_gcd` via `testbenches/test_gcd.py` — the identical
+file, never copied or symlinked — while each still uses its own `sources` and
+its own `.klt/functional-verification/` scratch directory (per "Request",
+`sources` and `testbench.search_path` resolve the same way: absolute, or
+relative to the request's own directory).
 
 ## Out of scope
 
