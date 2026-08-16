@@ -368,6 +368,29 @@ into the circuit.)
   see "Via-drop routing (metal2/via, #454)" below. `"metal"` (the base role)
   is unaffected: a caller who does not opt into `"metal2"` still gets exactly
   #433's and #453's fail-visibly behavior for a same-layer crossing.
+- **Two distinct nets whose backbones cross are no longer a silent short
+  (#1057, fixed).** Every check above compares one `connectivity[]` entry's
+  own backbone against *block* geometry -- none of them compared one entry's
+  drawn backbone against *another already-routed* entry's. Two nets on the
+  same `routing.layer_role` whose fixed (or `waypoints_um`-supplied, #634)
+  backbones happened to cross could each independently pass every check
+  above and both compose `routed: true`, silently shorting a pair the caller
+  explicitly declared distinct. `compose()`'s connectivity loop now
+  intersects each newly-accepted backbone (`_drawn_route_region`, the same
+  helper #433's check above uses) against the union of every backbone already
+  accepted earlier in the *same request* -- a positive-area overlap (a mere
+  edge touch is a `klt drc` spacing question, not a short) reports the losing
+  net **unroutable** (`unrouted_nets[]`, `routed: false`, a
+  `drc_hints.notes[]` entry naming the net it crosses) instead of drawing it.
+  This is **order-dependent**, consistent with every other check here: a net
+  is compared only against whatever `routed_geometry` already exists at the
+  time it is processed, so reversing `connectivity[]`'s order can flip which
+  of the two nets "wins". Two entries that share a literal pin (`{block,
+  port}`) — e.g. bussing three ports into one node via two chained 2-pin
+  nets, as "Via-drop routing" below and #433's own worked reproduction both
+  do — are exempt from this check: both backbones necessarily converge on
+  the identical point from the identical direction there, so the resulting
+  overlap is the caller's intended merge, not an accidental short.
 
 ## Via-drop routing (metal2/via, #454)
 
@@ -712,7 +735,7 @@ exit codes).
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed) — **`"row"` placement only**. `null` when no `connectivity[]` was supplied (nothing was routed, so no routing/placement spacing was exercised as a clearance), and always `null` under `"explicit"` (#321) or `"array"` (#1053) placement — neither has a single shared spacing value to report (`"explicit"`'s per-pair separation is exactly what a caller-declared origin expresses; `"array"` has two independent pitches, `row_pitch_um`/`col_pitch_um`, not one). |
 | `matched_groups[]` | array\<object\> | One entry per distinct `matched_group_id` seen among the input blocks' own `generator_report.drc_hints.matched_group_id` (in first-seen order): `matched_group_id` (echoed), `blocks` (the request-level block `id`s carrying it), and `placement_symmetric` (always `null` this phase — symmetry *verification* against a declared symmetry axis is out of scope). Empty when no input block carries a `matched_group_id`. |
-| `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, or a bundle net deferred this phase). Always present, empty when there is nothing to report. |
+| `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, a bundle net deferred this phase, or a route-vs-route collision with an already-routed net, #1057). Always present, empty when there is nothing to report. |
 
 #### `blocks[]` entries
 

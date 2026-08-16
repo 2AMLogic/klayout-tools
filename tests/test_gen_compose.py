@@ -2983,6 +2983,200 @@ def test_compose_rejects_self_net_same_row_same_direction_pair(
 
 
 # --------------------------------------------------------------------------- #
+# Route-vs-route collision (#1057): route_two_pin()'s six routability checks
+# (channel width, guard/collector-ring, self-net pad-crossing, self-net
+# drawn-metal, obstacle-overlap, via-drop resolution) each compare a single
+# net's own backbone against *block* geometry -- none of them compares one
+# connectivity[] entry's drawn backbone against *another* entry's already-
+# accepted one. Two distinct nets routed on the same routing.layer_role could
+# be drawn crossing each other, both composing `routed: true`, silently
+# shorting a caller-declared distinct net pair -- the one failure mode in the
+# router that was silent-and-wrong rather than conservative-and-refused. This
+# is checked in `compose()`'s connectivity loop, order-aware just like every
+# other check here: a net is compared only against whatever routed_geometry
+# already exists at the time it is processed.
+# --------------------------------------------------------------------------- #
+
+
+def _crossing_routes_fixture(tmp_path, pdk_root, width_um=0.17):
+    """Four `resistor_strip` blocks, placed (`"explicit"`) so that a straight
+    horizontal net (``NET_H``, west block to east block, no waypoints needed)
+    and a caller-routed vertical net (``NET_V``, north block to south block,
+    via ``waypoints_um``) are geometrically forced to cross at (16, ~15.21) --
+    an inverter-chain-shaped fixture's crossing reduced to its essential
+    shape: two backbones whose fixed paths intersect, nowhere near any
+    block's own bbox (each pair's stub only ever moves *away* from its own
+    block, so the existing route-vs-block checks stay silent -- this is
+    purely a route-vs-route collision).
+    """
+    bw = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw", num=1)
+    be = _gen_block(tmp_path, pdk_root, "resistor_strip", "be", num=1)
+    bn = _gen_block(tmp_path, pdk_root, "resistor_strip", "bn", num=1)
+    bs = _gen_block(tmp_path, pdk_root, "resistor_strip", "bs", num=1)
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": "bw", "generator_report": bw},
+            {"id": "be", "generator_report": be},
+            {"id": "bn", "generator_report": bn},
+            {"id": "bs", "generator_report": bs},
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["bw", "be", "bn", "bs"],
+            "origins_um": {
+                "bw": {"x": 0.0, "y": 15.0},
+                "be": {"x": 30.0, "y": 15.0},
+                "bn": {"x": 10.0, "y": 25.0},
+                "bs": {"x": 18.0, "y": 5.0},
+            },
+        },
+        "connectivity": [
+            {
+                "net": "NET_H",
+                "pins": [
+                    {"block": "bw", "port": "P2"},
+                    {"block": "be", "port": "P1"},
+                ],
+            },
+            {
+                "net": "NET_V",
+                "pins": [
+                    {"block": "bn", "port": "P2"},
+                    {"block": "bs", "port": "P1"},
+                ],
+                # Forces a vertical drop through x=16, crossing NET_H's
+                # straight y=15.21 backbone -- see the module docstring
+                # above: waypoints_um switches off only the *fixed-shape*
+                # heuristics (channel width, degenerate same-dir jog, #461
+                # stub lift), never the checks that look at the actual drawn
+                # `points`, which is exactly what the route-vs-route check
+                # does.
+                "waypoints_um": [[16.0, 25.21], [16.0, 5.21]],
+            },
+        ],
+        "routing": {"layer_role": "metal", "width_um": width_um},
+    }
+
+
+def test_compose_rejects_route_that_crosses_an_already_routed_net(tmp_path, pdk_root):
+    output = tmp_path / "cross.gds"
+    request = _crossing_routes_fixture(tmp_path, pdk_root)
+    request["options"] = {"cell_name": "cross", "output": str(output)}
+    report = compose(request)
+
+    assert output.is_file()
+    # NET_H, processed first (connectivity[] order), routes cleanly.
+    assert report["nets"][0]["net"] == "NET_H"
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] is not None
+
+    # NET_V's backbone is geometrically forced to cross NET_H's already-
+    # accepted backbone -- caught here instead of composing `routed: true`
+    # for both and silently drawing a short.
+    assert report["nets"][1]["net"] == "NET_V"
+    assert report["nets"][1]["routed"] is False
+    assert report["nets"][1]["route_length_um"] is None
+    assert report["unrouted_nets"] == ["NET_V"]
+    assert any(
+        "NET_V" in note and "crosses" in note and "NET_H" in note
+        for note in report["drc_hints"]["notes"]
+    )
+
+    # routed: false means no metal path was drawn for NET_V -- the short
+    # never gets a chance to be drawn on the route layer.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("cross")
+    li1 = layout.layer(67, 20)
+    paths = [s for s in top.shapes(li1).each() if s.is_path()]
+    assert len(paths) == 1  # NET_H's path only
+
+
+def test_compose_route_vs_route_collision_is_order_dependent(tmp_path, pdk_root):
+    # Consistent with every other route_two_pin() check: a net is compared
+    # only against whatever geometry already exists at the time it is
+    # processed. Reversing connectivity[] order flips which net "wins" --
+    # NET_V (now first) routes, NET_H (now second) is rejected instead.
+    output = tmp_path / "cross_reversed.gds"
+    request = _crossing_routes_fixture(tmp_path, pdk_root)
+    request["connectivity"] = list(reversed(request["connectivity"]))
+    request["options"] = {"cell_name": "cross_reversed", "output": str(output)}
+    report = compose(request)
+
+    assert report["nets"][0]["net"] == "NET_V"
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["net"] == "NET_H"
+    assert report["nets"][1]["routed"] is False
+    assert report["unrouted_nets"] == ["NET_H"]
+    assert any(
+        "NET_H" in note and "crosses" in note and "NET_V" in note
+        for note in report["drc_hints"]["notes"]
+    )
+
+
+def test_compose_allows_disjoint_routes_on_the_same_layer(tmp_path, pdk_root):
+    # No regression: two nets on the same routing.layer_role that do *not*
+    # cross must both still route -- the collision check must not fire on
+    # backbones that merely coexist on the same layer. Two independent
+    # west-to-east straight-line pairs (same shape as NET_H above), stacked
+    # at different y so neither backbone ever comes near the other.
+    width_um = 0.17
+    bw1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw1", num=1)
+    be1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "be1", num=1)
+    bw2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "bw2", num=1)
+    be2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "be2", num=1)
+    output = tmp_path / "nocross.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "bw1", "generator_report": bw1},
+                {"id": "be1", "generator_report": be1},
+                {"id": "bw2", "generator_report": bw2},
+                {"id": "be2", "generator_report": be2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["bw1", "be1", "bw2", "be2"],
+                "origins_um": {
+                    "bw1": {"x": 0.0, "y": 15.0},
+                    "be1": {"x": 30.0, "y": 15.0},
+                    # NET_2 is a second straight west-to-east line, well
+                    # clear (10um) of NET_1's y=15.21 line.
+                    "bw2": {"x": 0.0, "y": 25.0},
+                    "be2": {"x": 30.0, "y": 25.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "NET_1",
+                    "pins": [
+                        {"block": "bw1", "port": "P2"},
+                        {"block": "be1", "port": "P1"},
+                    ],
+                },
+                {
+                    "net": "NET_2",
+                    "pins": [
+                        {"block": "bw2", "port": "P2"},
+                        {"block": "be2", "port": "P1"},
+                    ],
+                },
+            ],
+            "routing": {"layer_role": "metal", "width_um": width_um},
+            "options": {"cell_name": "nocross", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["routed"] is True
+
+
+# --------------------------------------------------------------------------- #
 # Via-drop routing (#454, re-raising #433's Ask options 1/2): a `"metal2"`
 # `routing.layer_role` runs the backbone on sky130's met1 and drops to each
 # target pin's own li1 pad only via the connecting mcon via
