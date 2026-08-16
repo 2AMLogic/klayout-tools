@@ -208,6 +208,54 @@ shorts every transistor terminal inside the well together. See
 `ExtractionDeck`'s docstring in `src/klayout_tools/decks/__init__.py` for
 the full reasoning.
 
+### Anonymous net numbering (`$N`) is NOT a stable cross-platform contract (issue #1063)
+
+A net with no drawn label writes as `Net.expanded_name()`'s own
+placeholder, `"$" + cluster_id` (e.g. `$171`) — both in the written
+`.spice` netlist's instance/node syntax and in the JSON `nets[].name`
+field (`net_id` is the same underlying `cluster_id`, as an integer — see
+"`nets[]` entries" below). `cluster_id` is assigned once, internally,
+inside the native `l2n.extract_netlist()` call — a single opaque
+KLayout/`kdb` (compiled C++) routine. This repo only *reads* that string;
+it never assigns, sorts, or otherwise influences it.
+
+**This numbering is deterministic within one run and one environment
+(re-running extraction on the same machine against the same pinned
+`klayout` version reproduces the identical `$N` labels every time — see
+`test_parasitics_deterministic_across_runs` in `tests/test_extract.py`),
+but it is explicitly NOT a stable/guaranteed contract across different
+`klayout` point releases or host platforms.** `pyproject.toml` pins only
+`klayout>=0.30` (no upper bound), and KLayout documents no guarantee that
+`cluster_id` assignment order survives a version bump or a differing
+platform's native shape-clustering traversal. In practice, extracting the
+byte-identical GDS with the byte-identical deck on two different
+environments has been observed to swap which anonymous net gets which
+number (e.g. `$171`/`$172` trading places) while every *named* net and
+every device stays byte-identical.
+
+**This does not affect `klt lvs`.** `klt lvs` compares with KLayout's
+native `NetlistComparer`, a topological/graph-isomorphism comparator that
+pairs nets and devices by connectivity structure, never by name or number
+(`src/klayout_tools/lvs.py`'s `same_circuits()` call is deliberately
+pinned away from `NetlistComparer`'s default name-based top-circuit
+matching — see issue #231) — so an anonymous-net-label swap changes
+nothing about a `klt lvs` match/mismatch verdict.
+
+**What this means for callers**: do not diff two `klt extract` netlists
+(or two JSON reports' `nets[]`/`devices[]`) *by raw text* across different
+machines, CI runners, or resolved `klayout` pip versions and expect zero
+diff — a byte-for-byte difference confined to swapped `$N`/`$M` anonymous
+net labels, with every named net and device otherwise identical, is a
+numbering artifact, not a connectivity regression. Compare with `klt lvs`
+instead (see [`docs/cli/lvs.md`](lvs.md)) to verify connectivity
+equivalence between two extractions — it is unaffected by this numbering
+and gives a definitive match/mismatch verdict rather than a fragile text
+diff. If a caller genuinely needs byte-for-byte netlist reproducibility
+across environments, pin the exact resolved `klayout` version (reported in
+the JSON `provenance.klayout_version` field — see "JSON schema (the
+contract)" below) on every environment that produces or compares extracted
+netlists.
+
 ### Reserved annotation layer
 
 Recording a floorplan reservation, an out-of-scope region, or a black-box

@@ -780,7 +780,13 @@ def create_parser() -> argparse.ArgumentParser:
             "contract and docs/cli/extract.md for the CLI surface. Runs "
             "fully headless via KLayout's native LayoutToNetlist/"
             "NetlistSpiceWriter -- no GUI, no Qt. PDK resolution (when "
-            "--pdk/--pdk-root are given) reuses `klt pdk find`'s resolver."
+            "--pdk/--pdk-root are given) reuses `klt pdk find`'s resolver. "
+            "NOTE: anonymous net numbering ('$N' labels assigned to a net "
+            "with no drawn label) is NOT a stable contract across klayout "
+            "versions or host platforms (issue #1063) -- do not diff raw "
+            "netlist text across environments; compare with `klt lvs` "
+            "(topological, unaffected by this numbering) instead. See "
+            "docs/cli/extract.md's 'Anonymous net numbering' section."
         ),
     )
     extract_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
