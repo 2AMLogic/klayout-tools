@@ -102,7 +102,8 @@ expected to grow incrementally in follow-on issues (e.g. Pplus/Nplus
 implant-specific rules, LVPWELL/DNWELL, the remaining BJT rules that key off
 DNWELL/LVPWELL, 5V/6V variants, and DFM guidelines). ``MIMTM.2``'s
 sized/derived-layer need (see its own note below) is closed as of #345 via
-:class:`~klayout_tools.decks.DerivedLayer`.
+:class:`~klayout_tools.decks.DerivedLayer`; ``MIMTM.1``'s equivalent need is
+closed as of #1033, the same way.
 
 ``klt extract``'s MiM-capacitor device recognition (``EXTRACTION_DECK.capacitors``
 below, issue #225) is transcribed from a *different*, LVS-specific source
@@ -204,30 +205,63 @@ are always the real, unmodified DRM values:
   connectivity information, only geometry, so it is approximated as a
   separation check against every ``comp`` shape on the layout, which may
   over-flag COMP that is legitimately part of the same BJT structure.
-- ``mim.space.1``: the official ``MIMTM.1`` scopes to the MiM capacitor's
-  "virtual bottom plate" (per the DRM's own note: ``FuseTop`` sized/oversized
-  by 1.06um, intersected with ``Metal4``) versus nearby bottom-plate-or-
-  routing ``Metal4``; approximated as a general ``Metal4``-to-``Metal4``
-  spacing check across the whole drawn layer rather than the virtual bottom
-  plate. Unlike ``MIMTM.2`` below, this rule has *not* been rewritten to use
-  :class:`~klayout_tools.decks.DerivedLayer` (added for ``MIMTM.2`` in #345)
-  -- that primitive derives a checked *region*, and ``space_check`` is a
-  single-region check, so scoping it would still over-flag any ordinary
-  ``Metal4`` shape spaced near a genuine virtual bottom plate, just from a
-  smaller set of shapes; left as today's more conservative over-approximation
-  rather than half-fixed. This means ordinary ``Metal4`` routing traces
-  spaced between the deck's generic metal-spacing range and 1.2um apart --
-  nothing to do with a MiM capacitor -- will be flagged even though they
-  violate no real DRM rule. Threshold value unmodified.
+- ``mim.space.1``: scoped to the real virtual bottom plate as of #1033 (see
+  the note immediately below), so it no longer over-flags ordinary
+  ``Metal4`` routing. One narrow approximation remains, in the "adjacent
+  MiM" half of ``MIMTM.1`` only: plate-to-plate spacing is measured between
+  the *whole* ``Metal4`` polygons that carry a virtual bottom plate, not
+  between the sized-``FuseTop`` plate outlines themselves, so two
+  neighbouring MiM capacitors whose plate metals face each other across
+  routing tails (metal that is part of neither virtual plate) closer than
+  1.2um are flagged even though the plates proper clear the rule. This is
+  deliberately the conservative direction, and is confined to ``Metal4``
+  that already touches a ``FuseTop`` shape -- measuring the clipped plate
+  outlines instead would falsely split one *shared* bottom plate carrying
+  two top plates more than 2 x 1.06um apart into two "plates" with a gap
+  between them, reporting a violation across continuous metal. Threshold
+  value unmodified.
 
-``MIMTM.2`` ("min. MiM bottom-plate overlap of ``Via4``", 0.4um) is
-transcribed below as ``mim.enclosing.via4.1`` (issue #345), scoped to the
-same "virtual bottom plate" derived layer ``MIMTM.1``/``mim.space.1``
-already cite (``FuseTop`` sized by 1.06um, restricted to wherever ``Metal4``
-already comes near it) via :class:`~klayout_tools.decks.DerivedLayer`
-(``klayout_tools/decks/__init__.py``). An *unscoped* approximation of this
-rule (checking raw ``Metal4`` enclosure of every ``Via4``) would have been
-actively wrong, not merely conservative like ``mim.space.1``'s: ordinary
+``MIMTM.1`` (transcribed below as ``mim.space.1``) and ``MIMTM.2``
+("min. MiM bottom-plate overlap of ``Via4``", 0.4um, transcribed below as
+``mim.enclosing.via4.1``, issue #345) both scope to the MiM capacitor's
+"virtual bottom plate" (per the DRM's own note: ``FuseTop`` sized/oversized
+by 1.06um, intersected with ``Metal4``) rather than raw ``Metal4``, and are
+both rewritten to use :class:`~klayout_tools.decks.DerivedLayer`
+(``klayout_tools/decks/__init__.py``) to enforce that scope --
+``mim.enclosing.via4.1`` since #345, and ``mim.space.1`` since #1033 (it
+previously approximated ``MIMTM.1`` as a general ``Metal4``-to-``Metal4``
+``space`` check across the whole drawn layer -- flagging *any* two ordinary
+``Metal4`` shapes closer than 1.2um apart, PDN power-stripe or routing
+geometry included, regardless of whether the layout drew a MiM capacitor
+anywhere -- because ``DerivedLayer`` only derives a checked *region* and
+``space_check`` is a single-region primitive; #1033 closes this gap by
+rewriting the rule as a ``separation`` check between the derived virtual
+bottom plate and the rest of ``Metal4`` instead, see
+``mim.space.1``'s own rule comment below and ``drc.py``'s
+``run_drc()``/``other_region`` handling for the "other" side's own
+whole-polygon exclusion of any ``Metal4`` shape overlapping the raw,
+unsized ``FuseTop`` region).
+
+``MIMTM.1``'s text covers spacing to the bottom plate metal "whether
+adjacent MiM **or** routing metal", and that whole-polygon exclusion drops
+the *adjacent MiM* half out of the ``separation`` check's "other" side (a
+neighbouring cap's plate metal overlaps ``FuseTop`` too, so it is excluded
+along with this rule's own plate). ``run_drc()`` therefore measures that
+half separately, as a peer-to-peer ``isolated_check`` among the excluded
+plate-bearing polygons, reported under the same ``mim.space.1`` rule id --
+``isolated_check`` (spacing between *different* polygons) rather than
+``space_check``, so a slot cut into one cap's own wide plate metal, a
+routine density/stress-relief feature and not "spacing to another bottom
+plate", is not reported. See ``tests/test_drc.py``'s
+``test_run_drc_gf180mcu_mim_space_adjacent_mim_violation`` (the covered
+half), ``..._slotted_bottom_plate_clean`` and
+``..._shared_plate_two_top_plates_clean`` (the two false positives that
+choice avoids), and the ``mim.space.1`` bullet above for the residual
+conservatism it accepts in exchange.
+
+An *unscoped* approximation of ``MIMTM.2`` (checking raw ``Metal4``
+enclosure of every ``Via4``) would have been actively wrong, not merely
+conservative like ``mim.space.1``'s pre-#1033 approximation: ordinary
 ``Metal4``-to-``Metal5`` routing vias use a much smaller enclosure than a
 MiM cap's virtual bottom plate requires, so a blanket "``Metal4`` must
 enclose every ``Via4`` by 0.4um" check would flag legitimate routing vias
@@ -239,7 +273,9 @@ the DRM's own 1.06um margin, so ordinary routing with no MiM cap anywhere
 nearby has an empty derived region and never trips this rule (see
 ``tests/test_drc.py``'s
 ``test_run_drc_gf180mcu_mim_enclosing_via4_ordinary_routing_clean`` negative
-control).
+control, and its ``mim.space.1`` sibling
+``test_run_drc_gf180mcu_mim_space_ordinary_routing_no_mim_devices_clean``,
+added by #1033).
 
 The DRM's "10.4 MIM Capacitor" section defines two mutually-exclusive
 process options (a PDK is wired for one or the other, never both): Option A
@@ -856,17 +892,38 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="mim.space.1",
         description=(
-            "minimum MiM bottom-plate (metal4) spacing to bottom-plate "
-            "metal (approximated as general metal4-to-metal4 spacing)"
+            "minimum MiM virtual bottom plate spacing to other bottom-plate-"
+            "or-routing metal4 (fusetop-sized metal4, scoped to genuine MiM "
+            "structures)"
         ),
-        layer=(46, 0),  # Metal4
-        check="space",
+        layer=(46, 0),  # Metal4 -- reporting identity, matches the sibling MiM rules
+        other_layer=(46, 0),  # Metal4 -- the "other" side of the separation check
+        check="separation",
         threshold_dbu=1200,  # 1.2 um
+        derived_layer=DerivedLayer(
+            base=(75, 0),  # FuseTop, sized (oversized) below
+            sized_by_um=1.06,
+            intersect_with=(46, 0),  # Metal4
+        ),
         # DRM 10.4.2 MIM Option B, rule "MIMTM.1": "Minimum MiM bottom plate
         # spacing to the bottom plate metal (whether adjacent MiM or routing
-        # metal)" -> 1.2um. Approximation: see the module docstring's
-        # `mim.space.1` note above (virtual-bottom-plate context our engine
-        # can't isolate; over-flags ordinary Metal4 routing). Threshold value
+        # metal)" -> 1.2um, per the DRM's own note scoped to the "virtual
+        # bottom plate" (FuseTop sized by 1.06um AND Metal4 restricted to
+        # wherever it already overlaps FuseTop) rather than raw Metal4 -- see
+        # `DerivedLayer`'s docstring and the module docstring's own
+        # `mim.space.1` note (issue #1033, mirroring `mim.enclosing.via4.1`'s
+        # #345 fix for the sibling rule) for why an unscoped check here used
+        # to over-flag: a blanket "Metal4-to-Metal4 spacing" check trips on
+        # any ordinary Metal4 routing/PDN geometry spaced tighter than 1.2um,
+        # regardless of whether a MiM capacitor is anywhere on the layout.
+        # `run_drc()`'s dispatch (`drc.py`) additionally scopes the
+        # "separation" check's `other_layer` side to exclude Metal4 that is
+        # itself part of the same virtual-bottom-plate construction (issue
+        # #1033), so this rule reports zero violations for a design with no
+        # recognised MiM structures -- and measures the rule's "whether
+        # adjacent MiM" half, which that exclusion would otherwise drop, as a
+        # peer-to-peer `isolated_check` among those excluded plate-bearing
+        # polygons, reported under this same rule id. Threshold value
         # unmodified.
         scope="10.4.2 MIM Option B",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("10.4.2 MIM Option B", "MIMTM.1"),

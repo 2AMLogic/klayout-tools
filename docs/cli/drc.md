@@ -232,6 +232,43 @@ MIM capacitors or gf180mcu — any future deck (this one or sky130) can use it
 for another rule whose official scope needs a sized/boolean layer
 expression.
 
+A `"separation"` rule (two-layer, unlike `"enclosing"`'s single derived
+region above) can combine `derived_layer` with an `other_layer` equal to
+`derived_layer.intersect_with` — gf180mcu's `mim.space.1` (issue #1033) does
+exactly this: `region` is the derived virtual bottom plate, `other_layer` is
+`Metal4` itself. `run_drc()` scopes that `other_layer` side too: rather than
+a plain set-subtraction of the (partial, sizing-clipped) derived region,
+it excludes the *whole* `Metal4` polygon for any polygon that already
+overlaps the raw, unsized `base` region anywhere — the same
+`.interacting(base)` pre-filter `region`'s own construction already applies.
+This matters because a `Metal4` shape that only partly falls inside the
+oversized `base` window would otherwise be split by a plain subtraction into
+a "derived" fragment and a "leftover" fragment that exactly touch at the
+sizing cutoff (zero gap) — a real `separation_check` reports that touching
+seam as a violation, an artefact of one continuous physical shape being cut
+in two by the derivation, not a real spacing gap. Excluding matching
+`other_layer` polygons wholesale avoids this: a `Metal4` shape either
+contributes to the plate (and is fully excluded from "other") or is
+genuinely separate geometry (and is fully included), never both.
+
+That exclusion is total, so the excluded polygons are never measured
+against *each other* by the `separation_check` — which for `mim.space.1`
+would drop half of the official rule (`MIMTM.1` is spacing to the bottom
+plate metal "whether adjacent MiM **or** routing metal", and a neighbouring
+capacitor's plate metal is excluded along with this one's). `run_drc()`
+measures that half separately, as a peer-to-peer `isolated_check` among the
+excluded plate-bearing polygons, and reports its edge pairs under the same
+rule id — the same additive "supplementary result under one rule id"
+pattern `_run_check`'s `outside_region` escape term already uses (#318).
+`isolated_check` measures spacing between *different* polygons only, unlike
+`space_check`, which also measures intra-polygon notches: one capacitor's
+own slotted wide plate metal is a single merged polygon, and its slot is
+not "spacing to another bottom plate". The peer check runs on the whole
+plate-bearing polygons rather than the sizing-clipped plates, so a shared
+bottom plate carrying two top plates further apart than `2 * sized_by_um`
+is still one polygon with no gap to measure; the residual conservatism that
+trades for is documented in `gf180mcu.py`'s `mim.space.1` note.
+
 ### `"area"` / `"density"` / `"antenna"` check kinds (issue #812)
 
 Three more check kinds exist alongside `"width"`/`"space"`/`"notch"`
@@ -408,23 +445,56 @@ primitives can't isolate (`comp.space.1`, `poly2.space.1`, `poly2.width.1`,
 approximated as a minimum only), an array-density context our primitives
 have no notion of (`via1.space.1`-`via4.space.1`, which use the ordinary
 two-via `Vn.2a` threshold rather than the tighter `Vn.2b` one that applies
-inside a >=4x4 via array), a
-sized/derived-layer context our primitives can't isolate (`mim.space.1`,
-approximated as a general `Metal4`-to-`Metal4` spacing check that may
-over-flag ordinary `Metal4` routing unrelated to a MiM capacitor), or
-context our engine has no data for at all — net-potential (`nwell.space.1`)
-or device connectivity (`bjt.separation.comp.1`), both of which require
-netlist/connectivity information the geometry-only check primitives don't
-have. Each is called out explicitly in its rule's docstring in
-`gf180mcu.py`; the threshold values used are always the real, unmodified
-DRM values.
+inside a >=4x4 via array), a plate-outline-vs-whole-polygon choice in one
+half of one rule (`mim.space.1`'s "adjacent MiM" half, see below), or
+context our engine has no data for at all — net-potential
+(`nwell.space.1`) or device connectivity (`bjt.separation.comp.1`), both of
+which require netlist/connectivity information the geometry-only check
+primitives don't have. Each is called out explicitly in its rule's
+docstring in `gf180mcu.py`; the threshold values used are always the real,
+unmodified DRM values.
 
-The DRM's MiM capacitor rule `MIMTM.2` (minimum bottom-plate overlap of
-`Via4`) is transcribed as `mim.enclosing.via4.1` (issue #345) using the
-`derived_layer` primitive described above, rather than approximated against
-raw `Metal4` — see "Sized/derived-layer rules (`DerivedLayer`)" above for
-why an unscoped version of this particular rule would have been actively
-wrong, not merely conservative.
+The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
+`MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing
+metal, transcribed as `mim.space.1`) and `MIMTM.2` (minimum bottom-plate
+overlap of `Via4`, transcribed as `mim.enclosing.via4.1`, issue #345) — both
+use the `derived_layer` primitive described above rather than being
+approximated against raw `Metal4`, so a design with **zero** recognised MiM
+structures (no `FuseTop` shapes at all) produces zero violations for either
+rule, not the false positives an unscoped whole-`Metal4` check would
+produce against ordinary routing or PDN power-stripe geometry. `mim.space.1`
+was fixed this way in issue #1033 — before that, it approximated `MIMTM.1`
+as a general `Metal4`-to-`Metal4` `"space"` check across the whole drawn
+layer, over-flagging any two ordinary `Metal4` shapes spaced tighter than
+1.2 um regardless of whether the layout drew a MiM capacitor anywhere (this
+was confirmed in practice against a real OpenROAD-routed digital block with
+a `Metal4` PDN grid and zero MiM devices: 188 false-positive `mim.space.1`
+violations, all attributable to top-level PDN/routing geometry, none to a
+qualified library cell). Because `"space"` is a single-region check
+primitive, `mim.space.1` is instead expressed as a `"separation"` check
+between the derived virtual bottom plate and the rest of `Metal4` — see
+"Sized/derived-layer rules (`DerivedLayer`)" above, and `drc.py`'s
+`run_drc()` for how the `"other"` side of that separation check further
+excludes any `Metal4` shape that is itself part of the same virtual-plate
+construction (not just a plain set-subtraction, which would produce a
+spurious violation at the sizing cutoff of a plate that straddles the
+oversized `FuseTop` window).
+
+`MIMTM.1` covers spacing to the bottom plate metal "whether adjacent MiM
+**or** routing metal". The separation check above measures the routing-metal
+half; the adjacent-MiM half is measured alongside it as a peer-to-peer
+`isolated_check` among the plate-bearing `Metal4` polygons that the "other"
+side excludes, reported under the same `mim.space.1` rule id (see
+"Sized/derived-layer rules (`DerivedLayer`)" above). That peer check runs on
+whole plate-bearing polygons rather than the sizing-clipped plate outlines,
+which is the one approximation left in this rule: two neighbouring MiM caps
+whose plate metals face each other across routing tails closer than 1.2 um
+are flagged even when the plates proper clear the rule (the conservative
+direction, and confined to `Metal4` that already touches a `FuseTop`).
+Measuring clipped outlines instead would split a *shared* bottom plate
+carrying two top plates more than 2 x 1.06 um apart into two "plates" and
+report a violation across continuous metal — a false positive of exactly
+the kind #1033 removed.
 
 Coverage does **not** yet include: `Pplus`/`Nplus` implant-specific rules
 (width/space/enclosure of the implant layers themselves), `LVPWELL` or
