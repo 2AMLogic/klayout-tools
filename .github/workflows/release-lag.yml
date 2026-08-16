@@ -1,0 +1,58 @@
+name: Release lag
+
+# Advisory-only check of RELEASING.md's "Release cadence" backstop: how many
+# commits `main` is ahead of the latest tag (issue #1020). The policy existed
+# (#957) but nothing computed it, so the gap grew silently — 240 commits ahead
+# of v0.2.0 by 2026-08-15, ~10x the 25-commit backstop.
+#
+# This workflow NEVER cuts a release: it does not tag, push, or trigger
+# publish.yml. It only reports, via the job summary plus an annotation.
+# Cutting a release stays a human action (see RELEASING.md).
+#
+# Deliberately NOT part of ci.yml and deliberately NOT run on `pull_request`:
+# release lag is a property of `main`, not of any PR, and an over-threshold
+# count must never redden an unrelated PR's checks.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly backstop, Mondays 15:17 UTC — catches drift during a quiet
+    # stretch with no merges to main.
+    - cron: "17 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-lag-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-lag:
+    name: Commits since latest tag (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history AND tags: the check compares the latest tag against
+          # the checked-out ref, and the default shallow fetch has neither.
+          fetch-depth: 0
+
+      - name: Check commits since the latest tag
+        # Exit 1 means "a release is due" — a signal, not a failure, so it is
+        # swallowed here (the ::warning:: annotation and the job summary the
+        # script writes to $GITHUB_STEP_SUMMARY carry it). Exit >= 2 means the
+        # check itself could not run (e.g. RELEASING.md's threshold wording
+        # drifted out of sync with the script's parser) and DOES fail the job —
+        # a check that silently stops checking is worse than no check.
+        run: |
+          status=0
+          scripts/check-release-lag.sh --ref HEAD --annotate || status=$?
+          if [ "$status" -ge 2 ]; then
+            echo "::error file=scripts/check-release-lag.sh,title=Release-lag check failed::check-release-lag.sh exited $status — see the log above"
+            exit 1
+          fi
+          exit 0
