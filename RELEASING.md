@@ -34,6 +34,20 @@ warranted."
    (`/repo:release` if using the Repo Skills wrapper) even if nothing has
    explicitly been requested as installable.
 
+   **You do not have to remember to run this.**
+   [`scripts/check-release-lag.sh`](scripts/check-release-lag.sh) computes the
+   same count (it *parses the 25 above out of this file*, so the two can never
+   drift apart), and `.github/workflows/release-lag.yml` runs it on every push
+   to `main`, weekly, and on demand — reporting an over-threshold count as a
+   job-summary entry plus a warning annotation. That check is advisory only:
+   it never tags, pushes, or triggers `publish.yml`. Run it locally the same
+   way CI does:
+
+   ```bash
+   scripts/check-release-lag.sh            # exit 1 ⇒ a release is due
+   scripts/check-release-lag.sh --format json
+   ```
+
 25 is deliberately closer to the low end of the 18–200+ commit range that
 #342 and #953 both surfaced friction within — cutting a release is cheap
 (one version bump PR + one tag push, see the sequence below), so the backstop
