@@ -13,10 +13,12 @@ This is Phase 0/1 of the analog-sizing epic
 ([#705](https://github.com/2AMLogic/klayout-tools/issues/705)): define the
 `klt size` request/response interface, wire `ngspice` in as the in-loop
 evaluator, solve the single-device gm/Id MVP (#721), add PVT corner sets
-(#729) and a worst-corner margin objective (#769), and extend the engine to
-a **coupled multi-device joint solve** (#768 -- see "Coupled multi-device
-topology sizing" below). Later phases add a real optimizer core and
-system-level (gain/UGF/phase-margin) objectives -- see epic #705.
+(#729) and a worst-corner margin objective (#769), extend the engine to a
+**coupled multi-device joint solve** (#768 -- see "Coupled multi-device
+topology sizing" below), and add a **fixed-`Vds` bias mode** (#1015 -- see
+"Fixed-Vds bias mode" below) alongside the original diode-connected method.
+Later phases add a real optimizer core and system-level (gain/UGF/phase-
+margin) objectives -- see epic #705.
 
 - `<request.json>` -- path to a request document (see "Request" below). A
   *reference*, not inline JSON on the command line, mirroring every other
@@ -31,40 +33,92 @@ system-level (gain/UGF/phase-margin) objectives -- see epic #705.
   "Performance" below for why this needs to be generous against a real PDK.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
 
-## Method: gm/Id lookup via a diode-connected bias sweep
+## Method: two bias modes, one search
 
-The classical gm/Id sizing methodology (Silveira/Flandre/Jespers) looks up
-current density (`Id/W`) for a target `gm/Id` from a pre-characterized curve
-at a *fixed* `Vds`. This MVP uses the closely related, simpler
-diode-connected variant instead: the device's gate is tied to its drain
-(`Vds = Vgs`), and an ideal current source fixes `Id` exactly at
+Both modes below solve the *same* problem the same way: `klt size` sweeps a
+log-spaced grid of candidate widths between `device.w_min_um` and
+`device.w_max_um` inside a single ngspice invocation, finds the two adjacent
+grid points whose measured `gm/Id` bracket `target.gm_id`, interpolates
+(linear in `ln(W)`) to estimate the width that hits it -- then **confirms**
+that estimate with a fresh, independent ngspice operating-point run, and
+reports the confirmed result, never the interpolated one, as
+`operating_point`. What differs between the two modes is only the generated
+deck's *bias topology* -- how each candidate width's `Vgs`/`Vds`/`Id` are
+tied down while `gm/Id` is measured.
+
+### Diode-connected bias sweep (default -- no `target.vds_v`)
+
+This is the original MVP method, unchanged: the device's gate is tied to its
+drain (`Vds = Vgs`), and an ideal current source fixes `Id` exactly at
 `target.id_a`. ngspice's own DC operating-point solver finds the `Vgs` (and
 therefore `gm`) the device settles at for a given width -- so the only free
 variable the search drives is `W`; no feedback/regulation loop is needed to
-hold an independently chosen `Vds` against the swept device.
+hold an independently chosen `Vds` against the swept device, and
+`margins.id_rel_error` is near-zero *by construction* (the ideal current
+source enforces it exactly).
 
 `gm/Id` at fixed `Id` is monotonically increasing in `W` (a wider device at
-the same current sits at lower current density, i.e. weaker inversion,
-i.e. higher `gm/Id`) -- verified empirically against the installed sky130A
-PDK's `sky130_fd_pr__nfet_01v8`/`__pfet_01v8` while building this command.
-That monotonicity is what makes a bracket-and-interpolate search well-posed:
-`klt size` sweeps a log-spaced grid of candidate widths between
-`device.w_min_um` and `device.w_max_um`, finds the two adjacent grid points
-whose `gm/Id` bracket the target, and interpolates (linear in `ln(W)`) to
-estimate the width that hits it -- then **confirms** that estimate with a
-fresh, independent ngspice operating-point run, and reports the confirmed
-result, never the interpolated one, as `operating_point`.
+the same current sits at lower current density, i.e. weaker inversion, i.e.
+higher `gm/Id`) -- verified empirically against the installed sky130A PDK's
+`sky130_fd_pr__nfet_01v8`/`__pfet_01v8` while building this command. That
+monotonicity is what makes the bracket-and-interpolate search well-posed.
 
-**Known limitation**: decoupling `Vds` from `Vgs` (the fully general
-fixed-`Vds` lookup-table method used for a real circuit's actual operating
-`Vds`) is not implemented in this MVP -- `request.target` has no `vds_v`
-field. `gm/Id` is only weakly sensitive to `Vds` in saturation (channel
-length modulation is a second-order effect), so the diode-connected result
-is a reasonable first-order sizing even when the eventual circuit's `Vds`
-differs from `Vgs`; a caller that needs the fixed-`Vds` variant should treat
-this command's result as a starting point and re-verify with `klt sim`
-against the actual circuit topology. Tracked as later-phase work under epic
-#705.
+This is a close, simpler cousin of the classical gm/Id sizing methodology
+(Silveira/Flandre/Jespers), which instead looks up current density (`Id/W`)
+for a target `gm/Id` from a pre-characterized curve at a *fixed* `Vds`.
+`gm/Id` is only weakly sensitive to `Vds` in saturation (channel length
+modulation is a second-order effect), so this mode's result is a reasonable
+first-order sizing even when the eventual circuit's `Vds` differs from
+`Vgs` -- but a device whose actual circuit `Vds` differs meaningfully from
+its diode-connected `Vgs` (a cascode leg, a device biased well above
+threshold) should use the fixed-`Vds` mode below instead of treating this
+result as a starting point to re-verify manually.
+
+### Fixed-Vds bias mode (`target.vds_v`, issue #1015)
+
+Setting `target.vds_v` switches to the fully general, classical fixed-`Vds`
+method: the device's `Vds` is held at exactly the requested value by an
+ideal voltage source (never tied to `Vgs`), and a **feedback-regulated gate
+bias** -- an ngspice behavioral source implementing a clamped, high-loop-
+gain servo on the measured drain current, resolved directly by ngspice's own
+DC Newton-Raphson solver at each `op` point (the same way SPICE resolves any
+other closed-loop feedback network, e.g. an op-amp macro-model, at DC) --
+finds the `Vgs` that hits `target.id_a` at that fixed `Vds`. No extra
+ngspice invocation or outer search loop is needed versus the diode-connected
+mode's own one-invocation-per-sweep design (see "Performance" below): the
+same bracket-and-interpolate-then-confirm width search runs unchanged, only
+the deck's bias topology differs.
+
+Because the target current is enforced by *feedback*, not an ideal current
+source, `margins.id_rel_error` in this mode is a **genuinely measured**
+quantity -- typically within ~0.01% of `target.id_a` against a realistic
+device, but not "near-zero by construction" the way the diode-connected
+mode's ideal current source guarantees. A request whose `target.vds_v`/
+`target.id_a` combination cannot be reached by any gate bias inside
+`[0, corner.vdd_v]` (e.g. too little `Vds` headroom for the requested current
+at the narrowest allowed width) surfaces as the feedback bias saturating
+against a supply rail: `margins.id_rel_error` will report the resulting
+mismatch honestly rather than silently reporting an unreachable point as
+met -- narrow the width bounds, lower the target current, or relax
+`target.vds_v` if this happens.
+
+`operating_point.vds_v` reports the confirmed `Vds` -- always exactly
+`target.vds_v` in this mode (enforced by the ideal voltage source, not a
+measured quantity), and `null` in diode-connected mode (which has no
+independently-declared `Vds` to echo; its `Vds` equals `operating_point.
+vgs_v` by construction).
+
+### When to use which
+
+Use the default diode-connected mode for a first-pass sizing, or when the
+eventual circuit's `Vds` is not yet known (e.g. a differential pair or
+mirror leg whose exact operating `Vds` depends on the rest of the not-yet-
+sized circuit -- see "Coupled multi-device topology sizing" below, which
+uses the diode-connected sweep the same way to *seed* its joint solve).
+Use fixed-`Vds` mode once the device's actual circuit `Vds` is known
+(a cascode leg's headroom-limited `Vds`, a device deliberately biased well
+above threshold) and you want the sizing measured at that real operating
+point rather than approximated at `Vds=Vgs`.
 
 ## Device convention (sky130-first)
 
@@ -128,7 +182,7 @@ verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
 
 | Field                        | Type              | Description |
 | ----------------------------- | ----------------- | ----------- |
-| `device.kind`                 | string, required  | `"nmos"` or `"pmos"` -- selects the diode-connected bias topology (see "Method" above). |
+| `device.kind`                 | string, required  | `"nmos"` or `"pmos"` -- selects the device orientation for either bias topology (see "Method" above). |
 | `device.model`                | string, required  | The PDK subcircuit name (see "Device convention" above). |
 | `device.l_um`                 | number, required  | Fixed channel length. Positive. |
 | `device.w_min_um`/`w_max_um`  | number, required  | Search bounds for the swept channel width. `w_max_um` must exceed `w_min_um`. |
@@ -139,8 +193,9 @@ verb -- see [`docs/json-contract.md`](../json-contract.md) for the envelope
 | `corner.process`              | string             | `.lib` section to select. Defaults to `"tt"`. Mutually exclusive with `corners` (see "Corner sets" below) -- a request declares one or the other, never both. |
 | `corner.vdd_v`                | number, required   | Supply voltage bias source value. |
 | `corner.temperature_c`        | number             | Simulation temperature. Defaults to `27`. |
-| `target.id_a`                 | number, required   | Current budget (amps) -- enforced exactly by an ideal bias current source; the search variable is width, not current. |
+| `target.id_a`                 | number, required   | Current budget (amps). In diode-connected mode, enforced exactly by an ideal bias current source; in fixed-Vds mode, the setpoint a feedback bias servos the measured current to (see "Method" above). The search variable is always width, not current. |
 | `target.gm_id`                | number, required   | Target small-signal `gm/Id` (units of 1/V, equivalently S/A). |
+| `target.vds_v`                | number             | Optional (issue #1015). When set, switches to fixed-Vds bias mode: holds the device at this `Vds` via a feedback-regulated gate bias instead of the default diode-connected tie. Absent (the default) keeps the original diode-connected behavior unchanged -- see "Method" above's "When to use which". |
 | `tolerance.gm_id_rel`         | number             | Relative tolerance on the confirmed `gm/Id` against `target.gm_id` for `status: "pass"`. Defaults to `0.03` (3%). |
 | `options.sweep_points`        | integer            | Points in the coarse log-spaced width sweep. Defaults to `25`; must be `>= 5`. |
 | `options.timeout_s`           | number             | Per-invocation ngspice wall-clock budget. Defaults to `180`. Overridable with `--timeout-s`. |
@@ -332,7 +387,7 @@ choice of width holds it constant across a PVT matrix. So the top-level
   "operating_point": {
     "w_um": 3.571887060106671, "l_um": 0.5, "nf": 1, "mult": 1,
     "id_a": 2e-05, "gm_s": 0.0002400316, "gm_id": 12.00158,
-    "vgs_v": 0.7633762, "vth_v": 0.6301946, "vov_v": 0.1331816,
+    "vgs_v": 0.7633762, "vds_v": null, "vth_v": 0.6301946, "vov_v": 0.1331816,
     "vdsat_v": 0.1348507, "inversion_level": "strong"
   },
   "margins": { "gm_id_rel_error": 0.0001317, "id_rel_error": 0.0 },
@@ -364,17 +419,28 @@ choice of width holds it constant across a PVT matrix. So the top-level
   see "Inversion-level classification" below. `vth_v`/`vdsat_v` are `null`
   when the device model does not expose them via ngspice's internal
   op-point vectors (e.g. a bare SPICE `level=1` model, as in
-  `examples/size/`'s worked example).
+  `examples/size/`'s worked example). `vds_v` (issue #1015) is `null` in
+  diode-connected mode (its `Vds` equals `vgs_v` by construction, not an
+  independently-declared value); in fixed-Vds mode it echoes
+  `target.vds_v` exactly (enforced by an ideal voltage source, not a
+  measured quantity).
 - `margins.gm_id_rel_error` -- `(confirmed_gm_id - target.gm_id) /
-  target.gm_id`; `margins.id_rel_error` is near-zero by construction, since
-  `Id` is enforced exactly by the bias current source rather than being a
-  search output.
+  target.gm_id`. `margins.id_rel_error` is near-zero *by construction* in
+  diode-connected mode, since `Id` is enforced exactly by the bias current
+  source rather than being a search output; in fixed-Vds mode it is a
+  genuinely **measured** quantity (typically within ~0.01% of
+  `target.id_a`, but not guaranteed exact -- see "Method" above's "Fixed-Vds
+  bias mode").
 - `method` -- **always populated**, on every `status`, including `"error"`
   (per this command's own acceptance bar: a result with no stated method is
   never valid). `rationale` is a human-readable sentence stating the
   sizing method, the inversion-level derivation, and (for an infeasible
   target) why. `feasible` is `false` when the target fell outside the swept
   width range; `bracket_w_um`/`interpolated_w_um` are `null` in that case.
+  `name`/`bias` reflect whichever bias mode the request selected -- e.g.
+  `"gm/Id lookup via fixed-Vds bias sweep (feedback-regulated)"` /
+  `"fixed-Vds (Vds regulated to 0.3V via a feedback-controlled gate bias; ..."`
+  when `target.vds_v` is set.
 - `environment`/`provenance` -- the same shape `klt sim` emits (see
   [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance`
   block"). `environment.artifacts_dir` is present only when
@@ -689,6 +755,18 @@ re-derives the expected width from the fixture's own textbook square-law
 equations (not by calling `klt size` a second time) and asserts the tool
 reproduces it.
 
+[`examples/size/cascode_request.json`](../../examples/size/cascode_request.json)
+-- the fixed-Vds worked example (issue #1015), reusing the same synthetic
+`models.lib`/`nmos_demo`: sizes the **same** device and 20 uA current budget
+as `request.json` above, but as a cascode leg held at `target.vds_v=0.3`
+(well below what the diode-connected tie above would settle at for this
+device/current) rather than at `Vds=Vgs`, for a different target `gm/Id=10`.
+`tests/test_size.py`'s `test_examples_size_cascode_worked_example_passes`
+runs it live and asserts it passes; `test_run_size_nmos_fixed_vds_pass`
+additionally asserts the confirmed `operating_point.vds_v` matches the
+requested `0.3V` exactly and that `vgs_v` is a genuinely different, solved
+quantity (not tied to `Vds` the way diode-connected mode's is).
+
 [`examples/size/topology_request.json`](../../examples/size/topology_request.json)
 -- the coupled-topology worked example (issue #768), reusing the same
 synthetic `models.lib`: sizes an NMOS input pair, a PMOS mirror load, and an
@@ -713,8 +791,9 @@ prose -- `gm1 = 2*pi*CL*ugf`, averaged over its four `tt` corners, gives
 The test asserts a factor-of-two band, because the canary's own `tt` corner
 spread alone (14.2-20.0 S/A, no 27C point in its matrix) maps to roughly
 3-9 um, the `ugf`-derived `gm1` neglects the OTA's parasitic loading, and
-this MVP biases the device diode-connected rather than at the OTA's actual
-`Vds` (the "Known limitation" above). It is skipped wherever no sky130A
+this test deliberately exercises the *diode-connected* mode (not the
+fixed-Vds mode above) rather than the OTA's actual `Vds`. It is skipped
+wherever no sky130A
 *ngspice* model library is installed -- including CI, which installs only
 the sky130 liberty subset -- so the offline square-law reproduction above
 is what gates every PR.

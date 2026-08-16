@@ -591,6 +591,172 @@ def test_run_size_infeasible_target_reports_fail(tmp_path):
     assert report["operating_point"]["w_um"] == pytest.approx(2.0, rel=0.05)
 
 
+# --------------------------------------------------------------------------- #
+# Fixed-Vds bias mode (issue #1015)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_target_vds_v_optional_and_positive():
+    assert "vds_v" not in size._parse_target({"id_a": 2e-05, "gm_id": 8.0})
+
+    parsed = size._parse_target({"id_a": 2e-05, "gm_id": 8.0, "vds_v": 0.3})
+    assert parsed["vds_v"] == 0.3
+
+    with pytest.raises(size.SizeError, match="vds_v"):
+        size._parse_target({"id_a": 2e-05, "gm_id": 8.0, "vds_v": -0.3})
+
+
+def test_run_size_non_positive_vds_v_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(target={"id_a": 2e-05, "gm_id": 8.0, "vds_v": 0}),
+    )
+
+    with pytest.raises(size.SizeError, match="vds_v"):
+        size.run_size(str(request))
+
+
+def test_write_sweep_deck_fixed_vds_uses_feedback_bias_not_diode_tie(tmp_path):
+    """Structural check of the generated deck, no ngspice needed: fixed-Vds
+    mode (``target.vds_v`` set) drops the diode-connected ``Idc``/tied-gate
+    topology entirely in favor of an ideal ``Vds`` source plus a feedback
+    ``Bgate`` behavioral source -- see this module's docstring's "Fixed-Vds
+    bias mode" section. `test_run_size_nmos_fixed_vds_pass` (real ngspice)
+    covers that the resulting deck actually converges to the requested
+    operating point; this test only covers the deck *shape*.
+    """
+    deck_path = tmp_path / "sweep.cir"
+    size._write_sweep_deck(
+        deck_path=str(deck_path),
+        device=size._parse_device(
+            {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            }
+        ),
+        corner=size._parse_corner({"process": "tt", "vdd_v": 1.8}),
+        target=size._parse_target({"id_a": 2e-05, "gm_id": 8.0, "vds_v": 0.3}),
+        models_lib="models.lib",
+        w_values=[1.0, 2.0],
+    )
+    deck = deck_path.read_text()
+
+    assert "Idc" not in deck
+    assert "X1 drain drain" not in deck  # no diode-connected gate-to-drain tie
+    assert "Vds drain 0 DC 0.3" in deck
+    assert "Bgate gate 0 V=" in deck
+    assert "i(Vds)" in deck
+    assert "X1 drain gate 0 0 nmos_demo" in deck
+
+
+def test_write_sweep_deck_diode_mode_unaffected_by_vds_v_absence(tmp_path):
+    """Regression check (issue #1015's acceptance criterion): a request
+    with no `target.vds_v` still generates the original diode-connected
+    deck, unchanged."""
+    deck_path = tmp_path / "sweep.cir"
+    size._write_sweep_deck(
+        deck_path=str(deck_path),
+        device=size._parse_device(
+            {
+                "kind": "nmos",
+                "model": "nmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            }
+        ),
+        corner=size._parse_corner({"process": "tt", "vdd_v": 1.8}),
+        target=size._parse_target({"id_a": 2e-05, "gm_id": 8.0}),
+        models_lib="models.lib",
+        w_values=[1.0, 2.0],
+    )
+    deck = deck_path.read_text()
+
+    assert "Idc vdd drain DC 2e-05" in deck
+    assert "X1 drain drain 0 0 nmos_demo" in deck
+    assert "Bgate" not in deck
+    assert "Vds drain" not in deck
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_nmos_fixed_vds_pass(tmp_path):
+    """Fixed-Vds mode (issue #1015): the confirmed operating point sits at
+    the requested Vds (enforced exactly by an ideal voltage source), not at
+    Vds=Vgs the way diode-connected mode's is."""
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(target={"id_a": 2e-05, "gm_id": 10.0, "vds_v": 0.3}),
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass"
+    assert report["operating_point"]["gm_id"] == pytest.approx(10.0, rel=0.02)
+    assert report["operating_point"]["id_a"] == pytest.approx(2e-5, rel=1e-2)
+    assert report["operating_point"]["vds_v"] == pytest.approx(0.3)
+    # Not diode-connected: Vgs is a genuinely different, solved quantity,
+    # not tied to Vds.
+    assert report["operating_point"]["vgs_v"] != pytest.approx(0.3, abs=0.05)
+    assert report["method"]["bias"].startswith("fixed-Vds")
+    assert "fixed-Vds" in report["method"]["name"]
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_pmos_fixed_vds_pass(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        _base_request(
+            device={
+                "kind": "pmos",
+                "model": "pmos_demo",
+                "l_um": 0.5,
+                "w_min_um": 0.5,
+                "w_max_um": 20,
+            },
+            target={"id_a": 2e-05, "gm_id": 8.0, "vds_v": 0.4},
+        ),
+    )
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass"
+    assert report["device"]["kind"] == "pmos"
+    assert report["operating_point"]["gm_id"] == pytest.approx(8.0, rel=0.02)
+    assert report["operating_point"]["vds_v"] == pytest.approx(0.4)
+
+
+@_SKIP_NO_NGSPICE
+def test_run_size_diode_mode_operating_point_vds_v_is_none(tmp_path):
+    """Regression check: diode-connected mode (no `target.vds_v`) never
+    populates `operating_point.vds_v` -- it only reflects a *requested*
+    fixed Vds, not a guess at the diode-connected tie's own Vgs=Vds."""
+    _write_models_lib(tmp_path)
+    request = _write_request(tmp_path, _base_request())
+
+    report = size.run_size(str(request))
+
+    assert report["status"] == "pass"
+    assert report["operating_point"]["vds_v"] is None
+    assert report["method"]["bias"] == "diode-connected (gate tied to drain, Vds=Vgs)"
+
+
+@_SKIP_NO_NGSPICE
+def test_examples_size_cascode_worked_example_passes():
+    """The fixed-Vds worked example (issue #1015) -- a cascode leg held at
+    Vds=0.3V, alongside `test_examples_size_worked_example_passes`'s
+    diode-connected example."""
+    exit_code = main(
+        ["size", str(EXAMPLES_DIR / "cascode_request.json"), "--format", "json"]
+    )
+    assert exit_code == 0
+
+
 @_SKIP_NO_NGSPICE
 def test_cli_exit_codes(tmp_path, monkeypatch):
     _write_models_lib(tmp_path)

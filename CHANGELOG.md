@@ -488,6 +488,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-16 — `klt size` requests gain an optional **`target.vds_v`**
+  (issue #1015): when set, sizes the device at a fixed `Vds` (the classical
+  gm/Id lookup-table methodology) instead of the default diode-connected
+  bias (`Vds=Vgs`). The generated ngspice deck holds `Vds` at exactly the
+  requested value via an ideal voltage source, and a feedback-regulated
+  gate bias (an ngspice behavioral source, resolved by ngspice's own DC
+  Newton-Raphson solver — no extra invocation or outer search loop) servos
+  `Vgs` to hit `target.id_a` at that `Vds`; the same bracket-and-interpolate
+  width search, then a fresh confirmation run, reports the confirmed
+  operating point exactly as before. The confirmed `Vds` is additionally
+  echoed as the additive **`operating_point.vds_v`** (`null` in
+  diode-connected mode, which has no independently-declared `Vds`).
+  `target.vds_v` absent (the default) reproduces the original
+  diode-connected deck byte-for-byte — no regression for existing callers.
+  See `docs/cli/size.md`'s "Fixed-Vds bias mode" and the new
+  `examples/size/cascode_request.json` worked example. No `schema_version`
+  bump — purely additive to `request.target`/`response.operating_point`.
 - 2026-08-15 — `klt functional-verification` requests gain
   **`options.defines`/`options.build_args`/`options.includes`** (issue
   #1001), forwarded to cocotb's own `Runner.build(defines=..., includes=...)`
