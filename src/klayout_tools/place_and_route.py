@@ -3001,6 +3001,23 @@ def _merge_def_to_gds(
     if layer_map_path is not None:
         lefdef_config.map_file = layer_map_path
 
+    # Issue #1032: KLayout's DEF reader silently proceeds when the target
+    # layout DBU it is configured for does not match the DEF file's own
+    # declared `UNITS DISTANCE MICRONS` value, producing wrong/lossy
+    # via-cut geometry as a side effect (only a `Warning:` line, never a
+    # raised error). Left unset, `lefdef_config.dbu` inherits KLayout's
+    # compiled-in default (0.001, i.e. `DATABASE MICRONS 1000`), which
+    # happens to match sky130 but is wrong for any PDK whose own tech LEF
+    # declares a different `DATABASE MICRONS` value (e.g. gf180mcu's 2000).
+    # Resolve the tech LEF's own declared value and set the reader's target
+    # DBU to match; when the tech LEF doesn't declare one (or the
+    # regex-based parser can't extract it), fall back to KLayout's existing
+    # default DBU behavior -- `read_lef_header` never raises on malformed
+    # input, so `database_microns is None` is a normal, expected case here.
+    database_microns = read_lef_header(tech_lef)["database_microns"]
+    if database_microns is not None:
+        lefdef_config.dbu = 1.0 / database_microns
+
     main_layout = kdb.Layout()
     try:
         main_layout.read(def_path, opts)

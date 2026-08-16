@@ -42,6 +42,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   standard-cell row abutment (#1028)" for the full writeup and
   `tests/test_drc.py`'s three new `row_abutment_*` regression tests. No
   response-shape change; `schema_version` unaffected.
+
+- 2026-08-16 — `_merge_def_to_gds` (the DEF/GDS merge step behind place-and-
+  route flows) now resolves the tech LEF's own declared `DATABASE MICRONS`
+  and configures KLayout's DEF reader to match, instead of silently
+  inheriting KLayout's compiled-in default DBU (issue #1032). Left unset,
+  `kdb.LoadLayoutOptions().lefdef_config.dbu` defaulted to `0.001`
+  (`DATABASE MICRONS 1000`), which happens to match sky130's tech LEF but is
+  wrong for any PDK declaring a different value (e.g. gf180mcu's `2000`).
+  KLayout's DEF reader never raises on this mismatch — it only logs a `DEF
+  UNITS does not match reader DBU` warning — so merged via-cut geometry was
+  silently dropped or misplaced. The fix reads `database_microns` via the
+  existing `read_lef_header()` helper and sets `dbu = 1.0 /
+  database_microns` before `main_layout.read(def_path, opts)`; when the tech
+  LEF doesn't declare a `DATABASE MICRONS` value, the merge falls back to
+  KLayout's prior default DBU behavior unchanged. sky130 output is
+  bit-identical (the resolved default is the same `0.001`); no response
+  shape changed, `schema_version` unaffected.
+
 - 2026-08-16 — `klt pex` no longer silently swaps the wrong `.include` line,
   and now names a schematic/extracted pin-list mismatch instead of burying it
   in a per-corner log (issue #1030). Two fixes to the DUT `.include` swap

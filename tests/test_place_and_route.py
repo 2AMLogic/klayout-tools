@@ -3589,6 +3589,271 @@ def test_merge_def_to_gds_merges_macro_gds_view_when_declared(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# DBU/DEF-UNITS mismatch (issue #1032): a tech LEF whose own `DATABASE
+# MICRONS` differs from KLayout's compiled-in reader default (0.001, i.e.
+# `DATABASE MICRONS 1000`) -- e.g. a gf180mcu-class tech LEF declaring 2000
+# -- must not silently mismatch and drop/corrupt via-cut geometry.
+# --------------------------------------------------------------------------- #
+
+
+def _write_matching_cell_gds_at_dbu(path: Path, cell_name: str, dbu: float) -> None:
+    """Same shape as `_write_matching_cell_gds`, but at an explicit `dbu`
+    rather than always 0.001 -- a real PDK install's own std-cell GDS views
+    share one resolution with its tech LEF's `DATABASE MICRONS` (e.g. every
+    gf180mcu asset is 0.0005, matching `DATABASE MICRONS 2000`, never mixed
+    with sky130-style 0.001 views). `_merge_def_to_gds` merges this cell GDS
+    into the DEF-derived layout via a second, options-less `Layout.read()`
+    call (`place_and_route.py`'s own merge loop) that resets the shared
+    layout's `dbu` to match whatever it reads -- rescaling only *new*
+    shapes, not shapes already inserted by the DEF/LEF read. A cell GDS at
+    the wrong dbu would corrupt the DEF-derived via-cut geometry checked
+    below the exact same way a DEF/tech-LEF DBU mismatch would (this is why
+    every asset in a real PDK install shares one dbu, not test-fixture
+    sloppiness)."""
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    cell = layout.create_cell(cell_name)
+    layer = layout.layer(kdb.LayerInfo(68, 20))  # met1 drawing, sky130-ish
+    cell.shapes(layer).insert(kdb.Box(0, 0, 100, 100))
+    layout.write(str(path))
+
+
+def _write_via_tech_lef(path: Path, *, database_microns: int | None) -> None:
+    """Same shape as `_write_tiny_tech_lef` but adds a CUT layer plus a
+    fixed (non-`GENERATE`) `VIA` definition between met1/met2, and -- the
+    part this issue is about -- accepts an arbitrary (or omitted)
+    `DATABASE MICRONS` value instead of always hard-coding 1000."""
+    units_block = (
+        f"UNITS\n  DATABASE MICRONS {database_microns} ;\nEND UNITS\n"
+        if database_microns is not None
+        else ""
+    )
+    path.write_text(
+        "VERSION 5.7 ;\n"
+        'BUSBITCHARS "[]" ;\n'
+        'DIVIDERCHAR "/" ;\n'
+        f"{units_block}"
+        "MANUFACTURINGGRID 0.0005 ;\n"
+        "SITE unithd\n"
+        "  SYMMETRY Y ;\n"
+        "  CLASS CORE ;\n"
+        "  SIZE 0.46 BY 2.72 ;\n"
+        "END unithd\n"
+        "LAYER met1\n"
+        "  TYPE ROUTING ;\n"
+        "  DIRECTION HORIZONTAL ;\n"
+        "  WIDTH 0.14 ;\n"
+        "  PITCH 0.34 ;\n"
+        "END met1\n"
+        "LAYER via1\n"
+        "  TYPE CUT ;\n"
+        "END via1\n"
+        "LAYER met2\n"
+        "  TYPE ROUTING ;\n"
+        "  DIRECTION VERTICAL ;\n"
+        "  WIDTH 0.14 ;\n"
+        "  PITCH 0.34 ;\n"
+        "END met2\n"
+        "VIA VIA1_0 DEFAULT\n"
+        "  LAYER via1 ;\n"
+        "    RECT -0.0705 -0.0705 -0.0700 -0.0700 ;\n"
+        "    RECT 0.0700 0.0700 0.0705 0.0705 ;\n"
+        "  LAYER met1 ;\n"
+        "    RECT -0.1 -0.1 0.1 0.1 ;\n"
+        "  LAYER met2 ;\n"
+        "    RECT -0.1 -0.1 0.1 0.1 ;\n"
+        "END VIA1_0\n",
+        encoding="utf-8",
+    )
+
+
+def _write_via_def(path: Path, *, database_microns: int, cell_name: str) -> None:
+    """A DEF at the given `UNITS DISTANCE MICRONS` resolution, placing one
+    standard cell and routing its pin through the fixed `VIA1_0` defined by
+    `_write_via_tech_lef` -- exercising the DEF->GDS via-cut merge path
+    `_merge_def_to_gds` actually goes through, not just placement."""
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        'DIVIDERCHAR "/" ;\n'
+        'BUSBITCHARS "[]" ;\n'
+        "DESIGN top ;\n"
+        f"UNITS DISTANCE MICRONS {database_microns} ;\n"
+        "DIEAREA ( 0 0 ) ( 4600 2720 ) ;\n"
+        "ROW ROW_0 unithd 0 0 N DO 10 BY 1 STEP 460 0 ;\n"
+        "COMPONENTS 1 ;\n"
+        f"- inst1 {cell_name} + PLACED ( 0 0 ) N ;\n"
+        "END COMPONENTS\n"
+        "NETS 1 ;\n"
+        f"- net1 ( inst1 A )\n"
+        "  + ROUTED met1 ( 1000 1000 ) VIA1_0 ;\n"
+        "END NETS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+
+
+def test_merge_def_to_gds_resolves_dbu_from_tech_lef_database_microns(tmp_path, capfd):
+    """The core regression: a tech LEF declaring `DATABASE MICRONS 2000`
+    (gf180mcu-shaped, per issue #1032's own repro) merged against a DEF at
+    the *same* declared units must not trigger KLayout's `DEF UNITS does
+    not match reader DBU` warning, and the via-cut geometry it places must
+    come out at the correct real-micron position/size.
+
+    Before the fix, `_merge_def_to_gds` left `lefdef_config.dbu` at
+    KLayout's compiled-in default (0.001, i.e. `DATABASE MICRONS 1000`)
+    regardless of what the tech LEF itself declared -- confirmed live
+    (`test_merge_def_to_gds_without_fix_logs_dbu_mismatch_warning` below
+    reproduces exactly that warning against this same fixture by
+    monkeypatching the resolution step back out)."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_via_tech_lef(tech_lef, database_microns=2000)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "gf180mcuC" / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds_at_dbu(
+        gds_dir / "gf180mcu_fd_sc_mcu9t5v0.gds", cell_name, dbu=0.0005
+    )
+
+    def_path = tmp_path / "design.def"
+    _write_via_def(def_path, database_microns=2000, cell_name=cell_name)
+
+    out_path = tmp_path / "out.gds"
+
+    capfd.readouterr()  # drain anything buffered before this test's own read
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root, variant="gf180mcuC"),
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        hdl_toplevel="top",
+        macros=[],
+        out_path=str(out_path),
+    )
+    captured = capfd.readouterr()
+    assert "DEF UNITS does not match reader DBU" not in captured.out
+    assert "Invalid via name" not in captured.out
+
+    assert out_path.is_file()
+    result = kdb.Layout()
+    result.read(str(out_path))
+    via_cell = result.cell("VIA_VIA1_0")
+    assert via_cell is not None
+    via1_layer = result.layer(kdb.LayerInfo(2, 0))
+    cut_shapes = list(via_cell.shapes(via1_layer).each())
+    assert len(cut_shapes) == 2
+    # Real-micron positions, independent of whatever `result.dbu` ended up
+    # being -- the fixed via's own two cut RECTs from `_write_via_tech_lef`.
+    boxes_um = sorted(
+        tuple(round(v * result.dbu, 4) for v in (b.left, b.bottom, b.right, b.top))
+        for b in (s.bbox() for s in cut_shapes)
+    )
+    assert boxes_um == [
+        (-0.0705, -0.0705, -0.07, -0.07),
+        (0.07, 0.07, 0.0705, 0.0705),
+    ]
+
+
+def test_merge_def_to_gds_without_fix_logs_dbu_mismatch_warning(
+    tmp_path, monkeypatch, capfd
+):
+    """Counterfactual proving the fixture above is a real regression guard,
+    not a vacuous one: with the exact same DATABASE-MICRONS-2000 tech LEF
+    and DEF, forcing `_merge_def_to_gds` to skip resolving `dbu` (as it did
+    before this issue's fix -- simulated here by making `read_lef_header`
+    report `database_microns: None` regardless of the LEF's actual content)
+    reproduces KLayout's own `DEF UNITS does not match reader DBU` warning
+    verbatim."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_via_tech_lef(tech_lef, database_microns=2000)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "gf180mcuC" / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds_at_dbu(
+        gds_dir / "gf180mcu_fd_sc_mcu9t5v0.gds", cell_name, dbu=0.0005
+    )
+
+    def_path = tmp_path / "design.def"
+    _write_via_def(def_path, database_microns=2000, cell_name=cell_name)
+
+    real_read_lef_header = place_and_route.read_lef_header
+
+    def _fake_read_lef_header(path):
+        result = dict(real_read_lef_header(path))
+        result["database_microns"] = None
+        return result
+
+    monkeypatch.setattr(place_and_route, "read_lef_header", _fake_read_lef_header)
+
+    out_path = tmp_path / "out.gds"
+    capfd.readouterr()
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root, variant="gf180mcuC"),
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        hdl_toplevel="top",
+        macros=[],
+        out_path=str(out_path),
+    )
+    captured = capfd.readouterr()
+    assert "DEF UNITS does not match reader DBU" in captured.out
+    # Falls back to KLayout's own default rather than crashing (issue
+    # #1032's second acceptance criterion) -- the merge still completes.
+    assert out_path.is_file()
+
+
+def test_merge_def_to_gds_falls_back_when_tech_lef_omits_database_microns(tmp_path):
+    """A tech LEF that never declares `DATABASE MICRONS` at all (the
+    regex-based `read_lef_header` parser returns `None`, never raises) must
+    fall back to KLayout's existing default DBU behavior rather than
+    crashing -- issue #1032's second acceptance criterion."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_via_tech_lef(tech_lef, database_microns=None)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "sky130A" / "libs.ref" / "sky130_fd_sc_hd" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "sky130_fd_sc_hd.gds", cell_name)
+
+    def_path = tmp_path / "design.def"
+    # KLayout's own default DBU (0.001) corresponds to `DATABASE MICRONS
+    # 1000` -- matching units here so the fallback path is a clean success,
+    # not itself another mismatch.
+    _write_via_def(def_path, database_microns=1000, cell_name=cell_name)
+
+    out_path = tmp_path / "out.gds"
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=_fake_pdk_info(root),
+        cell_library="sky130_fd_sc_hd",
+        hdl_toplevel="top",
+        macros=[],
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+    result = kdb.Layout()
+    result.read(str(out_path))
+    assert result.top_cell().name == "top"
+    assert result.cell("VIA_VIA1_0") is not None
+
+
+# --------------------------------------------------------------------------- #
 # Integration: real OpenROAD + a real, host-resolved sky130 PDK
 # (skipped when either is unavailable -- never required for CI, see this
 # module's own docstring)
