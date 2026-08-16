@@ -1188,6 +1188,7 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
     def fake_merge(**kwargs):
         calls.append(kwargs)
         Path(kwargs["out_path"]).write_text("fake gds\n")
+        return {"path": None, "resolution": "none"}
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
     return calls
@@ -3210,6 +3211,72 @@ def _fake_pdk_info(root: Path, variant: str = "sky130A") -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# `_resolve_layer_map` -- variant-exact vs. family-fallback vs. none found
+# (issue #1029: gf180mcu ships a single family-level `gf180mcu.map` shared
+# across every variant rather than a `<variant>.map` per variant, unlike
+# sky130).
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_layer_map_prefers_exact_variant_match(tmp_path):
+    klayout_dir = tmp_path / "klayout"
+    tech_dir = klayout_dir / "tech"
+    tech_dir.mkdir(parents=True)
+    (tech_dir / "sky130A.map").write_text("exact\n", encoding="utf-8")
+    (tech_dir / "sky130.map").write_text("family\n", encoding="utf-8")
+
+    pdk_info = _fake_pdk_info(tmp_path, variant="sky130A")
+    pdk_info["assets"]["klayout"] = str(klayout_dir)
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path == str(tech_dir / "sky130A.map")
+    assert resolution == "exact"
+
+
+def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path):
+    """gf180mcu-shaped fixture: only the bare-family `gf180mcu.map` exists,
+    never a `gf180mcuC.map`/`gf180mcuD.map` -- verified against a real
+    open_pdks install for issue #1029."""
+    klayout_dir = tmp_path / "klayout"
+    tech_dir = klayout_dir / "tech"
+    tech_dir.mkdir(parents=True)
+    (tech_dir / "gf180mcu.map").write_text("family\n", encoding="utf-8")
+
+    pdk_info = _fake_pdk_info(tmp_path, variant="gf180mcuC")
+    pdk_info["assets"]["klayout"] = str(klayout_dir)
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path == str(tech_dir / "gf180mcu.map")
+    assert resolution == "family"
+
+
+def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
+    klayout_dir = tmp_path / "klayout"
+    tech_dir = klayout_dir / "tech"
+    tech_dir.mkdir(parents=True)
+
+    pdk_info = _fake_pdk_info(tmp_path, variant="gf180mcuC")
+    pdk_info["assets"]["klayout"] = str(klayout_dir)
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path is None
+    assert resolution == "none"
+
+
+def test_resolve_layer_map_returns_none_when_no_klayout_asset(tmp_path):
+    pdk_info = _fake_pdk_info(tmp_path, variant="sky130A")
+    assert pdk_info["assets"]["klayout"] is None
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path is None
+    assert resolution == "none"
+
+
 def test_merge_def_to_gds_success(tmp_path):
     root = tmp_path / "install"
     cell_name = "testcell"
@@ -3227,7 +3294,7 @@ def test_merge_def_to_gds_success(tmp_path):
 
     out_path = tmp_path / "out.gds"
 
-    place_and_route._merge_def_to_gds(
+    result_info = place_and_route._merge_def_to_gds(
         def_path=str(def_path),
         tech_lef=str(tech_lef),
         cell_lef=str(cell_lef),
@@ -3242,6 +3309,53 @@ def test_merge_def_to_gds_success(tmp_path):
     result = kdb.Layout()
     result.read(str(out_path))
     assert result.top_cell().name == "top"
+    # `_fake_pdk_info`'s `assets.klayout` is `None` -- no map file to find.
+    assert result_info == {"path": None, "resolution": "none"}
+
+
+def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_path):
+    """A real gf180mcuC/gf180mcuD open_pdks install ships only the
+    family-level `libs.tech/klayout/tech/gf180mcu.map`, never a
+    variant-named `gf180mcuC.map`/`gf180mcuD.map` (issue #1029). The merge
+    must still resolve and apply a layer map instead of silently proceeding
+    without one."""
+    root = tmp_path / "install"
+    cell_name = "testcell"
+    tech_lef = tmp_path / "tech.tlef"
+    cell_lef = tmp_path / "cells.lef"
+    _write_tiny_tech_lef(tech_lef)
+    _write_tiny_cell_lef(cell_lef, cell_name)
+
+    gds_dir = root / "gf180mcuC" / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "gds"
+    gds_dir.mkdir(parents=True)
+    _write_matching_cell_gds(gds_dir / "gf180mcu_fd_sc_mcu9t5v0.gds", cell_name)
+
+    klayout_tech_dir = root / "gf180mcuC" / "libs.tech" / "klayout" / "tech"
+    klayout_tech_dir.mkdir(parents=True)
+    map_path = klayout_tech_dir / "gf180mcu.map"
+    map_path.write_text("met1 NET,SPNET,VIA 68 20\n", encoding="utf-8")
+
+    def_path = tmp_path / "design.def"
+    _write_tiny_def(def_path, design_name="top", cell_name=cell_name)
+
+    out_path = tmp_path / "out.gds"
+
+    pdk_info = _fake_pdk_info(root, variant="gf180mcuC")
+    pdk_info["assets"]["klayout"] = str(root / "gf180mcuC" / "libs.tech" / "klayout")
+
+    result_info = place_and_route._merge_def_to_gds(
+        def_path=str(def_path),
+        tech_lef=str(tech_lef),
+        cell_lef=str(cell_lef),
+        pdk_info=pdk_info,
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        hdl_toplevel="top",
+        macros=[],
+        out_path=str(out_path),
+    )
+
+    assert out_path.is_file()
+    assert result_info == {"path": str(map_path), "resolution": "family"}
 
 
 def test_merge_def_to_gds_missing_top_cell(tmp_path):

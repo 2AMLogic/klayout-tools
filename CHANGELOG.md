@@ -488,6 +488,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Added since release
 
+- 2026-08-16 — `klt place-and-route`'s DEF→GDS merge now resolves a
+  family-level KLayout LEF/DEF layer-map file (e.g. `gf180mcu.map`) when no
+  exact `<variant>.map` exists, instead of silently proceeding without a
+  layer map at all (issue #1029). Some open_pdks families — gf180mcu,
+  confirmed against both `gf180mcuC` and `gf180mcuD` — ship this file as a
+  single `libs.tech/klayout/tech/<family>.map` shared across every variant,
+  unlike sky130's one-file-per-variant convention (`sky130A.map`,
+  `sky130B.map`, …), which the resolver previously assumed unconditionally.
+  The response gains the additive **`layer_map`** field (`{path,
+  resolution}`, `null` unless `stage_reached` is `"route"`, mirroring
+  `gds_path`) so a caller can see whether a map was applied and how it was
+  resolved (`"exact"` / `"family"` / `"none"`) without reading source.
+  `klayout_tools.lef_abstract`'s own duplicate `_resolve_layer_map` gets the
+  identical fallback. No `schema_version` bump — purely additive to the
+  response envelope; sky130's existing exact-variant-match behavior is
+  unchanged.
 - 2026-08-16 — `klt size` requests gain an optional **`target.vds_v`**
   (issue #1015): when set, sizes the device at a fixed `Vds` (the classical
   gm/Id lookup-table methodology) instead of the default diode-connected

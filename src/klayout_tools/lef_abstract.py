@@ -212,7 +212,7 @@ def run_lef_abstract(
         if layer["type"] == "ROUTING"
     }
 
-    layer_map_path = _resolve_layer_map(pdk_info)
+    layer_map_path, _layer_map_resolution = _resolve_layer_map(pdk_info)
     if layer_map_path is None:
         raise LefAbstractError(
             f"no KLayout GDS<->LEF layer map found for resolved PDK install "
@@ -362,17 +362,38 @@ def _classify_pin(name: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_layer_map(pdk_info: dict[str, Any]) -> str | None:
+def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
     """The same open_pdks KLayout LEF/DEF layer-map file
     ``place_and_route.py``'s own DEF->GDS merge resolves
     (``libs.tech/klayout/tech/<variant>.map``) -- this module's own copy of
     that resolution (each verb module in this repo is self-contained,
-    matching the existing precedent noted in ``place_and_route.py``)."""
+    matching the existing precedent noted in ``place_and_route.py``).
+
+    Prefers the variant-named file (``<variant>.map``, ``resolution=
+    "exact"``); falls back to a family-level file (``<family>.map``,
+    ``resolution="family"``) when the variant-named file is absent -- some
+    open_pdks families (gf180mcu, unlike sky130) ship a single
+    ``klayout.tech`` map file shared across every variant rather than one
+    per variant (issue #1029). Returns ``(None, "none")`` when neither
+    exists (or the variant ships no ``klayout`` asset at all)."""
     klayout_dir = pdk_info["assets"].get("klayout")
     if klayout_dir is None:
-        return None
-    candidate = os.path.join(klayout_dir, "tech", f"{pdk_info['variant']}.map")
-    return candidate if os.path.isfile(candidate) else None
+        return None, "none"
+    tech_dir = os.path.join(klayout_dir, "tech")
+    variant = pdk_info["variant"]
+    exact = os.path.join(tech_dir, f"{variant}.map")
+    if os.path.isfile(exact):
+        return exact, "exact"
+
+    family = variant
+    if len(family) > 1 and family[-1].isupper():
+        family = family[:-1]
+    if family != variant:
+        family_candidate = os.path.join(tech_dir, f"{family}.map")
+        if os.path.isfile(family_candidate):
+            return family_candidate, "family"
+
+    return None, "none"
 
 
 def _load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
