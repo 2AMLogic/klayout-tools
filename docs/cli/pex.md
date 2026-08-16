@@ -227,7 +227,7 @@ extracted values, rather than an error. ngspice 42 is what Debian/Ubuntu
 are on ngspice < 46 and an extracted-vs-schematic delta looks implausible,
 compare the two `.SUBCKT` headers by hand before trusting it. Tightening
 this into an unconditional, engine-independent pre-flight header check is
-tracked separately.
+tracked in issue #1041.
 
 **Fixing a real mismatch is the caller's job, for now.** Give the schematic
 subcircuit the same pin list as the extracted one, or extract with a
