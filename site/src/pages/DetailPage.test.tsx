@@ -7,13 +7,17 @@
  * existing raw-file download link (`layout.downloadable === true &&
  * layout.layout_file !== undefined`).
  *
+ * Also covers per-PDK-family `pdk=` derivation on that link (issue #1060):
+ * the viewer link used to hardcode `pdk=sky130A` for every block, which
+ * broke the viewer for gf180mcu blocks (wrong layer table, empty render).
+ *
  * Also covers the Signals section's canary-block degradation (issue #653):
  * when `layout.signals` carries corners with no `waveform` artifact (e.g.
  * the sky130-bandgap/gf180-bandgap canary blocks), the page must render the
  * static measurements table `WaveformViewer` falls back to, not a
  * corner-toggle fieldset wired to a plot that can never draw.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { DetailPage } from "./DetailPage";
 import type { Layout, LayoutSignals } from "@/data/types";
@@ -83,6 +87,109 @@ describe("DetailPage viewer link", () => {
 
     expect(screen.queryByRole("link", { name: "View in browser" })).not.toBeInTheDocument();
     expect(screen.getByText("No download available.")).toBeInTheDocument();
+  });
+});
+
+describe("DetailPage viewer link PDK family derivation (issue #1060)", () => {
+  it("emits pdk=gf180mcuD for a gf180mcu std-cell slug", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "gf180mcu_fd_sc_mcu9t5v0__and2_1",
+          name: "and2_1",
+          downloadable: true,
+          layout_file: "and2_1.gds",
+        })}
+      />,
+    );
+
+    const viewerLink = screen.getByRole("link", { name: "View in browser" });
+    const href = viewerLink.getAttribute("href") ?? "";
+    const params = new URLSearchParams(href.split("?")[1]);
+    expect(params.get("model")).toBe(
+      "https://klayout-tools.org/blocks/gf180mcu_fd_sc_mcu9t5v0__and2_1/and2_1.gds",
+    );
+    // Well-formed viewer URL for a real gf180 block slug (acceptance
+    // criterion #2 -- full visual verification in the actual viewer was
+    // not possible in this headless environment, see PR description).
+    expect(params.get("pdk")).toBe("gf180mcuD");
+  });
+
+  it("emits pdk=gf180mcuD for the gf180-bandgap slug", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "gf180-bandgap",
+          name: "gf180 Bandgap",
+          downloadable: true,
+          layout_file: "layout.gds",
+        })}
+      />,
+    );
+
+    const viewerLink = screen.getByRole("link", { name: "View in browser" });
+    const href = viewerLink.getAttribute("href") ?? "";
+    const params = new URLSearchParams(href.split("?")[1]);
+    expect(params.get("pdk")).toBe("gf180mcuD");
+  });
+
+  it("emits pdk=sky130A for a sky130 slug", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "sky130_fd_sc_hd__nand2_2",
+          downloadable: true,
+          layout_file: "nand2_2.gds",
+        })}
+      />,
+    );
+
+    const viewerLink = screen.getByRole("link", { name: "View in browser" });
+    const href = viewerLink.getAttribute("href") ?? "";
+    const params = new URLSearchParams(href.split("?")[1]);
+    expect(params.get("pdk")).toBe("sky130A");
+  });
+
+  it("emits pdk=ihp-sg13g2 for an sg13g2 slug", () => {
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "sg13g2-inv",
+          downloadable: true,
+          layout_file: "layout.gds",
+        })}
+      />,
+    );
+
+    const viewerLink = screen.getByRole("link", { name: "View in browser" });
+    const href = viewerLink.getAttribute("href") ?? "";
+    const params = new URLSearchParams(href.split("?")[1]);
+    expect(params.get("pdk")).toBe("ihp-sg13g2");
+  });
+
+  it("omits the pdk param (rather than defaulting to sky130A) and logs a warning for an unrecognized slug prefix", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    render(
+      <DetailPage
+        layout={makeLayout({
+          slug: "some-future-pdk-block",
+          downloadable: true,
+          layout_file: "layout.gds",
+        })}
+      />,
+    );
+
+    const viewerLink = screen.getByRole("link", { name: "View in browser" });
+    const href = viewerLink.getAttribute("href") ?? "";
+    const params = new URLSearchParams(href.split("?")[1]);
+    expect(params.has("pdk")).toBe(false);
+    expect(params.get("model")).toBe(
+      "https://klayout-tools.org/blocks/some-future-pdk-block/layout.gds",
+    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("some-future-pdk-block"));
+
+    warnSpy.mockRestore();
   });
 });
 
