@@ -43,6 +43,7 @@ from pathlib import Path
 
 import klayout.db as kdb
 
+from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route, synthesize
@@ -398,26 +399,14 @@ def _stub_merge_def_to_gds(
 
 
 # --------------------------------------------------------------------------- #
-# Stubbed cocotb runner (tests/test_functional_verification.py's own
-# pattern)
+# Stubbed cocotb runner (tests/helpers/cocotb_fakes.py's shared
+# FakeCocotbRunner -- see tests/test_functional_verification.py for the
+# canonical usage pattern)
 # --------------------------------------------------------------------------- #
 
 
-class _FakeRunner:
-    def build(self, **kwargs):
-        Path(kwargs["build_dir"]).mkdir(parents=True, exist_ok=True)
-        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
-            handle.write("fake build log\n")
-
-    def test(self, **kwargs):
-        with open(kwargs["log_file"], "w", encoding="utf-8") as handle:
-            handle.write("fake test log\n")
-        with open(kwargs["results_xml"], "w", encoding="utf-8") as handle:
-            handle.write(_RESULTS_XML_ALL_PASS)
-
-
 def _stub_functional_verification(monkeypatch) -> None:
-    runner = _FakeRunner()
+    runner = _FakeRunner(_RESULTS_XML_ALL_PASS)
 
     def get_runner(name):
         assert name == "icarus"
