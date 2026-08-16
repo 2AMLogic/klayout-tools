@@ -39,10 +39,13 @@ import { blockAssetUrl } from "@/lib/blockAssets";
  * rather than embedding one in this site — cheapest way to prove the
  * pattern, revisit only if the operator wants a same-origin viewer later)
  * so a reviewer can zoom/pan/toggle layers without a local KLayout install.
- * Every gallery block is currently sky130, so the PDK query param is
- * hardcoded (`sky130A`, Tiny Tapeout's own PDK identifier) rather than
- * plumbed through a new `Layout` field — revisit if a non-sky130 PDK is
- * ever added to the gallery.
+ * The gallery now spans multiple PDK families (sky130, gf180mcu, and
+ * eventually ihp sg13g2 — issue #1060), so the viewer's `pdk` query param is
+ * derived per block from its slug prefix (`inferPdkFamily()` below) rather
+ * than hardcoded — `layout.json` carries no explicit PDK family field yet
+ * (see `types.ts`'s `drc.deck`, the closest existing analog), so this is a
+ * slug-prefix heuristic; a follow-up could add an explicit field to the
+ * `klt layout-metrics` schema so the site never has to guess.
  *
  * Matches the original Astro page's chrome exactly: no shared Header/Footer
  * — this page has always been a standalone document (see `[slug].astro`,
@@ -75,17 +78,60 @@ const STATUS_BORDER_CLASS: Record<Layout["status"], string> = {
  */
 const SITE_ORIGIN = "https://klayout-tools.org";
 
-/** Every gallery block is currently sky130 (see module doc comment above). */
-const GALLERY_PDK = "sky130A";
+/**
+ * One block's inferred PDK family, used only to pick the viewer's `pdk=`
+ * identifier below -- not a general-purpose PDK enum.
+ */
+type PdkFamily = "sky130" | "gf180mcu" | "ihp-sg13g2";
+
+/**
+ * Tiny Tapeout's own PDK identifiers, as accepted by its hosted viewer's
+ * `?pdk=` query param (github.com/TinyTapeout/tt-gds-action).
+ */
+const VIEWER_PDK_BY_FAMILY: Record<PdkFamily, string> = {
+  sky130: "sky130A",
+  gf180mcu: "gf180mcuD",
+  "ihp-sg13g2": "ihp-sg13g2",
+};
+
+/**
+ * Infers a block's PDK family from its slug prefix (issue #1060). This is a
+ * fallback heuristic -- `layout.json` has no explicit PDK family field yet
+ * (see module doc comment above) -- so it is deliberately conservative: an
+ * unrecognized prefix returns `undefined` rather than guessing wrong.
+ */
+function inferPdkFamily(slug: string): PdkFamily | undefined {
+  if (slug.startsWith("gf180mcu_") || slug.startsWith("gf180-")) return "gf180mcu";
+  if (slug.startsWith("sky130")) return "sky130";
+  if (slug.startsWith("sg13g2-")) return "ihp-sg13g2";
+  return undefined;
+}
 
 /**
  * Builds a Tiny Tapeout hosted-viewer link for a block's layout file (issue
  * #249). Mirrors Tiny Tapeout's own `?model=<url>&pdk=<pdk>` convention
  * (github.com/TinyTapeout/tt-gds-action) so the file can be inspected
  * (zoom/pan/layer toggle) from a browser with no local KLayout install.
+ *
+ * `pdk` is derived from `slug` via `inferPdkFamily()` (issue #1060) rather
+ * than hardcoded, since the gallery now spans multiple PDK families. When
+ * the family can't be inferred, the `pdk` param is omitted entirely (the
+ * viewer falls back to its own default) rather than lying with a wrong PDK
+ * identifier -- and a build-time warning is logged so an unrecognized slug
+ * prefix doesn't go unnoticed.
  */
-function gdsViewerUrl(fileUrl: string): string {
-  const params = new URLSearchParams({ model: fileUrl, pdk: GALLERY_PDK });
+function gdsViewerUrl(fileUrl: string, slug: string): string {
+  const family = inferPdkFamily(slug);
+  const pdk = family ? VIEWER_PDK_BY_FAMILY[family] : undefined;
+  if (!pdk) {
+    console.warn(
+      `gdsViewerUrl: could not infer a PDK family for slug "${slug}" -- omitting the viewer's pdk param (it will use its own default) instead of guessing wrong.`,
+    );
+  }
+  const params = new URLSearchParams({ model: fileUrl });
+  if (pdk) {
+    params.set("pdk", pdk);
+  }
   return `https://gds-viewer.tinytapeout.com/?${params.toString()}`;
 }
 
@@ -319,7 +365,7 @@ export function DetailPage({ layout, emExport }: DetailPageProps) {
             </li>
             <li>
               <a
-                href={gdsViewerUrl(layoutFileUrl)}
+                href={gdsViewerUrl(layoutFileUrl, layout.slug)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-block rounded-lg border border-border bg-panel px-[0.9rem] py-[0.55rem] text-[0.9rem] text-fog no-underline hover:border-cyan focus-visible:border-cyan focus-visible:outline-none"
