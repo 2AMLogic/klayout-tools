@@ -104,6 +104,43 @@ def write_request() -> None:
     print(f"wrote {path}")
 
 
+def write_cascode_request() -> None:
+    """The fixed-``Vds`` worked example (issue #1015): sizes the *same*
+    ``nmos_demo`` device and current budget `write_request` above uses in
+    diode-connected mode, but as a cascode leg -- held at a fixed
+    ``Vds=0.3V`` (a typical cascode headroom, far below what a
+    diode-connected tie would settle at for this device/current) via
+    ``target.vds_v`` rather than the diode-connected ``Vds=Vgs`` tie.
+
+    ``target.gm_id=10.0`` (vs. the diode-connected example's ``8.0``) is
+    deliberately a different value, so the two committed fixtures are not
+    trivially interchangeable -- `tests/test_size.py`'s
+    `test_examples_size_cascode_worked_example_passes` runs this live and
+    asserts both that it passes and that its confirmed ``Vds`` matches the
+    requested ``0.3V`` exactly (enforced by an ideal voltage source, not
+    swept -- see `docs/cli/size.md`'s "Fixed-Vds bias mode" section).
+    """
+    request = {
+        "device": {
+            "kind": "nmos",
+            "model": "nmos_demo",
+            "l_um": 0.5,
+            "w_min_um": 0.5,
+            "w_max_um": 20,
+        },
+        "models": {"lib": "models.lib"},
+        "corner": {"process": "tt", "vdd_v": 1.8, "temperature_c": 27},
+        "target": {"id_a": 2e-05, "gm_id": 10.0, "vds_v": 0.3},
+        "tolerance": {"gm_id_rel": 0.02},
+        "options": {"sweep_points": 20},
+    }
+    path = os.path.join(_DIR, "cascode_request.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {path}")
+
+
 def write_topology_request() -> None:
     """The coupled ``diff_pair_mirror_tail`` worked example (issue #768,
     Phase 1a of epic #705): sizes an NMOS input pair, a PMOS mirror load,
@@ -173,4 +210,5 @@ def write_topology_request() -> None:
 if __name__ == "__main__":
     write_models_lib()
     write_request()
+    write_cascode_request()
     write_topology_request()

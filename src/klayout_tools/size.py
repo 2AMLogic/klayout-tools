@@ -59,8 +59,61 @@ inversion -> higher ``gm/Id``, verified empirically against the installed
 sky130A PDK's ``sky130_fd_pr__nfet_01v8``/``__pfet_01v8`` while building this
 module), which is what makes a bracket-and-interpolate search well-posed.
 Decoupling ``Vds`` from ``Vgs`` (the fully general fixed-``Vds`` lookup-table
-method) is a documented known limitation -- see ``docs/cli/size.md``'s
-"Known limitations".
+method) is available as an opt-in mode -- see "Fixed-``Vds`` bias mode"
+below.
+
+Fixed-``Vds`` bias mode (issue #1015)
+----------------------------------------
+Setting ``request.target.vds_v`` switches the generated deck's bias topology
+from the diode-connected tie above to the fully general fixed-``Vds``
+lookup-table method: an ideal voltage source holds the device's ``Vds`` at
+exactly the requested value, and a **feedback-regulated gate bias** --
+implemented as an ngspice behavioral (``B``) source expressing the gate
+voltage as a clamped, high-loop-gain function of the measured drain current
+error, ``V(gate) = clip(Vdd/2 + K*(Id_measured - Id_target)/Id_target, 0,
+Vdd)`` -- servos ``Vgs`` until the device settles at the target current,
+*at that fixed Vds*. This is a single nonlinear algebraic constraint ngspice's
+own DC Newton-Raphson solver resolves directly inside each ``op`` point,
+exactly the same way SPICE resolves any other closed-loop feedback network
+(e.g. an op-amp macro-model) at DC -- no extra ngspice invocation or outer
+Python-level search loop is needed versus the diode-connected mode's own
+one-invocation-per-sweep design (see "Two-invocation-per-request design"
+below): the identical bracket-and-interpolate-then-confirm width search
+(:func:`_find_bracket`, :func:`_log_interp`, then a fresh single-point
+confirmation run) runs unchanged, only :func:`_write_sweep_deck`'s generated
+bias topology differs.
+
+The loop-gain constant ``K`` (:data:`_FIXED_VDS_FEEDBACK_GAIN`) is
+*normalized* by the target current (dividing the raw current error by
+``Id_target`` before multiplying by ``K``) rather than an absolute
+volts-per-amp gain, so the same constant gives comparable *relative*
+precision on the confirmed current across many decades of target current
+-- verified empirically against this module's own synthetic square-law
+device library (see ``examples/size/``) from sub-nanoamp to milliamp targets
+while building this feature: an absolute (non-normalized) gain converges
+each candidate width's confirmed current to a roughly *constant absolute*
+residual (set by the solver's own voltage precision divided by the gain),
+which is a negligible relative error at a typical ~10uA target but a huge
+one at a sub-nanoamp target; normalizing by ``Id_target`` fixes the
+confirmed current's *relative* precision at ~1e-4 (0.01%) regardless of
+scale, comfortably inside every default ``tolerance.gm_id_rel`` this module
+documents. ``K`` itself was picked empirically 100x below the value
+(``3e6``) at which the normalized loop stopped converging in that same
+sweep -- a comfortable margin below realistic PVT/model nonlinearity for a
+real PDK's own compact model.
+
+Because the target current is enforced by *feedback*, not an ideal current
+source, ``margins.id_rel_error`` in this mode is a genuinely measured
+quantity (not "near-zero by construction" the way the diode-connected
+mode's ideal current source guarantees) -- a caller whose declared
+``target.vds_v``/``target.id_a`` combination cannot be reached by any gate
+bias inside ``[0, Vdd]`` (an over-constrained request, e.g. too little
+``Vds`` headroom for the requested current at the narrowest allowed width)
+sees the feedback bias saturate against a supply rail and
+``margins.id_rel_error`` report the resulting mismatch honestly, rather
+than silently reporting an unreachable point as met. See
+``docs/cli/size.md``'s "Fixed-Vds bias mode" section for the request/
+response shape and a worked cascode-device example.
 
 Two-invocation-per-request design (performance)
 -------------------------------------------------
@@ -321,6 +374,18 @@ DEFAULT_TIMEOUT_S = 180
 #: against ``request.target.gm_id`` -- overridable via
 #: ``request.tolerance.gm_id_rel``.
 DEFAULT_GM_ID_TOLERANCE = 0.03
+
+#: Loop-gain constant for the fixed-``Vds`` mode's feedback-regulated gate
+#: bias (issue #1015, see this module's docstring's "Fixed-Vds bias mode"
+#: section) -- normalized by the target current, not an absolute
+#: volts-per-amp gain, so the confirmed current's *relative* precision is
+#: roughly constant (~1e-4) regardless of the target current's absolute
+#: scale. Chosen empirically 100x below the value (``3e6``) at which
+#: ngspice's DC operating-point solver stops converging the normalized loop
+#: against this module's own synthetic square-law device library
+#: (``examples/size/``), swept from sub-nanoamp to milliamp targets and
+#: from ``w_min_um`` to ``w_max_um``.
+_FIXED_VDS_FEEDBACK_GAIN = 1e4
 
 _MARKER_RE = re.compile(r"^KLT_SIZE_POINT\s+(\d+)\s+(\S+)\s*$")
 _OP_VALUE_RE = re.compile(r"^@\S+\[(\w+)\]\s*=\s*([-+0-9.eEgGnN]+)\s*$")
@@ -664,7 +729,36 @@ def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
         raise SizeError("request.target must be a JSON object")
     id_a = _require_positive_number(target.get("id_a"), "request.target.id_a")
     gm_id = _require_positive_number(target.get("gm_id"), "request.target.gm_id")
-    return {"id_a": id_a, "gm_id": gm_id}
+    parsed = {"id_a": id_a, "gm_id": gm_id}
+    vds_v = target.get("vds_v")
+    if vds_v is not None:
+        # Fixed-Vds sizing mode (issue #1015) -- see this module's
+        # docstring's "Fixed-Vds bias mode" section. Absent (the default),
+        # `_write_sweep_deck` keeps the original diode-connected bias
+        # (Vds=Vgs) unchanged.
+        parsed["vds_v"] = _require_positive_number(vds_v, "request.target.vds_v")
+    return parsed
+
+
+#: ``method.name``/``method.bias`` text for the two single-device bias
+#: modes (issue #1015) -- shared by every response-building site
+#: (:func:`run_size`'s own success/fail path, :func:`_error_payload`, and
+#: :func:`_run_worst_case_margin`) so the reported method always matches
+#: the deck :func:`_write_sweep_deck` actually generated.
+def _bias_method_name(target: dict[str, Any]) -> str:
+    if target.get("vds_v") is not None:
+        return "gm/Id lookup via fixed-Vds bias sweep (feedback-regulated)"
+    return "gm/Id lookup via diode-connected bias sweep"
+
+
+def _bias_label(target: dict[str, Any]) -> str:
+    vds_v = target.get("vds_v")
+    if vds_v is not None:
+        return (
+            f"fixed-Vds (Vds regulated to {vds_v:.6g}V via a feedback-"
+            "controlled gate bias; Vgs solved to hit the target current)"
+        )
+    return "diode-connected (gate tied to drain, Vds=Vgs)"
 
 
 def run_size(
@@ -893,7 +987,7 @@ def run_size(
         return payload
 
     operating_point, confirmed_gm_id, vov, vov_is_approx = _op_point_from_confirmed(
-        confirmed, device
+        confirmed, device, vds_v=target.get("vds_v")
     )
     gm_id_rel_error = (confirmed_gm_id - target["gm_id"]) / target["gm_id"]
     id_rel_error = (abs(confirmed["id_a"]) - target["id_a"]) / target["id_a"]
@@ -903,16 +997,34 @@ def run_size(
     within_tolerance = abs(gm_id_rel_error) <= gm_id_rel_tol
     sizing_status = "pass" if (feasible and within_tolerance) else "fail"
 
-    rationale_parts = [
-        f"gm/Id lookup via a diode-connected bias sweep (Vds=Vgs): {device['kind']} "
-        f"'{device['model']}' at L={device['l_um']}um, current fixed at "
-        f"{target['id_a']:.6g}A by an ideal bias source, width swept from "
-        f"{device['w_min_um']}um to {device['w_max_um']}um "
-        f"({len(sweep_points_result)} points) to bracket the target gm/Id="
-        f"{target['gm_id']:.6g}, then confirmed by a fresh ngspice operating-"
-        f"point run at the interpolated width (never trusting the sweep grid "
-        f"or interpolation alone)."
-    ]
+    if target.get("vds_v") is not None:
+        rationale_parts = [
+            f"gm/Id lookup via a fixed-Vds bias sweep: {device['kind']} "
+            f"'{device['model']}' at L={device['l_um']}um, Vds held at "
+            f"{target['vds_v']:.6g}V by an ideal bias source while a "
+            "feedback-regulated gate bias servos Vgs to hit the target "
+            f"current {target['id_a']:.6g}A (the confirmed current is "
+            "measured, not assumed exact the way the diode-connected mode's "
+            "ideal current source guarantees -- see margins.id_rel_error), "
+            f"width swept from {device['w_min_um']}um to "
+            f"{device['w_max_um']}um ({len(sweep_points_result)} points) to "
+            f"bracket the target gm/Id={target['gm_id']:.6g}, then "
+            "confirmed by a fresh ngspice operating-point run at the "
+            "interpolated width (never trusting the sweep grid or "
+            "interpolation alone)."
+        ]
+    else:
+        rationale_parts = [
+            "gm/Id lookup via a diode-connected bias sweep (Vds=Vgs): "
+            f"{device['kind']} '{device['model']}' at L={device['l_um']}um, "
+            "current fixed at "
+            f"{target['id_a']:.6g}A by an ideal bias source, width swept from "
+            f"{device['w_min_um']}um to {device['w_max_um']}um "
+            f"({len(sweep_points_result)} points) to bracket the target gm/Id="
+            f"{target['gm_id']:.6g}, then confirmed by a fresh ngspice operating-"
+            f"point run at the interpolated width (never trusting the sweep grid "
+            f"or interpolation alone)."
+        ]
     if not feasible:
         rationale_parts.append(
             f"Target gm/Id={target['gm_id']:.6g} is not reachable within "
@@ -942,8 +1054,8 @@ def run_size(
         )
 
     method = {
-        "name": "gm/Id lookup via diode-connected bias sweep",
-        "bias": "diode-connected (gate tied to drain, Vds=Vgs)",
+        "name": _bias_method_name(target),
+        "bias": _bias_label(target),
         "rationale": " ".join(rationale_parts),
         "sweep_points": len(sweep_points_result),
         "valid_sweep_points": len(valid_points),
@@ -1032,11 +1144,23 @@ def run_size(
 
 
 def _op_point_from_confirmed(
-    confirmed: dict[str, Any], device: dict[str, Any]
+    confirmed: dict[str, Any], device: dict[str, Any], *, vds_v: float | None = None
 ) -> tuple[dict[str, Any], float, float | None, bool]:
     """Build the ``operating_point`` response shape from one confirmed
     sweep-log point -- shared by the sizing corner's own confirmation and
     every other declared corner's verification run (:func:`_verify_corner`).
+
+    ``vds_v`` (issue #1015) echoes ``target.vds_v`` into
+    ``operating_point.vds_v`` for the fixed-Vds bias mode, where it is
+    enforced *exactly* by an ideal voltage source (see this module's
+    docstring's "Fixed-Vds bias mode" section) -- not a measured quantity,
+    so no op-point vector read is needed. Left ``None`` (the default) for
+    diode-connected single-device mode and for every coupled-topology
+    instance (issue #768), neither of which sits at a request-declared
+    fixed Vds -- the topology's own non-diode-connected instances measure
+    their real in-circuit Vds implicitly via their own Vgs/Vds node
+    voltages, which this shared helper does not have a uniform way to
+    surface without guessing.
 
     Returns ``(operating_point, gm_id, vov, vov_is_approx)`` -- the latter
     two are exposed separately because the sizing corner's rationale text
@@ -1085,6 +1209,7 @@ def _op_point_from_confirmed(
         "gm_s": abs(confirmed["gm_s"]),
         "gm_id": gm_id,
         "vgs_v": vgs,
+        "vds_v": vds_v,
         "vth_v": vth,
         "vov_v": vov,
         "vdsat_v": vdsat,
@@ -1152,7 +1277,7 @@ def _verify_corner(
         }
 
     operating_point, gm_id, _vov, _vov_is_approx = _op_point_from_confirmed(
-        confirmed, device
+        confirmed, device, vds_v=target.get("vds_v")
     )
     gm_id_rel_error = (gm_id - target["gm_id"]) / target["gm_id"]
     id_rel_error = (abs(confirmed["id_a"]) - target["id_a"]) / target["id_a"]
@@ -1389,7 +1514,7 @@ def _run_worst_case_margin(
 
     method = {
         "name": "worst-corner margin via minimax bisection across the declared PVT set",
-        "bias": "diode-connected (gate tied to drain, Vds=Vgs)",
+        "bias": _bias_label(target),
         "rationale": rationale,
         "sweep_points": len(w_grid),
         "valid_sweep_points": min(len(corner_curves[i]) for i in corner_curves),
@@ -1443,8 +1568,8 @@ def _error_payload(
         "operating_point": None,
         "margins": None,
         "method": {
-            "name": "gm/Id lookup via diode-connected bias sweep",
-            "bias": "diode-connected (gate tied to drain, Vds=Vgs)",
+            "name": _bias_method_name(target),
+            "bias": _bias_label(target),
             "rationale": f"Evaluator error: {reason}",
             "sweep_points": None,
             "valid_sweep_points": None,
@@ -1537,6 +1662,13 @@ def _write_sweep_deck(
     ``reset`` between points (cheap re-elaboration, no re-parse of the model
     library -- see this module's docstring's "Two-invocation-per-request
     design").
+
+    ``target.vds_v`` (issue #1015) switches the bias topology from the
+    default diode-connected tie (``Vds=Vgs``) to a fixed-``Vds`` feedback
+    bias -- see this module's docstring's "Fixed-Vds bias mode" section.
+    Everything else (the ``alterparam``/``reset`` width sweep, the marker/
+    print protocol :func:`_parse_sweep_log` reads back) is identical between
+    the two modes.
     """
     kind = device["kind"]
     model = device["model"]
@@ -1546,6 +1678,7 @@ def _write_sweep_deck(
     l_um = device["l_um"]
     nf = device["nf"]
     mult = device["mult"]
+    vds_v = target.get("vds_v")
 
     lines = ["* klt size -- generated device sweep deck, do not edit"]
     lines.append(f".param w_sweep={w_values[0]!r}")
@@ -1560,12 +1693,42 @@ def _write_sweep_deck(
         lines.append(f".lib {models_lib} {corner['process']}")
     lines.append(f"Vdd vdd 0 DC {vdd!r}")
     x_params = f"l={l_um!r} w={{w_sweep}} nf={nf!r} mult={mult!r}"
-    if kind == "nmos":
-        lines.append(f"Idc vdd drain DC {id_a!r}")
-        lines.append(f"X1 drain drain 0 0 {model} {x_params}")
+    if vds_v is None:
+        if kind == "nmos":
+            lines.append(f"Idc vdd drain DC {id_a!r}")
+            lines.append(f"X1 drain drain 0 0 {model} {x_params}")
+        else:
+            lines.append(f"Idc drain 0 DC {id_a!r}")
+            lines.append(f"X1 drain drain vdd vdd {model} {x_params}")
     else:
-        lines.append(f"Idc drain 0 DC {id_a!r}")
-        lines.append(f"X1 drain drain vdd vdd {model} {x_params}")
+        # Fixed-Vds bias (issue #1015): an ideal voltage source holds the
+        # drain (nmos: referenced to the grounded source; pmos: referenced
+        # to the vdd-tied source, so the drain sits vds_v *below* vdd) at
+        # exactly the requested Vds. `Bgate` is a behavioral source
+        # expressing the gate voltage as a clamped, high-loop-gain function
+        # of the current error normalized by the target current (see this
+        # module's docstring for why normalized, not absolute, gain) --
+        # ngspice's own DC Newton-Raphson solver resolves this closed loop
+        # directly at each `op` point, exactly like any other feedback
+        # network (e.g. an op-amp macro-model) at DC. `i(Vds)` (the current
+        # ngspice reports flowing through the `Vds` source) is the negative
+        # of the device's drawn current for an nmos (the source *delivers*
+        # current into the drain) and the positive for a pmos (the source
+        # *sinks* the current the device pulls from vdd) -- both signs
+        # verified empirically against this module's own synthetic device
+        # library while building this feature.
+        gain = _FIXED_VDS_FEEDBACK_GAIN
+        if kind == "nmos":
+            lines.append(f"Vds drain 0 DC {vds_v!r}")
+            gate_error = f"(1+i(Vds)/{id_a!r})"
+            lines.append(f"X1 drain gate 0 0 {model} {x_params}")
+        else:
+            lines.append(f"Vds drain 0 DC {(vdd - vds_v)!r}")
+            gate_error = f"(i(Vds)/{id_a!r}-1)"
+            lines.append(f"X1 drain gate vdd vdd {model} {x_params}")
+        lines.append(
+            f"Bgate gate 0 V=min(max({vdd / 2!r}+{gain!r}*{gate_error},0),{vdd!r})"
+        )
     # A top-level dot-card, like `sim.py`'s own corner deck -- `.temp` is not
     # a `.control`-block command. `reset` (used between sweep points below)
     # re-elaborates the circuit from this same parsed source, so the

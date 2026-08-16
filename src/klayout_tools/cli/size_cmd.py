@@ -69,7 +69,11 @@ def _print_text(report: dict) -> None:
             f"Id={op['id_a']:g}A  inversion={op['inversion_level']}"
         )
         if op.get("vgs_v") is not None:
-            print(f"  Vgs={op['vgs_v']:g}V  Vth={op['vth_v']!r}  Vov={op['vov_v']!r}")
+            vds_str = f"  Vds={op['vds_v']:g}V" if op.get("vds_v") is not None else ""
+            print(
+                f"  Vgs={op['vgs_v']:g}V  Vth={op['vth_v']!r}  "
+                f"Vov={op['vov_v']!r}{vds_str}"
+            )
 
     margins = report.get("margins")
     if margins is not None:

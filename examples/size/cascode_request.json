@@ -1,0 +1,28 @@
+{
+  "device": {
+    "kind": "nmos",
+    "model": "nmos_demo",
+    "l_um": 0.5,
+    "w_min_um": 0.5,
+    "w_max_um": 20
+  },
+  "models": {
+    "lib": "models.lib"
+  },
+  "corner": {
+    "process": "tt",
+    "vdd_v": 1.8,
+    "temperature_c": 27
+  },
+  "target": {
+    "id_a": 2e-05,
+    "gm_id": 10.0,
+    "vds_v": 0.3
+  },
+  "tolerance": {
+    "gm_id_rel": 0.02
+  },
+  "options": {
+    "sweep_points": 20
+  }
+}
