@@ -29,6 +29,7 @@ VERBS = [
     ("layers", []),
     ("cells", []),
     ("stats", []),
+    ("economy", []),
     ("drc", ["--deck", "sky130"]),
     ("precheck", []),
     ("render", []),

@@ -17,6 +17,7 @@ from . import (
     design_centering_cmd,
     draw_cmd,
     drc_cmd,
+    economy_cmd,
     equiv_cmd,
     erc_cmd,
     eval_cmd,
@@ -174,6 +175,71 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
+
+    economy_parser = subparsers.add_parser(
+        "economy",
+        help="quantitative layout-density report (issue #1012)",
+        description=(
+            "Report utilization (per cell and for the top), a whitespace "
+            "map (grid + largest exact empty regions), bounding-box "
+            "tightness/aspect-ratio/dead-margins, and an optional "
+            "area-budget/reference-area check for one top cell of a "
+            "GDSII or OASIS layout stream."
+        ),
+    )
+    economy_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    economy_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to report on when the stream has more than one "
+            "(required in that case; optional otherwise)"
+        ),
+    )
+    economy_parser.add_argument(
+        "--grid-cols",
+        type=int,
+        default=4,
+        dest="grid_cols",
+        help="whitespace-grid column count (default: 4)",
+    )
+    economy_parser.add_argument(
+        "--grid-rows",
+        type=int,
+        default=4,
+        dest="grid_rows",
+        help="whitespace-grid row count (default: 4)",
+    )
+    economy_parser.add_argument(
+        "--max-empty-regions",
+        type=int,
+        default=10,
+        dest="max_empty_regions",
+        help="cap on how many largest empty regions to report (default: 10)",
+    )
+    economy_parser.add_argument(
+        "--budget-um2",
+        type=float,
+        default=None,
+        dest="budget_um2",
+        help=(
+            "area budget in square micrometres; when given, reports a "
+            "PASS/FAIL 'budget' block against the top cell's bbox area"
+        ),
+    )
+    economy_parser.add_argument(
+        "--reference-area-um2",
+        type=float,
+        default=None,
+        dest="reference_area_um2",
+        help=(
+            "a comparable hand-designed reference's area in square "
+            "micrometres; when given, reports a 'reference' block with the "
+            "ratio to the top cell's bbox area"
+        ),
+    )
+    _add_format_arg(economy_parser)
+    economy_parser.set_defaults(func=economy_cmd.run)
 
     cells_parser = subparsers.add_parser(
         "cells",
