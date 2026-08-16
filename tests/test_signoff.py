@@ -2003,6 +2003,171 @@ def test_cli_manifest_missing_file_exits_one(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# `--tiers-doc` / `$KLT_TIERS_DOC` overrides (issue #1050)
+# --------------------------------------------------------------------------- #
+
+# A structurally valid but deliberately tiny tier doc: three T1 items, so a
+# report built from it is unmistakably *not* built from the real doc's ten.
+_VENDORED_TIERS_DOC = """\
+# Design-evidence tiers
+
+## The ladder
+
+| Tier | Claim | Demonstrated by |
+|---|---|---|
+| **T1 — sim-validated** | Designed and simulation-validated | Open-source evidence |
+| **T2 — signoff-validated** | Validated on commercial tools | T1, plus commercial |
+| **T3 — silicon-validated** | Fabricated and measured | T2, plus a tapeout |
+| **T4 — production-validated** | Proven in silicon | An external project |
+
+## T1 checklist — what "sim-validated" requires
+
+1. **Vendored item one**
+   - *Analog* — committed schematic sources.
+   - *Digital* — committed RTL sources.
+2. **Vendored item two** — latest `klt drc` JSON report: `status: clean`.
+3. **Vendored item three** — some other gate.
+
+## Verification rules
+
+- **Staleness is failure.**
+"""
+
+
+def _write_tiers_doc(tmp_path) -> str:
+    path = tmp_path / "vendored-tiers.md"
+    path.write_text(_VENDORED_TIERS_DOC, encoding="utf-8")
+    return str(path)
+
+
+def test_cli_manifest_tiers_doc_overrides_the_parsed_doc(tmp_path, capsys):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+    tiers_doc = _write_tiers_doc(tmp_path)
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--tiers-doc",
+            tiers_doc,
+            "--format",
+            "json",
+        ]
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 3
+    assert out["t1_item_count"] == 3
+    assert out["items"][0]["title"] == "Vendored item one"
+    # The report names the doc it was actually built from, not the canonical one.
+    assert out["source_doc"] == tiers_doc
+
+
+def test_cli_fleet_tiers_doc_overrides_the_parsed_doc(tmp_path, capsys):
+    fleet_path = _write(
+        tmp_path,
+        "fleet.json",
+        {"blocks": [{"block": "b1", "kind": "analog", "evidence": {}}]},
+    )
+    tiers_doc = _write_tiers_doc(tmp_path)
+
+    exit_code = main(
+        ["signoff", "--fleet", fleet_path, "--tiers-doc", tiers_doc, "--format", "json"]
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 3
+    assert out["source_doc"] == tiers_doc
+    assert out["blocks"][0]["t1_item_count"] == 3
+
+
+def test_cli_manifest_env_var_overrides_the_parsed_doc(tmp_path, capsys, monkeypatch):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+    tiers_doc = _write_tiers_doc(tmp_path)
+    monkeypatch.setenv("KLT_TIERS_DOC", tiers_doc)
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 3
+    assert out["t1_item_count"] == 3
+    assert out["source_doc"] == tiers_doc
+
+
+def test_cli_manifest_tiers_doc_beats_the_env_var(tmp_path, capsys, monkeypatch):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+    tiers_doc = _write_tiers_doc(tmp_path)
+    monkeypatch.setenv("KLT_TIERS_DOC", str(tmp_path / "does-not-exist.md"))
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--tiers-doc",
+            tiers_doc,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 3
+    assert json.loads(capsys.readouterr().out)["source_doc"] == tiers_doc
+
+
+def test_cli_manifest_unreadable_tiers_doc_emits_the_error_envelope(tmp_path, capsys):
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--tiers-doc",
+            str(tmp_path / "nope.md"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "signoff"
+    assert "could not read design-evidence-tiers doc" in err["error"]["message"]
+
+
+def test_cli_tiers_doc_without_manifest_or_fleet_is_an_error(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    tiers_doc = _write_tiers_doc(tmp_path)
+
+    exit_code = main(
+        ["signoff", drc_path, "--tiers-doc", tiers_doc, "--format", "json"]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "signoff"
+    assert "--tiers-doc" in err["error"]["message"]
+
+
+def test_cli_envelope_aggregation_is_unaffected_by_a_missing_tier_doc(
+    tmp_path, capsys, monkeypatch
+):
+    """AC: envelope-aggregation mode never reads the tier doc, so it keeps
+    working even where the doc cannot be resolved at all (issue #1050)."""
+    monkeypatch.setenv("KLT_TIERS_DOC", str(tmp_path / "does-not-exist.md"))
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    exit_code = main(["signoff", drc_path, "--format", "json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert out["status"] == "pass"
+
+
+# --------------------------------------------------------------------------- #
 # build_fleet_report(): fleet-wide tier roll-up (issue #827, Phase 1c of
 # epic #706)
 # --------------------------------------------------------------------------- #

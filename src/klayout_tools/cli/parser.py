@@ -2061,6 +2061,17 @@ def create_parser() -> argparse.ArgumentParser:
             "manifest shape."
         ),
     )
+    signoff_parser.add_argument(
+        "--tiers-doc",
+        metavar="PATH",
+        help=(
+            "path to the design-evidence-tiers Markdown doc to parse the "
+            "T1-T4 item skeleton from, instead of the copy this install "
+            "ships (or $KLT_TIERS_DOC, which this overrides) -- only "
+            "meaningful with --manifest/--fleet. See docs/cli/signoff.md's "
+            "'Where the tier doc comes from' section."
+        ),
+    )
     _add_format_arg(signoff_parser)
     signoff_parser.set_defaults(func=signoff_cmd.run)
 

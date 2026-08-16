@@ -149,6 +149,18 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/klayout_tools"]
 
+# `klt signoff --manifest`/`--fleet` parse `docs/design-evidence-tiers.md` at
+# runtime (see src/klayout_tools/design_evidence_tiers.py), so the doc is
+# runtime tool data, not just prose: bundle it *inside* the package so a wheel
+# install (`pip install`, `uv tool install`) can find it with no source
+# checkout and no sibling `docs/` directory (issue #1050). The destination
+# must stay in sync with `_PACKAGED_DOC_PATH` in that module -- a test
+# asserts the two agree. (Note this is deliberately unlike `kb/`, which
+# `kb.py` documents as a repo-checkout corpus intentionally left out of the
+# wheel.)
+[tool.hatch.build.targets.wheel.force-include]
+"docs/design-evidence-tiers.md" = "klayout_tools/data/design-evidence-tiers.md"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

@@ -29,8 +29,8 @@ Three modes, one verb:
 
 ```
 klt signoff <file>... [--format text|json]
-klt signoff --manifest <manifest-file> [--format text|json]
-klt signoff --fleet <fleet-manifest-file> [--format text|json]
+klt signoff --manifest <manifest-file> [--tiers-doc <path>] [--format text|json]
+klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -46,6 +46,11 @@ klt signoff --fleet <fleet-manifest-file> [--format text|json]
   switches to the fleet roll-up mode instead of aggregating `<file>...`
   arguments or rendering one block's tier report. Mutually exclusive with
   `<file>...`/`--manifest`.
+- `--tiers-doc` — path to the `design-evidence-tiers.md` to parse the T1-T4
+  item skeleton from, instead of the copy this install ships. Only
+  meaningful with `--manifest`/`--fleet`; passing it in envelope-aggregation
+  mode is an error (that mode never reads the doc). See "Where the tier doc
+  comes from" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -236,6 +241,36 @@ statistical-evidence item, binding a `klt yield`
 pex` report — and, unlike every other item, restricts which envelope
 *kinds* satisfy it (see "Item 7 is kind-restricted: `klt pex`" below).
 
+### Where the tier doc comes from
+
+Both doc-parsing modes (`--manifest` and `--fleet`) resolve
+`design-evidence-tiers.md` in this order (issue #1050):
+
+1. `--tiers-doc <path>`, if given.
+2. `$KLT_TIERS_DOC`, if set and non-empty — same effect, for a caller that
+   would otherwise have to pass the flag on every invocation.
+3. The copy **bundled inside the installed package**
+   (`klayout_tools/data/design-evidence-tiers.md`), which every wheel ships
+   (`pip install`, `uv tool install`).
+4. `docs/design-evidence-tiers.md` in a source checkout / editable install,
+   where the package has no bundled copy.
+
+Steps 3 and 4 are the same document — the wheel's copy is
+`docs/design-evidence-tiers.md` verbatim, force-included at build time — so
+these two modes work identically from a packaged install with no repo
+checkout anywhere on disk. Only an override (1 or 2) changes `source_doc` in
+the report; the shipped doc always reports as
+`"docs/design-evidence-tiers.md"` regardless of install layout.
+
+Both override forms expand a leading `~`, so a quoted
+`--tiers-doc '~/vendored-tiers.md'` (which the shell leaves unexpanded)
+resolves the same way `KLT_TIERS_DOC=~/vendored-tiers.md` does.
+
+If the resolved doc cannot be read or does not have the structure the parser
+understands, the command emits the usual error envelope (`schema_version`,
+`error.command: "signoff"`, `error.message`) and exits `1` — a tier report is
+never rendered from a partially-understood doc.
+
 ### Item 7 is kind-restricted: `klt pex`
 
 Every T1 item except item 7 accepts *any* recognised, passing envelope kind
@@ -376,7 +411,7 @@ required.
 | `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"`; otherwise `null` — no partial credit.  |
 | `t1_item_count` | integer              | Number of rendered T1 items (10 for `analog`/`digital`, 20 for `mixed-signal`).          |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
-| `source_doc`    | string               | Always `"docs/design-evidence-tiers.md"` — where the item list was parsed from.          |
+| `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `items`         | array\<object\>      | One entry per T1 checklist item (per partition, for `mixed-signal`), then one entry per T2-T4 ladder row. |
 
 #### `items[]` entries
@@ -513,7 +548,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 | `block_count`   | integer             | Number of `blocks[]` entries graded.                                                     |
 | `t1_count`      | integer             | Number of those blocks with `tier: "T1"`.                                                |
 | `not_t1_count`  | integer             | `block_count - t1_count`.                                                                 |
-| `source_doc`    | string               | Always `"docs/design-evidence-tiers.md"`.                                                |
+| `source_doc`    | string               | As in tier-report mode: `"docs/design-evidence-tiers.md"`, or the `--tiers-doc`/`$KLT_TIERS_DOC` override path. |
 | `blocks`        | array\<object\>      | One entry per fleet manifest `blocks[]` entry, in order.                                 |
 
 #### `blocks[]` entries

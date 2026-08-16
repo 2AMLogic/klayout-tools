@@ -16,6 +16,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-16 — `klt signoff --manifest`/`--fleet` now work from a packaged
+  install (issue #1050). Both modes parse
+  `docs/design-evidence-tiers.md` at runtime, but resolved it three
+  directories above the installed module — a path that only exists in a
+  source checkout, so a `pip install`/`uv tool install` failed outright with
+  `could not read design-evidence-tiers doc at '<prefix>/lib/python3.X/docs/…'`.
+  Built wheels now bundle the doc as package data
+  (`klayout_tools/data/design-evidence-tiers.md`, force-included from the
+  canonical `docs/` copy) and the default resolves against the installed
+  package, falling back to the checkout's `docs/` for editable installs.
+  Two overrides were added for consumers vendoring their own copy: the new
+  `klt signoff --tiers-doc PATH` flag and the `KLT_TIERS_DOC` environment
+  variable (flag wins). `source_doc` in both reports still reads
+  `"docs/design-evidence-tiers.md"` for the shipped doc regardless of
+  install layout, and names the override path when one is used.
+  Envelope-aggregation mode (`klt signoff <file>...`) never read the doc and
+  is unchanged.
 - 2026-08-16 — `klt drc`'s `gf180mcu` deck no longer reports `mim.space.1`
   against ordinary `Metal4` routing or PDN power-stripe geometry (issue
   #1033). The rule transcribes the DRM's `MIMTM.1`, whose own scope is the

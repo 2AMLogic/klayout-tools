@@ -171,10 +171,15 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 from ._provenance import sha256_file
-from .design_evidence_tiers import DesignEvidenceTiersError, parse_tier_doc
+from .design_evidence_tiers import (
+    DesignEvidenceTiersError,
+    doc_source_label,
+    parse_tier_doc,
+)
 
 __all__ = [
     "SignoffError",
@@ -719,11 +724,21 @@ def _check_deck_hashes(
 # --------------------------------------------------------------------------- #
 
 
-def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
+def build_tier_report(
+    manifest: dict[str, Any], *, tiers_doc: str | Path | None = None
+) -> dict[str, Any]:
     """Grade a block manifest against the T1-T4 evidence-tier item skeleton
     mechanically parsed from ``docs/design-evidence-tiers.md``
     (:mod:`.design_evidence_tiers`) -- the item list is never duplicated
     here, so tiers and this aggregator can never drift.
+
+    ``tiers_doc`` (``klt signoff --tiers-doc``) points the parse at an
+    explicit copy of that doc; with none given,
+    :func:`~.design_evidence_tiers.default_doc_path` resolves it
+    (``$KLT_TIERS_DOC``, then the copy bundled inside the installed package,
+    then the source checkout's ``docs/`` -- issue #1050). ``source_doc`` in
+    the result names the override when one is used, and the canonical
+    ``docs/design-evidence-tiers.md`` otherwise.
 
     ``manifest`` (JSON in)::
 
@@ -918,7 +933,7 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
             f"{type(evidence).__name__}"
         )
 
-    doc = parse_tier_doc()
+    doc = parse_tier_doc(tiers_doc)
     partitions: tuple[str, ...] = (
         ("analog", "digital") if kind == "mixed-signal" else (kind,)
     )
@@ -969,7 +984,7 @@ def build_tier_report(manifest: dict[str, Any]) -> dict[str, Any]:
         "tier": tier,
         "t1_item_count": total,
         "t1_met_count": met_count,
-        "source_doc": "docs/design-evidence-tiers.md",
+        "source_doc": doc_source_label(tiers_doc),
         "items": items,
     }
 
@@ -1283,13 +1298,19 @@ def _build_tier_item(
 # --------------------------------------------------------------------------- #
 
 
-def build_fleet_report(fleet: dict[str, Any]) -> dict[str, Any]:
+def build_fleet_report(
+    fleet: dict[str, Any], *, tiers_doc: str | Path | None = None
+) -> dict[str, Any]:
     """Grade every block in a **fleet manifest** against the T1-T4 item
     skeleton (:func:`build_tier_report`, called once per block) and reduce
     each block's result down to its current tier and, for any block not yet
     at T1, the single T1 item still blocking it -- turning "which canaries
     are at which tier, and what's blocking each not-yet-T1 block" into one
     query instead of a survey (Epic #706, Phase 1c).
+
+    ``tiers_doc`` is forwarded verbatim to every per-block
+    :func:`build_tier_report` call, so one roll-up always grades every block
+    against the same doc.
 
     ``fleet`` (JSON in)::
 
@@ -1399,7 +1420,7 @@ def build_fleet_report(fleet: dict[str, Any]) -> dict[str, Any]:
                 "canary in the roll-up"
             )
 
-        tier_report = build_tier_report(manifest)
+        tier_report = build_tier_report(manifest, tiers_doc=tiers_doc)
         blocking_item = _first_unmet_t1_item(tier_report["items"])
         if tier_report["tier"] == "T1":
             t1_count += 1
@@ -1421,7 +1442,7 @@ def build_fleet_report(fleet: dict[str, Any]) -> dict[str, Any]:
         "block_count": len(blocks),
         "t1_count": t1_count,
         "not_t1_count": len(blocks) - t1_count,
-        "source_doc": "docs/design-evidence-tiers.md",
+        "source_doc": doc_source_label(tiers_doc),
         "blocks": blocks,
     }
 

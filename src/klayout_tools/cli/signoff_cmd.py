@@ -19,6 +19,13 @@
 The three modes are mutually exclusive: ``--manifest``/``--fleet`` each
 replace the positional ``<file>...`` arguments and each other.
 
+The two doc-parsing modes read ``design-evidence-tiers.md`` from
+``--tiers-doc``, else ``$KLT_TIERS_DOC``, else the copy bundled inside the
+installed package, else the source checkout's ``docs/`` (issue #1050 --
+:func:`klayout_tools.design_evidence_tiers.default_doc_path`), so they work
+from a wheel/``uv tool`` install with no repo checkout. ``--tiers-doc`` is
+refused in envelope-aggregation mode, which never reads the doc.
+
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
@@ -79,6 +86,13 @@ def run(args: argparse.Namespace) -> int:
             "--manifest and --fleet are mutually exclusive",
             args.format,
         )
+    if getattr(args, "tiers_doc", None) and not (manifest_source or fleet_source):
+        return emit_error(
+            "signoff",
+            "--tiers-doc only applies to --manifest/--fleet (envelope "
+            "aggregation does not read the design-evidence-tiers doc)",
+            args.format,
+        )
     if fleet_source:
         return _run_fleet_report(args, fleet_source)
     if manifest_source:
@@ -121,7 +135,7 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
                 f"manifest '{manifest_source}' must be a JSON object, got "
                 f"{type(manifest).__name__}"
             )
-        result = build_tier_report(manifest)
+        result = build_tier_report(manifest, tiers_doc=getattr(args, "tiers_doc", None))
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
@@ -145,7 +159,7 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
                 f"fleet manifest '{fleet_source}' must be a JSON object, got "
                 f"{type(fleet).__name__}"
             )
-        result = build_fleet_report(fleet)
+        result = build_fleet_report(fleet, tiers_doc=getattr(args, "tiers_doc", None))
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
