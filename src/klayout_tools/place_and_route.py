@@ -912,6 +912,7 @@ def run_place_and_route(
     gds_path: str | None = None
     verilog_path: str | None = None
     spef_sta: dict[str, Any] | None = None
+    layer_map_info: dict[str, Any] | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
@@ -920,7 +921,7 @@ def run_place_and_route(
         # rather than threaded back out, exactly as `def_path` above and the
         # `-output_drc` report path earlier already are.
         verilog_path = os.path.join(output_dir, f"{hdl_toplevel}.v")
-        _merge_def_to_gds(
+        layer_map_info = _merge_def_to_gds(
             def_path=def_path,
             tech_lef=tech_lef,
             cell_lef=cell_lef,
@@ -1003,6 +1004,14 @@ def run_place_and_route(
         ],
         "def_path": def_path,
         "gds_path": gds_path,
+        # Additive field (issue #1029): whether the DEF->GDS merge above
+        # actually applied a KLayout LEF/DEF layer-map file, and how it was
+        # resolved -- `_resolve_layer_map` silently degrades to no map at
+        # all (`resolution: "none"`) when neither a variant-named nor a
+        # family-level map file exists, which previously left no trace in
+        # this response for a caller to notice. `null` unless
+        # `stage_reached` is `"route"`, mirroring `gds_path`/`verilog_path`.
+        "layer_map": layer_map_info,
         # Additive field (issue #996): the `write_verilog`-produced,
         # *as-built* gate-level netlist -- the design as CTS/timing repair/
         # antenna repair actually left it, i.e. the netlist the routed
@@ -1584,19 +1593,47 @@ def _resolve_gds_view(pdk_info: dict[str, Any], cell_library: str) -> str:
     return gds_path
 
 
-def _resolve_layer_map(pdk_info: dict[str, Any]) -> str | None:
+def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
     """The KLayout LEF/DEF layer-map file open_pdks ships alongside its
     ``klayout`` tool area (``libs.tech/klayout/tech/<variant>.map``), or
-    ``None`` when the resolved install ships no ``klayout`` asset or no
-    matching map file -- the DEF->GDS merge still proceeds without one
-    (matching ``def2stream.py``'s own ``if len(layer_map) > 0`` guard),
-    just without a guaranteed-matching layer/datatype assignment for
-    routing shapes."""
+    ``(None, "none")`` when the resolved install ships no ``klayout`` asset
+    or no matching map file at all -- the DEF->GDS merge still proceeds
+    without one (matching ``def2stream.py``'s own ``if len(layer_map) > 0``
+    guard), just without a guaranteed-matching layer/datatype assignment for
+    routing shapes.
+
+    Prefers the variant-named file (``<variant>.map``, e.g.
+    ``sky130A.map``) when it exists (``resolution="exact"``). Falls back to
+    a family-level file (``<family>.map``, e.g. ``gf180mcu.map`` for variant
+    ``gf180mcuC``/``gf180mcuD``) when the variant-named file is absent
+    (``resolution="family"``) -- some open_pdks families (gf180mcu, unlike
+    sky130) ship a single ``klayout.tech`` map file shared across every
+    variant rather than one per variant (issue #1029). ``family`` is
+    derived by stripping a trailing single uppercase PDK-suite designator
+    from the variant, the same convention :func:`klayout_tools.pdk.
+    lvs_deck_file` already uses for its own variant/family fallback --
+    restated locally rather than imported, matching this module's existing
+    "each verb module is self-contained" precedent (see
+    ``lef_abstract.py``'s own duplicate of this function).
+    """
     klayout_dir = pdk_info["assets"].get("klayout")
     if klayout_dir is None:
-        return None
-    candidate = os.path.join(klayout_dir, "tech", f"{pdk_info['variant']}.map")
-    return candidate if os.path.isfile(candidate) else None
+        return None, "none"
+    tech_dir = os.path.join(klayout_dir, "tech")
+    variant = pdk_info["variant"]
+    exact = os.path.join(tech_dir, f"{variant}.map")
+    if os.path.isfile(exact):
+        return exact, "exact"
+
+    family = variant
+    if len(family) > 1 and family[-1].isupper():
+        family = family[:-1]
+    if family != variant:
+        family_candidate = os.path.join(tech_dir, f"{family}.map")
+        if os.path.isfile(family_candidate):
+            return family_candidate, "family"
+
+    return None, "none"
 
 
 # --------------------------------------------------------------------------- #
@@ -2927,7 +2964,7 @@ def _merge_def_to_gds(
     hdl_toplevel: str,
     macros: list[dict[str, Any]],
     out_path: str,
-) -> None:
+) -> dict[str, Any]:
     """Merge the routed DEF with the resolved standard-cell GDS view into a
     single GDS -- ported directly from ORFS's ``def2stream.py`` (survey
     section 4) onto this repo's ``klayout.db`` package, in-process. Never
@@ -2945,17 +2982,24 @@ def _merge_def_to_gds(
     instead -- an abstract-only macro instance (this issue's own DEF-level
     placement/obstruction verification does not need a real GDS view) is
     expected to stay empty, not an error.
+
+    Returns ``{"path": <str | None>, "resolution": <str>}`` describing the
+    :func:`_resolve_layer_map` result actually applied (or not) to this
+    merge, so the caller can surface it in the response envelope's
+    ``layer_map`` field (issue #1029) -- a caller has no other way to tell
+    whether the merged GDS's routing shapes got a guaranteed-matching
+    layer/datatype assignment.
     """
     import klayout.db as kdb
 
     cell_gds = _resolve_gds_view(pdk_info, cell_library)
-    layer_map = _resolve_layer_map(pdk_info)
+    layer_map_path, layer_map_resolution = _resolve_layer_map(pdk_info)
 
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
     lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
-    if layer_map is not None:
-        lefdef_config.map_file = layer_map
+    if layer_map_path is not None:
+        lefdef_config.map_file = layer_map_path
 
     main_layout = kdb.Layout()
     try:
@@ -3036,6 +3080,8 @@ def _merge_def_to_gds(
         raise PlaceAndRouteError(
             f"could not write merged GDS '{out_path}': {exc}"
         ) from exc
+
+    return {"path": layer_map_path, "resolution": layer_map_resolution}
 
 
 __all__ = [

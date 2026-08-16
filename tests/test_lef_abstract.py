@@ -18,7 +18,11 @@ import pytest
 
 from klayout_tools import pdk as pdk_module
 from klayout_tools.cli import main
-from klayout_tools.lef_abstract import LefAbstractError, run_lef_abstract
+from klayout_tools.lef_abstract import (
+    LefAbstractError,
+    _resolve_layer_map,
+    run_lef_abstract,
+)
 from klayout_tools.lef_header import read_lef_header
 
 DBU_UM = 0.001
@@ -86,8 +90,18 @@ met1    LEFOBS                   68  4
 
 
 def _make_pdk_install(
-    root: Path, variant: str, cell_library: str = "sky130_fd_sc_hd"
+    root: Path,
+    variant: str,
+    cell_library: str = "sky130_fd_sc_hd",
+    *,
+    map_filename: str | None = None,
 ) -> None:
+    """``map_filename`` (default ``"<variant>.map"``, sky130's own naming
+    convention) lets a caller instead write the family-level filename a
+    real gf180mcu install ships (``"gf180mcu.map"`` shared across
+    ``gf180mcuC``/``gf180mcuD``, never a per-variant file -- issue #1029),
+    to exercise :func:`klayout_tools.lef_abstract._resolve_layer_map`'s
+    family fallback end to end."""
     variant_dir = root / variant
     (variant_dir / "libs.tech").mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +113,9 @@ def _make_pdk_install(
 
     klayout_tech_dir = variant_dir / "libs.tech" / "klayout" / "tech"
     klayout_tech_dir.mkdir(parents=True, exist_ok=True)
-    (klayout_tech_dir / f"{variant}.map").write_text(_MAP_FILE_TEXT, encoding="utf-8")
+    (klayout_tech_dir / (map_filename or f"{variant}.map")).write_text(
+        _MAP_FILE_TEXT, encoding="utf-8"
+    )
 
 
 def _box_um(x0: float, y0: float, x1: float, y1: float) -> kdb.Box:
@@ -448,6 +464,96 @@ def test_no_layer_map_raises(tmp_path, monkeypatch):
             cell_library="sky130_fd_sc_hd",
             output_path=str(tmp_path / "out.lef"),
         )
+
+
+# --------------------------------------------------------------------------- #
+# `_resolve_layer_map` -- variant-exact vs. family-fallback vs. none found
+# (issue #1029), this module's own duplicate of
+# `place_and_route._resolve_layer_map`'s equivalent coverage.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_layer_map_prefers_exact_variant_match(tmp_path, monkeypatch):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+
+    pdk_info = {
+        "variant": "sky130A",
+        "assets": {"klayout": str(install_root / "sky130A" / "libs.tech" / "klayout")},
+    }
+
+    path, resolution = _resolve_layer_map(pdk_info)
+
+    assert path == str(
+        install_root / "sky130A" / "libs.tech" / "klayout" / "tech" / "sky130A.map"
+    )
+    assert resolution == "exact"
+
+
+def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path, monkeypatch):
+    """gf180mcu-shaped fixture: only the bare-family `gf180mcu.map` exists,
+    never a `gf180mcuC.map` -- verified against a real open_pdks install for
+    issue #1029."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "gf180mcuC", map_filename="gf180mcu.map")
+
+    pdk_info = {
+        "variant": "gf180mcuC",
+        "assets": {
+            "klayout": str(install_root / "gf180mcuC" / "libs.tech" / "klayout")
+        },
+    }
+
+    path, resolution = _resolve_layer_map(pdk_info)
+
+    assert path == str(
+        install_root / "gf180mcuC" / "libs.tech" / "klayout" / "tech" / "gf180mcu.map"
+    )
+    assert resolution == "family"
+
+
+def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
+    pdk_info = {
+        "variant": "gf180mcuC",
+        "assets": {"klayout": str(tmp_path / "no-such-klayout-dir")},
+    }
+
+    path, resolution = _resolve_layer_map(pdk_info)
+
+    assert path is None
+    assert resolution == "none"
+
+
+def test_run_lef_abstract_succeeds_with_only_family_level_map_file(
+    tmp_path, monkeypatch
+):
+    """End-to-end: `run_lef_abstract` against a gf180mcu-shaped install
+    shipping only `gf180mcu.map` (no `gf180mcuC.map`) still resolves a
+    layer map and succeeds, instead of raising "no ... layer map found"."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "gf180mcuC",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        map_filename="gf180mcu.map",
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+
+    layout_path = _write_layout(_basic_layout(), tmp_path / "block.gds")
+    socket_path = _write_socket(_basic_descriptor(), tmp_path / "socket.json")
+
+    report = run_lef_abstract(
+        layout_path,
+        socket_path,
+        macro_name="analog_block",
+        cell_library="gf180mcu_fd_sc_mcu9t5v0",
+        output_path=str(tmp_path / "out.lef"),
+    )
+
+    assert report["macro_name"] == "analog_block"
 
 
 def test_pin_layer_with_no_lef_mapping_gets_no_geometry_and_a_warning(

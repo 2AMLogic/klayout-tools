@@ -943,6 +943,10 @@ live re-measurement above.
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
   "gds_path": "/abs/path/.klt/place-and-route/gcd.gds",
+  "layer_map": {
+    "path": "/abs/path/pdk/sky130A/libs.tech/klayout/tech/sky130A.map",
+    "resolution": "exact"
+  },
   "verilog_path": "/abs/path/.klt/place-and-route/gcd.v",
   "spef_sta": {
     "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
@@ -990,6 +994,7 @@ live re-measurement above.
 | `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
+| `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |

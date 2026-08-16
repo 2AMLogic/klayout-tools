@@ -394,6 +394,7 @@ def _stub_merge_def_to_gds(
         layout = _make_layout(clean)
         layout.write(kwargs["out_path"])
         layout.write(str(block_layout_path))
+        return {"path": None, "resolution": "none"}
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
 
