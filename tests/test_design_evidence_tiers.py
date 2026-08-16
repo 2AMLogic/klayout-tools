@@ -4,11 +4,17 @@
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
+import tomllib
+
+from klayout_tools import design_evidence_tiers
 from klayout_tools.design_evidence_tiers import (
     DEFAULT_DOC_PATH,
+    DOC_PATH_ENV_VAR,
     DesignEvidenceTiersError,
+    default_doc_path,
     parse_tier_doc,
 )
 
@@ -49,6 +55,9 @@ Some prose ahead of the itemized list that must not be mistaken for an item.
 
 - **Staleness is failure.** Some prose here should never be parsed as an item.
 """
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _write_doc(tmp_path, text: str) -> str:
@@ -125,6 +134,121 @@ def test_real_doc_item_5_has_a_kind_independent_note():
 def test_default_doc_path_points_at_the_real_doc():
     assert DEFAULT_DOC_PATH.name == "design-evidence-tiers.md"
     assert DEFAULT_DOC_PATH.is_file()
+
+
+# --------------------------------------------------------------------------- #
+# Default-path resolution (issue #1050): a packaged (wheel) install has no
+# sibling `docs/` directory, so the default must resolve against the
+# *installed package* first and only fall back to the source checkout.
+# --------------------------------------------------------------------------- #
+
+
+def test_packaged_doc_path_lives_inside_the_installed_package():
+    # The bundled copy must sit under the package directory itself -- that is
+    # the only location that survives a wheel install (issue #1050).
+    package_dir = Path(design_evidence_tiers.__file__).resolve().parent
+    assert design_evidence_tiers._PACKAGED_DOC_PATH.parent.parent == package_dir, (
+        "the bundled doc must resolve relative to the installed package"
+    )
+
+
+def test_wheel_build_bundles_the_doc_inside_the_package():
+    # Mechanical check that packaging config and the resolution above cannot
+    # drift: pyproject must force-include the canonical doc at exactly the
+    # package-relative path `_PACKAGED_DOC_PATH` resolves to.
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"][
+        "force-include"
+    ]
+
+    package_dir = Path(design_evidence_tiers.__file__).resolve().parent
+    expected = str(
+        design_evidence_tiers._PACKAGED_DOC_PATH.relative_to(package_dir.parent)
+    )
+    assert force_include["docs/design-evidence-tiers.md"] == expected
+
+
+def test_default_doc_path_prefers_the_packaged_copy(monkeypatch, tmp_path):
+    packaged = tmp_path / "packaged.md"
+    packaged.write_text(_MINIMAL_DOC, encoding="utf-8")
+    monkeypatch.setattr(design_evidence_tiers, "_PACKAGED_DOC_PATH", packaged)
+    monkeypatch.setattr(
+        design_evidence_tiers, "_SOURCE_DOC_PATH", tmp_path / "checkout.md"
+    )
+    monkeypatch.delenv(DOC_PATH_ENV_VAR, raising=False)
+
+    assert default_doc_path() == packaged
+
+
+def test_default_path_works_without_a_sibling_docs_directory(monkeypatch, tmp_path):
+    """Regression for issue #1050: a wheel install puts the package under
+    site-packages with no `docs/` three directories up. The bundled copy must
+    carry the parse on its own."""
+    packaged = tmp_path / "site-packages" / "klayout_tools" / "data" / "tiers.md"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text(_MINIMAL_DOC, encoding="utf-8")
+    monkeypatch.setattr(design_evidence_tiers, "_PACKAGED_DOC_PATH", packaged)
+    # The source-checkout fallback does not exist in a packaged install.
+    monkeypatch.setattr(
+        design_evidence_tiers,
+        "_SOURCE_DOC_PATH",
+        tmp_path / "site-packages" / "docs" / "design-evidence-tiers.md",
+    )
+    monkeypatch.delenv(DOC_PATH_ENV_VAR, raising=False)
+
+    doc = parse_tier_doc()
+
+    assert [row["tier"] for row in doc["ladder"]] == ["T1", "T2", "T3", "T4"]
+
+
+def test_default_doc_path_falls_back_to_the_source_checkout(monkeypatch, tmp_path):
+    source = tmp_path / "checkout.md"
+    source.write_text(_MINIMAL_DOC, encoding="utf-8")
+    monkeypatch.setattr(
+        design_evidence_tiers, "_PACKAGED_DOC_PATH", tmp_path / "not-bundled.md"
+    )
+    monkeypatch.setattr(design_evidence_tiers, "_SOURCE_DOC_PATH", source)
+    monkeypatch.delenv(DOC_PATH_ENV_VAR, raising=False)
+
+    assert default_doc_path() == source
+
+
+def test_env_var_overrides_the_default_doc_path(monkeypatch, tmp_path):
+    override = tmp_path / "vendored.md"
+    override.write_text(_MINIMAL_DOC, encoding="utf-8")
+    monkeypatch.setenv(DOC_PATH_ENV_VAR, str(override))
+
+    assert default_doc_path() == override
+    doc = parse_tier_doc()
+    assert [item["id"] for item in doc["t1_items"]] == [1, 2, 3]
+
+
+def test_explicit_path_beats_the_env_var(monkeypatch, tmp_path):
+    override = tmp_path / "vendored.md"
+    override.write_text(_MINIMAL_DOC.replace("Design sources", "Env doc"), "utf-8")
+    monkeypatch.setenv(DOC_PATH_ENV_VAR, str(override))
+    explicit = _write_doc(tmp_path, _MINIMAL_DOC)
+
+    doc = parse_tier_doc(explicit)
+
+    assert doc["t1_items"][0]["title"] == "Design sources"
+
+
+def test_unreadable_default_doc_still_raises_the_structured_error(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        design_evidence_tiers, "_PACKAGED_DOC_PATH", tmp_path / "not-bundled.md"
+    )
+    monkeypatch.setattr(
+        design_evidence_tiers, "_SOURCE_DOC_PATH", tmp_path / "not-a-checkout.md"
+    )
+    monkeypatch.delenv(DOC_PATH_ENV_VAR, raising=False)
+
+    with pytest.raises(DesignEvidenceTiersError, match="could not read"):
+        parse_tier_doc()
 
 
 # --------------------------------------------------------------------------- #

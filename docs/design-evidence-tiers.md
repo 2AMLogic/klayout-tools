@@ -11,6 +11,14 @@ The ladder exists so that "this block is done" is never a vibe. A tier claim
 is checkable: every requirement below names an artifact that either exists,
 is fresh, and passes — or doesn't.
 
+> **This file is runtime tool data, not only prose.** `klt signoff
+> --manifest`/`--fleet` parse the ladder table and the T1 checklist below
+> mechanically (`klayout_tools/design_evidence_tiers.py`), and every built
+> wheel bundles a copy of this file as package data so a packaged install can
+> read it without a source checkout (issue #1050). Restructuring either
+> section — not merely rewording it — changes what `klt signoff` reports; see
+> [`docs/cli/signoff.md`](cli/signoff.md)'s "Where the tier doc comes from".
+
 ## The ladder
 
 | Tier | Claim | Demonstrated by |
