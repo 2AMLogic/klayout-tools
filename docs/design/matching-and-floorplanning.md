@@ -234,10 +234,13 @@ process-specific matching constant (a resistor's, sometimes written `A_R`;
 a BJT's `V_BE` mismatch, its own `A_VBE`), not `A_VT`/`A_β`. Get that
 constant from the same §2 sources for the device class in question rather
 than reusing a MOS transistor's number, then apply the same
-spec → area → generator-parameter steps above (`num`/`rows` for
-`res_array`, `rows`/`cols` for `bjt_array`, both defaulting to
-`topology: "common_centroid"` and accepting `topology: "array"` when
-systematic-mismatch cancellation genuinely isn't needed for that instance).
+spec → area → generator-parameter steps above via each generator's own
+multiplier knob: `num` for `res_array` (its `rows` parameter only folds
+that same `num` count into a more-square boustrophedon layout — it has no
+`topology` choice, unlike `mos_array`/`bjt_array`), and `rows`/`cols` for
+`bjt_array`, which — like `mos_array` — defaults to
+`topology: "common_centroid"` and accepts `topology: "array"` when
+systematic-mismatch cancellation genuinely isn't needed for that instance.
 
 ## Relationship to the #1013 layout-economy rubric
 
