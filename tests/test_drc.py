@@ -2457,6 +2457,140 @@ def test_run_drc_synthetic_enclosed_check_touching_shapes_clean(tmp_path, monkey
     assert report["violation_count"] == 0
 
 
+# --- #1028: real gf180mcu standard-cell row abutment must not false-positive --
+
+
+def _gf180mcu_and2_corpus_file() -> Path:
+    """Locate the real `gf180mcu_fd_sc_mcu9t5v0__and2_1` corpus GDS (see
+    `tests/corpus/README.md`) -- the exact cell issue #1028's own
+    reproduction script names."""
+    matches = [p for p in GF180MCU_CORPUS_FILES if "and2_1" in p.name]
+    assert matches, "expected gf180mcu_fd_sc_mcu9t5v0__and2_1.gds in the corpus"
+    return matches[0]
+
+
+def _gf180mcu_and2_row(tmp_path, name: str, pitch_delta_dbu: int, count: int = 3):
+    """Build a GDS with `count` instances of the real `and2_1` standard-cell
+    corpus GDS placed in a horizontal row, in a new top cell
+    `"ROW_ABUTMENT_TEST"`.
+
+    The pitch is derived from the cell's own `PRBoundary`-equivalent shape
+    (layer `0/0`, this library's cell-outline/`SIZE` layer -- verified
+    empirically to be `(0,0)-(4480,5040)` dbu, i.e. a real 4.48um cell width
+    at this deck's nominal 0.001um dbu) -- *not* the fixed `2.8` um the
+    original issue's own reproduction script assumed. `pitch_delta_dbu` is
+    added to that true pitch: `0` reproduces an exact, correctly-abutted
+    row (no overlap, no gap); a small positive value introduces a genuine
+    sub-dbu residual gap between adjacent instances, as a real (if tiny)
+    P&R placement-precision defect might leave.
+    """
+    layout = kdb.Layout()
+    layout.read(str(_gf180mcu_and2_corpus_file()))
+    cell = layout.cell("gf180mcu_fd_sc_mcu9t5v0__and2_1")
+    boundary_layer = layout.find_layer(0, 0)
+    assert boundary_layer is not None, "expected a cell-outline (0/0) shape"
+    bbox = None
+    for shape in cell.shapes(boundary_layer).each():
+        bbox = shape.bbox()
+    assert bbox is not None, "expected exactly one cell-outline (0/0) shape"
+    pitch = bbox.width() + pitch_delta_dbu
+
+    top = layout.create_cell("ROW_ABUTMENT_TEST")
+    for i in range(count):
+        top.insert(
+            kdb.CellInstArray(cell.cell_index(), kdb.Trans(kdb.Point(i * pitch, 0)))
+        )
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_gf180mcu_row_abutment_real_pitch_clean(tmp_path):
+    """Issue #1028: a row of the real `gf180mcu_fd_sc_mcu9t5v0__and2_1`
+    standard-cell corpus GDS, abutted at the cell's own true pitch (its
+    cell-outline shape's width, 4.48um -- see `_gf180mcu_and2_row`'s
+    docstring for why that is *not* the 2.8um the issue's own reproduction
+    script assumed), reports no violations against current `origin/main`
+    (post-#998): none of the four rule ids the issue reported
+    (`comp.enclosing.contact.1`, `contact.space.1`, `metal1.space.1`,
+    `poly2.space.1`) false-positive on a genuinely, correctly abutted row of
+    real standard-cell geometry -- confirming acceptance criterion 1/2/3 of
+    #1028 empirically, not just against the sky130 `diff.enclosing.licon.1`
+    case #995/#998 already covered.
+    """
+    path = _gf180mcu_and2_row(tmp_path, "row_abutment_real_pitch", pitch_delta_dbu=0)
+
+    report = run_drc(str(path), "gf180mcu", top="ROW_ABUTMENT_TEST")
+
+    # The four originally-reported rules really ran (their layers are all
+    # present in `and2_1.gds`) -- a "clean" verdict here must not be the
+    # vacuous kind a skipped rule would produce.
+    for rule_id in (
+        "comp.enclosing.contact.1",
+        "contact.space.1",
+        "metal1.space.1",
+        "poly2.space.1",
+    ):
+        assert rule_id not in report["coverage"]["rules_skipped"]
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_gf180mcu_row_abutment_issue_reported_pitch_is_real_overlap(tmp_path):
+    """Control for the clean test above: issue #1028's own reproduction
+    script placed instances 2.8um apart -- narrower than `and2_1`'s own
+    real 4.48um cell width (see `_gf180mcu_and2_row`'s docstring) -- so
+    consecutive instances genuinely *overlap* by 1.68um, not merely abut.
+    Reproducing that exact (incorrect) pitch against current `origin/main`
+    produces exactly the rule counts the issue reported
+    (`comp.enclosing.contact.1: 2`, `contact.space.1: 4`,
+    `metal1.space.1: 4`, `poly2.space.1: 2`) -- confirming those were real,
+    correctly-reported violations from a corrupted (overlapping) placement
+    rather than an engine false positive, and that this detection is not
+    regressed by #998's merge fix.
+    """
+    path = _gf180mcu_and2_row(
+        tmp_path,
+        "row_abutment_issue_reported_pitch",
+        # and2_1's true pitch (4480 dbu) minus the issue's assumed 2800 dbu
+        # (2.8um at this deck's nominal 0.001um dbu) pitch.
+        pitch_delta_dbu=round(2.8 / 0.001) - 4480,
+    )
+
+    report = run_drc(str(path), "gf180mcu", top="ROW_ABUTMENT_TEST")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {
+        "comp.enclosing.contact.1": 2,
+        "contact.space.1": 4,
+        "metal1.space.1": 4,
+        "poly2.space.1": 2,
+    }
+
+
+def test_run_drc_gf180mcu_row_abutment_subdbu_gap_real_shortfall(tmp_path):
+    """Monotonic control for the clean test above: introducing a genuine, if
+    tiny (1 dbu = 1nm at this deck's nominal scale) gap between two
+    otherwise correctly-pitched instances is a *real* `metal1.space.1`
+    shortfall, not a false positive to also suppress. `and2_1`'s
+    power/ground rail (`Metal1`) is drawn flush to the cell's own outline
+    specifically so abutment forms one continuous rail; any nonzero gap
+    leaves two real, facing rail edges closer than `metal1.space.1`'s
+    0.23um threshold. The `#995`/`#998` merge fix only ever removes false
+    positives -- this pins that a genuine sub-dbu placement-precision
+    defect still flags for the `*.space.1` check family (a different
+    dispatch path, `_SINGLE_LAYER_CHECKS`, from the `enclosing`/`enclosed`
+    checks #995/#998's own `..._real_shortfall` test already covers),
+    addressing #1028's acceptance criterion 4.
+    """
+    path = _gf180mcu_and2_row(tmp_path, "row_abutment_subdbu_gap", pitch_delta_dbu=1)
+
+    report = run_drc(str(path), "gf180mcu", top="ROW_ABUTMENT_TEST")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal1.space.1": 4}
+
+
 def test_run_drc_gf180mcu_reproducer_from_issue(tmp_path):
     """The exact reproducer geometry from issue #188: illegal MiM-stack and
     upper-metal geometry that used to report `"status": "clean"` (no rule

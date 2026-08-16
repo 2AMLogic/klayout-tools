@@ -476,6 +476,61 @@ Splitting one layer's geometry into several touching shapes is an ordinary
 GDS authoring/tiling choice, not a drawn defect, so this class of report
 was never a real violation to fix in the layout.
 
+### gf180mcu standard-cell row abutment (#1028)
+
+Issue #1028 reported that checking a row of abutted
+`gf180mcu_fd_sc_mcu9t5v0` standard-cell instances (adjacent library-cell
+placements with zero overlap at the library's own declared cell-outline
+pitch — an ordinary, correct digital place-and-route pattern) against the
+`gf180mcu` deck produced false-positive `comp.enclosing.contact.1`,
+`contact.space.1`, `metal1.space.1`, and `poly2.space.1` violations. Two
+distinct findings, both verified against real `gf180mcu_fd_sc_mcu9t5v0`
+corpus GDS (`tests/corpus/gf180mcu/`), not synthetic geometry:
+
+- **A row of real standard-cell instances abutted at the library's own true
+  pitch is DRC-clean today.** Tiling the real `and2_1` corpus cell at its
+  own cell-outline shape's width (4.48um, read from the GDS's own `(0,0)`
+  layer — the real "`SIZE`" the reproducer needed) — as a single-cell row,
+  a heterogeneous multi-cell row, and a 3x3 row-flipped grid — reports
+  `status: "clean"` for every rule, including all four the issue named. The
+  `enclosing`/`enclosed` half of that (`comp.enclosing.contact.1`) is
+  covered by the same `_run_check` `.merged()` fix #995/#998 already made
+  (above); the three `*.space.1` rules dispatch through a different code
+  path (`_SINGLE_LAYER_CHECKS`, `Region.space_check`) that #995/#998 never
+  touched, but `space_check`'s own `merged_semantics` already tolerates an
+  exact zero-gap abutment seam with no engine change needed — pinned by
+  `test_run_drc_gf180mcu_row_abutment_real_pitch_clean` in
+  `tests/test_drc.py`.
+- **The issue's own reproduction script's pitch was itself the bug, not
+  `klt drc`.** It assumed a flat `2.8` um pitch for `and2_1` rather than
+  reading the cell's real 4.48um outline width — a pitch narrower than the
+  real cell, so consecutive instances *genuinely overlap* by 1.68um rather
+  than merely abut. Reproducing that literal (incorrect) pitch against
+  current `origin/main` reproduces the issue's exact reported rule counts
+  (`comp.enclosing.contact.1: 2`, `contact.space.1: 4`,
+  `metal1.space.1: 4`, `poly2.space.1: 2`) — real, correctly-detected
+  violations from a corrupted (overlapping) placement, not a false
+  positive — pinned by
+  `test_run_drc_gf180mcu_row_abutment_issue_reported_pitch_is_real_overlap`.
+
+**By design, not a coverage gap: a genuine sub-dbu residual gap between
+otherwise correctly-pitched instances still reports a real
+`metal1.space.1` violation, and this is intentionally not loosened.**
+`and2_1`'s power/ground rail (`Metal1`) is drawn flush to the cell's own
+outline specifically so that row abutment forms one continuous rail; any
+nonzero gap — even a single database unit (0.001um at this deck's nominal
+scale) — between two instances leaves two real, facing rail edges closer
+than `metal1.space.1`'s 0.23um threshold, which `space_check` correctly
+flags. A real place-and-route flow that leaves any such residual gap (a
+DEF->GDS-merge or router-output snapping artifact) has a genuine rail
+discontinuity — precisely the defect a filler-cell/rail-continuity
+insertion stage exists to close — so `klt drc` treats it as a real
+violation rather than tolerating an arbitrary gap magnitude. Pinned by
+`test_run_drc_gf180mcu_row_abutment_subdbu_gap_real_shortfall`, the same
+"merging only removes false positives, a genuine shortfall still flags"
+monotonic guarantee #995/#998's own `..._real_shortfall` test pins for the
+`enclosing`/`enclosed` check family, extended here to `*.space.1`.
+
 ## Mixed sky130_fd_sc_hd + analog-macro layout (Epic #393 Phase 3, #456)
 
 Extending the macro-scale check above, issue #456 ran `klt drc` against a

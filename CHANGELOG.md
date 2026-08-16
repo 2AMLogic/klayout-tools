@@ -16,6 +16,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-16 — `klt drc`'s `gf180mcu` deck does not false-positive on a
+  correctly-abutted standard-cell row (issue #1028); the false positives
+  originally reported were verified to be an artifact of the reproduction
+  script's own placement pitch, not an engine defect. Reproducing the
+  issue against a row of the real `gf180mcu_fd_sc_mcu9t5v0__and2_1` corpus
+  cell (`tests/corpus/gf180mcu/`) abutted at the cell's own true 4.48um
+  cell-outline pitch reports `status: "clean"` for all four rules the
+  issue named (`comp.enclosing.contact.1`, `contact.space.1`,
+  `metal1.space.1`, `poly2.space.1`) — `comp.enclosing.contact.1` via the
+  same `_run_check` `.merged()` fix #995/#998 already made, and the three
+  `*.space.1` rules (a different dispatch path, `_SINGLE_LAYER_CHECKS` /
+  `Region.space_check`, not touched by #995/#998) via `space_check`'s own
+  `merged_semantics` already tolerating an exact zero-gap abutment seam —
+  no `_run_check` code change was needed. Reproducing the issue's own
+  literal reproduction script instead (a flat `2.8` um assumed pitch,
+  narrower than `and2_1`'s real 4.48um width) reproduces its exact reported
+  rule counts — real, correctly-detected violations from a corrupted
+  (overlapping) placement, confirming the original script's pitch was
+  itself the bug. A genuine sub-dbu residual gap between otherwise
+  correctly-pitched instances still reports a real `metal1.space.1`
+  violation (the shared power/ground rail's real facing-edge spacing), by
+  design — not loosened, since a real place-and-route flow leaving such a
+  gap has a genuine rail discontinuity. See `docs/cli/drc.md`'s "gf180mcu
+  standard-cell row abutment (#1028)" for the full writeup and
+  `tests/test_drc.py`'s three new `row_abutment_*` regression tests. No
+  response-shape change; `schema_version` unaffected.
 - 2026-08-16 — `klt pex` no longer silently swaps the wrong `.include` line,
   and now names a schematic/extracted pin-list mismatch instead of burying it
   in a per-corner log (issue #1030). Two fixes to the DUT `.include` swap
