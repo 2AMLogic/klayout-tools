@@ -442,12 +442,24 @@ def _write_gds(layout: kdb.Layout, path: Path) -> str:
     return str(path)
 
 
-def _make_sky130_poly_resistor_layout(top_name: str = "RES") -> kdb.Layout:
+def _make_sky130_poly_resistor_layout(
+    top_name: str = "RES",
+    extra_tap_labels: tuple[str, ...] = (),
+) -> kdb.Layout:
     """A single drawn sky130 poly resistor with a labelled, contacted head
     at each end -- the same fixture shape `tests/test_extract.py`'s
     `_make_poly_resistor_layout` uses (kept self-contained here rather than
     imported across test modules), extracting to `res_generic_po` with
-    `R = L / W * sheet_rho = 6.0 / 1.0 * 48.2 = 289.2` ohm (issue #222)."""
+    `R = L / W * sheet_rho = 6.0 / 1.0 * 48.2 = 289.2` ohm (issue #222).
+
+    ``extra_tap_labels`` adds that many *additional* labelled li1 islands
+    clear of the resistor body. Each one extracts to its own named net and
+    therefore its own top-cell pin, so the extracted `.SUBCKT RES` header
+    gains a terminal the hand-written schematic DUT does not declare -- the
+    shape issue #1030 reports from real decks, where extraction promotes a
+    physical body/substrate-tap net the schematic never modelled. See
+    `_PROMOTED_TAP_LABELS` for why the count matters.
+    """
     layout = kdb.Layout()
     top = layout.create_cell(top_name)
 
@@ -471,6 +483,13 @@ def _make_sky130_poly_resistor_layout(top_name: str = "RES") -> kdb.Layout:
         draw(*contact, kdb.Box(x - 100, 400, x + 100, 600))
         draw(*metal, kdb.Box(x - 400, 200, x + 400, 800))
         label(*metal_label, name, x, 500)
+
+    # Well clear of the resistor bar (y 0..1000) and its heads, so these stay
+    # separate nets rather than merging into RA/RB.
+    for index, name in enumerate(extra_tap_labels):
+        x = 1500 + index * 3000
+        draw(*metal, kdb.Box(x - 400, 3000, x + 400, 3600))
+        label(*metal_label, name, x, 3300)
 
     return layout
 
@@ -516,6 +535,39 @@ def _write_request(
 @pytest.fixture
 def resistor_layout(tmp_path):
     return _write_gds(_make_sky130_poly_resistor_layout(), tmp_path / "res.gds")
+
+
+# The two extra labelled taps the pin-count-mismatch integration tests below
+# rely on. *Two* is deliberate, and load-bearing across ngspice versions:
+#
+# - The schematic DUT declares 2 pins (`.SUBCKT RES RA RB`), so the testbench's
+#   own `Xres RA RB RES` line supplies 2 nodes. `klt pex` re-runs that exact
+#   line against the extracted netlist, whose header is
+#   `.SUBCKT RES RA RB VSUB VNW` -- 4 pins for 2 supplied nodes, i.e. ngspice's
+#   "*Too few* parameters for subcircuit type" (extraction promoted more pins
+#   than the schematic models -- issue #1030's real-world direction).
+# - ngspice 46 rejects any pin-count difference, in either direction. ngspice
+#   42 -- which this repo's CI installs via apt (`42+ds-3build1`) -- does not:
+#   it silently accepts *every* "too many parameters" case, and tolerates
+#   "too few" when the shortfall is only one node. It raises the error only
+#   once the instance supplies at least *two* fewer nodes than the `.SUBCKT`
+#   declares.
+#
+# So one tap (a 3-pin extraction) would reproduce PR #1039's original CI
+# failure -- green on a dev machine's ngspice 46, silently passing on CI's
+# ngspice 42. Two taps is the smallest mismatch both versions reject. Do not
+# reduce this to one, and do not restate it as a "too many parameters" case.
+_PROMOTED_TAP_LABELS = ("VSUB", "VNW")
+
+
+@pytest.fixture
+def resistor_layout_promoted_taps(tmp_path):
+    """The same resistor, plus two labelled taps that extraction promotes to
+    top-cell pins the schematic DUT does not declare (issue #1030)."""
+    return _write_gds(
+        _make_sky130_poly_resistor_layout(extra_tap_labels=_PROMOTED_TAP_LABELS),
+        tmp_path / "res_taps.gds",
+    )
 
 
 def test_run_pex_requires_at_least_one_testbench(resistor_layout):
@@ -778,27 +830,26 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
 
 
 @_SKIP_NO_NGSPICE
-def test_integration_run_pex_pin_count_mismatch(tmp_path, resistor_layout):
-    """Issue #1030, end to end against real `ngspice`: a schematic DUT whose
-    `.SUBCKT` declares one more pin than the extraction's own header (here an
-    unused `VSUB` terminal, standing in for the body/substrate-tap net a
-    real deck's extraction promotes). The schematic side runs fine; the
-    extracted side is refused by ngspice with `Too many parameters for
-    subcircuit type` -- and the report says so by name instead of leaving it
-    in a per-corner `ngspice.log`."""
-    dut = tmp_path / "schematic_dut.spice"
-    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
-    tb = tmp_path / "testbench.spice"
-    tb.write_text(
-        f'.include "{dut}"\n'
-        ".model res_generic_po r\n"
-        "Vdd RA 0 DC 1.8\n"
-        "Xres RA RB 0 RES\n"
-        "Rload RB 0 1000.0\n"
-    )
+def test_integration_run_pex_pin_count_mismatch(
+    tmp_path, resistor_layout_promoted_taps
+):
+    """Issue #1030, end to end against real `ngspice`: extraction promotes two
+    physical tap nets (`VSUB`, `VNW`) to top-cell pins, so its
+    `.SUBCKT RES RA RB VSUB VNW` header declares two more terminals than the
+    hand-written schematic DUT's `.SUBCKT RES RA RB`. The schematic side runs
+    fine; the extracted side is refused by ngspice with `Too few parameters
+    for subcircuit type` -- and the report says so by name instead of leaving
+    it buried in a per-corner `ngspice.log`.
+
+    See `_PROMOTED_TAP_LABELS` for why the mismatch is two pins wide and in
+    this direction: it is the only shape both ngspice 46 and CI's ngspice 42
+    reject.
+    """
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
 
-    report = run_pex(resistor_layout, [str(request)], "sky130")
+    report = run_pex(resistor_layout_promoted_taps, [str(request)], "sky130")
 
     assert report["status"] == "error"
     assert report["errored"] == 1
@@ -812,44 +863,45 @@ def test_integration_run_pex_pin_count_mismatch(tmp_path, resistor_layout):
     mismatch = report["pin_count_mismatch"]
     assert mismatch is not None
     assert mismatch["subcircuit"].upper() == "RES"
-    assert mismatch["schematic"]["pin_count"] == 3
-    assert mismatch["schematic"]["pins"] == ["RA", "RB", "VSUB"]
-    assert mismatch["extracted"]["pin_count"] == 2
+    assert mismatch["schematic"]["pin_count"] == 2
+    assert mismatch["schematic"]["pins"] == ["RA", "RB"]
+    assert mismatch["extracted"]["pin_count"] == 4
+    assert sorted(mismatch["extracted"]["pins"]) == ["RA", "RB", "VNW", "VSUB"]
     assert mismatch["extracted"]["netlist"] == report["netlist"]
 
 
 @_SKIP_NO_NGSPICE
-def test_integration_run_pex_pin_count_mismatch_cli(tmp_path, resistor_layout, capsys):
+def test_integration_run_pex_pin_count_mismatch_cli(
+    tmp_path, resistor_layout_promoted_taps, capsys
+):
     """The same run through the CLI: exit code 4 (a delta row errored, not a
     hard exit-1 abort) and the named diagnostic present in both output
     formats."""
-    dut = tmp_path / "schematic_dut.spice"
-    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
-    tb = tmp_path / "testbench.spice"
-    tb.write_text(
-        f'.include "{dut}"\n'
-        ".model res_generic_po r\n"
-        "Vdd RA 0 DC 1.8\n"
-        "Xres RA RB 0 RES\n"
-        "Rload RB 0 1000.0\n"
-    )
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
-    argv = ["pex", str(resistor_layout), str(request), "--deck", "sky130"]
+    argv = [
+        "pex",
+        str(resistor_layout_promoted_taps),
+        str(request),
+        "--deck",
+        "sky130",
+    ]
 
     exit_code = main([*argv, "--format", "json"])
     assert exit_code == 4
     payload = json.loads(capsys.readouterr().out)
     mismatch = payload["pin_count_mismatch"]
-    assert mismatch["schematic"]["pin_count"] == 3
-    assert mismatch["extracted"]["pin_count"] == 2
+    assert mismatch["schematic"]["pin_count"] == 2
+    assert mismatch["extracted"]["pin_count"] == 4
 
     exit_code = main(argv)
     assert exit_code == 4
     out = capsys.readouterr().out
     assert "pin_count_mismatch:" in out
     assert "schematic:" in out
-    assert "pins=3" in out
     assert "pins=2" in out
+    assert "pins=4" in out
 
 
 @_SKIP_NO_NGSPICE

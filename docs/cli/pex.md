@@ -208,6 +208,27 @@ simulated, `pin_count_mismatch` is `null`; the detection only ever runs when
 the extracted side produced no measured value at all, so a passing (or
 merely limit-failing) run can never pick up a false-positive diagnostic.
 
+**Detection depends on your ngspice version.** Because the diagnostic is
+raised from ngspice's own refusal to elaborate the deck, `klt pex` can only
+name a mismatch that ngspice actually rejects — and older ngspice does not
+reject all of them. Measured directly on both versions:
+
+| Mismatch (relative to the testbench's `X...` node count) | ngspice 46 | ngspice 42 |
+| --- | --- | --- |
+| Extracted `.SUBCKT` declares **≥2 more** pins ("too few parameters") | rejected | rejected |
+| Extracted `.SUBCKT` declares **exactly 1 more** pin | rejected | **accepted silently** |
+| Extracted `.SUBCKT` declares **fewer** pins ("too many parameters") | rejected | **accepted silently** |
+
+Where ngspice 42 accepts the deck, it simulates to completion and the
+extra/missing terminals are simply left dangling — so the run reports
+`status: "pass"` with `pin_count_mismatch: null` and **silently wrong**
+extracted values, rather than an error. ngspice 42 is what Debian/Ubuntu
+`apt` currently ships (`42+ds-3build1`), including in this repo's CI. If you
+are on ngspice < 46 and an extracted-vs-schematic delta looks implausible,
+compare the two `.SUBCKT` headers by hand before trusting it. Tightening
+this into an unconditional, engine-independent pre-flight header check is
+tracked separately.
+
 **Fixing a real mismatch is the caller's job, for now.** Give the schematic
 subcircuit the same pin list as the extracted one, or extract with a
 `--top` cell whose interface matches. A general bridging mechanism (a

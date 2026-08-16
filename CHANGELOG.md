@@ -42,8 +42,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   extracted side simulated, and the detection only runs when the extracted
   side produced no measured value at all, so a passing run cannot pick up a
   false positive. Bridging a genuine interface mismatch (a caller-supplied
-  pin map, a wrapper subcircuit) remains deliberately out of scope. No
-  response-shape break; `schema_version` unaffected.
+  pin map, a wrapper subcircuit) remains deliberately out of scope. Note that
+  detection is only as good as the engine's own refusal to elaborate the
+  deck: ngspice 46 rejects any pin-count difference, but ngspice 42 (what
+  `apt` ships, and what CI installs) silently accepts every "too many
+  parameters" case *and* a one-pin "too few" shortfall, simulating on with
+  dangling terminals — so on ngspice < 46 such a run still reports `status:
+  "pass"` with `pin_count_mismatch: null`. See `docs/cli/pex.md`, "Detection
+  depends on your ngspice version". No response-shape break;
+  `schema_version` unaffected.
 
 - 2026-08-14 — `klt drc` no longer reports false-positive `"enclosing"` /
   `"enclosed"` violations when a checked layer is drawn as several abutting
