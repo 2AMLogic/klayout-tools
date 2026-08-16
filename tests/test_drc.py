@@ -1465,45 +1465,235 @@ def test_run_drc_gf180mcu_metaltop_clean(tmp_path):
 
 
 # --- mim.space.1 (MIMTM.1) / mim.enclosing.fusetop.1 (MIMTM.3) (#188) ----
+#
+# `mim.space.1` (issue #1033) is scoped to the same "virtual bottom plate"
+# derived layer `mim.enclosing.via4.1` uses -- `FuseTop` sized/oversized by
+# 1.06um (1060 dbu), restricted to wherever `Metal4` already overlaps the
+# *unsized* `FuseTop` -- via `DerivedLayer`, checked as a `"separation"`
+# against the rest of `Metal4` rather than a raw whole-layer `"space"` check.
+# Before #1033 this rule flagged *any* two Metal4 shapes spaced under 1.2um,
+# with no relationship to a MiM capacitor required.
 
 
 def test_run_drc_gf180mcu_mim_space_violation(tmp_path):
-    """Two Metal4 bars closer than the 1200 dbu (1.2 um) `mim.space.1`
-    threshold trip exactly one violation."""
+    """A genuine MiM bottom plate (Metal4 under a FuseTop top plate) spaced
+    closer than the 1200 dbu (1.2 um) `mim.space.1` threshold from a nearby,
+    unrelated Metal4 shape trips exactly one violation."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     metal4 = layout.layer(46, 0)
     layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+    # Bottom plate: Metal4 fully under a FuseTop top plate (well inside the
+    # 1060 dbu oversized window, so the whole bar becomes the derived region).
     top.shapes(metal4).insert(kdb.Box(0, 0, 2000, 4000))
-    top.shapes(metal4).insert(kdb.Box(2300, 0, 4000, 4000))  # 300 dbu gap < 1200
+    top.shapes(fusetop).insert(kdb.Box(200, 200, 1800, 3800))
+    # Unrelated Metal4, 300 dbu away (< 1200) and nowhere near any FuseTop.
+    top.shapes(metal4).insert(kdb.Box(2300, 0, 4000, 4000))
     path = tmp_path / "mim_space_violation.gds"
     layout.write(str(path))
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] == "violations"
-    assert report["rule_counts"] == {"mim.space.1": 1}
-    (violation,) = report["violations"]
-    assert violation["rule"] == "mim.space.1"
-    assert violation["check"] == "space"
+    assert report["rule_counts"]["mim.space.1"] == 1
+    (violation,) = [v for v in report["violations"] if v["rule"] == "mim.space.1"]
+    assert violation["check"] == "separation"
     assert violation["layer"] == "Metal4"
 
 
 def test_run_drc_gf180mcu_mim_space_clean(tmp_path):
-    """Two Metal4 bars spaced exactly at the 1200 dbu threshold pass."""
+    """The same genuine MiM bottom plate, with the nearby Metal4 shape spaced
+    exactly at the 1200 dbu threshold, passes."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     metal4 = layout.layer(46, 0)
     layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
     top.shapes(metal4).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(fusetop).insert(kdb.Box(200, 200, 1800, 3800))
     top.shapes(metal4).insert(kdb.Box(3200, 0, 5000, 4000))  # 1200 dbu gap == threshold
     path = tmp_path / "mim_space_clean.gds"
     layout.write(str(path))
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
+    assert report["rule_counts"].get("mim.space.1", 0) == 0
+
+
+def test_run_drc_gf180mcu_mim_space_ordinary_routing_no_mim_devices_clean(tmp_path):
+    """Regression for issue #1033: a Metal4-only layout with tight,
+    PDN-style spacing (well under the 1200 dbu `mim.space.1` threshold) and
+    **no** `FuseTop`/`CAP_MK`/`MIM_L_MK` anywhere -- i.e. zero recognised MiM
+    capacitor devices, mirroring the real gf180mcu OpenROAD-routed digital
+    block this issue reports (a Metal4 PDN grid at 0.56um stripe spacing plus
+    Metal4 vertical I/O pin routing) -- must report **zero** `mim.space.1`
+    violations. Before #1033 this exact shape of layout tripped `mim.space.1`
+    188 times on the real corpus, none attributable to a MiM capacitor.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+
+    # PDN-style power/ground stripes at 560 dbu pitch (tighter than the
+    # deck's generic Metal4 spacing minimum), plus a vertical I/O pin trace --
+    # ordinary place-and-route geometry, no FuseTop/CAP_MK/MIM_L_MK anywhere.
+    for i in range(6):
+        x0 = i * 560
+        top.shapes(metal4).insert(kdb.Box(x0, 0, x0 + 200, 20000))
+    top.shapes(metal4).insert(kdb.Box(10000, -5000, 10200, 25000))  # vertical I/O pin
+
+    path = tmp_path / "mim_space_pdn_no_mim.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    # `FuseTop` (the derived region's `base` layer) is entirely absent from
+    # this stream -- the same "no MiM devices at all" shape as the real
+    # corpus this issue reports -- so `mim.space.1` is skipped outright
+    # (no violations possible), the same as any other rule whose layer is
+    # missing from the input. Either way, the observable contract this issue
+    # cares about holds: zero `mim.space.1` violations.
+    assert report["rule_counts"].get("mim.space.1", 0) == 0
+    assert "mim.space.1" in report["coverage"]["rules_skipped"]
+
+
+def test_run_drc_gf180mcu_mim_space_ordinary_routing_clean(tmp_path):
+    """Negative control mirroring `mim.enclosing.via4.1`'s own
+    `..._ordinary_routing_clean` test (issue #345): a genuine, cleanly-spaced
+    MiM cap coexists with ordinary Metal4 routing *elsewhere* on the same
+    layout, spaced well under the 1200 dbu `mim.space.1` threshold from each
+    other but with no FuseTop anywhere near the routing. Because the derived
+    virtual bottom plate is scoped to Metal4 that already overlaps a FuseTop
+    shape, the routing traces never become part of the derived region (or
+    get excluded from "other" for a plate they aren't near), so this must
+    **not** report `mim.space.1` for them -- confirming the fix does not
+    reintroduce the "flags all Metal4 routing/PDN geometry" false-positive
+    risk this issue reports.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+
+    # Genuine MiM cap, spaced >= 1200 dbu from anything else nearby.
+    top.shapes(metal4).insert(kdb.Box(0, 0, 5000, 5000))
+    top.shapes(fusetop).insert(kdb.Box(500, 500, 4500, 4500))
+
+    # Ordinary PDN-style routing far away, at tight (< 1200 dbu) pitch, no
+    # FuseTop anywhere nearby -- no MiM structure involved at all.
+    for i in range(6):
+        x0 = 100000 + i * 560
+        top.shapes(metal4).insert(kdb.Box(x0, 0, x0 + 200, 20000))
+
+    path = tmp_path / "mim_space_ordinary_routing.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert "mim.space.1" not in report["coverage"]["rules_skipped"]
+    assert report["rule_counts"].get("mim.space.1", 0) == 0
+
+
+def test_run_drc_gf180mcu_mim_space_adjacent_mim_violation(tmp_path):
+    """`MIMTM.1` is spacing to the bottom plate metal "whether adjacent MiM
+    **or** routing metal" -- both halves must survive #1033's scoping fix.
+    Two *separate* MiM capacitors whose bottom plates sit 800 dbu apart
+    (< 1200) violate the adjacent-MiM half, which the `"separation"` check
+    alone cannot see (both plates are scoped into the checked region and
+    excluded from "other"), so `run_drc` measures it as a peer-to-peer
+    `isolated_check` among the plate-bearing polygons and reports it under
+    the same rule id."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+
+    top.shapes(metal4).insert(kdb.Box(0, 0, 2000, 4000))
+    top.shapes(fusetop).insert(kdb.Box(700, 700, 1300, 3300))
+    top.shapes(metal4).insert(kdb.Box(2800, 0, 4800, 4000))  # 800 dbu gap
+    top.shapes(fusetop).insert(kdb.Box(3500, 700, 4100, 3300))
+
+    path = tmp_path / "mim_space_adjacent_mim.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["rule_counts"]["mim.space.1"] == 1
+    (violation,) = [v for v in report["violations"] if v["rule"] == "mim.space.1"]
+    assert violation["check"] == "separation"
+    assert violation["layer"] == "Metal4"
+
+
+def test_run_drc_gf180mcu_mim_space_slotted_bottom_plate_clean(tmp_path):
+    """The adjacent-MiM half of `mim.space.1` uses `isolated_check`
+    (different-polygon spacing), not `space_check` (which also measures
+    intra-polygon notches): a 1000 dbu slot cut into one MiM's own wide
+    bottom plate -- a routine density/stress-relief feature, not "spacing to
+    another bottom plate" -- must not be reported, or #1033's fix would have
+    traded one false-positive class for another."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+
+    # One bottom plate polygon with a 1000 dbu slot open at its top edge.
+    slotted = kdb.Region(kdb.Box(0, 0, 8000, 6000)) - kdb.Region(
+        kdb.Box(3500, 2000, 4500, 6001)
+    )
+    for polygon in slotted.each():
+        top.shapes(metal4).insert(polygon)
+    top.shapes(fusetop).insert(kdb.Box(700, 700, 3000, 5300))
+
+    path = tmp_path / "mim_space_slotted_plate.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert "mim.space.1" not in report["coverage"]["rules_skipped"]
+    assert report["rule_counts"].get("mim.space.1", 0) == 0
+
+
+def test_run_drc_gf180mcu_mim_space_shared_plate_two_top_plates_clean(tmp_path):
+    """The adjacent-MiM half measures the *whole* plate-bearing Metal4
+    polygons, not the sizing-clipped virtual plates, precisely so a single
+    shared bottom plate carrying two top plates further apart than
+    `2 * 1.06 um` does not read as two plates with a gap between them: the
+    metal between them is continuous, so there is no spacing to measure.
+    Top plates here are 2600 dbu apart -- inside the (2120, 3320) dbu window
+    where clipped virtual plates would be disjoint *and* closer than the
+    1200 dbu threshold."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal4 = layout.layer(46, 0)
+    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
+    fusetop = layout.layer(75, 0)
+    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
+
+    top.shapes(metal4).insert(kdb.Box(0, 0, 8000, 4000))
+    top.shapes(fusetop).insert(kdb.Box(700, 700, 2000, 3300))
+    top.shapes(fusetop).insert(kdb.Box(4600, 700, 6000, 3300))
+
+    path = tmp_path / "mim_space_shared_plate.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert "mim.space.1" not in report["coverage"]["rules_skipped"]
+    assert report["rule_counts"].get("mim.space.1", 0) == 0
 
 
 def test_run_drc_gf180mcu_mim_enclosing_fusetop_violation(tmp_path):
@@ -2614,7 +2804,14 @@ def test_run_drc_gf180mcu_reproducer_from_issue(tmp_path):
 
     top.shapes(m4).insert(kdb.Box(0, 0, 5000, 5000))  # bottom plate
     top.shapes(m4).insert(kdb.Box(5300, 0, 7300, 5000))  # 0.3 um away
-    top.shapes(ft).insert(kdb.Box(4800, 200, 6000, 4800))  # top plate hangs off
+    # Top plate hangs off the bottom plate's own right edge (0 margin, well
+    # under the 600 dbu `mim.enclosing.fusetop.1` threshold). Kept clear of
+    # the second Metal4 bar (x >= 5300) so that bar stays genuinely
+    # "unrelated routing metal" for `mim.space.1` (issue #1033) -- a FuseTop
+    # shape reaching into it too would make *both* bars part of the derived
+    # virtual bottom plate, leaving no "other" Metal4 to measure spacing
+    # against.
+    top.shapes(ft).insert(kdb.Box(4800, 200, 5000, 4800))
     top.shapes(v4).insert(kdb.Box(-100, 500, 100, 700))  # via straddles edge
     top.shapes(m5).insert(kdb.Box(4900, 2000, 7000, 3000))
     top.shapes(m2).insert(kdb.Box(0, 6000, 4000, 6050))  # 0.05 um wide

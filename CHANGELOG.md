@@ -16,6 +16,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ### Fixed since release
 
+- 2026-08-16 — `klt drc`'s `gf180mcu` deck no longer reports `mim.space.1`
+  against ordinary `Metal4` routing or PDN power-stripe geometry (issue
+  #1033). The rule transcribes the DRM's `MIMTM.1`, whose own scope is the
+  MiM capacitor's "virtual bottom plate" (`FuseTop` oversized by 1.06um,
+  intersected with `Metal4`), but it was implemented as a general
+  whole-layer `Metal4`-to-`Metal4` `"space"` check — so any two `Metal4`
+  shapes closer than 1.2um tripped it even on a design with zero MiM
+  capacitors (confirmed in practice on an OpenROAD-routed digital block
+  with a `Metal4` PDN grid: 188 violations, none MiM-related). It is now
+  scoped to that derived virtual bottom plate via the same `DerivedLayer`
+  primitive `mim.enclosing.via4.1` has used since #345, expressed as a
+  `"separation"` check between the plate and the rest of `Metal4` (`"space"`
+  is a single-region primitive and could not express it). `run_drc()`
+  additionally excludes, wholesale, any `other_layer` polygon that overlaps
+  the raw unsized `base` region, so a plate straddling the sizing cutoff
+  does not report a spurious zero-gap violation against its own leftover
+  fragment — and, since that exclusion also removes a *neighbouring* MiM
+  cap's plate metal, measures `MIMTM.1`'s "whether adjacent MiM" half
+  separately as a peer-to-peer `isolated_check` among those excluded
+  plate-bearing polygons, reported under the same rule id (so the fix
+  narrows false positives without dropping DRM coverage).
+  A design with no `FuseTop` shapes now skips the rule entirely
+  (`coverage.rules_skipped`) instead of emitting false positives; genuine
+  `MIMTM.1` violations against a real MiM bottom plate are still reported.
+  The rule's `check` field changes from `"space"` to `"separation"` and its
+  `description` is restated (both are per-violation payload *values*, not
+  response-shape changes; `schema_version` unaffected). See
+  `docs/cli/drc.md` and `tests/test_drc.py`'s two new negative controls.
 - 2026-08-16 — `klt drc`'s `gf180mcu` deck does not false-positive on a
   correctly-abutted standard-cell row (issue #1028); the false positives
   originally reported were verified to be an artifact of the reproduction

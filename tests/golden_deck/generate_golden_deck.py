@@ -27,12 +27,16 @@ follow-on (`docs/design/deck-compiler-proposal.md`'s own "narrow go"
 recommendation), not something issue #904 (a gf180mcu-focused phase) should
 fold in as a side effect of a shared generator.
 
-One rule is a documented exception to the generic `enclosing`-pair builder
-below: gf180mcu's `mim.enclosing.via4.1` scopes its checked region via a
-`DerivedLayer` (three real drawn layers -- FuseTop/Metal4/Via4 -- not the
-plain two-layer `layer`/`other_layer` shape every other rule uses), so its
-fixture is hand-authored in `_DERIVED_LAYER_FIXTURES` below rather than
-derived generically.
+Two rules are a documented exception to the generic `enclosing`/`separation`-
+pair builders below: gf180mcu's `mim.enclosing.via4.1` and `mim.space.1`
+(issue #1033) both scope their checked region via a `DerivedLayer` (real
+drawn layers read outside the plain two-layer `layer`/`other_layer` shape
+every other rule uses -- `mim.enclosing.via4.1` reads three: FuseTop/Metal4/
+Via4; `mim.space.1` reads two, FuseTop/Metal4, but `other_layer` is *also*
+Metal4, so a naive `_separation_pair` fixture would draw two bare Metal4
+bars with no FuseTop at all and never trip the rule), so both fixtures are
+hand-authored in `_DERIVED_LAYER_FIXTURES` below rather than derived
+generically.
 
 `"expected_disagreement"` is a deliberately **hand-authored** annotation (see
 `README.md`), never derived from geometry -- regeneration preserves each
@@ -292,6 +296,19 @@ def _separation_pair(
 #: single-layer width/space rule on Metal4/FuseTop/Via4 clears its own
 #: threshold by construction (a lone polygon has no `space_check` neighbour;
 #: `_ENCLOSED_SHAPE_SIZE_DBU`-plus geometry clears every width threshold).
+#: gf180mcu's `mim.space.1` (issue #1033) scopes its "separation" check's
+#: `region` side the same way, but its `other_layer` is *also* `Metal4` --
+#: `run_drc()` additionally excludes any `Metal4` polygon that itself
+#: overlaps the raw (unsized) `FuseTop` from the "other" side (see
+#: `drc.py`'s own comment on this), so a single Metal4 bar fully covered by a
+#: comfortably-enclosed FuseTop box becomes the entire derived plate (not
+#: split into a plate fragment plus a same-polygon "other" leftover), and a
+#: second, genuinely separate Metal4 bar -- never touching FuseTop at all --
+#: is placed `threshold_dbu(1200) +/- _margin_dbu(1200)(100)` away from the
+#: first bar's own edge for `"clean"`/`"violate"`. The FuseTop box keeps a
+#: 700 dbu margin inside its own Metal4 bar (>= the 600 dbu
+#: `mim.enclosing.fusetop.1` threshold) so neither fixture incidentally trips
+#: that rule too.
 _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     "mim.enclosing.via4.1": (
         {  # violate: Via4 straddles the derived region's right edge (x=7060)
@@ -306,6 +323,22 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
                 {"layer": [41, 0], "box": [-560, -560, 6560, 6560]},  # Via4
+            ]
+        },
+    ),
+    "mim.space.1": (
+        {  # violate: second Metal4 bar 1100 dbu (< 1200) from the plate
+            "shapes": [
+                {"layer": [46, 0], "box": [0, 0, 2000, 4000]},  # bottom plate
+                {"layer": [75, 0], "box": [700, 700, 1300, 3300]},  # FuseTop
+                {"layer": [46, 0], "box": [3100, 0, 5100, 4000]},  # other Metal4
+            ]
+        },
+        {  # clean: second Metal4 bar 1300 dbu (> 1200) from the plate
+            "shapes": [
+                {"layer": [46, 0], "box": [0, 0, 2000, 4000]},  # bottom plate
+                {"layer": [75, 0], "box": [700, 700, 1300, 3300]},  # FuseTop
+                {"layer": [46, 0], "box": [3300, 0, 5300, 4000]},  # other Metal4
             ]
         },
     ),

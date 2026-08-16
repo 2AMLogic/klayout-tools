@@ -35,6 +35,7 @@ instance rather than only the top cell.
 
 from __future__ import annotations
 
+import itertools
 import os
 import re
 import subprocess
@@ -359,6 +360,85 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
                 else None
             )
 
+            # Supplementary edge pairs reported under the same rule id,
+            # alongside whatever `_run_check` returns -- the same additive
+            # pattern `_run_check`'s own `outside_region` escape term already
+            # uses (#318). Only ever set for the derived+`"separation"`
+            # same-drawn-layer case immediately below (issue #1033).
+            peer_edge_pairs: Any | None = None
+
+            if (
+                rule.derived_layer is not None
+                and rule.check == "separation"
+                and other_region is not None
+                and rule.other_layer == rule.derived_layer.intersect_with
+            ):
+                # A `derived_layer` "separation" rule whose `other_layer` is
+                # the *same* drawn layer `derived_layer.intersect_with` reads
+                # (issue #1033, e.g. gf180mcu's `mim.space.1`: `region` is the
+                # virtual bottom plate carved out of `Metal4`, `other_layer`
+                # is `Metal4` itself) needs `other_region` scoped to exclude
+                # the plate's own footprint -- otherwise `other_region`
+                # trivially contains every shape `region` was built from
+                # (they're the same drawn layer), which is not a meaningful
+                # "spacing to other metal" comparison.
+                #
+                # A plain `other_region - region` is not safe here: `region`
+                # is only the *clipped* fragment of an `other_layer` polygon
+                # that falls inside the oversized `base` window (see
+                # `DerivedLayer`'s docstring) -- any part of that same
+                # physical polygon *outside* the window would be left behind
+                # in `other_region`, touching `region` at the sizing cutoff
+                # with zero gap: a `separation_check` between them reports a
+                # synthetic violation at that seam, an artefact of one
+                # continuous shape being cut in two, not a real spacing gap.
+                #
+                # Instead, exclude the *whole* `other_region` polygon for any
+                # polygon that already overlaps the raw (unsized) `base`
+                # region anywhere. Every polygon that can contribute a
+                # fragment to `region` only does so because it already passed
+                # this same `.interacting(base_region)` pre-filter (see
+                # `region`'s own construction above), so this removes exactly
+                # the candidates `region` was built from, wholesale --
+                # leaving only genuinely distinct `other_layer` geometry (e.g.
+                # ordinary routing/PDN metal with no relationship to any MiM
+                # structure) as "other".
+                other_merged = other_region.merged()
+                peer_region = other_merged.interacting(base_region)
+                other_region = other_merged - peer_region
+
+                # That wholesale exclusion leaves one half of the official
+                # rule unmeasured: gf180mcu's `MIMTM.1` is spacing to the
+                # bottom plate metal "whether adjacent MiM or routing
+                # metal", and every *adjacent MiM* plate has just been
+                # excluded from `other_region` along with this rule's own
+                # plate (both overlap `base`). Measure that half here, as a
+                # peer-to-peer check among the excluded, plate-bearing
+                # polygons themselves, and report it under the same rule id.
+                #
+                # `isolated_check` (spacing between *different* polygons of
+                # one region), not `space_check` (which also measures
+                # intra-polygon notches): a single MiM's own bottom plate
+                # metal is one polygon after `.merged()`, and a legitimate
+                # slot in wide plate metal (a routine density/stress-relief
+                # feature, typically ~1um wide) is not "spacing to another
+                # bottom plate" -- `space_check` would flag it, a fresh
+                # false positive of exactly the kind this issue is about.
+                #
+                # Measured on the *whole* plate-bearing polygons rather than
+                # the sizing-clipped virtual plates, which is deliberate:
+                # clipped plates split a shared bottom plate carrying two
+                # top plates more than `2 * sized_by_um` apart into two
+                # region polygons with no real gap between them (the metal
+                # is continuous), which `isolated_check` would flag. The
+                # residual conservatism this trades for -- two plate-bearing
+                # polygons whose *facing* metal is routing tail rather than
+                # virtual plate on both sides -- is documented in the deck's
+                # own `mim.space.1` note.
+                peer_edge_pairs = peer_region.isolated_check(
+                    round(rule.threshold_dbu * dbu_scale)
+                )
+
             if rule.check in _AREA_CHECKS:
                 for polygon in _run_area_check(region, rule, dbu_scale).each_merged():
                     bbox = polygon.bbox()
@@ -450,7 +530,13 @@ def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]
                 region, other_region, rule, dbu_scale
             )
 
-            for edge_pair in edge_pairs:
+            checked_edge_pairs = (
+                edge_pairs
+                if peer_edge_pairs is None
+                else itertools.chain(edge_pairs, peer_edge_pairs)
+            )
+
+            for edge_pair in checked_edge_pairs:
                 bbox = edge_pair.bbox()
                 try:
                     polygon = edge_pair.polygon(0)
