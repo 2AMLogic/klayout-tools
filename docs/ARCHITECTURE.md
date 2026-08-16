@@ -98,7 +98,10 @@ and engines: BAG-style generators, OpenVAF, openEMS, magic/netgen, Xyce,
 and whatever else the field produces. No single framework is assumed to
 be the answer; we take engines where they are sound and ideas where the
 code is not. Survey findings land as issues or epics, not as unexamined
-dependencies.
+dependencies, and every mined resource earns an entry in the standing
+[resource library](library/README.md) — the index of what actually
+changed here (a doc, a `klt` check, a review rubric line, a canary
+convention, a `spec-review` reference file) because of it.
 
 ## In-house prior art
 

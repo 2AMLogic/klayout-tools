@@ -7,7 +7,9 @@ rewritten; [`json-contract.md`](json-contract.md) specifies the shared output
 envelope (`schema_version`, error shape, exit codes) every `klt` verb emits
 through. Per-verb CLI references live under `cli/`, design notes and surveys
 under `design/`, published JSON Schemas under `schemas/`, and how-to guides
-under `guides/`.
+under `guides/`. What those surveys and other mined resources actually
+changed here — one entry per resource, with impact links — is indexed in
+[`library/README.md`](library/README.md).
 
 ## Layout
 
@@ -86,6 +88,8 @@ docs/
     synthesize-qor-improvements-survey.md
     wasm-spice-playground-spike.md
     yosys-synthesis-spike.md
+  library/                # standing resource library: mined resources -> what changed here
+    README.md
   schemas/               # published JSON Schemas
     em-site-export.schema.json
     remote-sim-ami-manifest.schema.json
