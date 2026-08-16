@@ -107,6 +107,8 @@ _HIDDEN_PARAMS = {
     "esd_mark_present",
     "salicide_block_layer",
     "salicide_block_present",
+    "voltage_flavor_mark_layer",
+    "voltage_flavor_mark_present",
 }
 
 #: Minimum contact/via drawn size (um) used by every phase-2 generator --
@@ -533,6 +535,66 @@ def _role_layer_info(family: str, role: str) -> Any:
     return kdb.LayerInfo(*pair) if pair is not None else None
 
 
+#: Per-PDK-family medium-voltage/thick-oxide transistor *flavour* -> marker
+#: layer, selected by ``mos_array``'s/``diff_pair``'s ``voltage_flavor``
+#: request param (issue #1054). Mirrors :data:`_PDK_RES_FLAVOR_LAYERS`'s own
+#: "family -> flavour name -> layer" shape, not a new pattern -- a device's
+#: recognised higher-voltage class is chosen by which marker/implant mask
+#: covers its body, exactly like a poly resistor's recognised precision class
+#: above.
+#:
+#: gf180mcu's single supported flavour, ``"medium_voltage"``, reuses
+#: :data:`_PDK_ROLE_LAYERS`'s existing ``esd_mark`` citation (``Dualgate``,
+#: 55/0) -- *the same* verified layer, not a second private one: that role's
+#: own comment already establishes "the two 6V (``Dualgate``-marked,
+#: medium-voltage) flavours are the ones the PDK's own I/O library uses for
+#: its ESD clamps", so a core ``mos_array``/``diff_pair`` unit device
+#: requesting the thick-oxide/medium-voltage variant gets the identical
+#: marker gf180mcu's own higher-voltage transistor flavour carries.
+#: ``esd_device`` keeps resolving that citation through its own
+#: ``esd_mark``/``_esd_device_layer_params`` path (unconditional, no
+#: ``voltage_flavor`` value to select) -- this table gives ``mos_array``/
+#: ``diff_pair`` a second, opt-in way to draw the same GDS layer without
+#: renaming or otherwise disturbing ``esd_device``'s existing role.
+#:
+#: sky130 has no entry: this deck's own transcription cites no numbered
+#: medium/high-voltage transistor marker layer (the same gap
+#: :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role documents -- sky130's
+#: ``hvtr``/``hvtp`` names are cited only as unnumbered exclusions in the
+#: official ``sky130.lvs``, never with a transcribed layer/datatype pair this
+#: module could cite without guessing). A ``voltage_flavor`` request on this
+#: family resolves to no layer for *any* name -- reported via
+#: ``drc_hints.notes``, never silently dropped (see
+#: :func:`_voltage_flavor_mark_layer`).
+_PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
+    "gf180mcu": {
+        "medium_voltage": (55, 0),  # Dualgate -- same citation as
+        # _PDK_ROLE_LAYERS's "esd_mark" entry.
+    },
+    "sky130": {},
+}
+
+
+def _voltage_flavor_mark_layer(family: str, voltage_flavor: str) -> Any:
+    """Return the ``kdb.LayerInfo`` for ``voltage_flavor`` in ``family``'s
+    :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` table, or ``None`` when that family's
+    curated deck has no marker layer for the requested flavour name
+    (including every name on sky130 today, and an unrecognised name on any
+    family).
+
+    Deliberately never raises -- mirrors :func:`_role_layer_info`'s own
+    "``None`` means absent" contract rather than :func:`_res_flavor_layers`'s
+    hard-reject one, so an unresolved ``voltage_flavor`` is reported via
+    ``drc_hints.notes`` (see ``_mos_array_describe``/``_diff_pair_describe``)
+    instead of failing the request outright -- the same "notes it, never
+    silently drops it" precedent ``esd_device``'s own optional
+    ``esd_mark``/``salicide_block`` roles established."""
+    import klayout.db as kdb
+
+    pair = _PDK_VOLTAGE_FLAVOR_LAYERS.get(family, {}).get(voltage_flavor)
+    return kdb.LayerInfo(*pair) if pair is not None else None
+
+
 def _resistor_strip_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -561,12 +623,25 @@ def _device_layer_params(
     ``dummy_cells``' gate footprint so ``klt extract``'s existing
     dummy-suppression guards (#295/#462) actually fire. ``None`` (e.g.
     gf180mcu, or ``diff_pair``, which never populates ``dummy_cells``) is a
-    silent no-op, matching every other ``*_present``-gated role here."""
+    silent no-op, matching every other ``*_present``-gated role here.
+
+    Also resolves ``voltage_flavor_mark_layer``/``voltage_flavor_mark_present``
+    (issue #1054) -- the optional medium-voltage/thick-oxide device-class
+    marker selected by the request's own ``voltage_flavor`` param (see
+    :data:`_PDK_VOLTAGE_FLAVOR_LAYERS`). The default, an empty string, means
+    "no marker requested" and always resolves to absent -- a request that
+    never mentions ``voltage_flavor`` reproduces the pre-#1054 geometry
+    exactly, matching every other opt-in role here (e.g. ``esd_device``'s
+    ``salicide_block``)."""
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
     well = _role_layer_info(family, "well")
     dummy = _role_layer_info(family, "dummy")
+    voltage_flavor = params.get("voltage_flavor", "")
+    voltage_flavor_mark = (
+        _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
+    )
     return {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
@@ -576,6 +651,12 @@ def _device_layer_params(
         "well_present": well is not None,
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
+        "voltage_flavor_mark_layer": (
+            voltage_flavor_mark
+            if voltage_flavor_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_mark_present": voltage_flavor_mark is not None,
     }
 
 
@@ -2375,7 +2456,15 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         of width ``fingers * w_um``; ``"series"`` draws the bare, unstrapped
         stripes -- a chain of transistors whose interior terminals are
         neither reported nor contactable (warned about by
-        :func:`_mos_array_describe`)."""
+        :func:`_mos_array_describe`).
+
+        ``voltage_flavor`` (issue #1054) optionally draws a PDK
+        medium-voltage/thick-oxide device-class marker (e.g. gf180mcu's
+        ``Dualgate``) sized to enclose every unit device (real and dummy) --
+        the same shared box ``flavor="pfet"``'s well shape already encloses.
+        The default, an empty string, draws nothing (byte-for-byte unchanged
+        geometry). See :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` for the flavour
+        names each PDK family recognises."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -2421,6 +2510,17 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Device flavor: 'nfet' (default, no well drawn) or 'pfet' "
                 "(unit devices enclosed in a well on PDK families that check one)",
                 default="nfet",
+            )
+            self.param(
+                "voltage_flavor",
+                self.TypeString,
+                "Optional medium-voltage/thick-oxide device-class marker: "
+                "'' (default, no marker drawn) or a name the resolved PDK "
+                "family's role-layer table recognises (e.g. 'medium_voltage' "
+                "on gf180mcu, drawing its Dualgate marker). A name the family "
+                "doesn't recognise draws nothing and is reported via "
+                "drc_hints.notes, never silently dropped",
+                default="",
             )
             self.param(
                 "gate_contact",
@@ -2482,6 +2582,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "deck declares (see ExtractionDeck.dummy)",
                 default=False,
             )
+            self.param(
+                "voltage_flavor_mark_layer",
+                self.TypeLayer,
+                "Medium-voltage/thick-oxide device-class marker drawing "
+                "layer, sized to enclose every unit device (only used when "
+                "voltage_flavor_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_mark_layer is a real layer resolved "
+                "for params.voltage_flavor on this PDK family",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -2518,6 +2633,19 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             if self.flavor == "pfet" and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
                 _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
+
+            # Medium-voltage/thick-oxide device-class marker (issue #1054):
+            # sized to enclose every unit device (real and dummy) -- the same
+            # shared box the well shape above encloses -- independent of
+            # `flavor`, so a caller can request both a well (pfet) and a
+            # voltage-flavor marker (or either alone).
+            if self.voltage_flavor_mark_present:
+                li_voltage_flavor_mark = self.layout.layer(
+                    self.voltage_flavor_mark_layer
+                )
+                _insert_boxes(
+                    self.cell, li_voltage_flavor_mark, dbu, [info["well_box_um"]]
+                )
 
             # Dummy-device marker (issue #491): drawn only over
             # dummy_cells' gate footprint (unit_boxes["poly"], the exact
@@ -2898,7 +3026,15 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         (family 3). ``flavor="pfet"`` encloses the device pair's own active
         footprint in a well (independent of ``add_guard_ring``'s own,
         separate well tie -- see ``guard_ring``); ``flavor="nfet"`` (the
-        default) draws no additional well shape (#208)."""
+        default) draws no additional well shape (#208).
+
+        ``voltage_flavor`` (issue #1054) optionally draws a PDK
+        medium-voltage/thick-oxide device-class marker over the same device
+        pair footprint the well shape above encloses, independent of
+        ``flavor``. The default, an empty string, draws nothing (byte-for-
+        byte unchanged geometry). See ``mos_array``'s own ``voltage_flavor``
+        docstring and :data:`_PDK_VOLTAGE_FLAVOR_LAYERS` for the flavour
+        names each PDK family recognises."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -2970,6 +3106,17 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default="nfet",
             )
             self.param(
+                "voltage_flavor",
+                self.TypeString,
+                "Optional medium-voltage/thick-oxide device-class marker: "
+                "'' (default, no marker drawn) or a name the resolved PDK "
+                "family's role-layer table recognises (e.g. 'medium_voltage' "
+                "on gf180mcu, drawing its Dualgate marker). A name the family "
+                "doesn't recognise draws nothing and is reported via "
+                "drc_hints.notes, never silently dropped",
+                default="",
+            )
+            self.param(
                 "gate_contact",
                 self.TypeBoolean,
                 "Finish the gate stack: draw a contact and a local-metal pad "
@@ -3021,6 +3168,21 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
                 default=False,
             )
+            self.param(
+                "voltage_flavor_mark_layer",
+                self.TypeLayer,
+                "Medium-voltage/thick-oxide device-class marker drawing "
+                "layer, sized to enclose the device pair's own footprint "
+                "(only used when voltage_flavor_mark_present)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "voltage_flavor_mark_present",
+                self.TypeBoolean,
+                "Whether voltage_flavor_mark_layer is a real layer resolved "
+                "for params.voltage_flavor on this PDK family",
+                default=False,
+            )
 
         def display_text_impl(self) -> str:
             return f"diff_pair(w={self.w_um},l={self.l_um},splits={self.splits})"
@@ -3055,6 +3217,18 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
 
+            # Shared device-pair-footprint box (well margin), used by both
+            # the `flavor="pfet"` well shape and the `voltage_flavor` marker
+            # below -- computed once, independent of either param, so a
+            # caller can request both, either, or neither.
+            margin = WELL_ENCLOSURE_MARGIN_UM
+            device_well_box = (
+                -margin,
+                -margin,
+                info["core_w_um"] + margin,
+                info["core_h_um"] + margin,
+            )
+
             if self.flavor == "pfet" and self.well_present:
                 # Enclose the device pair's own active footprint in a well,
                 # independent of the (optional) automatically-sized guard
@@ -3062,14 +3236,16 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # well_layer, so they simply merge into one region on any
                 # boolean/DRC pass over it.
                 li_well = self.layout.layer(self.well_layer)
-                margin = WELL_ENCLOSURE_MARGIN_UM
-                device_well_box = (
-                    -margin,
-                    -margin,
-                    info["core_w_um"] + margin,
-                    info["core_h_um"] + margin,
-                )
                 _insert_boxes(self.cell, li_well, dbu, [device_well_box])
+
+            # Medium-voltage/thick-oxide device-class marker (issue #1054):
+            # same shared box as the well shape above, independent of
+            # `flavor`.
+            if self.voltage_flavor_mark_present:
+                li_voltage_flavor_mark = self.layout.layer(
+                    self.voltage_flavor_mark_layer
+                )
+                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [device_well_box])
 
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
@@ -3821,6 +3997,32 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         )
 
 
+def _voltage_flavor_hints(
+    family: str, params: dict[str, Any], notes: list[str]
+) -> dict[str, Any]:
+    """``drc_hints`` fields for the optional ``voltage_flavor`` marker (issue
+    #1054), shared by :func:`_mos_array_describe`/:func:`_diff_pair_describe`:
+    echoes the requested flavour (``None`` when omitted) and whether a real
+    marker layer was resolved for it, appending an explanatory entry to
+    ``notes`` (in place) when a non-empty request resolved to no layer --
+    mirrors ``esd_device``'s own ``esd_mark``/``salicide_block`` "notes it,
+    never silently drops it" precedent rather than rejecting the request."""
+    voltage_flavor = params["voltage_flavor"]
+    mark_present = False
+    if voltage_flavor:
+        mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
+        if not mark_present:
+            notes.append(
+                f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
+                f"resolved for the resolved PDK family ('{family}') -- no marker "
+                "was drawn"
+            )
+    return {
+        "voltage_flavor": voltage_flavor or None,
+        "voltage_flavor_mark_present": mark_present,
+    }
+
+
 def _mos_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3958,6 +4160,8 @@ def _mos_array_describe(
             f"(reported as U<i>_S<j>/U<i>_D<j>/U<i>_G<j> ports, one per finger)"
         )
 
+    voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
+
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     grid = f"{params['rows']}x{params['cols']}"
     # `flavor` is not folded into `matched_group_id` -- a matched group is
@@ -3982,6 +4186,7 @@ def _mos_array_describe(
             "matched_group_id": matched_group_id,
             "snapped_to_grid": snapped,
             "notes": notes,
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
@@ -4502,6 +4707,8 @@ def _diff_pair_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
+    voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
+
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
     # `flavor` is not folded into `matched_group_id` -- see the equivalent
@@ -4516,6 +4723,7 @@ def _diff_pair_describe(
             "matched_group_id": matched_group_id,
             "snapped_to_grid": snapped,
             "notes": notes,
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]

@@ -924,6 +924,143 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+#: gf180mcu's `Dualgate` layer (see `klayout_tools.gen._PDK_VOLTAGE_FLAVOR_LAYERS`'s
+#: `"medium_voltage"` entry) -- the same citation `esd_device`'s own `esd_mark`
+#: role reuses (issue #1054).
+_GF180_VOLTAGE_FLAVOR_MARK_LAYER = (55, 0)
+
+
+def test_mos_array_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
+    """`voltage_flavor` defaults to `''`, which must draw *no* marker shape --
+    geometry-identical to a request that never even mentions `voltage_flavor`
+    (issue #1054 acceptance criterion: the default case is not allowed to
+    change)."""
+    implicit = tmp_path / "implicit.gds"
+    explicit = tmp_path / "explicit.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(implicit)},
+        }
+    )
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"voltage_flavor": ""},
+            "options": {"output": str(explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert report["drc_hints"]["voltage_flavor"] is None
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_mos_array_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
+    tmp_path, both_pdk_root
+):
+    """`voltage_flavor='medium_voltage'` draws gf180mcu's `Dualgate` marker
+    over the unit device(s) and reports the selection in `drc_hints`, staying
+    DRC-clean (issue #1054)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_voltage_flavor_gf180.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": "medium_voltage"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
+    tmp_path, both_pdk_root
+):
+    """sky130's curated deck cites no medium/high-voltage transistor marker
+    layer -- a `voltage_flavor` request resolves to no layer and is reported
+    via `drc_hints.notes`, never silently dropped (issue #1054, mirroring
+    `esd_device`'s own `esd_mark` absence precedent)."""
+    output = tmp_path / "mos_array_voltage_flavor_sky130.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": "medium_voltage"},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert any("voltage_flavor" in n for n in report["drc_hints"]["notes"])
+
+
+def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(
+    tmp_path, both_pdk_root
+):
+    """An unrecognised `voltage_flavor` value on a family that *does*
+    resolve other flavour names (gf180mcu) is treated the same as an
+    unsupported family -- notes it, doesn't raise or silently drop it."""
+    output = tmp_path / "mos_array_voltage_flavor_unknown.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": "not_a_real_flavor"},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert any("voltage_flavor" in n for n in report["drc_hints"]["notes"])
+
+
+def test_mos_array_voltage_flavor_and_flavor_pfet_both_drawn_and_drc_clean(
+    tmp_path, both_pdk_root
+):
+    """`voltage_flavor` is orthogonal to `flavor` -- requesting both a `pfet`
+    well and a `medium_voltage` marker draws both shapes without conflict,
+    staying DRC-clean (issue #1054 edge case)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_voltage_flavor_pfet.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "medium_voltage"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert (21, 0) in present  # gf180mcu's Nwell, drawn for flavor='pfet'
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 def _layer_bbox(gds_path, layer, datatype):
     """Merged bounding box (in um) of one layer across the whole cell tree."""
     import klayout.db as kdb
@@ -2611,6 +2748,86 @@ def test_diff_pair_flavor_pfet_no_guard_ring_still_draws_device_well(
         for i in layout.layer_indexes()
     }
     assert (64, 20) in present
+
+
+def test_diff_pair_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
+    """`voltage_flavor` defaults to `''`, which must draw *no* marker shape --
+    geometry-identical to a request that never even mentions `voltage_flavor`
+    (issue #1054 acceptance criterion: the default case is not allowed to
+    change)."""
+    implicit = tmp_path / "implicit.gds"
+    explicit = tmp_path / "explicit.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(implicit)},
+        }
+    )
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"voltage_flavor": ""},
+            "options": {"output": str(explicit)},
+        }
+    )
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert report["drc_hints"]["voltage_flavor"] is None
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_diff_pair_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
+    tmp_path, both_pdk_root
+):
+    """`voltage_flavor='medium_voltage'` draws gf180mcu's `Dualgate` marker
+    over the device pair's own footprint and reports the selection in
+    `drc_hints`, staying DRC-clean (issue #1054)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "diff_pair_voltage_flavor_gf180.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": "medium_voltage"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_diff_pair_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
+    tmp_path, both_pdk_root
+):
+    """sky130's curated deck cites no medium/high-voltage transistor marker
+    layer -- a `voltage_flavor` request resolves to no layer and is reported
+    via `drc_hints.notes`, never silently dropped (issue #1054)."""
+    output = tmp_path / "diff_pair_voltage_flavor_sky130.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": "medium_voltage"},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert any("voltage_flavor" in n for n in report["drc_hints"]["notes"])
 
 
 # --- flavor -> klt extract device_counts (issue #208) ------------------------ #
