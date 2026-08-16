@@ -1,0 +1,565 @@
+{
+  "schema_version": 1,
+  "placeholder": true,
+  "placeholder_note": "Computed by .claude/skills/economy-review/scripts/economy_metrics.py, a minimal stand-in pending the dedicated `klt economy` command (issue #1012).",
+  "file": "blocks/sky130_fd_sc_hd__buf_4/output/sky130_fd_sc_hd__buf_4.gds",
+  "top": "sky130_fd_sc_hd__buf_4",
+  "bbox_um": {
+    "left": -0.19,
+    "bottom": -0.24,
+    "right": 2.95,
+    "top": 2.96
+  },
+  "width_um": 3.14,
+  "height_um": 3.2,
+  "aspect_ratio": 0.98125,
+  "bbox_area_um2": 10.048,
+  "drawn_area_um2": 9.4419,
+  "utilization": 0.9396795382165606,
+  "dead_margins_um": {
+    "left": 0.0,
+    "right": 0.0,
+    "bottom": 0.0,
+    "top": 0.0
+  },
+  "whitespace_grid": {
+    "cols": 8,
+    "rows": 6,
+    "cells": [
+      {
+        "row": 0,
+        "col": 0,
+        "bbox_um": {
+          "left": -0.19,
+          "bottom": -0.24,
+          "right": 0.202,
+          "top": 0.293
+        },
+        "covered_fraction": 0.5153061224489796
+      },
+      {
+        "row": 0,
+        "col": 1,
+        "bbox_um": {
+          "left": 0.202,
+          "bottom": -0.24,
+          "right": 0.595,
+          "top": 0.293
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 0,
+        "col": 2,
+        "bbox_um": {
+          "left": 0.595,
+          "bottom": -0.24,
+          "right": 0.988,
+          "top": 0.293
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 0,
+        "col": 3,
+        "bbox_um": {
+          "left": 0.988,
+          "bottom": -0.24,
+          "right": 1.3800000000000001,
+          "top": 0.293
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 0,
+        "col": 4,
+        "bbox_um": {
+          "left": 1.3800000000000001,
+          "bottom": -0.24,
+          "right": 1.772,
+          "top": 0.293
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 0,
+        "col": 5,
+        "bbox_um": {
+          "left": 1.772,
+          "bottom": -0.24,
+          "right": 2.165,
+          "top": 0.293
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 0,
+        "col": 6,
+        "bbox_um": {
+          "left": 2.165,
+          "bottom": -0.24,
+          "right": 2.5580000000000003,
+          "top": 0.293
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 0,
+        "col": 7,
+        "bbox_um": {
+          "left": 2.5580000000000003,
+          "bottom": -0.24,
+          "right": 2.95,
+          "top": 0.293
+        },
+        "covered_fraction": 0.5153061224489796
+      },
+      {
+        "row": 1,
+        "col": 0,
+        "bbox_um": {
+          "left": -0.19,
+          "bottom": 0.293,
+          "right": 0.202,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 0.5153061224489796
+      },
+      {
+        "row": 1,
+        "col": 1,
+        "bbox_um": {
+          "left": 0.202,
+          "bottom": 0.293,
+          "right": 0.595,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 1,
+        "col": 2,
+        "bbox_um": {
+          "left": 0.595,
+          "bottom": 0.293,
+          "right": 0.988,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 1,
+        "col": 3,
+        "bbox_um": {
+          "left": 0.988,
+          "bottom": 0.293,
+          "right": 1.3800000000000001,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 1,
+        "col": 4,
+        "bbox_um": {
+          "left": 1.3800000000000001,
+          "bottom": 0.293,
+          "right": 1.772,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 1,
+        "col": 5,
+        "bbox_um": {
+          "left": 1.772,
+          "bottom": 0.293,
+          "right": 2.165,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 1,
+        "col": 6,
+        "bbox_um": {
+          "left": 2.165,
+          "bottom": 0.293,
+          "right": 2.5580000000000003,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 1,
+        "col": 7,
+        "bbox_um": {
+          "left": 2.5580000000000003,
+          "bottom": 0.293,
+          "right": 2.95,
+          "top": 0.8270000000000001
+        },
+        "covered_fraction": 0.5153061224489796
+      },
+      {
+        "row": 2,
+        "col": 0,
+        "bbox_um": {
+          "left": -0.19,
+          "bottom": 0.8270000000000001,
+          "right": 0.202,
+          "top": 1.36
+        },
+        "covered_fraction": 0.5653214381437378
+      },
+      {
+        "row": 2,
+        "col": 1,
+        "bbox_um": {
+          "left": 0.202,
+          "bottom": 0.8270000000000001,
+          "right": 0.595,
+          "top": 1.36
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 2,
+        "col": 2,
+        "bbox_um": {
+          "left": 0.595,
+          "bottom": 0.8270000000000001,
+          "right": 0.988,
+          "top": 1.36
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 2,
+        "col": 3,
+        "bbox_um": {
+          "left": 0.988,
+          "bottom": 0.8270000000000001,
+          "right": 1.3800000000000001,
+          "top": 1.36
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 2,
+        "col": 4,
+        "bbox_um": {
+          "left": 1.3800000000000001,
+          "bottom": 0.8270000000000001,
+          "right": 1.772,
+          "top": 1.36
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 2,
+        "col": 5,
+        "bbox_um": {
+          "left": 1.772,
+          "bottom": 0.8270000000000001,
+          "right": 2.165,
+          "top": 1.36
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 2,
+        "col": 6,
+        "bbox_um": {
+          "left": 2.165,
+          "bottom": 0.8270000000000001,
+          "right": 2.5580000000000003,
+          "top": 1.36
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 2,
+        "col": 7,
+        "bbox_um": {
+          "left": 2.5580000000000003,
+          "bottom": 0.8270000000000001,
+          "right": 2.95,
+          "top": 1.36
+        },
+        "covered_fraction": 0.5653214381437378
+      },
+      {
+        "row": 3,
+        "col": 0,
+        "bbox_um": {
+          "left": -0.19,
+          "bottom": 1.36,
+          "right": 0.202,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 1,
+        "bbox_um": {
+          "left": 0.202,
+          "bottom": 1.36,
+          "right": 0.595,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 2,
+        "bbox_um": {
+          "left": 0.595,
+          "bottom": 1.36,
+          "right": 0.988,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 3,
+        "bbox_um": {
+          "left": 0.988,
+          "bottom": 1.36,
+          "right": 1.3800000000000001,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 4,
+        "bbox_um": {
+          "left": 1.3800000000000001,
+          "bottom": 1.36,
+          "right": 1.772,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 5,
+        "bbox_um": {
+          "left": 1.772,
+          "bottom": 1.36,
+          "right": 2.165,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 6,
+        "bbox_um": {
+          "left": 2.165,
+          "bottom": 1.36,
+          "right": 2.5580000000000003,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 3,
+        "col": 7,
+        "bbox_um": {
+          "left": 2.5580000000000003,
+          "bottom": 1.36,
+          "right": 2.95,
+          "top": 1.893
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 0,
+        "bbox_um": {
+          "left": -0.19,
+          "bottom": 1.893,
+          "right": 0.202,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 1,
+        "bbox_um": {
+          "left": 0.202,
+          "bottom": 1.893,
+          "right": 0.595,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 2,
+        "bbox_um": {
+          "left": 0.595,
+          "bottom": 1.893,
+          "right": 0.988,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 3,
+        "bbox_um": {
+          "left": 0.988,
+          "bottom": 1.893,
+          "right": 1.3800000000000001,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 4,
+        "bbox_um": {
+          "left": 1.3800000000000001,
+          "bottom": 1.893,
+          "right": 1.772,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 5,
+        "bbox_um": {
+          "left": 1.772,
+          "bottom": 1.893,
+          "right": 2.165,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 6,
+        "bbox_um": {
+          "left": 2.165,
+          "bottom": 1.893,
+          "right": 2.5580000000000003,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 4,
+        "col": 7,
+        "bbox_um": {
+          "left": 2.5580000000000003,
+          "bottom": 1.893,
+          "right": 2.95,
+          "top": 2.427
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 0,
+        "bbox_um": {
+          "left": -0.19,
+          "bottom": 2.427,
+          "right": 0.202,
+          "top": 2.96
+        },
+        "covered_fraction": 0.9545315311865834
+      },
+      {
+        "row": 5,
+        "col": 1,
+        "bbox_um": {
+          "left": 0.202,
+          "bottom": 2.427,
+          "right": 0.595,
+          "top": 2.96
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 2,
+        "bbox_um": {
+          "left": 0.595,
+          "bottom": 2.427,
+          "right": 0.988,
+          "top": 2.96
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 3,
+        "bbox_um": {
+          "left": 0.988,
+          "bottom": 2.427,
+          "right": 1.3800000000000001,
+          "top": 2.96
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 4,
+        "bbox_um": {
+          "left": 1.3800000000000001,
+          "bottom": 2.427,
+          "right": 1.772,
+          "top": 2.96
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 5,
+        "bbox_um": {
+          "left": 1.772,
+          "bottom": 2.427,
+          "right": 2.165,
+          "top": 2.96
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 6,
+        "bbox_um": {
+          "left": 2.165,
+          "bottom": 2.427,
+          "right": 2.5580000000000003,
+          "top": 2.96
+        },
+        "covered_fraction": 1.0
+      },
+      {
+        "row": 5,
+        "col": 7,
+        "bbox_um": {
+          "left": 2.5580000000000003,
+          "bottom": 2.427,
+          "right": 2.95,
+          "top": 2.96
+        },
+        "covered_fraction": 0.9545315311865834
+      }
+    ]
+  },
+  "empty_regions": [],
+  "provenance": {
+    "input_content_hash": "sha256:50d31323ec85291e1631f826576c7add7482994f711756a5f4c4c90eb81153f0",
+    "klayout_version": "0.30.10",
+    "annotation_layers_excluded": []
+  }
+}
