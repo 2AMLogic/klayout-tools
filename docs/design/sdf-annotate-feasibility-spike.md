@@ -302,6 +302,69 @@ This composes cleanly with §4.2's multi-corner sweep: one `write_sdf` per
 corner, or one SDF with real triplets plus a `-T` selection — the follow-on
 should pick one and say so.
 
+### 3.6 A top-level-port-attached `INTERCONNECT` entry needs the DUT nested, not rooted
+
+Found live during issue #1056, after this document's original GO verdict had
+already shipped (#1002/PR #1007): every purely internal
+`INTERCONNECT <inst>.<pin> <inst>.<pin>` entry resolves exactly as §3.2
+describes, but an entry touching a **top-level port** —
+`INTERCONNECT a u_and.A` (a primary input) or `INTERCONNECT u_and.Y b` (a
+primary output) — always failed, even with `-ginterconnect` present and
+even though §3.2's own worked example above *looks* like a counter-example
+(`(INTERCONNECT a u_and.A (4.000:…))`). The difference: that example's
+`$sdf_annotate` call was issued from a **standalone repro harness**, not
+through this repo's actual shim generator; §2.1's shim (the one that
+shipped) elaborates the DUT as its own `-s` root, and *that* is what breaks
+top-level-port resolution.
+
+**Root cause, confirmed live (not the mechanism originally suspected):**
+Icarus cannot resolve a bare top-level-port identifier against a module
+elaborated as its *own* `-s` root at all — regardless of whether
+`$sdf_annotate` is called from a sibling elaboration root (this repo's
+shim) or from an `initial` block *inside* the DUT's own scope (tested
+directly: identical failure). The previously-plausible "separate
+elaboration root" theory is therefore **ruled out** — moving the
+`$sdf_annotate` call does not change the outcome. What does: Icarus resolves
+the identical bare-port SDF syntax cleanly when the named module is instead
+a **nested child instance** of another root — confirmed against Icarus's
+own `ivtest` SDF regression fixtures (`ivtest/ivltests/sdf_interconnect1.v`
+et al.), which use exactly that shape (a `top` module instantiates the real
+design as a named child, and calls `$sdf_annotate` from `top` naming that
+child).
+
+**This corrects §2.1's table.** The "wrap the DUT in a Verilog harness
+module" row above was rejected there on the assumption that it necessarily
+breaks `dut.<port>` testbench access (`dut.u_dut.<port>`) — true only if the
+wrapper does *not* re-declare the DUT's own port list. A **transparent**
+pass-through wrapper (identical port names/widths, forwarding straight into
+a nested DUT instance) does not have this problem: cocotb's `hdl_toplevel`
+becomes the wrapper, so `dut.<port>` in Python resolves to the *wrapper's*
+identically-named port — completely unchanged from the testbench's point of
+view — while `$sdf_annotate`'s own scope argument (Verilog-level, entirely
+decoupled from cocotb's `COCOTB_TOPLEVEL` machinery) can now name the nested
+DUT instance directly. Verified live end-to-end through real cocotb 2.0.1 +
+Icarus 13.0, not just raw `iverilog`/`vvp`: a two-cell design with one
+top-level-port `INTERCONNECT` entry and one internal one, both apply
+cleanly, and the annotated delay changes the testbench's own verdict exactly
+as §2.2's coverage metric expects.
+
+Implemented in `_write_sdf_dut_wrapper`/`_parse_toplevel_ports`
+(`src/klayout_tools/functional_verification.py` **[REPO]**): the wrapper's
+port list is parsed from the DUT's own module declaration (both the
+non-ANSI convention Yosys/OpenROAD `write_verilog` emit and the ANSI
+convention this repo's own test fixtures use), so it stays byte-for-byte in
+sync with whatever netlist `options.sdf` names — no drift between the
+wrapper and the design it wraps.
+
+One known gap, not yet closed: `request.parameters` combined with
+`options.sdf` is currently a **request error**, not silently broken —
+cocotb's own Icarus parameter-override syntax is always
+`-P<hdl_toplevel>.<name>=<value>`, and once `hdl_toplevel` is the generated
+wrapper (which declares no parameters), that override would target the
+wrong scope. A follow-on could reformat the override to target
+`<wrapper>.<nested-instance>.<name>` directly instead of relying on cocotb's
+own injection, but no design in this repo's own corpus needs both today.
+
 ---
 
 ## 4. Follow-on sketch (§4.3, Icarus half)

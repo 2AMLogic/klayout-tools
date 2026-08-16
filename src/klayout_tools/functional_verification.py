@@ -75,6 +75,31 @@ implemented deliberately rather than rediscovered:
    exit code, derive the verdict from the artifact" discipline as finding 1,
    one level deeper.
 
+7. **A top-level-port-attached ``INTERCONNECT`` entry needs the DUT nested,
+   not rooted** (issue #1056, live on Icarus 13.0). Every real post-route
+   SDF's top design ``CELL`` block mixes purely-internal
+   ``INTERCONNECT <inst>.<pin> <inst>.<pin>`` entries (always resolved fine)
+   with entries touching a bare top-level port name, e.g.
+   ``INTERCONNECT a buffer0.in`` (a primary input) or
+   ``INTERCONNECT buffer2.out b`` (a primary output). The latter always
+   failed with ``SDF ERROR: ... Could not find intermodpath!`` /
+   ``Could not find net`` -- live testing ruled out the previously-suspected
+   mechanism (this module's own generated-sibling-elaboration-root shim):
+   calling ``$sdf_annotate`` from *inside* the DUT's own scope reproduces the
+   identical failure, so the shim's placement was never the cause. The real
+   mechanism: Icarus cannot resolve a bare port identifier against a module
+   elaborated as its *own* ``-s`` root at all -- only against a module
+   elaborated as a *nested child instance* of another root (confirmed against
+   Icarus's own ``ivtest`` SDF regression fixtures, which use exactly that
+   shape). :func:`_write_sdf_dut_wrapper` supplies it: a generated,
+   transparent pass-through wrapper re-declares ``hdl_toplevel``'s exact port
+   list, instantiates the real (unmodified) DUT as a nested child, and
+   becomes the new elaboration root in ``hdl_toplevel``'s place -- verified
+   live end-to-end through real cocotb + Icarus 13.0, not just raw
+   ``iverilog``/``vvp``. Every other build path (baseline gate-level, RTL,
+   coverage) is unaffected: the wrapper is only generated when
+   ``request.options.sdf`` is present.
+
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
 *optional* runtime dependency, deliberately not in ``pyproject.toml``'s
@@ -129,6 +154,15 @@ SDF_ENGINES = ("icarus",)
 #: cocotb's own Icarus runner already uses this exact shape for its
 #: ``cocotb_iverilog_dump`` waveform module.
 SDF_ANNOTATE_MODULE = "klt_sdf_annotate"
+
+#: The generated transparent pass-through wrapper module (issue #1056's
+#: fix -- see :func:`_write_sdf_dut_wrapper`), and the name it instantiates
+#: the real DUT under. Both are elaborated in place of ``hdl_toplevel``
+#: *only* for an ``options.sdf`` build; every other build path (baseline
+#: gate-level, RTL, coverage) still passes the real ``hdl_toplevel`` straight
+#: through, unaffected.
+SDF_WRAPPER_MODULE = "klt_sdf_dut_wrapper"
+SDF_WRAPPER_DUT_INSTANCE = "klt_sdf_dut"
 
 #: ``iverilog`` flags an SDF-annotated build requires, all three verified
 #: live (spike §3.1/§3.2/§2.1): without ``-gspecify`` Icarus omits every
@@ -637,17 +671,22 @@ def _resolve_sdf_option(
     return {"file": os.path.abspath(path), "corner": corner}
 
 
-def _write_sdf_annotate_shim(path: str, *, sdf_path: str, hdl_toplevel: str) -> None:
+def _write_sdf_annotate_shim(path: str, *, sdf_path: str, scope: str) -> None:
     """Write the extra elaboration root that carries the ``$sdf_annotate``
     call (spike §2.1, verified live; the same shape cocotb's own Icarus
     runner generates for waveform dumping).
 
     ``sdf_path`` must already be absolute -- ``vvp`` runs with its own
     working directory, so a relative path here is one ``SDF WARNING`` away
-    from a silent zero-delay run. Because a root module's instance name is
-    its module name, ``hdl_toplevel`` resolves to the DUT root and the DUT's
-    own hierarchy (the thing the Python testbench addresses as
-    ``dut.<port>``) is untouched.
+    from a silent zero-delay run. ``scope`` is the Verilog hierarchical
+    reference ``$sdf_annotate``'s SDF paths resolve relative to -- since
+    issue #1056, this is **not** ``hdl_toplevel`` directly, but
+    ``<SDF_WRAPPER_MODULE>.<SDF_WRAPPER_DUT_INSTANCE>``: the DUT nested one
+    level under the generated pass-through wrapper (see
+    :func:`_write_sdf_dut_wrapper`), which is what lets Icarus resolve a
+    bare top-level-port ``INTERCONNECT`` endpoint at all. The DUT's own
+    hierarchy (the thing the Python testbench addresses as ``dut.<port>``,
+    now via the wrapper's identically-named ports) is untouched either way.
     """
     escaped = sdf_path.replace("\\", "\\\\").replace('"', '\\"')
     with open(path, "w", encoding="utf-8") as handle:
@@ -657,7 +696,155 @@ def _write_sdf_annotate_shim(path: str, *, sdf_path: str, hdl_toplevel: str) -> 
             "// a cocotb regression's hdl_toplevel is the DUT itself and has\n"
             "// nowhere to host an initial block (issue #1002).\n"
             f"module {SDF_ANNOTATE_MODULE}();\n"
-            f'  initial $sdf_annotate("{escaped}", {hdl_toplevel});\n'
+            f'  initial $sdf_annotate("{escaped}", {scope});\n'
+            "endmodule\n"
+        )
+
+
+#: Two Verilog module-header conventions :func:`_parse_toplevel_ports`
+#: supports: non-ANSI (``module <name>(<bare port names>);``, directions
+#: declared separately in the body -- what both `klt synthesize`'s Yosys
+#: ``write_verilog`` and `klt place-and-route`'s OpenROAD ``write_verilog``
+#: emit, verified against ``tests/corpus/statime/gcd_netlist.v``) and
+#: ANSI-style (``module <name>(input wire a, output [7:0] y);``, direction
+#: inline per port -- what this module's own hand-authored integration-test
+#: fixtures use). A *mixed* header (some ports carry an inline direction,
+#: others don't -- Verilog's "inherit the previous port's direction" rule)
+#: is rejected rather than guessed at.
+_ANSI_PORT_TOKEN_RE = re.compile(
+    r"^(input|output|inout)\b(?:\s+(?:reg|wire|signed))*\s*(\[[^\]]+\])?\s*"
+    r"([A-Za-z_$][A-Za-z0-9_$]*)$"
+)
+
+
+def _parse_toplevel_ports(
+    source_paths: list[str], hdl_toplevel: str
+) -> list[tuple[str, str, str]]:
+    """Return ``[(direction, width_or_empty, name), ...]`` for every port of
+    ``hdl_toplevel``'s module declaration, in header order -- the port list
+    :func:`_write_sdf_dut_wrapper` needs to re-declare identically on the
+    generated wrapper (issue #1056).
+
+    Raises :class:`FunctionalVerificationError` (never mis-parses silently)
+    when the module cannot be found, its port list mixes ANSI and non-ANSI
+    ports, or a non-ANSI port's direction/width declaration cannot be
+    located -- any of which would otherwise produce a wrapper that fails to
+    compile or, worse, compiles with the wrong port shape.
+    """
+    header_re = re.compile(
+        r"module\s+" + re.escape(hdl_toplevel) + r"\s*\(([^;]*?)\)\s*;", re.DOTALL
+    )
+    text: str | None = None
+    header_match = None
+    for path in source_paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                candidate = handle.read()
+        except OSError:
+            continue
+        match = header_re.search(candidate)
+        if match is not None:
+            text, header_match = candidate, match
+            break
+    if header_match is None or text is None:
+        raise FunctionalVerificationError(
+            f"options.sdf could not find a 'module {hdl_toplevel}(...)' "
+            "declaration in request.sources to build the SDF top-level-port "
+            "workaround wrapper (issue #1056)"
+        )
+
+    tokens = [
+        " ".join(token.split()).lstrip("\\")
+        for token in header_match.group(1).split(",")
+        if token.strip()
+    ]
+    if not tokens:
+        raise FunctionalVerificationError(
+            f"options.sdf: module '{hdl_toplevel}' declares no ports -- "
+            "nothing for the SDF top-level-port workaround wrapper to forward"
+        )
+
+    ansi_matches = [_ANSI_PORT_TOKEN_RE.match(token) for token in tokens]
+    is_ansi = [match is not None for match in ansi_matches]
+    if any(is_ansi) and not all(is_ansi):
+        raise FunctionalVerificationError(
+            f"options.sdf: module '{hdl_toplevel}' mixes ANSI-style ports "
+            "(inline direction keywords) with bare port names -- the SDF "
+            "top-level-port workaround (issue #1056) does not resolve "
+            "Verilog's 'inherit the previous port's direction' rule for this"
+        )
+
+    if all(is_ansi):
+        return [
+            (match.group(1), (match.group(2) or "").strip(), match.group(3))
+            for match in ansi_matches
+        ]
+
+    # Non-ANSI: `tokens` are bare port names; direction/width is declared
+    # separately in the body, one `input`/`output`/`inout` line per port
+    # (Yosys/OpenROAD convention).
+    ports: list[tuple[str, str, str]] = []
+    for name in tokens:
+        decl_re = re.compile(
+            r"^[ \t]*(input|output|inout)\b"
+            r"(?:[ \t]+(?:reg|wire|signed))*"
+            r"[ \t]*(\[[^\]]+\])?[ \t]+" + re.escape(name) + r"[ \t]*;",
+            re.MULTILINE,
+        )
+        decl_match = decl_re.search(text)
+        if decl_match is None:
+            raise FunctionalVerificationError(
+                "options.sdf could not find a direction declaration for "
+                f"port '{name}' of module '{hdl_toplevel}' -- cannot build "
+                "the SDF top-level-port workaround wrapper (issue #1056)"
+            )
+        ports.append((decl_match.group(1), (decl_match.group(2) or "").strip(), name))
+    return ports
+
+
+def _write_sdf_dut_wrapper(
+    path: str, *, hdl_toplevel: str, ports: list[tuple[str, str, str]]
+) -> None:
+    """Write a transparent pass-through wrapper module around ``hdl_toplevel``
+    -- the client-side fix for issue #1056.
+
+    Icarus's ``$sdf_annotate`` cannot resolve an ``INTERCONNECT`` entry whose
+    endpoint is a bare top-level port of a module elaborated as its own
+    ``-s`` root (verified live: every purely-internal
+    ``INTERCONNECT <inst>.<pin> <inst>.<pin>`` entry resolves fine; every
+    entry touching a top-level port fails with ``Could not find
+    intermodpath!``/``Could not find net`` -- regardless of whether
+    ``$sdf_annotate`` is called from a sibling elaboration root or from
+    inside the DUT's own initial block, which rules out this module's
+    previous separate-elaboration-root shim as the mechanism). The identical
+    bare-port SDF syntax resolves cleanly when the named module is instead a
+    *nested child instance* of another root (Icarus's own ``ivtest`` SDF
+    regression fixtures use exactly this shape). This wrapper supplies that
+    shape without touching the DUT's own netlist, ports, or hierarchy: it
+    re-declares ``hdl_toplevel``'s exact port list (``ports``, from
+    :func:`_parse_toplevel_ports`), instantiates the unmodified DUT as
+    :data:`SDF_WRAPPER_DUT_INSTANCE`, and becomes the new elaboration root in
+    its place -- so cocotb's own ``dut.<port>`` handles keep resolving
+    unchanged (the wrapper's ports carry the identical names and widths),
+    while ``$sdf_annotate``'s scope argument
+    (:func:`_write_sdf_annotate_shim`) can now name
+    ``<SDF_WRAPPER_MODULE>.<SDF_WRAPPER_DUT_INSTANCE>``, a genuinely nested
+    scope. Verified live end-to-end through real cocotb + Icarus 13.0, not
+    just raw ``iverilog``/``vvp``.
+    """
+    port_lines = ",\n".join(
+        f"  {direction} {(width + ' ') if width else ''}{name}".rstrip()
+        for direction, width, name in ports
+    )
+    connections = ",\n".join(f"    .{name}({name})" for _, _, name in ports)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "// Generated by klt functional-verification -- do not edit.\n"
+            "// Transparent pass-through wrapper working around Icarus's\n"
+            "// inability to resolve a top-level-port INTERCONNECT entry\n"
+            "// against a module elaborated as its own -s root (issue #1056).\n"
+            f"module {SDF_WRAPPER_MODULE} (\n{port_lines}\n);\n"
+            f"  {hdl_toplevel} {SDF_WRAPPER_DUT_INSTANCE} (\n{connections}\n  );\n"
             "endmodule\n"
         )
 
@@ -1258,6 +1445,10 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     # caller's own `options.build_args` composes last, after both (see
     # :func:`_resolve_build_args`).
     build_args: list[str] = []
+    # The Verilog toplevel actually passed to `-s`/cocotb's `hdl_toplevel`
+    # for this build+test -- the real DUT unless `options.sdf` swaps in the
+    # generated wrapper below (issue #1056).
+    build_hdl_toplevel = hdl_toplevel
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -1266,17 +1457,43 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # fails the build with a message that names neither SDF nor this
         # request field.)
         _check_sdf_engine_capability(_engine_version(engine))
-        # The generated second elaboration root, and the three flags that
-        # make it do anything at all -- plus `-T <corner>`, which is how
-        # Icarus selects a member of each SDF `min:typ:max` triplet (a
-        # compile-time flag, not an `$sdf_annotate` argument; see
+        if parameters:
+            # cocotb's own Icarus parameter-override syntax is always
+            # `-P<hdl_toplevel>.<name>=<value>` (its Runner, not this
+            # module, formats it) -- once `hdl_toplevel` becomes the
+            # generated wrapper below, that would silently target the
+            # wrapper (which declares no parameters) instead of the real
+            # DUT rather than erroring, so the combination is rejected up
+            # front instead of risking a parameter override that looks
+            # applied but was not.
+            raise FunctionalVerificationError(
+                "request.parameters cannot currently be combined with "
+                "options.sdf on Icarus: the top-level-port workaround "
+                "(issue #1056) elaborates a generated wrapper module as the "
+                "new -s root, and cocotb's own parameter-override syntax "
+                "would then target that wrapper instead of the real DUT"
+            )
+        # The transparent pass-through wrapper (issue #1056) that makes the
+        # DUT a nested child instance rather than its own elaboration root
+        # -- required for Icarus to resolve a bare top-level-port
+        # `INTERCONNECT` endpoint at all -- plus the generated second
+        # elaboration root carrying the `$sdf_annotate` call itself, and the
+        # three flags that make it do anything -- plus `-T <corner>`, which
+        # is how Icarus selects a member of each SDF `min:typ:max` triplet
+        # (a compile-time flag, not an `$sdf_annotate` argument; see
         # `SDF_CORNERS`).
+        ports = _parse_toplevel_ports(sources, hdl_toplevel)
+        wrapper_path = os.path.join(output_dir, f"{SDF_WRAPPER_MODULE}.v")
+        _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
         shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
         _write_sdf_annotate_shim(
-            shim_path, sdf_path=sdf["file"], hdl_toplevel=hdl_toplevel
+            shim_path,
+            sdf_path=sdf["file"],
+            scope=f"{SDF_WRAPPER_MODULE}.{SDF_WRAPPER_DUT_INSTANCE}",
         )
-        sources = [*sources, shim_path]
+        sources = [*sources, wrapper_path, shim_path]
         build_args += [*SDF_BUILD_ARGS, "-T", sdf["corner"]]
+        build_hdl_toplevel = SDF_WRAPPER_MODULE
     build_args += user_build_args
 
     runner_module = _import_runner()
@@ -1284,7 +1501,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         runner_module,
         engine=engine,
         sources=sources,
-        hdl_toplevel=hdl_toplevel,
+        hdl_toplevel=build_hdl_toplevel,
         build_dir=build_dir,
         build_args=build_args,
         defines=defines,
@@ -1298,7 +1515,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         engine=engine,
         module=module,
         module_dir=module_dir,
-        hdl_toplevel=hdl_toplevel,
+        hdl_toplevel=build_hdl_toplevel,
         testcase=testcase,
         random_seed=random_seed,
         build_dir=build_dir,
