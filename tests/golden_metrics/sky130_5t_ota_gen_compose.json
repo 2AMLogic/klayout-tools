@@ -22,6 +22,7 @@
     "extract.devices_count": 9,
     "extract.dummy_devices_dropped": 2,
     "extract.ignored_layers_count": 0,
+    "extract.matched_device_groups_count": 0,
     "extract.merged_net_labels_count": 0,
     "extract.net_count": 25,
     "extract.nets_count": 25,
