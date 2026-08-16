@@ -32,38 +32,31 @@ role file) to be useful. A Loom role would only make sense if this became a
 mandatory gate in the Builder→Judge lifecycle itself — that is a separate,
 later decision this issue does not make.
 
-## Numeric backing: placeholder pending `klt economy` (issue #1012)
+## Numeric backing: `klt economy` (issue #1012)
 
 Issue #1013 (this skill) and issue #1012 (`klt economy`, the real
 quantitative report — utilization, whitespace map, bbox tightness,
-area-budget check, reference deltas) were filed together but are separate,
-independently-owned pieces of work. **`klt economy` did not exist when this
-skill was built** (verified: no `economy_cmd.py`/`economy.py` under
-`src/klayout_tools/`/`src/klayout_tools/cli/` as of the commit that added
-this skill). Rather than block the review skill on that command landing,
-this skill ships its own minimal, self-contained metrics script:
-[`scripts/economy_metrics.py`](scripts/economy_metrics.py).
+area-budget check, reference deltas) were filed together but were built as
+separate, independently-owned pieces of work. `klt economy` has since
+shipped (`src/klayout_tools/economy.py` + `src/klayout_tools/cli/
+economy_cmd.py`, PR #1040) — this skill's measurement step uses that command
+directly (see [`docs/cli/economy.md`](../../../docs/cli/economy.md) for the
+full JSON schema reference).
 
-- It computes a deliberately small subset of what `klt economy` will
-  eventually report: bbox tightness (bbox area, aspect ratio), utilization
-  (merged drawn area ÷ bbox area, excluding reserved annotation layers),
-  a coarse whitespace grid with 4-connected empty-region clustering, and
-  per-edge dead-margin bands.
-- It lives under `.claude/skills/`, not `src/`, and is not part of the
-  installed `klayout_tools` package or its JSON contract — deliberately, so
-  it never collides with `klt economy`'s own module/CLI-verb naming while
-  that work is in flight on a separate issue/PR.
-- Its JSON shape was kept close to #1012's own described shape
-  (`utilization`, whitespace fractions, bbox tightness) specifically so that
-  **once `klt economy` ships, step 2 below becomes `klt economy <gds>
-  --format json` instead of this script**, with the rest of this skill
-  (rubric, verdict format) unchanged.
+`klt economy` reports everything this skill's rubric consumes and more:
+bbox tightness/aspect ratio, utilization (merged drawn area ÷ bbox area,
+excluding reserved annotation layers), a configurable whitespace grid, the
+**exact** disjoint empty regions (`largest_empty_regions`, an exact
+`kdb.Region` boolean subtraction rather than a coarse rasterized grid),
+per-edge dead-margin bands (`dead_margins_um`), per-cell utilization, and
+optional `--budget-um2`/`--reference-area-um2` checks this skill does not
+yet ask for by default but can pass through when a block has a ratified
+budget or a comparable reference design.
 
 Run it directly:
 
 ```bash
-python .claude/skills/economy-review/scripts/economy_metrics.py <gds> \
-    [--top CELL] [--grid COLSxROWS] --format json
+klt economy <gds> [--top CELL] [--grid-cols N] [--grid-rows N] --format json
 ```
 
 ## Workflow
@@ -96,17 +89,16 @@ coordinates even without an in-image annotation.
 
 ### 2. Measure
 
-Run the metrics script (see above) against the same top cell:
+Run `klt economy` (see above) against the same top cell:
 
 ```bash
-python .claude/skills/economy-review/scripts/economy_metrics.py <gds> \
-    --top <cell> --format json > <review-dir>/metrics.json
+klt economy <gds> --top <cell> --format json > <review-dir>/metrics.json
 ```
 
-Read every field before judging — in particular `empty_regions[]` (each
-with a `bbox_um` and `mean_covered_fraction`) and `dead_margins_um`, which
-are the coordinate-level "specific empty regions to fix" a `revise` verdict
-must cite.
+Read every field before judging — in particular `largest_empty_regions[]`
+(each with a `bbox_um`, `area_um2`, and `fill_fraction`) and
+`dead_margins_um`, which are the coordinate-level "specific empty regions to
+fix" a `revise` verdict must cite.
 
 ### 3. Judge — the rubric
 
@@ -116,7 +108,7 @@ different for an analog block than a digital one:
 
 | Block kind | Utilization expectation | Why |
 |---|---|---|
-| **Digital standard-cell rows** | ≥ 0.85 typical, ≥ 0.70 floor | Row-based placement; whitespace beyond routing/legalization slack is pure waste. A real sky130 standard cell (e.g. `sky130_fd_sc_hd__buf_4`) measures ~0.94 by this script's own metric — treat a full digital block far below that as a placement/legalization defect, not a style choice. |
+| **Digital standard-cell rows** | ≥ 0.85 typical, ≥ 0.70 floor | Row-based placement; whitespace beyond routing/legalization slack is pure waste. A real sky130 standard cell (e.g. `sky130_fd_sc_hd__buf_4`) measures ~0.94 by `klt economy`'s own metric — treat a full digital block far below that as a placement/legalization defect, not a style choice. |
 | **Analog: matched pairs / current mirrors** | 0.35-0.55 typical | Common-centroid layout, dummy devices, and matching-driven spacing legitimately cost area — Pelgrom-law matching requirements (see `docs/design/...` KB entries) can dominate the floorplan. Below ~0.25 with no matching/isolation rationale is a red flag, not an automatic fail. |
 | **Analog: isolation-heavy (bandgap, LDO, references)** | 0.30-0.50 typical | Guard rings, deep n-well isolation, and supply/substrate separation between noisy and sensitive sub-blocks are the point, not overhead. A ratified area budget (see the block's own spec table) is the authoritative ceiling regardless of this heuristic range. |
 | **Mixed-signal top-level integration** | 0.40-0.65 typical | Between the two analog rows above; expect some pure-digital sub-blocks pulling the average up and analog sub-blocks pulling it down — judge sub-blocks individually when the layout hierarchy allows it, not only the flattened top. |
@@ -146,7 +138,7 @@ walked in order:
 3. **Is the empty region interior, isolated (a single grid cell or small
    cluster far from any device), and not explained by (1)?** Waste — likely
    a placement gap or an oversized initial floorplan grid. Cite its
-   `empty_regions[].bbox_um`.
+   `largest_empty_regions[].bbox_um`.
 4. **Is the aspect ratio far from what the block's I/O/pin layout implies**
    (e.g. a block whose pins concentrate on two opposite edges but whose
    drawn bbox is nearly square)? Flag even if utilization looks fine —
@@ -184,11 +176,11 @@ Reviewed: <date> · GDS: <path> (sha256:<hash>) · Top cell: <name>
 - Overview: <path>
 - Quadrants: <paths>
 
-## Metrics (economy_metrics.py, placeholder pending klt economy #1012)
+## Metrics (klt economy)
 - bbox: <width> x <height> um, aspect ratio <ratio>
 - utilization: <value> (block-kind expectation: <range>)
 - dead margins (um): left=<x> right=<x> bottom=<x> top=<x>
-- empty regions: <count>, largest at <bbox_um>
+- empty regions: <empty_region_count>, largest at <bbox_um>
 
 ## Judgment
 <Per the rubric above -- for each notable empty region or margin, state
@@ -212,13 +204,14 @@ the right direction:
 
 - **Known-loose**: `blocks/sky130-bandgap` — the block's own `NOTE.md`
   already documents "area is over the ratified budget pending DR-007
-  (relaxed from 0.05 to fit the drawn `MCC` cap)". This skill's metrics
-  independently found utilization 0.38, ~41 um dead margins on both left
-  and right edges, and two named empty regions — see
+  (relaxed from 0.05 to fit the drawn `MCC` cap)". `klt economy` reports
+  utilization 0.38 and ~41 um dead margins on both left and right edges,
+  matching this documented looseness — see
   `evidence/economy-review/sky130-bandgap/`.
 - **Known-tight**: `blocks/sky130_fd_sc_hd__buf_4` — a foundry-authored
-  digital standard cell, tight by construction. This skill's metrics found
-  utilization 0.94, zero dead margins, zero empty regions — see
+  digital standard cell, tight by construction. `klt economy` reports
+  utilization 0.94, zero dead margins on every edge, and `bbox_tightness`
+  1.0 (drawn geometry touches every bbox edge) — see
   `evidence/economy-review/sky130_fd_sc_hd__buf_4/`.
 
 ## Not built in this PR (documented, not scope creep)
@@ -233,4 +226,7 @@ the right direction:
   above). An automatic classifier risks silently mis-scoring a block.
 - **Reference-design deltas** (issue #1012's "where a comparable
   hand-designed reference exists ... an `x`× the reference area" hook) —
-  depends on `klt economy` landing first; not reimplemented here.
+  `klt economy` now supports this directly via `--reference-area-um2`/
+  `--budget-um2`; this skill's own workflow does not yet pass those flags by
+  default (a block needs a ratified budget or reference area first), left
+  for a follow-up if that proves useful in practice.
