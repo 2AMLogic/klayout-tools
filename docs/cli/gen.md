@@ -193,6 +193,24 @@ on PDK families whose curated deck checks a well layer (both `sky130` and
 for the layer numbers). `flavor="nfet"` (the default) draws no well shape at
 all — output for the default case is unchanged.
 
+`voltage_flavor` (issue #1054) is a separate, orthogonal opt-in for a PDK's
+**medium-voltage/thick-oxide transistor variant** — a common multi-voltage-
+domain process feature distinct from `flavor`'s NMOS-vs-PMOS selection. The
+default, an empty string, draws nothing (byte-for-byte unchanged geometry).
+`voltage_flavor="medium_voltage"` on `gf180mcu` additionally draws that
+family's `Dualgate` marker layer (`55/0`), sized to enclose every unit device
+(real and dummy) the same shared box `flavor="pfet"`'s well shape already
+encloses, and echoes the selection back in the response's
+`drc_hints.voltage_flavor`/`drc_hints.voltage_flavor_mark_present` fields (see
+below) so downstream tooling (`klt gen-compose`, `klt extract`, `klt lvs`)
+doesn't have to re-derive it from raw geometry. **`sky130`'s curated deck
+cites no numbered medium/high-voltage transistor marker layer** — any
+`voltage_flavor` value on that family (or an unrecognised value on any
+family) draws nothing and is reported via a `drc_hints.notes` entry, never
+silently dropped. `voltage_flavor` is independent of `flavor`: requesting
+both `flavor="pfet"` and `voltage_flavor="medium_voltage"` draws both the
+well and the marker with no conflict.
+
 | `params` field | Type   | Default            | Description |
 | -------------- | ------ | ------------------ | ----------- |
 | `w_um`         | double | `0.42`             | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
@@ -203,6 +221,7 @@ all — output for the default case is unchanged.
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
+| `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — currently only `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 
 ### `res_array` (family 2: resistor/capacitor array)
@@ -409,6 +428,16 @@ well shape — the default case's output is unchanged. Note that
 automatically-sized ring already draws its own well tie regardless of
 `flavor`, same as the standalone `guard_ring` generator's `add_well` default.
 
+`voltage_flavor` (issue #1054), same semantics as `mos_array`'s own param of
+the same name: an opt-in, orthogonal-to-`flavor` medium-voltage/thick-oxide
+device-class marker over the device pair's own footprint. The default, an
+empty string, draws nothing; `voltage_flavor="medium_voltage"` on `gf180mcu`
+draws its `Dualgate` marker layer and echoes the selection in
+`drc_hints.voltage_flavor`/`drc_hints.voltage_flavor_mark_present` (see
+below); any other value on any family (including every value on `sky130`,
+which cites no such marker layer) draws nothing and is reported via
+`drc_hints.notes`, never silently dropped.
+
 | `params` field    | Type   | Default | Description |
 | ------------------ | ------ | ------- | ----------- |
 | `w_um`             | double | `0.42`  | Unit device width (µm). Must be `>= 0.42` (the smallest width that fits an enclosed contact -- a generator-side structural floor, not a target PDK's own diffusion-width minimum). |
@@ -422,6 +451,7 @@ automatically-sized ring already draws its own well tie regardless of
 | `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
+| `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. Currently only `"medium_voltage"` resolves (on `gf180mcu`); any other value draws nothing and is flagged via `drc_hints.notes`. |
 | `gate_contact`     | bool   | `false` | Draw a contact + local-metal pad on each gate landing pad and report `*_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. Grows each device row (and the automatically-sized guard ring with it) by `0.4` µm. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
@@ -736,6 +766,8 @@ family/variant split the resolver doesn't have. The response's
 | `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`); always `null` for `resistor_strip`, `guard_ring`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
+| `voltage_flavor` | string \| null | `mos_array`/`diff_pair` only (issue #1054): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
+| `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair` only (issue #1054): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
 
 ### Semantics and guarantees
 
