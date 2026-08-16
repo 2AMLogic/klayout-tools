@@ -107,6 +107,7 @@ synthesize` already use — and kept, never deleted:
 | `build_<engine>.log` / `test_<engine>.log` | The engine's own transcripts. These are captured to files rather than inherited, so simulator chatter can never corrupt `--format json`'s stdout. |
 | `coverage.info` | lcov-format coverage, on coverage runs only (see below). |
 | `klt_sdf_annotate.v` | The generated `$sdf_annotate` elaboration root, on `options.sdf` runs only — kept, so the exact annotation call a run used is inspectable after the fact. |
+| `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
 
 ## Coverage
 
@@ -247,22 +248,50 @@ must be called from an `initial` block inside some elaborated module — and a
 cocotb regression has no such module, since `hdl_toplevel` *is* the DUT. So
 this verb generates a second, otherwise-empty **elaboration root** carrying
 the call (the same idiom cocotb's own Icarus runner uses for its waveform-dump
-module) and elaborates it alongside the DUT:
+module). A bare top-level-port `INTERCONNECT` entry (one endpoint a primary
+input/output rather than an internal `<inst>.<pin>`) additionally needs the
+DUT to be a *nested child instance*, not its own `-s` root — Icarus cannot
+resolve a bare port identifier against a module elaborated as its own root at
+all (issue #1056). So a second generated module, a transparent pass-through
+wrapper, re-declares `hdl_toplevel`'s exact port list, instantiates the real
+(unmodified) DUT as a nested child, and becomes the new elaboration root in
+`hdl_toplevel`'s place:
 
 ```verilog
+module klt_sdf_dut_wrapper (
+  input a,
+  ...
+);
+  gcd klt_sdf_dut (
+    .a(a),
+    ...
+  );
+endmodule
+
 module klt_sdf_annotate();
-  initial $sdf_annotate("/abs/path/gcd_route.sdf", gcd);
+  initial $sdf_annotate("/abs/path/gcd_route.sdf", klt_sdf_dut_wrapper.klt_sdf_dut);
 endmodule
 ```
 
-The DUT's own hierarchy is untouched, so every `dut.<port>` handle in the
-Python testbench keeps resolving exactly as before. The embedded path is
+The wrapper's ports carry the DUT's exact names and widths, so the DUT's own
+hierarchy is untouched and every `dut.<port>` handle in the Python testbench
+keeps resolving exactly as before, now via the wrapper. The embedded path is
 always **absolute**: `vvp` runs with its own working directory, and a relative
 path there is one `SDF WARNING` away from a silent zero-delay run. The build
-gains `-gspecify -ginterconnect -s klt_sdf_annotate -T <corner>` — the first
-two are mandatory (without `-gspecify`, Icarus discards the annotation call
-itself and runs at zero delay; without `-ginterconnect`, every `INTERCONNECT`
-entry — which is exactly what a post-route SDF carries — fails at run time).
+gains `-gspecify -ginterconnect -s klt_sdf_annotate -T <corner>` plus a second
+`-s klt_sdf_dut_wrapper` root (from `hdl_toplevel` itself becoming the
+wrapper) — `-gspecify`/`-ginterconnect` are both mandatory (without
+`-gspecify`, Icarus discards the annotation call itself and runs at zero
+delay; without `-ginterconnect`, every `INTERCONNECT` entry — which is exactly
+what a post-route SDF carries — fails at run time).
+
+**Not with `request.parameters`.** cocotb's own Icarus parameter-override
+syntax is always `-P<hdl_toplevel>.<name>=<value>`; once `hdl_toplevel`
+becomes the generated wrapper above, that would silently target the wrapper
+(which declares no parameters) instead of the real DUT. `options.sdf`
+together with a non-empty `parameters` is therefore rejected at
+request-validation time (exit 1) rather than risking an override that looks
+applied but was not.
 
 **Corner selection is a compile-time flag.** `options.sdf.corner`
 (`"min"`/`"typ"`/`"max"`, default `"typ"`) maps to `iverilog -T`, which picks
@@ -334,7 +363,7 @@ annotated one.
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
-| `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. |
+| `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. |
 
 ## Response
 
