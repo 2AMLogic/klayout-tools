@@ -262,6 +262,10 @@ checkout anywhere on disk. Only an override (1 or 2) changes `source_doc` in
 the report; the shipped doc always reports as
 `"docs/design-evidence-tiers.md"` regardless of install layout.
 
+Both override forms expand a leading `~`, so a quoted
+`--tiers-doc '~/vendored-tiers.md'` (which the shell leaves unexpanded)
+resolves the same way `KLT_TIERS_DOC=~/vendored-tiers.md` does.
+
 If the resolved doc cannot be read or does not have the structure the parser
 understands, the command emits the usual error envelope (`schema_version`,
 `error.command: "signoff"`, `error.message`) and exits `1` — a tier report is

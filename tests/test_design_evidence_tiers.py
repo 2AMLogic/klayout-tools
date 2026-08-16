@@ -7,14 +7,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import tomllib
 
 from klayout_tools import design_evidence_tiers
 from klayout_tools.design_evidence_tiers import (
+    CANONICAL_DOC_LABEL,
     DEFAULT_DOC_PATH,
     DOC_PATH_ENV_VAR,
     DesignEvidenceTiersError,
     default_doc_path,
+    doc_source_label,
     parse_tier_doc,
 )
 
@@ -156,6 +157,15 @@ def test_wheel_build_bundles_the_doc_inside_the_package():
     # Mechanical check that packaging config and the resolution above cannot
     # drift: pyproject must force-include the canonical doc at exactly the
     # package-relative path `_PACKAGED_DOC_PATH` resolves to.
+    #
+    # `tomllib` is stdlib only from 3.11 (PEP 680) and this project supports
+    # 3.10, so scope the import to this one test rather than the module: a
+    # module-level import would make the whole file uncollectable on 3.10 and
+    # take every other test here (including the #1050 regression tests) with
+    # it. Deliberately not worth a `tomli` backport dependency -- the drift
+    # guard running on 3.11+ is enough to catch a config/code mismatch.
+    tomllib = pytest.importorskip("tomllib")
+
     pyproject = tomllib.loads(
         (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
@@ -223,6 +233,54 @@ def test_env_var_overrides_the_default_doc_path(monkeypatch, tmp_path):
     assert default_doc_path() == override
     doc = parse_tier_doc()
     assert [item["id"] for item in doc["t1_items"]] == [1, 2, 3]
+
+
+def test_both_override_forms_expand_a_leading_tilde(monkeypatch, tmp_path):
+    """A quoted `--tiers-doc '~/vendored.md'` reaches the parser unexpanded
+    (the shell never touched it), so it must read the same way
+    `KLT_TIERS_DOC=~/vendored.md` does -- one expansion rule for both
+    override paths."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "vendored.md").write_text(_MINIMAL_DOC, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows' expanduser source
+
+    monkeypatch.setenv(DOC_PATH_ENV_VAR, "~/vendored.md")
+    assert default_doc_path() == home / "vendored.md"
+    assert doc_source_label() == str(home / "vendored.md")
+
+    monkeypatch.delenv(DOC_PATH_ENV_VAR, raising=False)
+    doc = parse_tier_doc("~/vendored.md")
+    assert [item["id"] for item in doc["t1_items"]] == [1, 2, 3]
+    assert doc_source_label("~/vendored.md") == str(home / "vendored.md")
+
+
+def test_doc_source_label_defers_to_default_doc_path(monkeypatch, tmp_path):
+    """`doc_source_label()` must not carry its own copy of the precedence
+    rule: with no override it names the canonical doc whichever default
+    location resolved, and it reports an override only because
+    `default_doc_path()` resolved to one."""
+    packaged = tmp_path / "packaged.md"
+    packaged.write_text(_MINIMAL_DOC, encoding="utf-8")
+    source = tmp_path / "checkout.md"
+    source.write_text(_MINIMAL_DOC, encoding="utf-8")
+    monkeypatch.setattr(design_evidence_tiers, "_PACKAGED_DOC_PATH", packaged)
+    monkeypatch.setattr(design_evidence_tiers, "_SOURCE_DOC_PATH", source)
+    monkeypatch.delenv(DOC_PATH_ENV_VAR, raising=False)
+
+    # Bundled copy present (wheel layout) -- still the canonical label.
+    assert doc_source_label() == CANONICAL_DOC_LABEL
+
+    # Source-checkout fallback -- same canonical label, different file.
+    monkeypatch.setattr(
+        design_evidence_tiers, "_PACKAGED_DOC_PATH", tmp_path / "not-bundled.md"
+    )
+    assert doc_source_label() == CANONICAL_DOC_LABEL
+
+    # Only an override renames the source.
+    monkeypatch.setenv(DOC_PATH_ENV_VAR, str(tmp_path / "vendored.md"))
+    assert doc_source_label() == str(tmp_path / "vendored.md")
 
 
 def test_explicit_path_beats_the_env_var(monkeypatch, tmp_path):

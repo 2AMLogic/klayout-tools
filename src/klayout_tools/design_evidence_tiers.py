@@ -123,13 +123,18 @@ def doc_source_label(path: str | Path | None = None) -> str:
     evidence; the default is the same canonical document in every install
     layout, so it is named canonically rather than by wherever this install
     happens to keep its copy.
+
+    The ``$KLT_TIERS_DOC`` half of that rule is not restated here: this
+    defers to :func:`default_doc_path`, which owns the precedence, and only
+    decides whether what came back is one of the canonical (non-override)
+    locations.
     """
     if path is not None:
-        return str(path)
-    override = os.environ.get(DOC_PATH_ENV_VAR)
-    if override:
-        return str(Path(override).expanduser())
-    return CANONICAL_DOC_LABEL
+        return str(Path(path).expanduser())
+    resolved = default_doc_path()
+    if resolved in (_PACKAGED_DOC_PATH, _SOURCE_DOC_PATH):
+        return CANONICAL_DOC_LABEL
+    return str(resolved)
 
 
 #: The default doc location *ignoring* the environment override -- the
@@ -210,7 +215,10 @@ def parse_tier_doc(path: str | Path | None = None) -> dict[str, Any]:
     than silently producing a wrong (or empty) tier skeleton.
     """
     explicit = path is not None
-    doc_path = Path(path) if path is not None else default_doc_path()
+    # `.expanduser()` on the explicit path too, so a literal (shell-quoted)
+    # `--tiers-doc '~/vendored.md'` resolves the same way `KLT_TIERS_DOC`
+    # does in :func:`default_doc_path` -- one rule for both override paths.
+    doc_path = Path(path).expanduser() if path is not None else default_doc_path()
     try:
         text = doc_path.read_text(encoding="utf-8")
     except OSError as exc:
