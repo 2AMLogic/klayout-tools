@@ -6271,6 +6271,49 @@ def test_parasitics_deterministic_across_runs(tmp_path):
     assert a["parasitics"] == b["parasitics"]
 
 
+def test_extract_help_documents_anonymous_net_numbering_non_guarantee():
+    """Doc-contract test for issue #1063 (Option E): `klt extract`'s
+    anonymous/synthetic net numbering (`$NNN`, KLayout's own
+    `Net.expanded_name()`/`cluster_id` placeholder for a net with no drawn
+    label) is assigned inside an opaque native KLayout call this repo does
+    not control, and is NOT guaranteed stable across `klayout` point
+    releases or host platforms -- even though `klt lvs`'s topological
+    compare is unaffected (see root-cause investigation in the issue).
+    Rather than leaving that gap undocumented, `klt extract --help` must
+    say so explicitly and point callers at `klt lvs` for cross-environment
+    reproducibility checks instead of raw netlist text diffing."""
+    from klayout_tools.cli.parser import create_parser
+
+    parser = create_parser()
+    subparsers_action = next(
+        action
+        for action in parser._actions
+        if getattr(action, "choices", None) and "extract" in action.choices
+    )
+    description = subparsers_action.choices["extract"].description
+    assert description is not None
+    lowered = description.lower()
+    assert "anonymous" in lowered
+    assert "not" in lowered and "stable" in lowered
+    assert "klt lvs" in lowered
+
+
+def test_extract_docs_document_anonymous_net_numbering_non_guarantee():
+    """Doc-contract counterpart to the `--help` test above (issue #1063,
+    Option E's own suggested test plan): `docs/cli/extract.md` must state
+    the same non-guarantee, not just the `--help` text, so a reader of
+    either surface gets the same answer."""
+    docs_path = Path(__file__).parent.parent / "docs" / "cli" / "extract.md"
+    text = docs_path.read_text()
+    lowered = text.lower()
+    assert "anonymous net numbering" in lowered
+    assert "not a stable" in lowered
+    assert "klt lvs" in lowered
+    # The specific issue this documents, so the section is discoverable
+    # from a `grep -n 1063` sweep of the docs tree.
+    assert "#1063" in text
+
+
 def test_cli_parasitics_flag_json(tmp_path, capsys):
     path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
     exit_code = main(
